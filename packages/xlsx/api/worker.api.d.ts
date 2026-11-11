@@ -3089,6 +3089,11 @@ export class XlsxDocument {
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
     /**
+     * Open keeping cached formula results, recalculating only a file with an uncached formula
+     * or a `calcPr` full calculation request.
+     */
+    static openRecalculatingStale(bytes: Uint8Array, context?: string | null): XlsxDocument;
+    /**
      * Checkpoints are only restorable by the same engine version and codec.
      */
     static openRecoveryCheckpoint(bytes: Uint8Array, through_seq: number): XlsxDocument;
@@ -3276,6 +3281,7 @@ export interface InitOutput {
     readonly xlsxdocument_nextPeerSnapshotChunk: (a: number) => [number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
+    readonly xlsxdocument_openRecalculatingStale: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_openRecoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxdocument_openWithCalculationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_openWithPeerHydrationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
@@ -3639,6 +3645,12 @@ export interface OpenWorkbookOptions {
     /** Peer-unique positive safe integer. Generated securely when omitted. */
     clientId?: number;
     calculation?: WorkbookCalculationContext;
+    /**
+     * `'stale'` shows the results the file cached, recalculating every formula only when one has
+     * no cached result or `calcPr` asks for a full calculation on load. Edits still recalculate
+     * what they reach. Defaults to `'all'`. Unavailable for collaborative workbooks.
+     */
+    recalculate?: 'all' | 'stale';
 }
 /**
  * The editable view of one cell: A1 address, the exact string the user would

@@ -90,6 +90,11 @@ export declare class XlsxDocument {
   saveWarningsJson(): string
   static open(bytes: Uint8Array): XlsxDocument
   static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument
+  /**
+   * Open keeping cached formula results, recalculating only a file with an uncached formula
+   * or a `calcPr` full calculation request.
+   */
+  static openRecalculatingStale(bytes: Uint8Array, context?: string | undefined | null): XlsxDocument
   /** Checkpoints are only restorable by the same engine version and codec. */
   static openRecoveryCheckpoint(bytes: Uint8Array, throughSeq: number): XlsxDocument
   static openCollaborative(bytes: Uint8Array, clientId: number): XlsxDocument

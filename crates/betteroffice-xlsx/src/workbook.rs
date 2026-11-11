@@ -866,6 +866,28 @@ impl Workbook {
         Ok(workbook)
     }
 
+    /// Opens keeping the results the file cached. Recalculates every formula, as
+    /// [`Workbook::open_recalculated_with_seed`] does, only when a formula has no cached
+    /// result or `calcPr` asks for a full calculation on load.
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        options: CalculationOptions,
+        rand_seed: Option<u32>,
+    ) -> Result<Self> {
+        let mut workbook = Self::open_internal(bytes, false, None)?;
+        workbook.set_rand_seed(rand_seed);
+        let full_calculation = match &workbook.source_package {
+            Some(package) => package.materialize()?.requests_full_calculation(),
+            None => false,
+        };
+        if full_calculation || workbook.has_uncached_source_formulas() {
+            workbook.recalculate(options);
+        } else {
+            workbook.derive_unevaluated(Some(options));
+        }
+        Ok(workbook)
+    }
+
     pub fn set_rand_seed(&mut self, seed: Option<u32>) {
         if self.rand_seed != seed {
             self.snapshot_package_lineage = None;

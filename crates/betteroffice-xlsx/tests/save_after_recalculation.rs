@@ -1,4 +1,5 @@
-use betteroffice_xlsx::{CalculationOptions, Workbook};
+use betteroffice_xlsx::{CalculationOptions, CellRef, CellValue, SheetId, Workbook};
+use xlsx_model::CellProvider;
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -146,6 +147,62 @@ fn recalculated_values_survive_a_recovery_checkpoint() {
         saved_caches(&restored.save().unwrap()),
         vec![Some("5".into()), Some("999".into()), Some("2".into())]
     );
+}
+
+const CACHED: &str = r#"<row r="1"><c r="A1"><v>5</v></c><c r="B1"><f>A1*2</f><v>999</v></c><c r="C1"><f>SUM(2,3)</f><v>7</v></c></row>"#;
+
+fn values(workbook: &Workbook) -> Vec<CellValue> {
+    (0..3)
+        .map(|col| workbook.model().value(SheetId(0), CellRef::new(0, col)))
+        .collect()
+}
+
+fn numbers(values: &[f64]) -> Vec<CellValue> {
+    values
+        .iter()
+        .map(|&value| CellValue::Number { value })
+        .collect()
+}
+
+#[test]
+fn a_stale_open_keeps_cached_results_until_an_edit_reaches_them() {
+    let source = package(CACHED, "");
+    let recalculated = Workbook::open_recalculated(&source, options()).unwrap();
+    assert_eq!(values(&recalculated), numbers(&[5.0, 10.0, 5.0]));
+
+    let mut workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+    assert_eq!(values(&workbook), numbers(&[5.0, 999.0, 7.0]));
+    assert_eq!(workbook.save().unwrap(), source);
+
+    workbook
+        .edit_cell(SheetId(0), CellRef::new(0, 0), "6", options())
+        .unwrap();
+    assert_eq!(values(&workbook), numbers(&[6.0, 12.0, 7.0]));
+    assert_eq!(
+        saved_caches(&workbook.save().unwrap()),
+        vec![Some("6".into()), Some("12".into()), Some("7".into())]
+    );
+
+    workbook.undo(options()).unwrap();
+    assert_eq!(values(&workbook)[..2], numbers(&[5.0, 10.0]));
+}
+
+#[test]
+fn a_stale_open_recalculates_a_file_with_an_uncached_formula_or_a_full_calculation_request() {
+    let uncached = CACHED.replace("</row>", r#"<c r="D1"><f>1+1</f></c></row>"#);
+    for (sheet_data, calc_pr) in [
+        (uncached.as_str(), ""),
+        (CACHED, r#"<calcPr fullCalcOnLoad="1"/>"#),
+        (CACHED, r#"<calcPr forceFullCalc="1"/>"#),
+    ] {
+        let source = package(sheet_data, calc_pr);
+        let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+        assert_eq!(
+            values(&workbook),
+            numbers(&[5.0, 10.0, 5.0]),
+            "{sheet_data} {calc_pr}"
+        );
+    }
 }
 
 #[test]

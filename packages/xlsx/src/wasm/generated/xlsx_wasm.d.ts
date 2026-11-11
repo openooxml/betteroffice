@@ -101,6 +101,11 @@ export class XlsxDocument {
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
     /**
+     * Open keeping cached formula results, recalculating only a file with an uncached formula
+     * or a `calcPr` full calculation request.
+     */
+    static openRecalculatingStale(bytes: Uint8Array, context?: string | null): XlsxDocument;
+    /**
      * Checkpoints are only restorable by the same engine version and codec.
      */
     static openRecoveryCheckpoint(bytes: Uint8Array, through_seq: number): XlsxDocument;
@@ -288,6 +293,7 @@ export interface InitOutput {
     readonly xlsxdocument_nextPeerSnapshotChunk: (a: number) => [number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
+    readonly xlsxdocument_openRecalculatingStale: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_openRecoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxdocument_openWithCalculationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_openWithPeerHydrationJson: (a: number, b: number, c: number, d: number) => [number, number, number];

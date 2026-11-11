@@ -849,6 +849,10 @@ a precompiled `WebAssembly.Module` in runtimes that cannot fetch that URL. The
 core also provides hit-testing, viewport calculations, accessibility data, and
 TSV clipboard helpers.
 
+`openWorkbook` recalculates every formula at open. Pass `{ recalculate: "stale" }`
+to show the results the file cached instead; it recalculates only when a formula
+has no cached result or the file asks for a full calculation on load.
+
 ## Edit DOCX in version-checked batches
 
 A DOCX session reads paragraphs with the version they were read at, then applies

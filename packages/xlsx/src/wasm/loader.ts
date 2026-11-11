@@ -382,6 +382,12 @@ export interface OpenWorkbookOptions {
   /** Peer-unique positive safe integer. Generated securely when omitted. */
   clientId?: number;
   calculation?: WorkbookCalculationContext;
+  /**
+   * `'stale'` shows the results the file cached, recalculating every formula only when one has
+   * no cached result or `calcPr` asks for a full calculation on load. Edits still recalculate
+   * what they reach. Defaults to `'all'`. Unavailable for collaborative workbooks.
+   */
+  recalculate?: 'all' | 'stale';
 }
 
 /**
@@ -938,12 +944,22 @@ function openWorkbookInternal(
       throw new TypeError('calculation context is unavailable for collaborative workbooks');
     }
   }
+  if (options.recalculate !== undefined && options.recalculate !== 'all' && options.recalculate !== 'stale') {
+    throw new TypeError("recalculate must be 'all' or 'stale'");
+  }
+  if (options.recalculate === 'stale' && options.collaborative === true) {
+    throw new TypeError("recalculate 'stale' is unavailable for collaborative workbooks");
+  }
   requireInitialized();
   const collaborativeClientId = resolveCollaborativeClientId(options);
   let doc: XlsxDocument;
   try {
     if (hydration !== undefined) {
       doc = (XlsxDocument as PeerDocumentConstructor).openWithPeerHydrationJson(bytes, hydration);
+    } else if (options.recalculate === 'stale') {
+      doc = XlsxDocument.openRecalculatingStale(
+        bytes, options.calculation === undefined ? undefined : JSON.stringify(options.calculation)
+      );
     } else if (options.calculation !== undefined) {
       doc = (XlsxDocument as CalculationDocumentConstructor).openWithCalculationJson(
         bytes, JSON.stringify(options.calculation)

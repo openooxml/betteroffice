@@ -91,6 +91,21 @@ test('ack delivery skips removed listeners and defers replacements until the nex
   } finally { offCurrent(); offRemoved(); await session.dispose(); }
 });
 
+test("the worker opens with recalculate: 'stale'", async () => {
+  const bytes = await volatileWorkbookBytes();
+  const read = { ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:B1' } }] } as const;
+  for (const recalculate of ['stale', 'all'] as const) {
+    const session = await createTestWorkbookSession(bytes, undefined, { calculation, wasm: wasmBytes.buffer, recalculate });
+    try {
+      const cells = await session.call.readCells(read);
+      if (!cells.ok) throw new Error(cells.failure.message);
+      expect(cells.ranges[0].cells[0].map((cell: XlsxCellRead) => cell.value)).toEqual(recalculate === 'stale'
+        ? [{ kind: 'number', value: 0 }, { kind: 'number', value: 0 }]
+        : [{ kind: 'number', value: calculation.nowSerial }, { kind: 'number', value: Math.floor(calculation.nowSerial) }]);
+    } finally { await session.dispose(); }
+  }
+});
+
 function crashableHost(): {
   wrap(transport: SessionTransport): SessionTransport;
   crash(): void;
