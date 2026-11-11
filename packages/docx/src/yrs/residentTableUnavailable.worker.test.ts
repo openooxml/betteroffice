@@ -26,12 +26,12 @@ const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></
 
 const table = (...cells: string[]) => `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid>${cells.map(() => '<w:gridCol w:w="2340"/>').join('')}</w:tblGrid><w:tr>${cells.join('')}</w:tr></w:tbl>`;
 
-/** A body with one two-cell table, or, `nested`, that table inside the first cell of a healthy outer table. */
-function documentBytes(nested: boolean): Uint8Array {
+/** A body with one two-cell table, or, `nested`, that table inside the first cell of a healthy outer table, or `body`. */
+function documentBytes(nested: boolean, body?: string): Uint8Array {
   const inner = table(cell('First'), cell('Second'));
-  const content = nested
+  const content = body ?? (nested
     ? table(`<w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr>${inner}${paragraph('After inner')}</w:tc>`, cell('Outer two'))
-    : inner;
+    : inner);
   const parts: PartsMap = new Map();
   parts.set('[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'));
   parts.set('_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'));
@@ -39,8 +39,8 @@ function documentBytes(nested: boolean): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-async function open(clientId: number, nested = false) {
-  const bytes = documentBytes(nested);
+async function open(clientId: number, nested = false, body?: string) {
+  const bytes = documentBytes(nested, body);
   const worker = start(clientId);
   const client = new DocxSourceWorkerClient(worker);
   await client.openSource({ bytes, collaboration: { clientId } });
@@ -427,6 +427,127 @@ test('with the caret in a cell of an inner table that lost its properties and wh
     const typed = await replica.session.submit('insertText', { text: 'Z', selection: { anchor: inOuter, focus: inOuter } }).ack;
     expect(typed.status).toBe('applied');
     expect(cellTexts(replica, outerCells[1]!)).toEqual(['ZOuter two']);
+  } finally {
+    host.destroy();
+    first.destroy();
+    second.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
+const siblingTables = table(cell('A one'), cell('A two')) + paragraph('Between') + table(cell('B one'), cell('B two'));
+const siblingRange = (tableIndex: number, column: number) => {
+  const loc = { story: 'body', tableIndex, row: 0, column };
+  return { anchor: loc, head: loc };
+};
+
+test('after deleteTable removes an unavailable table, a second deleteTable from its old cell refuses and its sibling that lost its rows is untouched', async () => {
+  const replica = await open(9961, false, siblingTables);
+  const first = await peer(replica, 9962);
+  const second = await peer(replica, 9963);
+  const third = await peer(replica, 9964);
+  const fourth = await peer(replica, 9965);
+  try {
+    const story = firstCell(replica, 'body');
+    const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 0 };
+    first.setTableProperties({ story: 'body', tableIndex: 0 }, { width: 4000, widthType: 'dxa' });
+    sync(first, second);
+    second.setTableProperties({ story: 'body', tableIndex: 0 }, { justification: 'center' });
+    expect(first.undo()).toBe(true);
+    sync(first, second);
+    expect(second.undo()).toBe(true);
+    sync(first, second);
+    third.setCellShading(siblingRange(1, 0), 'FF0000');
+    sync(third, fourth);
+    fourth.setCellShading(siblingRange(1, 1), '00FF00');
+    expect(third.undo()).toBe(true);
+    sync(third, fourth);
+    expect(fourth.undo()).toBe(true);
+    sync(third, fourth);
+    await receive(replica, second);
+    await receive(replica, fourth);
+
+    const lostTblPr = (replica.engine.tablePayload('body', 0) ?? {}) as { rows?: Array<{ cells: Array<{ story: string }> }> };
+    expect('tblPr' in lostTblPr).toBe(false);
+    expect(lostTblPr.rows?.[0]?.cells[0]?.story).toBe(story);
+    expect('rows' in (replica.engine.tablePayload('body', 1) ?? {})).toBe(false);
+    expect(located(replica, story)).toBeNull();
+
+    const sibling = JSON.stringify(replica.engine.tablePayload('body', 1));
+    const selection = { anchor: inCell, focus: inCell };
+    const removed = await replica.session.submit('deleteTable', { selection } as never).ack;
+    expect([removed.status, (removed as { reason?: string }).reason]).toEqual(['applied', undefined]);
+    expect(replica.engine.tablePayload('body', 1)).toBeNull();
+    expect(JSON.stringify(replica.engine.tablePayload('body', 0))).toBe(sibling);
+    expect(cellTexts(replica, story)).toEqual(['A one']);
+
+    const untouched = replica.engine.encodeState();
+    const again = await replica.session.submit('deleteTable', { selection } as never).ack;
+    expect([again.status, (again as { reason?: string }).reason]).toEqual(['refused', 'table-unavailable']);
+    expect(JSON.stringify(replica.engine.tablePayload('body', 0))).toBe(sibling);
+    expect(replica.engine.encodeState()).toEqual(untouched);
+  } finally {
+    first.destroy();
+    second.destroy();
+    third.destroy();
+    fourth.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
+test('with the caret in a cell of an inner table a merge moved into another outer cell and that then lost its properties, every table command refuses coded and the outer table is untouched', async () => {
+  const replica = await open(9971, true);
+  const host = await peer(replica, 9972);
+  const first = await peer(replica, 9973);
+  const second = await peer(replica, 9974);
+  try {
+    const source = tableStory(replica);
+    const outerCells = (replica.engine.tablePayload('body', 0) as { rows: Array<{ cells: Array<{ story: string }> }> })
+      .rows[0]!.cells.map((entry) => entry.story);
+    const target = outerCells[1]!;
+    const moved = replica.engine.tablePayload(source, 0) as { rows: Array<{ cells: Array<{ story: string }> }> };
+    const inner = moved.rows[0]!.cells.map((entry) => entry.story);
+    expect(inner.every((story) => story.startsWith(`${source}:`))).toBe(true);
+    host.applyRawOps(source, [{ op: 'delete', index: 0, len: 1 }]);
+    host.applyRawOps(target, [{ op: 'insertEmbed', index: 0, kind: 'table', payload: { ...moved } }]);
+    sync(host, first);
+    sync(host, second);
+    await receive(replica, host);
+    expect(replica.engine.tablePayload(source, 0)).toBeNull();
+    expect(firstCell(replica, target)).toBe(inner[0]!);
+
+    first.setTableProperties({ story: target, tableIndex: 0 }, { width: 4000, widthType: 'dxa' });
+    sync(first, second);
+    second.setTableProperties({ story: target, tableIndex: 0 }, { justification: 'center' });
+    expect(first.undo()).toBe(true);
+    sync(first, second);
+    expect(second.undo()).toBe(true);
+    sync(first, second);
+    await receive(replica, second);
+    const payload = (replica.engine.tablePayload(target, 0) ?? {}) as { rows?: Array<{ cells: Array<{ story: string }> }> };
+    expect('tblPr' in payload).toBe(false);
+    expect(payload.rows?.[0]?.cells.map((entry) => entry.story)).toEqual(inner);
+    expect(inner.map((story) => located(replica, story))).toEqual([null, null]);
+
+    const outer = () => JSON.stringify(replica.engine.tablePayload('body', 0));
+    const intact = outer();
+    const untouched = replica.engine.encodeState();
+    for (const story of inner) {
+      const inCell = { story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 0 };
+      const selection = { anchor: inCell, focus: inCell };
+      for (const [kind, extra] of CARET_TABLE_COMMANDS) {
+        const ack = await replica.session.submit(kind as 'deleteTable', { ...extra, selection } as never).ack;
+        expect([story, kind, ack.status, (ack as { reason?: string }).reason]).toEqual([story, kind, 'refused', 'invalid-cell-target']);
+        expect(outer()).toBe(intact);
+        expect(replica.engine.encodeState()).toEqual(untouched);
+      }
+    }
+    expect(replica.engine.tablePayload(target, 0)).not.toBeNull();
+    expect(inner.map((story) => cellTexts(replica, story))).toEqual([['First'], ['Second']]);
+
+    const body = { story: 'body', paraId: replica.engine.paragraphs('body').at(-1)!.paraId, offset: 0 };
+    const typed = await replica.session.submit('insertText', { text: 'Z', selection: { anchor: body, focus: body } }).ack;
+    expect(typed.status).toBe('applied');
   } finally {
     host.destroy();
     first.destroy();
