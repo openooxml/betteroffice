@@ -80,8 +80,6 @@ export interface DocxClipboardFragment {
 export interface DocxClipboardSlice {
   text: string;
   fragment: DocxClipboardFragment | null;
-  /** Set, with no text or fragment, when the worker refuses the selection: one across stories that no retained cell range holds. */
-  refused?: 'invalid-selection';
 }
 
 /** @internal */

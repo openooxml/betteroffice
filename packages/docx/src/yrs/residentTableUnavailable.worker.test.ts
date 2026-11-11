@@ -11,6 +11,8 @@ import { createYrsSession, type YrsCellLoc, type YrsSession } from './index';
 import { tableUnavailableError } from './tableUnavailable';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
 import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
+import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
+import { ResidentWorkerInvalidSelectionError } from './residentEngineWorkerClient';
 import { resolveLiveCell, resolvePointerCellRange, setCellLocationShadowCheck } from './residentCommandTableSelection';
 
 let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -58,7 +60,7 @@ async function open(clientId: number, nested = false, body?: string) {
     echo: { paint() {}, drop() {}, present() {} }, maxRecoveryAttempts: 0,
     recovery: { reopen: () => Promise.reject(new Error('Unexpected reopen')) },
   });
-  return { engine, session, client, bytes, nested };
+  return { engine, session, client, worker, bytes, nested };
 }
 
 const merge = { lane: 'collab', fence: true } as const;
@@ -593,38 +595,85 @@ test('a copy from a cell of an inner table that lost its properties, with an out
   }
 }, TIMEOUT);
 
-test('a copy from another outer cell to a cell of an inner table that lost its properties, with an outer cell range retained, refuses invalid-selection and the session takes the next command', async () => {
+/** Leaves the inner table without its properties under a retained outer cell range; returns a selection from the second outer cell into the inner cell. */
+async function crossStoryCopySelection(replica: Opened, first: YrsSession, second: YrsSession) {
+  const table = tableStory(replica);
+  const story = cellStory(replica);
+  const [lost] = INNER_LOST;
+  lost!.edit(first, table, true);
+  sync(first, second);
+  lost!.edit(second, table, false);
+  expect(first.undo()).toBe(true);
+  sync(first, second);
+  expect(second.undo()).toBe(true);
+  sync(first, second);
+  await receive(replica, second);
+  expect('tblPr' in (replica.engine.tablePayload(table, 0) ?? {})).toBe(false);
+  expect(located(replica, story)).toBeNull();
+
+  const other = outerCellsOf(replica)[1]!;
+  replica.engine.setCellSelection(outerRange);
+  return { other, selection: { anchor: startOf(replica, other), focus: { ...startOf(replica, story), offset: 'First'.length } } };
+}
+
+test('a copy from another outer cell to a cell of an inner table that lost its properties, with an outer cell range retained, gets a non-terminal invalid-selection reply from the worker and the next command applies', async () => {
   const replica = await open(9471, true);
   const first = await peer(replica, 9472);
   const second = await peer(replica, 9473);
   try {
-    const table = tableStory(replica);
-    const story = cellStory(replica);
-    const [lost] = INNER_LOST;
-    lost!.edit(first, table, true);
-    sync(first, second);
-    lost!.edit(second, table, false);
-    expect(first.undo()).toBe(true);
-    sync(first, second);
-    expect(second.undo()).toBe(true);
-    sync(first, second);
-    await receive(replica, second);
-    expect('tblPr' in (replica.engine.tablePayload(table, 0) ?? {})).toBe(false);
-    expect(located(replica, story)).toBeNull();
-
-    const other = outerCellsOf(replica)[1]!;
-    replica.engine.setCellSelection(outerRange);
+    const { other, selection } = await crossStoryCopySelection(replica, first, second);
     const untouched = replica.engine.encodeState();
-    const { value } = await replica.client.documentRead({ kind: 'clipboardSlice', selection: {
-      anchor: startOf(replica, other), focus: { ...startOf(replica, story), offset: 'First'.length },
-    } });
-    expect(value).toEqual({ text: '', fragment: null, refused: 'invalid-selection' });
+    const replies: DocxEngineWorkerResponse[] = [];
+    const deliver = replica.worker.onmessage!;
+    replica.worker.onmessage = (event) => {
+      replies.push(event.data);
+      deliver.call(replica.worker, event);
+    };
+    try {
+      await expect(replica.client.documentRead({ kind: 'clipboardSlice', selection }))
+        .rejects.toMatchObject({ code: 'invalid-selection' });
+    } finally {
+      replica.worker.onmessage = deliver;
+    }
+    const failed = replies.filter((reply) => !reply.ok);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ ok: false, code: 'invalid-selection' });
+    expect(failed[0]).not.toHaveProperty('terminal');
+    expect(failed[0]).not.toHaveProperty('failureCode');
+    expect(failed[0]).not.toHaveProperty('commandError');
     expect(replica.engine.encodeState()).toEqual(untouched);
 
     const inOuter = startOf(replica, other);
     const typed = await replica.session.submit('insertText', { text: 'Z', selection: { anchor: inOuter, focus: inOuter } }).ack;
     expect(typed.status).toBe('applied');
     expect(cellTexts(replica, other)).toEqual(['ZOuter two']);
+  } finally {
+    first.destroy();
+    second.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
+test('a copy from another outer cell to a cell of an inner table that lost its properties rejects documentRead and documentReadAt with invalid-selection, and the client answers the next read', async () => {
+  const replica = await open(9474, true);
+  const first = await peer(replica, 9475);
+  const second = await peer(replica, 9476);
+  try {
+    const { selection } = await crossStoryCopySelection(replica, first, second);
+    const untouched = replica.engine.encodeState();
+
+    const read = replica.client.documentRead({ kind: 'clipboardSlice', selection });
+    await expect(read).rejects.toBeInstanceOf(ResidentWorkerInvalidSelectionError);
+    await expect(read).rejects.toMatchObject({ code: 'invalid-selection' });
+    const { version, value: vector } = await replica.client.documentRead({ kind: 'collabStateVector' });
+    expect(vector).toEqual(replica.engine.encodeStateVector());
+
+    const readAt = replica.client.documentReadAt({ kind: 'clipboardSlice', selection }, version);
+    await expect(readAt).rejects.toBeInstanceOf(ResidentWorkerInvalidSelectionError);
+    await expect(readAt).rejects.toMatchObject({ code: 'invalid-selection' });
+    expect(await replica.client.documentReadAt({ kind: 'collabStateVector' }, version))
+      .toEqual({ status: 'ok', version, value: replica.engine.encodeStateVector() });
+    expect(replica.engine.encodeState()).toEqual(untouched);
   } finally {
     first.destroy();
     second.destroy();

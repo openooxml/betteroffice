@@ -97,7 +97,7 @@ import {
   resolveSelectionUnit,
 } from './viewerSelection';
 import { readAdjacentRevision, readSidebar, readOutlineHeadings } from './sidebarReads';
-import { clipboardTablePayload, readClipboardSlice, type DocxClipboardSlice } from './clipboardFragment';
+import { clipboardTablePayload, readClipboardSlice } from './clipboardFragment';
 import { storyOffsetForLoc, tableAnchors } from './storyPlainText';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
@@ -1318,6 +1318,7 @@ let editorSaves: ResidentSaveRecord = { full: false };
 let saveSeedStatesPrimed = false;
 class SaveUnavailableError extends Error {}
 class SourceCutKeptError extends Error {}
+class InvalidSelectionError extends Error {}
 let openedVersion: string | null | undefined;
 /** A change before the whole document's first frame leaves no frame as opened. */
 function noteDocumentChange(): void {
@@ -1650,6 +1651,7 @@ function replyFailure(id: number, error: unknown): void {
     error: error instanceof Error ? error.message : String(error),
     ...(failure instanceof SaveUnavailableError ? { code: 'save-unavailable' as const } : {}),
     ...(failure instanceof SourceCutKeptError ? { code: 'cut-kept' as const } : {}),
+    ...(failure instanceof InvalidSelectionError ? { code: 'invalid-selection' as const } : {}),
   });
 }
 
@@ -2306,10 +2308,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
             break;
           }
         }
-        if (anchor.story !== focus.story) {
-          value = { text: '', fragment: null, refused: 'invalid-selection' } satisfies DocxClipboardSlice;
-          break;
-        }
+        if (anchor.story !== focus.story) throw new InvalidSelectionError('Cross-story selection is unavailable');
         value = readClipboardSlice(reader, {
           story: anchor.story,
           from: storyOffsetForLoc(session.geometryReader, anchor),
