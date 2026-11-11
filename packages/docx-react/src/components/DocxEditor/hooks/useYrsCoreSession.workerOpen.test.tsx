@@ -128,6 +128,7 @@ const editModule = new WebAssembly.Module(
 );
 let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
 
+const { test, previousTestSettled } = budgetedTests();
 beforeEach(() => {
   setMissingWorkerCapabilitiesForTests([]);
   const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
@@ -144,7 +145,6 @@ beforeAll(async () => {
   ))));
   startWorker = await residentWorkerFactory();
 }, 30_000);
-const { test, previousTestSettled } = budgetedTests();
 afterEach(async () => {
   try {
     await previousTestSettled();
