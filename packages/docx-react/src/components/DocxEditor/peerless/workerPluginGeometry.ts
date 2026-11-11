@@ -155,11 +155,9 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       return true;
     }).catch(error => {
       if (current === source && selectionRead === entry) {
+        showSelection(null, null);
         if (error instanceof WorkerReadSupersededError) selectionRead = null;
-        else if (fresh(source)) {
-          entry.failed = true;
-          showSelection(null, selected);
-        }
+        else entry.failed = true;
       }
       return false;
     }).finally(() => { if (current === source && selectionRead === entry) publish(); });

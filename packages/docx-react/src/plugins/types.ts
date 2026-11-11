@@ -160,9 +160,9 @@ export interface DocxPluginSelection {
   formatting: SelectionState | null;
   /**
    * Display positions in the layout `layoutId` names; never an edit range. Compare `layoutId` with
-   * `snapshot.layout?.id` before positioning anything by it. When they differ, these are the previous
-   * layout's positions, kept while the current layout maps the unchanged selection, and exactly one
-   * later selection change replaces them with the mapped range or clears them.
+   * `snapshot.layout?.id` before positioning anything by it. The range is kept across a frame
+   * replacement until the new layout maps it, and is then replaced or cleared by one selection change.
+   * A superseded or failed read shows null, as before.
    */
   displayRange: { story: string; from: number; to: number; layoutId: string } | null;
 }
