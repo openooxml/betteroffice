@@ -283,13 +283,14 @@ mod tests {
 
     static LIMITS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Serialises the tests that change how many threads hold a limit.
+    /// Serialises every test that reads the counters or changes counting, limits or the epoch.
     fn limits() -> MutexGuard<'static, ()> {
         LIMITS.lock().unwrap_or_else(|error| error.into_inner())
     }
 
     #[test]
     fn counts_allocations_reallocations_and_frees() {
+        let _limits = limits();
         enable();
         let before = live();
         let layout = Layout::from_size_align(1024, 8).unwrap();
@@ -312,6 +313,7 @@ mod tests {
 
     #[test]
     fn counts_zeroed_allocations() {
+        let _limits = limits();
         enable();
         let before = live();
         let layout = Layout::from_size_align(256, 8).unwrap();
@@ -330,6 +332,7 @@ mod tests {
 
     #[test]
     fn a_failed_reallocation_keeps_the_block_and_records_its_size() {
+        let _limits = limits();
         enable();
         let before = live();
         let layout = Layout::from_size_align(64, 8).unwrap();
@@ -346,6 +349,7 @@ mod tests {
 
     #[test]
     fn counters_belong_to_the_calling_thread() {
+        let _limits = limits();
         enable();
         let block = vec![1u8; 1 << 20];
         let (other_live, other_peak) = std::thread::spawn(|| (live(), peak())).join().unwrap();
@@ -357,6 +361,7 @@ mod tests {
 
     #[test]
     fn a_free_on_another_thread_subtracts_there_saturating_at_zero() {
+        let _limits = limits();
         enable();
         let block = vec![1u8; 1 << 20];
         let allocated = live();
@@ -373,6 +378,7 @@ mod tests {
 
     #[test]
     fn a_block_from_before_counting_started_frees_saturating_at_zero() {
+        let _limits = limits();
         let layout = Layout::from_size_align(1 << 20, 8).unwrap();
         let uncounted = unsafe { INNER.alloc(layout) } as usize;
         assert_ne!(uncounted, 0);
@@ -390,6 +396,7 @@ mod tests {
 
     #[test]
     fn enabling_from_any_thread_turns_counting_on_everywhere_and_stays_on() {
+        let _limits = limits();
         assert!(std::thread::spawn(enable).join().unwrap());
         assert!(enabled());
         assert!(enable());
@@ -469,7 +476,6 @@ mod tests {
         drop(block);
     }
 
-    #[test]
     /// Starts a new counting epoch, as counting switching on from off does. Other tests may have
     /// turned counting on for good, so the switch itself cannot always happen here.
     fn restart_counting() {
@@ -568,6 +574,7 @@ mod tests {
 
     #[test]
     fn without_a_limit_counting_never_flags_the_thread() {
+        let _limits = limits();
         enable();
         assert_eq!(limit(), None);
         let block = vec![1u8; 1 << 20];
