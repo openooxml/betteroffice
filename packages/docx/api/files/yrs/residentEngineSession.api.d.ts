@@ -77,6 +77,11 @@ export type ResidentEngineSession = Pick<YrsSession, 'clientId' | 'applyDelete' 
     /** Rects of the resident display list for each `[from, to)` range of one region, in order. */
     storyRangeRects(region: DisplayListHitRegion, partId: string, ranges: readonly (readonly [number, number])[]): DisplayListRect[][];
     clearCellSelection(): YrsLoc | null;
+    /**
+     * @internal A key that changes whenever an embed, a table's rows, cells or cell stories, or
+     * the set of stories changes, and with every document instance, seed or loaded state.
+     */
+    cellStructureKey?(): string;
     controlTargets(): ResidentControlTarget[];
     repeatControlAt(at: ResidentControlPosition, remove: boolean): boolean;
     setControlValue(at: ResidentControlPosition, value: import('./index').YrsContentControlValue): void;
