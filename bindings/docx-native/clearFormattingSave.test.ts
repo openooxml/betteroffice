@@ -6,6 +6,7 @@ import { createEmptyDocx } from '../../packages/docx/src/docx/rezip/createEmpty'
 import { applyClipboardFragment } from '../../packages/docx/src/yrs/clipboardFragment';
 import { savedRunProperties } from '../../packages/docx/src/yrs/__fixtures__/textRuns';
 import type { DocxEditStep } from '../../packages/docx/src/yrs/edits';
+import type { TablePayload } from '../../packages/docx/src/yrs/storyPlainText';
 
 type Yrs = typeof wasmYrs;
 type Session = Awaited<ReturnType<Yrs['createYrsSession']>>;
@@ -195,34 +196,45 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       }
       return undefined;
     };
-    const cases: [string, (session: Session) => [string, boolean | null][]][] = [
-      ['a row inserted above the header row, the old header cell untouched', (session) => {
-        session.insertRow(at(0, 0), 'above');
-        const fresh = session.listStories().stories.find((entry) => entry.kind === 'tableCell' && session.paragraphs(entry.story).some((paragraph) => paragraph.text === ''))!.story;
-        const paraId = session.paragraphs(fresh)[0]!.paraId;
-        session.insertText({ story: fresh, paraId, offset: 0 }, 'New head');
-        session.formatRange(whole(session, paraId, paraId, fresh), { bold: false });
-        return [['Old head', null], ['New head', null]];
+    type Expected = { marker: string; session?: boolean; saved: string | null; reopens: boolean };
+    const direct = (marker: string, on: boolean | null): Expected =>
+      ({ marker, saved: on === null ? null : on ? '<w:b/>' : '<w:b w:val="0"/>', reopens: on === true });
+    const typeIntoInsertedFirstRow = (session: Session) => {
+      session.insertRow(at(0, 0), 'above');
+      const table = session.tablePayload('body', 0) as unknown as TablePayload;
+      const story = table.rows[0]!.cells[0]!.story;
+      const paraId = session.paragraphs(story)[0]!.paraId;
+      session.insertText({ story, paraId, offset: 0 }, 'New head');
+      session.formatRange(whole(session, paraId, paraId, story), { bold: false });
+    };
+    const cases: [string, (session: Session) => Expected[]][] = [
+      ['a row inserted above the header row, the old header cell now in row 1 untouched', (session) => {
+        typeIntoInsertedFirstRow(session);
+        return [direct('Old head', null)];
+      }],
+      ['a row inserted above the header row, text typed into a cell of the inserted first row', (session) => {
+        typeIntoInsertedFirstRow(session);
+        return [{ marker: 'New head', session: true, saved: null, reopens: true }];
       }],
       ['the header row deleted', (session) => {
         session.deleteRow({ anchor: at(0, 0), head: at(0, 0) });
         format(session, '00000043', false);
-        return [['Body one', false]];
+        return [direct('Body one', false)];
       }],
       ['a column deleted', (session) => {
         session.deleteColumn({ anchor: at(0, 1), head: at(0, 1) });
         format(session, '00000041', true);
-        return [['Old head', true]];
+        return [direct('Old head', true)];
       }],
       ['cells merged down the first column', (session) => {
         session.mergeCells({ anchor: at(0, 0), head: at(1, 0) });
         format(session, '00000043', false);
-        return [['Body one', false]];
+        return [direct('Body one', false)];
       }],
       ['a row inserted in the outer table of a nested one', (session) => {
         session.insertRow(at(0, 0), 'above');
         format(session, '00000046', true);
-        return [['Inner head', true]];
+        return [direct('Inner head', true)];
       }],
     ];
     for (const [name, edit] of cases) {
@@ -234,10 +246,11 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         first.reopened.destroy();
         const { xml, reopened } = await saveAndReopen(yrs, session);
         try {
-          for (const [marker, on] of expected) {
-            const saved = on === null ? null : on ? '<w:b/>' : '<w:b w:val="0"/>';
-            expect({ name, marker, saved: savedRunProperties(xml, marker) }).toEqual({ name, marker, saved });
-            expect({ name, marker, bold: boldIn(reopened, marker) }).toEqual({ name, marker, bold: on === true });
+          for (const want of expected) {
+            const { marker } = want;
+            const got: Record<string, unknown> = { marker, saved: savedRunProperties(xml, marker), reopens: boldIn(reopened, marker) };
+            if ('session' in want) got.session = boldIn(session, marker);
+            expect({ engine, name, ...got }).toEqual({ engine, name, ...want });
           }
         } finally {
           reopened.destroy();
@@ -248,7 +261,7 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     }
   });
 
-  test(`${engine}: a header cell explicitly not bold, made bold after a row is inserted above it, saves explicit bold`, async () => {
+  test(`${engine}: the old header cell, explicitly not bold and now in row 1 after a row is inserted above it, made bold saves explicit bold`, async () => {
     const cell = (paraId: string, run: string) =>
       `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="${paraId}">${run}</w:p></w:tc>`;
     const body = '<w:tbl><w:tblPr><w:tblStyle w:val="HeaderGrid"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>' +
