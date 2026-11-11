@@ -1,6 +1,7 @@
+import { budgetedTests, EDITOR_TEARDOWN_BUDGET_MS, pollUntil } from '../../../../shared/office-session/testing/loadBudget';
 import { gestureFor, trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { StrictMode, useState } from 'react';
@@ -62,7 +63,11 @@ beforeAll(async () => {
   console.error = () => {};
   console.warn = () => {};
 }, 30_000);
-afterEach(cleanup);
+const { test, previousTestSettled } = budgetedTests();
+afterEach(async () => {
+  try { await previousTestSettled(); }
+  finally { cleanup(); }
+}, EDITOR_TEARDOWN_BUDGET_MS);
 afterAll(async () => {
   await new Promise((done) => setTimeout(done, 50));
   console.error = quiet.error;
@@ -81,7 +86,7 @@ async function settle(ms = 20) {
 }
 
 async function until(done: () => boolean) {
-  for (let attempt = 0; attempt < 300 && !done(); attempt += 1) await settle(10);
+  await pollUntil(done, settle);
   expect(done()).toBe(true);
 }
 

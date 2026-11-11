@@ -1,6 +1,7 @@
 import './peerlessTestCapabilities';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn } from 'bun:test';
+import { budgetedTests, budgetedWaitFor, EDITOR_TEARDOWN_BUDGET_MS } from '../../../../shared/office-session/testing/loadBudget';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { StrictMode } from 'react';
@@ -46,7 +47,9 @@ mock.module('./peerlessViewStore', () => ({
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor: waitForCondition } = await import('@testing-library/react');
+const waitFor = budgetedWaitFor(waitForCondition);
+const { test, previousTestSettled } = budgetedTests();
 const restorers: (() => void)[] = [];
 const file = new Uint8Array([1]);
 let paints: PeerlessConfirmedFrame[];
@@ -380,10 +383,13 @@ beforeEach(() => {
   });
   restorers.push(() => frame.mockRestore());
 });
-afterEach(() => {
-  cleanup();
-  for (const restore of restorers.splice(0).reverse()) restore();
-});
+afterEach(async () => {
+  try { await previousTestSettled(); }
+  finally {
+    cleanup();
+    for (const restore of restorers.splice(0).reverse()) restore();
+  }
+}, EDITOR_TEARDOWN_BUDGET_MS);
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('peerless editor chunk failures', () => {

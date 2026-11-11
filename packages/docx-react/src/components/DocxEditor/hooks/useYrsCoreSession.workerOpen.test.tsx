@@ -2,6 +2,7 @@ import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { budgetedTests, EDITOR_TEARDOWN_BUDGET_MS } from '../../../../../../shared/office-session/testing/loadBudget';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { createRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -143,7 +144,15 @@ beforeAll(async () => {
   ))));
   startWorker = await residentWorkerFactory();
 }, 30_000);
-afterEach(() => {
+const budgeted = budgetedTests();
+afterEach(async () => {
+  try {
+    await budgeted.previousTestSettled();
+  } finally {
+    teardown();
+  }
+}, EDITOR_TEARDOWN_BUDGET_MS);
+function teardown() {
   try {
     cleanup();
   } finally {
@@ -157,7 +166,7 @@ afterEach(() => {
     console.error = originalConsoleError;
     for (const session of sessions.splice(0)) session.destroy();
   }
-});
+}
 afterAll(async () => {
   await act(async () => {});
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -8173,7 +8182,7 @@ test('font announcements in viewer sessions are not held', async () => {
   }
 });
 
-test('held input and loading reads wait for the current worker layout after hydration', async () => {
+budgeted.test('held input and loading reads wait for the current worker layout after hydration', async () => {
   const opened = await openingEditor(true, false, {
     holdFullLayout: true,
   });
@@ -8461,7 +8470,7 @@ test('readiness commits thirty seconds after hydration even with ongoing layout 
   }
 });
 
-test('replacing a document discards its hydrated peer waiting for layout completion', async () => {
+budgeted.test('replacing a document discards its hydrated peer waiting for layout completion', async () => {
   const opened = await openingEditor(true, false, {
     holdFullLayout: true,
   });
