@@ -1,7 +1,8 @@
 import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { budgetedTest } from '../../../../../../shared/office-session/testing/loadBudget';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { createRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -126,6 +127,7 @@ const editModule = new WebAssembly.Module(
   new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
 );
 let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
+const test = budgetedTest();
 
 beforeEach(() => {
   setMissingWorkerCapabilitiesForTests([]);
