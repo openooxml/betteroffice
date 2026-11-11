@@ -11,7 +11,7 @@ import { createYrsSession, type YrsCellLoc, type YrsSession } from './index';
 import { tableUnavailableError } from './tableUnavailable';
 import { closeCommandEngines, openCommandEngine, TIMEOUT } from './residentCommandTestSupport';
 import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
-import { resolveLiveCell, setCellLocationShadowCheck } from './residentCommandTableSelection';
+import { resolveLiveCell, resolvePointerCellRange, setCellLocationShadowCheck } from './residentCommandTableSelection';
 
 let start: Awaited<ReturnType<typeof residentWorkerFactory>>;
 beforeAll(async () => {
@@ -415,6 +415,59 @@ for (const [index, lost] of INNER_LOST.entries()) {
     }
   }, TIMEOUT);
 }
+
+const outerCellsOf = (replica: Opened) => (replica.engine.tablePayload('body', 0) as { rows: Array<{ cells: Array<{ story: string }> }> })
+  .rows[0]!.cells.map((entry) => entry.story);
+const startOf = (replica: Opened, story: string) => ({ story, paraId: replica.engine.paragraphs(story)[0]!.paraId, offset: 0 });
+const pointerRange = (replica: Opened, from: ReturnType<typeof startOf>, to: ReturnType<typeof startOf>) =>
+  resolvePointerCellRange(replica.engine as unknown as DocxWorkerCommandEngine, from, to);
+
+test(`a Shift-click from a caret the local user's own undo left in a cell of an inner table without properties to another outer cell builds no outer cell range`, async () => {
+  const replica = await open(9981, true);
+  const first = await peer(replica, 9982);
+  try {
+    const table = tableStory(replica);
+    const story = cellStory(replica);
+    const inCell = startOf(replica, story);
+    const selection = { anchor: inCell, focus: inCell };
+
+    first.setTableProperties({ story: table, tableIndex: 0 }, { width: 4000, widthType: 'dxa' });
+    await receive(replica, first);
+    const patched = await replica.session.submit('setTableProperties', { op: 'patch', patch: { justification: 'center' }, selection } as never).ack;
+    expect(patched.status).toBe('applied');
+    expect(first.undo()).toBe(true);
+    await receive(replica, first);
+    await replica.session.submit('select', { selection }).ack;
+    expect(replica.session.state.selection?.focus.story).toBe(story);
+    expect((await replica.session.submit('undo', {}).ack).status).toBe('applied');
+
+    const payload = (replica.engine.tablePayload(table, 0) ?? {}) as { rows?: unknown };
+    expect('tblPr' in payload).toBe(false);
+    expect(Array.isArray(payload.rows)).toBe(true);
+    expect(located(replica, story)).toBeNull();
+    const caret = replica.session.state.selection?.focus;
+    expect(caret?.story).toBe(story);
+    expect(pointerRange(replica, caret!, startOf(replica, outerCellsOf(replica)[1]!))).toBeNull();
+  } finally {
+    first.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
+test('a Shift-click from a caret in a healthy inner table cell to another outer cell selects both outer cells, anchored at the start of the cell holding the inner table', async () => {
+  const replica = await open(9991, true);
+  try {
+    const outer = outerCellsOf(replica);
+    const story = cellStory(replica);
+    expect(located(replica, story)).toEqual(at(tableStory(replica), 0, 0));
+    expect(pointerRange(replica, startOf(replica, story), startOf(replica, outer[1]!))).toMatchObject({
+      cells: { anchor: at('body', 0, 0), head: at('body', 0, 1) },
+      textAnchor: { story: outer[0]!, offset: 0 },
+    });
+  } finally {
+    replica.session.dispose();
+  }
+}, TIMEOUT);
 
 test('with the caret in a cell of an inner table that lost its properties and whose cell ids name no parent story, every table command refuses coded and the outer table is untouched', async () => {
   const replica = await open(9951, true);

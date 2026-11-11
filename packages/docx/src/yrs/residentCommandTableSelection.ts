@@ -56,6 +56,13 @@ function laidOut(engine: DocxWorkerCommandEngine, root: string, story: string): 
   return createYrsPositionProjection(engine.geometryReader, root)?.positionForLoc({ story, paraId: paragraph.paraId, offset: 0 }) != null;
 }
 
+/** Whether `story` may resolve to a cell of `tables`, an ancestor one included: it is itself a cell there, or the layout shows it. */
+function shownStory(
+  engine: DocxWorkerCommandEngine, root: string, tables: readonly ProjectedCellTable[] | null, story: string
+): boolean {
+  return isCellOf(tables, story) || laidOut(engine, root, story);
+}
+
 const projectedTables = new WeakMap<object, Map<string, { key: string; tables: ProjectedCellTable[] | null }>>();
 let shadowCheck = false;
 const cacheCounts = { built: 0, reused: 0, uncached: 0 };
@@ -105,7 +112,7 @@ export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string):
       throw new Error(`cell location cache differs for ${story}: ${JSON.stringify(located)} != ${JSON.stringify(fresh)}`);
     }
   }
-  if (located && !isCellOf(tables, story) && !laidOut(engine, root, story)) return null;
+  if (located && !shownStory(engine, root, tables, story)) return null;
   return located;
 }
 
@@ -182,10 +189,13 @@ interface CommonTable {
 
 function commonTableFor(engine: DocxWorkerCommandEngine, first: string, second: string): CommonTable | null {
   if (first === second || rootOf(first) !== rootOf(second)) return null;
-  const projection = createYrsPositionProjection(engine.geometryReader, rootOf(first));
+  const root = rootOf(first);
+  const projection = createYrsPositionProjection(engine.geometryReader, root);
   if (!projection) return null;
+  const tables = projection.allTables();
+  if (!shownStory(engine, root, tables, first) || !shownStory(engine, root, tables, second)) return null;
   let best: { story: string; tableIndex: number } | null = null;
-  for (const table of projection.allTables()) {
+  for (const table of tables) {
     const holds = (story: string) => table.cells.some((cell) => cell.story === story || story.startsWith(`${cell.story}:`));
     if (!holds(first) || !holds(second)) continue;
     if (!best || table.story.length > best.story.length) best = { story: table.story, tableIndex: table.tableIndex };
