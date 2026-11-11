@@ -37,9 +37,8 @@ fn callbacks(
 }
 
 /// a stacked function vector, or several functions over several value
-/// columns, has no Excel-saved layout to follow yet: it counts as an
-/// unsupported shape, so a saved result is kept, even under a handler, and
-/// none gives `#CALC!`.
+/// columns, has no Excel-saved layout to follow yet: it counts as
+/// unsupported, so a saved result is kept and none gives `#CALC!`.
 fn check_supported_shape(
     by_col: bool,
     lambdas: &[Rc<Lambda>],
@@ -47,7 +46,7 @@ fn check_supported_shape(
     ctx: &EvalContext<'_>,
 ) -> Result<(), ErrorValue> {
     if lambdas.len() > 1 && (!by_col || value_cols > 1) {
-        ctx.record_unsupported_shape();
+        ctx.record_unsupported_function();
         return Err(ErrorValue::Calc);
     }
     Ok(())
