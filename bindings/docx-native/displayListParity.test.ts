@@ -1,7 +1,8 @@
 /**
  * PNG export on the native and wasm engines hands each page the same display
  * list. Face ids are canonicalised before comparing because they follow font
- * load completion order.
+ * load completion order; each canonical id keeps the hash of the face bytes
+ * the session registered under it.
  */
 import { describe, expect, test } from 'bun:test';
 import { canonicalFaceIds, dumpDisplayLists, firstDifferences, type DisplayListDump } from './displayListParity';
@@ -33,8 +34,12 @@ for (const engine of ['wasm', 'native'] as const) {
 }
 
 describe('face id canonicalisation', () => {
-  const recorded = (fontChains: Record<string, number[]>, ids: [number, number, number, number]) => JSON.stringify({
+  const face = (id: number) => `face-${id}`;
+  const facesOf = (fontChains: Record<string, number[]>, ids: number[]) =>
+    Object.fromEntries([...Object.values(fontChains).flat(), ...ids].map(id => [id, face(id)]));
+  const recorded = (fontChains: Record<string, number[]>, ids: [number, number, number, number], faces = facesOf(fontChains, ids)) => JSON.stringify({
     fontChains,
+    faces,
     page: {
       pageIndex: 0,
       primitives: [
@@ -50,9 +55,29 @@ describe('face id canonicalisation', () => {
   ];
 
   test('lists that differ only by a permutation of face ids compare equal', () => {
-    const left = recorded({ body: [3, 8], heading: [8, 11] }, [8, 3, 11, 3]);
-    const right = recorded({ heading: [2, 7], body: [5, 2] }, [2, 5, 7, 5]);
+    const left = recorded({ body: [3, 8], heading: [8, 11] }, [8, 3, 11, 3], { 3: 'regular', 8: 'bold', 11: 'italic' });
+    const right = recorded({ heading: [2, 7], body: [5, 2] }, [2, 5, 7, 5], { 5: 'regular', 2: 'bold', 7: 'italic' });
     expect(firstDifferences(...pair(left, right))).toEqual([]);
+  });
+
+  test('ids that renumber alike but stand for different faces compare unequal', () => {
+    const left = recorded({ 'calibri|0|0': [3] }, [3, 3, 3, 3], { 3: 'calibri-a' });
+    const right = recorded({ 'calibri|0|0': [8] }, [8, 8, 8, 8], { 8: 'calibri-b' });
+    expect(canonicalFaceIds(left).page).toEqual(canonicalFaceIds(right).page);
+    const found = firstDifferences(...pair(left, right));
+    expect(found).toHaveLength(1);
+    expect(found[0]).toBe('sample page 0: faces differ: ["calibri-a"] vs ["calibri-b"]');
+  });
+
+  test('ids that renumber alike and stand for the same face compare equal', () => {
+    const left = recorded({ 'calibri|0|0': [3] }, [3, 3, 3, 3], { 3: 'calibri' });
+    const right = recorded({ 'calibri|0|0': [8] }, [8, 8, 8, 8], { 8: 'calibri' });
+    expect(firstDifferences(...pair(left, right))).toEqual([]);
+  });
+
+  test('an id with no recorded face throws', () => {
+    const left = recorded({ body: [3, 8] }, [8, 3, 8, 21], { 3: 'regular', 8: 'bold' });
+    expect(() => canonicalFaceIds(left)).toThrow('face id 21 has no recorded face');
   });
 
   test('a primitive pointing at a different face of the same chains compares unequal', () => {
@@ -69,6 +94,10 @@ describe('face id canonicalisation', () => {
     const canonical = canonicalFaceIds(left);
     expect(canonical.fontChains).toEqual({ body: [0, 1] });
     expect(JSON.stringify(canonical.page)).toContain('"leaderGlyphs":{"fontId":2,');
-    expect(firstDifferences(...pair(left, right))).toHaveLength(1);
+    expect(canonical.faces).toEqual(['face-3', 'face-8', 'face-21']);
+    const found = firstDifferences(...pair(left, right));
+    expect(found).toHaveLength(2);
+    expect(found[0]).toStartWith('sample page 0: faces differ:');
+    expect(found[1]).toStartWith('sample page 0 primitive 2 of 3/3:');
   });
 });

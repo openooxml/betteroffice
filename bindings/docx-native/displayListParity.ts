@@ -33,20 +33,31 @@ export function dumpDisplayLists(engine: 'wasm' | 'native', fonts: 'pinned' | 'd
   }
 }
 
-/** One recorded page: the font chains the engine was handed and the page's display list. */
-export interface RecordedPage { fontChains?: Record<string, number[]>; page: { primitives?: unknown[] } & Record<string, unknown> }
+/** One recorded page: the font chains the engine was handed, the face behind each id, and the page's display list. */
+export interface RecordedPage { fontChains?: Record<string, number[]>; faces?: Record<string, string>; page: { primitives?: unknown[] } & Record<string, unknown> }
+
+/** A recorded page after `canonicalFaceIds`: `faces[n]` is the face canonical id `n` stands for. */
+export interface CanonicalPage { fontChains?: Record<string, number[]>; faces: string[]; page: RecordedPage['page'] }
 
 /**
  * Renumbers the face ids of one recorded page by first occurrence: chains in
  * sorted key order, then chain position, then every `fontId` in a walk of the
  * page. An id that no chain holds is numbered after all chain ids, so it never
- * shares a number with a chained face.
+ * shares a number with a chained face. Each canonical id keeps the face the
+ * recording named for its original id; an id the recording names no face for
+ * throws.
  */
-export function canonicalFaceIds(json: string): RecordedPage {
+export function canonicalFaceIds(json: string): CanonicalPage {
   const recorded = JSON.parse(json) as RecordedPage;
   const numbers = new Map<number, number>();
+  const faces: string[] = [];
   const renumber = (id: number) => {
-    if (!numbers.has(id)) numbers.set(id, numbers.size);
+    if (!numbers.has(id)) {
+      const face = recorded.faces?.[id];
+      if (face === undefined) throw new Error(`face id ${id} has no recorded face`);
+      numbers.set(id, numbers.size);
+      faces.push(face);
+    }
     return numbers.get(id)!;
   };
   const chains = recorded.fontChains;
@@ -56,10 +67,11 @@ export function canonicalFaceIds(json: string): RecordedPage {
     if (value === null || typeof value !== 'object') return value;
     return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, key === 'fontId' && typeof field === 'number' ? renumber(field) : walk(field)]));
   };
-  return { ...(fontChains ? { fontChains } : {}), page: walk(recorded.page) as RecordedPage['page'] };
+  const page = walk(recorded.page) as RecordedPage['page'];
+  return { ...(fontChains ? { fontChains } : {}), faces, page };
 }
 
-/** Where two dumps first differ for each fixture: the page, its font chains when they differ, and the first differing primitive or field, all after `canonicalFaceIds`. */
+/** Where two dumps first differ for each fixture: the page, its font chains or faces when they differ, and the first differing primitive or field, all after `canonicalFaceIds`. */
 export function firstDifferences(expected: DisplayListDump, actual: DisplayListDump): string[] {
   const found: string[] = [];
   for (const name of Object.keys(expected.pages).sort()) {
@@ -78,6 +90,10 @@ export function firstDifferences(expected: DisplayListDump, actual: DisplayListD
     if (chainsDiffer) {
       found.push(`${name} page ${page}: font chains differ: ${clip(a.fontChains)} vs ${clip(b.fontChains)}`);
     }
+    const facesDiffer = JSON.stringify(a.faces) !== JSON.stringify(b.faces);
+    if (facesDiffer) {
+      found.push(`${name} page ${page}: faces differ: ${clip(a.faces)} vs ${clip(b.faces)}`);
+    }
     const left = a.page.primitives ?? [];
     const right = b.page.primitives ?? [];
     const index = left.findIndex((primitive, at) => JSON.stringify(primitive) !== JSON.stringify(right[at]));
@@ -87,7 +103,7 @@ export function firstDifferences(expected: DisplayListDump, actual: DisplayListD
       continue;
     }
     const field = Object.keys({ ...a.page, ...b.page }).find(key => JSON.stringify(a.page[key]) !== JSON.stringify(b.page[key]));
-    if (field !== undefined || !chainsDiffer) found.push(`${name} page ${page} field ${field}: ${clip(field && a.page[field])} vs ${clip(field && b.page[field])}`);
+    if (field !== undefined || (!chainsDiffer && !facesDiffer)) found.push(`${name} page ${page} field ${field}: ${clip(field && a.page[field])} vs ${clip(field && b.page[field])}`);
   }
   return found;
 }
