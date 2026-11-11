@@ -725,6 +725,27 @@ fn editor_clear_into_a_table_cell_keeps_what_the_table_style_gives() {
 }
 
 #[test]
+fn limit_a_clear_ending_at_the_start_of_the_paragraph_after_a_table_leaves_the_cells() {
+    let body = concat!(
+        r#"<w:p w14:paraId="00000011"><w:r><w:rPr><w:i/></w:rPr><w:t>Intro</w:t></w:r></w:p>"#,
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>"#,
+        r#"<w:p w14:paraId="00000012"><w:r><w:rPr><w:i/></w:rPr><w:t>Cell</w:t></w:r></w:p>"#,
+        r#"</w:tc></w:tr></w:tbl>"#,
+        r#"<w:p w14:paraId="00000013"><w:r><w:t>After</w:t></w:r></w:p>"#,
+    );
+    let doc = EditingDoc::new(7112);
+    seed_from_docx(&doc, &package_with_styles(body, STYLES)).unwrap();
+    let cell = cell_story(&doc);
+    editor_clear(
+        &doc,
+        &EditCtx::local("", ""),
+        editor_range(&doc, "body", ("00000011", 0), ("00000013", 0)),
+    );
+    assert!(active(&marks_in(&doc, &cell, "Cell"), "italic"));
+    assert!(!active(&marks(&doc, "Intro"), "italic"));
+}
+
+#[test]
 fn a_suggested_editor_clear_records_the_style_values() {
     let doc = open();
     let revisions = editor_clear(
