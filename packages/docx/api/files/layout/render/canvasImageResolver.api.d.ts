@@ -26,5 +26,7 @@ export interface CanvasImageResolverOptions {
     mediaScope?: () => number;
     /** Maximum cached decoded bytes; defaults to 64 MiB. */
     maxCacheBytes?: number;
+    /** Told why a source resolved to nothing; with it set, an unreadable token resolves to null instead of a grey box. */
+    onUnavailable?: (relId: string, reason: 'missing' | 'decode-failed') => void;
 }
 export declare function createCanvasImageResolver(options?: CanvasImageResolverOptions): ImageResolver;
