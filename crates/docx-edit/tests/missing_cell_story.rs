@@ -732,3 +732,47 @@ fn host_batches_with_formatted_runs_aimed_at_the_cell_are_refused() {
         }
     }
 }
+
+#[test]
+fn format_text_steps_aimed_at_the_cell_are_refused_before_their_own_checks() {
+    for synced in [true, false] {
+        let (left, right, _undo) = dangling_state(synced);
+        let (_, _, cell) = dangling(&left).remove(0);
+        let key = format!("{cell}#p0");
+        let paragraph = json!({"kind": "paragraph", "story": cell, "paraId": key});
+        let range = json!({
+            "kind": "range",
+            "story": cell,
+            "start": {"paraId": key, "offset": 0},
+            "end": {"paraId": key, "offset": 0},
+            "view": "accepted",
+        });
+        for doc in [&left, &right] {
+            for step in [
+                json!({"op": "formatText", "target": paragraph, "set": {"bold": true}}),
+                json!({"op": "formatText", "target": paragraph, "clear": "all"}),
+                json!({"op": "formatText", "target": range, "set": {"italic": true}}),
+                json!({"op": "formatText", "target": range, "clear": "all"}),
+                json!({"op": "formatText", "target": paragraph, "set": {"notAMark": true}}),
+            ] {
+                let before = state(doc);
+                let request: EditRequest = serde_json::from_value(json!({
+                    "expectVersion": doc.version().as_str(),
+                    "steps": [step],
+                }))
+                .unwrap();
+                let refusal = doc
+                    .apply_edits(&request, &UndoSession::new())
+                    .unwrap()
+                    .expect_err("a formatText step into the cell is refused");
+                assert_eq!(refusal.failure.code, EditFailureCode::Unsupported);
+                assert_eq!(
+                    refusal.failure.reason,
+                    Some(EditFailureReason::CellHasNoStory),
+                    "synced={synced}"
+                );
+                assert_eq!(state(doc), before, "synced={synced}");
+            }
+        }
+    }
+}

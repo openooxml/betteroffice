@@ -557,7 +557,8 @@ impl<'a> BatchStep<'a> {
         match &step.operation {
             EditOperation::InsertText { target, .. }
             | EditOperation::ReplaceText { target, .. }
-            | EditOperation::DeleteText { target } => Some(target.story()),
+            | EditOperation::DeleteText { target }
+            | EditOperation::FormatText { target, .. } => Some(target.story()),
             EditOperation::InsertParagraphs { target, .. }
             | EditOperation::SetParagraphStyle { target, .. }
             | EditOperation::InsertSectionBreakAfter { target, .. } => Some(target.story.as_str()),

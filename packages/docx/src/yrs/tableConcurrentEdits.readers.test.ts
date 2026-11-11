@@ -496,6 +496,32 @@ const WRITES: WriteCase[] = [
     }),
   },
   {
+    name: 'host batch formatText step setting marks',
+    prepare: (s, story) => () => s.applyEdits({
+      expectVersion: s.version(),
+      steps: [{ op: 'formatText', target: { kind: 'paragraph', story, paraId: cellLoc(s, story).paraId }, set: { bold: true, italic: true } }],
+    }),
+  },
+  {
+    name: 'host batch formatText step clearing marks',
+    prepare: (s, story) => () => s.applyEdits({
+      expectVersion: s.version(),
+      steps: [{ op: 'formatText', target: { kind: 'paragraph', story, paraId: cellLoc(s, story).paraId }, clear: 'all' }],
+    }),
+  },
+  {
+    name: 'host batch formatText step over a range in the cell',
+    prepare: (s, story) => () => s.applyEdits({
+      expectVersion: s.version(),
+      steps: [{
+        op: 'formatText',
+        target: { kind: 'range', story, start: { paraId: cellLoc(s, story).paraId, offset: 0 }, end: { paraId: cellLoc(s, story).paraId, offset: 0 }, view: 'accepted' },
+        set: { bold: true },
+        clear: ['italic'],
+      }],
+    }),
+  },
+  {
     name: 'host batch replaceText step',
     prepare: (s, story) => () => s.applyEdits({
       expectVersion: s.version(),
