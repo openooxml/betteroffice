@@ -87,9 +87,12 @@ impl EditingDoc {
         let txn = self.doc.transact();
         let mut scan = Scan {
             active: true,
-            found: Vec::new(),
+            ..Scan::default()
         };
         build_story(&txn, &mut BTreeMap::new(), root, 0, 0, &mut scan)?;
+        if scan.incomplete {
+            return Err(());
+        }
         Ok(scan.found)
     }
 
@@ -102,11 +105,22 @@ impl EditingDoc {
     }
 }
 
-/// What a scanning outline walk collects: the unavailable tables it meets.
+/// What a scanning outline walk collects: the unavailable tables it meets, and whether it stopped
+/// at a depth or position limit, which leaves what lies beyond unread.
 #[derive(Default)]
 struct Scan {
     active: bool,
     found: Vec<TableLocator>,
+    incomplete: bool,
+}
+
+impl Scan {
+    /// Records that the walk stopped at a limit: a scan that stopped there could not look, so it
+    /// reports no result rather than an empty one.
+    fn limit<V>(&mut self) -> Result<V, ()> {
+        self.incomplete = true;
+        Err(())
+    }
 }
 
 /// `result`, except that a scanning walk takes `skipped` for a malformed entry so it still
@@ -147,7 +161,7 @@ fn build_story<T: ReadTxn>(
         return Ok(existing.size);
     }
     if depth > 256 || content_start > MAX_POSITION {
-        return Err(());
+        return scan.limit();
     }
     let story = match story_ref(txn, story_id) {
         Ok(story) => story,
@@ -248,7 +262,7 @@ fn build_story<T: ReadTxn>(
             _ => inline_length += 1,
         }
         if cursor > MAX_POSITION || inline_length > MAX_POSITION {
-            return Err(());
+            return scan.limit();
         }
     }
     let size = cursor.max(
@@ -260,7 +274,7 @@ fn build_story<T: ReadTxn>(
             },
     );
     if size > MAX_POSITION {
-        return Err(());
+        return scan.limit();
     }
     let entry = outline.get_mut(story_id).unwrap();
     entry.size = size;
@@ -280,7 +294,7 @@ fn build_table<T: ReadTxn>(
     scan: &mut Scan,
 ) -> Result<u64, ()> {
     if start > MAX_POSITION {
-        return Err(());
+        return scan.limit();
     }
     let Some(payload) = crate::unavailable_tables::table_payload(map, txn) else {
         if scan.active {
@@ -313,7 +327,7 @@ fn build_table<T: ReadTxn>(
             _ => {
                 table_size += 2;
                 if table_size > MAX_POSITION {
-                    return Err(());
+                    return scan.limit();
                 }
                 continue;
             }
@@ -335,16 +349,16 @@ fn build_table<T: ReadTxn>(
             let size = build_story(txn, outline, &child, child_start, depth + 1, scan);
             row_size += lenient(scan, size, 0)? + 2;
             if row_size > MAX_POSITION {
-                return Err(());
+                return scan.limit();
             }
         }
         table_size += row_size + 2;
         if table_size > MAX_POSITION {
-            return Err(());
+            return scan.limit();
         }
     }
     if table_size + 2 > MAX_POSITION {
-        return Err(());
+        return scan.limit();
     }
     Ok(table_size + 2)
 }

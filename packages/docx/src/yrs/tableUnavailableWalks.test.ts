@@ -231,3 +231,40 @@ describe('a gate pass', () => {
     });
   }
 });
+
+describe('a save over tables nested past the engine walk depth', () => {
+  it('saves a healthy document through the projection walk and refuses one whose deepest table is unavailable', async () => {
+    const { preloadOpcWasm } = await import('../wasm/opc');
+    await preloadOpcWasm();
+    const { saveYrsDocx } = await import('./index');
+    const source = containers();
+    const a = await session(81);
+    const b = await session(82);
+    const builder = await session(83);
+    a.seedFromDocx(source);
+    b.openDocx(source, false);
+    b.applyUpdate(a.encodeState());
+    builder.openDocx(source, false);
+    builder.applyUpdate(a.encodeState());
+    let story = 'body';
+    let deepest = story;
+    for (let depth = 0; depth < 260; depth += 1) {
+      const paraId = builder.paragraphs(story)[0]!.paraId;
+      const receipt = builder.insertTable({ story, paraId, offset: 0 }, 1, 1);
+      deepest = story;
+      story = receipt.createdStoryIds[0]!;
+    }
+    for (const target of [a, b]) target.applyUpdate(builder.encodeState());
+    expect(sessionUnavailableTablesFrom(a, ['body'])).toBeNull();
+    await saveYrsDocx(a, { updateModifiedDate: false });
+
+    crossing(a, b, deepest);
+    let code: string | undefined;
+    try {
+      await saveYrsDocx(a, { updateModifiedDate: false });
+    } catch (error) {
+      code = (error as Error & { code?: string }).code;
+    }
+    expect(code).toBe('table-unavailable');
+  }, 60_000);
+});

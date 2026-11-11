@@ -914,7 +914,7 @@ export function applyDocxCommand(
   environment?: DocxCommandHooksEnvironment
 ): DocxCommandApplyResult {
   const { inputTime, lastInputTime } = prepared.command;
-  const version = engine.proposalEngine.version();
+  const version = isTableCommandKind(prepared.command.kind) ? engine.proposalEngine.version() : null;
   try {
     if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
     engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
@@ -924,7 +924,7 @@ export function applyDocxCommand(
       engine.setUndoInputTime(null);
     }
   } catch (error) {
-    if (!isTableUnavailableRefusal(error) || engine.proposalEngine.version() !== version) throw error;
+    if (version === null || !isTableUnavailableRefusal(error) || engine.proposalEngine.version() !== version) throw error;
     const corrected = state.selection ? readCommandSelection(engine, state) : null;
     return { status: 'refused', reason: 'table-unavailable', selection: corrected?.ok ? corrected.selection : null,
       editState: projectDocxEditState(engine, state, corrected) };
@@ -1130,12 +1130,8 @@ function applyPreparedDocxCommand(
     return result(applied.applied ? 'applied' : 'noop');
   }
   if (command.kind === 'undo' || command.kind === 'redo') {
-    const before = engine.selection();
-    const beforeHead = before?.head ?? null;
+    const beforeHead = engine.selection()?.head ?? null;
     const tables = beforeHead ? liveTableAncestors(engine, beforeHead.story) : [];
-    const laidOutCells = new Set([before?.anchor, before?.head]
-      .filter((at): at is YrsLoc => !!at && resolveLiveCell(engine, at.story) !== null)
-      .map((at) => at.story));
     const nearby = tables.map((table) => nearTable(engine, table)).filter((at): at is YrsLoc => !!at);
     engine.addUndoBoundary();
     const changed = command.kind === 'undo' ? engine.undo() : engine.redo();
@@ -1155,13 +1151,20 @@ function applyPreparedDocxCommand(
     const native = !story || engine.geometryReader.hasStory(story) ? engine.selection() : null;
     const resolvedSelection = resolved?.ok ? resolved.selection : native && commandSelectionRange(engine, { anchor: native.anchor, focus: native.head })
       ? { anchor: native.anchor, focus: native.head } : null;
-    const hidden = resolvedSelection && [resolvedSelection.anchor, resolvedSelection.focus]
-      .some((at) => laidOutCells.has(at.story) && resolveLiveCell(engine, at.story) === null);
+    const projections = new Map<string, YrsPositionProjection | null>();
+    const placed = (at: YrsLoc): boolean => {
+      const root = rootOf(at.story);
+      if (at.story === root) return true;
+      if (!projections.has(root)) projections.set(root, createYrsPositionProjection(engine.geometryReader, root));
+      return projections.get(root)?.positionForLoc(at) != null;
+    };
+    const hidden = tables.length > 0 && !!resolvedSelection &&
+      ![resolvedSelection.anchor, resolvedSelection.focus].every(placed);
     const selected = hidden ? null : resolvedSelection;
     const root = story && story !== 'body' && !story.startsWith('body:') ? story.split(':').slice(0, 2).join(':') : 'body';
     const fallbackStory = engine.geometryReader.hasStory(root) ? root : 'body';
     const near = nearby.map((at) => pastLeadingBlocks(engine, at))
-      .find((at) => !!at && (at.story === rootOf(at.story) || resolveLiveCell(engine, at.story) !== null)) ?? null;
+      .find((at) => !!at && placed(at)) ?? null;
     const first = selected ? null : engine.geometryReader.paragraphSpans(fallbackStory)[0];
     const at = first ? { story: fallbackStory, paraId: first.paraId, offset: 0 } : null;
     const repaired = selected ?? (near ? { anchor: near, focus: near } : null) ?? (at ? { anchor: at, focus: at } : null);

@@ -75,13 +75,27 @@ export function unavailableTablesByProjection(
 }
 
 /**
- * The unavailable tables a save of `document` would meet: the engine's walk from the saved root
- * stories, or the projection walk when the session has no engine or the engine walk cannot finish.
+ * The unavailable tables a walk from `roots` meets: the engine's walk, or the projection walk
+ * when the session has no engine or the engine walk could not look everywhere (a depth or
+ * position limit). Throws the coded refusal when neither walk can finish: a save that cannot
+ * look must not read that as nothing there.
+ */
+function scanFrom(session: TableScanSession, roots: readonly string[]): YrsTableLoc[] {
+  const found = sessionUnavailableTablesFrom(session, roots);
+  if (found) return found;
+  try {
+    return unavailableTablesByProjection(session, roots);
+  } catch {
+    throw tableUnavailableError();
+  }
+}
+
+/**
+ * The unavailable tables a save of `document` would meet, by [`scanFrom`] its saved root stories.
  * @internal
  */
 export function unavailableTables(session: TableScanSession, document: Document): YrsTableLoc[] {
-  const roots = savedRootStories(session, document);
-  return sessionUnavailableTablesFrom(session, roots) ?? unavailableTablesByProjection(session, roots);
+  return scanFrom(session, savedRootStories(session, document));
 }
 
 /** A gate pass: the session version and the root stories the scan covered. */
@@ -107,8 +121,7 @@ export function refuseUnavailableTables(session: TableScanSession, document: Doc
   const version = session.version();
   const mark = gated.get(document);
   if (mark?.version === version && roots.every((root) => mark.roots.has(root))) return roots;
-  const found = sessionUnavailableTablesFrom(session, roots) ?? unavailableTablesByProjection(session, roots);
-  if (found.length > 0) throw tableUnavailableError();
+  if (scanFrom(session, roots).length > 0) throw tableUnavailableError();
   gated.set(document, { version, roots: new Set(roots) });
   return roots;
 }

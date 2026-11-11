@@ -235,6 +235,30 @@ mod tests {
     }
 
     #[test]
+    fn a_scan_that_stops_at_the_depth_limit_reports_no_result_rather_than_none_found() {
+        let doc = EditingDoc::new(82);
+        doc.create_story("body", "Hello", "Normal", "left")
+            .unwrap();
+        let mut story = "body".to_owned();
+        let mut deepest = story.clone();
+        for _ in 0..260 {
+            let receipt = doc
+                .insert_table(&ctx(), Position::new(&story, 0), 1, 1)
+                .unwrap();
+            deepest = story;
+            story = receipt.created_story_ids[0].clone();
+        }
+        let roots = ["body".to_owned()];
+        assert_eq!(
+            doc.unavailable_tables_from(&roots),
+            None,
+            "a healthy document nested past the limit cannot be vouched for"
+        );
+        strip(&doc, &deepest);
+        assert_eq!(doc.unavailable_tables_from(&roots), None);
+    }
+
+    #[test]
     fn a_malformed_block_control_does_not_stop_the_scan() {
         let doc = EditingDoc::new(79);
         doc.create_story("body", "Hello", "Normal", "left")
