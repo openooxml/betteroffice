@@ -241,6 +241,7 @@ export const editsession_table_payload: (a: number, b: number, c: number, d: num
 export const editsession_take_base_latin_miss: (a: number) => number;
 export const editsession_toggle_mark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
 export const editsession_track_undo: (a: number) => void;
+export const editsession_unavailable_tables_from: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_undo: (a: number) => number;
 export const editsession_undo_capture_mode: (a: number) => [number, number];
 export const editsession_update_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];

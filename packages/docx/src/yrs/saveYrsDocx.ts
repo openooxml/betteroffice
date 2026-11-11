@@ -19,6 +19,7 @@ import { resolveCommentMedia } from './hostMedia';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
 import { sessionMaterializedSource, sessionSourceNoteSeparators, sessionSourcePackage } from './sessionInternals';
+import { refuseUnavailableTables } from './tableUnavailable';
 import type {
   DocxParagraphIdentitySnapshot,
   DocxParagraphSavePlan,
@@ -570,6 +571,7 @@ export async function writeSessionSave(
   splices: (part: string) => boolean = patches,
   yieldSave?: () => Promise<void>
 ): Promise<DocxSavedDocument> {
+  refuseUnavailableTables(session, document);
   if (yieldSave) await yieldSave();
   engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);

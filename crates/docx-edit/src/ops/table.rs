@@ -293,17 +293,16 @@ fn record_row_revision(resolved: &mut Vec<String>, value: Option<&Any>) {
     }
 }
 
-fn shared_any<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> OpResult<Any> {
-    match map.get(txn, key) {
-        Some(Out::Any(value)) => Ok(value),
-        _ => Err(invalid(format!("table is missing {key}"))),
-    }
-}
-
 fn read_table<T: ReadTxn>(map: &MapRef, txn: &T) -> OpResult<TableData> {
-    let tbl_pr = any_map(&shared_any(map, txn, "tblPr")?, "tblPr")?;
-    let grid = any_array(&shared_any(map, txn, "grid")?, "grid")?;
-    let row_values = any_array(&shared_any(map, txn, "rows")?, "rows")?;
+    let payload =
+        crate::unavailable_tables::table_payload(map, txn).ok_or(OpError::TableUnavailable)?;
+    let plain = |value: Out, key: &str| match value {
+        Out::Any(value) => Ok(value),
+        _ => Err(invalid(format!("table is missing {key}"))),
+    };
+    let tbl_pr = any_map(&plain(payload.tbl_pr, "tblPr")?, "tblPr")?;
+    let grid = any_array(&plain(payload.grid, "grid")?, "grid")?;
+    let row_values = any_array(&plain(payload.rows, "rows")?, "rows")?;
     if row_values.is_empty() {
         return Err(invalid("table must contain at least one row"));
     }
@@ -1707,7 +1706,10 @@ pub(crate) fn resolve_table_row_revisions(
 
     let mut removed_tables = 0;
     for (table_offset, table_index, table) in tables.into_iter().rev() {
-        let mut data = read_table(&table, txn)?;
+        let mut data = match read_table(&table, txn) {
+            Err(OpError::TableUnavailable) => continue,
+            read => read?,
+        };
         let mut remove = Vec::new();
         let mut changed = false;
         for (row_index, row) in data.rows.iter_mut().enumerate() {
@@ -2529,7 +2531,13 @@ impl EditingDoc {
     pub fn delete_table(&self, ctx: &EditCtx, locator: &TableLocator) -> OpResult<TableReceipt> {
         let mut txn = self.transact_for(ctx);
         let (parent_story, table, table_story_index) = table_at(&txn, locator)?;
-        let data = read_table(&table, &txn)?;
+        let data = match read_table(&table, &txn) {
+            Err(OpError::TableUnavailable) => {
+                parent_story.remove_range(&mut txn, table_story_index, 1);
+                return receipt(locator.clone(), None, Vec::new(), Vec::new(), Vec::new());
+            }
+            read => read?,
+        };
         delete_table_in_txn(&mut txn, locator, &parent_story, table_story_index, &data)
     }
 
