@@ -1821,3 +1821,47 @@ fn groupby_composite_keys_with_separator_characters_stay_apart() {
         )
     );
 }
+
+/// an aggregation that answers more than one cell is #CALC!, never its first
+/// cell; a 1x1 block still counts as a single value.
+#[test]
+fn groupby_and_pivotby_aggregations_returning_arrays_are_calc() {
+    let workbook = sales_workbook();
+    for formula in [
+        "GROUPBY(A2:A6,C2:C6,LAMBDA(x,HSTACK(SUM(x),COUNT(x))),0,0)",
+        "GROUPBY(A2:A6,C2:C6,LAMBDA(x,all,VSTACK(SUM(x),SUM(all))),0,0)",
+        "GROUPBY(A2:A6,C2:C6,HSTACK(SUM,LAMBDA(x,VSTACK(x,x))),0,0)",
+        "PIVOTBY(A2:A6,E2:E6,C2:C6,LAMBDA(x,VSTACK(x,x)),0,0,1,0)",
+    ] {
+        assert_eq!(
+            values(formula, &workbook),
+            error(ErrorValue::Calc),
+            "{formula}"
+        );
+    }
+    assert_eq!(
+        values("GROUPBY(A2:A6,C2:C6,LAMBDA(x,HSTACK(SUM(x))),0,0)", &workbook),
+        vec![t("East"), n(55.0), t("West"), n(45.0)]
+    );
+}
+
+/// a PERCENTOF whose sums overflow is #NUM!, as SUM is, not a share of zero.
+#[test]
+fn percentof_with_overflowing_sums_is_num() {
+    let mut workbook = Workbook::default();
+    let mut sheet = Sheet::new("Data");
+    for (idx, (key, value)) in [("a", 1.0), ("b", 9e307), ("a", 9e307)].into_iter().enumerate() {
+        put(&mut sheet, &format!("A{}", idx + 1), t(key));
+        put(&mut sheet, &format!("B{}", idx + 1), n(value));
+    }
+    workbook.sheets.push(sheet);
+    let num = CellValue::Error {
+        value: ErrorValue::Num,
+    };
+    assert_eq!(
+        values("GROUPBY(A1:A3,B1:B3,PERCENTOF,0,0)", &workbook),
+        vec![t("a"), num.clone(), t("b"), num.clone()]
+    );
+    assert_eq!(values("PERCENTOF(B2,B1:B3)", &workbook), vec![num.clone()]);
+    assert_eq!(values("PERCENTOF(B2:B3,B2)", &workbook), vec![num]);
+}
