@@ -466,13 +466,25 @@ pub struct SectionNoteNumbering {
 }
 
 impl SectionNoteNumbering {
+    /// Each region section's note numbering, keeping only what changes a note's label. Regions
+    /// whose every section numbers notes continuously in decimal from 1 give none, the same
+    /// numbering as regions without sections.
     pub fn for_regions(regions: &DocumentRegions) -> Vec<Self> {
-        (0..regions.sections.len().max(1))
+        let sections: Vec<Self> = (0..regions.sections.len().max(1))
             .map(|index| Self {
-                footnote: regions.note_properties(index, NoteKind::Footnote.as_str()),
-                endnote: regions.note_properties(index, NoteKind::Endnote.as_str()),
+                footnote: numbering_properties(
+                    regions.note_properties(index, NoteKind::Footnote.as_str()),
+                ),
+                endnote: numbering_properties(
+                    regions.note_properties(index, NoteKind::Endnote.as_str()),
+                ),
             })
-            .collect()
+            .collect();
+        if sections.iter().all(|section| *section == Self::default()) {
+            Vec::new()
+        } else {
+            sections
+        }
     }
 
     fn properties(&self, kind: NoteKind) -> &NoteProperties {
@@ -480,6 +492,17 @@ impl SectionNoteNumbering {
             NoteKind::Footnote => &self.footnote,
             NoteKind::Endnote => &self.endnote,
         }
+    }
+}
+
+fn numbering_properties(properties: NoteProperties) -> NoteProperties {
+    NoteProperties {
+        num_fmt: properties.num_fmt.filter(|format| format != "decimal"),
+        num_start: properties.num_start.filter(|start| *start != 1),
+        num_restart: properties
+            .num_restart
+            .filter(|restart| matches!(restart.as_str(), "eachPage" | "eachSect")),
+        ..NoteProperties::default()
     }
 }
 
