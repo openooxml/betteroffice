@@ -43,26 +43,38 @@ thread_local! {
 /// The structure revision a reach walk ran under.
 pub(crate) type ReachKey = u64;
 
+/// What layout requests have been given to lay out besides the body: note stories and the
+/// relationship ids of section headers and footers.
+#[derive(Default)]
+pub(crate) struct LayoutRoots {
+    notes: std::collections::BTreeSet<String>,
+    header_footer_ids: std::collections::BTreeSet<String>,
+}
+
 /// What a pass over every live story found: for each story a complete table's cell or a block
-/// control names, the story that names it, and whether any story holds an unavailable table.
+/// control names, every story that names it, and whether any story holds an unavailable table.
 /// Nothing in it depends on which stories are roots.
 pub(crate) struct DocumentReach {
-    parents: HashMap<String, String>,
+    parents: HashMap<String, Vec<String>>,
     met_unavailable: bool,
 }
 
 impl DocumentReach {
-    /// The story at the top of `story`'s chain of containers: itself when nothing names it.
-    fn top<'a>(&'a self, story: &'a str) -> &'a str {
-        let mut top = story;
+    /// Whether `story` is in `roots` or some chain of containers above it leads to one.
+    fn under_a_root(&self, story: &str, roots: &HashSet<String>) -> bool {
+        let mut stack = vec![story];
         let mut seen = HashSet::from([story]);
-        while let Some(parent) = self.parents.get(top) {
-            if !seen.insert(parent.as_str()) {
-                break;
+        while let Some(current) = stack.pop() {
+            if roots.contains(current) {
+                return true;
             }
-            top = parent;
+            for parent in self.parents.get(current).into_iter().flatten() {
+                if seen.insert(parent.as_str()) {
+                    stack.push(parent);
+                }
+            }
         }
-        top
+        false
     }
 }
 
@@ -97,7 +109,19 @@ impl EditingDoc {
             Err(_) => return false,
         }
         let reach = self.document_reach();
-        !reach.met_unavailable || self.document_roots().contains(reach.top(story))
+        !reach.met_unavailable || reach.under_a_root(story, &self.document_roots())
+    }
+
+    /// Records what a layout request was given to lay out: its note stories and the relationship
+    /// ids of its sections' headers and footers, so they count as roots from then on.
+    pub(crate) fn note_layout_roots(
+        &self,
+        notes: impl IntoIterator<Item = String>,
+        header_footer_ids: impl IntoIterator<Item = String>,
+    ) {
+        let mut roots = self.layout_roots.lock().unwrap();
+        roots.notes.extend(notes);
+        roots.header_footer_ids.extend(header_footer_ids);
     }
 
     /// The structure revision the kept [`DocumentReach`] is valid for: it moves with table
@@ -121,7 +145,7 @@ impl EditingDoc {
     /// The document's roots, read from its own indexes and never from a story's id: the body,
     /// every header and footer the header/footer index knows (each section's references and
     /// every sourced one, as the story list reads them), and every note the source package or
-    /// the part metadata holds.
+    /// the part metadata holds or a layout request has laid out.
     fn document_roots(&self) -> HashSet<String> {
         let mut roots: HashSet<String> = {
             let txn = self.yrs_doc().transact();
@@ -132,6 +156,12 @@ impl EditingDoc {
                 .collect()
         };
         roots.insert("body".to_owned());
+        let (notes, header_footer_ids) = {
+            let layout = self.layout_roots.lock().unwrap();
+            (layout.notes.clone(), layout.header_footer_ids.clone())
+        };
+        roots.extend(notes);
+        roots.extend(header_footer_ids.iter().map(|id| self.header_footer_story(id)));
         if let Some(source) = self.source_metadata() {
             roots.extend(
                 source
@@ -187,7 +217,10 @@ impl EditingDoc {
             .collect();
         for (story_id, story) in live {
             let mut name = |child: String| {
-                parents.entry(child).or_insert_with(|| story_id.clone());
+                parents
+                    .entry(child)
+                    .or_default()
+                    .push(story_id.clone());
             };
             let mut table_index = 0;
             for diff in story.diff(&txn, YChange::identity) {
@@ -651,6 +684,70 @@ mod tests {
         moved("pointing a block control at another story");
         doc.delete_story("host").unwrap();
         moved("deleting a story");
+    }
+
+    fn block_control(doc: &EditingDoc, at: &str, story: &str) {
+        let mut txn = doc.yrs_doc().transact_mut();
+        let text = crate::story_ref(&txn, at).unwrap();
+        let control = text.insert_embed(&mut txn, 0, yrs::MapPrelim::default());
+        yrs::Map::insert(&control, &mut txn, crate::KIND_KEY, "blockSdt");
+        yrs::Map::insert(&control, &mut txn, "story", story);
+    }
+
+    #[test]
+    fn a_root_or_a_story_one_visible_container_names_stays_shown_whatever_hidden_cells_name() {
+        let doc = EditingDoc::new(89);
+        doc.create_story("body", "Hello", "Normal", "left")
+            .unwrap();
+        doc.create_story("shared", "Shared", "Normal", "left")
+            .unwrap();
+        let cell = doc
+            .insert_table(&ctx(), Position::new("body", 0), 1, 1)
+            .unwrap()
+            .created_story_ids[0]
+            .clone();
+        block_control(&doc, &cell, "body");
+        block_control(&doc, &cell, "shared");
+        block_control(&doc, "body", "shared");
+        strip(&doc, "body");
+        assert!(!doc.story_laid_out(&cell), "the cell of the unavailable table is hidden");
+        assert!(
+            doc.story_laid_out("body"),
+            "the body is a root, whatever a hidden cell's block control names"
+        );
+        assert!(
+            doc.story_laid_out("shared"),
+            "a story the body's block control names is shown though a hidden cell names it too"
+        );
+    }
+
+    #[test]
+    fn a_note_a_layout_request_lays_out_stays_shown_beside_an_unavailable_table() {
+        let engine = crate::EngineSession::new(136);
+        let doc = engine.doc();
+        doc.create_story("body", "See", "Normal", "left").unwrap();
+        doc.insert_table(&ctx(), Position::new("body", 0), 1, 1)
+            .unwrap();
+        doc.create_story("fn:5", "Footnote text", "Normal", "left")
+            .unwrap();
+        strip(doc, "body");
+        assert!(!doc.story_laid_out("fn:5"), "no index and no layout knows the note yet");
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20}
+            }]},
+            "notes": {"contents": [{"id": 5, "height": 0}]},
+            "measurement": {
+                "fontChains": {},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"}
+            },
+            "renderEnv": {}
+        });
+        let _ = engine.layout_document_with_regions_json(&request.to_string());
+        assert!(doc.story_laid_out("fn:5"), "the note layout was given is a root");
     }
 
     #[test]
