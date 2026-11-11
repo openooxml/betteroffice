@@ -1,4 +1,4 @@
-import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { isEngineTrap, withEngineCleanup } from '../../../../shared/office-session/trap';
 import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches';
 import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { createProposalRegistry } from './proposals';
@@ -918,11 +918,10 @@ export function applyDocxCommand(
   try {
     if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
     engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
-    try {
-      return applyPreparedDocxCommand(engine, state, prepared, context, environment);
-    } finally {
-      engine.setUndoInputTime(null);
-    }
+    return withEngineCleanup(
+      () => applyPreparedDocxCommand(engine, state, prepared, context, environment),
+      () => engine.setUndoInputTime(null)
+    );
   } catch (error) {
     // The engine refuses a write into a table cell that has no story before it mutates anything.
     if (!isCellHasNoStoryRefusal(error) || engine.proposalEngine.version() !== version) throw error;
@@ -970,24 +969,28 @@ function applyPreparedDocxCommand(
     const before = engine.proposalEngine.version();
     engine.beginUndoCapture();
     engine.addUndoBoundary();
-    try {
-      if (command.kind === 'setContentControlValue') engine.setControlValue(target.at, command.payload.value);
-      else {
-        engine.repeatControlAt(target.at, command.kind === 'removeRepeatingItem');
-        if (state.selection && !engine.geometryReader.hasStory(state.selection.focus.story)) {
-          const story = target.at.story.startsWith('body') ? 'body' : target.at.story.split(':').slice(0, 2).join(':');
-          const paragraph = engine.geometryReader.paragraphSpans(story)[0];
-          if (!paragraph) throw new Error('Control removal has no caret target');
-          const at = { story, paraId: paragraph.paraId, offset: 0 };
-          engine.setSelection(at, at);
-          state.selection = mintCommandSelection(engine, state, { anchor: at, focus: at });
-          state.storedMarks = null;
+    const refused = withEngineCleanup((): DocxCommandApplyResult | null => {
+      try {
+        if (command.kind === 'setContentControlValue') engine.setControlValue(target.at, command.payload.value);
+        else {
+          engine.repeatControlAt(target.at, command.kind === 'removeRepeatingItem');
+          if (state.selection && !engine.geometryReader.hasStory(state.selection.focus.story)) {
+            const story = target.at.story.startsWith('body') ? 'body' : target.at.story.split(':').slice(0, 2).join(':');
+            const paragraph = engine.geometryReader.paragraphSpans(story)[0];
+            if (!paragraph) throw new Error('Control removal has no caret target');
+            const at = { story, paraId: paragraph.paraId, offset: 0 };
+            engine.setSelection(at, at);
+            state.selection = mintCommandSelection(engine, state, { anchor: at, focus: at });
+            state.storedMarks = null;
+          }
         }
+        return null;
+      } catch (error) {
+        if (isEngineTrap(error) || engine.proposalEngine.version() !== before) throw error;
+        return { ...result('noop'), status: 'refused', reason: typeof error === 'string' ? error : error instanceof Error ? error.message : 'invalid-control-value' };
       }
-    } catch (error) {
-      if (isEngineTrap(error) || engine.proposalEngine.version() !== before) throw error;
-      return { ...result('noop'), status: 'refused', reason: typeof error === 'string' ? error : error instanceof Error ? error.message : 'invalid-control-value' };
-    } finally { engine.addUndoBoundary(); }
+    }, () => engine.addUndoBoundary());
+    if (refused) return refused;
     return result(engine.proposalEngine.version() !== before ? 'applied' : 'noop');
   }
   if (command.kind === 'openPart' || command.kind === 'ensurePart' || command.kind === 'removePart') {

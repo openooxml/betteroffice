@@ -1,3 +1,4 @@
+import { withEngineCleanup } from '../../../../shared/office-session/trap';
 import { readRetainedLayoutMeta } from './layoutMeta';
 import { PeerMetadataError } from './peerMetadata';
 import { decodeEncodedSelection } from './encodedSelection';
@@ -538,20 +539,17 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
   const applyCommandMutation = <T>(story: string, apply: () => T): T => {
     ensureUndo();
     const version = session.version();
-    try {
-      return apply();
-    } finally {
+    return withEngineCleanup(apply, () => {
       if (session.version() !== version) projectionStories.add(story);
-    }
+    });
   };
 
   const applyFormatting = <T>(story: string, apply: () => T): T => {
     const since = storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
-    try {
-      return applyCommandMutation(story, apply);
-    } finally {
-      markProjectionStories(storiesChangedSince(since).stories);
-    }
+    return withEngineCleanup(
+      () => applyCommandMutation(story, apply),
+      () => markProjectionStories(storiesChangedSince(since).stories)
+    );
   };
 
   const proposalEngine: ResidentEngineSession['proposalEngine'] = {
@@ -589,11 +587,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       ? {
           sharedReads: <R>(read: () => R): R => {
             session.begin_shared_reads();
-            try {
-              return read();
-            } finally {
-              session.end_shared_reads();
-            }
+            return withEngineCleanup(read, () => session.end_shared_reads());
           },
         }
       : {}),
@@ -1162,17 +1156,17 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     applyRawOps: (story, ops) => {
       geometryStories.clear();
       const version = session.version();
-      try {
+      withEngineCleanup(() => {
         session.apply_raw_ops(story, JSON.stringify(ops));
         projectionStories.add(story);
-      } finally {
+      }, () => {
         if (session.version() !== version) {
           projectionStories.add(story);
           syncStoryRevisions();
           storyRevision += 1;
           storyRevisions.set(story, storyRevision);
         }
-      }
+      });
     },
     applyInputProfiled: (text, expectedFrameEpoch) => {
       const frame = applyResidentInput(() => session.apply_input_profiled(text, expectedFrameEpoch));

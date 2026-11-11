@@ -11,6 +11,7 @@ import {
 } from '../wasm/engineEdit';
 import { preloadEditWasm, setEditWasmHeapLimit } from '../wasm/edit';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
+import type { DocxCommandEnvelope } from './residentCommandProtocol';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 
 let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -78,4 +79,44 @@ test.skipIf(engineKind !== 'native')('an engine panic after a call ran past the 
   }
   expect(wasm_failed_allocation_bytes()).toBeGreaterThan(0);
   await expectPanicToTrap();
+}, 20_000);
+
+test.skipIf(engineKind !== 'native')('a command edit past the heap limit fails the session as out of memory', async () => {
+  const worker = startWorker();
+  const client = new DocxSourceWorkerClient(worker);
+  try {
+    await client.openSource({ document: { package: { document: { content: [
+      { type: 'paragraph', content: [{ type: 'run', content: [{ type: 'text', text: 'Budget test' }] }] },
+    ] } } } });
+    const point = { story: 'body', paraId: worker.sessions[0]!.paragraphs('body')[0]!.paraId, offset: 0 };
+    const font = new Uint8Array(readFileSync(new URL(
+      '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url
+    )));
+    const initial = await client.commandInit({
+      session: 'engine-budget', incarnation: 1, epoch: 1, readOnly: false,
+      selection: { anchor: point, focus: point },
+      fonts: [font], fontRegistrationSlots: true,
+      layoutInput: JSON.stringify({
+        bodyStory: 'body', regions: { sections: [{ properties: {} }] }, renderEnv: {},
+        measurement: {
+          defaults: { fontSize: 11, fontFamily: 'Liberation Sans' },
+          fontChains: { 'liberation sans|0|0': [0] },
+        },
+      }),
+      layoutWithRegions: true, layoutRevision: 1, extras: '{}', displayWindow: [0, 1],
+    });
+    const command: DocxCommandEnvelope = {
+      session: initial.session, incarnation: initial.incarnation, seq: 1,
+      basis: { epoch: initial.epoch, version: initial.version }, kind: 'insertText', payload: { text: 'x' },
+    };
+    setEditWasmHeapLimit(0);
+    try {
+      await expect(client.edit(command)).rejects.toMatchObject({ code: 'out-of-memory' });
+    } finally {
+      setEditWasmHeapLimit(undefined);
+    }
+    expect(client.commandFailure).toMatchObject({ code: 'out-of-memory' });
+  } finally {
+    client.destroy();
+  }
 }, 20_000);
