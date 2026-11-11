@@ -319,6 +319,60 @@ fn default_calibri_uses_regular_and_bold_carlito() {
     assert_eq!(actual, glyphs(&expected));
 }
 
+#[cfg(feature = "fonts-latin")]
+fn with_compat(package: &[u8], compat: &str) -> Vec<u8> {
+    let package = common::with_part(package, "[Content_Types].xml", |xml| {
+        xml.replace(
+            "</Types>",
+            r#"<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>"#,
+        )
+    });
+    let package = common::with_part(&package, "word/_rels/document.xml.rels", |xml| {
+        xml.replace(
+            "</Relationships>",
+            r#"<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#,
+        )
+    });
+    let mut parts = common::parts_of(&package);
+    parts.push((
+        "word/settings.xml".to_owned(),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:compat>{compat}</w:compat></w:settings>"#
+        )
+        .into_bytes(),
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[cfg(feature = "fonts-latin")]
+fn paragraph_heights(document: &Document) -> f64 {
+    document
+        .layout(input())
+        .unwrap()
+        .layout
+        .pages
+        .iter()
+        .flat_map(|page| &page.fragments)
+        .filter_map(|fragment| match fragment {
+            docx_layout::types::Fragment::Paragraph(paragraph) => Some(paragraph.height),
+            _ => None,
+        })
+        .sum()
+}
+
+#[cfg(feature = "fonts-latin")]
+#[test]
+fn layout_measures_with_the_document_no_leading() {
+    let leading = Document::open(&with_compat(&common::sample_docx(), "")).unwrap();
+    let no_leading =
+        Document::open(&with_compat(&common::sample_docx(), "<w:noLeading/>")).unwrap();
+    assert!(no_leading.model().settings.compatibility_flags.no_leading);
+    let with_gap = paragraph_heights(&leading);
+    let without_gap = paragraph_heights(&no_leading);
+    assert!(without_gap > 0.0);
+    assert!(without_gap < with_gap, "{without_gap} >= {with_gap}");
+}
+
 #[cfg(feature = "fonts")]
 #[test]
 fn registered_and_option_faces_win_over_the_source() {
