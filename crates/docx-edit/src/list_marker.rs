@@ -645,7 +645,10 @@ mod tests {
 
     #[test]
     fn a_level_override_start_wins_over_the_abstract_start() {
-        assert_eq!(first_override_marker("decimal", Some(3), Some(5), None), "5.");
+        assert_eq!(
+            first_override_marker("decimal", Some(3), Some(5), None),
+            "5."
+        );
         assert_eq!(
             first_override_marker("upperLetter", Some(3), Some(5), None),
             "E."
