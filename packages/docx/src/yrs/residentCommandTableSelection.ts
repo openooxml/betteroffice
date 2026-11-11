@@ -50,15 +50,15 @@ function isCellOf(tables: readonly ProjectedCellTable[] | null, story: string): 
 }
 
 /** Whether the layout shows `story`: its first paragraph has a position in a fresh projection of `root`. */
-function laidOut(engine: DocxWorkerCommandEngine, root: string, story: string): boolean {
+function laidOut(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, root: string, story: string): boolean {
   const paragraph = engine.geometryReader.hasStory(story) ? engine.geometryReader.paragraphSpans(story)[0] : undefined;
   if (!paragraph) return false;
   return createYrsPositionProjection(engine.geometryReader, root)?.positionForLoc({ story, paraId: paragraph.paraId, offset: 0 }) != null;
 }
 
 /** Whether `story` may resolve to a cell of `tables`, an ancestor one included: it is itself a cell there, or the layout shows it. */
-function shownStory(
-  engine: DocxWorkerCommandEngine, root: string, tables: readonly ProjectedCellTable[] | null, story: string
+export function shownStory(
+  engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, root: string, tables: readonly ProjectedCellTable[] | null, story: string
 ): boolean {
   return isCellOf(tables, story) || laidOut(engine, root, story);
 }

@@ -85,7 +85,7 @@ import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
 import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles } from './residentObjectGeometry';
-import { cellSelectionHeadPosition, readCellSelection } from './residentCommandTableSelection';
+import { cellSelectionHeadPosition, readCellSelection, rootOf, shownStory } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
   resolveBookmarkTarget,
@@ -2297,10 +2297,10 @@ async function handle(request: ScheduledRequest): Promise<void> {
           const payload = clipboardTablePayload(
             session.tablePayload(cells.anchor.story, cells.anchor.tableIndex),
           );
-          const holds = !!payload &&
-            tableAnchors(payload).anchors.some(
-              (cell) => focus.story === cell.story || focus.story.startsWith(`${cell.story}:`),
-            );
+          const anchors = payload ? tableAnchors(payload).anchors : [];
+          const holds = anchors.some((cell) => focus.story === cell.story) ||
+            (anchors.some((cell) => focus.story.startsWith(`${cell.story}:`)) &&
+              shownStory(session, rootOf(focus.story), null, focus.story));
           if (holds) {
             value = readClipboardSlice(reader, { cells });
             break;

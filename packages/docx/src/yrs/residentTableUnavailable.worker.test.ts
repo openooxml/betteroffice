@@ -556,6 +556,58 @@ test('with the caret in a cell of an inner table that lost its properties and wh
   }
 }, TIMEOUT);
 
+const outerRange = { anchor: at('body', 0, 0), head: at('body', 0, 1) };
+const copyFrom = async (replica: Opened, story: string, length: number) => {
+  const from = startOf(replica, story);
+  return (await replica.client.documentRead({ kind: 'clipboardSlice', selection: { anchor: from, focus: { ...from, offset: length } } })).value;
+};
+
+test('a copy from a cell of an inner table that lost its properties, with an outer cell range retained, copies only its own text and not the outer range', async () => {
+  const replica = await open(9411, true);
+  const first = await peer(replica, 9412);
+  const second = await peer(replica, 9413);
+  try {
+    const table = tableStory(replica);
+    const story = cellStory(replica);
+    const [lost] = INNER_LOST;
+    lost!.edit(first, table, true);
+    sync(first, second);
+    lost!.edit(second, table, false);
+    expect(first.undo()).toBe(true);
+    sync(first, second);
+    expect(second.undo()).toBe(true);
+    sync(first, second);
+    await receive(replica, second);
+    expect('tblPr' in (replica.engine.tablePayload(table, 0) ?? {})).toBe(false);
+    expect(located(replica, story)).toBeNull();
+
+    replica.engine.setCellSelection(outerRange);
+    const copied = await copyFrom(replica, story, 'First'.length);
+    expect(copied.text).toBe('First');
+    expect(copied.text).not.toContain('Outer two');
+    expect((copied.fragment?.paragraphs ?? []).flatMap((entry) => entry.tables ?? [])).toEqual([]);
+  } finally {
+    first.destroy();
+    second.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
+test('a copy from a healthy inner table cell inside a retained outer cell range copies the outer range, as from an outer cell', async () => {
+  const replica = await open(9421, true);
+  try {
+    const story = cellStory(replica);
+    expect(located(replica, story)).toEqual(at(tableStory(replica), 0, 0));
+    replica.engine.setCellSelection(outerRange);
+    const fromOuter = await copyFrom(replica, outerCellsOf(replica)[1]!, 1);
+    expect(fromOuter.text).toContain('Outer two');
+    expect(fromOuter.fragment?.paragraphs[0]?.tables?.[0]?.rows).toHaveLength(1);
+    expect(await copyFrom(replica, story, 1)).toEqual(fromOuter);
+  } finally {
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
 const siblingTables = table(cell('A one'), cell('A two')) + paragraph('Between') + table(cell('B one'), cell('B two'));
 const siblingRange = (tableIndex: number, column: number) => {
   const loc = { story: 'body', tableIndex, row: 0, column };
