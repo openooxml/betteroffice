@@ -121,9 +121,25 @@ interface RegisteredModule {
   memory: () => WebAssembly.Memory | null;
   nativeReady?: () => boolean;
   heap?: () => WasmHeapStats | undefined;
+  startHeapCounting?: () => boolean;
 }
 
 const registered: RegisteredModule[] = [];
+
+/**
+ * Starts counting the heap of every native engine in this process, so that
+ * {@link wasmModuleMemories} lists it. A native engine does not count by default:
+ * counting costs a little on every allocation. It starts at zero and stays on for
+ * the life of the process. WebAssembly engines always count. Returns whether every
+ * engine module that can count now does.
+ */
+export function startHeapCounting(): boolean {
+  let counting = true;
+  for (const module of registered) {
+    if (module.startHeapCounting && !module.startHeapCounting()) counting = false;
+  }
+  return counting;
+}
 
 /** The memory of every engine module instantiated in this thread, by label. */
 export function wasmModuleMemories(): WasmModuleMemory[] {
@@ -170,6 +186,8 @@ export function createWasmModuleState(options: {
   shareModule?: boolean;
   /** Reads the module's allocator counters, if it counts; called only once initialized. */
   heap?: () => WasmHeapStats | undefined;
+  /** Starts a native engine's heap counting; returns whether it counts. */
+  startHeapCounting?: () => boolean;
 }): WasmModuleState {
   let initialized = false;
   let pending: Promise<void> | undefined;
@@ -180,6 +198,9 @@ export function createWasmModuleState(options: {
     memory: () => (initialized ? memory : null),
     ...(options.engineKind === 'native' ? { nativeReady: () => initialized } : {}),
     ...(options.heap ? { heap: options.heap } : {}),
+    ...(options.engineKind === 'native' && options.startHeapCounting
+      ? { startHeapCounting: options.startHeapCounting }
+      : {}),
   });
 
   function module(): Promise<WebAssembly.Module> {

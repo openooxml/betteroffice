@@ -1057,6 +1057,7 @@ describe('docx native engine parity', () => {
     });
     expect(native.unzip_docx(native.rezip_docx(entries)))
       .toEqual(wasm.unzip_docx(wasm.rezip_docx(entries)));
+    expect(native.set_wasm_heap_counting(true)).toBe(wasm.set_wasm_heap_counting(true));
     expect(native.wasm_heap_counted()).toBe(wasm.wasm_heap_counted());
     native.set_wasm_heap_limit(1);
     try {

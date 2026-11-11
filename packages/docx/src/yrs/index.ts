@@ -171,6 +171,7 @@ export {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 export {
+  startHeapCounting,
   WASM32_MEMORY_LIMIT_BYTES,
   wasmModuleMemories,
   type WasmHeapStats,

@@ -24,7 +24,8 @@ export type DocxMemoryPressureLevel = 'normal' | 'warning' | 'critical';
 /**
  * How much memory the editor may use. A native engine has no 4 GiB limit:
  * its heap is held only against the thresholds set here, and without them it
- * reports no pressure.
+ * reports no pressure. It counts its heap only after `startHeapCounting()` from
+ * `@betteroffice/docx/yrs`.
  */
 export interface DocxMemoryBudget {
   /** Pressure is `warning` from here. Default: 75% of the 4 GiB limit. */

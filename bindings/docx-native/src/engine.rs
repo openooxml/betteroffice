@@ -3799,10 +3799,22 @@ pub fn rezip_docx(env: Env, entries: Unknown<'_>) -> Result<Uint8Array> {
         .and_then(|bytes| byte_result(env, bytes))
 }
 
-/// Whether the counters below see every allocation of this thread's engine.
+/// Whether the counters below see every allocation of this thread's engine: false until
+/// `set_wasm_heap_counting(true)`.
 #[napi(catch_unwind, js_name = "wasm_heap_counted")]
 pub fn wasm_heap_counted() -> bool {
-    true
+    crate::heap::enabled()
+}
+
+/// Starts counting heap bytes on every thread when `on` is true; counting starts at zero and
+/// cannot be stopped again, so `false` changes nothing. Returns whether counting is on.
+#[napi(catch_unwind, js_name = "set_wasm_heap_counting")]
+pub fn set_wasm_heap_counting(on: bool) -> bool {
+    if on {
+        crate::heap::enable()
+    } else {
+        crate::heap::enabled()
+    }
 }
 
 /// Bytes the calling thread currently holds on the engine's heap.

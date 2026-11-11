@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 
 /** The heap counters an editing engine exports, under their shared engine names. */
 export interface HeapEngine {
@@ -8,6 +8,7 @@ export interface HeapEngine {
   wasm_failed_allocation_bytes(): number;
   reset_wasm_peak_bytes(): void;
   set_wasm_heap_limit(bytes: number): void;
+  set_wasm_heap_counting(on: boolean): boolean;
 }
 
 /** The engine's entry in `wasmModuleMemories()`. */
@@ -47,7 +48,13 @@ export function describeHeapTable<T>(
   release: (held: T) => void,
   entry: () => HeapMemoryEntry | undefined,
 ) {
-  test('the heap is counted', () => {
+  beforeAll(() => {
+    expect(engine().set_wasm_heap_counting(true)).toBe(true);
+  });
+
+  test('the heap is counted once counting is asked for, and stays counted', () => {
+    expect(engine().wasm_heap_counted()).toBe(true);
+    expect(engine().set_wasm_heap_counting(false)).toBe(true);
     expect(engine().wasm_heap_counted()).toBe(true);
   });
 

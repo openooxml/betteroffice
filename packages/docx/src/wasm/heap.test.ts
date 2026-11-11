@@ -1,9 +1,9 @@
-import { beforeAll } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { describeHeapTable } from '../../../../bindings/heap-cases';
 import { preloadEditWasm } from './edit';
 import * as engine from './engineEdit';
-import { wasmModuleMemories } from './loadWasmAsset';
+import { startHeapCounting, wasmModuleMemories } from './loadWasmAsset';
 
 let docx: Uint8Array;
 
@@ -37,3 +37,11 @@ describeHeapTable(
   (session) => session.free(),
   () => wasmModuleMemories().find(({ label }) => label === 'docx-edit'),
 );
+
+test('a host starts heap counting through the package, and the engine then lists its counters', () => {
+  expect(startHeapCounting()).toBe(true);
+  expect(engine.wasm_heap_counted()).toBe(true);
+  const listed = wasmModuleMemories().find(({ label }) => label === 'docx-edit');
+  expect(listed?.liveBytes).toBeGreaterThanOrEqual(0);
+  expect(listed?.native).toBe(engine.engineKind === 'native' ? true : undefined);
+});
