@@ -200,8 +200,8 @@ export interface DocxEditRequest {
  * does not accept edits, never from a session.
  */
 export type DocxEditFailureCode = 'stale-version' | 'missing-target' | 'ambiguous-target' | 'content-mismatch' | 'overlapping-steps' | 'locked-target' | 'read-only' | 'tracked-revision-conflict' | 'unsupported' | 'invalid-step' | 'limit-exceeded';
-/** Why a `setContentControlText` step was refused, beside its failure code. */
-export type DocxEditFailureReason = 'missing-control' | 'missing-tag' | 'ambiguous-tag' | 'ambiguous-control-id' | 'missing-ooxml-id' | 'ambiguous-ooxml-id' | 'content-locked' | 'bound-control' | 'unsupported-control-type' | 'unsupported-children' | 'nested-controls' | 'unknown-lock' | 'unsupported-suggestion' | 'provenance-unavailable' | 'unsupported-story' | 'multiline-not-allowed' | 'invalid-text';
+/** Why a step was refused, beside its failure code: a `setContentControlText` step, or a step aimed at a table cell that has no story. */
+export type DocxEditFailureReason = 'missing-control' | 'missing-tag' | 'ambiguous-tag' | 'ambiguous-control-id' | 'missing-ooxml-id' | 'ambiguous-ooxml-id' | 'content-locked' | 'bound-control' | 'unsupported-control-type' | 'unsupported-children' | 'nested-controls' | 'unknown-lock' | 'unsupported-suggestion' | 'provenance-unavailable' | 'unsupported-story' | 'multiline-not-allowed' | 'invalid-text' | 'cell-has-no-story';
 export type DocxEditFailure = OperationFailure<DocxEditFailureCode, DocxEditTarget> & {
     reason?: DocxEditFailureReason;
 };

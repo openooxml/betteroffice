@@ -322,6 +322,7 @@ export interface DocxDocumentReadValues {
             pageIndex: number;
             paragraphs: {
                 text: string;
+                paraId?: string;
                 level?: number;
                 inTable?: true;
             }[];
