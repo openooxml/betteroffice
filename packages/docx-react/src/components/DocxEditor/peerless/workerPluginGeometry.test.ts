@@ -432,6 +432,28 @@ test('a frame replaced again before the remap still ends the kept worker range w
   } finally { h.dispose(); }
 });
 
+test('a frame replaced again whose remap finds no geometry ends the kept worker range with one empty change', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    const second = h.present();
+    await h.flush();
+    const third = h.present();
+    await h.flush();
+    expect(h.layoutId()).toBe('s:0:3');
+    expect(h.snapshot().selection.displayRange).toEqual(h.first);
+    expect(h.events).toEqual([]);
+    h.mapping.geometry = false;
+    h.release();
+    await Promise.all([second, third]);
+    await h.flush();
+    expect(h.geometry.selectionMapped()).toBe(true);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.events).toEqual([{ formatting: null, displayRange: null }]);
+    expect(h.snapshot().selection.displayRange).toBeNull();
+  } finally { h.dispose(); }
+});
+
 test('unmounting while the worker range is kept publishes nothing more and drops the range', async () => {
   const h = await selectionRemap();
   try {
@@ -459,10 +481,32 @@ test('a replaced worker document never carries the kept range across', async () 
     expect(h.layoutId()).toBe('s2:0:2');
     expect(h.geometry.selectionMapped()).toBe(false);
     expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
     h.release();
     await replaced;
     await h.flush();
     expect(h.geometry.displaySelection()).toEqual({ ...h.first, layoutId: 's2:0:2' });
+    expect(h.events).toEqual([{ formatting: null, displayRange: { ...h.first, layoutId: 's2:0:2' } }]);
+  } finally { h.dispose(); }
+});
+
+test('a replaced worker document that cannot place the selection ends the kept range with one empty change', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    h.mapping.geometry = false;
+    const replaced = h.present({ identity: { session: 's2', incarnation: 1, epoch: 1 } });
+    await h.flush();
+    expect(h.layoutId()).toBe('s2:0:2');
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
+    h.release();
+    await replaced;
+    await h.flush();
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.events).toEqual([{ formatting: null, displayRange: null }]);
+    expect(h.snapshot().selection.displayRange).toBeNull();
   } finally { h.dispose(); }
 });
 

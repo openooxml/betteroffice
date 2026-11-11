@@ -222,6 +222,24 @@ test('a layout replaced again before the selection maps still ends the kept rang
     displayRange: { story: 'body', from: 1, to: 3, layoutId: snapshotOf(view).layout!.id } }]);
 });
 
+test('a layout replaced again that cannot place the selection ends the kept range with one empty change', async () => {
+  const { view, before, editElsewhere } = await bodyBesideOtherStory();
+  await remoteEdit(view, editElsewhere('one '));
+  await act(async () => {
+    view.options.queries = queriesAt('a superseded version');
+    view.rerender();
+  });
+  await remoteEdit(view, editElsewhere('two '));
+  expect(snapshotOf(view).layout).toBeNull();
+  expect(snapshotOf(view).selection).toEqual(before.selection);
+  expect(view.events).toEqual([]);
+  view.setDisplayRange(null);
+  await relayout(view);
+  expect(snapshotOf(view).layout).not.toBeNull();
+  expect(view.events).toEqual([{ formatting: before.selection.formatting, displayRange: null }]);
+  expect(snapshotOf(view).selection.displayRange).toBeNull();
+});
+
 test('unmounting while a selection keeps its range publishes nothing more', async () => {
   const { view, before, editElsewhere } = await bodyBesideOtherStory();
   await remoteEdit(view, editElsewhere());
@@ -248,8 +266,11 @@ test('a replaced document never carries the kept range across', async () => {
   await waitFor(() => expect(snapshotOf(view).generation).not.toBe(before.generation));
   expect(snapshotOf(view).layout).toBeNull();
   expect(snapshotOf(view).selection.displayRange).toBeNull();
+  await waitFor(() => expect(view.events.map(event => event.displayRange)).toEqual([null]));
   await relayout(view, next.version());
-  expect(snapshotOf(view).selection.displayRange).toEqual({ story: 'body', from: 1, to: 3, layoutId: snapshotOf(view).layout!.id });
+  const mapped = { story: 'body', from: 1, to: 3, layoutId: snapshotOf(view).layout!.id };
+  expect(snapshotOf(view).selection.displayRange).toEqual(mapped);
+  expect(view.events.map(event => event.displayRange)).toEqual([null, mapped]);
 });
 
 test('a paragraph removed at flush time clears selection without blaming the plugin', async () => {
