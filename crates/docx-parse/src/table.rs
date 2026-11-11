@@ -445,7 +445,9 @@ fn referenced_style<'a>(
     style_type: &str,
 ) -> Option<&'a Style> {
     let id = parent?.child("w", name)?.attribute(Some("w"), "val")?;
-    styles.get(id).filter(|style| style.style_type == style_type)
+    styles
+        .get(id)
+        .filter(|style| style.style_type == style_type)
 }
 
 fn style_hidden(style: Option<&Style>) -> Option<bool> {
