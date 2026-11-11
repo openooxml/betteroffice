@@ -125,6 +125,8 @@ export { breakRefusedWhileSuggesting } from './sectionBreak';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
+/** @internal */
+export { subscribeYrsSelection, withYrsSelectionCause, yrsSelectionCause } from './selectionChanges';
 export * from './storyPlainText';
 export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
 export { isCellHasNoStoryRefusal } from './cellRefusal';
@@ -173,6 +175,7 @@ export {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 export {
+  startHeapCounting,
   WASM32_MEMORY_LIMIT_BYTES,
   wasmModuleMemories,
   type WasmHeapStats,

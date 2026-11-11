@@ -5,7 +5,7 @@ import { isTransferResult } from '../../../../shared/office-session/protocol';
 import type { WorkbookHandle } from '../wasm/loader';
 import { createWorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
-import type { WorkbookCommand, WorkbookCommandFrame, WorkbookEditConnection, WorkbookSharedAck, WorkbookSharedCommand } from './commandProtocol';
+import type { WorkbookCommand, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditConnection, WorkbookSharedAck, WorkbookSharedCommand } from './commandProtocol';
 import { createWorkbookEditSession } from './editSession';
 
 const initial: WorkbookSharedAck = {
@@ -583,4 +583,26 @@ test('an edit waiting behind a read is not overtaken by an edit submitted as the
   expect(await waiting.ack).toMatchObject({ seq: 2, status: 'applied' });
   expect(await laterTicket.ack).toMatchObject({ seq: 3, status: 'applied' });
   await session.dispose();
+});
+
+test('xlsx selection at equal command coverage rejects older versions and accepts newer versions', async () => {
+  const port = controlled();
+  const session = createWorkbookEditSession({ connection: port.connection, requestFullFrame: async () => initial });
+  const selection = (a1: string): WorkbookCommandSelection => ({ sheetId: 'sheet:0', range: { kind: 'a1', a1 } });
+  const tickets = ['A1', 'B2', 'C3'].map(a1 => session.submit('select', { payload: { selection: selection(a1) } }));
+  try {
+    await drain();
+    expect(port.calls).toHaveLength(3);
+    const ack = async (index: number, version: number, a1: string) => {
+      port.calls[index].resolve({ ...initial, throughSeq: 3, version, engineVersion: `opaque:${version}`,
+        outcomes: [{ seq: index + 1, status: 'noop' }], selection: selection(a1) });
+      await tickets[index].ack;
+    };
+    await ack(2, 2, 'C3');
+    expect(session.state.selection).toEqual(selection('C3'));
+    await ack(0, 1, 'A1');
+    expect(session.state.selection).toEqual(selection('C3'));
+    await ack(1, 3, 'B2');
+    expect(session.state.selection).toEqual(selection('B2'));
+  } finally { await session.dispose(); }
 });

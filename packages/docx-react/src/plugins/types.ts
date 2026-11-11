@@ -27,6 +27,7 @@ import type {
   PluginLoadReason,
   PluginLocaleChangeEvent,
   PluginRefusal,
+  PluginSelectionSettleEvent,
   PluginViewportChangeEvent,
 } from '../../../../shared/host-contracts/plugins';
 import type {
@@ -174,6 +175,8 @@ export interface DocxPluginSnapshot {
   readOnly: boolean;
   grant: DocxPluginGrant;
   selection: DocxPluginSelection;
+  /** @experimental Whether the selection has finished changing. */
+  selectionSettled: boolean;
   /** Null while no rendered layout shows `version`. */
   layout: DocxPluginLayout | null;
 }
@@ -192,6 +195,8 @@ export interface DocxPluginPageRect extends DocxAnchorRect {
 }
 
 export type DocxGeometryTarget =
+  /** @experimental Selection anchors are live-only; use a range target to keep a position. */
+  | { kind: 'selection' }
   | { kind: 'proposal'; id: string }
   | { kind: 'revision'; revisionId: string }
   | { kind: 'paragraph'; paragraph: DocxParagraphAnchor }
@@ -252,16 +257,18 @@ export interface DocxPluginGeometry {
    * drawn frame box of the drawing atom at its `offset`, on every page that paints it; an
    * optional `index` addresses a drawing inside a content-control atom. Invalid offsets or
    * indices are `missing-target`. Refuses stale or unrendered layouts.
-   * In the worker-only editor, a target whose geometry is still being read is `pending`, and one
-   * whose read failed is `read-failed`; overlays render again once either read settles.
+   * A selection awaiting its display range, or a worker-only target still being read, is `pending`.
+   * A failed worker read is `read-failed`; overlays render again once either read settles.
+   * A `selection` target answers `layout-unavailable` once the context's selection is superseded.
    */
   getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
   /**
    * {@link getAnchorGeometry} of every target, in order; it never answers `pending` and never
-   * rejects. Only the worker-only editor awaits reads, one batched read for the targets asked in
-   * one tick; the hybrid editor, removed in 0.6.0, answers right away and still answers
-   * `layout-unavailable` while its own reads are in flight. A target whose read failed answers
-   * `read-failed` and is read again only when this method asks for it, so retry with backoff.
+   * rejects. Selection targets wait for mapping or a display range for up to two seconds, then
+   * answer `layout-unavailable`. Other targets await worker-only reads, batched in one tick; the
+   * hybrid editor, removed in 0.6.0, answers them right away, with `layout-unavailable` while reading.
+   * A target whose read failed answers `read-failed` and is read again only when this method asks
+   * for it, so retry with backoff.
    * Answers come from the layout current when the reads land, so a newer layout gives its own
    * `layoutId` or `stale-version`. `layout-unavailable` means no presented layout of this document
    * showed the target then (an edit, zoom or proposal preview not yet painted, or the document
@@ -310,11 +317,15 @@ export type DocxPluginLocaleChangeEvent = PluginLocaleChangeEvent;
 /** @experimental The plugin API may change in minor releases. */
 export type DocxPluginViewportChangeEvent = PluginViewportChangeEvent<DocxPluginRect>;
 
+/** @experimental The plugin API may change in minor releases. */
+export type DocxPluginSelectionSettleEvent = PluginSelectionSettleEvent<DocxPluginSelection>;
+
 /**
  * Lifecycle notifications describe current state; several changes may arrive as one.
  * `layout-change` repeats once the pages have painted a layout that arrived before its pixels.
  */
 export type DocxPluginEvent =
+  | DocxPluginSelectionSettleEvent
   | DocxPluginFocusChangeEvent
   | DocxPluginLocaleChangeEvent
   | DocxPluginViewportChangeEvent

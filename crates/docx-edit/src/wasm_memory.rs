@@ -101,6 +101,14 @@ pub fn wasm_heap_counted() -> bool {
     cfg!(all(target_arch = "wasm32", feature = "heap-stats"))
 }
 
+/// Asks for heap counting. A wasm build with the counters always counts, so this only
+/// reports [`wasm_heap_counted`].
+#[wasm_bindgen]
+pub fn set_wasm_heap_counting(on: bool) -> bool {
+    let _ = on;
+    wasm_heap_counted()
+}
+
 /// Bytes currently allocated on the Rust heap.
 #[wasm_bindgen]
 pub fn wasm_live_bytes() -> f64 {

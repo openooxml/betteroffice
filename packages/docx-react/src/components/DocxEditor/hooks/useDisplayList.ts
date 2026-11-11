@@ -47,6 +47,7 @@ import {
   takePreloadedResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   sameYrsSelection,
+  withYrsSelectionCause,
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
   type ResidentEngineWorkerFrame,
@@ -1837,8 +1838,10 @@ export function useRustDisplayList(
         if (reply.repair) {
           suppressWorkerInvalidationRef.current += 1;
           try {
-            if (hasEditorWorkerProposalRounds(peer)) peer.applyHostUpdate(reply.repair);
-            else peer.applyLocalUpdate(reply.repair);
+            withYrsSelectionCause(peer, 'remote', () => {
+              if (hasEditorWorkerProposalRounds(peer)) peer.applyHostUpdate(reply.repair!);
+              else peer.applyLocalUpdate(reply.repair!);
+            });
           } finally {
             suppressWorkerInvalidationRef.current -= 1;
           }
