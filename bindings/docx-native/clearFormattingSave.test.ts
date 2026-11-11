@@ -39,7 +39,8 @@ const UNFORMATTED_BODY =
   '</w:tc></w:tr></w:tbl>' +
   '<w:p w14:paraId="00000044"><w:r><w:t>After</w:t></w:r></w:p>';
 
-const BOLD_GRID = '<w:style w:type="table" w:styleId="BoldGrid"><w:name w:val="Bold Grid"/><w:rPr><w:b/></w:rPr></w:style>';
+const BOLD_GRID = '<w:style w:type="table" w:styleId="BoldGrid"><w:name w:val="Bold Grid"/><w:rPr><w:b/></w:rPr></w:style>' +
+  '<w:style w:type="table" w:styleId="HeaderGrid"><w:name w:val="Header Grid"/><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style>';
 
 async function fixture(body = FORMATTED_BODY): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -130,6 +131,41 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
           return segment?.kind === 'text' ? Boolean(segment.attributes.bold) : undefined;
         };
         expect(cells.map(boldIn)).toEqual([true, false, true]);
+      } finally {
+        reopened.destroy();
+      }
+    } finally {
+      session.destroy();
+    }
+  });
+
+  test(`${engine}: in a header row whose table style bolds the first row the saved bold follows that row`, async () => {
+    const cell = (paraId: string, run: string) =>
+      `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="${paraId}">${run}</w:p></w:tc>`;
+    const body = '<w:tbl><w:tblPr><w:tblStyle w:val="HeaderGrid"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>' +
+      `<w:tr>${cell('00000031', '<w:r><w:t>Header off</w:t></w:r>')}${cell('00000032', '<w:r><w:rPr><w:b w:val="0"/><w:i/></w:rPr><w:t>Header clear</w:t></w:r>')}</w:tr>` +
+      `<w:tr>${cell('00000033', '<w:r><w:rPr><w:b/></w:rPr><w:t>Body off</w:t></w:r>')}${cell('00000034', '<w:r><w:t>Body plain</w:t></w:r>')}</w:tr>` +
+      '</w:tbl><w:p w14:paraId="00000035"><w:r><w:t>After</w:t></w:r></w:p>';
+    const markers = ['Header off', 'Header clear', 'Body off'];
+    const storyOf = (session: Session, paraId: string) =>
+      session.listStories().stories.find((entry) => entry.kind === 'tableCell' && session.paragraphs(entry.story).some((paragraph) => paragraph.paraId === paraId))!.story;
+    const boldIn = (session: Session, paraId: string, marker: string) => {
+      const segment = session.storySegments(storyOf(session, paraId)).find((entry) => entry.kind === 'text' && entry.text.includes(marker));
+      return segment?.kind === 'text' ? Boolean(segment.attributes.bold) : undefined;
+    };
+    const session = await yrs.createYrsSession({ clientId: 99 });
+    try {
+      session.seedFromDocx(await fixture(body));
+      expect([boldIn(session, '00000031', 'Header off'), boldIn(session, '00000033', 'Body off')]).toEqual([true, true]);
+      session.formatRange(whole(session, '00000031', '00000031', storyOf(session, '00000031')), { bold: false });
+      session.clearFormatting(whole(session, '00000032', '00000032', storyOf(session, '00000032')));
+      session.formatRange(whole(session, '00000033', '00000033', storyOf(session, '00000033')), { bold: false });
+      const { xml, reopened } = await saveAndReopen(yrs, session);
+      try {
+        expect(markers.map((marker) => savedRunProperties(xml, marker))).toEqual(['<w:b w:val="0"/>', null, null]);
+        expect([
+          boldIn(reopened, '00000031', 'Header off'), boldIn(reopened, '00000032', 'Header clear'), boldIn(reopened, '00000033', 'Body off'),
+        ]).toEqual([false, true, false]);
       } finally {
         reopened.destroy();
       }
