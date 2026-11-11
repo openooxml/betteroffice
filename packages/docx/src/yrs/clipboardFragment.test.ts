@@ -797,7 +797,9 @@ test('picture copy rejects content controls containing nested pictures and other
   for (const controlKind of ['sdt', 'blockSdt']) {
     for (const objectKind of ['image', 'chart', 'shape', 'table', 'unknown']) {
       for (const nested of [false, true]) {
-        const object = { kind: objectKind, payload: { src: 'data:image/png;base64,AA==' } };
+        const object = { kind: objectKind, payload: objectKind === 'table'
+          ? { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'tableCell', tcPr: {} }] }] }
+          : { src: 'data:image/png;base64,AA==' } };
         const content = [{ kind: 'text', text: 'kept' }, ...(nested ? [{ kind: 'sdt', payload: { content: [object] } }] : [object])];
         const payload = controlKind === 'sdt' ? { content } : { story: 'control' };
         const child = nested ? embedSegment('sdt', { content: [object] }) : embedSegment(objectKind, object.payload);
