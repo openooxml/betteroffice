@@ -33,24 +33,50 @@ export function dumpDisplayLists(engine: 'wasm' | 'native', fonts: 'pinned' | 'd
   }
 }
 
-/** Where two dumps first differ for each fixture: the page, then the first differing primitive or field. */
+/** One recorded page: the font chains the engine was handed and the page's display list. */
+export interface RecordedPage { fontChains?: Record<string, number[]>; page: { primitives?: unknown[] } & Record<string, unknown> }
+
+/**
+ * Renumbers the face ids of one recorded page by first occurrence: chains in
+ * sorted key order, then chain position, then every `fontId` in a walk of the
+ * page. An id that no chain holds is numbered after all chain ids, so it never
+ * shares a number with a chained face.
+ */
+export function canonicalFaceIds(json: string): RecordedPage {
+  const recorded = JSON.parse(json) as RecordedPage;
+  const numbers = new Map<number, number>();
+  const renumber = (id: number) => {
+    if (!numbers.has(id)) numbers.set(id, numbers.size);
+    return numbers.get(id)!;
+  };
+  const chains = recorded.fontChains;
+  const fontChains = chains && Object.fromEntries(Object.keys(chains).sort().map(key => [key, chains[key]!.map(renumber)]));
+  const walk = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(walk);
+    if (value === null || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).map(([key, field]) => [key, key === 'fontId' && typeof field === 'number' ? renumber(field) : walk(field)]));
+  };
+  return { ...(fontChains ? { fontChains } : {}), page: walk(recorded.page) as RecordedPage['page'] };
+}
+
+/** Where two dumps first differ for each fixture: the page, its font chains when they differ, and the first differing primitive or field, all after `canonicalFaceIds`. */
 export function firstDifferences(expected: DisplayListDump, actual: DisplayListDump): string[] {
   const found: string[] = [];
   for (const name of Object.keys(expected.pages).sort()) {
-    const ours = expected.pages[name] ?? [];
-    const theirs = actual.pages[name] ?? [];
+    const ours = (expected.pages[name] ?? []).map(canonicalFaceIds);
+    const theirs = (actual.pages[name] ?? []).map(canonicalFaceIds);
     if (ours.length !== theirs.length) {
       found.push(`${name}: ${expected.engine} lays out ${ours.length} page(s), ${actual.engine} ${theirs.length}`);
       continue;
     }
-    const page = ours.findIndex((json, index) => json !== theirs[index]);
+    const page = ours.findIndex((recorded, index) => JSON.stringify(recorded) !== JSON.stringify(theirs[index]));
     if (page < 0) continue;
-    const a = JSON.parse(ours[page]!) as { fontChains: unknown; page: { primitives?: unknown[] } & Record<string, unknown> };
-    const b = JSON.parse(theirs[page]!) as typeof a;
+    const a = ours[page]!;
+    const b = theirs[page]!;
     const clip = (value: unknown) => JSON.stringify(value)?.slice(0, 600);
-    if (JSON.stringify(a.fontChains) !== JSON.stringify(b.fontChains)) {
+    const chainsDiffer = JSON.stringify(a.fontChains) !== JSON.stringify(b.fontChains);
+    if (chainsDiffer) {
       found.push(`${name} page ${page}: font chains differ: ${clip(a.fontChains)} vs ${clip(b.fontChains)}`);
-      continue;
     }
     const left = a.page.primitives ?? [];
     const right = b.page.primitives ?? [];
@@ -61,24 +87,24 @@ export function firstDifferences(expected: DisplayListDump, actual: DisplayListD
       continue;
     }
     const field = Object.keys({ ...a.page, ...b.page }).find(key => JSON.stringify(a.page[key]) !== JSON.stringify(b.page[key]));
-    found.push(`${name} page ${page} field ${field}: ${clip(field && a.page[field])} vs ${clip(field && b.page[field])}`);
+    if (field !== undefined || !chainsDiffer) found.push(`${name} page ${page} field ${field}: ${clip(field && a.page[field])} vs ${clip(field && b.page[field])}`);
   }
   return found;
 }
 
-/** How many pages and primitives differ between two dumps, per fixture. */
+/** How many pages and primitives differ between two dumps, per fixture, after `canonicalFaceIds`. */
 export function differenceCounts(expected: DisplayListDump, actual: DisplayListDump): Record<string, { pages: string; primitives: string }> {
   const counts: Record<string, { pages: string; primitives: string }> = {};
   for (const name of Object.keys(expected.pages).sort()) {
-    const ours = expected.pages[name] ?? [];
-    const theirs = actual.pages[name] ?? [];
+    const ours = (expected.pages[name] ?? []).map(canonicalFaceIds);
+    const theirs = (actual.pages[name] ?? []).map(canonicalFaceIds);
     let pages = 0;
     let primitives = 0;
     let total = 0;
     for (let index = 0; index < Math.max(ours.length, theirs.length); index++) {
-      const left = ours[index] ? (JSON.parse(ours[index]!) as { page: { primitives?: unknown[] } }).page.primitives ?? [] : [];
-      const right = theirs[index] ? (JSON.parse(theirs[index]!) as { page: { primitives?: unknown[] } }).page.primitives ?? [] : [];
-      if (ours[index] !== theirs[index]) pages++;
+      const left = ours[index]?.page.primitives ?? [];
+      const right = theirs[index]?.page.primitives ?? [];
+      if (JSON.stringify(ours[index]) !== JSON.stringify(theirs[index])) pages++;
       total += Math.max(left.length, right.length);
       for (let at = 0; at < Math.max(left.length, right.length); at++) {
         if (JSON.stringify(left[at]) !== JSON.stringify(right[at])) primitives++;
