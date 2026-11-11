@@ -776,3 +776,38 @@ fn format_text_steps_aimed_at_the_cell_are_refused_before_their_own_checks() {
         }
     }
 }
+
+#[test]
+fn validating_format_text_steps_aimed_at_the_cell_reports_the_refusal() {
+    for synced in [true, false] {
+        let (left, right, _undo) = dangling_state(synced);
+        let (_, _, cell) = dangling(&left).remove(0);
+        let key = format!("{cell}#p0");
+        let target = json!({"kind": "paragraph", "story": cell, "paraId": key});
+        for doc in [&left, &right] {
+            for step in [
+                json!({"op": "formatText", "target": target, "set": {"bold": true}}),
+                json!({"op": "formatText", "target": target, "clear": "all"}),
+            ] {
+                let before = state(doc);
+                let request: EditRequest = serde_json::from_value(json!({
+                    "expectVersion": doc.version().as_str(),
+                    "steps": [step],
+                }))
+                .unwrap();
+                let refusal = doc
+                    .validate_edits(&request)
+                    .unwrap()
+                    .expect_err("validating a formatText step into the cell reports a refusal");
+                assert_eq!(refusal.failure.code, EditFailureCode::Unsupported);
+                assert_eq!(
+                    refusal.failure.reason,
+                    Some(EditFailureReason::CellHasNoStory),
+                    "synced={synced}"
+                );
+                assert_eq!(refusal.failure.step_index, Some(0));
+                assert_eq!(state(doc), before, "synced={synced}");
+            }
+        }
+    }
+}

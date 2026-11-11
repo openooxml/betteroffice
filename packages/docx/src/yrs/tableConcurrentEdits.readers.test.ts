@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { createEditSession, preloadEditWasm, type EditSession } from '../wasm/edit';
-import { saveYrsDocx, type YrsAuthor, type YrsCellBorders, type YrsCellLoc, type YrsLoc, type YrsSession, type YrsStoryRange, type YrsTableRange } from './index';
+import { saveYrsDocx, type DocxEditRequest, type YrsAuthor, type YrsCellBorders, type YrsCellLoc, type YrsLoc, type YrsSession, type YrsStoryRange, type YrsTableRange } from './index';
 import { readTableFragment } from './clipboardFragment';
 import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { resolveLiveCell } from './residentCommandTableSelection';
@@ -382,6 +382,11 @@ interface WriteCase {
   prepare: (session: YrsSession, story: string) => WriteThunk;
   /** A collapsed deletion at a cell edge may be a no-op instead of a refusal. */
   mayNoop?: boolean;
+  /**
+   * `throws` (the default): the session call throws the coded `cell-has-no-story` error. `batch`: a
+   * host edit batch returns a refusal with code `unsupported` and reason `cell-has-no-story`, and does not throw.
+   */
+  outcome?: 'throws' | 'batch';
   /** A host-side argument check that rejects every table cell before the engine is reached. */
   hostRefusal?: RegExp;
 }
@@ -475,14 +480,14 @@ const WRITES: WriteCase[] = [
   },
   { name: 'splitCell', prepare: (s, story) => () => s.splitCell(cellOf(s, story), 1, 2) },
   {
-    name: 'host batch insertText step',
+    name: 'host batch insertText step', outcome: 'batch',
     prepare: (s, story) => () => s.applyEdits({
       expectVersion: s.version(),
       steps: [{ op: 'insertText', target: { kind: 'paragraph', story, paraId: cellLoc(s, story).paraId }, at: 'end', text: 'from host' }],
     }),
   },
   {
-    name: 'host batch insertText step with formatted runs',
+    name: 'host batch insertText step with formatted runs', outcome: 'batch',
     prepare: (s, story) => () => s.applyEdits({
       expectVersion: s.version(),
       steps: [{
@@ -496,21 +501,21 @@ const WRITES: WriteCase[] = [
     }),
   },
   {
-    name: 'host batch formatText step setting marks',
+    name: 'host batch formatText step setting marks', outcome: 'batch',
     prepare: (s, story) => () => s.applyEdits({
       expectVersion: s.version(),
       steps: [{ op: 'formatText', target: { kind: 'paragraph', story, paraId: cellLoc(s, story).paraId }, set: { bold: true, italic: true } }],
     }),
   },
   {
-    name: 'host batch formatText step clearing marks',
+    name: 'host batch formatText step clearing marks', outcome: 'batch',
     prepare: (s, story) => () => s.applyEdits({
       expectVersion: s.version(),
       steps: [{ op: 'formatText', target: { kind: 'paragraph', story, paraId: cellLoc(s, story).paraId }, clear: 'all' }],
     }),
   },
   {
-    name: 'host batch formatText step over a range in the cell',
+    name: 'host batch formatText step over a range in the cell', outcome: 'batch',
     prepare: (s, story) => () => s.applyEdits({
       expectVersion: s.version(),
       steps: [{
@@ -522,21 +527,21 @@ const WRITES: WriteCase[] = [
     }),
   },
   {
-    name: 'host batch replaceText step',
+    name: 'host batch replaceText step', outcome: 'batch',
     prepare: (s, story) => () => s.applyEdits({
       expectVersion: s.version(),
       steps: [{ op: 'replaceText', target: { kind: 'paragraph', story, paraId: cellLoc(s, story).paraId }, text: 'from host' }],
     }),
   },
   {
-    name: 'host batch insertParagraphs step',
+    name: 'host batch insertParagraphs step', outcome: 'batch',
     prepare: (s, story) => () => s.applyEdits({
       expectVersion: s.version(),
       steps: [{ op: 'insertParagraphs', target: { story, paraId: cellLoc(s, story).paraId }, at: 'end', paragraphs: [{ text: 'from host' }] }],
     }),
   },
   {
-    name: 'host batch setParagraphStyle step',
+    name: 'host batch setParagraphStyle step', outcome: 'batch',
     prepare: (s, story) => () => s.applyEdits({
       expectVersion: s.version(),
       steps: [{ op: 'setParagraphStyle', target: { story, paraId: cellLoc(s, story).paraId }, styleId: 'Heading1' }],
@@ -559,7 +564,7 @@ for (const order of ['synced', 'concurrent'] as const) test(`${order}: every wri
   const outcomes: Record<string, string> = {};
   const problems: string[] = [];
   let base = order === 'synced' ? 10_000 : 30_000;
-  for (const { name, prepare, mayNoop, hostRefusal } of WRITES) {
+  for (const { name, prepare, mayNoop, hostRefusal, outcome = 'throws' } of WRITES) {
     const { a, b, peers, story } = await danglingRoom(base, 2, order);
     base += 10;
     const run = prepare(b, story);
@@ -573,8 +578,10 @@ for (const order of ['synced', 'concurrent'] as const) test(`${order}: every wri
     const text = error === undefined ? `ok ${JSON.stringify(value ?? null).slice(0, 120)}` : `throws: ${fullMessage(error)}`;
     outcomes[name] = `${text.slice(0, 200)}${unchanged ? '' : ' (wrote)'}`;
     if (/unreachable|panicked|RuntimeError/.test(text)) problems.push(`${name}: engine trap ${text}`);
-    const refused = cellRefused(error) || batchUnsupported(value) || (hostRefusal !== undefined && error instanceof Error && hostRefusal.test(error.message));
-    if (!refused && !(mayNoop && error === undefined)) problems.push(`${name}: not refused: ${text.slice(0, 200)}`);
+    const refused = outcome === 'batch'
+      ? error === undefined && batchUnsupported(value)
+      : cellRefused(error) || (hostRefusal !== undefined && error instanceof Error && hostRefusal.test(error.message));
+    if (!refused && !(mayNoop && error === undefined)) problems.push(`${name}: expected ${outcome === 'batch' ? 'a structured batch refusal' : 'a thrown cell-has-no-story error'}, got ${text.slice(0, 200)}`);
     if (!unchanged) problems.push(`${name}: state changed`);
     for (const peer of [a, b]) {
       for (const [reader, result] of Object.entries(readerRows(peer))) if (result !== 'ok') problems.push(`${name}: ${reader} ${result}`);
@@ -766,6 +773,30 @@ for (const order of ['synced', 'concurrent'] as const) {
     expect(b.storyIds()).not.toContain(fresh);
     expect(danglingCells(b)).toContain(story);
     expectReadable(b);
+  }, 60_000);
+}
+
+for (const order of ['synced', 'concurrent'] as const) {
+  test(`${order}: validating a formatText step aimed at the missing cell reports the structured refusal and writes nothing`, async () => {
+    const { a, b, peers, story } = await danglingRoom(order === 'synced' ? 10_960 : 34_150, 2, order);
+    const paraId = cellLoc(b, story).paraId;
+    const requests: Array<[string, DocxEditRequest]> = [
+      ['set', { expectVersion: b.version(), steps: [{ op: 'formatText', target: { kind: 'paragraph', story, paraId }, set: { bold: true } }] }],
+      ['clear', { expectVersion: b.version(), steps: [{ op: 'formatText', target: { kind: 'paragraph', story, paraId }, clear: 'all' }] }],
+    ];
+    for (const [name, request] of requests) {
+      const before = peers.map(stateBytes);
+      let error: unknown;
+      let value: unknown;
+      try { value = b.validateEdits(request); } catch (caught) { error = caught; }
+      syncAll(peers);
+      const text = error === undefined ? JSON.stringify(value ?? null).slice(0, 200) : `throws: ${fullMessage(error)}`;
+      expect(`${name}: ${error === undefined && batchUnsupported(value) ? 'refused' : text}`).toBe(`${name}: refused`);
+      expect(peers.every((peer, index) => stateBytes(peer) === before[index])).toBe(true);
+    }
+    expect(danglingCells(b)).toContain(story);
+    expectReadable(b);
+    expectConverged([a, b]);
   }, 60_000);
 }
 
