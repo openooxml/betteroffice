@@ -179,7 +179,7 @@ test('selection and range anchors follow stage scrolling at every zoom', async (
       expect(await pinnedEvaluate(page, async ({ story, anchor, focus }) =>
         await (window as unknown as { __probe: Probe }).__probe.editor!.selectText({
           slide: 1, shapeId: story.shapeId, storyId: story.storyId, start: anchor, end: focus,
-        }), { story, anchor, focus })).toBe(true);
+        }), { story, anchor, focus }), `selectText anchor=${anchor} focus=${focus} scale=${scale}`).toBe(true);
       await expect(page.locator('[data-probe-anchor="selection"]')).toBeAttached();
       const read = () => pinnedEvaluate(page, async ({ story, anchor, focus }) => {
         const geometry = (window as unknown as { __probe: Probe }).__probe.geometry;
