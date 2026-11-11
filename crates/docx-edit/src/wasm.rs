@@ -115,6 +115,16 @@ impl From<EngineError> for JsValue {
                 );
                 value.into()
             }
+            EngineErrorKind::TableUnavailable => {
+                let value = js_sys::Error::new(&error.message);
+                value.set_name("TableUnavailableError");
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("table-unavailable"),
+                );
+                value.into()
+            }
             EngineErrorKind::CellHasNoStory => {
                 let value = js_sys::Error::new(&error.message);
                 value.set_name("CellHasNoStoryError");
@@ -2621,6 +2631,15 @@ impl EditSession {
         self.core.story_ids()
     }
 
+    /// `[{"story","tableIndex"}]` from a full walk of the roots in `roots_json`, or `null` when
+    /// a walk cannot finish.
+    /// @internal
+    pub fn unavailable_tables_from(&self, roots_json: &str) -> Result<String, JsValue> {
+        self.core
+            .unavailable_tables_from(roots_json)
+            .map_err(JsValue::from)
+    }
+
     /// Story length in UTF-16 units, every embed (pilcrows included) counting
     /// as one. Errors on an unknown story.
     pub fn story_len(&self, story: &str) -> Result<u32, JsValue> {
@@ -2664,9 +2683,13 @@ impl EditSession {
 
     /// Compact paragraph-position projection built in one story traversal:
     /// `[{"paraId","length"}, …]` in document order, where `length` counts the
-    /// UTF-16 text and inline embed units before that paragraph's pilcrow —
-    /// exactly the `offset` domain of a Loc in it. One call replaces crossing
-    /// the boundary once per paragraph. Errors on an unknown story.
+    /// UTF-16 text, inline embed units and one unit per block embed (table,
+    /// block content control) that leads the paragraph, before its pilcrow —
+    /// exactly the `offset` domain of a Loc in it. In a paragraph that follows
+    /// one table, offset 0 is before the table and the text starts at offset 1;
+    /// each further leading table or block content control adds one.
+    /// One call replaces crossing the boundary once per paragraph. Errors on an
+    /// unknown story.
     pub fn paragraph_spans(&self, story: &str) -> Result<String, JsValue> {
         self.core.paragraph_spans(story).map_err(JsValue::from)
     }

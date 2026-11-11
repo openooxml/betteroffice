@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use docx_parse::paragraph_patch::{
-    AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, LegacyParagraphV1,
-    ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1,
-    canonical_json_v1, result_sha256, unit_sha256,
+    AttrDeltaV1, Attrs, DonorV1, InheritanceStateV1, InheritanceV1, InsertedTextV1,
+    LegacyParagraphV1, ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1,
+    UnitV1, canonical_json_v1, result_sha256, unit_sha256,
 };
 use serde_json::{Value, json};
 use yrs::Any;
@@ -1801,6 +1801,11 @@ fn plan_paragraph(
         para_inherit,
         mark_inherit,
         result_sha256: result_sha256(&units(&replay), &result_properties),
+        inheritance: if context.metadata.is_some() {
+            InheritanceStateV1::Current
+        } else {
+            InheritanceStateV1::Unknown
+        },
     })
 }
 

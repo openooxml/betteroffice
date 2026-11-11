@@ -61,6 +61,9 @@ pub enum OpError {
     },
     /// The stored table shape or requested grid operation is invalid.
     InvalidTable(String),
+    /// The table embed lost its properties, grid or rows (a concurrent undo can leave it so). It
+    /// takes no table operation until the undo is redone or the table is deleted.
+    TableUnavailable,
     InvalidComment(String),
     InvalidUpdate(String),
     /// A plain- or rich-text content control holds its text as content, never as a `value`.
@@ -118,6 +121,7 @@ impl fmt::Display for OpError {
                 write!(f, "table {table_index} was not found in story {story:?}")
             }
             Self::InvalidTable(message) => write!(f, "invalid table: {message}"),
+            Self::TableUnavailable => f.write_str(crate::unavailable_tables::TABLE_UNAVAILABLE),
             Self::InvalidComment(message) => write!(f, "invalid comment: {message}"),
             Self::InvalidUpdate(message) => write!(f, "invalid yrs update: {message}"),
             Self::TextControlValue => write!(

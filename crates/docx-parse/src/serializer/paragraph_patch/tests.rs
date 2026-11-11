@@ -32,6 +32,7 @@ fn patch(seed: Vec<UnitV1>, result: Vec<UnitV1>) -> ParagraphPatchV1 {
         para_inherit: Attrs::new(),
         mark_inherit: Attrs::new(),
         result_sha256: result_sha256(&result, &Attrs::new()),
+        inheritance: Default::default(),
     }
 }
 
@@ -213,7 +214,7 @@ fn paragraph_patch_empty_donor_clears_shading_highlight() {
     plan.text_edits[0].donor = DonorV1::Pilcrow;
     assert_eq!(
         write(source, &plan).unwrap(),
-        r#"<w:p><w:r><w:rPr><w:highlight w:val="none"/><w:shd w:val="clear" x:keep="yes"/></w:rPr><w:t>x</w:t></w:r></w:p>"#
+        r#"<w:p><w:r><w:rPr><w:shd w:val="clear" x:keep="yes"/></w:rPr><w:t>x</w:t></w:r></w:p>"#
     );
 }
 
@@ -865,7 +866,7 @@ fn paragraph_patch_color_removal_keeps_required_attributes_valid() {
     });
     assert_eq!(
         write(source, &plan).unwrap(),
-        source.replace("<w:color w:val='FF0000'/>", "")
+        source.replace("<w:rPr><w:color w:val='FF0000'/></w:rPr>", "")
     );
     let opaque = source.replace("w:val='FF0000'", "w:val='FF0000' x:keep='yes'");
     assert_eq!(
@@ -1530,7 +1531,7 @@ fn paragraph_patch_restyle_normalizes_inherited_run_fields() {
         write(&source, &plan).unwrap(),
         source
             .replace("w:val='Body24'", "w:val='Heading1'")
-            .replace("w:val='yellow'", "w:val='green'")
+            .replace("<w:highlight w:val='yellow'/>", "")
     );
 }
 
@@ -1663,7 +1664,9 @@ fn paragraph_patch_restyle_keeps_inherited_run_properties_out_of_xml() {
             after.insert("pStyle".to_owned(), json!("Heading1"));
             plan.result_sha256 = result_sha256(&[text("x", new)], &after);
             let expected = source.replace("w:val='Body24'", "w:val='Heading1'");
-            let expected = if direct_size == "sz" {
+            let expected = if direct_size == "sz" && target_size == 32 {
+                expected.replace("<w:sz w:val='24'/>", "")
+            } else if direct_size == "sz" {
                 expected.replace("w:val='24'", &format!("w:val='{target_size}'"))
             } else if target_size == 40 {
                 let next = if direct_size == "szCs" {

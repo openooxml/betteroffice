@@ -100,6 +100,11 @@ impl List {
                 .find(|value| value.ilvl == level as f64)
                 .and_then(|value| value.start_override)
                 .or(definition.start)
+                .or_else(|| {
+                    numbering
+                        .get_abstract_level(instance.abstract_num_id, level as f64)?
+                        .start
+                })
                 .filter(|start| start.is_finite())
                 .map_or(0, |start| start.clamp(0.0, MAX_START as f64) as i64);
             *entry = (start, definition.lvl_restart);
@@ -582,6 +587,186 @@ mod tests {
                 &[paragraph(1.0, 0.0, "%1."), paragraph(1.0, 0.0, "%1.")]
             ),
             ["0.", "1."]
+        );
+    }
+
+    /// The first label of a list whose instance overrides level 0 with a whole `w:lvl`.
+    fn first_override_marker(
+        format: &str,
+        abstract_start: Option<u32>,
+        level_start: Option<u32>,
+        start_override: Option<u32>,
+    ) -> String {
+        let start = |value: Option<u32>| {
+            value.map_or_else(String::new, |value| {
+                format!(r#"<w:start w:val="{value}"/>"#)
+            })
+        };
+        let level = |value: Option<u32>, abstract_format: &str| {
+            format!(
+                r#"<w:lvl w:ilvl="0">{}<w:numFmt w:val="{abstract_format}"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl>"#,
+                start(value)
+            )
+        };
+        let start_override = start_override.map_or_else(String::new, |value| {
+            format!(r#"<w:startOverride w:val="{value}"/>"#)
+        });
+        let numbering = definitions(
+            &level(abstract_start, "decimal"),
+            &format!(
+                r#"<w:num w:numId="1"><w:abstractNumId w:val="4"/><w:lvlOverride w:ilvl="0">{start_override}{}</w:lvlOverride></w:num>"#,
+                level(level_start, format)
+            ),
+        );
+        let mut state = ListState::new(Some(numbering));
+        let mut values = paragraph(1.0, 0.0, "%1.");
+        values.insert(
+            "listLevelNumFmts".to_owned(),
+            Any::from_json(&format!(r#"["{format}"]"#)).unwrap(),
+        );
+        compute_list_marker(&values, &mut state).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_start_override_wins_over_both_level_starts_in_decimal() {
+        assert_eq!(
+            first_override_marker("decimal", Some(3), Some(5), Some(7)),
+            "7."
+        );
+    }
+
+    #[test]
+    fn a_start_override_wins_over_both_level_starts_in_letters() {
+        assert_eq!(
+            first_override_marker("upperLetter", Some(3), Some(5), Some(7)),
+            "G."
+        );
+    }
+
+    #[test]
+    fn a_level_override_start_wins_over_the_abstract_start_in_decimal() {
+        assert_eq!(
+            first_override_marker("decimal", Some(3), Some(5), None),
+            "5."
+        );
+    }
+
+    #[test]
+    fn a_level_override_start_wins_over_the_abstract_start_in_letters() {
+        assert_eq!(
+            first_override_marker("upperLetter", Some(3), Some(5), None),
+            "E."
+        );
+    }
+
+    #[test]
+    fn a_decimal_level_override_without_a_start_keeps_an_abstract_start_of_two() {
+        assert_eq!(first_override_marker("decimal", Some(2), None, None), "2.");
+    }
+
+    #[test]
+    fn a_decimal_level_override_without_a_start_keeps_an_abstract_start_of_three() {
+        assert_eq!(first_override_marker("decimal", Some(3), None, None), "3.");
+    }
+
+    #[test]
+    fn a_decimal_level_override_without_a_start_keeps_an_abstract_start_of_four() {
+        assert_eq!(first_override_marker("decimal", Some(4), None, None), "4.");
+    }
+
+    #[test]
+    fn a_letter_level_override_without_a_start_keeps_an_abstract_start_of_one() {
+        assert_eq!(
+            first_override_marker("upperLetter", Some(1), None, None),
+            "A."
+        );
+    }
+
+    #[test]
+    fn a_letter_level_override_without_a_start_keeps_an_abstract_start_of_three() {
+        assert_eq!(
+            first_override_marker("upperLetter", Some(3), None, None),
+            "C."
+        );
+    }
+
+    #[test]
+    fn a_decimal_level_with_no_start_anywhere_counts_from_zero() {
+        assert_eq!(first_override_marker("decimal", None, None, None), "0.");
+    }
+
+    #[test]
+    fn letter_level_with_no_start_anywhere_has_an_empty_label_unverified() {
+        assert_eq!(first_override_marker("upperLetter", None, None, None), "");
+    }
+
+    fn style_linked_numbering(linked_levels: &str, override_levels: &str) -> Arc<NumberingMap> {
+        let xml = format!(
+            r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="4"><w:styleLink w:val="Linked"/>{linked_levels}</w:abstractNum><w:abstractNum w:abstractNumId="5"><w:numStyleLink w:val="Linked"/></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="5"/>{override_levels}</w:num></w:numbering>"#
+        );
+        let limits = docx_parse::ParseLimits::default();
+        Arc::new(
+            docx_parse::numbering::parse_numbering(
+                Some(xml.as_bytes()),
+                "word/numbering.xml",
+                &mut docx_parse::ParseBudget::new(&limits),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn style_linked_letter_override_keeps_the_linked_start_by_extension_unverified() {
+        let numbering = style_linked_numbering(
+            r#"<w:lvl w:ilvl="0"><w:start w:val="2"/><w:numFmt w:val="upperLetter"/><w:lvlText w:val="%1."/></w:lvl>"#,
+            r#"<w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="upperLetter"/><w:lvlText w:val="%1."/></w:lvl></w:lvlOverride>"#,
+        );
+        let mut state = ListState::new(Some(numbering));
+        let mut values = paragraph(1.0, 0.0, "%1.");
+        values.insert(
+            "listLevelNumFmts".to_owned(),
+            Any::from_json(r#"["upperLetter"]"#).unwrap(),
+        );
+        assert_eq!(markers(&mut state, &[values]), ["B."]);
+    }
+
+    #[test]
+    fn style_linked_decimal_override_keeps_the_linked_start_by_extension_unverified() {
+        let numbering = style_linked_numbering(
+            &decimal_level(3),
+            r#"<w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:lvlOverride>"#,
+        );
+        let mut state = ListState::new(Some(numbering));
+        assert_eq!(
+            markers(
+                &mut state,
+                &[paragraph(1.0, 0.0, "%1."), paragraph(1.0, 0.0, "%1.")]
+            ),
+            ["3.", "4."]
+        );
+    }
+
+    #[test]
+    fn style_linked_deeper_override_restarts_at_the_linked_start_by_extension_unverified() {
+        let numbering = style_linked_numbering(
+            concat!(
+                r#"<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>"#,
+                r#"<w:lvl w:ilvl="1"><w:start w:val="3"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/></w:lvl>"#
+            ),
+            r#"<w:lvlOverride w:ilvl="1"><w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/></w:lvl></w:lvlOverride>"#,
+        );
+        let mut state = ListState::new(Some(numbering));
+        assert_eq!(
+            markers(
+                &mut state,
+                &[
+                    paragraph(1.0, 1.0, "%2."),
+                    paragraph(1.0, 1.0, "%2."),
+                    paragraph(1.0, 0.0, "%1."),
+                    paragraph(1.0, 1.0, "%2."),
+                ]
+            ),
+            ["3.", "4.", "1.", "3."]
         );
     }
 

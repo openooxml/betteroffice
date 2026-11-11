@@ -114,7 +114,7 @@ function splitRowWorker(direction: 'up' | 'down', queryEngine?: RustDisplayListQ
           ? [{ paraId: focus.paraId, length: 20 }, { paraId: 'next', length: 4 }] : [{ paraId: 'body', length: 1 }],
         paragraphIdCount: (story: string, paraId: string) => story === focus.story && [focus.paraId, 'next'].includes(paraId) ? 1 : 0,
         storySegments: (story: string): YrsStorySegment[] => story === 'body' ? [{
-          kind: 'embed', embedKind: 'table', payload: { rows: [{ cells: [{ story: focus.story }] }] }, attributes: {},
+          kind: 'embed', embedKind: 'table', payload: { tblPr: {}, grid: [], rows: [{ cells: [{ story: focus.story }] }] }, attributes: {},
         }, { kind: 'pilcrow', paraId: 'body', properties: {}, attributes: {} }] : [
           { kind: 'text', text: 'abcdefghijklmnopqrst', attributes: {} },
           { kind: 'pilcrow', paraId: focus.paraId, properties: {}, attributes: {} },

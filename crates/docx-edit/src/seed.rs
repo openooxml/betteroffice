@@ -575,9 +575,10 @@ impl SourceMetadata {
     }
 
     pub(crate) fn prepare_patch_table_styles(&self, story: &str, source: &SourceIndex) {
-        if crate::structured::source::cell_table(story).is_some()
-            && self.structure.patch_table_styles.is_empty()
-        {
+        let in_cell = std::iter::once(story)
+            .chain(story.match_indices(':').map(|(at, _)| &story[..at]))
+            .any(|prefix| crate::structured::source::cell_table(prefix).is_some());
+        if in_cell && self.structure.patch_table_styles.is_empty() {
             self.peer_patch_table_styles
                 .get_or_init(|| source.patch_table_styles().clone());
         }
