@@ -615,6 +615,36 @@ fn bold_toggle_off_on_non_theme_run_still_patches() {
 }
 
 #[test]
+fn a_replica_without_the_opened_styles_saves_bold_turned_off_in_a_bold_paragraph_style() {
+    let content = concat!(
+        r#"<w:pPr><w:pStyle w:val="Strong"/></w:pPr>"#,
+        r#"<w:r><w:rPr><w:b/></w:rPr><w:t>abc</w:t></w:r>"#,
+    );
+    let replica = EditingDoc::new(72);
+    replica
+        .apply_update_v1(&open(content).encode_state_as_update_v1())
+        .unwrap();
+    replica.retain_source_docx(package(content));
+    format(
+        &replica,
+        0,
+        3,
+        InlineFormatDelta {
+            bold: Patch::Set(false),
+            ..Default::default()
+        },
+    );
+    let (saved, warnings) = save_paragraph(&replica, content, |paragraph| {
+        paragraph["content"][0]["formatting"]["bold"] = json!(false);
+    });
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(
+        saved.contains(r#"<w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>abc</w:t></w:r>"#),
+        "{saved}"
+    );
+}
+
+#[test]
 fn supplementary_plane_offsets_are_utf16() {
     let doc = open(&text("a😀bc"));
     replace(&doc, 3, 4, "X");

@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use super::Failure;
-use super::properties::run_properties;
+use super::properties::{paragraph_properties, run_properties};
 use crate::paragraph_patch::{AttrDeltaV1, Attrs, SlotV1};
 
 fn attrs(value: Value) -> Attrs {
@@ -134,6 +134,48 @@ fn a_value_changed_away_from_the_style_is_written() {
         json!({"bold": true, "fontSize": {"size": 22}}),
     );
     assert_eq!(sized, r#"<w:rPr><w:sz w:val="22"/></w:rPr>"#);
+}
+
+#[test]
+fn widow_control_turned_off_where_the_styles_say_nothing_stays_explicitly_off() {
+    for (source, before) in [
+        ("", None),
+        ("<w:pPr><w:widowControl/></w:pPr>", Some(json!(true))),
+    ] {
+        let result: Result<String, Failure> = paragraph_properties(
+            source,
+            &[delta(&["widowControl"], before, Some(json!(false)))],
+            &Attrs::new(),
+            &attrs(json!({"widowControl": false})),
+            &Attrs::new(),
+            true,
+        );
+        let off = result.unwrap_or_else(|error| panic!("{}", error.detail));
+        assert_eq!(
+            off,
+            r#"<w:pPr><w:widowControl w:val="0"/></w:pPr>"#,
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn clearing_a_direct_fill_toward_a_hex_style_value_replaces_the_fill() {
+    let style = json!({"highlight": {"color": "#2E74B5"}});
+    let cleared = written(
+        r#"<w:rPr><w:shd w:val="clear" w:fill="FF0000"/></w:rPr>"#,
+        &[delta(
+            &["highlight"],
+            Some(json!({"color": "#FF0000"})),
+            Some(json!({"color": "#2E74B5"})),
+        )],
+        style.clone(),
+        style,
+    );
+    assert_eq!(
+        cleared,
+        r#"<w:rPr><w:shd w:val="clear" w:fill="2E74B5"/></w:rPr>"#
+    );
 }
 
 #[test]

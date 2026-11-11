@@ -277,6 +277,48 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     }
   });
 
+  test(`${engine}: a peer joined from an update keeps the table style's bold when clearing formatting in a cell`, async () => {
+    const body = '<w:tbl><w:tblPr><w:tblStyle w:val="BoldGrid"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>' +
+      '<w:p w14:paraId="00000061"><w:r><w:rPr><w:i/></w:rPr><w:t>Peer cell</w:t></w:r></w:p>' +
+      '</w:tc></w:tr></w:tbl><w:p w14:paraId="00000062"><w:r><w:t>After</w:t></w:r></w:p>';
+    const bytes = await fixture(body);
+    const host = await yrs.createYrsSession({ clientId: 81 });
+    const peer = await yrs.createYrsSession({ clientId: 82 });
+    try {
+      host.seedFromDocx(bytes);
+      peer.openDocx(bytes, false);
+      peer.applyUpdate(host.encodeState());
+      const cell = peer.listStories().stories.find((entry) => entry.kind === 'tableCell')!.story;
+      peer.clearFormatting(whole(peer, '00000061', '00000061', cell));
+      const segment = peer.storySegments(cell).find((entry) => entry.kind === 'text' && entry.text.includes('Peer cell'));
+      expect(segment?.kind === 'text' && { bold: Boolean(segment.attributes.bold), italic: Boolean(segment.attributes.italic) })
+        .toEqual({ bold: true, italic: false });
+      const { xml, reopened } = await saveAndReopen(yrs, peer);
+      reopened.destroy();
+      expect(savedRunProperties(xml, 'Peer cell')).toBeNull();
+    } finally {
+      peer.destroy();
+      host.destroy();
+    }
+  });
+
+  test(`${engine}: known limit: Clear Formatting in a cell resets to the formatting of the row position the cell had when the document was opened`, async () => {
+    const body = '<w:tbl><w:tblPr><w:tblStyle w:val="HeaderGrid"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>' +
+      '<w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="00000071"><w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>Moved head</w:t></w:r></w:p></w:tc></w:tr>' +
+      '</w:tbl><w:p w14:paraId="00000072"><w:r><w:t>After</w:t></w:r></w:p>';
+    const session = await yrs.createYrsSession({ clientId: 83 });
+    try {
+      session.seedFromDocx(await fixture(body));
+      session.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'above');
+      const story = session.listStories().stories.find((entry) => entry.kind === 'tableCell' && session.paragraphs(entry.story).some((paragraph) => paragraph.paraId === '00000071'))!.story;
+      session.clearFormatting(whole(session, '00000071', '00000071', story));
+      const segment = session.storySegments(story).find((entry) => entry.kind === 'text' && entry.text.includes('Moved head'));
+      expect(segment?.kind === 'text' && Boolean(segment.attributes.bold)).toBe(true);
+    } finally {
+      session.destroy();
+    }
+  });
+
   test(`${engine}: known limit: a direct value equal to the style stays after clear formatting`, async () => {
     const session = await yrs.createYrsSession({ clientId: 96 });
     try {
