@@ -641,6 +641,8 @@ export interface ImagePrimitive extends DocAttrs {
   // alternative text (wp:docPr descr → ImageRun/ImageBlock alt); file-derived
   // attacker-controlled data, capped at 2048 chars by the builder
   altText?: string;
+  /** The picture's relationship id (`r:embed`), which names it when `relId` resolves to nothing; at most 255 characters. */
+  relationshipId?: string;
   /** Ordered image effects. Undefined = use legacy `filter` only. */
   effects?: Array<{
     kind?: string;
