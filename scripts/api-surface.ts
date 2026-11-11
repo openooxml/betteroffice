@@ -177,6 +177,12 @@ function declarationText(files: Map<string, string>, file: string): string {
   return (files.get(file) as string).replace(/\/\/# sourceMappingURL=.*$/gm, "").trim();
 }
 
+function setEntrySnapshot(snapshots: Map<string, string>, entry: string, content: string): void {
+  const name = entryFileName(entry);
+  if (snapshots.has(name)) throw new Error(`entry "${entry}" shares the snapshot ${name} with another entry`);
+  snapshots.set(name, content);
+}
+
 export function sharedFileName(file: string): string {
   return `files/${file.replace(/\.d\.[cm]?ts$/, "")}.api.d.ts`;
 }
@@ -207,7 +213,7 @@ export function buildSharedSnapshots(
       sources.set(name, file);
       lines.push(name);
     }
-    snapshots.set(entryFileName(entry), `${lines.join("\n")}\n`);
+    setEntrySnapshot(snapshots, entry, `${lines.join("\n")}\n`);
   }
   for (const [name, file] of [...sources].sort(([a], [b]) => a.localeCompare(b))) {
     snapshots.set(name, `// ${packageName} declaration ${file}\n${regenerate}\n${declarationText(files, file)}\n`);
@@ -332,7 +338,7 @@ export function generateSnapshotsForPackage(config: FormatConfig, root: string):
   const snapshots = new Map<string, string>();
   for (const [entry, sourceEntry] of Object.entries(config.entries)) {
     const declaration = entryDeclarationFor(config, entry, sourceEntry);
-    snapshots.set(entryFileName(entry), buildSnapshot(config.packageName, entry, declaration, files, options));
+    setEntrySnapshot(snapshots, entry, buildSnapshot(config.packageName, entry, declaration, files, options));
   }
   return snapshots;
 }

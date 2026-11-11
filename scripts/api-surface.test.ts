@@ -116,6 +116,22 @@ describe("api-surface", () => {
     expect(sharedFileName("a/b.d.mts")).toBe("files/a/b.api.d.ts");
   });
 
+  test("two exports whose snapshot names flatten to the same file fail loudly", () => {
+    const dir = mkdtempSync(join(tmpdir(), "api-surface-collide-"));
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({
+        exports: { "./utils-comments": "./dist/utils-comments.d.mts", "./utils/comments": "./dist/utils/comments.d.mts" },
+      }));
+      const entries = Object.entries(entriesFromExports(dir))
+        .map(([entry, source]): [string, string] => [entry, source.replace(/^src\//, "").replace(/\.ts$/, ".d.ts")]);
+      const files = new Map([["utils-comments.d.ts", "export {};"], ["utils/comments.d.ts", "export {};"]]);
+      expect(() => buildSharedSnapshots("@test/fixture", entries, files))
+        .toThrow('entry "./utils/comments" shares the snapshot utils-comments.api.d.ts with another entry');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("docx checks every sub-path its package exports, from the source tsup builds it from", () => {
     const docx = join(import.meta.dir, "..", "packages/docx");
     const manifest = JSON.parse(readFileSync(join(docx, "package.json"), "utf8")) as { exports: Record<string, unknown> };
