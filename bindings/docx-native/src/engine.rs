@@ -301,6 +301,12 @@ fn map_error(env: Env, error: EngineError) -> Error {
                 exception.set_named_property("code", "suggested-formatting-over-container")?;
                 env.throw(exception)
             }
+            EngineErrorKind::CellHasNoStory => {
+                let mut exception = env.create_error(Error::from_reason(error.message.clone()))?;
+                exception.set_named_property("name", "CellHasNoStoryError")?;
+                exception.set_named_property("code", "cell-has-no-story")?;
+                env.throw(exception)
+            }
         }
     })();
     match result {
@@ -1001,6 +1007,14 @@ impl EditSession {
             .build_display_pages_frame(pages.to_vec(), expected_frame_epoch)
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(catch_unwind, js_name = "page_texts_json")]
+    pub fn page_texts_json(&self, env: Env, pages: Uint32Array) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .page_texts_json(pages.to_vec())
+            .map_err(|error| map_error(env, error))
     }
 
     #[napi(catch_unwind, js_name = "release_display_pages_frame")]
@@ -2075,6 +2089,12 @@ impl EditSession {
         self.document(env)?
             .load_json(&stories_json)
             .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind, js_name = "rebuild_media_sources")]
+    pub fn rebuild_media_sources(&self, env: Env) -> Result<bool> {
+        let _call = EngineCall::new(env);
+        Ok(self.document(env)?.rebuild_media_sources())
     }
 
     #[napi(catch_unwind, js_name = "load_media_sources")]

@@ -18,6 +18,7 @@ from betteroffice_docx import (
 )
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+LAYOUT_TESTS = Path(__file__).resolve().parents[3] / "crates" / "docx-layout" / "tests"
 
 
 def _page(width: int, height: int) -> DisplayList:
@@ -330,3 +331,31 @@ def test_png_uses_the_document_theme_accent(font_bytes: bytes) -> None:
         abs(r - 0x44) <= 12 and abs(g - 0x72) <= 12 and abs(b - 0xC4) <= 12
         for r, g, b in pixels
     )
+
+
+def _with_table_row_grid(envelope: "dict[str, Any]", value: Any) -> "dict[str, Any]":
+    envelope = json.loads(json.dumps(envelope))
+    rows = [
+        row
+        for item in envelope["measured"]
+        if item["block"]["kind"] == "table"
+        for row in item["block"]["rows"]
+    ]
+    assert rows
+    for row in rows:
+        row["gridBefore"] = value
+        row["gridAfter"] = value
+    return envelope
+
+
+def test_layout_reads_whole_number_floats_from_a_parsed_model(minimal_bytes: bytes) -> None:
+    fixture = LAYOUT_TESTS / "fixtures" / "table-splits-with-repeated-header.input.json"
+    envelope = json.loads(fixture.read_text())
+    document = Document.open(minimal_bytes)
+
+    as_integer = document.layout(_with_table_row_grid(envelope, 0))
+    as_float = document.layout(_with_table_row_grid(envelope, 0.0))
+    assert as_float.json == as_integer.json
+
+    with pytest.raises(ValueError, match="gridBefore must be a nonnegative integer, got 0.5"):
+        document.layout(_with_table_row_grid(envelope, 0.5))

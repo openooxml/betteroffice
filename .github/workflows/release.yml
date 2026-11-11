@@ -112,7 +112,15 @@ jobs:
       # It reads name and version, which the pin below leaves alone.
       - name: Check npm publish targets
         if: steps.pending.outputs.publishing == 'true'
+        env:
+          RELEASE_SKIP_NATIVE: ${{ vars.RELEASE_SKIP_NATIVE }}
         run: node scripts/check-publish-targets.mjs --npm
+
+      # A peer range a bump leaves turns its dependents major, and a fixed group
+      # carries that to every member: refuse a release PR nobody asked to be major.
+      - name: Check the release plan for unrequested major bumps
+        if: steps.pending.outputs.publishing != 'true'
+        run: node scripts/check-publish-targets.mjs --plan
 
       - name: Publish Rust crates
         if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
@@ -141,6 +149,13 @@ jobs:
           # package after the first manual publish creates it). id-token: write
           # above authorizes the exchange and signs provenance.
           NPM_CONFIG_PROVENANCE: "true"
+
+      # Also after a failed publish: it names what the set is missing. Reports
+      # only: deploy and the native and Python jobs still run after a miss.
+      - name: Verify npm and CDN publish targets
+        if: "always() && steps.pending.outputs.publishing == 'true'"
+        continue-on-error: true
+        run: node scripts/check-publish-targets.mjs --verify-published
 
       # GITHUB_TOKEN releases don't fire `on: release`, so dispatch directly.
       - name: Trigger deploy

@@ -167,6 +167,7 @@ pub struct NoteAnchor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteContent {
+    #[serde(deserialize_with = "crate::whole_number::note_id")]
     pub id: i64,
     #[serde(default)]
     pub note_kind: NoteKind,

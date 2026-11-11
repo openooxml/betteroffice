@@ -1,3 +1,4 @@
+import { pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import { Component, type PointerEvent, type ReactNode } from 'react';
 import { claimPluginEvent } from '../commands/pluginEvents';
 import { PptxCommandContext } from '../commands/PptxCommandProvider';
@@ -53,6 +54,7 @@ export function PluginRenderScope({
     <PluginContributionBoundary onError={(error) => host.fail(activation.pluginId, phase, error)}>
       <PptxCommandContext.Provider value={store}>
         <div
+          data-plugin-activation={pluginActivationId(activation.activation)}
           style={{ display: 'contents' }}
           onKeyDownCapture={(event) => claimPluginEvent(event.nativeEvent, store)}
           onPointerDownCapture={claimPointer}

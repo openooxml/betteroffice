@@ -166,9 +166,11 @@ test('app registration overtakes a pending browser default without blocking its 
   expect(wire.coverage).not.toHaveBeenCalled();
 });
 
-test('expired module imports acknowledge open and cannot create a late manager', async () => {
+test('expired module imports acknowledge open, then load arriving requests and repaint', async () => {
   const expire = deadline();
   const wire = connection(['target', 'other']);
+  wire.collect.mockImplementation((_, id) => id === 'target' ? [{ ...regular, family: 'Cambria' }]
+    : id === 'other' ? [regular] : [{ ...regular, family: 'Cambria' }, regular]);
   const imported = deferred<typeof fontModule>();
   const importing = deferred<void>();
   const load = spyOn(commandDefaultFontModule, 'load').mockImplementation(() => { importing.resolve(); return imported.promise; });
@@ -180,12 +182,89 @@ test('expired module imports acknowledge open and cannot create a late manager',
   const client = await opening;
   clients.push(client);
   expect(client.state.frame).not.toBeNull();
-  imported.resolve(fontModule);
-  await Promise.resolve(); await Promise.resolve();
+  expect(create).not.toHaveBeenCalled();
   await client.dispatch({ kind: 'activateSlide', payload: { slideId: 'other' } });
+  expect(JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)).families).toEqual([]);
+  const epoch = client.state.frame!.epoch;
+  imported.resolve(fontModule);
+  for (let tick = 0; tick < 50 && wire.registered.length < 2; tick++) await new Promise((resolve) => setTimeout(resolve, 0));
+  await client.flush();
+  expect(create).toHaveBeenCalledTimes(1);
+  expect(wire.registered).toEqual(['Cambria', 'Calibri']);
+  expect(wire.coverage).toHaveBeenCalledTimes(1);
+  expect(wire.messages.filter((message) => isHostMessage(message) && message.kind === 'event' && message.name === 'defaultFonts'))
+    .toMatchObject([{ payload: { defaultFonts: [{ ...regular, family: 'Cambria' }, regular] } }]);
+  expect(client.state.frame!.epoch).toBeGreaterThan(epoch);
+  expect(JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)).families).toEqual(['Cambria', 'Calibri']);
+  expect(load).toHaveBeenCalledTimes(1);
+});
+
+test('disposing after the import deadline prevents a late manager', async () => {
+  const expire = deadline();
+  const wire = connection(['target']);
+  const imported = deferred<typeof fontModule>();
+  const importing = deferred<void>();
+  const load = spyOn(commandDefaultFontModule, 'load').mockImplementation(() => { importing.resolve(); return imported.promise; });
+  const create = spyOn(fontModule, 'createCommandDefaultFonts');
+  restorers.push(() => { load.mockRestore(); create.mockRestore(); });
+  const opening = createPresentationCommandClient(Uint8Array.of(0), { session: 'fonts', incarnation: 'worker', fonts: [] }, wire.transport);
+  await importing.promise;
+  expire();
+  const client = await opening;
+  clients.push(client);
+  await client.dispose();
+  imported.resolve(fontModule);
+  await new Promise((resolve) => setTimeout(resolve, 0));
   expect(create).not.toHaveBeenCalled();
   expect(wire.registered).toEqual([]);
+});
+
+test('a rejected module import retries after backoff and loads fonts', async () => {
+  const wire = connection(['target', 'other']);
+  let now = Date.now();
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  const load = spyOn(commandDefaultFontModule, 'load').mockRejectedValueOnce(new Error('Unavailable')).mockResolvedValue(fontModule);
+  restorers.push(() => { clock.mockRestore(); load.mockRestore(); });
+  const client = await createPresentationCommandClient(Uint8Array.of(0),
+    { session: 'fonts', incarnation: 'worker', fonts: [] }, wire.transport);
+  clients.push(client);
+  expect(wire.registered).toEqual([]);
+  now += 2000;
+  await client.dispatch({ kind: 'activateSlide', payload: { slideId: 'other' } });
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(wire.registered).toEqual(['Cambria']);
+});
+
+test('rejected module imports back off and stop after three attempts', async () => {
+  const wire = connection(['target', 'other']);
+  let now = Date.now();
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  const load = spyOn(commandDefaultFontModule, 'load').mockRejectedValue(new Error('Unavailable'));
+  const create = spyOn(fontModule, 'createCommandDefaultFonts');
+  restorers.push(() => { clock.mockRestore(); load.mockRestore(); create.mockRestore(); });
+  const client = await createPresentationCommandClient(Uint8Array.of(0),
+    { session: 'fonts', incarnation: 'worker', fonts: [] }, wire.transport);
+  clients.push(client);
+  const request = async () => {
+    await client.dispatch({ kind: 'activateSlide', payload: { slideId: client.state.activeSlideId === 'target' ? 'other' : 'target' } });
+  };
   expect(load).toHaveBeenCalledTimes(1);
+  for (const [delay, attempts] of [[2000, 1], [8000, 2]]) {
+    now += delay - 1;
+    for (let call = 0; call < 20; call++) await request();
+    expect(load).toHaveBeenCalledTimes(attempts);
+    now++;
+    await request();
+    expect(load).toHaveBeenCalledTimes(attempts + 1);
+  }
+  for (let call = 0; call < 20; call++) {
+    now += 60_000;
+    await request();
+  }
+  expect(load).toHaveBeenCalledTimes(3);
+  expect(create).not.toHaveBeenCalled();
+  expect(wire.registered).toEqual([]);
+  expect(wire.messages.some((message) => isHostMessage(message) && message.kind === 'event' && message.name === 'defaultFonts')).toBe(false);
 });
 
 for (const shared of [false, true]) for (const kind of ['undo', 'redo', 'applyRemoteUpdate', 'invoke'] as const) {

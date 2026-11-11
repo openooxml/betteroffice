@@ -30,12 +30,14 @@ test('the Rust publish set respects each crate manifest', () => {
 });
 
 test('font preflight remains an unpublished path-only development dependency', () => {
-  const edit = Bun.TOML.parse(readFileSync(new URL('crates/docx-edit/Cargo.toml', root), 'utf8'));
   const preflight = Bun.TOML.parse(readFileSync(new URL('crates/ooxml-font-preflight/Cargo.toml', root), 'utf8'));
-  expect(edit['dev-dependencies']['ooxml-font-preflight']).toEqual({
-    package: 'betteroffice-ooxml-font-preflight',
-    path: '../ooxml-font-preflight',
-  });
+  for (const crate of ['docx-edit', 'pptx-engine', 'xlsx-engine']) {
+    const manifest = Bun.TOML.parse(readFileSync(new URL(`crates/${crate}/Cargo.toml`, root), 'utf8'));
+    expect(manifest['dev-dependencies']['ooxml-font-preflight']).toEqual({
+      package: 'betteroffice-ooxml-font-preflight',
+      path: '../ooxml-font-preflight',
+    });
+  }
   expect(dependencies['ooxml-font-preflight']).toBeUndefined();
   expect(preflight.package.publish).toBe(false);
 });

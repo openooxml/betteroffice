@@ -6,6 +6,7 @@ use std::sync::Arc;
 use ooxml_opc::PackageBytes;
 use serde_json::{Value, json};
 
+use super::args::writable_story;
 use super::{EditSessionCore, EngineError, EngineResult, UpdateEventObserver};
 use crate::engine::RelayoutTrigger;
 use crate::presence::apply_update_with_typing_inference;
@@ -142,6 +143,23 @@ impl EditSessionCore {
         }
     }
 
+    /// Adds to this replica's media sources every part of its own media table
+    /// they lack, so it resolves the `data:` URLs seeding wrote whether or not
+    /// it was seeded itself; `false` when nothing was added or it has no table.
+    pub fn rebuild_media_sources(&self) -> bool {
+        let doc = self.engine.doc();
+        let Some(table) = doc.media_table() else {
+            return false;
+        };
+        let current = doc.media_sources();
+        let rebuilt = crate::media::sources_from_table(&current, &table);
+        if rebuilt == current {
+            return false;
+        }
+        doc.set_media_sources(rebuilt);
+        true
+    }
+
     /// Lays this replica's `data:` image sources out as the `media:{n}` tokens
     /// another replica seeded them from.
     pub fn load_media_sources(&self, json: &str) -> EngineResult<()> {
@@ -256,6 +274,12 @@ impl EditSessionCore {
         let entries = value
             .as_array()
             .ok_or_else(|| EngineError::message("load_json expects an array of stories"))?;
+        for story_id in entries
+            .iter()
+            .filter_map(|entry| entry.get("storyId").and_then(Value::as_str))
+        {
+            writable_story(self.engine.doc(), story_id)?;
+        }
         let mut receipt = serde_json::Map::new();
         for entry in entries {
             let story_id = entry

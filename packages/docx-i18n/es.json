@@ -799,6 +799,8 @@
   },
   "a11y": {
     "pageLabel": "Página {number}",
+    "unbuiltPagesNotMirrored": "Las páginas {from} a {to} aún no están en la vista de lectura.",
+    "goToPage": "Ir a la página {number}",
     "headerLabel": "Encabezado de página",
     "footerLabel": "Pie de página",
     "chartNoData": "Sin datos",
@@ -862,7 +864,7 @@
       "targetChanged": "El contenido para el que se abrió esta acción cambió antes de que pudiera aplicarse.",
       "commandFailed": "No se pudo completar el comando.",
       "permissionDenied": "La aplicación host no ha permitido que este complemento use este comando.",
-      "unsupportedPolicy": "Los complementos aún no pueden ejecutar este comando. Use en su lugar un lote de ediciones.",
+      "unsupportedPolicy": "Este comando requiere una acción del usuario en la interfaz del propio complemento.",
       "pluginUnavailable": "El complemento ya no está activo.",
       "aborted": "La acción del complemento se canceló antes de que se ejecutara el comando."
     }

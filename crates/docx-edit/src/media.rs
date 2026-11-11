@@ -256,6 +256,65 @@ pub(crate) fn write_data_urls<'a>(
     })))
 }
 
+/// `base` extended with the `data:` URL of every part of `table` it lacks,
+/// under `base`'s key (a fresh one when it is empty), so a replica that holds
+/// the package resolves the URLs seeding wrote whether or not it was seeded
+/// itself. What `base` maps stays; a URL two parts share and `base` does not
+/// map is left unresolved unless both draw the same bytes.
+pub(crate) fn sources_from_table(base: &MediaSources, table: &MediaTable) -> MediaSources {
+    let key = if base.is_empty() {
+        let [k0, k1] = crate::identity::entropy();
+        (k0, k1)
+    } else {
+        base.0.key
+    };
+    let mut added: HashMap<u64, u32> = HashMap::new();
+    let mut ambiguous = std::collections::HashSet::new();
+    for index in 0..table.len() {
+        let Ok(url) = table.data_url(index) else {
+            continue;
+        };
+        let digest = digest(key, &url);
+        if base.0.parts.contains_key(&digest) || ambiguous.contains(&digest) {
+            continue;
+        }
+        match added.get(&digest) {
+            None => {
+                added.insert(digest, index as u32);
+            }
+            Some(&kept) if !draws_same(table, kept as usize, index) => {
+                added.remove(&digest);
+                ambiguous.insert(digest);
+            }
+            Some(_) => {}
+        }
+    }
+    if added.is_empty() {
+        return base.clone();
+    }
+    let mut parts = base.0.parts.clone();
+    parts.extend(added);
+    MediaSources(Arc::new(Sources {
+        key,
+        parts,
+        seen: Mutex::new(Seen::new(HashMap::new())),
+        json: Mutex::new(Seen::new(HashMap::new())),
+    }))
+}
+
+/// Whether a raster backend draws parts `a` and `b` from the same bytes; on
+/// wasm a part is drawn from its display copy, which a shared URL already
+/// makes equal.
+#[cfg(not(target_arch = "wasm32"))]
+fn draws_same(table: &MediaTable, a: usize, b: usize) -> bool {
+    matches!((table.raster_bytes(a), table.raster_bytes(b)), (Ok(a), Ok(b)) if a == b)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn draws_same(_table: &MediaTable, _a: usize, _b: usize) -> bool {
+    true
+}
+
 pub(crate) fn write_segment_data_urls(
     segments: &mut [StorySegment],
     table: &MediaTable,
@@ -683,6 +742,86 @@ mod tests {
                 .collect();
             assert_eq!(indices, expected);
         }
+    }
+
+    #[test]
+    fn sources_rebuilt_from_the_table_resolve_only_what_seeding_wrote() {
+        let bytes = ooxml_opc::rezip_parts(&[
+            ("word/media/a.png".to_owned(), vec![1, 2, 3, 4]),
+            ("word/media/b.png".to_owned(), vec![5]),
+        ])
+        .unwrap();
+        let table =
+            MediaTable::new(ooxml_opc::RetainedPackage::new(Arc::from(bytes)).unwrap()).unwrap();
+        let a = (0..table.len())
+            .find(|&i| table.path(i) == Some("word/media/a.png"))
+            .unwrap();
+        let mut ops = vec![RawOp::InsertEmbed {
+            index: 0,
+            kind: "image".to_owned(),
+            payload: vec![("src".to_owned(), Any::from(format!("media:{a}")))],
+            attrs: crate::Attrs::new(),
+        }];
+        let seeded = write_data_urls(&mut ops, &table, true).unwrap();
+        let RawOp::InsertEmbed { payload, .. } = &ops[0] else {
+            unreachable!()
+        };
+        let Any::String(url) = &payload[0].1 else {
+            unreachable!()
+        };
+        let rebuilt = sources_from_table(&MediaSources::default(), &table);
+        assert_eq!(rebuilt.token_of(url), Some(media_token(a)));
+        assert_eq!(rebuilt.token_of(url), seeded.token_of(url));
+        assert_eq!(rebuilt.token_of("data:image/png;base64,AQIDBQ=="), None);
+    }
+
+    #[cfg(feature = "metafile")]
+    #[test]
+    fn rebuilt_sources_leave_a_url_two_differently_drawn_parts_share_unresolved() {
+        let emf = include_bytes!("../../ooxml-metafile/tests/fixtures/clip-bitmap.emf").to_vec();
+        let table = |parts: &[(&str, Vec<u8>)]| {
+            let parts: Vec<(String, Vec<u8>)> = parts
+                .iter()
+                .map(|(path, bytes)| ((*path).to_owned(), bytes.clone()))
+                .collect();
+            MediaTable::new(
+                ooxml_opc::RetainedPackage::new(Arc::from(ooxml_opc::rezip_parts(&parts).unwrap()))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let alone = table(&[("word/media/a.emf", emf.clone())]);
+        let display = alone.bytes(0).unwrap().into_owned();
+        assert!(display.starts_with(b"<svg"));
+        let both = table(&[("word/media/a.emf", emf), ("word/media/b.svg", display)]);
+        let url = both.data_url(1).unwrap();
+        assert_eq!(both.data_url(0).unwrap(), url);
+        assert_eq!(
+            sources_from_table(&MediaSources::default(), &both).token_of(&url),
+            None
+        );
+        let mut ops = vec![RawOp::InsertEmbed {
+            index: 0,
+            kind: "image".to_owned(),
+            payload: vec![("src".to_owned(), Any::from("media:0"))],
+            attrs: crate::Attrs::new(),
+        }];
+        let seeded = write_data_urls(&mut ops, &both, true).unwrap();
+        assert_eq!(seeded.token_of(&url), Some(media_token(0)));
+        assert_eq!(
+            sources_from_table(&seeded, &both).token_of(&url),
+            Some(media_token(0))
+        );
+        let twins = table(&[
+            ("word/media/a.png", vec![1, 2, 3, 4]),
+            ("word/media/b.png", vec![1, 2, 3, 4]),
+        ]);
+        let url = twins.data_url(0).unwrap();
+        assert!(
+            sources_from_table(&MediaSources::default(), &twins)
+                .token_of(&url)
+                .is_some()
+        );
     }
 
     #[test]

@@ -142,6 +142,12 @@ before the missing-selection check. Charts and absent selections return `missing
 cells on another sheet or offscreen return `layout-unavailable`. `readAnchorGeometries`
 returns the same answers in a promise. In-cell editing anchors to the cell.
 
+Granted mutating built-in commands require `document: "write"`. A trusted `click`, `keydown`,
+or `pointerup` in the plugin's own UI, including its contributed toolbar buttons, admits
+that plugin's mutating calls until the event finishes dispatching, including the handler
+and microtasks queued before it settles, whichever of the plugin's code paths makes them.
+Another plugin's calls and calls after the window closes refuse with `unsupported-policy`.
+
 ## Structured export
 
 Await `api.exportStructured()` or `api.exportMarkdown()` for content with positional anchors and

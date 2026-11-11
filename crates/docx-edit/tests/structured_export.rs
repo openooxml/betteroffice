@@ -866,6 +866,7 @@ fn replace(doc: &EditingDoc, history: &UndoSession, para_id: &str, text: &str) {
         source: EditSource::Host,
         history: EditHistory::Separate,
         steps: vec![EditStep::new(EditOperation::ReplaceText {
+            runs: None,
             target: TextTarget::Paragraph(ParagraphTarget {
                 story: "body".to_owned(),
                 para_id: para_id.to_owned(),
@@ -953,10 +954,12 @@ fn live_edits_appear_and_removed_content_does_not_return() {
         history: EditHistory::Separate,
         steps: vec![
             EditStep::new(EditOperation::ReplaceText {
+                runs: None,
                 target: TextTarget::Paragraph(target("00000017")),
                 text: "Rewritten".to_owned(),
             }),
             EditStep::new(EditOperation::InsertText {
+                runs: None,
                 target: TextTarget::Paragraph(target("00000015")),
                 at: TargetEdge::Start,
                 text: "Prefix ".to_owned(),

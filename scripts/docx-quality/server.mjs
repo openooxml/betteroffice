@@ -5,12 +5,14 @@ import { qualityRendererPlugin } from '../office-quality/renderer.mjs';
 
 const packageRoot = process.env.QUALITY_PACKAGE_ROOT;
 const reactRoot = process.env.QUALITY_REACT_ROOT;
+const fontsRoot = process.env.QUALITY_FONTS_ROOT;
 const format = process.env.QUALITY_FORMAT ?? 'docx';
 if (!['docx', 'pptx', 'xlsx', 'vsdx'].includes(format)) throw new Error('Invalid format');
 const aliases = [];
 for (const [name, override] of [
   [format, packageRoot],
   ['docx-react', reactRoot],
+  ['fonts', fontsRoot],
 ]) {
   if (!override) continue;
   const manifest = JSON.parse(readFileSync(resolve(override, 'package.json')));
@@ -60,7 +62,7 @@ const server = await createServer({
         });
       },
     }] : []),
-    ...(format === 'docx' ? [] : [qualityRendererPlugin(format)]),
+    ...(format === 'docx' ? [] : [qualityRendererPlugin(format, { publishedFonts: Boolean(fontsRoot) })]),
   ],
   cacheDir: resolve(
     `.source/docx-quality/vite-cache-${process.env.QUALITY_PORT ?? 4178}`
@@ -88,6 +90,7 @@ const server = await createServer({
         process.cwd(),
         ...(packageRoot ? [packageRoot] : []),
         ...(reactRoot ? [reactRoot] : []),
+        ...(fontsRoot ? [fontsRoot] : []),
       ],
     },
   },

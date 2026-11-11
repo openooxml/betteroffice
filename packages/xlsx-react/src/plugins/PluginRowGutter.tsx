@@ -137,6 +137,7 @@ export const PluginRowGutter = memo(function PluginRowGutter({
             key={`${entry.key}\u0000${entry.item.id}`}
             type="button"
             data-plugin-id={entry.pluginId}
+            data-plugin-activation={entry.activationId}
             data-decoration-id={entry.item.id}
             aria-label={label}
             title={entry.item.tooltip}

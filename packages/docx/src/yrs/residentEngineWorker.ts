@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
 import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
 import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
 import { readResidentRangeHighlights } from './residentRangeHighlights';
@@ -2527,6 +2528,13 @@ async function handle(request: ScheduledRequest): Promise<void> {
       case 'headings':
         value = readOutlineHeadings(session.geometryReader, request.read.expectVersion);
         break;
+      case 'pageTexts':
+        value = !retainedFrame || retainedLayoutVersion !== engine.version() ||
+          (request.read.expectFrameEpoch !== undefined && request.read.expectFrameEpoch !== retainedFrame.frameEpoch) ||
+          (request.read.expectLayoutRevision !== undefined && request.read.expectLayoutRevision !== layoutRevision)
+          ? null : { pages: JSON.parse(session.pageTextsJson(Uint32Array.from(request.read.pages))),
+            frameEpoch: retainedFrame.frameEpoch, layoutRevision };
+        break;
       case 'adjacentRevision':
         value = readAdjacentRevision(session.geometryReader, request.read.selection, request.read.direction,
           new Set(proposals?.snapshot().proposals.flatMap((proposal) => proposal.revisionIds)));
@@ -2853,7 +2861,9 @@ async function handle(request: ScheduledRequest): Promise<void> {
       id: request.id,
       ok: false,
       error: message,
-      residentUnavailable: message.includes('resident input state is not ready'),
+      // A write into a table cell with no story is refused before the engine changes anything.
+      residentUnavailable: message.includes('resident input state is not ready') ||
+        (pendingUpdates.length === 0 && isCellHasNoStoryRefusal(error)),
       // The edit committed here but never reached the host: this replica is
       // no longer the host's, so the host must replace it.
       ...(pendingUpdates.length > 0 ? { terminal: true } : {}),

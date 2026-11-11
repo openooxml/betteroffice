@@ -184,6 +184,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (!worker.current) return Promise.reject(new Error('The document worker is not ready'));
     return worker.current.documentRead(request);
   }, []);
+  const mirrorReadBlocked = useCallback(() => !worker.current || worker.current.frameRequestPending(false), []);
+  const readPageTexts = useCallback<import('./UnbuiltPageMirrors').ReadPageTexts>((pages, stamp) => {
+    if (mirrorReadBlocked()) return Promise.resolve(null);
+    return read({ kind: 'pageTexts', pages, expectFrameEpoch: stamp.frameEpoch, expectLayoutRevision: stamp.layoutRevision }).then((reply) => reply.value);
+  }, [read, mirrorReadBlocked]);
   const readAt = useCallback<ResidentEngineWorkerClient['documentReadAt']>((request, token) => {
     if (!worker.current) return Promise.reject(new Error('The document worker is not ready'));
     return worker.current.documentReadAt(request, token);
@@ -261,8 +266,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     navigation.scrollToBookmark(name).then(() => focus(), error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
   };
   const inputCommand = useRef<ReturnType<typeof useWorkerContextMenu>['input']>(async () => ({ ok: false, failure: { code: 'editor-unavailable', message: '' } }));
-  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, image: propertyDialogs.imageState, onImageWrap: propertyDialogs.applyImageWrap, onImageTransform: propertyDialogs.applyImageTransform, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, openTableProperties: propertyDialogs.openTableProperties, perform: async (id) => {
-    if (id === 'cut' || id === 'copy' || id === 'paste' || id === 'pasteAsPlainText' || id === 'selectAll') return inputCommand.current(id);
+  useLayoutEffect(() => controller.update({ ...controllerOptions, imagePropertiesAvailable: propertyDialogs.imagePropertiesAvailable, image: propertyDialogs.imageState, onImageWrap: propertyDialogs.applyImageWrap, onImageTransform: propertyDialogs.applyImageTransform, search: search.host, pickImage: fileIO.pickImage, openSplitCell: propertyDialogs.openSplitCell, openTableProperties: propertyDialogs.openTableProperties, perform: async (id, _args, clipboardText) => {
+    if (id === 'cut' || id === 'copy' || id === 'paste' || id === 'pasteAsPlainText' || id === 'selectAll') return inputCommand.current(id, clipboardText);
     if (id === 'pageSetup') return propertyDialogs.openPageSetup();
     if (id === 'paragraphSpacingDialog') return propertyDialogs.openParagraphSpacing();
     if (id === 'watermark') return propertyDialogs.openWatermark();
@@ -1462,7 +1467,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         <MirrorLinkRouteContext.Provider value={mirrorLinkRoute}><PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
           overlay={workerCollaboration.overlay(displayWindow)}
           displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={setDragSelecting} pictures={pictureMoves} tables={tableResize}
-          pageMirror={props.pageMirror} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} /></MirrorLinkRouteContext.Provider>
+          pageMirror={props.pageMirror} unbuiltPageMirror={props.unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={navigation.scrollToPage} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} /></MirrorLinkRouteContext.Provider>
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
     </div>} />
   </DocxCommandProvider>;

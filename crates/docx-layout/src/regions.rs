@@ -112,7 +112,11 @@ pub struct AuthoredSectionProperties {
     pub separator: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns: Option<Vec<AuthoredColumn>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::footnote_columns"
+    )]
     pub footnote_columns: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section_start: Option<crate::types::SectionBreakType>,
@@ -161,7 +165,11 @@ pub struct NoteSettings {
     pub footnote: NoteProperties,
     #[serde(default)]
     pub endnote: NoteProperties,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::footnote_columns"
+    )]
     pub footnote_columns: Option<u64>,
 }
 
@@ -172,7 +180,11 @@ pub struct NoteProperties {
     pub position: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub num_fmt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::note_num_start"
+    )]
     pub num_start: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub num_restart: Option<String>,
@@ -412,32 +424,11 @@ pub struct PageNumbering {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_page_start"
+        deserialize_with = "crate::whole_number::page_start"
     )]
     pub start: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
-}
-
-fn deserialize_page_start<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error> {
-    let value = Option::<serde_json::Number>::deserialize(deserializer)?;
-    value
-        .map(|value| {
-            value
-                .as_u64()
-                .or_else(|| {
-                    value.as_f64().and_then(|value| {
-                        (value >= 0.0 && value < u64::MAX as f64 && value.fract() == 0.0)
-                            .then_some(value as u64)
-                    })
-                })
-                .ok_or_else(|| {
-                    serde::de::Error::custom("page numbering start must be a nonnegative integer")
-                })
-        })
-        .transpose()
 }
 
 #[derive(Debug, Deserialize)]

@@ -346,6 +346,14 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    */
   pageMirror?: 'full' | 'text';
   /**
+   * Plain paragraphs for pages the worker-only editor has not built yet, without layout
+   * positions or headings. Tables read as paragraphs; notes, text boxes, headers, footers and
+   * list numbers or bullets are omitted. Beyond a reading window, a line names the page range with a Go to page
+   * control. Find in page matches no text outside that window. `pageMirror` covers built
+   * pages and replaces the section when a page is built. Default: `'text'`.
+   */
+  unbuiltPageMirror?: 'text' | 'off';
+  /**
    * Lets the ref's proposal methods run while the editor is read-only or viewing. Typing,
    * `applyEdits`, commands and plugin writes stay blocked. Default: false.
    */

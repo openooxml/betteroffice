@@ -479,6 +479,7 @@ export default function Editor({
         i18n={i18n?.docx}
         ref={docx}
         {...(legacyDocx() ? { legacySyncApi: true as const } : { legacySyncApi: false as const })}
+        unbuiltPageMirror={typeof location !== "undefined" && new URLSearchParams(location.search).get("unbuiltPageMirror") === "off" ? "off" : undefined}
         trackedChanges={TRACKED_CHANGES}
         mode={mode}
         readOnly={readOnly}

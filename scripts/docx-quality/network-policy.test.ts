@@ -144,3 +144,22 @@ for (const format of ['docx', 'pptx', 'xlsx', 'vsdx']) {
     }
   });
 }
+
+test('a published-channel capture may load only the fonts of the recorded published release', () => {
+  const published = { QUALITY_PUBLISHED_FONTS: '0.4.2' };
+  const ok = (url: string, environment: Record<string, string> = published) =>
+    isAllowedFontRequest({ url, method: 'GET', bodyBytes: 0 } as any, environment as any);
+  expect(ok('https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf')).toBe(true);
+  expect(ok('https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@0.4.2/assets/NotoSansJP-Regular.otf')).toBe(true);
+  for (const url of [
+    'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.3/assets/LiberationSans-Regular.ttf',
+    'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/dist/index.js',
+    'https://cdn.jsdelivr.net/npm/@betteroffice/fonts-latin@0.4.2/assets/LiberationSans-Regular.ttf',
+    'https://cdn.jsdelivr.net/npm/@betteroffice/docx@0.4.2/assets/LiberationSans-Regular.ttf',
+    'https://cdn.jsdelivr.net/npm/other@0.4.2/assets/LiberationSans-Regular.ttf',
+    'https://evil.example/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf',
+  ]) expect({ url, allowed: ok(url) }).toEqual({ url, allowed: false });
+  expect(ok('https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf', {})).toBe(false);
+  expect(ok('https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf', { QUALITY_PUBLISHED_FONTS: '0.0.0-stage' })).toBe(false);
+  expect(isAllowedFontRequest({ url: 'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf', method: 'POST', bodyBytes: 0 } as any, published as any)).toBe(false);
+});

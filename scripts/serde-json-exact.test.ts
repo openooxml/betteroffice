@@ -7,7 +7,9 @@ const WASM = 'wasm32-unknown-unknown';
 const ARTIFACTS: Array<[name: string, dir: string, target: string | undefined, args: string[]]> = [
   ['docx edit', 'crates/docx-edit', WASM, ['--features', 'wasm,tiff,metafile,heap-stats']],
   ['docx parse', 'crates/docx-parse', WASM, ['--features', 'wasm-layout,tiff,metafile']],
-  ['docx preflight', 'crates/ooxml-font-preflight', WASM, ['--features', 'wasm']],
+  ['docx preflight', 'crates/ooxml-font-preflight', WASM, ['--no-default-features', '--features', 'wasm,docx']],
+  ['pptx preflight', 'crates/ooxml-font-preflight', WASM, ['--no-default-features', '--features', 'wasm,pptx']],
+  ['xlsx preflight', 'crates/ooxml-font-preflight', WASM, ['--no-default-features', '--features', 'wasm,xlsx']],
   ['docx query', 'crates/docx-layout', WASM, ['--features', 'wasm-query']],
   ['pptx', 'crates/pptx-wasm', WASM, []],
   ['pptx lean', 'crates/pptx-wasm', WASM, ['--no-default-features']],

@@ -1,3 +1,4 @@
+import { fontPreflightFixture } from '../../packages/pptx/src/wasm/__fixtures__/fontPreflight';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -141,4 +142,25 @@ describe('@betteroffice/pptx-native allocator', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('allocator smoke ok');
   });
+});
+
+test('font preflight works without initializing an engine or fetching wasm', async () => {
+  const instantiate = spyOn(WebAssembly, 'instantiate');
+  const compile = spyOn(WebAssembly, 'compile');
+  const fetch = spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network disabled'));
+  try {
+    const bytes = await fontPreflightFixture();
+    const core = await entry('.') as typeof import('../../packages/pptx/src/index');
+    await core.preloadPreflightWasm();
+    const result = await core.fontPreflight(bytes);
+    expect(result.complete).toBe(true);
+    expect(result.faces.length).toBeGreaterThan(0);
+    expect(instantiate).not.toHaveBeenCalled();
+    expect(compile).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  } finally {
+    instantiate.mockRestore();
+    compile.mockRestore();
+    fetch.mockRestore();
+  }
 });

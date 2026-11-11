@@ -151,7 +151,7 @@
       "commandFailed": "Não foi possível aplicar a alteração.",
       "commandRefused": "O comando foi recusado.",
       "permissionDenied": "O aplicativo host não permitiu que este plugin usasse este comando.",
-      "unsupportedPolicy": "Os plugins ainda não podem executar este comando. Use um lote de edições.",
+      "unsupportedPolicy": "Este comando exige uma ação do usuário na interface do próprio plugin.",
       "pluginUnavailable": "O plugin não está mais ativo.",
       "aborted": "A ação do plugin foi cancelada antes de o comando ser executado.",
       "clipboardUnavailable": "Este navegador não permite colar a partir de um menu. Use o atalho de teclado.",

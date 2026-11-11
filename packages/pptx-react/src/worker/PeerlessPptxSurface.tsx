@@ -1,3 +1,4 @@
+import { usePluginGestures } from '../../../../shared/plugin-host/usePluginGestures';
 import { initialPptxZoom } from '../initialPptxZoom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, RefObject } from 'react';
@@ -156,6 +157,7 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
 export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const { t } = useTranslation();
   const editor = useRef<HTMLDivElement>(null);
+  usePluginGestures(editor);
   const canvas = useRef<HTMLCanvasElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const slideFrame = useRef<HTMLDivElement>(null);

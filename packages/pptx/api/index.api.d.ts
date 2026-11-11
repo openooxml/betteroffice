@@ -506,6 +506,8 @@ export { openPresentationSession } from './session/client';
 export { createPptxWorkerEditorSession } from './session/editorSession';
 export { fontPackDiagnostics } from './fontPackDiagnostics';
 export type { FontPackDiagnostic } from './fontPackDiagnostics';
+export { fontPreflight, preloadPreflightWasm } from './wasm/preflight';
+export type { FontPreflight, FontPreflightFace } from './wasm/preflight';
 
 // ---- proposals.d.ts ----
 import type { DeckSnapshot, ParagraphAlignment, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeFill, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextParagraphDraft, TextStyleSnapshot } from './types';
@@ -1681,6 +1683,34 @@ export declare function copyDecodedFace(face: {
     font: Uint8Array;
     payload?: Uint8Array;
 }): FontDecodeResult;
+
+// ---- shared/office-session/fontPreflight.d.ts ----
+export type PreflightWasmInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+/** @experimental */
+export interface FontPreflightFace {
+    family: string;
+    bold: boolean;
+    italic: boolean;
+    scripts: string[];
+}
+/** @experimental */
+export interface FontPreflight {
+    faces: FontPreflightFace[];
+    /** False when some font rules could not be resolved. */
+    complete: boolean;
+}
+/** @internal */
+export declare function createPreflightState(options: {
+    assetUrl: () => URL;
+    engineKind: 'wasm' | 'native';
+    initAsync: (input: {
+        module_or_path: PreflightWasmInput;
+    }) => Promise<unknown>;
+}): {
+    status(): "idle" | "loading" | "ready";
+    memory(): WebAssembly.Memory | undefined;
+    preload(input?: PreflightWasmInput): Promise<void>;
+};
 
 // ---- shared/office-session/host.d.ts ----
 import { type TaskExecutor } from './scheduler';
@@ -3709,3 +3739,16 @@ export interface PptxPngOptions {
      */
     fonts?: ReadonlyArray<PptxFontFace>;
 }
+
+// ---- wasm/preflight.d.ts ----
+import { type FontPreflight, type PreflightWasmInput } from '../../../../shared/office-session/fontPreflight';
+export type { FontPreflight, FontPreflightFace } from '../../../../shared/office-session/fontPreflight';
+export declare const preflightWasmState: {
+    status(): "idle" | "loading" | "ready";
+    memory(): WebAssembly.Memory | undefined;
+    preload(input?: PreflightWasmInput): Promise<void>;
+};
+/** @experimental Load the font preflight wasm on demand. Idempotent. */
+export declare function preloadPreflightWasm(input?: PreflightWasmInput): Promise<void>;
+/** @experimental Font faces for a zero-based slide index. Defaults to the first slide. */
+export declare function fontPreflight(bytes: Uint8Array, activeSlide?: number): Promise<FontPreflight>;

@@ -27,7 +27,12 @@ interface ProbeContext {
 }
 
 interface Probe {
-  editor: { commands: { execute(id: string, args: unknown): Promise<unknown> } } | null;
+  editor: { commands: {
+    execute(id: string, args: unknown): Promise<unknown>;
+    getState(id: string): { active?: boolean | 'mixed' };
+  } } | null;
+  mutation: unknown;
+  runMutation(): Promise<unknown>;
   act<T>(action: (context: ProbeContext) => Promise<T>): Promise<T>;
   navigation: unknown;
   selection: { sheetId: string; cells: { focus: { row: number; col: number } } | null } | null;
@@ -168,6 +173,35 @@ test('T22: shift-arrow settles once with the painted range anchor', async ({ pag
   expect(anchor.selection).toMatchObject([{ ok: true, rects: [anchor.range], anchor: anchor.range }]);
   await tick(700);
   expect(await events()).toHaveLength(1);
+});
+
+test('xlsx: a plugin panel gesture admits a granted built-in mutation', async ({ page }) => {
+  await open(page, engine);
+  await select(page, 2, 1);
+  const state = () => pinnedEvaluate(page, async () => {
+    const probe = (window as unknown as { __probe: Probe }).__probe;
+    const version = await probe.act((context) => context.read.version());
+    return { version: version.version, bold: probe.editor!.commands.getState('bold').active };
+  });
+  const before = await state();
+  await expect(page.getByTestId('probe-mutation')).toHaveAttribute('data-version', before.version);
+  await page.getByTestId('probe-mutation').click();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __probe: Probe }).__probe.mutation)).toMatchObject({ ok: true, status: 'executed' });
+  await expect.poll(async () => (await state()).bold).toBe(before.bold !== true);
+  expect((await state()).version).not.toBe(before.version);
+  const after = await state();
+  expect(await pinnedEvaluate(page, () =>
+    (window as unknown as { __probe: Probe }).__probe.runMutation())).toMatchObject({
+    ok: false, failure: { code: 'unsupported-policy' },
+  });
+  expect(await state()).toEqual(after);
+  await page.getByTestId('probe-timer-mutation').click();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __probe: Probe }).__probe.mutation)).toMatchObject({
+    ok: false, failure: { code: 'unsupported-policy' },
+  });
+  expect(await state()).toEqual(after);
 });
 
 test('document focus excludes the plugin panel', async ({ page }) => {

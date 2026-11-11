@@ -431,6 +431,7 @@ export function ToolbarCommandButton<K extends PptxCommandId | PptxPluginCommand
   props: ToolbarCommandButtonProps<K>
 ) {
   const { id, children, label, className, style } = props;
+  const store = usePptxCommands();
   const args = (props as { args?: unknown }).args;
   const builtIn = isPluginCommandId(id) ? null : (id as PptxCommandId);
   const command = usePptxCommand(
@@ -441,7 +442,7 @@ export function ToolbarCommandButton<K extends PptxCommandId | PptxPluginCommand
   if (!builtIn && command.descriptor === null) return null;
   const icon = builtIn ? iconFor(builtIn, args) : undefined;
   const name = label ?? (builtIn ? labelFor(builtIn, args, t, command.label) : command.label);
-  return (
+  const button = (
     <ToolbarButton
       active={command.state.active}
       disabled={!command.state.enabled}
@@ -457,6 +458,11 @@ export function ToolbarCommandButton<K extends PptxCommandId | PptxPluginCommand
       {children ?? (icon ? <ToolbarIcon name={icon} /> : name)}
     </ToolbarButton>
   );
+  return isPluginCommandId(id) ? (
+    <span data-plugin-activation={pptxCommandController(store)?.pluginActivation(id)} style={{ display: 'contents' }}>
+      {button}
+    </span>
+  ) : button;
 }
 
 function OverflowUnit({

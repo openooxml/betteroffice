@@ -129,6 +129,8 @@ export declare function exportXlsxMarkdownJson(bytes: Uint8Array, options: strin
 
 export declare function exportXlsxStructuredJson(bytes: Uint8Array, options: string): string
 
+export declare function font_preflight(bytes: Uint8Array): string
+
 /** Internal: the installed font packs `configureFontPacks` left out, and why, as JSON. */
 export declare function fontPackDiagnosticsJson(): string
 

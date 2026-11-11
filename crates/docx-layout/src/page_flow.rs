@@ -74,6 +74,9 @@ pub struct PageFlowGeometry {
     pub footnote_reserved_heights: Option<Arc<std::collections::BTreeMap<String, f64>>>,
     /// Whether this page opened a column region that placement balances.
     pub balanced_region: bool,
+    /// Whether the continuous section in force frames its text horizontally,
+    /// which depends on the sections before it.
+    pub(crate) continuous_horizontal_frame: bool,
 }
 
 /// Current state of a page being laid out.
@@ -519,6 +522,7 @@ impl Paginator {
         paginator.displayed_parity_offset = geometry.continued_parity_offset;
         paginator.section_page_float_bands = geometry.section_page_float_bands.clone();
         paginator.balanced_page = geometry.balanced_region.then_some(0);
+        paginator.continuous_horizontal_frame = geometry.continuous_horizontal_frame;
         Ok(paginator)
     }
 
@@ -600,6 +604,7 @@ impl Paginator {
                 .states
                 .last()
                 .is_some_and(|state| self.balanced_page == Some(state.page_index)),
+            continuous_horizontal_frame: self.continuous_horizontal_frame,
         }
     }
 
@@ -1640,6 +1645,26 @@ mod tests {
             equal_width: None,
             separator: None,
             columns: None,
+        }
+    }
+
+    #[test]
+    fn a_resumed_checkpoint_keeps_the_continuous_section_frame() {
+        for (frame, started) in [(true, true), (true, false), (false, true)] {
+            let mut paginator = Paginator::new(
+                Size { w: 600.0, h: 600.0 },
+                margins(60.0, 80.0),
+                columns(),
+                None,
+            )
+            .unwrap();
+            paginator.continuous_horizontal_frame = frame;
+            paginator.section_started = started;
+            let geometry = paginator.snapshot_geometry();
+            let resumed = Paginator::resume_in_section(&geometry, 1, 0, None).unwrap();
+            assert_eq!(resumed.continuous_horizontal_frame, frame);
+            assert_eq!(resumed.section_started, started);
+            assert_eq!(resumed.snapshot_geometry(), geometry);
         }
     }
 

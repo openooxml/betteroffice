@@ -19,6 +19,7 @@ crate-type = ["cdylib", "rlib"]
 engine = []
 metafile-svg = ["ooxml-metafile/svg"]
 wasm = ["engine", "dep:js-sys", "dep:wasm-bindgen"]
+test-counters = []
 
 [dependencies]
 base64 = "0.22"
@@ -36,3 +37,7 @@ yrs = "0.27.3"
 
 [dev-dependencies]
 ooxml-opc.workspace = true
+
+[[test]]
+name = "attach_scaling"
+required-features = ["test-counters"]

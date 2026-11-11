@@ -6,6 +6,13 @@ const lean = new URL('../target/wasm-pack/pptx-wasm-lean/generated/', import.met
 
 await buildWasmModules([
   {
+    crate: 'ooxml-font-preflight',
+    name: 'pptx_preflight',
+    generated: 'packages/pptx/src/wasm/generated/preflight',
+    cargoArgs: ['--locked', '--no-default-features', '--features', 'wasm,pptx'],
+    variant: 'pptx',
+  },
+  {
     crate: 'metafile-svg-wasm',
     name: 'metafile_svg_wasm',
     generated: 'packages/pptx/src/wasm/generated',

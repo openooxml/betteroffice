@@ -636,7 +636,7 @@ pub(crate) fn revised_story(doc: &EditingDoc, stories: &BTreeSet<String>) -> Opt
     }
     let txn = doc.yrs_doc().transact();
     for story_id in stories {
-        let Ok(story) = story_ref(&txn, story_id) else {
+        let Some(story) = crate::story_text(&txn, story_id) else {
             continue;
         };
         let chunks = doc.chunk_snapshot(story_id, &story, &txn);

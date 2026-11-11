@@ -814,6 +814,14 @@ export class EditSession {
      */
     outline_glyph_json(font_id: number, glyph_id: number): string;
     /**
+     * The text each of `pages` shows in the retained layout, built or not, as
+     * `[{"pageIndex","paragraphs":[{"text","level"?,"inTable"?}]}]`: body
+     * paragraphs cut where the page cuts them, headings with their zero-based
+     * outline level, and the rows of tables the page places, cell by cell.
+     * Header rows a table repeats on later pages read only once.
+     */
+    page_texts_json(pages: Uint32Array): string;
+    /**
      * How many paragraphs of `story` carry `para_id`: 0, 1, or 2 for two or
      * more. Errors on an unknown story.
      */
@@ -896,6 +904,12 @@ export class EditSession {
      * "ok":false,"failure"}]}`. Listed entries keep their order; a kind expands in id order.
      */
     read_stories_json(request: string): string;
+    /**
+     * Adds to this replica's media sources every part of its own media table
+     * they lack, so it resolves the `data:` URLs seeding wrote whether or not
+     * it was seeded itself; `false` when nothing was added or it has no table.
+     */
+    rebuild_media_sources(): boolean;
     /**
      * Reconciles and publishes the `[owner, paraId]` pairs a save captured,
      * an owner being a session key or a source occurrence's
@@ -1919,6 +1933,7 @@ export interface InitOutput {
     readonly editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_open_docx_preview_with_budget: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_page_texts_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_id_count: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
@@ -1933,6 +1948,7 @@ export interface InitOutput {
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_rebuild_media_sources: (a: number) => number;
     readonly editsession_record_saved_paragraph_ids: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
