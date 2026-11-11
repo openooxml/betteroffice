@@ -3844,6 +3844,8 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
       const stop = h.host.subscribe(() => states.push(h.context().snapshot.selectionSettled));
       h.reset();
       const held = h.controller() && place === 'elsewhere' ? h.holdDisplayRange() : null;
+      const workerSelection = () => ({ workerSelectionUnchangedByRemoteEditElsewhere: JSON.stringify(h.controller()!.getSnapshot().view!.workerSelection) });
+      const selectedBefore = held ? workerSelection() : null;
       try {
         await h.remote(peer => {
           if (place === 'elsewhere') {
@@ -3857,6 +3859,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
         if (held) {
           await h.heldRemap(beforeRange!.layoutId);
           expect(h.context().snapshot.layout!.id).not.toBe(beforeRange!.layoutId);
+          expect(workerSelection()).toEqual(selectedBefore!);
           expect(h.context().snapshot.selection.displayRange).toEqual(beforeRange);
           expect(h.context().snapshot.selectionSettled).toBe(true);
           expect(h.events.filter(event => event.type === 'selection-change')).toEqual([]);
