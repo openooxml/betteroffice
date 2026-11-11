@@ -3387,6 +3387,39 @@ test('a click on canvas host chrome outside the page canvas keeps the keyboard s
   } finally { chrome.remove(); h.dispose(); }
 });
 
+test('a held press on an unlinked mirror image postpones the settle and settles as pointer', async () => {
+  const bytes = await storyAnchorsDocx();
+  const h = await matrixEditor('DI', bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, undefined, true);
+  const image = document.createElement('img');
+  try {
+    await h.selection('body', h.first.paraId, 1);
+    await h.selectionLayout();
+    await h.quiet();
+    h.reset();
+    const canvasHost = h.view.container.querySelector('.canvas-pages')!;
+    expect(canvasHost).not.toBeNull();
+    const mirror = canvasHost.querySelector('.canvas-page-mirror') ??
+      canvasHost.appendChild(Object.assign(document.createElement('div'), { className: 'canvas-page-mirror' }));
+    image.className = 'layout-run-image';
+    mirror.appendChild(image);
+    await act(async () => { fireEvent.keyDown(h.input(), { key: 'ArrowLeft', shiftKey: true }); });
+    await h.selectionLayout();
+    const extended = h.context().snapshot.selection;
+    const point = { pointerId: 1, pointerType: 'mouse', button: 0, detail: 1 };
+    await act(async () => { fireEvent.pointerDown(image, { ...point, buttons: 1 }); });
+    await h.quiet(700);
+    expect(h.events.filter(event => event.type === 'selection-settle')).toHaveLength(0);
+    await act(async () => {
+      fireEvent.pointerUp(image, { ...point, buttons: 0 });
+      fireEvent.click(image, point);
+    });
+    await h.quiet(700);
+    expect(h.events.filter(event => event.type === 'selection-settle')).toMatchObject([
+      { source: 'pointer', selection: extended },
+    ]);
+  } finally { image.remove(); h.dispose(); }
+});
+
 for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${engine}`, () => {
   for (const [location, story, paraId] of [
     ['body', 'body', '00000001'],
