@@ -2664,9 +2664,13 @@ impl EditSession {
 
     /// Compact paragraph-position projection built in one story traversal:
     /// `[{"paraId","length"}, …]` in document order, where `length` counts the
-    /// UTF-16 text and inline embed units before that paragraph's pilcrow —
-    /// exactly the `offset` domain of a Loc in it. One call replaces crossing
-    /// the boundary once per paragraph. Errors on an unknown story.
+    /// UTF-16 text, inline embed units and one unit per block embed (table,
+    /// block content control) that leads the paragraph, before its pilcrow —
+    /// exactly the `offset` domain of a Loc in it. In a paragraph that follows
+    /// one table, offset 0 is before the table and the text starts at offset 1;
+    /// each further leading table or block content control adds one.
+    /// One call replaces crossing the boundary once per paragraph. Errors on an
+    /// unknown story.
     pub fn paragraph_spans(&self, story: &str) -> Result<String, JsValue> {
         self.core.paragraph_spans(story).map_err(JsValue::from)
     }
