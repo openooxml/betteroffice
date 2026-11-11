@@ -220,8 +220,7 @@ mod tests {
     #[test]
     fn a_healthy_table_operation_and_outline_read_the_payload_once() {
         let doc = EditingDoc::new(81);
-        doc.create_story("body", "Hello", "Normal", "left")
-            .unwrap();
+        doc.create_story("body", "Hello", "Normal", "left").unwrap();
         doc.insert_table(&ctx(), Position::new("body", 0), 2, 2)
             .unwrap();
         let reads = || super::PAYLOAD_READS.with(std::cell::Cell::get);
@@ -231,14 +230,17 @@ mod tests {
         assert_eq!(reads() - start, 1, "one table operation, one payload read");
         let start = reads();
         assert_eq!(doc.unavailable_tables(), Some(Vec::new()));
-        assert_eq!(reads() - start, 1, "one table in the outline, one payload read");
+        assert_eq!(
+            reads() - start,
+            1,
+            "one table in the outline, one payload read"
+        );
     }
 
     #[test]
     fn a_scan_that_stops_at_the_depth_limit_reports_no_result_rather_than_none_found() {
         let doc = EditingDoc::new(82);
-        doc.create_story("body", "Hello", "Normal", "left")
-            .unwrap();
+        doc.create_story("body", "Hello", "Normal", "left").unwrap();
         let mut story = "body".to_owned();
         let mut deepest = story.clone();
         for _ in 0..260 {
@@ -261,8 +263,7 @@ mod tests {
     #[test]
     fn a_malformed_block_control_does_not_stop_the_scan() {
         let doc = EditingDoc::new(79);
-        doc.create_story("body", "Hello", "Normal", "left")
-            .unwrap();
+        doc.create_story("body", "Hello", "Normal", "left").unwrap();
         doc.insert_table(&ctx(), Position::new("body", 0), 1, 1)
             .unwrap();
         {
@@ -291,8 +292,7 @@ mod tests {
         assert!(!super::is_note_root("fn:1:t0:r0c0"));
         assert!(!super::is_note_root("fn:"));
         let doc = EditingDoc::new(80);
-        doc.create_story("body", "Hello", "Normal", "left")
-            .unwrap();
+        doc.create_story("body", "Hello", "Normal", "left").unwrap();
         doc.create_story("fn:1", "Note", "Normal", "left").unwrap();
         let outer = doc
             .insert_table(&ctx(), Position::new("fn:1", 0), 1, 1)

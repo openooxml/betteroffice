@@ -587,15 +587,12 @@ impl StoryRevisions {
             }),
             yrs::types::Event::Map(event) => {
                 event.path().is_empty()
-                    || event
-                        .keys(txn)
-                        .keys()
-                        .any(|key| {
-                            matches!(
-                                key.as_ref(),
-                                KIND_KEY | "tblPr" | "grid" | "rows" | "cells" | "story"
-                            )
-                        })
+                    || event.keys(txn).keys().any(|key| {
+                        matches!(
+                            key.as_ref(),
+                            KIND_KEY | "tblPr" | "grid" | "rows" | "cells" | "story"
+                        )
+                    })
             }
             _ => true,
         }) {
