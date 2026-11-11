@@ -339,13 +339,27 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
   ) => mountEditor(props, strict, buffer, experimentalWorkerOpen);
 
   test('selection changes emit one selection-settle after the quiet window', async () => {
-    const clock = selectionClock();
+    const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => new Proxy({} as Record<string, unknown>, {
+      get(target, key) {
+        if (key === 'measureText') return () => ({ width: 0 });
+        if (key === 'createImageData') return (width: number, height: number) => ({ width, height, data: new Uint8ClampedArray(width * height * 4) });
+        return key in target ? target[key as string] : () => {};
+      },
+      set(target, key, value) { target[key as string] = value; return true; },
+    }) as unknown as CanvasRenderingContext2D) as unknown as HTMLCanvasElement['getContext']);
+    const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 1000));
+    let restoreClock = () => {};
     try {
       const events: DocxPluginEvent[] = [];
+      let painted = false;
       const plugin = defineDocxPlugin({ id: 'settle', createState: () => null,
         onEvent(_context, event) { events.push(event); } });
-      const { ref } = await mount({ plugins: [plugin] });
+      const { ref } = await mount({ plugins: [plugin], onFirstPagePainted: () => { painted = true; } });
+      await until(() => painted);
       await act(async () => { await ref.current!.whenLayoutComplete({ timeoutMs: 3000 }); });
+      await act(async () => { await selectionWindow().tick(400); });
+      const clock = selectionClock();
+      restoreClock = () => clock.restore();
       await act(async () => { await clock.tick(400); });
       events.length = 0;
       const settles = () => events.filter((event) => event.type === 'selection-settle');
@@ -360,7 +374,11 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
       expect(settles()).toHaveLength(1);
       await act(async () => { await clock.tick(400); });
       expect(settles()).toHaveLength(1);
-    } finally { clock.restore(); }
+    } finally {
+      restoreClock();
+      bounds.mockRestore();
+      canvasContext.mockRestore();
+    }
   });
 
   if (experimentalWorkerOpen === undefined) test('viewer open reads the main session selection at most once with plugins installed', async () => {
