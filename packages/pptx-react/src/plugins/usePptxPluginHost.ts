@@ -14,14 +14,14 @@ import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
 import type { TFunction } from '@betteroffice/pptx-i18n';
 import type { PptxCommandController } from '../commands/createPptxCommandStore';
 import { subscribeShortcuts } from '../commands/shortcutTable';
-import type { PptxPointPosition } from '../PptxEditor';
+import type { PptxPointPosition, PptxTextSelection } from '../PptxEditor';
 import type { PptxPluginEditorAccess } from './createPluginClients';
 import {
   createPptxPluginHost,
   type PptxPluginActivation,
   type PptxPluginHost,
 } from './createPptxPluginHost';
-import { createPluginGeometry, pluginLayout, type PresentedSlide } from './geometry';
+import { createPluginGeometry, pluginLayout, type PresentedSlide, type SelectionCaret } from './geometry';
 import type { PptxEditorPluginProps, PptxPluginGeometry, PptxPluginSelection } from './types';
 
 const NO_ACTIVATIONS: readonly PptxPluginActivation[] = Object.freeze([]);
@@ -43,6 +43,7 @@ export interface UsePptxPluginHostOptions extends PptxEditorPluginProps {
   /** Proposal review paints a preview over the slide, so no layout is published meanwhile. */
   reviewing: boolean;
   selection: PptxPluginSelection;
+  textSelection: PptxTextSelection | null;
   /** Hit-tests client coordinates while `frame` is the editor's current frame. */
   pointAt(frame: SlideDisplayList, clientX: number, clientY: number): PptxPointPosition | null;
   t: TFunction;
@@ -64,13 +65,13 @@ export interface PptxPluginHostBinding {
 export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPluginHostBinding {
   const latest = useRef(options);
   latest.current = options;
-  const geometryRef = useRef<PptxPluginGeometry | null>(null);
+  const geometryRef = useRef<((selection: PptxPluginSelection, caretHint?: SelectionCaret) => PptxPluginGeometry) | null>(null);
 
   const [host] = useState(() =>
     createPptxPluginHost({
       ...options.access,
       translate: (key) => latest.current.t(key),
-      geometry: () => geometryRef.current,
+      geometry: (selection = null, caretHint) => geometryRef.current?.(selection, caretHint) ?? null,
     })
   );
 
@@ -120,8 +121,8 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
   const activations = useSyncExternalStore(host.subscribe, host.activations, () => NO_ACTIVATIONS);
 
   useEffect(() => {
-    if (managed) host.selectionChanged(options.selection);
-  }, [host, managed, options.selection]);
+    if (managed) host.selectionChanged(options.selection, { focusLine: options.textSelection?.focusLine });
+  }, [host, managed, options.selection, options.textSelection?.focusLine]);
 
   const presentedRef = useRef<PresentedCanvas | null>(null);
   const [presented, setPresented] = useState<PresentedCanvas | null>(null);
@@ -174,17 +175,20 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
   const geometry = useMemo(
     () =>
       layout && presented && layer
-        ? createPluginGeometry(
+        ? (selection: PptxPluginSelection, caretHint?: SelectionCaret) => createPluginGeometry(
             layout,
             presented,
             presented.canvas,
             layer,
             () =>
+              !latest.current.reviewing &&
               host.layoutId() === layout.id &&
               presentedRef.current === presented &&
               presented.canvas.isConnected,
             (frame, clientX, clientY) => latest.current.pointAt(frame, clientX, clientY),
-            options.focusRoot?.current ?? layer
+            options.focusRoot?.current ?? layer,
+            () => selection,
+            caretHint
           )
         : null,
     // `moved` rebuilds the geometry when its elements move without a new frame.

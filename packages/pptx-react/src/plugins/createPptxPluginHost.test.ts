@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
-import type { PresentationHandle } from '@betteroffice/pptx';
-import { createPptxPluginHost } from './createPptxPluginHost';
+import type { DeckSnapshot, PresentationHandle, SlideDisplayList } from '@betteroffice/pptx';
+import { createPptxPluginHost, type PptxPluginHost } from './createPptxPluginHost';
 import { definePptxPlugin } from './definePptxPlugin';
-import type { PptxPluginEvent, PptxPluginGeometry, PptxPluginLayout } from './types';
+import type { PptxPluginContext, PptxPluginEvent, PptxPluginGeometry, PptxPluginLayout } from './types';
+import { createAnchorGeometry, createPluginGeometry, pluginGeometryIndex, pluginLayout, type PresentedSlide } from './geometry';
 
 const settle = () => new Promise((done) => setTimeout(done, 0));
 function setupSignals() {
@@ -118,3 +119,54 @@ test('a superseded generation receives no queued signals', async () => {
   expect(events[events.length - 1]).toEqual({ type: 'focus-change', generation: host.generation()!, focused: false });
   host.close('unmounted');
 });
+
+for (const path of ['IN', 'PL'] as const) {
+  test(`plugin anchor target matrix at non-unit zoom (${path}, no-selection host path)`, async () => {
+    const document = { version: () => 'v1', onUpdate: () => () => {} } as unknown as PresentationHandle;
+    const slide: PresentedSlide = { version: 'v1', scale: 1.5, slideIndex: 0,
+      snapshot: { slides: [{ id: 'slide', shapes: [] }] } as unknown as DeckSnapshot,
+      frame: { width: 960, height: 540, primitives: [] } as unknown as SlideDisplayList };
+    const layout = pluginLayout(slide, 'v1')!;
+    const element = { isConnected: true, clientLeft: 0, clientTop: 0, scrollLeft: 0, scrollTop: 0, clientWidth: 1440, clientHeight: 810,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 1440, height: 810 }) } as unknown as HTMLElement;
+    const host: PptxPluginHost = createPptxPluginHost({ handle: () => document,
+      admit: async (_handle, operation) => ({ ok: true, value: operation() }), readOnlyRefusal: () => null,
+      applyEdits: () => { throw new Error('Unexpected edit'); }, commands: () => null,
+      navigator: { goToSlide: () => null, selectShape: () => null, selectText: () => null },
+      geometry: (selection = null) => path === 'IN'
+        ? createPluginGeometry(layout, slide, element, element, () => host.layoutId() === layout.id,
+          () => null, element, () => selection)
+        : { layout, viewport: { x: 0, y: 0, width: 1440, height: 810 },
+          ...createAnchorGeometry(layout, pluginGeometryIndex(slide.frame), () => host.layoutId() === layout.id,
+            rect => ({ x: rect.x * 1.5, y: rect.y * 1.5, width: rect.width * 1.5, height: rect.height * 1.5 }),
+            () => null, () => selection),
+          getShapeRect: () => null, getPositionAtPoint: () => null, toOverlayRect: () => null },
+      translate: key => key,
+    });
+    let context!: PptxPluginContext<null>;
+    let loaded!: () => void;
+    const load = new Promise<void>(resolve => { loaded = resolve; });
+    let changed!: () => void;
+    const change = new Promise<void>(resolve => { changed = resolve; });
+    host.setPlugins([definePptxPlugin({ id: 'empty-selection', createState: () => null,
+      onEvent(next, event) {
+        context = next;
+        if (event.type === 'load') loaded();
+        if (event.type === 'layout-change' && event.layout) changed();
+      } })]);
+    try {
+      host.open(document);
+      await load;
+      expect(context.snapshot.selection).toBeNull();
+      expect(context.geometry).toBeNull();
+      host.layoutChanged(layout);
+      await change;
+      expect(context.snapshot.generation).toBe(host.generation()!);
+      expect(context.snapshot.selection).toBeNull();
+      expect(context.geometry?.layout.zoom).toBe(1.5);
+      const answer = context.geometry!.getAnchorGeometry({ kind: 'selection' });
+      expect(answer).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+      expect(await context.geometry!.readAnchorGeometries([{ kind: 'selection' }])).toEqual([answer]);
+    } finally { host.close('unmounted'); }
+  });
+}

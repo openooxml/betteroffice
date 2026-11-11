@@ -2,14 +2,14 @@ import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { RefObject } from 'react';
 import type { DeckSnapshot, ShapeSnapshot } from '@betteroffice/pptx';
-import { indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
+import { transformedRect } from '@betteroffice/pptx/worker';
 import { findShape } from '../interactions';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { subscribeShortcuts } from '../commands/shortcutTable';
 import type { PptxCommandStore } from '../commands/types';
 import { createPptxPluginHost } from '../plugins/createPptxPluginHost';
 import type { PptxEditorPluginProps, PptxPluginGeometry, PptxPluginSelection } from '../plugins/types';
-import { EMU_PER_PIXEL, slideRectToOverlay, slideViewport } from '../plugins/geometry';
+import { createAnchorGeometry, EMU_PER_PIXEL, pluginGeometryIndex, slideRectToOverlay, slideViewport, type SelectionCaret } from '../plugins/geometry';
 import { useTranslation } from '../i18n';
 import { resolvedLocale } from '../i18n/LocaleContext';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
@@ -23,13 +23,13 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
   const { t, lang } = useTranslation();
   const latest = useRef({ commands, t, reviewing });
   latest.current = { commands, t, reviewing };
-  const geometry = useRef<PptxPluginGeometry | null>(null);
+  const geometry = useRef<((selection: PptxPluginSelection, caretHint?: SelectionCaret) => PptxPluginGeometry) | null>(null);
   const [layer, layerRef] = useState<HTMLDivElement | null>(null);
   const managed = Boolean(props.plugins?.length);
   const binding = useRef<{ run: PeerlessPresentation; document: ReturnType<typeof peerlessPluginDocument> } | null>(null);
   const host = useMemo(() => createPptxPluginHost({
     commands: () => pptxCommandController(latest.current.commands),
-    translate: (key) => latest.current.t(key), geometry: () => geometry.current,
+    translate: (key) => latest.current.t(key), geometry: (selection = null, caretHint) => geometry.current?.(selection, caretHint) ?? null,
   }, (invocation, grant, store) => {
     const current = binding.current!;
     return peerlessPluginClients(invocation, current.run, () => api.current, grant, store,
@@ -69,10 +69,12 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
 
   const subscribe = useCallback((listener: () => void) =>
     managed && run ? run.subscribeVisual(listener) : () => {}, [run, managed]);
-  const snapshot = useCallback(() => managed ? run?.getVisualSnapshot() ?? null : null, [run, managed]);
+  const snapshot = useCallback(() => managed ? run?.pluginVisual() ?? null : null, [run, managed]);
   const visual = useSyncExternalStore(subscribe, snapshot, snapshot);
   const confirmed = visual?.view.confirmed;
   const fit = visual?.fit;
+  const selected = visual?.view.selection;
+  const affinity = selected?.kind === 'object' ? undefined : selected?.affinity;
   const version = confirmed?.frame.version;
   const [shapes, setShapes] = useState<{ run: PeerlessPresentation; version: string; deck: DeckSnapshot } | null>(null);
   useEffect(() => {
@@ -85,7 +87,7 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
     return () => { current = false; };
   }, [run, version, managed]);
 
-  const presentedGeometry = useMemo<PptxPluginGeometry | null>(() => {
+  const presentedGeometry = useMemo<((selection: PptxPluginSelection, caretHint?: SelectionCaret) => PptxPluginGeometry) | null>(() => {
     const surface = canvas.current;
     if (!managed || reviewing || !run?.current || !confirmed || !fit || !surface || !layer ||
       shapes?.run !== run || shapes.version !== confirmed.frame.version || confirmed.frame.version !== run.client.state.version) return null;
@@ -96,13 +98,29 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
       width: displayList.width, height: displayList.height,
     };
     const current = () => run.current && !latest.current.reviewing && surface.isConnected &&
-      host.layoutId() === layout.id && run.getVisualSnapshot()?.view.confirmed === confirmed &&
-      run.getVisualSnapshot()?.fit === fit && run.store.getSnapshot().confirmed === confirmed && run.client.state.version === frame.version;
+      host.layoutId() === layout.id && run.pluginVisual()?.view.confirmed === confirmed &&
+      run.pluginVisual()?.fit === fit && run.store.getSnapshot().confirmed === confirmed && run.client.state.version === frame.version;
     const toOverlay = (rect: { x: number; y: number; width: number; height: number }) =>
       current() ? slideRectToOverlay(surface, layer, displayList, rect) : null;
-    const indexed = indexGeometry(displayList);
-    return {
+    const indexed = pluginGeometryIndex(displayList);
+    const getShapeRect = (id: string) => {
+      const slide = shapes.deck.slides.find((slide) => slide.id === frame.slideId);
+      const shape = slide && findShape(slide.shapes, id);
+      if (!shape) return null;
+      const ids = new Set<string>();
+      const collect = (shape: ShapeSnapshot) => { ids.add(shape.id); shape.children.forEach(collect); };
+      collect(shape);
+      const bounds = indexed.hits.filter((hit) => hit.primitive.shapeId && ids.has(hit.primitive.shapeId))
+        .map((hit) => transformedRect(hit.transforms, { x: hit.primitive.x, y: hit.primitive.y, width: hit.primitive.w, height: hit.primitive.h }));
+      if (!bounds.length) return null;
+      const x = Math.min(...bounds.map((rect) => rect.x));
+      const y = Math.min(...bounds.map((rect) => rect.y));
+      return toOverlay({ x, y, width: Math.max(...bounds.map((rect) => rect.x + rect.width)) - x,
+        height: Math.max(...bounds.map((rect) => rect.y + rect.height)) - y });
+    };
+    return (selection: PptxPluginSelection, caretHint?: SelectionCaret): PptxPluginGeometry => ({
       layout,
+      ...createAnchorGeometry(layout, indexed, current, toOverlay, getShapeRect, () => selection, caretHint),
       get viewport() { return slideViewport(stage.current ?? layer, layer); },
       toOverlayRect: (input) => {
         const rect = input?.rect;
@@ -112,31 +130,17 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
         return toOverlay({ x: rect.x / EMU_PER_PIXEL, y: rect.y / EMU_PER_PIXEL,
           width: rect.width / EMU_PER_PIXEL, height: rect.height / EMU_PER_PIXEL });
       },
-      getShapeRect: (id) => {
-        const slide = shapes.deck.slides.find((slide) => slide.id === frame.slideId);
-        const shape = slide && findShape(slide.shapes, id);
-        if (!shape) return null;
-        const ids = new Set<string>();
-        const collect = (shape: ShapeSnapshot) => { ids.add(shape.id); shape.children.forEach(collect); };
-        collect(shape);
-        const bounds = indexed.hits.filter((hit) => hit.primitive.shapeId && ids.has(hit.primitive.shapeId))
-          .map((hit) => transformedRect(hit.transforms, { x: hit.primitive.x, y: hit.primitive.y, width: hit.primitive.w, height: hit.primitive.h }));
-        if (!bounds.length) return null;
-        const x = Math.min(...bounds.map((rect) => rect.x));
-        const y = Math.min(...bounds.map((rect) => rect.y));
-        return toOverlay({ x, y, width: Math.max(...bounds.map((rect) => rect.x + rect.width)) - x,
-          height: Math.max(...bounds.map((rect) => rect.y + rect.height)) - y });
-      },
+      getShapeRect,
       getPositionAtPoint: (x, y) => {
         if (!current()) return null;
         const hit = peerlessPositionAtPoint(run, surface, x, y);
         return hit ? { ...hit, version: frame.version, layoutId: layout.id } : null;
       },
-    };
+    });
   }, [host, managed, reviewing, run, confirmed, fit, canvas, layer, shapes, stage]);
   geometry.current = presentedGeometry;
   useLayoutEffect(() => {
-    host.layoutChanged(presentedGeometry?.layout ?? null);
+    host.layoutChanged(presentedGeometry?.(null).layout ?? null);
     host.geometryChanged();
   }, [host, presentedGeometry]);
   useLayoutEffect(() => {
@@ -146,8 +150,8 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
     const selected: PptxPluginSelection = { slideId: frame.slideId, slide: frame.slideIndex + 1,
       target: !selection ? { kind: 'slide' } : selection.kind === 'object' ? { kind: 'shape', shapeId: selection.shapeId }
         : { kind: 'text', shapeId: selection.shapeId, storyId: selection.storyId, anchor: selection.anchor, focus: selection.focus } };
-    host.selectionChanged(selected);
-  }, [host, confirmed, visual?.view.selection]);
+    host.selectionChanged(selected, { affinity });
+  }, [host, confirmed, visual?.view.selection, affinity]);
   useEffect(() => {
     const surface = canvas.current;
     if (!managed || !surface || !layer) return;
