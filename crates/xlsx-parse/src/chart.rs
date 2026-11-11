@@ -1569,6 +1569,22 @@ pub(crate) fn patch_drawing_anchors(
                 push_anchor_edits(element, &moved, &mut edits)?;
             }
         }
+        for wrapper in root.child_elements().filter(|child| {
+            child.is(
+                crate::drawing_anchors::NS_MARKUP_COMPATIBILITY,
+                "AlternateContent",
+            )
+        }) {
+            for anchor in crate::drawing_anchors::alternate_anchors(wrapper)? {
+                let authored = anchor_geometry(anchor)?;
+                let moved = crate::drawing_anchors::followed(&authored, axes).ok_or_else(|| {
+                    ParseError::UnsupportedEdit("a drawing anchor would leave the grid".into())
+                })?;
+                if moved != authored {
+                    push_anchor_edits(anchor, &moved, &mut edits)?;
+                }
+            }
+        }
     }
     if edits.is_empty() {
         return Ok(part.to_vec());
