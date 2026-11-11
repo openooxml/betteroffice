@@ -195,15 +195,14 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       }
       return undefined;
     };
-    const cases: [string, (session: Session) => [string, boolean][]][] = [
-      ['a row inserted above the header row', (session) => {
+    const cases: [string, (session: Session) => [string, boolean | null][]][] = [
+      ['a row inserted above the header row, the old header cell untouched', (session) => {
         session.insertRow(at(0, 0), 'above');
         const fresh = session.listStories().stories.find((entry) => entry.kind === 'tableCell' && session.paragraphs(entry.story).some((paragraph) => paragraph.text === ''))!.story;
         const paraId = session.paragraphs(fresh)[0]!.paraId;
         session.insertText({ story: fresh, paraId, offset: 0 }, 'New head');
         session.formatRange(whole(session, paraId, paraId, fresh), { bold: false });
-        format(session, '00000041', true);
-        return [['Old head', true], ['New head', false]];
+        return [['Old head', null], ['New head', false]];
       }],
       ['the header row deleted', (session) => {
         session.deleteRow({ anchor: at(0, 0), head: at(0, 0) });
@@ -236,8 +235,9 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         const { xml, reopened } = await saveAndReopen(yrs, session);
         try {
           for (const [marker, on] of expected) {
-            expect({ name, marker, saved: savedRunProperties(xml, marker) }).toEqual({ name, marker, saved: on ? '<w:b/>' : '<w:b w:val="0"/>' });
-            expect({ name, marker, bold: boldIn(reopened, marker) }).toEqual({ name, marker, bold: on });
+            const saved = on === null ? null : on ? '<w:b/>' : '<w:b w:val="0"/>';
+            expect({ name, marker, saved: savedRunProperties(xml, marker) }).toEqual({ name, marker, saved });
+            expect({ name, marker, bold: boldIn(reopened, marker) }).toEqual({ name, marker, bold: on === true });
           }
         } finally {
           reopened.destroy();
@@ -248,30 +248,32 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     }
   });
 
-  test(`${engine}: a cell edited after a save that inserted a row above the header saves explicit bold`, async () => {
+  test(`${engine}: a header cell explicitly not bold, made bold after a row is inserted above it, saves explicit bold`, async () => {
     const cell = (paraId: string, run: string) =>
       `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="${paraId}">${run}</w:p></w:tc>`;
     const body = '<w:tbl><w:tblPr><w:tblStyle w:val="HeaderGrid"/><w:tblLook w:val="0020" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>' +
-      `<w:tr>${cell('00000051', '<w:r><w:t>Old head</w:t></w:r>')}</w:tr></w:tbl><w:p w14:paraId="00000052"><w:r><w:t>After</w:t></w:r></w:p>`;
-    const session = await yrs.createYrsSession({ clientId: 99 });
-    try {
-      session.seedFromDocx(await fixture(body));
-      session.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'above');
-      (await saveAndReopen(yrs, session)).reopened.destroy();
-      const story = session.listStories().stories.find((entry) => entry.kind === 'tableCell' && session.paragraphs(entry.story).some((paragraph) => paragraph.paraId === '00000051'))!.story;
-      session.formatRange(whole(session, '00000051', '00000051', story), { bold: true });
-      const { xml, reopened } = await saveAndReopen(yrs, session);
+      `<w:tr>${cell('00000051', '<w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>Old head</w:t></w:r>')}</w:tr></w:tbl><w:p w14:paraId="00000052"><w:r><w:t>After</w:t></w:r></w:p>`;
+    for (const saveBetween of [false, true]) {
+      const session = await yrs.createYrsSession({ clientId: 99 });
       try {
-        expect(savedRunProperties(xml, 'Old head')).toBe('<w:b/>');
-        const segment = reopened.listStories().stories
-          .flatMap((entry) => reopened.storySegments(entry.story))
-          .find((entry) => entry.kind === 'text' && entry.text.includes('Old head'));
-        expect(segment?.kind === 'text' && Boolean(segment.attributes.bold)).toBe(true);
+        session.seedFromDocx(await fixture(body));
+        session.insertRow({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 'above');
+        if (saveBetween) (await saveAndReopen(yrs, session)).reopened.destroy();
+        const story = session.listStories().stories.find((entry) => entry.kind === 'tableCell' && session.paragraphs(entry.story).some((paragraph) => paragraph.paraId === '00000051'))!.story;
+        session.formatRange(whole(session, '00000051', '00000051', story), { bold: true });
+        const { xml, reopened } = await saveAndReopen(yrs, session);
+        try {
+          expect({ saveBetween, saved: savedRunProperties(xml, 'Old head') }).toEqual({ saveBetween, saved: '<w:b/>' });
+          const segment = reopened.listStories().stories
+            .flatMap((entry) => reopened.storySegments(entry.story))
+            .find((entry) => entry.kind === 'text' && entry.text.includes('Old head'));
+          expect({ saveBetween, bold: segment?.kind === 'text' && Boolean(segment.attributes.bold) }).toEqual({ saveBetween, bold: true });
+        } finally {
+          reopened.destroy();
+        }
       } finally {
-        reopened.destroy();
+        session.destroy();
       }
-    } finally {
-      session.destroy();
     }
   });
 
