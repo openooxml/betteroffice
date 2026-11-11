@@ -3,7 +3,10 @@
 //! crossing order can leave every entry deleted. Such a table lays out as nothing, takes no table
 //! operation and blocks saving until its last undo is redone or the table is deleted.
 
-use yrs::{Map, MapRef, Out, ReadTxn};
+use std::collections::HashSet;
+
+use yrs::types::text::YChange;
+use yrs::{Any, Map, MapRef, Out, ReadTxn, Text};
 
 use crate::{EditingDoc, TableLocator};
 
@@ -78,8 +81,7 @@ impl EditingDoc {
     /// Whether the outline walk from `root` lays `story` out: a live root always, any other live
     /// story only when the walk reaches it through complete tables and block controls, so a cell
     /// of an unavailable table, at any depth, is not laid out. Each root's set is kept until a
-    /// structural change, so typing never walks again. A walk that stops at a limit cannot tell,
-    /// and reads as laid out.
+    /// structural change, so typing never walks again. The walk has no depth limit.
     pub(crate) fn story_laid_out(&self, root: &str, story: &str) -> bool {
         if crate::story_ref(&self.yrs_doc().transact(), story).is_err() {
             return false;
@@ -93,15 +95,75 @@ impl EditingDoc {
         {
             return stories.contains(story);
         }
-        let Ok(stories) = self.laid_out_stories_under(root) else {
-            return true;
-        };
+        let stories = self.reachable_stories(root);
         let laid_out = stories.contains(story);
         self.laid_out_stories
             .lock()
             .unwrap()
             .insert(root.to_owned(), (structure, std::sync::Arc::new(stories)));
         laid_out
+    }
+
+    /// Every live story reachable from `root` through the cells of complete tables and block
+    /// controls' stories, at any depth: the stories the layout shows, named as the outline walk
+    /// names them. A malformed entry is skipped; an unavailable table leads nowhere.
+    fn reachable_stories(&self, root: &str) -> HashSet<String> {
+        let txn = self.yrs_doc().transact();
+        let mut reached = HashSet::new();
+        let mut queue = vec![root.to_owned()];
+        while let Some(story_id) = queue.pop() {
+            if reached.contains(&story_id) {
+                continue;
+            }
+            let Ok(story) = crate::story_ref(&txn, &story_id) else {
+                continue;
+            };
+            reached.insert(story_id.clone());
+            let mut table_index = 0;
+            for diff in story.diff(&txn, YChange::identity) {
+                let Out::YMap(map) = diff.insert else {
+                    continue;
+                };
+                match crate::map_string(&map, &txn, crate::KIND_KEY).as_deref() {
+                    Some("table") => {
+                        let index = table_index;
+                        table_index += 1;
+                        let Some(TablePayload {
+                            rows: Out::Any(Any::Array(rows)),
+                            ..
+                        }) = table_payload(&map, &txn)
+                        else {
+                            continue;
+                        };
+                        for (row_index, row) in rows.iter().enumerate() {
+                            let Any::Map(row) = row else { continue };
+                            let Some(Any::Array(cells)) = row.get("cells") else {
+                                continue;
+                            };
+                            for (cell_index, cell) in cells.iter().enumerate() {
+                                let Any::Map(cell) = cell else { continue };
+                                match cell.get("story") {
+                                    None | Some(Any::Null | Any::Undefined) => queue.push(format!(
+                                        "{story_id}:t{index}:r{row_index}c{cell_index}"
+                                    )),
+                                    Some(Any::String(child)) => queue.push(child.to_string()),
+                                    Some(_) => {}
+                                }
+                            }
+                        }
+                    }
+                    Some("blockSdt") => match map.get(&txn, "story") {
+                        None | Some(Out::Any(Any::Null | Any::Undefined)) => {
+                            queue.push(format!("{story_id}:sdt0"));
+                        }
+                        Some(Out::Any(Any::String(child))) => queue.push(child.to_string()),
+                        Some(_) => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+        reached
     }
 
     /// The unavailable tables the geometry outline walk meets from `roots`, by story and ordinal,
@@ -283,8 +345,17 @@ mod tests {
             None,
             "a healthy document nested past the limit cannot be vouched for"
         );
+        assert!(
+            doc.story_laid_out("body", &story),
+            "a cell of a complete table is shown at any depth"
+        );
         strip(&doc, &deepest);
         assert_eq!(doc.unavailable_tables_from(&roots), None);
+        assert!(
+            !doc.story_laid_out("body", &story),
+            "a cell of the deepest table is hidden once that table lost its payload, past any walk limit"
+        );
+        assert!(doc.story_laid_out("body", &deepest));
     }
 
     #[test]
