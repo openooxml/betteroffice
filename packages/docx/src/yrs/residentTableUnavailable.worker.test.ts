@@ -593,6 +593,45 @@ test('a copy from a cell of an inner table that lost its properties, with an out
   }
 }, TIMEOUT);
 
+test('a copy from another outer cell to a cell of an inner table that lost its properties, with an outer cell range retained, refuses invalid-selection and the session takes the next command', async () => {
+  const replica = await open(9471, true);
+  const first = await peer(replica, 9472);
+  const second = await peer(replica, 9473);
+  try {
+    const table = tableStory(replica);
+    const story = cellStory(replica);
+    const [lost] = INNER_LOST;
+    lost!.edit(first, table, true);
+    sync(first, second);
+    lost!.edit(second, table, false);
+    expect(first.undo()).toBe(true);
+    sync(first, second);
+    expect(second.undo()).toBe(true);
+    sync(first, second);
+    await receive(replica, second);
+    expect('tblPr' in (replica.engine.tablePayload(table, 0) ?? {})).toBe(false);
+    expect(located(replica, story)).toBeNull();
+
+    const other = outerCellsOf(replica)[1]!;
+    replica.engine.setCellSelection(outerRange);
+    const untouched = replica.engine.encodeState();
+    const { value } = await replica.client.documentRead({ kind: 'clipboardSlice', selection: {
+      anchor: startOf(replica, other), focus: { ...startOf(replica, story), offset: 'First'.length },
+    } });
+    expect(value).toEqual({ text: '', fragment: null, refused: 'invalid-selection' });
+    expect(replica.engine.encodeState()).toEqual(untouched);
+
+    const inOuter = startOf(replica, other);
+    const typed = await replica.session.submit('insertText', { text: 'Z', selection: { anchor: inOuter, focus: inOuter } }).ack;
+    expect(typed.status).toBe('applied');
+    expect(cellTexts(replica, other)).toEqual(['ZOuter two']);
+  } finally {
+    first.destroy();
+    second.destroy();
+    replica.session.dispose();
+  }
+}, TIMEOUT);
+
 test('a copy from a healthy inner table cell inside a retained outer cell range copies the outer range, as from an outer cell', async () => {
   const replica = await open(9421, true);
   try {

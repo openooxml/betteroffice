@@ -97,7 +97,7 @@ import {
   resolveSelectionUnit,
 } from './viewerSelection';
 import { readAdjacentRevision, readSidebar, readOutlineHeadings } from './sidebarReads';
-import { clipboardTablePayload, readClipboardSlice } from './clipboardFragment';
+import { clipboardTablePayload, readClipboardSlice, type DocxClipboardSlice } from './clipboardFragment';
 import { storyOffsetForLoc, tableAnchors } from './storyPlainText';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
@@ -2306,7 +2306,10 @@ async function handle(request: ScheduledRequest): Promise<void> {
             break;
           }
         }
-        if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
+        if (anchor.story !== focus.story) {
+          value = { text: '', fragment: null, refused: 'invalid-selection' } satisfies DocxClipboardSlice;
+          break;
+        }
         value = readClipboardSlice(reader, {
           story: anchor.story,
           from: storyOffsetForLoc(session.geometryReader, anchor),
