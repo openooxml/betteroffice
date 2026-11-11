@@ -19,12 +19,23 @@ export function readCellSelection(engine: Pick<DocxWorkerCommandEngine, 'cellSel
   }
 }
 
-export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string): YrsCellLoc | null {
-  if (story === rootOf(story)) return null;
-  const projection = createYrsPositionProjection(engine.geometryReader, rootOf(story));
+type ProjectedCellTable = { story: string; tableIndex: number; cells: { story: string; row: number; column: number }[] };
+
+/** The tables of `root` as the position projection lays them out: only what cell location reads. */
+function projectedCellTables(engine: DocxWorkerCommandEngine, root: string): ProjectedCellTable[] | null {
+  const projection = createYrsPositionProjection(engine.geometryReader, root);
   if (!projection) return null;
+  return projection.allTables().map((table) => ({
+    story: table.story,
+    tableIndex: table.tableIndex,
+    cells: table.cells.map((cell) => ({ story: cell.story, row: cell.row, column: cell.column })),
+  }));
+}
+
+function cellIn(tables: readonly ProjectedCellTable[] | null, story: string): YrsCellLoc | null {
+  if (!tables) return null;
   let best: YrsCellLoc | null = null;
-  for (const table of projection.allTables()) {
+  for (const table of tables) {
     const cell = table.cells.find((candidate) => candidate.story === story || story.startsWith(`${candidate.story}:`));
     if (!cell) continue;
     if (!best || table.story.length > best.story.length) {
@@ -32,6 +43,57 @@ export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string):
     }
   }
   return best;
+}
+
+const projectedTables = new WeakMap<object, Map<string, { key: string; tables: ProjectedCellTable[] | null }>>();
+let shadowCheck = false;
+const cacheCounts = { built: 0, reused: 0, uncached: 0 };
+
+/** @internal Every resolveLiveCell call also builds a fresh projection and throws when the answers differ. */
+export function setCellLocationShadowCheck(enabled: boolean): void {
+  shadowCheck = enabled;
+}
+
+/** @internal How often resolveLiveCell rebuilt, reused or could not cache the projected tables. */
+export function cellLocationCacheCounts(): { built: number; reused: number; uncached: number } {
+  return { ...cacheCounts };
+}
+
+/**
+ * The innermost table cell holding `story`, as the position projection of its root finds it. The
+ * projected tables are kept per engine and root until the engine's structure key changes: a key
+ * that changes with every embed, table row/cell/story change, story creation or removal, and with
+ * the document instance. Engines without a key project on every call.
+ */
+export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string): YrsCellLoc | null {
+  const root = rootOf(story);
+  if (story === root) return null;
+  const key = typeof engine.cellStructureKey === 'function' ? engine.cellStructureKey() : null;
+  let tables: ProjectedCellTable[] | null;
+  if (key === null) {
+    cacheCounts.uncached++;
+    tables = projectedCellTables(engine, root);
+  } else {
+    let roots = projectedTables.get(engine);
+    if (!roots) projectedTables.set(engine, roots = new Map());
+    const cached = roots.get(root);
+    if (cached?.key === key) {
+      cacheCounts.reused++;
+      tables = cached.tables;
+    } else {
+      cacheCounts.built++;
+      tables = projectedCellTables(engine, root);
+      roots.set(root, { key, tables });
+    }
+  }
+  const located = cellIn(tables, story);
+  if (shadowCheck && key !== null) {
+    const fresh = cellIn(projectedCellTables(engine, root), story);
+    if (JSON.stringify(fresh) !== JSON.stringify(located)) {
+      throw new Error(`cell location cache differs for ${story}: ${JSON.stringify(located)} != ${JSON.stringify(fresh)}`);
+    }
+  }
+  return located;
 }
 
 function validPayload(value: unknown): value is TablePayload {
