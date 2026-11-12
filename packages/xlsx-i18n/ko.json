@@ -1,4 +1,32 @@
 {
+  "replaceDialog": {
+    "title": "Find and replace",
+    "find": "Find",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "Replace",
+    "matchPosition": "{index} of {total}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "This changes formulas and recalculates results.",
+    "preview": "Preview",
+    "replaceAll": "Replace all",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}"
+  },
   "_lang": "ko",
   "toolbar": {
     "actionsLabel": "스프레드시트 작업",
@@ -103,6 +131,7 @@
     "redo": "다시 실행"
   },
   "commands": {
+    "findReplace": "Find and replace",
     "fontSizeStep": "글꼴 크기 변경",
     "numberFormat": "표시 형식",
     "decimalPlaces": "소수 자릿수 변경",

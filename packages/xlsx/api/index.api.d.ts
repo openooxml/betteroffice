@@ -679,6 +679,23 @@ export type XlsxEditOperation = {
     op: 'patchStyle';
     target: XlsxRangeTarget;
     patch: RangeStylePatch;
+} | {
+    /**
+     * Literal, case-sensitive replacement inside `target`.
+     *
+     * `values` rewrites stored text in non-formula cells and reports matching formula
+     * results as skipped. `formulas` rewrites text cells and formula source. Numeric,
+     * boolean, merged-follower, array-filled and locked cells are skipped; formatting is
+     * preserved. Limit exhaustion refuses the whole batch. It takes no `expect` guards.
+     */
+    op: 'replaceText';
+    target: XlsxRangeTarget;
+    query: string;
+    replacement: string;
+    /** Match only a cell whose whole searched text equals `query`. */
+    entireCell?: boolean;
+    /** Defaults to `values`. */
+    lookIn?: 'values' | 'formulas';
 };
 export type XlsxEditStep = XlsxEditOperation & {
     expect?: {
@@ -708,12 +725,24 @@ export interface XlsxEditRequest {
 export type XlsxEditFailureCode = 'stale-version' | 'missing-target' | 'content-mismatch' | 'overlapping-steps' | 'locked-target' | 'read-only' | 'unsupported' | 'invalid-step' | 'limit-exceeded';
 export type XlsxEditFailure = OperationFailure<XlsxEditFailureCode, XlsxRangeTarget>;
 export type XlsxEditRefusal = OperationRefusal<XlsxEditFailure>;
+/** Counts for one `replaceText` step; omitted for other operations. */
+export interface XlsxReplaceStats {
+    /** Cells whose searched text matched, including cells that could not be rewritten. */
+    matched: number;
+    /** Cells whose stored input changed. */
+    replaced: number;
+    /** Formula results that matched in `values` mode; their formulas are untouched. */
+    skippedFormulas: number;
+    /** Matches on merged followers, array fills or locked cells of a protected sheet. */
+    skippedLocked: number;
+}
 export interface XlsxEditReceipt {
     stepIndex: number;
     changed: boolean;
     target: XlsxRangeTarget;
     /** Row-major. */
     changedCells: XlsxCellAddress[];
+    replace?: XlsxReplaceStats;
 }
 /** What one step would do; it cannot be committed later. */
 export interface XlsxEditPreview {
@@ -721,6 +750,7 @@ export interface XlsxEditPreview {
     target: XlsxRangeTarget;
     wouldChange: boolean;
     changedCellCount: number;
+    replace?: XlsxReplaceStats;
 }
 export interface XlsxEditCalculation {
     /** Dependents whose value moved. */
@@ -816,6 +846,16 @@ export interface XlsxFindRequest {
     text: string;
     /** Defaults to every sheet. */
     sheetIds?: readonly string[];
+    /** Restricts the search to one rectangle. Takes precedence over `sheetIds`. */
+    range?: XlsxRangeTarget;
+    /**
+     * Omit to search the display text of every stored cell. `values` narrows to text cells and
+     * formula results; `formulas` narrows to text cells and formula source, matching what
+     * `replaceText` can rewrite.
+     */
+    lookIn?: 'values' | 'formulas';
+    /** Match only cells whose whole searched text equals `text`. */
+    entireCell?: boolean;
     /** Defaults to 100; at most 10,000. */
     limit?: number;
 }
@@ -1142,7 +1182,7 @@ export { initWasm, decodeFontFace, isWasmAvailable, isPngExportAvailable, isProp
 /** @internal */
 export { translateFormulasOn } from './wasm/loader';
 export type { WasmInitInput, WasmInitOptions, OpenWorkbookOptions, WorkbookCalculationContext, Viewport, PrintMetrics, SheetInfo, WorkbookHandle, XlsxTextMatch, XlsxTextSearchOptions, WorkbookUpdateInfo, WorkbookUpdateListener, WorkbookUpdateOrigin, CellEdit, CellPosition, CellInputEdit, EditResult, EditProfile, ProfiledEditResult, DisplayListProfile, ProfiledDisplayList, CalculationStatus, UnevaluatedCellStatus, BorderPatch, BorderPreset, BorderStyle, CapturedFormat, CapturedColor, CapturedFill, CapturedBorderStyle, CapturedBorderEdge, CapturedCellFormat, CellPoint, ConditionalFormatInfo, XlsxAutoFilterOp, ConditionalFormatOp, ConditionalFormatRuleInput, DifferentialFormatInput, HistoryState, HorizontalAlignment, MergedRange, WorkbookHyperlink, NumberFormat, NumberFormatMutation, Proposal, ProposalCell, ProposalEdit, RangeStylePatch, SelectionFormatting, StaleProposalTarget, StyleProperty, TextWrapping, VerticalAlignment, } from './wasm/loader';
-export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess, XlsxCellAddress, XlsxCellGuard, XlsxCellPosition, XlsxCellRead, XlsxCellValue, XlsxEditCalculation, XlsxEditFailure, XlsxEditFailureCode, XlsxEditHistory, XlsxEditOperation, XlsxEditPreview, XlsxEditReceipt, XlsxEditRefusal, XlsxEditRequest, XlsxEditResult, XlsxEditSource, XlsxEditStep, XlsxErrorValue, XlsxFindMatch, XlsxFindRequest, XlsxFindResult, XlsxRangeAddress, XlsxRangeRead, XlsxRangeTarget, XlsxReadCalculation, XlsxReadRequest, XlsxUnevaluatedCell, XlsxReadResult, XlsxSheetEntry, XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter, XlsxValidationResult, } from './edits';
+export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess, XlsxCellAddress, XlsxCellGuard, XlsxCellPosition, XlsxCellRead, XlsxCellValue, XlsxEditCalculation, XlsxEditFailure, XlsxEditFailureCode, XlsxEditHistory, XlsxEditOperation, XlsxEditPreview, XlsxEditReceipt, XlsxEditRefusal, XlsxEditRequest, XlsxEditResult, XlsxEditSource, XlsxEditStep, XlsxErrorValue, XlsxFindMatch, XlsxFindRequest, XlsxFindResult, XlsxRangeAddress, XlsxRangeRead, XlsxRangeTarget, XlsxReadCalculation, XlsxReadRequest, XlsxReplaceStats, XlsxUnevaluatedCell, XlsxReadResult, XlsxSheetEntry, XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter, XlsxValidationResult, } from './edits';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, XlsxAnchor, XlsxExportCell, XlsxExportDefinedName, XlsxExportDiagnostic, XlsxExportDiagnosticCode, XlsxExportFailure, XlsxExportFailureCode, XlsxExportHyperlink, XlsxExportMerge, XlsxExportObject, XlsxExportOptions, XlsxExportResult, XlsxExportScope, XlsxExportSheet, XlsxExportTable, XlsxExportValue, XlsxFormulaResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxObjectKind, XlsxSheetIdentity, XlsxSheetVisibility, XlsxSourcePart, XlsxStructuredContent, } from './exports';
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
 export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName } from './charts';

@@ -62,7 +62,8 @@ const LINK_TARGET = 'https://example.com/report';
 const LINK_CELL: CellAddr = { row: 5, col: 4 };
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+// Load after happy-dom exists; a static import binds events to the pre-DOM globals.
+const { act, cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react');
 
 function stubContext(): CanvasRenderingContext2D {
   const noop = () => {};
@@ -1090,6 +1091,25 @@ describe('XlsxEditor chart objects', () => {
     // no invisible selection left swallowing the keyboard.
     await waitFor(() => expect(view.outline()).toBeNull());
     await waitFor(() => expect(view.selectionBox()).not.toBeNull());
+  });
+});
+
+describe('XlsxEditor replace dialog', () => {
+  it('opens with Mod+H and applies a previewed replacement', async () => {
+    const view = await mountEditor();
+    fireEvent.keyDown(view.surface, { key: 'h', ...(isMacPlatform() ? { metaKey: true } : { ctrlKey: true }) });
+    const dialog = await waitFor(() => view.view.getByRole('dialog'));
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Find' }), {
+      target: { value: 'Quarterly' },
+    });
+    fireEvent.change(within(dialog).getByRole('textbox', { name: 'Replace with' }), {
+      target: { value: 'Yearly' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Preview' }));
+    await waitFor(() => expect(within(dialog).getByRole('status').textContent).toContain('Matched'));
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Replace all' }));
+    await waitFor(() => expect(view.workbook().cell(0, 0, 0).input).toBe('Yearly Budget Report'));
   });
 });
 

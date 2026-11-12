@@ -9,7 +9,7 @@ use xlsx_render::display_text;
 use super::Workbook;
 use super::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditOperation, EditRefusal,
-    MAX_DIAGNOSTIC_CELLS, failure, refusal,
+    MAX_DIAGNOSTIC_CELLS, ReplaceLookIn, failure, refusal,
 };
 use crate::{CellAddress, Result, XlsxSheetVisibility};
 
@@ -145,7 +145,7 @@ pub struct CellsRead {
 
 pub type ReadOutcome = std::result::Result<CellsRead, EditRefusal>;
 
-/// An exact, case-sensitive substring search over formatted cell text.
+/// An exact, case-sensitive search over cell text, optionally scoped and formula-aware.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FindRequest {
@@ -153,6 +153,16 @@ pub struct FindRequest {
     /// Defaults to every sheet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet_ids: Option<Vec<String>>,
+    /// Restricts the search to one rectangle. Takes precedence over `sheet_ids`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<RangeTarget>,
+    /// Omit to search display text of every stored cell. `values` narrows to text cells and
+    /// formula results; `formulas` narrows to text cells and formula source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look_in: Option<ReplaceLookIn>,
+    /// Match only cells whose whole searched text equals `text`.
+    #[serde(default)]
+    pub entire_cell: bool,
     /// Defaults to 100; at most 10,000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
@@ -374,6 +384,23 @@ impl Workbook {
         })
     }
 
+    /// `at` when a protected sheet's cell style leaves it locked. `None` on an unprotected
+    /// sheet or an unlocked cell.
+    pub(super) fn content_locked_cell(&self, sheet: SheetId, at: CellRef) -> Option<CellRef> {
+        match self.sheet_lock(sheet) {
+            Some(SheetLock::Protected { .. }) => {}
+            _ => return None,
+        }
+        let sheet_ref = self.model.sheet(sheet)?;
+        let mut defaults = ColumnDefaults::new(sheet_ref);
+        self.model
+            .styles
+            .xf(defaults.effective_style(at).unwrap_or(0))
+            .and_then(|xf| xf.protection)
+            .is_none_or(|protection| protection.locked)
+            .then_some(at)
+    }
+
     /// Why batches refuse `operation` on `target`, if they do: a protected sheet takes content
     /// only in unlocked cells and formats only when it allows formatting cells.
     pub(super) fn step_write_refusal(
@@ -388,6 +415,13 @@ impl Workbook {
             SheetLock::Protected { format_cells } => format_cells,
         };
         match operation {
+            // A replace checks the cells it actually rewrites, not its whole range.
+            EditOperation::ReplaceText { .. } => {
+                if let Some(SheetLock::NotWorksheet) = self.sheet_lock(target.sheet) {
+                    return self.sheet_write_refusal(target.sheet);
+                }
+                None
+            }
             EditOperation::SetCellInputs { .. }
             | EditOperation::SetCellValues { .. }
             | EditOperation::SetFormulas { .. } => {
@@ -579,52 +613,72 @@ impl Workbook {
             );
         }
         let keys = self.sheet_keys();
-        let sheets = match &request.sheet_ids {
-            None => (0..self.model.sheets.len()).collect::<Vec<_>>(),
-            Some(ids) => {
-                let mut sheets = Vec::with_capacity(ids.len());
-                for id in ids {
-                    match keys.iter().position(|key| key == id) {
-                        Some(index) if index < self.model.sheets.len() => sheets.push(index),
-                        _ => {
-                            return refused(
-                                EditFailureCode::MissingTarget,
-                                format!("no sheet has the id {id:?}"),
-                            );
+        let scopes: Vec<(SheetId, Option<CellRange>)> = if let Some(target) = &request.range {
+            let resolved = match self.resolve_target(&keys, target) {
+                Ok(resolved) => resolved,
+                Err(failure) => return Ok(Err(refusal(version, failure))),
+            };
+            vec![(resolved.sheet, Some(resolved.range))]
+        } else {
+            let sheets = match &request.sheet_ids {
+                None => (0..self.model.sheets.len()).collect::<Vec<_>>(),
+                Some(ids) => {
+                    let mut sheets = Vec::with_capacity(ids.len());
+                    for id in ids {
+                        match keys.iter().position(|key| key == id) {
+                            Some(index) if index < self.model.sheets.len() => sheets.push(index),
+                            _ => {
+                                return refused(
+                                    EditFailureCode::MissingTarget,
+                                    format!("no sheet has the id {id:?}"),
+                                );
+                            }
                         }
                     }
+                    sheets.sort_unstable();
+                    sheets.dedup();
+                    sheets
                 }
-                sheets.sort_unstable();
-                sheets.dedup();
-                sheets
-            }
+            };
+            sheets
+                .into_iter()
+                .map(|index| (SheetId(index as u32), None))
+                .collect()
         };
         let mut matches = Vec::new();
         let mut text_bytes = 0_usize;
-        for index in sheets {
-            for (at, cell) in self.model.sheets[index].iter_cells() {
-                let text = display_text(&self.model.styles, self.model.date_system, cell);
-                if !text.contains(request.text.as_str()) {
-                    continue;
-                }
-                if matches.len() == limit as usize {
+        for (sheet, range) in scopes {
+            let cells = &self.model.sheets[sheet.0 as usize];
+            let truncated = match range {
+                Some(range) => self.find_in_cells(
+                    &keys,
+                    sheet,
+                    cells.cells_in_range(range),
+                    request,
+                    limit,
+                    &mut matches,
+                    &mut text_bytes,
+                ),
+                None => self.find_in_cells(
+                    &keys,
+                    sheet,
+                    cells.iter_cells(),
+                    request,
+                    limit,
+                    &mut matches,
+                    &mut text_bytes,
+                ),
+            };
+            match truncated {
+                Ok(true) => {
                     return Ok(Ok(TextFound {
                         version,
                         matches,
                         truncated: true,
                     }));
                 }
-                text_bytes += text.len();
-                if text_bytes > MAX_OUTPUT_TEXT_BYTES {
-                    return refused(
-                        EditFailureCode::LimitExceeded,
-                        format!("a search returns at most {MAX_OUTPUT_TEXT_BYTES} bytes of text"),
-                    );
-                }
-                matches.push(FindMatch {
-                    cell: cell_target(&keys, SheetId(index as u32), at),
-                    text,
-                });
+                Ok(false) => {}
+                Err((code, message)) => return refused(code, message),
             }
         }
         Ok(Ok(TextFound {
@@ -632,5 +686,66 @@ impl Workbook {
             matches,
             truncated: false,
         }))
+    }
+
+    /// Appends matches from one sheet in iteration order; `true` when `limit` stopped the scan.
+    fn find_in_cells<'a>(
+        &self,
+        keys: &[String],
+        sheet: SheetId,
+        cells: impl Iterator<Item = (CellRef, &'a xlsx_model::Cell)>,
+        request: &FindRequest,
+        limit: u32,
+        matches: &mut Vec<FindMatch>,
+        text_bytes: &mut usize,
+    ) -> std::result::Result<bool, (EditFailureCode, String)> {
+        for (at, cell) in cells {
+            let display = display_text(&self.model.styles, self.model.date_system, cell);
+            let stored_text = match &cell.value {
+                CellValue::Text { value } => Some(value.as_str()),
+                _ => None,
+            };
+            let searched = match request.look_in {
+                // Legacy callers get display text for every cell, numbers included.
+                None => display.as_str(),
+                Some(ReplaceLookIn::Values) => match cell.formula.as_deref() {
+                    Some(_) => display.as_str(),
+                    None => match stored_text {
+                        Some(value) => value,
+                        None => continue,
+                    },
+                },
+                Some(ReplaceLookIn::Formulas) => match cell.formula.as_deref() {
+                    Some(formula) => formula,
+                    None => match stored_text {
+                        Some(value) => value,
+                        None => continue,
+                    },
+                },
+            };
+            let matched = if request.entire_cell {
+                searched == request.text.as_str()
+            } else {
+                searched.contains(request.text.as_str())
+            };
+            if !matched {
+                continue;
+            }
+            if matches.len() == limit as usize {
+                return Ok(true);
+            }
+            *text_bytes += display.len();
+            if *text_bytes > MAX_OUTPUT_TEXT_BYTES {
+                return Err((
+                    EditFailureCode::LimitExceeded,
+                    format!("a search returns at most {MAX_OUTPUT_TEXT_BYTES} bytes of text"),
+                ));
+            }
+            matches.push(FindMatch {
+                cell: cell_target(keys, sheet, at),
+                text: display,
+            });
+        }
+        Ok(false)
     }
 }

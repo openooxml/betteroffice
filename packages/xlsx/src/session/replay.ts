@@ -190,6 +190,13 @@ function editRequest(value: unknown): boolean {
       case 'setFormulas': return matrix(step.formulas);
       case 'setNumberFormat': return numberFormat(step.format);
       case 'patchStyle': return style(step.patch);
+      case 'replaceText': return typeof step.query === 'string' && step.query.length > 0 &&
+        typeof step.replacement === 'string' &&
+        optionalFields(step, {
+          entireCell: (field) => typeof field === 'boolean',
+          lookIn: (field) => field === 'values' || field === 'formulas',
+        }) &&
+        step.expect === undefined;
       default: return false;
     }
   });

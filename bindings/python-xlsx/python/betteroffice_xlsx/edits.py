@@ -112,7 +112,20 @@ class PatchStyle(_Guarded):
     patch: dict
 
 
-EditStep = Union[SetCellInputs, SetFormulas, SetNumberFormat, PatchStyle]
+class ReplaceText(_Step, total=False):
+    """Literal, case-sensitive replacement; other cells are skipped.
+
+    ``lookIn`` defaults to ``values``; ``formulas`` also rewrites formula source.
+    """
+
+    op: Literal["replaceText"]
+    query: str
+    replacement: str
+    entireCell: bool
+    lookIn: Literal["values", "formulas"]
+
+
+EditStep = Union[SetCellInputs, SetFormulas, SetNumberFormat, PatchStyle, ReplaceText]
 
 
 class CalculationRequest(TypedDict, total=False):
@@ -149,14 +162,27 @@ class Refusal(TypedDict):
     failure: EditFailure
 
 
-class EditReceipt(TypedDict):
+class ReplaceStats(TypedDict):
+    """Counts for one ``replaceText`` step; omitted for other operations."""
+
+    matched: int
+    replaced: int
+    skippedFormulas: int
+    skippedLocked: int
+
+
+class _OptionalReplace(TypedDict, total=False):
+    replace: ReplaceStats
+
+
+class EditReceipt(_OptionalReplace):
     stepIndex: int
     changed: bool
     target: RangeTarget
     changedCells: List[CellAddress]
 
 
-class EditPreview(TypedDict):
+class EditPreview(_OptionalReplace):
     stepIndex: int
     target: RangeTarget
     wouldChange: bool
@@ -243,9 +269,16 @@ class _FindRequest(TypedDict):
 
 
 class FindRequest(_FindRequest, total=False):
-    """Exact, case-sensitive search over display text; ``limit`` defaults to 100."""
+    """Exact, case-sensitive search; ``limit`` defaults to 100.
+
+    Omit ``lookIn`` to search display text of every stored cell. ``values`` and
+    ``formulas`` narrow to cells ``ReplaceText`` can rewrite.
+    """
 
     sheetIds: List[str]
+    range: RangeTarget
+    lookIn: Literal["values", "formulas"]
+    entireCell: bool
     limit: int
 
 

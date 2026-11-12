@@ -1,4 +1,32 @@
 {
+  "replaceDialog": {
+    "title": "查找和替换",
+    "find": "查找",
+    "replaceWith": "替换为",
+    "findPrevious": "查找上一个",
+    "findNext": "查找下一个",
+    "replace": "替换",
+    "matchPosition": "第 {index} 个，共 {total} 个",
+    "lookIn": "查找范围",
+    "values": "值",
+    "formulas": "公式",
+    "entireCell": "匹配整个单元格内容",
+    "range": "范围：{range}",
+    "scope": "搜索范围",
+    "scopeSelection": "当前选区",
+    "scopeSheet": "当前工作表",
+    "scopeWorkbook": "全部工作表",
+    "sheetScope": "工作表：{sheet}",
+    "workbookScope": "全部工作表（{count} 个）",
+    "noRange": "请先选择单元格区域。",
+    "formulaWarning": "这会修改公式并重新计算结果。",
+    "preview": "预览",
+    "replaceAll": "全部替换",
+    "working": "正在检查…",
+    "noMatches": "没有匹配项。",
+    "summary": "匹配 {matched} 个，替换 {replaced} 个，跳过 {formulas} 个公式结果和 {locked} 个锁定单元格。",
+    "refused": "未替换：{message}"
+  },
   "_lang": "zh-CN",
   "toolbar": {
     "actionsLabel": "电子表格操作",
@@ -103,6 +131,7 @@
     "redo": "恢复"
   },
   "commands": {
+    "findReplace": "查找和替换",
     "fontSizeStep": "更改字号",
     "numberFormat": "数字格式",
     "decimalPlaces": "更改小数位数",

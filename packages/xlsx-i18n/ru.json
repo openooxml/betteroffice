@@ -1,4 +1,32 @@
 {
+  "replaceDialog": {
+    "title": "Find and replace",
+    "find": "Find",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "Replace",
+    "matchPosition": "{index} of {total}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "This changes formulas and recalculates results.",
+    "preview": "Preview",
+    "replaceAll": "Replace all",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}"
+  },
   "_lang": "ru",
   "toolbar": {
     "actionsLabel": "Действия с электронной таблицей",
@@ -103,6 +131,7 @@
     "redo": "Вернуть"
   },
   "commands": {
+    "findReplace": "Find and replace",
     "fontSizeStep": "Изменить размер шрифта",
     "numberFormat": "Числовой формат",
     "decimalPlaces": "Изменить разрядность",
