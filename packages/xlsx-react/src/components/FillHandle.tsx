@@ -68,6 +68,9 @@ export interface FillHandleProps {
 interface FillDrag {
   pointerId: number;
   endpoint: CellAddr;
+  startX: number;
+  startY: number;
+  moved: boolean;
 }
 
 /**
@@ -119,7 +122,13 @@ export function FillHandle({
     } catch {
       // pointer capture is best effort; bubbling pointer events still work.
     }
-    const next = { pointerId: event.pointerId, endpoint: { row: source.bottom, col: source.right } };
+    const next = {
+      pointerId: event.pointerId,
+      endpoint: { row: source.bottom, col: source.right },
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    };
     dragRef.current = next;
     setDrag(next);
   };
@@ -131,7 +140,8 @@ export function FillHandle({
     event.stopPropagation();
     const endpoint = cellAt(event.clientX, event.clientY);
     if (!endpoint) return;
-    const next = { ...current, endpoint };
+    const moved = current.moved || event.clientX !== current.startX || event.clientY !== current.startY;
+    const next = { ...current, endpoint, moved };
     dragRef.current = next;
     setDrag(next);
   };
@@ -149,8 +159,9 @@ export function FillHandle({
     } catch {
       // the pointer may already be gone.
     }
+    const moved = current.moved || event.clientX !== current.startX || event.clientY !== current.startY;
     const completed = fillDestination(source, endpoint);
-    if (completed.bottom > source.bottom || completed.right > source.right) onFill(source, completed);
+    if (moved && (completed.bottom > source.bottom || completed.right > source.right)) onFill(source, completed);
   };
 
   const onPointerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {

@@ -132,6 +132,13 @@ describe('FillHandle gesture', () => {
     expect(onFill).not.toHaveBeenCalled();
   });
 
+  it('does not fill on a press and release over the neighbouring cell without moving', () => {
+    const { handle, onFill } = mount();
+    press(handle, 98, 26);
+    release(handle, 98, 26);
+    expect(onFill).not.toHaveBeenCalled();
+  });
+
   it('cancels the preview and the pending fill on Escape', () => {
     const { view, handle, onFill } = mount();
     press(handle, 94, 22);
