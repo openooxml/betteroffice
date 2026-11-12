@@ -5156,9 +5156,15 @@ fn table_cell_style_formatting(
     {
         return result;
     }
-    for (region, _) in
-        table_style_regions(table, style, row_index, start_column, end_column, columns, 1)
-    {
+    for (region, _) in table_style_regions(
+        table,
+        style,
+        row_index,
+        start_column,
+        end_column,
+        columns,
+        1,
+    ) {
         if region == "wholeTable" && property != "rPr" {
             continue;
         }
@@ -9007,9 +9013,7 @@ mod tests {
                 ]
             }]
         });
-        let cell = |shading: Value| {
-            json!({ "type": "tableCell", "formatting": { "shading": shading }, "content": [] })
-        };
+        let cell = |shading: Value| json!({ "type": "tableCell", "formatting": { "shading": shading }, "content": [] });
         let nil = cell(json!({ "pattern": "nil" }));
         let solid = cell(json!({
             "pattern": "solid", "color": { "rgb": "FF0000" }, "fill": { "auto": true }
