@@ -476,10 +476,7 @@ pub(super) fn visible_text(
         .map(|(text, _)| text)
         .collect();
     if actual != expected {
-        return Err(Failure::new(
-            PatchErrorCode::ResultMismatch,
-            "visible text differs outside the edit",
-        ));
+        return Err(Failure::structure("visible text differs outside the edit"));
     }
     Ok(())
 }
@@ -543,10 +540,10 @@ mod tests {
     }
 
     #[test]
-    fn a_patch_dropping_a_field_result_character_is_refused() {
+    fn a_patch_dropping_a_field_result_character_is_declined() {
         let Err(failure) = check_typing_x(&paragraph("aXbc", "1")) else {
             panic!("dropped result text was accepted");
         };
-        assert_eq!(failure.code, PatchErrorCode::ResultMismatch);
+        assert_eq!(failure.code, PatchErrorCode::UnsupportedStructure);
     }
 }
