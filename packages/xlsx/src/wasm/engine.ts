@@ -8,6 +8,7 @@ export {
   displayListCellLimit,
   exportXlsxMarkdownJson,
   exportXlsxStructuredJson,
+  install_panic_hook,
   renderXlsxMarkdownJson,
 } from './generated/xlsx_wasm.js';
 export type { InitInput } from './generated/xlsx_wasm.js';

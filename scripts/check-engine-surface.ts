@@ -86,7 +86,6 @@ export const FORMATS: Record<string, FormatConfig> = {
 
 const IGNORED_FUNCTIONS = new Set([
   "free",
-  "install_panic_hook",
   "initSync",
   "default",
   "__wbg_init",

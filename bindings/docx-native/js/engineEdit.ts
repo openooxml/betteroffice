@@ -70,6 +70,7 @@ type Engine = Pick<
 >;
 
 const binding = createRequire(import.meta.url)('../index.js') as Engine;
+binding.install_panic_hook();
 installDispose(binding.EditSession, binding.RetainedLayoutMeta, binding.RunInheritance);
 
 export const EditSession = binding.EditSession;

@@ -89,11 +89,12 @@ function flatten(extras: { functions: object; members: object }): Record<string,
 
 const NAPI_INTERNALS: Record<string, Internal> = { __napiBindingTarget: { reason: 'napi-rs loader: which prebuilt binary was loaded' } };
 
-const PANIC_HOOK: Internal = { reason: 'wasm panic-hook installer; not part of any engine module surface' };
+const PANIC_HOOK: Internal = { reason: 'panic-hook installer; runs once when the engine loads' };
 
-/** Formats whose wasm glue exports install_panic_hook; docx-native carries an empty one (gap item 2). */
+/** Formats whose wasm glue and native binding export install_panic_hook. */
 const PANIC_HOOK_FORMATS: Record<Format, { wasm: boolean; native: boolean }> = {
-  xlsx: { wasm: true, native: false },
+  xlsx: { wasm: true, native: true },
+  // pptx has no panic hook on either side.
   pptx: { wasm: false, native: false },
   docx: { wasm: true, native: true },
 };
