@@ -6793,6 +6793,64 @@ mod tests {
     }
 
     #[test]
+    fn a_prime_slice_that_gives_up_mid_story_reports_what_it_hashed() {
+        use crate::seed::fixture;
+        let text: String = (0..40u32)
+            .map(|index| {
+                fixture::para(
+                    &format!("{:08X}", 0x0400_0000 + index),
+                    &fixture::run(&format!("Text paragraph {index} before the pictures")),
+                )
+            })
+            .collect();
+        let pictures: String = (0..10u32)
+            .map(|index| {
+                fixture::para(
+                    &format!("{:08X}", 0x0500_0000 + index),
+                    &fixture::image("rIdImage", "Picture"),
+                )
+            })
+            .collect();
+        let package = |body: &str| {
+            let mut parts = fixture::Package::new(body)
+                .rel("rIdImage", "image", "media/image1.png")
+                .parts();
+            for (name, bytes) in &mut parts {
+                if name == "word/media/image1.png" {
+                    bytes.resize(200_000, 0);
+                }
+            }
+            ooxml_opc::rezip_parts(&parts).unwrap()
+        };
+        let text_only = one_shot_prime_cost(&package(&text));
+        let bytes = package(&format!("{text}{pictures}"));
+        let session = bytes_session(&bytes);
+        let doc = session.engine.doc();
+        let source = doc.source_index().unwrap();
+        let packed = source.bytes().as_ref().len() as u64;
+        let opened = ooxml_opc::RetainedPackage::from_bytes(source.bytes()).unwrap();
+        let inflated = opened.parts().map(|(_, size)| size).sum::<u64>();
+        let size = u32::try_from(packed.max(inflated)).unwrap();
+        loop {
+            let slice = charged_slice(doc, u32::MAX, size, WIDE_BUDGET, 1);
+            assert_eq!(slice, (PrimeSlice::Pending, 0, 0));
+            if prime_phase(doc) == Some(PrimePhase::Stories) {
+                break;
+            }
+        }
+        let story = PRIME_STORY_COST as u64;
+        let start = charged_slice(doc, u32::MAX, size, WIDE_BUDGET, 1);
+        assert_eq!(start, (PrimeSlice::Pending, story, story));
+        assert_eq!(current_charge(doc), Some(("body".to_owned(), 0)));
+        let (outcome, reported, spent) = charged_slice(doc, u32::MAX, size, WIDE_BUDGET, 1);
+        assert_eq!(outcome, PrimeSlice::Declined);
+        assert_eq!(reported, spent);
+        assert_eq!(reported, text_only - story);
+        assert!(doc.prime_progress.lock().unwrap().is_none());
+        assert!(!source.seed_states_initialized());
+    }
+
+    #[test]
     fn a_declined_slice_reports_what_it_charged() {
         let bytes = multi_chunk_docx();
         let session = bytes_session(&bytes);
