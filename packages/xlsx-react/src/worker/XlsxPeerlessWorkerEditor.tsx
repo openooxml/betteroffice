@@ -332,10 +332,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     commit: (_handle, edges) => resizeChartRef.current(edges),
   });
   // the engine clamps the preview at the far edge of the last cell, not at the
-  // used range; read it once per chart selection and active sheet.
+  // used range; read it once per resize gesture.
+  const chartResizing = chartPreview?.kind === 'resize';
   useEffect(() => {
     const owner = run;
-    if (!selectedChart || !owner?.ready || !owner.current) {
+    if (!selectedChart || !chartResizing || !owner?.ready || !owner.current) {
       setChartSheetExtent(null);
       return;
     }
@@ -349,7 +350,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       })
       .catch(() => { if (!cancelled) setChartSheetExtent(null); });
     return () => { cancelled = true; };
-  }, [run, run?.ready, active, selectedChart]);
+  }, [run, run?.ready, active, selectedChart, chartResizing]);
   const report = useCallback((error: unknown) => {
     if (error instanceof XlsxHostRefusalError) {
       setRefusal({ code: error.code, message: error.message });
