@@ -4990,14 +4990,10 @@ fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<
     let shading = field(formatting, "shading")
         .filter(|value| !value.is_null())
         .or_else(|| field(options.style_cell, "shading"));
-    let background = resolve_color_to_hex(
-        if string(field(shading, "pattern")) == Some("solid") {
-            field(shading, "color")
-        } else {
-            field(shading, "fill")
-        },
-        options.theme,
-    );
+    let background = (string(field(shading, "pattern")) == Some("solid"))
+        .then(|| resolve_color_to_hex(field(shading, "color"), options.theme))
+        .flatten()
+        .or_else(|| resolve_color_to_hex(field(shading, "fill"), options.theme));
     let width = field(field(formatting, "width"), "value")
         .cloned()
         .or_else(|| options.grid_width.map(|value| json!(value)));
