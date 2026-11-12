@@ -198,7 +198,7 @@ def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0, 
     return results
 
 
-REGISTRY_EXPORTS_SINCE = '0.6.0'
+LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS = '0.5.1'
 
 
 def semver_key(version):
@@ -216,10 +216,11 @@ def validate_font_paths(paths, published_version):
         raise ValueError(f"Font chains were recorded for published {paths['published'].get('version')}, the plan measures {published_version}")
     entry = paths['published']
     if entry.get('path') == 'bench-manifest':
-        if entry.get('registry_exports_since') != REGISTRY_EXPORTS_SINCE:
-            raise ValueError(f"Font chains name {entry.get('registry_exports_since')} as the first release with the registry exports, expected {REGISTRY_EXPORTS_SINCE}")
-        if semver_key(entry['version']) >= semver_key(REGISTRY_EXPORTS_SINCE):
-            raise ValueError(f"Published {entry['version']} is not older than {REGISTRY_EXPORTS_SINCE}, so it must replay the product registry, not the bench manifest")
+        last = LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS
+        if entry.get('last_release_without_registry_exports') != last:
+            raise ValueError(f"Font chains name {entry.get('last_release_without_registry_exports')} as the last release without the registry exports, expected {last}")
+        if semver_key(entry['version']) > semver_key(last):
+            raise ValueError(f"Published {entry['version']} is newer than {last}, the last release without the registry exports, so it must replay the product registry, not the bench manifest")
     elif entry.get('path') != 'product-registry':
         raise ValueError(f"Unknown font path for the published channel: {entry.get('path')}")
     return paths
@@ -241,9 +242,9 @@ def font_path_notes(paths, method):
     for channel in CHANNELS[:2]:
         entry = (paths or {}).get(channel, dict(path='bench-manifest'))
         note = f'native column not comparable with runs before {method}'
-        if entry['path'] == 'bench-manifest' and entry.get('registry_exports_since'):
-            note += (f"; {channel} {entry['version']} predates {entry['registry_exports_since']}, the first release with the registry exports"
-                     f" ({entry['version']} < {entry['registry_exports_since']}), so its native column is still on the old font map"
+        if entry['path'] == 'bench-manifest' and entry.get('last_release_without_registry_exports'):
+            note += (f"; {channel} {entry['version']} <= {entry['last_release_without_registry_exports']}, the last release without the registry exports,"
+                     ' so its native column is still on the old font map'
                      ' and published against commit on the native column is not like for like until the next release')
         notes[channel] = note
     return notes

@@ -7,8 +7,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import JSZip from 'jszip';
 import {
-  REGISTRY_EXPORTS_SINCE, compareSemver, describeAddons, fontPathFor, guardRegistrations, layOutFonts, loadProduct, missingAddons,
-  serializeChains, writeDocumentChains, type FontPackages, type Product,
+  LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS, compareSemver, describeAddons, describeFontPath, fontPathFor, guardRegistrations, layOutFonts,
+  loadProduct, missingAddons, missingExportsFailure, serializeChains, writeDocumentChains, type FontPackages, type Product,
 } from './native-chains';
 
 type Faces = Record<string, string[]>;
@@ -183,14 +183,22 @@ test('a document fails only when it needs an add-on its channel lacks', () => {
   expect(missingAddons(withoutLatin, [requirement('Calibri')])).toEqual(['Calibri (family face, latin.ttf) needs @betteroffice/fonts-latin, which is broken']);
 });
 
-test('the old font map is chosen only for a published release older than the first one with the registry exports', () => {
-  expect(REGISTRY_EXPORTS_SINCE).toBe('0.6.0');
+test('the old font map is chosen only for a published release no newer than the last one without the registry exports', () => {
+  expect(LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS).toBe('0.5.1');
   expect(fontPathFor('published', '0.5.1')).toBe('bench-manifest');
-  expect(fontPathFor('published', '0.6.0-next.3')).toBe('bench-manifest');
+  expect(fontPathFor('published', '0.5.0')).toBe('bench-manifest');
+  expect(fontPathFor('published', '0.5.2')).toBe('product-registry');
+  expect(fontPathFor('published', '0.6.0-next.3')).toBe('product-registry');
   expect(fontPathFor('published', '0.6.0')).toBe('product-registry');
   expect(fontPathFor('published', '0.10.0')).toBe('product-registry');
   expect(fontPathFor('commit', '0.5.1')).toBe('product-registry');
   expect(() => fontPathFor('published', 'latest')).toThrow('not a semver version');
+  expect(describeFontPath('published', '0.5.1')).toBe('published: bench-manifest, @betteroffice/docx@0.5.1 <= 0.5.1, the last release without the registry exports; its native column stays on the old font map until the next release');
+  expect(describeFontPath('published', '0.6.0')).toBe('published: product-registry, @betteroffice/docx@0.6.0 > 0.5.1, the last release without the registry exports');
+  expect(describeFontPath('commit', '0.5.1')).toContain('commit: product-registry, @betteroffice/docx@0.5.1 is the commit under test');
+  expect(missingExportsFailure('published', '0.5.2', 'no ./fonts export')).toBe('published: @betteroffice/docx@0.5.2 is newer than 0.5.1, the last release without the registry exports, so it must carry the registry exports the recorder needs: no ./fonts export');
+  expect(missingExportsFailure('published', '0.6.0', 'x')).toContain('0.6.0 is newer than 0.5.1');
+  expect(missingExportsFailure('commit', '0.5.1', 'x')).toBe('commit: @betteroffice/docx@0.5.1 is the commit under test, so it must carry the registry exports the recorder needs: x');
   expect(compareSemver('0.6.0-next.2', '0.6.0-next.10')).toBe(-1);
   expect(compareSemver('0.6.0-next', '0.6.0-next.1')).toBe(-1);
   expect(compareSemver('0.6.0-1', '0.6.0-alpha')).toBe(-1);
@@ -198,9 +206,9 @@ test('the old font map is chosen only for a published release older than the fir
   expect(compareSemver('0.5.10', '0.6.0')).toBe(-1);
 });
 
-test('the bench reads the same first release with the registry exports as the recorder', async () => {
+test('the bench reads the same last release without the registry exports as the recorder', async () => {
   const python = await readFile(join(import.meta.dir, 'docx_benchmark.py'), 'utf8');
-  expect(python).toContain(`REGISTRY_EXPORTS_SINCE = '${REGISTRY_EXPORTS_SINCE}'`);
+  expect(python).toContain(`LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS = '${LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS}'`);
 });
 
 test('a registration the product registry drops fails the recording, naming the family', async () => {

@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from docx_benchmark import (CHANNELS, REGISTRY_EXPORTS_SINCE, edge_adjust, font_path_notes, measure_sample, semver_key,
-                            sha256, validate_font_paths, validate_png)
+from docx_benchmark import (CHANNELS, LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS, edge_adjust, font_path_notes, measure_sample,
+                            semver_key, sha256, validate_font_paths, validate_png)
 
 FACES = ['a' * 64, 'b' * 64, 'a' * 64 + '~Calibri']
 
@@ -75,18 +75,21 @@ class NativeBenchmarkTests(unittest.TestCase):
             self.assertEqual(result['commit']['status'], 'failed')
             self.assertIn('different font faces', result['commit']['error'])
 
-    def test_the_old_font_map_is_allowed_only_for_a_published_release_older_than_the_registry_exports(self):
-        old = dict(path='bench-manifest', version='0.5.1', registry_exports_since=REGISTRY_EXPORTS_SINCE)
+    def test_the_old_font_map_is_allowed_only_for_a_published_release_no_newer_than_the_last_without_the_registry_exports(self):
+        self.assertEqual(LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS, '0.5.1')
+        old = dict(path='bench-manifest', version='0.5.1', last_release_without_registry_exports=LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS)
         commit = dict(path='product-registry', version='0.5.1')
         self.assertEqual(validate_font_paths(dict(published=old, commit=commit), '0.5.1')['published'], old)
         self.assertLess(semver_key('0.6.0-next.1'), semver_key('0.6.0'))
         self.assertLess(semver_key('0.6.0-next.2'), semver_key('0.6.0-next.10'))
         self.assertLess(semver_key('0.5.10'), semver_key('0.6.0'))
-        validate_font_paths(dict(published=dict(old, version='0.6.0-next.1'), commit=commit), '0.6.0-next.1')
+        validate_font_paths(dict(published=dict(old, version='0.5.0'), commit=commit), '0.5.0')
         for published, version, error in [
-            (dict(old, version='0.6.0'), '0.6.0', 'not older than'),
-            (dict(old, version='0.10.0'), '0.10.0', 'not older than'),
-            (dict(old, registry_exports_since='0.5.0'), '0.5.1', 'first release'),
+            (dict(old, version='0.5.2'), '0.5.2', 'is newer than 0.5.1'),
+            (dict(old, version='0.6.0-next.1'), '0.6.0-next.1', 'is newer than 0.5.1'),
+            (dict(old, version='0.6.0'), '0.6.0', 'is newer than 0.5.1'),
+            (dict(old, version='0.10.0'), '0.10.0', 'is newer than 0.5.1'),
+            (dict(old, last_release_without_registry_exports='0.5.0'), '0.5.1', 'last release without'),
             (dict(old, version='latest'), 'latest', 'Not a semver'),
             (dict(old, path='system'), '0.5.1', 'Unknown font path'),
             (old, '0.6.0', 'plan measures'),
@@ -98,7 +101,7 @@ class NativeBenchmarkTests(unittest.TestCase):
         notes = font_path_notes(dict(published=old, commit=commit), 'docx-cli-page1-v2')
         self.assertIn('not comparable with runs before docx-cli-page1-v2', notes['commit'])
         self.assertNotIn('old font map', notes['commit'])
-        self.assertIn('0.5.1 predates 0.6.0', notes['published'])
+        self.assertIn('0.5.1 <= 0.5.1, the last release without the registry exports', notes['published'])
         self.assertIn('not like for like until the next release', notes['published'])
 
     def test_failed_or_skipped_native_render_cannot_contribute_a_fast_time(self):

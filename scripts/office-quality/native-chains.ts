@@ -326,7 +326,7 @@ export async function writeDocumentChains(product: Product, bytes: Uint8Array, d
   return path;
 }
 
-export const REGISTRY_EXPORTS_SINCE = '0.6.0';
+export const LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS = '0.5.1';
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
 
@@ -357,7 +357,23 @@ export function compareSemver(left: string, right: string): number {
 }
 
 export function fontPathFor(channel: string, version: string): 'bench-manifest' | 'product-registry' {
-  return channel === 'published' && compareSemver(version, REGISTRY_EXPORTS_SINCE) < 0 ? 'bench-manifest' : 'product-registry';
+  return channel === 'published' && compareSemver(version, LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS) <= 0 ? 'bench-manifest' : 'product-registry';
+}
+
+export function describeFontPath(channel: string, version: string) {
+  const last = LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS;
+  if (channel !== 'published')
+    return `${channel}: product-registry, @betteroffice/docx@${version} is the commit under test, never compared with ${last}, the last release without the registry exports`;
+  if (fontPathFor(channel, version) === 'bench-manifest')
+    return `${channel}: bench-manifest, @betteroffice/docx@${version} <= ${last}, the last release without the registry exports; its native column stays on the old font map until the next release`;
+  return `${channel}: product-registry, @betteroffice/docx@${version} > ${last}, the last release without the registry exports`;
+}
+
+export function missingExportsFailure(channel: string, version: string, detail: string) {
+  const reason = channel === 'published'
+    ? `is newer than ${LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS}, the last release without the registry exports`
+    : 'is the commit under test';
+  return `${channel}: @betteroffice/docx@${version} ${reason}, so it must carry the registry exports the recorder needs: ${detail}`;
 }
 
 export function checkPublishedVersion(installed: string, source: unknown, planned: unknown) {
@@ -376,15 +392,15 @@ async function main(env: NodeJS.ProcessEnv) {
   const job = JSON.parse(await readFile(join(output, 'job.json'), 'utf8'));
   const build = JSON.parse(await readFile(join(required('QUALITY_NATIVE'), 'published', 'build.json'), 'utf8'));
   const roots = { published: required('QUALITY_PRODUCT_PUBLISHED'), commit: required('QUALITY_PRODUCT_COMMIT') };
-  const paths: Record<string, { path: string; version: string; registry_exports_since?: string }> = {};
+  const paths: Record<string, { path: string; version: string; last_release_without_registry_exports?: string }> = {};
   const lines: string[] = [];
   const failures: string[] = [];
   for (const [channel, root] of Object.entries(roots)) {
     const version = await packageVersion(root);
     if (channel === 'published') checkPublishedVersion(version, build.package_version, job.published_version);
     if (fontPathFor(channel, version) === 'bench-manifest') {
-      paths[channel] = { path: 'bench-manifest', version, registry_exports_since: REGISTRY_EXPORTS_SINCE };
-      lines.push(`${channel}: bench-manifest, @betteroffice/docx@${version} predates ${REGISTRY_EXPORTS_SINCE}, the first release with the registry exports (semver ${version} < ${REGISTRY_EXPORTS_SINCE}); its native column stays on the old font map until the next release`);
+      paths[channel] = { path: 'bench-manifest', version, last_release_without_registry_exports: LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS };
+      lines.push(describeFontPath(channel, version));
       console.log(lines.at(-1));
       continue;
     }
@@ -393,8 +409,7 @@ async function main(env: NodeJS.ProcessEnv) {
       product = await loadProduct(root);
     } catch (error) {
       if (!(error instanceof MissingExport)) throw error;
-      const reason = channel === 'published' ? `is not older than ${REGISTRY_EXPORTS_SINCE}` : 'is the commit under test';
-      throw new Error(`${channel}: @betteroffice/docx@${version} ${reason}, so it must carry the registry exports the recorder needs: ${error.message}`);
+      throw new Error(missingExportsFailure(channel, version, error.message));
     }
     lines.push(`${channel}: @betteroffice/fonts@${product.fonts.version}, ${describeAddons(product.fonts)}`);
     console.log(lines.at(-1));
@@ -408,7 +423,7 @@ async function main(env: NodeJS.ProcessEnv) {
       }
     }
     paths[channel] = { path: 'product-registry', version };
-    lines.push(`${channel}: product-registry, @betteroffice/docx@${version}${channel === 'published' ? ` (semver ${version} >= ${REGISTRY_EXPORTS_SINCE})` : ' (workspace)'}`);
+    lines.push(describeFontPath(channel, version));
     console.log(lines.at(-1));
   }
   const summary = [...lines, ...failures.map((failure) => `FAILED ${failure}`)];
