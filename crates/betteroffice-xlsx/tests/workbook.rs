@@ -4721,11 +4721,11 @@ fn fill_range_refuses_a_comment_on_a_target_cell() {
     );
     parts.push((
         "xl/worksheets/_rels/sheet1.xml.rels".into(),
-        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/></Relationships>"#.into_bytes(),
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/></Relationships>"#.into(),
     ));
     parts.push((
         "xl/comments/comment1.xml".into(),
-        r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="A2" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#.into_bytes(),
+        r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="A2" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#.into(),
     ));
     let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
     let mut workbook = Workbook::open(&bytes).unwrap();
@@ -4838,6 +4838,94 @@ fn fill_range_refuses_a_validation_once_rows_moved_since_opening() {
         "{result:?}"
     );
     assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_ignores_extension_formats_once_rows_moved_since_opening() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><extLst><ext uri="{78C0D931-6437-407d-A8EE-F0AAD7539E65}"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="dataBar" id="{00000000-0000-0000-0000-000000000001}"><x14:dataBar><x14:cfvo type="autoMin"/><x14:cfvo type="autoMax"/></x14:dataBar></x14:cfRule><xm:sqref>Z1:Z9</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst></worksheet>"#.to_vec(),
+    );
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A2"), cell("A2")),
+            CellRange::new(cell("A2"), cell("A3")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.cell(SheetId(0), cell("A3")).unwrap().input, "10");
+}
+
+fn fill_comment_bytes(anchor: &str) -> Vec<u8> {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".into(),
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/></Relationships>"#.into(),
+    ));
+    parts.push((
+        "xl/comments/comment1.xml".into(),
+        format!(r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="{anchor}" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#).into_bytes(),
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn fill_range_finds_comments_where_inserted_rows_moved_them() {
+    let insert = |workbook: &mut Workbook| {
+        workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    };
+    let mut moved_in = Workbook::open(&fill_comment_bytes("A2")).unwrap();
+    insert(&mut moved_in);
+    let result = moved_in.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A2"), cell("A2")),
+        CellRange::new(cell("A2"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("comments")),
+        "{result:?}"
+    );
+
+    let mut moved_out = Workbook::open(&fill_comment_bytes("A3")).unwrap();
+    insert(&mut moved_out);
+    moved_out
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A2"), cell("A2")),
+            CellRange::new(cell("A2"), cell("A3")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(moved_out.cell(SheetId(0), cell("A3")).unwrap().input, "10");
 }
 
 #[test]

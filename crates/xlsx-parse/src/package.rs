@@ -683,7 +683,7 @@ fn comment_move_unsupported(
 }
 
 /// Each data validation's ranges in a worksheet part, read from the `sqref`
-/// attribute or, for extension validations, the `sqref` element. `None` when
+/// attribute or, for extension validations, their `sqref` element. `None` when
 /// a range cannot be read.
 fn validation_ranges(bytes: &[u8]) -> Option<Vec<Vec<CellRange>>> {
     let parse = |sqref: &str| {
@@ -698,16 +698,21 @@ fn validation_ranges(bytes: &[u8]) -> Option<Vec<Vec<CellRange>>> {
     let mut buffer = Vec::new();
     let mut depth = 0;
     let mut rules = Vec::new();
+    let mut in_validation = false;
     loop {
         match next_event(&mut xml, &mut buffer, &mut depth).ok()? {
             Event::Start(start) | Event::Empty(start)
                 if local_name(&start).as_slice() == b"dataValidation" =>
             {
+                in_validation = true;
                 if let Some(sqref) = attr(&start, b"sqref").ok()? {
                     rules.push(parse(&sqref)?);
                 }
             }
-            Event::Start(start) if local_name(&start).as_slice() == b"sqref" => {
+            Event::End(end) if local_name_from_end(&end).as_slice() == b"dataValidation" => {
+                in_validation = false;
+            }
+            Event::Start(start) if in_validation && local_name(&start).as_slice() == b"sqref" => {
                 let sqref = collect_text(&mut xml, &mut buffer, &mut depth).ok()?;
                 rules.push(parse(&sqref)?);
             }

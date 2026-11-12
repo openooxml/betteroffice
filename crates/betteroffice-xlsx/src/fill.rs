@@ -75,14 +75,13 @@ pub(crate) fn preserved_fill_refusal(
     let feature = package.fill_unsupported_feature(
         origin,
         |ranges| !exact || covers_partially(ranges, destination),
-        |at| {
-            axes.and_then(|axes| {
-                Some(CellRef::new(
-                    axes.rows.current(at.row)?,
-                    axes.cols.current(at.col)?,
-                ))
-            })
-            .is_none_or(|at| destination.contains(at))
+        |at| match axes {
+            Some(axes) => axes
+                .rows
+                .current(at.row)
+                .zip(axes.cols.current(at.col))
+                .is_some_and(|(row, col)| destination.contains(CellRef::new(row, col))),
+            None => true,
         },
     )?;
     Some(refuses(feature))
