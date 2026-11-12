@@ -1811,6 +1811,8 @@ struct StoryFingerprint<'a> {
     position: u32,
     bytes: Vec<u8>,
     section_bytes: Vec<u8>,
+    /// The cost charged over every [`Self::advance`] call, counted as each segment goes in.
+    charged: u64,
 }
 
 impl<'a> StoryFingerprint<'a> {
@@ -1875,6 +1877,7 @@ impl<'a> StoryFingerprint<'a> {
             position: 0,
             bytes: Vec::new(),
             section_bytes: Vec::new(),
+            charged: 0,
         })
     }
 
@@ -1895,7 +1898,9 @@ impl<'a> StoryFingerprint<'a> {
         let mut digested = 0usize;
         while let Some(segment) = self.next_segment(txn, budget)? {
             segment_canonical(&segment, &mut self.bytes, &mut self.section_bytes);
-            digested = digested.saturating_add(self.bytes.len() + PRIME_SEGMENT_COST);
+            let segment_bytes = self.bytes.len() + PRIME_SEGMENT_COST;
+            digested = digested.saturating_add(segment_bytes);
+            self.charged = self.charged.saturating_add(segment_bytes as u64);
             self.unit.segment(&self.bytes);
             self.section_content.update(&self.section_bytes);
             self.section_content.update(b"\n");
@@ -3993,6 +3998,34 @@ impl EditingDoc {
         max_bytes: u32,
         segments_per_slice: usize,
     ) -> PrimeSlice {
+        self.prime_last_slice_cost.store(0, Ordering::Relaxed);
+        let mut cost = 0u64;
+        let outcome = self.prime_slice_step(
+            max_paragraphs,
+            max_inflated_bytes,
+            max_bytes,
+            segments_per_slice,
+            &mut cost,
+        );
+        self.prime_last_slice_cost.store(cost, Ordering::Relaxed);
+        outcome
+    }
+
+    /// What the last [`Self::prime_save_seed_states_slice`] call charged against its
+    /// `max_bytes`, story and segment costs and any overshoot included; 0 for a call that
+    /// charged nothing.
+    pub fn prime_last_slice_cost(&self) -> u64 {
+        self.prime_last_slice_cost.load(Ordering::Relaxed)
+    }
+
+    fn prime_slice_step(
+        &self,
+        max_paragraphs: u32,
+        max_inflated_bytes: u32,
+        max_bytes: u32,
+        segments_per_slice: usize,
+        cost: &mut u64,
+    ) -> PrimeSlice {
         let sliced = max_bytes != u32::MAX;
         let mut progress = self.prime_progress.lock().unwrap();
         let bytes = match self.source.lock().unwrap().as_ref() {
@@ -4140,6 +4173,7 @@ impl EditingDoc {
                 let anchors = state.anchors.remove(&story).unwrap_or_default();
                 let comments = crate::canonical::resolve_comment_anchors(&txn, &anchors);
                 left = left.saturating_sub(PRIME_STORY_COST);
+                *cost = cost.saturating_add(PRIME_STORY_COST as u64);
                 let kept = state.kept.remove(&story);
                 let cursor = || match kept {
                     Some(segments) => Some(crate::StorySegmentCursor::Diffs(segments.into_iter())),
@@ -4177,7 +4211,9 @@ impl EditingDoc {
             let Some((_, fingerprint)) = state.current.as_mut() else {
                 continue;
             };
+            let before = fingerprint.charged;
             let advanced = fingerprint.advance(&txn, &mut state.budget, left.max(1));
+            *cost = cost.saturating_add(fingerprint.charged - before);
             if fingerprint.vanished {
                 *progress = None;
                 return PrimeSlice::Declined;
@@ -6482,6 +6518,107 @@ mod tests {
                 sliced.paragraph_save_plan().unwrap(),
                 whole.paragraph_save_plan().unwrap()
             );
+        }
+    }
+
+    fn one_shot_prime_cost(bytes: &[u8]) -> u64 {
+        let whole = bytes_session(bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        whole.engine.doc().prime_last_slice_cost()
+    }
+
+    /// The cost each story slice of a sliced prime charged, the last one answering `Known`.
+    fn story_slice_costs(doc: &EditingDoc, max_bytes: u32) -> Vec<u64> {
+        assert_eq!(doc.prime_last_slice_cost(), 0);
+        for step in ["start", "scan", "anchors"] {
+            assert_eq!(
+                doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
+                PrimeSlice::Pending,
+                "{step} at {max_bytes}"
+            );
+            assert_eq!(doc.prime_last_slice_cost(), 0, "{step} at {max_bytes}");
+        }
+        let mut costs = Vec::new();
+        loop {
+            let outcome = doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes);
+            costs.push(doc.prime_last_slice_cost());
+            match outcome {
+                PrimeSlice::Pending => {
+                    let slice = costs.len();
+                    assert!(costs[slice - 1] > 0, "slice {slice} at {max_bytes}");
+                }
+                PrimeSlice::Known => break,
+                PrimeSlice::Declined => panic!("declined at {max_bytes}"),
+            }
+        }
+        assert_eq!(
+            doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
+            PrimeSlice::Known
+        );
+        assert_eq!(doc.prime_last_slice_cost(), 0);
+        costs
+    }
+
+    #[test]
+    fn prime_last_slice_cost_reports_what_each_slice_charged() {
+        let bytes = multi_chunk_docx();
+        let all = one_shot_prime_cost(&bytes);
+        assert!(all > 0);
+        for max_bytes in [1u32, 4096] {
+            let session = bytes_session(&bytes);
+            let costs = story_slice_costs(session.engine.doc(), max_bytes);
+            assert!(costs.len() > 2, "{} at {max_bytes}", costs.len());
+            assert_eq!(costs.iter().sum::<u64>(), all, "{max_bytes}");
+        }
+    }
+
+    #[test]
+    fn a_prime_slice_reports_its_overshoot_past_max_bytes() {
+        let bytes = multi_chunk_docx();
+        let session = bytes_session(&bytes);
+        let costs = story_slice_costs(session.engine.doc(), 1);
+        assert!(costs.iter().all(|&cost| cost > 1 || cost == 0), "{costs:?}");
+        assert!(
+            costs.iter().any(|&cost| cost > PRIME_STORY_COST as u64),
+            "{costs:?}"
+        );
+    }
+
+    #[test]
+    fn priming_many_tiny_stories_charges_story_cost_in_bounded_slices() {
+        use crate::seed::fixture;
+        let nested = 60u32;
+        let mut body = fixture::para("10000001", &commented(1, "Body"));
+        let mut rows = String::new();
+        for index in 0..nested {
+            body.push_str(&format!(
+                r#"<w:sdt><w:sdtPr><w:id w:val="{}"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+                -1000 - index as i32,
+                fixture::para(&format!("{:08X}", 0x0200_0000 + index), &fixture::run("C"))
+            ));
+            rows.push_str(&format!(
+                r#"<w:tr><w:tc><w:tcPr/>{}</w:tc></w:tr>"#,
+                fixture::para(&format!("{:08X}", 0x0300_0000 + index), &fixture::run("C"))
+            ));
+        }
+        body.push_str(&format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>{rows}</w:tbl>"#
+        ));
+        body.push_str(&fixture::para("10000002", &fixture::run("After")));
+        let bytes = commented_docx(&body, 1);
+        let whole = bytes_session(&bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let source = whole.engine.doc().source_index().unwrap();
+        let stories = source.seed_states().len() as u64;
+        assert!(stories > u64::from(nested), "{stories}");
+        let all = whole.engine.doc().prime_last_slice_cost();
+        assert!(all >= stories * PRIME_STORY_COST as u64, "{all}");
+        for max_bytes in [2048u32, 4096] {
+            let session = bytes_session(&bytes);
+            let costs = story_slice_costs(session.engine.doc(), max_bytes);
+            assert_eq!(costs.iter().sum::<u64>(), all, "{max_bytes}");
+            let bound = all.div_ceil(u64::from(max_bytes)) + 2;
+            assert!(costs.len() as u64 <= bound, "{} > {bound}", costs.len());
         }
     }
 
