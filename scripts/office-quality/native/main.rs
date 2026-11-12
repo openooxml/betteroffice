@@ -402,10 +402,7 @@ impl Fonts {
             );
             registry.ids.insert(key.clone(), chain);
         }
-        for requirement in requirements
-            .as_array()
-            .ok_or("invalid font requirements")?
-        {
+        for requirement in requirements.as_array().ok_or("invalid font requirements")? {
             let key = requirement["key"]
                 .as_str()
                 .ok_or("font requirement has no key")?;

@@ -38,6 +38,22 @@ async function fontDocx(): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
+async function replayedNames(product: Product, fonts: Array<Uint8Array | { substituteOf: number; family: string }>): Promise<string[]> {
+  const session = await product.yrs.createYrsSession();
+  try {
+    const names: string[] = [];
+    for (const font of fonts) {
+      const isBytes = ArrayBuffer.isView(font);
+      const id: number = isBytes ? session.registerFont(font) : session.registerSubstituteFont(font.substituteOf, font.family);
+      if (id === names.length) names.push(isBytes ? hash(font) : `${names[font.substituteOf]}~${font.family}`);
+      else expect({ id, base: isBytes ? undefined : font.substituteOf }).toEqual({ id, base: id });
+    }
+    return names;
+  } finally {
+    session.destroy();
+  }
+}
+
 async function productFaces(product: Product, bytes: Uint8Array): Promise<{ faces: Faces; measurement: Record<string, unknown> }> {
   const laid = await layOutFonts(product, bytes);
   try {
@@ -45,8 +61,8 @@ async function productFaces(product: Product, bytes: Uint8Array): Promise<{ face
     product.editor.computeLayout({ document: laid.document, pageGap: 0, session: laid.session, renderEnv: laid.renderEnv, measurement: laid.measurement });
     const fonts = laid.session.residentWorkerSnapshot()?.fonts as Array<Uint8Array | { substituteOf: number; family: string }> | undefined;
     if (!fonts) throw new Error('the session handed no resident fonts to wasm');
-    const names: string[] = [];
-    for (const font of fonts) names.push(ArrayBuffer.isView(font) ? hash(font) : `${names[font.substituteOf]}~${font.family}`);
+    console.log(`RAW product: ${JSON.stringify(fonts.map((font) => (ArrayBuffer.isView(font) ? hash(font) : font)))}`);
+    const names = await replayedNames(product, fonts);
     return { faces: Object.fromEntries(Object.entries(laid.measurement.fontChains).map(([key, chain]) => [key, chain.map((id) => names[id])])), measurement };
   } finally {
     laid.session.destroy();
@@ -55,6 +71,7 @@ async function productFaces(product: Product, bytes: Uint8Array): Promise<{ face
 
 async function chainsFaces(path: string): Promise<Faces> {
   const chains = JSON.parse(await readFile(path, 'utf8'));
+  console.log(`RAW recorded: ${JSON.stringify(chains.faces.map((face: any) => ('substituteOf' in face ? face : face.sha256)))}`);
   const names: string[] = [];
   for (const face of chains.faces) {
     if ('substituteOf' in face) {
