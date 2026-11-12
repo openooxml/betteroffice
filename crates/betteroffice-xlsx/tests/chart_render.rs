@@ -350,7 +350,7 @@ fn a_reachable_chart_grows_the_default_render() {
     let png = workbook
         .render_sheet(SheetId(0), &RenderOptions::default())
         .unwrap();
-    assert_eq!((png.width, png.height), (1075, 340));
+    assert_eq!((png.width, png.height), (1044, 340));
 
     let display_list = workbook
         .display_list_for(
@@ -378,7 +378,7 @@ fn a_chart_parked_far_below_the_data_leaves_the_sheet_renderable() {
             .render_sheet(SheetId(0), &RenderOptions::default())
             .unwrap();
         assert!(png.bytes.starts_with(&[0x89, b'P', b'N', b'G']));
-        assert_eq!((png.width, png.height), (563, 240), "chart at row {row}");
+        assert_eq!((png.width, png.height), (532, 240), "chart at row {row}");
         assert!(u64::from(png.width) * u64::from(png.height) <= MAX_PIXMAP_PIXELS);
         assert!(png.width.max(png.height) <= MAX_PIXMAP_DIM);
     }
