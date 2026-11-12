@@ -16,6 +16,13 @@ export function isImplicitFontProvider(provider: BundledFontProvider | undefined
 }
 
 const hostedFamiliesKey = Symbol.for('@betteroffice/docx/hostedFontFamilies');
+const standInKey = Symbol.for('@betteroffice/docx/standInFamily');
+const STAND_IN_TIMEOUT_MS = 30_000;
+
+interface StandInHook {
+  standsIn(family: string): boolean;
+  report(family: string): boolean;
+}
 
 export function hostedFontFamilies(source: object | undefined): ReadonlySet<string> | undefined {
   return (source as { [hostedFamiliesKey]?: ReadonlySet<string> } | undefined)?.[hostedFamiliesKey];
@@ -48,6 +55,27 @@ function implicitFontProvider(
     manager.resolveMetricCompatFamily(family) !== undefined ||
     manager.resolveBundledFamilyFace(family, false, false) !== undefined;
   const fallsBack = (family: string) => standIns || providesFamily(family);
+  const standsIn = (family: string) => standIns && !providesFamily(family);
+  const bounded = new WeakMap<BundledFontLoader, BundledFontLoader>();
+  const standIn = (loader: BundledFontLoader | undefined): BundledFontLoader | undefined => {
+    if (!loader) return undefined;
+    let wrapped = bounded.get(loader);
+    if (!wrapped) {
+      const due = (load: () => Promise<ArrayBuffer>) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        return Promise.race([
+          load(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('the stand-in face did not load in time')), STAND_IN_TIMEOUT_MS);
+          }),
+        ]).finally(() => clearTimeout(timer));
+      };
+      const read = loader.readOnlyBytes;
+      wrapped = Object.assign(() => due(loader), loader, read && { readOnlyBytes: () => due(read) });
+      bounded.set(loader, wrapped);
+    }
+    return wrapped;
+  };
   const checked = (
     loader: BundledFontLoader | undefined,
     face: import('@betteroffice/fonts').BundledFontFace | undefined
@@ -100,19 +128,38 @@ function implicitFontProvider(
       provider.resolveScriptFallback(script, bold, italic, family),
       manager.resolveScriptFallbackFace(script, bold, italic, family)
     ),
-    resolveGlyphFallback: (family, bold, italic, office) => fallsBack(family) ? checkedFamilyFallback(
-      checked(
-        provider.resolveGlyphFallback?.(family, bold, italic, office),
-        manager.resolveGlyphFallbackFace(family, bold, italic, office)
-      ), family, bold, italic
-    ) : undefined,
-    resolveLastResort: (family, bold, italic, office) => fallsBack(family) ? checkedFamilyFallback(
-      checked(
-        provider.resolveLastResort(family, bold, italic, office),
-        manager.resolveLastResortFace(family, bold, italic, office)
-      ), family, bold, italic
-    ) : undefined,
+    resolveGlyphFallback: (family, bold, italic, office) => {
+      if (!fallsBack(family)) return undefined;
+      const loader = checkedFamilyFallback(
+        checked(
+          provider.resolveGlyphFallback?.(family, bold, italic, office),
+          manager.resolveGlyphFallbackFace(family, bold, italic, office)
+        ), family, bold, italic
+      );
+      return standsIn(family) ? standIn(loader) : loader;
+    },
+    resolveLastResort: (family, bold, italic, office) => {
+      if (!fallsBack(family)) return undefined;
+      const loader = checkedFamilyFallback(
+        checked(
+          provider.resolveLastResort(family, bold, italic, office),
+          manager.resolveLastResortFace(family, bold, italic, office)
+        ), family, bold, italic
+      );
+      return standsIn(family) ? standIn(loader) : loader;
+    },
   };
+  const reported = new Set<string>();
+  const standInHook: StandInHook = {
+    standsIn,
+    report: (family) => {
+      const key = family.trim().toLowerCase();
+      if (reported.has(key)) return false;
+      reported.add(key);
+      return true;
+    },
+  };
+  Object.assign(implicit, { [standInKey]: standInHook });
   implicitProviders.add(implicit);
   return implicit;
 }
@@ -190,7 +237,7 @@ export function resolveDefaultFontProvider(
   runtime: { decoder?: FontDecoder } = engineRuntime,
   standIns = false
 ): Promise<BundledFontProvider | undefined> {
-  const cache = standIns ? resolvedWithStandIns : resolved;
+  const cache = standIns && !hasConfiguredFontSource() && options.baseUrl === undefined ? resolvedWithStandIns : resolved;
   let pending = cache.get(runtime);
   if (pending === undefined) {
     const promise = load(runtime, standIns);
@@ -210,8 +257,17 @@ export function resolveDefaultFontProvider(
 export async function resolveCompleteFontProvider(
   runtime: { decoder?: FontDecoder } = engineRuntime
 ): Promise<BundledFontProvider | undefined> {
-  if (hasConfiguredFontSource() || options.baseUrl !== undefined) return resolveDefaultFontProvider(runtime);
-  return (await import('@betteroffice/fonts')).createFontProvider(undefined, runtime);
+  return (await resolveCompleteFontSelection(runtime)).provider;
+}
+
+/** @internal {@link resolveCompleteFontProvider}, with whether the provider is the configured one. */
+export async function resolveCompleteFontSelection(
+  runtime: { decoder?: FontDecoder } = engineRuntime
+): Promise<{ provider: BundledFontProvider | undefined; configured: boolean }> {
+  if (hasConfiguredFontSource() || options.baseUrl !== undefined) {
+    return { provider: await resolveDefaultFontProvider(runtime), configured: true };
+  }
+  return { provider: (await import('@betteroffice/fonts')).createFontProvider(undefined, runtime), configured: false };
 }
 
 /** @internal State the lazily loaded backstop provider resolves against. */

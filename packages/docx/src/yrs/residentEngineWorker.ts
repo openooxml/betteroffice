@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 
-import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { isEngineTrap, nativeBudgetFailure } from '../../../../shared/office-session/trap';
 import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { resolveReservations, validReservationsPayload, type DocxResolvedReservations } from './reservations';
 import { readParsedToolbarMetadata, readResidentToolbarMetadata, type DocxToolbarMetadata } from './residentToolbarMetadata';
@@ -86,7 +86,7 @@ import { partMetadata } from './residentParts';
 import { readControlHandles } from './residentControls';
 import { readResidentProperties } from './residentProperties';
 import { readResidentFrameGeometry, readResidentCellSelectionRects, resetResidentObjectHandles } from './residentObjectGeometry';
-import { cellSelectionHeadPosition, readCellSelection } from './residentCommandTableSelection';
+import { cellSelectionHeadPosition, readCellSelection, rootOf, shownStory } from './residentCommandTableSelection';
 import {
   resolveBookmarkPosition,
   resolveBookmarkTarget,
@@ -99,6 +99,7 @@ import {
 } from './viewerSelection';
 import { readAdjacentRevision, readSidebar, readOutlineHeadings } from './sidebarReads';
 import { clipboardTablePayload, readClipboardSlice } from './clipboardFragment';
+import { isTableUnavailableRefusal, isUnavailableTablePayload, tableUnavailableError } from './tableUnavailable';
 import { storyOffsetForLoc, tableAnchors } from './storyPlainText';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
@@ -116,7 +117,8 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
-import { WASM32_MEMORY_LIMIT_BYTES, wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { saveWarmupPolicy, type SaveWarmupPolicy } from './saveWarmupPolicy';
 import {
   encodeDisplayListFrameExtras,
   loadRustDisplayListQueryEngine,
@@ -1304,8 +1306,6 @@ interface SaveWarmup {
 let saveWarmup: SaveWarmup | null = null;
 const SAVE_WARMUP_IDLE_MS = 300;
 const SAVE_WARMUP_INPUT_IDLE_MS = 600;
-const SAVE_WARMUP_MIN_HEADROOM_BYTES = 64 * 1024 * 1024;
-const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
 const SAVE_SEED_MAX_PARAGRAPHS = 4096;
 const SAVE_SEED_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
 const SAVE_SEED_SLICE_BYTES = 16 * 1024;
@@ -1319,6 +1319,7 @@ let editorSaves: ResidentSaveRecord = { full: false };
 let saveSeedStatesPrimed = false;
 class SaveUnavailableError extends Error {}
 class SourceCutKeptError extends Error {}
+class InvalidSelectionError extends Error {}
 let openedVersion: string | null | undefined;
 /** A change before the whole document's first frame leaves no frame as opened. */
 function noteDocumentChange(): void {
@@ -1651,6 +1652,8 @@ function replyFailure(id: number, error: unknown): void {
     error: error instanceof Error ? error.message : String(error),
     ...(failure instanceof SaveUnavailableError ? { code: 'save-unavailable' as const } : {}),
     ...(failure instanceof SourceCutKeptError ? { code: 'cut-kept' as const } : {}),
+    ...(failure instanceof InvalidSelectionError ? { code: 'invalid-selection' as const } : {}),
+    ...(isTableUnavailableRefusal(failure) ? { code: 'table-unavailable' as const } : {}),
   });
 }
 
@@ -1661,7 +1664,7 @@ function trapped(id: number, error: Error): void {
   trap = error;
   let memory: ReturnType<typeof wasmModuleMemories> = [];
   try { memory = wasmModuleMemories(); } catch {}
-  const failed = memory.find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
+  const failed = outOfMemoryBytes(error, memory);
   reply({
     id,
     ok: false,
@@ -2295,19 +2298,19 @@ async function handle(request: ScheduledRequest): Promise<void> {
           cells.anchor.tableIndex !== cells.head.tableIndex ||
           cells.anchor.row !== cells.head.row || cells.anchor.column !== cells.head.column);
         if (multiCell && cells) {
-          const payload = clipboardTablePayload(
-            session.tablePayload(cells.anchor.story, cells.anchor.tableIndex),
-          );
-          const holds = !!payload &&
-            tableAnchors(payload).anchors.some(
-              (cell) => focus.story === cell.story || focus.story.startsWith(`${cell.story}:`),
-            );
+          const raw = session.tablePayload(cells.anchor.story, cells.anchor.tableIndex);
+          if (raw && isUnavailableTablePayload(raw)) throw tableUnavailableError();
+          const payload = clipboardTablePayload(raw);
+          const anchors = payload ? tableAnchors(payload).anchors : [];
+          const holds = anchors.some((cell) => focus.story === cell.story) ||
+            (anchors.some((cell) => focus.story.startsWith(`${cell.story}:`)) &&
+              shownStory(session, rootOf(focus.story), null, focus.story));
           if (holds) {
             value = readClipboardSlice(reader, { cells });
             break;
           }
         }
-        if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
+        if (anchor.story !== focus.story) throw new InvalidSelectionError('Cross-story selection is unavailable');
         value = readClipboardSlice(reader, {
           story: anchor.story,
           from: storyOffsetForLoc(session.geometryReader, anchor),
@@ -3916,7 +3919,7 @@ async function replayOffscreen(
           return session!.outlineGlyphJson(fontId, glyphId);
         } catch (error) {
           // The raster paints on with browser text, so running out of memory is answered here.
-          if (isEngineTrap(error) && editFailedAllocationBytes() > 0) {
+          if (isEngineTrap(error) && outOfMemoryBytes(error as Error, wasmModuleMemories()) > 0) {
             trapped(handlingId, error as Error);
           }
           throw error;
@@ -4016,8 +4019,16 @@ function exactBuffer(bytes: Uint8Array): ArrayBuffer {
   return exactFrameBuffer(bytes);
 }
 
-function editFailedAllocationBytes(): number {
-  return wasmModuleMemories().find((module) => module.label === 'docx-edit')?.failedAllocationBytes ?? 0;
+/**
+ * The size of the allocation a trap ran out of memory on, or 0 for any other trap. A native call
+ * past its heap limit names the allocation in its own error, while the native failed-bytes
+ * counter outlives the call; a wasm module that trapped is dead, so its counter is this trap's.
+ */
+function outOfMemoryBytes(error: Error, memory: ReturnType<typeof wasmModuleMemories>): number {
+  const budget = nativeBudgetFailure(error.message);
+  if (budget) return budget.bytes;
+  const edit = memory.find((module) => module.label === 'docx-edit');
+  return edit && !edit.native ? edit.failedAllocationBytes ?? 0 : 0;
 }
 
 let pipeOutputTimer: ReturnType<typeof setTimeout> | null = null;
@@ -4066,7 +4077,7 @@ function primeSaveSeedStatesOnce(): void {
   if (saveSeedStatesPrimed || !session || !commandHost || !canPreloadSaveWasm() || slicedCompletion ||
     incompleteLayout || commandLayout?.certifiedPages() != null) return;
   saveSeedStatesPrimed = true;
-  if (!saveWarmupHasHeadroom()) return;
+  if (!currentSaveWarmupPolicy().primeSeeds) return;
   const owner = session;
   let maxBytes = SAVE_SEED_SLICE_BYTES;
   scheduler.schedule({
@@ -4132,27 +4143,21 @@ function interruptSaveWarmup(type: string): void {
 
 function saveWarmupCurrent(attempt: SaveWarmup): boolean {
   return !attempt.cancelled && session === attempt.owner && saveWarmupOwner === attempt.owner &&
-    canPreloadSaveWasm() && saveWarmupHasHeadroom();
+    canPreloadSaveWasm() && currentSaveWarmupPolicy().warm;
 }
 
-function saveWarmupHasHeadroom(): boolean {
-  // Save warmup is sized against a wasm32 memory; the native engine does not run it.
-  if (engineKind === 'native') return false;
+function currentSaveWarmupPolicy(): SaveWarmupPolicy {
   const configured = openedDocument?.heapLimitBytes;
-  if (configured !== undefined && (!Number.isSafeInteger(configured) || configured <= 0)) return false;
+  const unread = saveWarmupPolicy(engineKind, configured, undefined);
+  if (unread.reason === 'no-limit') return unread;
   let memory: ReturnType<typeof wasmModuleMemories>[number] | undefined;
   try {
     memory = wasmModuleMemories().find((module) => module.label === 'docx-edit');
   } catch (error) {
     if (isEngineTrap(error)) trapped(0, error as Error);
-    return false;
+    return unread;
   }
-  const limit = Math.min(configured ?? WASM32_MEMORY_LIMIT_BYTES,
-    memory?.maximumBytes ?? WASM32_MEMORY_LIMIT_BYTES, WASM32_MEMORY_LIMIT_BYTES);
-  if (!Number.isSafeInteger(limit) || limit <= 0) return false;
-  const live = memory?.liveBytes;
-  return typeof live === 'number' && Number.isSafeInteger(live) && live >= 0 &&
-    limit - live >= Math.max(SAVE_WARMUP_MIN_HEADROOM_BYTES, limit * SAVE_WARMUP_HEADROOM_FRACTION);
+  return saveWarmupPolicy(engineKind, configured, memory);
 }
 
 function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
@@ -4179,13 +4184,13 @@ function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
 
 function scheduleSaveWarmup(): void {
   if (saveWarmupTimer !== null || saveWarmup || !saveWarmupOwner || session !== saveWarmupOwner ||
-    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm() || !saveWarmupHasHeadroom()) return;
+    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm() || !currentSaveWarmupPolicy().warm) return;
   const owner = saveWarmupOwner;
   const delay = Math.max(0, saveWarmupRequestAt + SAVE_WARMUP_IDLE_MS - performance.now(),
     saveWarmupInputAt + SAVE_WARMUP_INPUT_IDLE_MS - performance.now());
   saveWarmupTimer = setTimeout(() => {
     saveWarmupTimer = null;
-    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished || !saveWarmupHasHeadroom()) return;
+    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished || !currentSaveWarmupPolicy().warm) return;
     const attempt: SaveWarmup = { owner, cancelled: false };
     saveWarmup = attempt;
     void yieldSaveWarmup(attempt).then(async () => {

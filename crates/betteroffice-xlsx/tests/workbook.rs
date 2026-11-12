@@ -4219,6 +4219,804 @@ fn move_range_materializes_missing_cell_styles_in_one_transaction() {
 }
 
 #[test]
+fn fill_range_tiles_values_styles_and_translated_formulas_one_undo() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    let mut model = WorkbookModel::default();
+    let style = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#00ff00".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 10.0 },
+            style: Some(style),
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Number { value: 20.0 },
+            formula: Some("A1+$A$1".into()),
+            style: Some(style),
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model_collaborative(model.clone(), 809).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B1")),
+            CellRange::new(cell("A1"), cell("B4")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(result.applied);
+    assert_eq!(workbook.history_state().undo_depth, 1);
+    for (address, expected) in [
+        ("A2", "10"),
+        ("B2", "=A2+$A$1"),
+        ("A3", "10"),
+        ("B3", "=A3+$A$1"),
+        ("A4", "10"),
+        ("B4", "=A4+$A$1"),
+    ] {
+        assert_eq!(
+            workbook.cell(SheetId(0), cell(address)).unwrap().input,
+            expected,
+            "{address}"
+        );
+    }
+    for address in ["A2", "B2", "A3", "B3", "A4", "B4"] {
+        assert_eq!(
+            workbook.model().sheets[0]
+                .cell(cell(address))
+                .unwrap()
+                .style,
+            Some(style),
+            "{address} style"
+        );
+    }
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.cell(SheetId(0), cell("B4")).unwrap().input,
+        "=A4+$A$1"
+    );
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(workbook.model(), &before);
+    assert!(!workbook.can_undo());
+}
+
+#[test]
+fn fill_range_extends_right_and_keeps_absolute_references() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 5.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            formula: Some("A1+$A$1+B$1+$B2".into()),
+            ..Cell::default()
+        },
+    );
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    })
+    .unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B1")),
+            CellRange::new(cell("A1"), cell("D1")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        workbook.cell(SheetId(0), cell("C1")).unwrap().input,
+        "5",
+        "a two-column source tiles B1's formula into D1, not C1"
+    );
+    assert_eq!(
+        workbook.cell(SheetId(0), cell("D1")).unwrap().input,
+        "=C1+$A$1+D$1+$B2"
+    );
+}
+
+#[test]
+fn fill_range_tiles_the_whole_source_block_including_the_corner() {
+    let mut sheet = Sheet::new("Data");
+    for (address, value) in [("A1", 1.0), ("B1", 2.0), ("A2", 3.0), ("B2", 4.0)] {
+        sheet.set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    })
+    .unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B2")),
+            CellRange::new(cell("A1"), cell("C4")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for (address, expected) in [
+        ("C1", "1"),
+        ("A3", "1"),
+        ("B3", "2"),
+        ("C3", "1"),
+        ("A4", "3"),
+        ("B4", "4"),
+        ("C4", "3"),
+        ("C2", "3"),
+    ] {
+        assert_eq!(
+            workbook.cell(SheetId(0), cell(address)).unwrap().input,
+            expected,
+            "{address}"
+        );
+    }
+}
+
+#[test]
+fn fill_range_pins_plain_style_over_inherited_column_formatting() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    let mut model = WorkbookModel::default();
+    let styled = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#ff0000".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let mut sheet = Sheet::new("Data");
+    sheet.col_styles.push(ColStyle {
+        first: 1,
+        last: 1,
+        xf: styled,
+    });
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            CellRange::new(cell("A1"), cell("B1")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let filled = workbook.model().sheets[0].cell(cell("B1")).unwrap();
+    assert_eq!(filled.value, CellValue::Empty);
+    assert_eq!(
+        filled.style,
+        Some(0),
+        "a blank source cell pins the plain style instead of leaving column formatting"
+    );
+    assert_ne!(filled.style, Some(styled));
+}
+
+fn assert_fill_refused(model: WorkbookModel, source: &str, destination: &str, expected: &str) {
+    let mut workbook = Workbook::from_model_collaborative(model, 810).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let model_before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::parse_a1(source).unwrap(),
+        CellRange::parse_a1(destination).unwrap(),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains(expected)),
+        "{result:?}"
+    );
+    assert!(!workbook.can_undo());
+    assert_eq!(workbook.history_state().undo_depth, 0);
+    assert_eq!(workbook.model(), &model_before);
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+}
+
+#[test]
+fn fill_range_materializes_a_plain_style_when_no_cell_xf_reads_plain() {
+    use xlsx_model::{Border, Fill, Font, Xf};
+    let mut model = WorkbookModel::default();
+    model.styles.fonts.push(Font {
+        bold: true,
+        ..Default::default()
+    });
+    model.styles.fills.push(Fill::None);
+    model.styles.borders.push(Border::default());
+    model.styles.cell_xfs.push(Xf {
+        font: Some(0),
+        fill: Some(0),
+        border: Some(0),
+        ..Default::default()
+    });
+    let mut sheet = Sheet::new("Data");
+    sheet.col_styles.push(ColStyle {
+        first: 6,
+        last: 6,
+        xf: 0,
+    });
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let result = workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("F1"), cell("F1")),
+            CellRange::new(cell("F1"), cell("G1")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(result.applied);
+    let filled = workbook.model().sheets[0]
+        .cell(cell("G1"))
+        .expect("a blank source cell writes its copied appearance");
+    let style = filled.style.expect("the plain style is pinned explicitly");
+    assert_ne!(style, 0, "style 0 is not the plain format");
+    let plain = workbook.model().styles.resolved_format(None);
+    assert_eq!(workbook.model().styles.resolved_format(Some(style)), plain);
+    assert!(
+        !workbook
+            .model()
+            .styles
+            .resolved_format(Some(style))
+            .font
+            .bold
+    );
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    let reopened_style = reopened.model().sheets[0]
+        .cell(cell("G1"))
+        .and_then(|cell| cell.style)
+        .expect("G1 saves its explicit plain style");
+    assert_eq!(
+        reopened
+            .model()
+            .styles
+            .resolved_format(Some(reopened_style)),
+        reopened.model().styles.resolved_format(None)
+    );
+}
+
+#[test]
+fn fill_range_refuses_merge_fully_inside_the_destination() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Number { value: 2.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.merges.push(CellRange::new(cell("A2"), cell("B2")));
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1:B1",
+        "A1:B3",
+        "merged cells",
+    );
+}
+
+#[test]
+fn fill_range_refuses_an_array_formula_in_the_filled_range() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            formula: Some("SEQUENCE(2)".into()),
+            ..Cell::default()
+        },
+    );
+    sheet.set_array_formula(cell("B1"), CellRange::new(cell("B1"), cell("B2")));
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:B2",
+        "array formulas",
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_table_in_the_filled_range() {
+    use xlsx_model::Table;
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    let mut model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    model.tables.push(Table {
+        name: "Sales".into(),
+        sheet: SheetId(0),
+        range: CellRange::new(cell("A1"), cell("B2")),
+        header_rows: 1,
+        totals_rows: 0,
+        columns: vec!["A".into(), "B".into()],
+    });
+    assert_fill_refused(model, "A1", "A1:A3", "Excel tables");
+}
+
+#[test]
+fn fill_range_refuses_a_chart_anchored_in_the_filled_range() {
+    let bytes = charted_fixture();
+    let mut workbook = Workbook::open_collaborative(&bytes, 810).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let model_before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("C1"), cell("C1")),
+        CellRange::new(cell("C1"), cell("C6")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains("charts anchored")),
+        "{result:?}"
+    );
+    assert!(!workbook.can_undo());
+    assert_eq!(workbook.history_state().undo_depth, 0);
+    assert_eq!(workbook.model(), &model_before);
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+    assert_eq!(workbook.save().unwrap(), bytes);
+}
+
+#[test]
+fn fill_range_pins_plain_style_over_an_unstyled_target_it_clears() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    let mut model = WorkbookModel::default();
+    let styled = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#ff0000".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let mut sheet = Sheet::new("Data");
+    sheet.col_styles.push(ColStyle {
+        first: 1,
+        last: 1,
+        xf: styled,
+    });
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Text {
+                value: "text".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            CellRange::new(cell("A1"), cell("B1")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let filled = workbook.model().sheets[0].cell(cell("B1"));
+    assert_eq!(
+        filled.and_then(|filled| filled.style),
+        Some(0),
+        "a cleared unstyled target keeps the plain look instead of taking the column's"
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_hyperlink_on_a_source_cell() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.hyperlinks.push(Hyperlink {
+        range: CellRange::new(cell("A1"), cell("A1")),
+        external_target: Some("https://example.com".into()),
+        location: None,
+        tooltip: None,
+        display: None,
+    });
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:A2",
+        "hyperlinks",
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_hyperlink_on_a_target_cell() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.hyperlinks.push(Hyperlink {
+        range: CellRange::new(cell("A2"), cell("A2")),
+        external_target: Some("https://example.com".into()),
+        location: None,
+        tooltip: None,
+        display: None,
+    });
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:A2",
+        "hyperlinks",
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_comment_on_a_target_cell() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".into(),
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/></Relationships>"#.into(),
+    ));
+    parts.push((
+        "xl/comments/comment1.xml".into(),
+        r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="A2" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#.into(),
+    ));
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A2")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains("comments")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+fn fill_validation_bytes(sqref: &str) -> Vec<u8> {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><dataValidations count="1"><dataValidation type="whole" sqref="{sqref}"><formula1>1</formula1></dataValidation></dataValidations></worksheet>"#
+        )
+        .into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn fill_range_refuses_a_validation_covering_only_the_source() {
+    let mut workbook = Workbook::open(&fill_validation_bytes("A1")).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains("data validations")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_refuses_any_sheet_with_validations() {
+    let mut workbook = Workbook::open(&fill_validation_bytes("A1:A3")).unwrap();
+    assert_preserved_fill_refused(&mut workbook, "A1", "A1:A3", "data validations");
+}
+
+#[test]
+fn fill_range_refuses_two_validations_that_split_the_filled_cells() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><dataValidations count="2"><dataValidation type="whole" sqref="A1"><formula1>1</formula1></dataValidation><dataValidation type="decimal" sqref="A2:A3"><formula1>2</formula1></dataValidation></dataValidations></worksheet>"#.to_vec(),
+    );
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("data validations")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_refuses_a_validation_once_rows_moved_since_opening() {
+    let mut workbook = Workbook::open(&fill_validation_bytes("A1:A3")).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A2"), cell("A2")),
+        CellRange::new(cell("A2"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("data validations")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+fn fill_extension_rule_bytes(sqref: &str) -> Vec<u8> {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        format!(r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><extLst><ext uri="{{78C0D931-6437-407d-A8EE-F0AAD7539E65}}"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="dataBar" id="{{00000000-0000-0000-0000-000000000001}}"><x14:dataBar><x14:cfvo type="autoMin"/><x14:cfvo type="autoMax"/></x14:dataBar></x14:cfRule><xm:sqref>{sqref}</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst></worksheet>"#).into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn fill_range_refuses_any_sheet_with_extension_rules() {
+    for sqref in ["A1", "Z1:Z9"] {
+        let mut workbook = Workbook::open(&fill_extension_rule_bytes(sqref)).unwrap();
+        assert_preserved_fill_refused(&mut workbook, "A1", "A1:A2", "conditional formats");
+    }
+}
+
+#[test]
+fn fill_range_refuses_any_extension_rule_once_rows_moved_since_opening() {
+    let mut workbook = Workbook::open(&fill_extension_rule_bytes("Z1:Z9")).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A2"), cell("A2")),
+        CellRange::new(cell("A2"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+fn fill_comment_bytes(anchor: &str) -> Vec<u8> {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".into(),
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/></Relationships>"#.into(),
+    ));
+    parts.push((
+        "xl/comments/comment1.xml".into(),
+        format!(r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="{anchor}" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#).into_bytes(),
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn fill_range_refuses_any_sheet_with_comments() {
+    for anchor in ["A2", "Z99"] {
+        let mut workbook = Workbook::open(&fill_comment_bytes(anchor)).unwrap();
+        assert_preserved_fill_refused(&mut workbook, "A1", "A1:A2", "comments");
+    }
+}
+
+#[test]
+fn fill_range_refuses_conditional_formats_in_alternate_content() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" mc:Ignorable="x14"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><mc:AlternateContent><mc:Choice Requires="x14"><conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>A1&gt;0</formula></cfRule></conditionalFormatting></mc:Choice></mc:AlternateContent></worksheet>"#.to_vec(),
+    );
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    assert_preserved_fill_refused(&mut workbook, "A1", "A1:A2", "conditional formats");
+}
+
+#[test]
+fn fill_range_refuses_source_conditional_formats_once_rows_moved_since_opening() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>A1&gt;0</formula></cfRule></conditionalFormatting></worksheet>"#.to_vec(),
+    );
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_preserved_fill_refused(&mut workbook, "A2", "A2:A3", "conditional formats");
+}
+
+fn assert_preserved_fill_refused(
+    workbook: &mut Workbook,
+    source: &str,
+    destination: &str,
+    expected: &str,
+) {
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::parse_a1(source).unwrap(),
+        CellRange::parse_a1(destination).unwrap(),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains(expected)),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_refuses_a_comment_whose_row_was_deleted() {
+    let mut workbook = Workbook::open(&fill_comment_bytes("A2")).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A2")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("comments")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_refuses_a_conditional_format_covering_only_the_target() {
+    use xlsx_model::{ConditionalFormatRule, ConditionalFormatting};
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.conditional_formats.push(ConditionalFormatting {
+        sqref: "B1".into(),
+        rules: vec![ConditionalFormatRule {
+            id: "cf:0".into(),
+            rule_type: "expression".into(),
+            operator: None,
+            formulas: vec!["B1>0".into()],
+            priority: 1,
+            dxf_id: None,
+            format: Default::default(),
+            raw_xml: None,
+        }],
+    });
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:B1",
+        "conditional formats",
+    );
+}
+
+#[test]
 fn move_range_refuses_related_comment_anchors_without_mutation() {
     for anchor in ["A1", "B1"] {
         for relationship_type in ["comments", "threadedComment"] {

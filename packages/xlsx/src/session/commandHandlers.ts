@@ -320,10 +320,11 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
       case 'applyFormat': op.args[0] = target.sheet; op.args[1] = target.range; break;
       case 'setActiveSheet': op.args[0] = target.sheet; break;
       case 'moveChart':
-      case 'moveRange': op.args[0] = target.sheet; break;
+      case 'moveRange':
+      case 'fillRange': op.args[0] = target.sheet; break;
       default: throw new WorkbookCommandRefusal('invalid-command');
     }
-  } else if (['editCell', 'editCells', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'setActiveSheet', 'moveChart', 'moveRange'].includes(op.method)) numericSheet();
+  } else if (['editCell', 'editCells', 'patchRangeStyle', 'setNumberFormat', 'applyFormat', 'setActiveSheet', 'moveChart', 'moveRange', 'fillRange'].includes(op.method)) numericSheet();
   return op;
 }
 
@@ -381,6 +382,19 @@ function preflight(handle: WorkbookHandle, state: WorkbookCommandState, op: Work
     case 'setActiveSheet':
     case 'moveChart':
     case 'moveRange': sheetTarget(handle, op.args[0], { kind: 'a1', a1: 'A1' }); break;
+    case 'fillRange': {
+      const [sheet, source, destination] = op.args;
+      const target = sheetTarget(handle, sheet, { kind: 'a1', a1: source });
+      resolveCommandTarget(handle, { sheetId: target.sheetId, range: { kind: 'a1', a1: destination } }, state.sheetIds);
+      const from = corners({ kind: 'a1', a1: source });
+      const to = corners({ kind: 'a1', a1: destination });
+      if (from.start.row !== to.start.row || from.start.col !== to.start.col ||
+        to.end.row < from.end.row || to.end.col < from.end.col) throw new WorkbookCommandRefusal('invalid-step');
+      if ((to.end.row - to.start.row + 1) * (to.end.col - to.start.col + 1) > workbookAdmissionBudget.cells) {
+        throw new WorkbookCommandRefusal('limit-exceeded');
+      }
+      break;
+    }
   }
 }
 
@@ -388,7 +402,7 @@ function preflight(handle: WorkbookHandle, state: WorkbookCommandState, op: Work
  * What a structural edit was refused to protect, as an editor names it to the user: a chart,
  * a table, a pivot table, or anything else that names the cells the edit would move.
  */
-export type WorkbookStructuralRefusalCause = 'chart' | 'table' | 'pivot' | 'other';
+export type WorkbookStructuralRefusalCause = 'chart' | 'table' | 'pivot' | 'fill' | 'other';
 
 /** The structural refusal result an `unsupported` status carries: the engine's message and its cause. */
 export interface WorkbookStructuralRefusalResult {
@@ -397,9 +411,15 @@ export interface WorkbookStructuralRefusalResult {
 
 /** Reads the cause from a structural refusal the engine raised. */
 export function structuralRefusalCause(message: string): WorkbookStructuralRefusalCause {
-  if (/^(?:chart |anchor \d+ of )/.test(message) || message === 'range move cannot safely preserve charts') return 'chart';
-  if (message === 'range move cannot safely preserve Excel tables') return 'table';
+  if (/^(?:chart |anchor \d+ of )/.test(message) || message === 'range move cannot safely preserve charts' ||
+    message === 'fill cannot safely preserve charts anchored in the filled range') return 'chart';
+  if (message === 'range move cannot safely preserve Excel tables' ||
+    message === 'fill cannot safely preserve Excel tables') return 'table';
   if (/^cannot move sheet \d+ tracks: table .+ covers the moved tracks$/.test(message)) return 'table';
+  if (message === 'fill cannot safely preserve hyperlinks' ||
+    message === 'fill cannot safely preserve comments' ||
+    message === 'fill cannot safely preserve data validations' ||
+    message === 'fill cannot safely preserve conditional formats') return 'fill';
   const part = /^(.+?) references cells this (?:edit would move|move would relocate), and it cannot be rewritten$/
     .exec(message)?.[1].toLowerCase().replace(/^\//, '');
   if (!part) return 'other';
@@ -457,6 +477,9 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     /^.+ contains worksheet features a cell move cannot safely preserve$/.test(error.message) ||
     /^.+ references cells this move would relocate, and it cannot be rewritten$/.test(error.message)
   )) return structuralRefusal(error.message);
+  if (method === 'fillRange' && /^fill cannot safely preserve .+$/.test(error.message)) {
+    return structuralRefusal(error.message);
+  }
   if (method === 'applyOps' &&
     /^chart frame .+ does not hold the chart part and anchor this op was recorded against; its drawing has changed$/.test(error.message)) {
     return new WorkbookCommandRefusal('stale-target');
@@ -465,6 +488,9 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     /^(?:cell number must be finite|cell text exceeds Excel's length limit|formula exceeds the length limit)$/.test(error.message)) {
     return new WorkbookCommandRefusal('invalid-step');
   }
+  if (method === 'fillRange' && (
+    /^(?:fill destination must start at the source's top-left cell and contain it|fill cannot copy a formula above the length limit)$/.test(error.message)
+  )) return new WorkbookCommandRefusal('invalid-step');
   if ((method === 'applyOps' || method === 'patchRangeStyle' || method === 'setNumberFormat' || method === 'applyFormat') &&
     (/^(?:font family must not be empty|font size must be between 1 and 400|captured format dimensions do not match its cells)$/.test(error.message) ||
       /^invalid color .*; expected #rrggbb$/.test(error.message))) {
@@ -484,10 +510,11 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     (method === 'applyFormat' && /^bad format args: /.test(error.message)) ||
     (method === 'editCells' && /^bad edit args: /.test(error.message)) ||
     (method === 'moveRange' && /^bad (?:move range args|range|move destination): /.test(error.message)) ||
+    (method === 'fillRange' && /^bad (?:fill args|range): /.test(error.message)) ||
     (method === 'applyEdits' && /^malformed request: /.test(error.message))) {
     return new WorkbookCommandRefusal('invalid-command');
   }
-  if ((method === 'applyOps' || method === 'moveChart' || method === 'moveRange') && (
+  if ((method === 'applyOps' || method === 'moveChart' || method === 'moveRange' || method === 'fillRange') && (
     /^(?:sheet(?: index)?|row|column) \d+ (?:is )?out of range$/.test(error.message) ||
     /^cell row \d+, column \d+ is out of range$/.test(error.message) ||
     /^sheet \d+ is not an editable worksheet$/.test(error.message) ||
@@ -756,6 +783,7 @@ function applyIntent(handle: WorkbookHandle, state: WorkbookCommandState, comman
       state.catalogDirty = types.some((type) => ['addSheet', 'removeSheet', 'moveSheet', 'renameSheet'].includes(type));
     } else if (op.method === 'patchRangeStyle' || op.method === 'setNumberFormat' ||
       op.method === 'applyFormat' || op.method === 'acceptProposal' || op.method === 'moveRange' ||
+      op.method === 'fillRange' ||
       op.method === 'applyEdits' && op.args[0].steps.some((step) => step.op === 'patchStyle' || step.op === 'setNumberFormat')) {
       state.formattingDirty = true;
     }

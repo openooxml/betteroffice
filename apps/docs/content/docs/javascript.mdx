@@ -192,8 +192,8 @@ Header and footer selections use their story's geometry; stories without geometr
 In the read-only viewer, header and footer selections return `unsupported`; body selections still return geometry.
 
 **Focus and locale.** `snapshot.focused` is true while focus is inside the
-editor's document surface; docked panels, toolbar controls, and host chrome are
-outside. `focus-change` carries `focused`. `snapshot.locale`
+editor's document surface; docked panels, plugin overlays, toolbar controls, and
+host chrome are outside. `focus-change` carries `focused`. `snapshot.locale`
 contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
 `locale`. The load snapshot includes both fields. These signals are on by default
 for installed plugins.
@@ -520,8 +520,8 @@ Slides also include `headerFooter` with visible slide footer, slide number and d
 placeholder text; `layout.headerFooter` reports stored layout or master settings, which do not gate those placeholders.
 
 **Focus and locale.** `snapshot.focused` is true while focus is inside the
-editor's document surface; docked panels, toolbar controls, and host chrome are
-outside. `focus-change` carries `focused`. `snapshot.locale`
+editor's document surface; docked panels, plugin overlays, toolbar controls, and
+host chrome are outside. `focus-change` carries `focused`. `snapshot.locale`
 contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
 `locale`. The load snapshot includes both fields. These signals are on by default
 for installed plugins.
@@ -636,7 +636,10 @@ rails move groups into an accessible More menu; wrap other host content in
 `pluginGrants` and `onPluginError` props as the DOCX editor. A plugin
 created with `defineXlsxPlugin` contributes a docked panel, an overlay on the
 grid and commands, and works through restricted clients. The plugin API
-can change in minor releases; changes are listed in the changelog:
+can change in minor releases; changes are listed in the changelog. The legacy
+read-only worker viewer (`legacySyncApi` with `experimentalWorkerOpen` and
+`readOnly`) does not run plugins and reports each one through `onPluginError`,
+or through `console.error` when `onPluginError` is not set:
 
 ```tsx
 import { XlsxEditor, defineXlsxPlugin } from "@betteroffice/xlsx-react";
@@ -778,8 +781,8 @@ that is too long or more than 10,000 items ends the plugin with the
 `row-decorations` phase.
 
 **Focus and locale.** `snapshot.focused` is true while focus is inside the
-editor's document surface; docked panels, toolbar controls, and host chrome are
-outside. `focus-change` carries `focused`. `snapshot.locale`
+editor's document surface; docked panels, plugin overlays, toolbar controls, and
+host chrome are outside. `focus-change` carries `focused`. `snapshot.locale`
 contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
 `locale`. The load snapshot includes both fields. These signals are on by default
 for installed plugins.

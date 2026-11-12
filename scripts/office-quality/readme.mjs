@@ -71,6 +71,106 @@ function score(samples, channel, revision) {
   };
 }
 
+const fontSourceLabel = (fonts) =>
+  `${fonts.package}${fonts.cjk ? ` and ${fonts.cjk}` : ''} (${fonts.copy})`;
+
+/** One arm's font source and face load counts across its captures. */
+export function fontSummary(samples, channel) {
+  const sources = new Set();
+  const loaded = new Set();
+  const failed = new Map();
+  let advertised = 0;
+  let baseLatin = 0;
+  let captures = 0;
+  let missing = 0;
+  const unattributed = { loaded: 0, failed: 0 };
+  const notMeasured = { timed_out: 0, errored: 0 };
+  for (const sample of samples) {
+    const fonts = sample.comparisons?.find((result) => result.channel === channel)?.fonts;
+    if (!fonts) continue;
+    if (typeof fonts.package === 'string') sources.add(fontSourceLabel(fonts));
+    const capture = fonts.capture ?? 'ok';
+    if (capture !== 'ok') {
+      if (capture === 'timeout') notMeasured.timed_out++;
+      else notMeasured.errored++;
+      continue;
+    }
+    if (!Number.isInteger(fonts.advertised)) {
+      if (fonts.measured) missing++;
+      continue;
+    }
+    captures++;
+    advertised = Math.max(advertised, fonts.advertised);
+    baseLatin = Math.max(baseLatin, fonts.base_latin ?? 0);
+    unattributed.loaded += fonts.unattributed?.loaded ?? 0;
+    unattributed.failed += fonts.unattributed?.failed ?? 0;
+    for (const face of fonts.loaded_faces ?? []) loaded.add(face);
+    for (const [face, reason] of Object.entries(fonts.failed_faces ?? {}))
+      if (!failed.has(face)) failed.set(face, reason);
+  }
+  for (const face of failed.keys()) loaded.delete(face);
+  const reasons = {};
+  for (const reason of failed.values()) reasons[reason] = (reasons[reason] ?? 0) + 1;
+  return {
+    sources: [...sources].sort(),
+    captures,
+    missing,
+    advertised,
+    base_latin: baseLatin,
+    requested: loaded.size + failed.size,
+    loaded: loaded.size,
+    failed: failed.size,
+    reasons,
+    unattributed,
+    not_measured: notMeasured,
+  };
+}
+
+const notMeasuredText = ({ not_measured: { timed_out, errored } }) =>
+  timed_out || errored ? `; captures not measured: ${timed_out} timed out, ${errored} errored` : '';
+
+/** Why a DOCX arm fails its font check, by name; its completed captures are always checked. */
+export function fontArmFailures(samples, channel) {
+  const summary = fontSummary(samples, channel);
+  const line = `DOCX ${fontArmLine(channel, summary)}`;
+  const failures = [];
+  if (!summary.captures && !summary.missing) failures.push(`DOCX ${channel} arm: nothing was measured${notMeasuredText(summary)}`);
+  if (summary.failed) failures.push(line);
+  const unrecorded = samples
+    .filter((sample) => {
+      const fonts = sample.comparisons.find((entry) => entry.channel === channel)?.fonts;
+      return (fonts?.capture ?? 'ok') === 'ok' && !Number.isInteger(fonts?.advertised);
+    })
+    .map((sample) => sample.id);
+  if (unrecorded.length)
+    failures.push(`DOCX ${channel} arm: ${unrecorded.length} completed captures recorded no font loads: ${unrecorded.slice(0, 10).join(', ')}${unrecorded.length > 10 ? ', …' : ''}`);
+  return { line, failures };
+}
+
+const reasonText = (reasons) =>
+  Object.entries(reasons).sort(([a], [b]) => a.localeCompare(b)).map(([reason, total]) => `${reason} ${total}`).join(', ') || 'none';
+
+const requestedDefinition = (summary) =>
+  `M = faces the documents requested that the arm's provider offers, ${summary.base_latin ? 'base latin included' : 'base latin: none in this release'}`;
+
+const unattributedText = ({ unattributed }) =>
+  unattributed.loaded || unattributed.failed
+    ? `; unattributed loads (not named in the advertised set, never a failure): ${unattributed.loaded} loaded, ${unattributed.failed} failed`
+    : '';
+
+export function fontArmLine(channel, summary) {
+  return `${channel} arm: ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)}), by reason: ${reasonText(summary.reasons)}${summary.missing ? `; ${summary.missing} captures recorded no font loads` : ''}${unattributedText(summary)}${notMeasuredText(summary)}`;
+}
+
+function fontNote(samples) {
+  const lines = [];
+  for (const [channel, label] of [['published', 'Published'], ['commit', 'Commit']]) {
+    const { sources } = fontSummary(samples, channel);
+    if (sources.length) lines.push(`- ${label} fonts: ${sources.join('; ')}`);
+  }
+  return lines.length ? `\n\n${lines.join('\n')}` : '';
+}
+
 const count = (value) => value.toLocaleString('en-US');
 const NOUNS = { docx: ['DOCX documents', 'pages'], pptx: ['PPTX presentations', 'slides'], xlsx: ['XLSX workbooks', 'printed pages'] };
 
@@ -262,6 +362,7 @@ export function renderSection(report, { privateCorpus = false } = {}) {
   ]);
   const xlsxTable = table('xlsx');
   const versionOf = (format) => report.versions[format];
+  const formatSamples = (format) => report.samples.filter((sample) => sample.format === format);
   const notes = {
     corpus: corpusNote(report.corpus),
     recalc: calculation ? recalcNote(calculation, report.xlsx_benchmark, versionOf('xlsx'), short) : '',
@@ -282,16 +383,16 @@ ${notes.corpus ? `${notes.corpus}\n\n` : ''}${chart(headline, perf)}
 
 Page agreement is reported separately from SSIM.
 
-${docxTable}
+${docxTable}${fontNote(formatSamples('docx'))}
 
 
 ### PPTX
 
-${pptxTable}
+${pptxTable}${fontNote(formatSamples('pptx'))}
 
 ### XLSX
 
-${xlsxTable}${note(notes.recalc)}${note(notes.timing)}
+${xlsxTable}${fontNote(formatSamples('xlsx'))}${note(notes.recalc)}${note(notes.timing)}
 
 </details>
 
@@ -327,6 +428,10 @@ export function aggregateReport(report) {
       },
     };
     if (report.corpus?.[format]) entry.corpus = { ...report.corpus[format] };
+    const fonts = Object.fromEntries(['published', 'commit']
+      .map((channel) => [channel, fontSummary(samples, channel)])
+      .filter(([, summary]) => summary.sources.length || summary.captures || summary.not_measured.timed_out || summary.not_measured.errored));
+    if (Object.keys(fonts).length) entry.fonts = fonts;
     if (format !== 'xlsx' && report[`${format}_benchmark`]) {
       const timing = timingSummary(report.samples, format);
       entry.render_ms = Object.fromEntries(['published', 'commit', 'libreoffice'].map((channel) =>

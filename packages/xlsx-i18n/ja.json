@@ -147,6 +147,7 @@
       "editUnsupportedChart": "この編集は適用できません。移動されるセルをグラフが使用しています。ブックは変更されていません。",
       "editUnsupportedTable": "この編集は適用できません。移動されるセルをテーブルが使用しています。ブックは変更されていません。",
       "editUnsupportedPivot": "この編集は適用できません。移動されるセルをピボットテーブルが使用しています。ブックは変更されていません。",
+      "editUnsupportedFill": "このフィルは適用できません。リンク、メモ、またはルールのあるセルが変更されます。ブックは変更されていません。",
       "sheetProtected": "このセルは保護されたシート上にあります。",
       "hostRefused": "この編集は許可されていません。",
       "tooManyToCheck": "プラグインが確認できるセル数を超えています（上限 {limit}）。",
@@ -237,7 +238,8 @@
     "rangeSelected": "{start} から {end} を選択、{rows} 行 × {columns} 列",
     "sheetActivated": "{name}、シート {index}/{count}",
     "cellInputLabel": "セル {address} を編集",
-    "gridRoleDescription": "ワークシート"
+    "gridRoleDescription": "ワークシート",
+    "fillHandleLabel": "フィルハンドル"
   },
   "plugins": {
     "toolbarGroup": "プラグイン",

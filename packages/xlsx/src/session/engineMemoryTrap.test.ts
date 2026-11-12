@@ -2,12 +2,14 @@ import { afterAll, beforeAll, expect, spyOn, test } from 'bun:test';
 import { SessionFailure } from '../../../../shared/office-session';
 import * as wasm from '../wasm/loader';
 import { engineKind } from '../wasm/engine';
-import { createTestWorkbookSession, initRecordedWasm, limitEngineMemoryHeadroom, numbersWorkbook, restoreEngineMemory } from './testHelpers';
+import { createTestWorkbookSession, initRecordedWasm, limitEngineMemoryHeadroom, numbersWorkbook, ranInOwnEngineProcess, restoreEngineMemory } from './testHelpers';
 
 beforeAll(initRecordedWasm);
 afterAll(restoreEngineMemory);
 
-test('a trap after an earlier engine out of memory on the same thread stays a trap', async () => {
+const name = 'a trap after an earlier engine out of memory on the same thread stays a trap';
+test(name, async () => {
+  if (await ranInOwnEngineProcess(import.meta.path, name)) return;
   if (engineKind === 'native') {
     const earlier = wasm.openWorkbook(await numbersWorkbook(20_000));
     limitEngineMemoryHeadroom(256 * 2 ** 10);
@@ -25,4 +27,4 @@ test('a trap after an earlier engine out of memory on the same thread stays a tr
       kind: 'setNumberFormat', payload: { args: [0, 'A1', { type: 'custom', pattern: '0.0000' }] } })).rejects.toBeInstanceOf(SessionFailure);
     expect(session.failure?.code).toBe('trap');
   } finally { await session.dispose(); }
-});
+}, 60_000);

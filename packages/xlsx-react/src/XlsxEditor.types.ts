@@ -157,6 +157,8 @@ export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHost
   readOnly?: boolean;
   /** Whether to show the column and row header bands. Defaults to false. */
   showSheetHeaders?: boolean;
+  /** Shows the fill handle on the selection corner. */
+  fillHandle?: boolean;
   allowHostProposals?: boolean;
   /**
    * Replaces the default toolbar: omitted keeps it (hidden when read-only),

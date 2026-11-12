@@ -1,0 +1,14 @@
+{
+  "signedEntities": [
+    {
+      "entity": "Ranger RFX, INC.",
+      "signed_by": "vcelluccirfx",
+      "signed_by_id": 307772750,
+      "signed_at": "2026-11-11T23:07:28Z",
+      "pull_request_no": 2495,
+      "designated": [
+        "vcelluccirfx"
+      ]
+    }
+  ]
+}

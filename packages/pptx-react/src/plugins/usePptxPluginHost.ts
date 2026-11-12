@@ -80,8 +80,13 @@ export function usePptxPluginHost(options: UsePptxPluginHostOptions): PptxPlugin
   useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
   useLayoutEffect(() => {
     if (!managed) return;
-    return trackFocus(() => latest.current.focusRoot?.current ? [latest.current.focusRoot.current] : [],
+    const tracker = trackFocus(() => latest.current.focusRoot?.current ? [latest.current.focusRoot.current] : [],
       (focused) => host.focusChanged(focused));
+    host.setFocusCheck(tracker.recheck);
+    return () => {
+      host.setFocusCheck(null);
+      tracker();
+    };
   }, [host, managed]);
 
   useLayoutEffect(() => {

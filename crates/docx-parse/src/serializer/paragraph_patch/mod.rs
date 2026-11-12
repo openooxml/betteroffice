@@ -6,6 +6,8 @@ mod text;
 mod verify;
 
 #[cfg(test)]
+mod inherited_tests;
+#[cfg(test)]
 mod language_tests;
 #[cfg(test)]
 mod tests;
@@ -226,6 +228,7 @@ fn patch_inner(
             &patch.para_inherit,
             &properties,
             &patch.seed.inherit.paragraph,
+            patch.inheritance.is_current(),
         )?;
         output = if let Some(at) = ppr {
             apply_bytes(&output, vec![(xml.nodes[at].span.clone(), replacement)])?

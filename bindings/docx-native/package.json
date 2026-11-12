@@ -299,7 +299,7 @@
   },
   "type": "commonjs",
   "dependencies": {
-    "@betteroffice/fonts": "workspace:^0",
+    "@betteroffice/fonts": "workspace:^",
     "@betteroffice/fonts-cjk": "workspace:^0",
     "@betteroffice/fonts-intl": "workspace:^0",
     "@betteroffice/fonts-latin": "workspace:^0"

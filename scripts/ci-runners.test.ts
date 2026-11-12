@@ -181,9 +181,10 @@ const routers = jobs.filter(({ id }) => id === 'route');
 const groupsOf = (router: (typeof jobs)[number]) =>
   parseGroups(router.job.steps.find((step: any) => step.id === 'route').env.ROUTE_GROUPS) as { name: string; slots: number }[];
 const everyGroup = Object.fromEntries(routers.flatMap((router) => groupsOf(router).map(({ name }) => [name, LABEL])));
+const runSteps = (job: any): string[] => (job.steps ?? []).map((step: any) => String(step.run ?? '')).filter(Boolean);
 
 describe('CI runner routing', () => {
-  test('with nothing routed, every CI and End-to-end Linux job but the routers, the two shortest and the timings upload runs on its kyora class', () => {
+  test('with nothing routed, every CI and End-to-end Linux job but the routers, the audit, the two native jobs and the timings upload runs on its kyora class', () => {
     expect(Object.fromEntries(kyoraJobs.map(({ name, runners }) => [name, runners['push to main'].unset]))).toEqual({
       'ci.yml packages': ['kyora-4x8'],
       'ci.yml package-tests': ['kyora-8x8'],
@@ -277,6 +278,23 @@ describe('CI runner routing', () => {
       }
       for (const event of UNTRUSTED) {
         expect(entry.runsOn(EVENTS[event], {}, everyGroup), `${entry.name}: ${event}`).toEqual(['ubuntu-latest']);
+      }
+    }
+  });
+
+  test('Playwright installs browsers without system packages, which only a separate retried install-deps step adds', () => {
+    const installers = jobs.filter(({ job }) => runSteps(job).some((run) => /\bplaywright install-deps\b/.test(run)));
+    expect(installers.map(({ name }) => name).sort()).toEqual(['e2e.yml browser', 'visual-fidelity.yml measure']);
+    for (const { name, job } of jobs) {
+      for (const run of runSteps(job)) {
+        expect(run, name).not.toMatch(/--with-deps\b/);
+        if (/\bplaywright install-deps\b/.test(run)) {
+          expect(run, name).not.toMatch(/\bplaywright install(?!-deps)\b/);
+          expect(run, name).toMatch(/for attempt in 1 2 3\b/);
+          expect(run, name).toMatch(/\bif bunx playwright install-deps chromium; then exit 0; fi\b/);
+          expect(run, name).not.toMatch(/\btimeout \d+ bunx playwright install-deps\b/);
+          expect(run, name).toMatch(/Acquire::Retries "1"; Acquire::http::Timeout "20"; Acquire::https::Timeout "20"; DPkg::Lock::Timeout "60";/);
+        }
       }
     }
   });

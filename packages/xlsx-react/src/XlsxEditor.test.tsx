@@ -31,6 +31,7 @@ import type {
   WorkbookHandle,
   XlsxEditResult,
 } from '@betteroffice/xlsx';
+import type { RenderResult } from '@testing-library/react';
 import { isMacPlatform } from './commands/descriptors';
 import { useXlsxCommands } from './commands/hooks';
 import type {
@@ -204,14 +205,17 @@ function pointAt(fixture: Fixture, addr: CellAddr): { clientX: number; clientY: 
   return { clientX: rect.x + rect.w / 2, clientY: rect.y + rect.h / 2 };
 }
 
-async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array) => void, showSheetHeaders = false) {
-  const ready: { handle: WorkbookHandle | null } = { handle: null };
+async function mountEditor(
+  fixture: Fixture = plain, onSave?: (bytes: Uint8Array) => void, showSheetHeaders = false, fillHandle = true,
+) {
+  const ready: { handle: WorkbookHandle | null; api: XlsxEditorApi | null } = { handle: null, api: null };
   const view = render(
-    <XlsxEditor legacySyncApi experimentalWorkerOpen={false} showSheetHeaders={showSheetHeaders}
+    <XlsxEditor legacySyncApi experimentalWorkerOpen={false} showSheetHeaders={showSheetHeaders} fillHandle={fillHandle}
       file={fixture.bytes.slice()}
       onSave={onSave}
       onReady={(api) => {
         ready.handle = api.handle;
+        ready.api = api;
       }}
     />
   );
@@ -230,14 +234,16 @@ async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array
     nameBox,
     editor,
     workbook: () => ready.handle!,
+    api: () => ready.api!,
     reopenWith: (next: Fixture) =>
       act(async () => {
         view.rerender(
-          <XlsxEditor legacySyncApi experimentalWorkerOpen={false} showSheetHeaders={showSheetHeaders}
+          <XlsxEditor legacySyncApi experimentalWorkerOpen={false} showSheetHeaders={showSheetHeaders} fillHandle={fillHandle}
             file={next.bytes.slice()}
             onSave={onSave}
             onReady={(api) => {
               ready.handle = api.handle;
+              ready.api = api;
             }}
           />
         );
@@ -933,6 +939,192 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 });
 
+describe('XlsxEditor fill handle', () => {
+  function dragHandle(
+    view: { view: RenderResult },
+    from: CellAddr,
+    to: CellAddr
+  ) {
+    const handle = view.view.getByTestId('xlsx-fill-handle');
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, ...pointAt(plain, from) });
+    fireEvent.pointerMove(handle, { pointerId: 1, ...pointAt(plain, to) });
+    fireEvent.pointerUp(handle, { pointerId: 1, ...pointAt(plain, to) });
+  }
+
+  it('tiles the source down one column and commits one fillRange call', async () => {
+    const view = await mountEditor();
+    const workbook = view.workbook();
+    view.click({ row: 2, col: 1 });
+    expect(workbook.cell(0, 2, 1).input).toBe('100');
+    const fill = spyOn(workbook, 'fillRange');
+
+    dragHandle(view, { row: 2, col: 1 }, { row: 4, col: 1 });
+
+    await waitFor(() => expect(fill).toHaveBeenCalledTimes(1));
+    expect(fill).toHaveBeenCalledWith(0, 'B3', 'B3:B5');
+    expect(workbook.cell(0, 3, 1).input).toBe('100');
+    expect(workbook.cell(0, 4, 1).input).toBe('100');
+    expect(view.view.queryByTestId('xlsx-fill-preview')).toBeNull();
+  });
+
+  it('tiles the source right one row and commits one fillRange call', async () => {
+    const view = await mountEditor();
+    const workbook = view.workbook();
+    view.click({ row: 2, col: 1 });
+    const fill = spyOn(workbook, 'fillRange');
+
+    dragHandle(view, { row: 2, col: 1 }, { row: 2, col: 3 });
+
+    await waitFor(() => expect(fill).toHaveBeenCalledTimes(1));
+    expect(fill).toHaveBeenCalledWith(0, 'B3', 'B3:D3');
+    expect(workbook.cell(0, 2, 2).input).toBe('100');
+    expect(workbook.cell(0, 2, 3).input).toBe('100');
+  });
+
+  it('cancels the drag on Escape without calling the engine', async () => {
+    const view = await mountEditor();
+    const workbook = view.workbook();
+    view.click({ row: 2, col: 1 });
+    const before = workbook.save();
+    const fill = spyOn(workbook, 'fillRange');
+    const handle = view.view.getByTestId('xlsx-fill-handle');
+
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, ...pointAt(plain, { row: 2, col: 1 }) });
+    fireEvent.pointerMove(handle, { pointerId: 1, ...pointAt(plain, { row: 4, col: 1 }) });
+    expect(view.view.getByTestId('xlsx-fill-preview')).toBeDefined();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(view.view.queryByTestId('xlsx-fill-preview')).toBeNull();
+    fireEvent.pointerUp(handle, { pointerId: 1, ...pointAt(plain, { row: 4, col: 1 }) });
+
+    expect(fill).not.toHaveBeenCalled();
+    expect(workbook.save()).toEqual(before);
+    expect(view.nameBox().value).toBe('B3');
+  });
+
+  it('keeps the workbook and selection when the engine refuses the fill', async () => {
+    const view = await mountEditor();
+    const workbook = view.workbook();
+    view.click({ row: 2, col: 1 });
+    const before = workbook.save();
+    const message = 'fill cannot safely preserve Excel tables';
+    const fill = spyOn(workbook, 'fillRange').mockImplementation(() => {
+      throw new Error(message);
+    });
+
+    dragHandle(view, { row: 2, col: 1 }, { row: 4, col: 1 });
+
+    await waitFor(() => expect(view.view.getByTestId('xlsx-input-refusal').textContent).toBe(message));
+    expect(fill).toHaveBeenCalledTimes(1);
+    expect(workbook.save()).toEqual(before);
+    expect(view.nameBox().value).toBe('B3');
+  });
+
+  it('does not render the handle by default', async () => {
+    const editor = await mountEditor(plain, undefined, false, false);
+    editor.click({ row: 2, col: 1 });
+    expect(editor.view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(editor.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('renders the handle only for an editable selection', async () => {
+    const editable = await mountEditor();
+    editable.click({ row: 2, col: 1 });
+    expect(editable.view.getByTestId('xlsx-fill-handle')).toBeDefined();
+    await act(async () => { editable.view.unmount(); });
+
+    const readOnly = render(
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false} readOnly fillHandle
+        file={plain.bytes.slice()} onReady={() => {}} />
+    );
+    await waitFor(() => expect(readOnly.getByTestId('xlsx-selection')).toBeDefined(), MOUNTED);
+    expect(readOnly.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('anchors the handle on the true bottom-right of a partially off-screen selection and fills every row', async () => {
+    const view = await mountEditor();
+    const canvas = view.view.container.querySelector('canvas') as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 600);
+    const workbook = view.workbook();
+    workbook.editCell(0, 99, 1, 'end');
+    await act(async () => {
+      view.api().selectCells(0, { anchor: { row: 0, col: 0 }, focus: { row: 99, col: 1 } });
+    });
+    await waitFor(() => expect(view.surface.scrollTop).toBeGreaterThan(0), MOUNTED);
+    await act(async () => { fireEvent.scroll(view.surface); });
+    // scrolled to B100, only the selection's last row is visible.
+    await waitFor(() => expect(parseFloat((view.view.getByTestId('xlsx-selection') as HTMLElement).style.height)).toBeLessThan(100), MOUNTED);
+    await waitFor(() => expect(parseFloat(fillHandleElement(view).style.top)).toBeLessThan(200), MOUNTED);
+    const endpoint = view.api().getPositionAtPoint(790, 12);
+    expect(endpoint).not.toBeNull();
+    expect(endpoint!.col).toBeGreaterThan(1);
+    const fill = spyOn(workbook, 'fillRange').mockImplementation(() => ({
+      applied: true, sheetInfo: workbook.sheetInfo(),
+    }));
+
+    await act(async () => {
+      fireEvent.pointerDown(fillHandleElement(view), { button: 0, pointerId: 1, clientX: 10, clientY: 12 });
+      fireEvent.pointerMove(fillHandleElement(view), { pointerId: 1, clientX: 790, clientY: 12 });
+    });
+    expect(view.view.getByTestId('xlsx-fill-preview')).toBeDefined();
+    await act(async () => {
+      fireEvent.pointerUp(fillHandleElement(view), { pointerId: 1, clientX: 790, clientY: 12 });
+    });
+
+    await waitFor(() => expect(fill).toHaveBeenCalledTimes(1));
+    const [sheet, source, destination] = fill.mock.calls[0];
+    expect(sheet).toBe(0);
+    expect(source).toMatch(/^A1:[A-Z]{1,3}100$/);
+    expect(destination).toMatch(/^A1:[A-Z]{1,3}100$/);
+    expect(destination).not.toBe(source);
+  });
+
+  it('clamps an off-screen bottom-right to the viewport and still fills the full row count', async () => {
+    const view = await mountEditor();
+    const canvas = view.view.container.querySelector('canvas') as HTMLCanvasElement;
+    canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 600);
+    const workbook = view.workbook();
+    workbook.editCell(0, 99, 1, 'end');
+    await act(async () => {
+      view.api().selectCells(0, { anchor: { row: 0, col: 0 }, focus: { row: 99, col: 1 } });
+    });
+    await waitFor(() => expect(view.surface.scrollTop).toBeGreaterThan(0), MOUNTED);
+    await act(async () => {
+      view.surface.scrollTop = 0;
+      view.surface.scrollLeft = 0;
+      fireEvent.scroll(view.surface);
+    });
+    // back at the top the selection's clipped edge spans the viewport, so the
+    // handle is clamped there rather than pinned to B100's off-screen corner.
+    await waitFor(() => expect(parseFloat((view.view.getByTestId('xlsx-selection') as HTMLElement).style.height)).toBeGreaterThan(500), MOUNTED);
+    await waitFor(() => expect(parseFloat(fillHandleElement(view).style.top)).toBeGreaterThan(500), MOUNTED);
+    const endpoint = view.api().getPositionAtPoint(790, 36);
+    expect(endpoint).not.toBeNull();
+    expect(endpoint!.col).toBeGreaterThan(1);
+    const fill = spyOn(workbook, 'fillRange').mockImplementation(() => ({
+      applied: true, sheetInfo: workbook.sheetInfo(),
+    }));
+
+    await act(async () => {
+      fireEvent.pointerDown(fillHandleElement(view), { button: 0, pointerId: 1, clientX: 10, clientY: 596 });
+      fireEvent.pointerMove(fillHandleElement(view), { pointerId: 1, clientX: 790, clientY: 36 });
+    });
+    expect(view.view.getByTestId('xlsx-fill-preview')).toBeDefined();
+    await act(async () => {
+      fireEvent.pointerUp(fillHandleElement(view), { pointerId: 1, clientX: 790, clientY: 36 });
+    });
+
+    await waitFor(() => expect(fill).toHaveBeenCalledTimes(1));
+    const [sheet, source, destination] = fill.mock.calls[0];
+    expect(sheet).toBe(0);
+    expect(source).toMatch(/^A1:[A-Z]{1,3}100$/);
+    expect(destination).toMatch(/^A1:[A-Z]{1,3}100$/);
+    expect(destination).not.toBe(source);
+  });
+});
+
+function fillHandleElement(view: { view: RenderResult }): HTMLElement {
+  return view.view.getByTestId('xlsx-fill-handle');
+}
 describe('XlsxEditor chart objects', () => {
   it('selects a chart instead of the cells behind it, and deselects off it', async () => {
     const [chart] = charted.charts;

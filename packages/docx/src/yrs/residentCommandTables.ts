@@ -7,6 +7,7 @@ import type {
   DocxWorkerCommandState,
 } from './residentCommandProtocol';
 import { readCellSelection, resolveLiveCell, rootOf } from './residentCommandTableSelection';
+import { isTableUnavailableRefusal, isUnavailableTablePayload } from './tableUnavailable';
 
 export type TableCommandKind =
   | 'insertTableRow' | 'insertTableColumn'
@@ -49,6 +50,37 @@ function resolveTableTarget(
   return { focused, range, table };
 }
 
+/**
+ * For a story in no laid-out cell, the one unavailable table whose rows name it as a cell, looked
+ * up in every story the story id starts with: `undefined` when no such story holds an unavailable
+ * table, `null` when none or several of them name it.
+ */
+function unavailableTableHolding(
+  engine: DocxWorkerCommandEngine,
+  story: string
+): { cell: YrsCellLoc; table: YrsTableLoc } | null | undefined {
+  let seen = false;
+  const tied: YrsCellLoc[] = [];
+  for (let cut = story.indexOf(':'); cut > 0; cut = story.indexOf(':', cut + 1)) {
+    const parent = story.slice(0, cut);
+    if (!engine.geometryReader.hasStory(parent)) continue;
+    for (let tableIndex = 0; ; tableIndex += 1) {
+      const payload = engine.tablePayload(parent, tableIndex) as TablePayload | null;
+      if (!payload) break;
+      if (!isUnavailableTablePayload(payload)) continue;
+      seen = true;
+      if (!Array.isArray(payload.rows)) continue;
+      payload.rows.forEach((row, rowIndex) => row.cells?.forEach((cell, column) => {
+        if (cell.story === story) tied.push({ story: parent, tableIndex, row: rowIndex, column });
+      }));
+    }
+  }
+  if (!seen) return undefined;
+  if (tied.length !== 1) return null;
+  const cell = tied[0]!;
+  return { cell, table: { story: cell.story, tableIndex: cell.tableIndex } };
+}
+
 export function nearTable(engine: DocxWorkerCommandEngine, table: YrsTableLoc): YrsLoc | null {
   const segments = engine.geometryReader.storySegments(table.story);
   let ordinal = 0;
@@ -85,8 +117,13 @@ export function preflightTableCommand(
   command: TableCommandIntent,
   selection: DocxCommandSelection
 ): { target: DocxTableCommandTarget } | { reason: string } {
-  const resolved = resolveTableTarget(engine, selection);
-  if (!resolved) return { reason: 'invalid-cell-target' };
+  let resolved = resolveTableTarget(engine, selection);
+  if (!resolved) {
+    const held = unavailableTableHolding(engine, selection.focus.story);
+    if (held === undefined) return { reason: 'invalid-cell-target' };
+    if (command.kind !== 'deleteTable' || !held) return { reason: 'table-unavailable' };
+    resolved = { focused: held.cell, range: { anchor: held.cell, head: held.cell }, table: held.table };
+  }
   if (rootOf(resolved.table.story) !== 'body') return { reason: 'invalid-selection' };
   if (command.payload.suggesting !== undefined &&
     command.kind !== 'insertTableRow' && command.kind !== 'deleteTableRow') {
@@ -114,7 +151,9 @@ export function preflightTableCommand(
 
 function liveAnchors(engine: DocxWorkerCommandEngine, at: YrsCellLoc) {
   const payload = engine.tablePayload(at.story, at.tableIndex) as TablePayload | null;
-  return payload && Array.isArray(payload.rows) ? tableAnchors(payload).anchors : null;
+  return payload && !isUnavailableTablePayload(payload) && Array.isArray(payload.rows)
+    ? tableAnchors(payload).anchors
+    : null;
 }
 
 function coveringAnchor(anchors: readonly TableCellAnchor[], at: YrsCellLoc): TableCellAnchor | null {
@@ -176,8 +215,16 @@ function nearestCellStory(engine: DocxWorkerCommandEngine, at: YrsCellLoc): stri
 
 export function syncCellSelectionWithCaret(engine: DocxWorkerCommandEngine, story: string): void {
   const cell = resolveLiveCell(engine, story);
-  if (cell) engine.setCellSelection({ anchor: cell, head: cell });
-  else engine.clearCellSelection();
+  if (!cell) {
+    engine.clearCellSelection();
+    return;
+  }
+  try {
+    engine.setCellSelection({ anchor: cell, head: cell });
+  } catch (error) {
+    if (!isTableUnavailableRefusal(error)) throw error;
+    engine.clearCellSelection();
+  }
 }
 
 export interface TableCommandSink {

@@ -6,6 +6,7 @@ import type { WorkbookFrame, WorkbookWireFrame } from './methods';
 export const WORKBOOK_REPLAY_MUTATORS = {
   editCell: true,
   editCells: true,
+  fillRange: true,
   applyEdits: true,
   applyOps: true,
   propose: true,
@@ -281,6 +282,9 @@ function validOp(value: unknown): boolean {
     case 'moveRange':
       return args.length === 3 && integer(args[0]) && typeof args[1] === 'string' &&
         typeof args[2] === 'string';
+    case 'fillRange':
+      return args.length === 3 && integer(args[0]) && typeof args[1] === 'string' &&
+        typeof args[2] === 'string';
     case 'undo':
     case 'redo': return args.length === 0;
     case 'setActiveSheet': return args.length === 1 && integer(args[0]);
@@ -326,6 +330,7 @@ export function applyWorkbookReplayOp(
     case 'applyFormat': return handle.applyFormat(...op.args);
     case 'moveChart': return handle.moveChart(...op.args);
     case 'moveRange': return handle.moveRange(...op.args);
+    case 'fillRange': return handle.fillRange(...op.args);
     case 'undo': return handle.undo(...op.args);
     case 'redo': return handle.redo(...op.args);
     case 'setActiveSheet': return handle.setActiveSheet(...op.args);

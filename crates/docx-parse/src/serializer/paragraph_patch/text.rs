@@ -92,6 +92,7 @@ pub(super) fn write(
     lowered: &Lowered,
     patch: &ParagraphPatchV1,
 ) -> Result<(String, Vec<UnitV1>), Failure> {
+    let current = patch.inheritance.is_current();
     let boundary = |offset| {
         offset == lowered.len
             || lowered.cells.iter().any(|cell| {
@@ -173,6 +174,7 @@ pub(super) fn write(
                             &edit.deltas,
                             &edit.inherit,
                             &edit.target,
+                            current,
                         )?;
                         let written = if restyle {
                             let deltas = properties::restyle_run_deltas(
@@ -187,6 +189,7 @@ pub(super) fn write(
                                 &deltas,
                                 &edit.inherit,
                                 &edit.target,
+                                current,
                             )?
                         } else {
                             written
@@ -313,6 +316,7 @@ pub(super) fn write(
                         &deltas,
                         &insert.inherit,
                         &insert.attrs,
+                        current,
                     )?;
                     let properties = if restyle {
                         let deltas = properties::restyle_run_deltas(
@@ -329,6 +333,7 @@ pub(super) fn write(
                             &deltas,
                             &insert.inherit,
                             &insert.attrs,
+                            current,
                         )?
                     } else {
                         properties
@@ -401,7 +406,7 @@ pub(super) fn write(
     }
     let mut output = apply_bytes(source, coalesce_edits(source, lowered, &writes, &text_runs))?;
     if let Some(edit) = empty_insert {
-        output = write_empty(source, lowered, edit)?;
+        output = write_empty(source, lowered, edit, current)?;
     }
     Ok((output, result_units))
 }
@@ -839,7 +844,12 @@ fn write_run(
     Ok(replacement)
 }
 
-fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<String, Failure> {
+fn write_empty(
+    source: &str,
+    lowered: &Lowered,
+    edit: &TextEditV1,
+    current: bool,
+) -> Result<String, Failure> {
     let empty: Vec<_> = lowered
         .runs
         .iter()
@@ -875,7 +885,7 @@ fn write_empty(source: &str, lowered: &Lowered, edit: &TextEditV1) -> Result<Str
         }
         let deltas = attr_deltas(&effective, &insert.attrs);
         let properties =
-            properties::run_properties(original, &deltas, &insert.inherit, &insert.attrs)?;
+            properties::run_properties(original, &deltas, &insert.inherit, &insert.attrs, current)?;
         let run = if let Some((_, run)) = empty.first() {
             let node = &lowered.xml.nodes[run.node];
             let children: Vec<_> = node
@@ -1234,6 +1244,7 @@ mod tests {
             para_inherit: Attrs::new(),
             mark_inherit: Attrs::new(),
             result_sha256: result_sha256(&seed, &Attrs::new()),
+            inheritance: Default::default(),
         };
         let mut lowered = match super::super::lower::lower(
             source,

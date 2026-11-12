@@ -632,6 +632,9 @@ interface LooseProbe {
       layout: { version: string; pageCount: number };
       getPositionAtPoint(clientX: number, clientY: number): PointHit | null;
       readPositionAtPoint(clientX: number, clientY: number): Promise<PointHit | null>;
+      readAnchorGeometries(
+        targets: unknown[]
+      ): Promise<({ ok: true; rects: (ProbeRect & { pageIndex: number })[] } | { ok: false })[]>;
     };
   };
 }
@@ -738,8 +741,8 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
       let found: { x: number; y: number; hit: PointHit } | null = null;
       for (let fy = 0.1; fy < 0.9 && !found; fy += 0.01) {
         for (let fx = 0.15; fx < 0.8 && !found; fx += 0.02) {
-          const x = canvas.left + canvas.width * fx;
-          const y = canvas.top + canvas.height * fy;
+          const x = Math.trunc(canvas.left + canvas.width * fx);
+          const y = Math.trunc(canvas.top + canvas.height * fy);
           if (y < 0 || y > window.innerHeight) continue;
           if (document.elementFromPoint(x, y) !== surface) continue;
           const hit = worker ? await editor.readPositionAtPoint(x, y) : editor.getPositionAtPoint(x, y);
@@ -765,6 +768,43 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
     expect(query.outside).toBeNull();
     expect(query.unchanged).toBe(true);
     expect(query.plugin).toEqual({ ...hit, layoutId: expect.any(String) });
+
+    const fractional = await operate(page, async ({ worker, hit }: { worker: boolean; hit: PointHit }) => {
+      const { editor, geometry } = (window as unknown as LooseProbe).__probe;
+      const read = await editor.readParagraphs({ story: hit.target.story, view: 'accepted' });
+      const paragraph = read.paragraphs.find((value) => value.paraId === hit.target.start.paraId);
+      if (!paragraph) throw new Error(`Paragraph not found for paraId ${hit.target.start.paraId} in story ${hit.target.story}`);
+      const targets = Array.from({ length: paragraph.text.length }, (_, offset) => ({
+        kind: 'range',
+        version: read.version,
+        range: {
+          story: hit.target.story,
+          view: 'accepted',
+          start: { paraId: paragraph.paraId, offset },
+          end: { paraId: paragraph.paraId, offset: offset + 1 },
+        },
+      }));
+      const results = await geometry.readAnchorGeometries(targets);
+      const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+      let glyph: { offset: number; mid: number; y: number } | null = null;
+      for (let index = 0; index < results.length && !glyph; index += 1) {
+        const offset = (hit.target.start.offset + index) % results.length;
+        if (paragraph.text[offset] === ' ') continue;
+        const result = results[offset]!;
+        if (!result.ok) continue;
+        const rect = result.rects.find((value) => value.pageIndex === 1 && value.width >= 4);
+        if (rect) glyph = { offset, mid: layer.left + rect.x + rect.width / 2, y: layer.top + rect.y + rect.height / 2 };
+      }
+      if (!glyph) throw new Error('No glyph with a 4px advance on page 2');
+      const found = glyph;
+      const at = async (pointX: number) => {
+        const point = worker ? await editor.readPositionAtPoint(pointX, found.y) : editor.getPositionAtPoint(pointX, found.y);
+        return point ? { paraId: point.target.start.paraId, offset: point.target.start.offset } : null;
+      };
+      return { glyph: found, left: await at(found.mid - 0.25), right: await at(found.mid + 0.25) };
+    }, { worker: peerless, hit });
+    expect(fractional.left).toEqual({ paraId: hit.target.start.paraId, offset: fractional.glyph.offset });
+    expect(fractional.right).toEqual({ paraId: hit.target.start.paraId, offset: fractional.glyph.offset + 1 });
 
     await page.mouse.click(x, y);
     await expect

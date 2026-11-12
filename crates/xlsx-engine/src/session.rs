@@ -85,6 +85,13 @@ struct MoveRangeArgs {
 }
 
 #[derive(Deserialize)]
+struct FillRangeArgs {
+    sheet: u32,
+    source: String,
+    destination: String,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CellEditInput {
     row: u32,
@@ -930,6 +937,28 @@ impl Session {
         let result = self
             .workbook
             .move_range(
+                SheetId(args.sheet),
+                source,
+                destination,
+                self.calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    /// Copies `source` over the filled rectangle `destination` as one undo step.
+    pub fn fill_range_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: FillRangeArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad fill args: {error}"))?;
+        let source = parse_range(&args.source)?;
+        let destination = parse_range(&args.destination)?;
+        let result = self
+            .workbook
+            .fill_range(
                 SheetId(args.sheet),
                 source,
                 destination,
@@ -2244,6 +2273,68 @@ mod tests {
                 .is_err()
         );
         assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+    }
+
+    #[test]
+    fn fill_range_json_commits_one_undoable_formula_aware_edit() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session
+            .edit_cells_json(
+                r#"{"sheet":0,"edits":[{"row":0,"col":2,"input":"5"},{"row":1,"col":2,"input":"=C1+$C$1"}]}"#,
+                None,
+            )
+            .unwrap();
+        let before = session.workbook.history_state().undo_depth;
+        let result = session
+            .fill_range_json(
+                r#"{"sheet":0,"source":"C1:C2","destination":"C1:C4"}"#,
+                None,
+            )
+            .unwrap();
+        assert!(result.contains(r#""applied":true"#));
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(2, 2))
+                .unwrap()
+                .input,
+            "5"
+        );
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(3, 2))
+                .unwrap()
+                .input,
+            "=C3+$C$1"
+        );
+        assert!(
+            session
+                .fill_range_json(
+                    r#"{"sheet":0,"source":"C1:C2","destination":"C2:C4"}"#,
+                    None,
+                )
+                .is_err()
+        );
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        session.undo_json(None).unwrap();
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(3, 2))
+                .unwrap()
+                .input,
+            ""
+        );
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(1, 2))
+                .unwrap()
+                .input,
+            "=C1+$C$1"
+        );
     }
 
     #[test]

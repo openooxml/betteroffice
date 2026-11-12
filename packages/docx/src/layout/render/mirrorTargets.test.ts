@@ -474,3 +474,26 @@ test('an endnote split across two pages is one note in the mirror', () => {
   expect(read.split('closing words')).toHaveLength(2);
   expect(split.map((page) => displayPageHoldsMirrorId(page, 'oox-endnote-9'))).toEqual([true, false]);
 });
+
+test('a note backlink without a label never reads the raw note id', () => {
+  const mirror = buildMirrorPage({
+    pageIndex: 0,
+    width: 100,
+    height: 100,
+    primitives: [],
+    noteAreas: [
+      {
+        kind: 'footnote',
+        y: 50,
+        height: 20,
+        noteIds: [12],
+        notes: [{ id: 12 }],
+        primitives: [text({ groupId: 'footnote-12', text: 'Body' })],
+      },
+    ],
+  });
+  const backlink = mirror.querySelector('[role="doc-backlink"]')!;
+  expect(backlink).not.toBeNull();
+  expect(backlink.hasAttribute('aria-label')).toBe(false);
+  expect(mirror.querySelector('[aria-label*="12"]')).toBeNull();
+});

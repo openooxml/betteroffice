@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
-use docx_parse::paragraph_patch::{LegacyParagraphV1, ParagraphPatchV1};
+use docx_parse::paragraph_patch::{InheritanceStateV1, LegacyParagraphV1, ParagraphPatchV1};
 use docx_parse::serializer::S13TablePatch;
 use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
@@ -3451,6 +3451,10 @@ impl EditingDoc {
                     }
                 }
             }
+            let mut by_id: HashMap<u32, Vec<&str>> = HashMap::new();
+            for (holder, now) in &current {
+                by_id.entry(*now).or_default().push(holder.as_str());
+            }
             let captured: HashSet<(&str, u32)> = saved
                 .iter()
                 .filter_map(|(owner, id)| Some((owner.as_str(), parse_paragraph_id(id)?)))
@@ -3469,10 +3473,11 @@ impl EditingDoc {
                 };
                 let moved = current.get(owner).is_some_and(|now| *now != id);
                 let viewed = occurrence(owner);
-                let taken = current.iter().any(|(holder, now)| {
-                    *now == id
-                        && !captured.contains(&(holder.as_str(), id))
-                        && (viewed.is_none() || occurrence(holder) != viewed)
+                let taken = by_id.get(&id).is_some_and(|holders| {
+                    holders.iter().any(|&holder| {
+                        !captured.contains(&(holder, id))
+                            && (viewed.is_none() || occurrence(holder) != viewed)
+                    })
                 });
                 if moved || taken {
                     stale.push((owner.clone(), text.clone()));
@@ -3933,7 +3938,8 @@ impl EditingDoc {
             if seeded.is_empty() {
                 continue;
             }
-            if let Some(mut spliced) = spliced_part(&source, index, seeded, &live, &by_key) {
+            if let Some((mut spliced, stale)) = spliced_part(&source, index, seeded, &live, &by_key)
+            {
                 let same_stories = part_stories(seeded, part)
                     .keys()
                     .eq(part_stories(&live, part).keys());
@@ -3964,7 +3970,16 @@ impl EditingDoc {
                             now.segments.as_deref().expect("changed segments retained"),
                             context,
                         ) {
-                            Ok(patch) => spliced.paragraph_patches.push(patch),
+                            Ok(mut patch) => {
+                                if stale.iter().any(|cell| {
+                                    story.strip_prefix(cell.as_str()).is_some_and(|rest| {
+                                        rest.is_empty() || rest.starts_with(':')
+                                    })
+                                }) {
+                                    patch.inheritance = InheritanceStateV1::Unknown;
+                                }
+                                spliced.paragraph_patches.push(patch);
+                            }
                             Err(legacy) => spliced.legacy_paragraphs.push(legacy),
                         }
                     }
@@ -4166,6 +4181,9 @@ struct RowSplices {
     inserted: HashMap<String, SpliceAnchor>,
     removed: HashSet<String>,
     tables: Vec<S13TablePatch>,
+    /// The cell stories of every table whose rows, cells or table properties changed: their
+    /// recorded style inheritance may no longer match the table.
+    stale: HashSet<String>,
 }
 
 fn simple_table_payload(
@@ -4273,6 +4291,13 @@ fn admit_row_splices(
         let new_rows = new_rows.as_array()?;
         let old_keys = old_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
         let new_keys = new_rows.iter().map(cells).collect::<Option<Vec<_>>>()?;
+        edits.stale.extend(
+            old_keys
+                .iter()
+                .chain(&new_keys)
+                .flatten()
+                .map(|story| (*story).to_owned()),
+        );
         let simple = patch_tables
             && old_keys == new_keys
             && simple_table_payload(&was[0]["payload"], before)
@@ -4424,7 +4449,7 @@ fn spliced_part(
     seeded: &HashMap<String, Arc<StoryState>>,
     live: &HashMap<String, Arc<StoryState>>,
     by_key: &HashMap<&str, &Pilcrow>,
-) -> Option<SplicedPart> {
+) -> Option<(SplicedPart, HashSet<String>)> {
     let part = &source.parts[index];
     if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {
         return None;
@@ -4654,19 +4679,22 @@ fn spliced_part(
     changed.sort_unstable();
     removed.sort_unstable();
     crate::sort::sort_by_key(&mut inserted, &|anchor| anchor.position());
-    Some(SplicedPart {
-        part: part.path().to_owned(),
-        sha256: part.sha256.clone(),
-        paragraphs,
-        changed,
-        section_only,
-        inserted,
-        removed,
-        paragraph_patches: Vec::new(),
-        legacy_paragraphs: Vec::new(),
-        table_patches: rows.tables,
-        format_only: Vec::new(),
-    })
+    Some((
+        SplicedPart {
+            part: part.path().to_owned(),
+            sha256: part.sha256.clone(),
+            paragraphs,
+            changed,
+            section_only,
+            inserted,
+            removed,
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: rows.tables,
+            format_only: Vec::new(),
+        },
+        rows.stale,
+    ))
 }
 
 fn last_block_paragraph(
@@ -6976,6 +7004,149 @@ mod tests {
         );
         let txn = left.yrs_doc().transact();
         assert!(claim(&claims(&txn), &current, &a).unwrap().published);
+    }
+
+    #[test]
+    fn recording_saved_ids_reports_moved_and_taken_pairs_and_publishes_the_rest() {
+        let base = EditingDoc::new(1);
+        for story in ["edited", "moved", "taken", "taker", "first", "second"] {
+            base.create_story(story, "one", "Normal", "left").unwrap();
+        }
+        base.create_story("body", "abc", "Normal", "left").unwrap();
+        let update = base.encode_state_as_update_v1();
+        let (left, right) = (EditingDoc::new(2), EditingDoc::new(3));
+        left.apply_update_v1(&update).unwrap();
+        right.apply_update_v1(&update).unwrap();
+        let key = |story: &str| base.paragraphs(story).unwrap()[0].para_id.clone();
+        let (edited, moved, taken, taker, first, second) = (
+            key("edited"),
+            key("moved"),
+            key("taken"),
+            key("taker"),
+            key("first"),
+            key("second"),
+        );
+
+        claim_id(&left, &edited, "0000E001", false);
+        left.insert_text(
+            &ctx(),
+            Position::new("edited", 0),
+            "typed",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        left.split_paragraph(&ctx(), Position::new("body", 1), None)
+            .unwrap();
+        let deleted = left
+            .split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap()
+            .first_para_id;
+        let deleted_id = doc_identity(&left, &deleted).ooxml_para_id.unwrap();
+        left.delete_range(&ctx(), StoryRange::new("body", 1, 3))
+            .unwrap();
+        claim_id(&left, &moved, "0000B001", false);
+        claim_id(&left, &moved, "0000B002", false);
+        claim_id(&left, &taken, "0000C001", false);
+        claim_id(&right, &taker, "0000C001", true);
+        claim_id(&right, &first, "0000D001", true);
+        claim_id(&left, &second, "0000D001", true);
+        left.apply_update_v1(&right.encode_state_as_update_v1())
+            .unwrap();
+        assert_ne!(
+            doc_identity(&left, &taken).ooxml_para_id.as_deref(),
+            Some("0000C001")
+        );
+        assert_eq!(
+            doc_identity(&left, &first).ooxml_para_id.as_deref(),
+            Some("0000D001")
+        );
+        assert_eq!(
+            doc_identity(&left, &second).ooxml_para_id.as_deref(),
+            Some("0000D001")
+        );
+
+        let saved = vec![
+            (edited.clone(), "0000E001".to_owned()),
+            (deleted.clone(), deleted_id.clone()),
+            (moved.clone(), "0000B001".to_owned()),
+            (taken.clone(), "0000C001".to_owned()),
+            (first.clone(), "0000D001".to_owned()),
+            (second.clone(), "0000D001".to_owned()),
+            (first.clone(), "0000D001".to_owned()),
+        ];
+        let expected = vec![
+            (moved.clone(), "0000B001".to_owned()),
+            (taken.clone(), "0000C001".to_owned()),
+        ];
+        assert_eq!(left.record_saved_paragraph_ids(&saved), expected);
+
+        let published = |id: &str, owner: &str| {
+            let txn = left.yrs_doc().transact();
+            claim(&claims(&txn), id, owner).unwrap().published
+        };
+        assert!(published("0000E001", &edited));
+        assert!(published(&deleted_id, &deleted));
+        assert!(!published("0000B001", &moved));
+        assert!(!published("0000B002", &moved));
+        assert!(!published("0000C001", &taken));
+        assert!(published("0000C001", &taker));
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+
+        let before = left.encode_state_vector_v1();
+        assert_eq!(left.record_saved_paragraph_ids(&saved), expected);
+        assert_eq!(left.encode_state_vector_v1(), before);
+    }
+
+    #[test]
+    fn a_saved_id_another_uncaptured_holder_shares_is_taken_without_moving() {
+        let base = EditingDoc::new(1);
+        for story in ["first", "second", "other"] {
+            base.create_story(story, "one", "Normal", "left").unwrap();
+        }
+        let update = base.encode_state_as_update_v1();
+        let (left, right) = (EditingDoc::new(2), EditingDoc::new(3));
+        left.apply_update_v1(&update).unwrap();
+        right.apply_update_v1(&update).unwrap();
+        let key = |story: &str| base.paragraphs(story).unwrap()[0].para_id.clone();
+        let (first, second, other) = (key("first"), key("second"), key("other"));
+        claim_id(&right, &first, "0000D001", true);
+        claim_id(&left, &second, "0000D001", true);
+        claim_id(&left, &other, "0000E001", false);
+        left.apply_update_v1(&right.encode_state_as_update_v1())
+            .unwrap();
+        for holder in [&first, &second] {
+            assert_eq!(
+                doc_identity(&left, holder).ooxml_para_id.as_deref(),
+                Some("0000D001")
+            );
+        }
+        let published = |id: &str, owner: &str| {
+            let txn = left.yrs_doc().transact();
+            claim(&claims(&txn), id, owner).unwrap().published
+        };
+
+        let taken_only = vec![
+            (first.clone(), "0000D001".to_owned()),
+            (other.clone(), "0000E001".to_owned()),
+        ];
+        assert_eq!(
+            left.record_saved_paragraph_ids(&taken_only),
+            [(first.clone(), "0000D001".to_owned())]
+        );
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+        assert!(published("0000E001", &other));
+
+        let before = left.encode_state_vector_v1();
+        let both = vec![
+            (first.clone(), "0000D001".to_owned()),
+            (second.clone(), "0000D001".to_owned()),
+        ];
+        assert!(left.record_saved_paragraph_ids(&both).is_empty());
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+        assert_eq!(left.encode_state_vector_v1(), before);
     }
 
     #[test]

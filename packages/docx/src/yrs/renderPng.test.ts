@@ -1,10 +1,11 @@
 import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import * as enginePng from '../wasm/enginePng';
 import { engineKind } from '../wasm/enginePng';
-import { preloadEditWasm } from '../wasm/edit';
-import { preloadOpcWasm } from '../wasm/opc';
+import { resolveCompleteFontProvider } from '../layout/measure';
 import { createYrsSession, type YrsSession } from './index';
+import { ENGINES, preloadEngines, restoreBrowser, scriptDocument, stubBrowser } from './renderPngTestSupport';
 import type { PngDiagnostic } from '../../../../shared/office-session/pngExportError';
 import fixture from '../../../../crates/docx-edit/tests/fixtures/behind_objects.json';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
@@ -13,43 +14,8 @@ const root = resolve(import.meta.dir, '../../../..');
 const deck = new Uint8Array(readFileSync(resolve(root, 'apps/demo/public/betteroffice-demo.docx')));
 const native = engineKind === 'native';
 
-beforeAll(async () => {
-  await preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))));
-  await preloadOpcWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm'))));
-});
-
-let restore: (() => void) | undefined;
-afterEach(() => { restore?.(); restore = undefined; });
-
-function stubBrowser() {
-  const calls = { sizes: [] as [number, number][], fills: 0, encoded: 0, scales: [] as number[][], bitmaps: 0 };
-  class Canvas {
-    constructor(public width: number, public height: number) {}
-    getContext() {
-      if (calls.sizes.at(-1)?.[0] !== this.width || calls.sizes.at(-1)?.[1] !== this.height) calls.sizes.push([this.width, this.height]);
-      return new Proxy({} as Record<string, unknown>, {
-        get(target, property) {
-          if (property === 'fill') return () => { calls.fills++; };
-          if (property === 'scale') return (x: number, y: number) => { calls.scales.push([x, y]); };
-          if (property === 'measureText') return (text: string) => ({ width: text.length });
-          if (property === 'createLinearGradient' || property === 'createRadialGradient' || property === 'createPattern') return () => ({ addColorStop: () => undefined });
-          return property in target ? target[property as string] : () => undefined;
-        },
-        set(target, property, value) { target[property as string] = value; return true; },
-      });
-    }
-    convertToBlob(request: { type: string }) { calls.encoded++; return Promise.resolve(new Blob(['png'], { type: request.type })); }
-  }
-  class Path { moveTo() {} lineTo() {} quadraticCurveTo() {} bezierCurveTo() {} closePath() {} addPath() {} }
-  const scope = globalThis as Record<string, unknown>;
-  const saved = { OffscreenCanvas: scope.OffscreenCanvas, Path2D: scope.Path2D, Image: scope.Image, createImageBitmap: scope.createImageBitmap };
-  Object.assign(scope, {
-    OffscreenCanvas: Canvas, Path2D: Path, Image: undefined,
-    createImageBitmap: () => { calls.bitmaps++; return Promise.resolve({ width: 4, height: 4, close: () => undefined }); },
-  });
-  restore = () => { Object.assign(scope, saved); };
-  return calls;
-}
+beforeAll(preloadEngines);
+afterEach(restoreBrowser);
 
 const pngSize = (bytes: Uint8Array): [number, number] => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -72,6 +38,45 @@ const smartArtParts = (drawingRels = '<Relationships xmlns="http://schemas.openx
         ['word/diagrams/_rels/drawing1.xml.rels', toBytes(drawingRels)],
         ['word/media/image1.png', new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==', 'base64'))],
     ]);
+
+function withCanonicalFontIds(value: unknown, ids = new Map<number, number>()): unknown {
+  if (Array.isArray(value)) return value.map((item) => withCanonicalFontIds(item, ids));
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => {
+    if (key !== 'fontId' || typeof field !== 'number') return [key, withCanonicalFontIds(field, ids)];
+    if (!ids.has(field)) ids.set(field, ids.size);
+    return [key, ids.get(field)];
+  }));
+}
+
+async function exportScriptDocument(options: Parameters<YrsSession['renderPng']>[1] = {}): Promise<Uint8Array> {
+  const session = await createYrsSession();
+  try {
+    session.openDocx(scriptDocument(), true);
+    return await session.renderPng({ page: 0 }, options);
+  } finally { session.destroy(); }
+}
+
+async function drawnPrimitives(options: Parameters<YrsSession['renderPng']>[1] = {}): Promise<unknown> {
+  const drawing = spyOn(enginePng, 'renderPng');
+  try {
+    await exportScriptDocument(options);
+    expect(drawing).toHaveBeenCalledTimes(1);
+    return withCanonicalFontIds(drawing.mock.calls[0]![0].page.primitives);
+  } finally { drawing.mockRestore(); }
+}
+
+for (const { kind } of ENGINES) {
+  describe.skipIf(engineKind !== kind)(`renderPng default fonts on the ${kind} engine`, () => {
+    test('without fontProvider, script text draws the primitives the complete bundled provider draws', async () => {
+      stubBrowser();
+      const complete = await resolveCompleteFontProvider();
+      expect(complete).toBeDefined();
+      const pinned = await drawnPrimitives({ fontProvider: complete });
+      expect(await drawnPrimitives()).toEqual(pinned);
+    });
+  });
+}
 
 describe('YrsSession.renderPng', () => {
   test('draws an EMF picture that reaches the export as its media part', async () => {
@@ -210,7 +215,7 @@ describe('YrsSession.renderPng', () => {
         session.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)), true);
         await session.renderPng({ page: 0 });
         return calls.scales;
-      } finally { session.destroy(); restore?.(); restore = undefined; }
+      } finally { session.destroy(); restoreBrowser(); }
     };
     expect(await scales('50')).toContainEqual([0.5, 1]);
     expect((await scales('0')).filter(([x]) => x === 0)).toEqual([]);

@@ -1323,6 +1323,23 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       void coordinator.command(input, { frame, selectionRevision }).result.catch(report);
     } else void coordinator.runAfterPendingInput(() => coordinator.command(input, { frame, selectionRevision }).result).catch(report);
   };
+  const fillSelection = (source: CellRange, destination: CellRange) => {
+    const current = selectionRef.current;
+    if (!editable() || !current || draftController.getSnapshot().cell) return;
+    const sheet = activeRef.current;
+    let target: WorkbookCommandSelection;
+    try {
+      target = rangeTarget(sheet, current);
+    } catch (error) {
+      report(error);
+      return;
+    }
+    const from = address({ row: source.top, col: source.left });
+    const sourceEnd = address({ row: source.bottom, col: source.right });
+    const end = address({ row: destination.bottom, col: destination.right });
+    command({ kind: 'fillRange',
+      payload: { args: [sheet, from === sourceEnd ? from : `${from}:${sourceEnd}`, `${from}:${end}`], target } });
+  };
   const clear = () => {
     const target = selectedTarget();
     const owner = ownerRef.current;
@@ -1878,6 +1895,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     return { cell: frame.geometry ? cellAtPoint(frame.geometry, x, y) : null,
       chart: chartRegionAtPoint(frame.displayList.charts, x, y) };
   };
+  const fillCellAt = useCallback((clientX: number, clientY: number): CellAddr | null =>
+    point({ clientX, clientY }).cell, []);
   const openCell = (seed?: string) => {
     const selected = selectionRef.current;
     if (!run?.ready || !editable() || !selected || !typingAllowed(selected.anchor)) return;
@@ -2115,7 +2134,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
               <canvas ref={canvasRef} style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} />
               <PeerlessWorkerOverlay store={presentation} active={active} zoom={zoom} selectedChart={selectedChart}
                 chartOffset={chartOffset} controller={draftController} run={run} disabled={Boolean(error) || Boolean(props.readOnly)}
-                showSheetHeaders={Boolean(props.showSheetHeaders)} />
+                showSheetHeaders={Boolean(props.showSheetHeaders)}
+                onFill={fillSelection} cellAt={fillCellAt} fillHandle={props.fillHandle} />
               <PeerlessWorkerPresence store={presentation} run={run} provider={props.collaboration?.provider}
                 active={active} sheets={sheets} />
               {pluginHost.managed && <PluginOverlays host={pluginHost.host} activations={pluginHost.activations}
