@@ -6298,50 +6298,85 @@ mod tests {
         }
     }
 
-    #[test]
-    fn prime_last_slice_bytes_reports_the_story_bytes_each_slice_digested() {
-        let bytes = multi_chunk_docx();
-        let whole = bytes_session(&bytes);
+    fn one_shot_prime_cost(bytes: &[u8]) -> u64 {
+        let whole = bytes_session(bytes);
         assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
-        let all = whole.engine.doc().prime_last_slice_bytes();
+        whole.engine.doc().prime_last_slice_cost()
+    }
+
+    /// The cost each story slice of a sliced prime charged, the last one answering `Known`.
+    fn story_slice_costs(doc: &EditingDoc, max_bytes: u32) -> Vec<u64> {
+        assert_eq!(doc.prime_last_slice_cost(), 0);
+        for step in ["start", "scan", "anchors"] {
+            assert_eq!(
+                doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
+                PrimeSlice::Pending,
+                "{step} at {max_bytes}"
+            );
+            assert_eq!(doc.prime_last_slice_cost(), 0, "{step} at {max_bytes}");
+        }
+        let mut costs = Vec::new();
+        loop {
+            let outcome = doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes);
+            costs.push(doc.prime_last_slice_cost());
+            match outcome {
+                PrimeSlice::Pending => {
+                    let slice = costs.len();
+                    assert!(costs[slice - 1] > 0, "slice {slice} at {max_bytes}");
+                }
+                PrimeSlice::Known => break,
+                PrimeSlice::Declined => panic!("declined at {max_bytes}"),
+            }
+        }
+        assert_eq!(
+            doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
+            PrimeSlice::Known
+        );
+        assert_eq!(doc.prime_last_slice_cost(), 0);
+        costs
+    }
+
+    #[test]
+    fn prime_last_slice_cost_reports_what_each_slice_charged() {
+        let bytes = multi_chunk_docx();
+        let all = one_shot_prime_cost(&bytes);
         assert!(all > 0);
         for max_bytes in [1u32, 4096] {
             let session = bytes_session(&bytes);
-            let doc = session.engine.doc();
-            assert_eq!(doc.prime_last_slice_bytes(), 0);
-            for step in ["start", "scan", "anchors"] {
-                assert_eq!(
-                    doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
-                    PrimeSlice::Pending,
-                    "{step} at {max_bytes}"
-                );
-                assert_eq!(doc.prime_last_slice_bytes(), 0, "{step} at {max_bytes}");
-            }
-            let (mut byte_slices, mut total, mut most) = (0, 0u64, 0u64);
-            loop {
-                let outcome = doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes);
-                let digested = doc.prime_last_slice_bytes();
-                if digested > 0 {
-                    byte_slices += 1;
-                }
-                total += digested;
-                most = most.max(digested);
-                match outcome {
-                    PrimeSlice::Pending => {}
-                    PrimeSlice::Known => break,
-                    PrimeSlice::Declined => panic!("declined at {max_bytes}"),
-                }
-            }
-            assert!(byte_slices > 1, "{byte_slices} at {max_bytes}");
-            assert_eq!(total, all, "{max_bytes}");
-            if max_bytes == 1 {
-                assert!(most > u64::from(max_bytes), "{most}");
-            }
-            assert_eq!(
-                doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
-                PrimeSlice::Known
-            );
-            assert_eq!(doc.prime_last_slice_bytes(), 0);
+            let costs = story_slice_costs(session.engine.doc(), max_bytes);
+            assert!(costs.len() > 2, "{} at {max_bytes}", costs.len());
+            assert_eq!(costs.iter().sum::<u64>(), all, "{max_bytes}");
+        }
+    }
+
+    #[test]
+    fn a_prime_slice_reports_its_overshoot_past_max_bytes() {
+        let bytes = multi_chunk_docx();
+        let session = bytes_session(&bytes);
+        let costs = story_slice_costs(session.engine.doc(), 1);
+        assert!(costs.iter().all(|&cost| cost > 1 || cost == 0), "{costs:?}");
+        assert!(costs.iter().any(|&cost| cost > PRIME_STORY_COST as u64), "{costs:?}");
+    }
+
+    #[test]
+    fn priming_many_tiny_stories_charges_story_cost_in_bounded_slices() {
+        use crate::seed::fixture;
+        let comments = 120u32;
+        let runs: String = (1..=comments).map(|id| commented(id, "C")).collect();
+        let bytes = commented_docx(&fixture::para("10000001", &runs), comments);
+        let whole = bytes_session(&bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let source = whole.engine.doc().source_index().unwrap();
+        let stories = source.seed_states().len() as u64;
+        assert!(stories > u64::from(comments), "{stories}");
+        let all = whole.engine.doc().prime_last_slice_cost();
+        assert!(all >= stories * PRIME_STORY_COST as u64, "{all}");
+        for max_bytes in [2048u32, 4096] {
+            let session = bytes_session(&bytes);
+            let costs = story_slice_costs(session.engine.doc(), max_bytes);
+            assert_eq!(costs.iter().sum::<u64>(), all, "{max_bytes}");
+            let bound = all.div_ceil(u64::from(max_bytes)) + 2;
+            assert!(costs.len() as u64 <= bound, "{} > {bound}", costs.len());
         }
     }
 
