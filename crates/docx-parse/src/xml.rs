@@ -430,6 +430,10 @@ pub struct XmlElement {
     /// For a block-level bookmark, its source slice plus the namespace
     /// bindings it needs when replayed outside its source ancestors.
     pub bookmark_replay_xml: Option<String>,
+    /// Set on every element of a part that binds a standard prefix to a
+    /// namespace other than its own, where prefixes no longer tell namespaces
+    /// apart and [`XmlElement::matches_name`] compares local names alone.
+    pub(crate) matches_local_names: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -452,15 +456,18 @@ impl XmlElement {
     /// Whether this element is `namespace:local`. An element under another
     /// prefix still matches on its local name, as a document may bind the
     /// namespace to any prefix, unless that prefix is itself one of the
-    /// standard prefixes and so names a different namespace.
+    /// standard prefixes and so names a different namespace, which holds only
+    /// in a part that binds every standard prefix it declares to its own
+    /// namespace.
     pub fn matches_name(&self, namespace: &str, local: &str) -> bool {
         self.local_name() == local
-            && self.namespace_prefix().is_none_or(|prefix| {
-                prefix == namespace
-                    || !STANDARD_NAMESPACES
-                        .iter()
-                        .any(|(standard, _)| *standard == prefix)
-            })
+            && (self.matches_local_names
+                || self.namespace_prefix().is_none_or(|prefix| {
+                    prefix == namespace
+                        || !STANDARD_NAMESPACES
+                            .iter()
+                            .any(|(standard, _)| *standard == prefix)
+                }))
     }
 
     pub fn child(&self, namespace: &str, local: &str) -> Option<&XmlElement> {
@@ -1311,6 +1318,7 @@ pub(crate) fn parse_xml_strict(
     let mut stack: Vec<XmlElement> = Vec::new();
     let mut starts = Vec::new();
     let mut paragraphs = 0u32;
+    let mut local_names = false;
     let mut number = |mut element: XmlElement, ancestors: &[XmlElement]| {
         if element.name == "w:p" {
             element.paragraph_ordinal = Some(paragraphs);
@@ -1343,7 +1351,8 @@ pub(crate) fn parse_xml_strict(
                         part: part.to_owned(),
                     });
                 }
-                let element = decode_element(&reader, start, part, budget)?;
+                let mut element = decode_element(&reader, start, part, budget)?;
+                scope_name_matching(&mut element, &mut stack, &mut local_names);
                 let element = number(element, &stack);
                 stack.push(element);
                 starts.push(offset);
@@ -1355,7 +1364,8 @@ pub(crate) fn parse_xml_strict(
                         part: part.to_owned(),
                     });
                 }
-                let element = decode_element(&reader, start, part, budget)?;
+                let mut element = decode_element(&reader, start, part, budget)?;
+                scope_name_matching(&mut element, &mut stack, &mut local_names);
                 let mut element = number(element, &stack);
                 retain_bookmark_xml(&mut element, xml, offset, reader.buffer_position() as usize);
                 retain_replayed_namespace_aliases(&mut element, &stack, part, budget)?;
@@ -1447,7 +1457,52 @@ pub(crate) fn parse_xml_strict(
             message: "unclosed element".to_owned(),
         });
     }
+    if local_names {
+        match_local_names(&mut roots);
+    }
     Ok(XmlDocument { roots })
+}
+
+/// The Strict conformance namespace that stands for the transitional `namespace`.
+pub(crate) fn strict_namespace(namespace: &str) -> Option<&'static str> {
+    match namespace {
+        namespaces::W => Some("http://purl.oclc.org/ooxml/wordprocessingml/main"),
+        namespaces::WP => Some("http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing"),
+        _ => None,
+    }
+}
+
+/// Whether `element` declares a standard prefix for a namespace other than the
+/// prefix's own or its Strict counterpart.
+fn rebinds_a_standard_prefix(element: &XmlElement) -> bool {
+    element.attributes.iter().any(|(key, uri)| {
+        key.strip_prefix("xmlns:").is_some_and(|prefix| {
+            STANDARD_NAMESPACES.iter().any(|(standard, own)| {
+                *standard == prefix && uri != own && strict_namespace(own) != Some(uri.as_str())
+            })
+        })
+    })
+}
+
+fn scope_name_matching(element: &mut XmlElement, open: &mut [XmlElement], local_names: &mut bool) {
+    if !*local_names && rebinds_a_standard_prefix(element) {
+        *local_names = true;
+        for ancestor in open.iter_mut() {
+            ancestor.matches_local_names = true;
+        }
+    }
+    element.matches_local_names = *local_names;
+}
+
+fn match_local_names(roots: &mut [XmlElement]) {
+    let mut pending: Vec<&mut XmlElement> = roots.iter_mut().collect();
+    while let Some(element) = pending.pop() {
+        element.matches_local_names = true;
+        pending.extend(element.children.iter_mut().filter_map(|child| match child {
+            XmlNode::Element(child) => Some(child),
+            _ => None,
+        }));
+    }
 }
 
 pub(crate) fn canonical_namespace(prefix: &str) -> Option<&'static str> {
@@ -1748,6 +1803,7 @@ fn decode_element(
         para_id_attribute: None,
         bookmark_xml: None,
         bookmark_replay_xml: None,
+        matches_local_names: false,
     })
 }
 
@@ -2373,6 +2429,39 @@ mod tests {
         assert_eq!(root.children_named("w14", "shadow").count(), 1);
         assert_eq!(root.find_deep("w", "pict").unwrap().name, "wx:pict");
         assert_eq!(root.find_deep("w", "p").unwrap().name, "s:p");
+    }
+
+    #[test]
+    fn a_standard_prefix_bound_to_its_strict_namespace_still_names_its_own_namespace() {
+        let doc = parse(concat!(
+            r#"<w:rPr xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" "#,
+            r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">"#,
+            r#"<w14:shadow w14:blurRad="1"/><w:shadow/></w:rPr>"#
+        ))
+        .unwrap();
+        let root = doc.root().unwrap();
+        assert_eq!(root.child("w", "shadow").unwrap().name, "w:shadow");
+        assert_eq!(root.child("w14", "shadow").unwrap().name, "w14:shadow");
+        assert_eq!(root.children_named("w", "shadow").count(), 1);
+        assert_eq!(root.children_named("w14", "shadow").count(), 1);
+    }
+
+    #[test]
+    fn a_standard_prefix_bound_to_another_namespace_matches_local_names_across_the_part() {
+        let doc = parse(concat!(
+            r#"<w:document "#,
+            r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+            r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">"#,
+            r#"<w:rPr><w14:shadow/><w:shadow/></w:rPr><w14:body "#,
+            r#"xmlns:w14="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+            r#"<w14:p/></w14:body></w:document>"#
+        ))
+        .unwrap();
+        let root = doc.root().unwrap();
+        assert_eq!(root.child("w", "body").unwrap().name, "w14:body");
+        assert_eq!(root.find_deep("w", "p").unwrap().name, "w14:p");
+        let properties = root.child("w", "rPr").unwrap();
+        assert_eq!(properties.children_named("w", "shadow").count(), 2);
     }
 
     fn escape_stray_ampersands_scalar(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
