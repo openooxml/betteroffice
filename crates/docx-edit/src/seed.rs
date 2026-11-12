@@ -10102,13 +10102,22 @@ mod tests {
 
     use super::*;
 
-    fn seeded_sharing(bytes: &[u8], sharing: bool) -> EditingDoc {
+    fn seeded_sharing(bytes: &[u8], sharing: bool, generation: Option<&str>) -> EditingDoc {
         let doc = EditingDoc::new(1);
         UNSHARED_SEED_ATTRS.with(|unshared| unshared.set(!sharing));
-        let seeded = seed_from_docx(&doc, bytes);
+        let seeded = match generation {
+            Some(generation) => seed_from_docx_with_generation(&doc, bytes, generation),
+            None => seed_from_docx(&doc, bytes),
+        };
         UNSHARED_SEED_ATTRS.with(|unshared| unshared.set(false));
         seeded.unwrap();
         doc
+    }
+
+    const GENERATION: &str = "shared-attributes";
+
+    fn seed_bytes(bytes: &[u8], sharing: bool, generation: Option<&str>) -> Vec<u8> {
+        seeded_sharing(bytes, sharing, generation).encode_state_as_update_v1()
     }
 
     fn body_attributes(doc: &EditingDoc, text: &str) -> Attrs {
@@ -10140,7 +10149,8 @@ mod tests {
             r#"<w:rPrChange w:id="8" w:author="A" w:date="2024-01-01T00:00:00Z"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>"#,
         );
         let other = r#"<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:i/><w:color w:val="0000FF"/></w:rPr>"#;
-        let spaced = r#"<w:pPr><w:spacing w:before="120" w:after="240"/><w:ind w:left="720"/></w:pPr>"#;
+        let spaced =
+            r#"<w:pPr><w:spacing w:before="120" w:after="240"/><w:ind w:left="720"/></w:pPr>"#;
         let body = [
             fixture::para(
                 "00000001",
@@ -10168,17 +10178,27 @@ mod tests {
             .rel("rIdImage", "image", "media/image1.png")
             .bytes();
         for bytes in [custom.clone(), fixture::principal_docx()] {
-            assert!(
-                seeded_sharing(&bytes, true).encode_state_as_update_v1()
-                    == seeded_sharing(&bytes, false).encode_state_as_update_v1(),
+            assert_eq!(
+                seed_bytes(&bytes, true, Some(GENERATION)),
+                seed_bytes(&bytes, false, Some(GENERATION)),
                 "sharing attribute allocations changed the seeded bytes"
             );
         }
-        let shared = seeded_sharing(&custom, true);
+        assert_ne!(
+            seed_bytes(&custom, false, None),
+            seed_bytes(&custom, false, None),
+            "fresh generations no longer make independent seeds differ"
+        );
+        assert_eq!(
+            seed_bytes(&custom, false, Some(GENERATION)),
+            seed_bytes(&custom, false, Some(GENERATION)),
+            "a fixed generation does not make unshared seeds identical"
+        );
+        let shared = seeded_sharing(&custom, true, Some(GENERATION));
         let shared_first = font_family(&shared, "First");
         let shared_third = font_family(&shared, "Third");
         assert!(Arc::ptr_eq(&shared_first, &shared_third));
-        let unshared = seeded_sharing(&custom, false);
+        let unshared = seeded_sharing(&custom, false, Some(GENERATION));
         let unshared_first = font_family(&unshared, "First");
         let unshared_third = font_family(&unshared, "Third");
         assert_eq!(unshared_first, unshared_third);
