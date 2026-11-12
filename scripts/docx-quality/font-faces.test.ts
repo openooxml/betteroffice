@@ -34,7 +34,7 @@ test('an advertised face that does not load fails the arm, with its reason', asy
   const summary = arm(fontFaceSummary(fontLoads, advertised));
   expect(summary).toMatchObject({ advertised: advertised.length, requested: 2, loaded: 1, failed: 1, reasons: { 'http 404': 1 } });
   expect(fontArmLine('published', summary)).toBe(
-    "published arm: 1 of 2 faces did not load (M = faces the documents requested that the arm's provider offers, base latin: none in this release), by reason: http 404 1"
+    "published arm: 1 of 2 faces did not load (M = faces the documents requested that the arm's provider offers, base latin: none in this release), by reason: http 404 1; sliced faces are observed only through their whole-face fallback at open; a chunk that fails or times out after open paints blank glyphs and is not observed"
   );
 });
 
@@ -101,6 +101,20 @@ test('a face whose request the capture policy refused counts as blocked, any oth
     failed_faces: { 'Caladea-Regular.ttf': 'error', 'Carlito-Regular.ttf': 'blocked' },
     unattributed: { loaded: 0, failed: 0 },
   });
+});
+
+test('the arm line says sliced faces are observed only through their whole-face fallback, with no requested count', () => {
+  const capture = fontFaceSummary([], ['NotoSansJP-Regular.otf.zst']);
+  expect('requested_faces' in capture).toBe(false);
+  const samples = [{ id: 'jp', comparisons: [{ channel: 'commit', fonts: { package: '@betteroffice/fonts@0.5.0', copy: 'workspace', measured: true, capture: 'ok', ...capture } }] }];
+  const summary = fontSummary(samples, 'commit');
+  expect('slices_requested' in summary).toBe(false);
+  const { line, failures } = fontArmFailures(samples, 'commit');
+  expect(failures).toEqual([]);
+  expect(line).toContain(
+    '; sliced faces are observed only through their whole-face fallback at open; a chunk that fails or times out after open paints blank glyphs and is not observed',
+  );
+  expect(line).not.toContain('sliced faces requested');
 });
 
 test('a capture that recorded no font loads is counted, never skipped', () => {
