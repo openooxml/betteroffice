@@ -139,10 +139,15 @@ class FakeTransport implements CollaborationTransport {
   attempted: Uint8Array[] = [];
   readonly listenerHistory: Array<(event: CollaborationTransportEvent) => void> = [];
   private readonly listeners = new Set<(event: CollaborationTransportEvent) => void>();
+  private readonly sendWaiters: Array<() => void> = [];
 
   connect(): void {
     this.connectCount += 1;
     if (this.connectError) throw this.connectError;
+  }
+
+  nextSend(): Promise<void> {
+    return new Promise((resolve) => this.sendWaiters.push(resolve));
   }
 
   disconnect(): void {
@@ -153,6 +158,7 @@ class FakeTransport implements CollaborationTransport {
   send(data: Uint8Array): boolean {
     if (this.sendError) throw this.sendError;
     this.attempted.push(data);
+    for (const resolve of this.sendWaiters.splice(0)) resolve();
     if (this.accept === false) {
       if (this.mutateRejectedFrame) data.fill(0xff);
       return false;
@@ -791,53 +797,68 @@ describe('CollaborationProvider awareness', () => {
   });
 
   it('coalesces cursor movement and keeps typing updates local', async () => {
+    const clock = spyOn(performance, 'now').mockReturnValue(1_000);
+    const timers = spyOn(globalThis, 'setTimeout');
+    const cleared = spyOn(globalThis, 'clearTimeout');
     const replica = new FakeReplica();
     const transport = new FakeTransport();
     const provider = new CollaborationProvider(replica, transport, {
       user: { name: 'Calm Otter' },
     });
-    provider.connect();
-    transport.emit({ type: 'open' });
-    const initialFrames = transport.sent.length;
+    try {
+      provider.connect();
+      transport.emit({ type: 'open' });
+      const initialFrames = transport.sent.length;
+      const trailing = transport.nextSend();
 
-    provider.setCursor({
-      story: 'body',
-      anchor: Uint8Array.of(1),
-      head: Uint8Array.of(1),
-    });
-    provider.setCursor({
-      story: 'body',
-      anchor: Uint8Array.of(2),
-      head: Uint8Array.of(2),
-    });
-    await Bun.sleep(100);
-
-    expect(transport.sent).toHaveLength(initialFrames + 1);
-    const movement = decodeMessages(transport.sent.at(-1) ?? Uint8Array.of())[0];
-    expect(movement.type).toBe('awareness');
-    if (movement.type !== 'awareness') return;
-    expect(decodeAwarenessUpdate(movement.update)[0]?.state?.cursor).toEqual({
-      story: 'body',
-      anchor: Uint8Array.of(2),
-      head: Uint8Array.of(2),
-    });
-
-    provider.setCursor({
-      story: 'body',
-      anchor: Uint8Array.of(3),
-      head: Uint8Array.of(3),
-    });
-    provider.setCursor(
-      {
+      provider.setCursor({
         story: 'body',
-        anchor: Uint8Array.of(4),
-        head: Uint8Array.of(4),
-      },
-      false
-    );
-    await Bun.sleep(100);
-    expect(transport.sent).toHaveLength(initialFrames + 1);
-    provider.destroy();
+        anchor: Uint8Array.of(1),
+        head: Uint8Array.of(1),
+      });
+      provider.setCursor({
+        story: 'body',
+        anchor: Uint8Array.of(2),
+        head: Uint8Array.of(2),
+      });
+      expect(transport.sent).toHaveLength(initialFrames);
+      await trailing;
+
+      expect(transport.sent).toHaveLength(initialFrames + 1);
+      const movement = decodeMessages(transport.sent.at(-1) ?? Uint8Array.of())[0];
+      expect(movement.type).toBe('awareness');
+      if (movement.type !== 'awareness') return;
+      expect(decodeAwarenessUpdate(movement.update)[0]?.state?.cursor).toEqual({
+        story: 'body',
+        anchor: Uint8Array.of(2),
+        head: Uint8Array.of(2),
+      });
+
+      timers.mockClear();
+      cleared.mockClear();
+      provider.setCursor({
+        story: 'body',
+        anchor: Uint8Array.of(3),
+        head: Uint8Array.of(3),
+      });
+      expect(timers).toHaveBeenCalledTimes(1);
+      const pending = timers.mock.results[0]?.value;
+      provider.setCursor(
+        {
+          story: 'body',
+          anchor: Uint8Array.of(4),
+          head: Uint8Array.of(4),
+        },
+        false
+      );
+      expect(cleared).toHaveBeenCalledWith(pending);
+      expect(transport.sent).toHaveLength(initialFrames + 1);
+    } finally {
+      provider.destroy();
+      cleared.mockRestore();
+      timers.mockRestore();
+      clock.mockRestore();
+    }
   });
 
   it('truncates an overlength user name and keeps document sync alive', () => {
