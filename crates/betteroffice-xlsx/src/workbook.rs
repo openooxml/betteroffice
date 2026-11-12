@@ -2498,19 +2498,6 @@ impl Workbook {
         graph.carry_answers(&moves);
     }
 
-    /// Refuses a host batch holding a row or column move, which hosts cannot originate yet.
-    pub fn refuse_track_moves(ops: &[Op]) -> Result<()> {
-        match ops
-            .iter()
-            .find(|op| matches!(op, Op::MoveCols { .. } | Op::MoveRows { .. }))
-        {
-            Some(Op::MoveCols { sheet, .. } | Op::MoveRows { sheet, .. }) => {
-                Err(Error::TrackMoveUnsupported(*sheet))
-            }
-            _ => Ok(()),
-        }
-    }
-
     /// Applies `ops` as one undoable edit. A `SetCell` whose formula text is
     /// new for its cell, compared with the cell as the earlier ops leave it,
     /// is entered as typed text is ([`entered_formula`]): a control character
@@ -2555,6 +2542,9 @@ impl Workbook {
     ) -> Result<MutationResult> {
         if ops.is_empty() {
             return Ok(MutationResult::default());
+        }
+        for op in &ops {
+            xlsx_ops::ensure_op_available(op)?;
         }
         if self.is_collaborative() {
             refuse_collaborative_structure(&ops, self.model.sheets.len())?;

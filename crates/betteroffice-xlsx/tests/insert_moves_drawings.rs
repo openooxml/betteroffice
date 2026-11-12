@@ -543,6 +543,7 @@ fn an_alternate_content_object_wholly_inside_deleted_rows_refuses() {
     );
 }
 
+#[cfg(feature = "unstable-track-moves")]
 fn move_cols(col: u32, count: u32, before: u32) -> Op {
     Op::MoveCols {
         sheet: SheetId(0),
@@ -552,6 +553,7 @@ fn move_cols(col: u32, count: u32, before: u32) -> Op {
     }
 }
 
+#[cfg(feature = "unstable-track-moves")]
 #[test]
 fn a_track_move_carries_a_column_anchored_picture_to_its_new_column() {
     // anchored entirely in column A, which the move puts before E
@@ -568,6 +570,7 @@ fn a_track_move_carries_a_column_anchored_picture_to_its_new_column() {
     );
 }
 
+#[cfg(feature = "unstable-track-moves")]
 #[test]
 fn a_move_after_a_source_shift_lands_the_picture_with_its_shifted_cell() {
     let anchors = [

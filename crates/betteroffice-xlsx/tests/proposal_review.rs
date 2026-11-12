@@ -818,6 +818,7 @@ fn moving_sheets_preserves_reviewed_dependency_ghosts() {
     assert_eq!(workbook.cell(SheetId(0), cell("C1")).unwrap().input, "42");
 }
 
+#[cfg(feature = "unstable-track-moves")]
 #[test]
 fn an_identity_track_move_leaves_pending_proposals_untouched() {
     let mut workbook = Workbook::from_model(model()).unwrap();

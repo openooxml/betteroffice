@@ -33,7 +33,6 @@ pub enum Error {
     /// unchanged and the next undo reaches the step before it.
     CollaborativeUndoRefused,
     CollaborativeStructureChanged,
-    TrackMoveUnsupported(SheetId),
     Spreadsheet(xlsx_parse::ParseError),
     Operation(xlsx_ops::OpError),
     NoSheets,
@@ -128,11 +127,6 @@ impl fmt::Display for Error {
             Self::CollaborativeStructureChanged => {
                 f.write_str("remote update changes the frozen workbook structure")
             }
-            Self::TrackMoveUnsupported(sheet) => write!(
-                f,
-                "cannot move sheet {} tracks: moving rows or columns is not supported yet",
-                sheet.0
-            ),
             Self::Spreadsheet(error) => error.fmt(f),
             Self::Operation(error) => error.fmt(f),
             Self::NoSheets => f.write_str("workbook has no sheets"),

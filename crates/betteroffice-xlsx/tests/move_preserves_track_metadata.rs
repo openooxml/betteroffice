@@ -1,6 +1,7 @@
 //! Moving tracks must not deserialize and reserialize the sheet: row and
 //! column attributes the model does not read (outlines, custom flags) have to
 //! travel with their track and stay in the saved worksheet.
+#![cfg(feature = "unstable-track-moves")]
 
 use betteroffice_xlsx::{CalculationOptions, SheetId, Workbook};
 use xlsx_ops::Op;

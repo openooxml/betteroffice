@@ -946,7 +946,6 @@ impl Session {
     ) -> Result<String, String> {
         let args: OpsArgs =
             serde_json::from_str(transaction_json).map_err(|error| format!("bad ops: {error}"))?;
-        Workbook::refuse_track_moves(&args.ops).map_err(|error| error.to_string())?;
         let result = self
             .workbook
             .apply_ops(args.ops, self.calculation_options(now_serial))
@@ -963,7 +962,6 @@ impl Session {
     ) -> Result<String, String> {
         let args: OpsArgs =
             serde_json::from_str(transaction_json).map_err(|error| format!("bad ops: {error}"))?;
-        Workbook::refuse_track_moves(&args.ops).map_err(|error| error.to_string())?;
         let (result, profile) = self
             .workbook
             .apply_ops_profiled(args.ops, self.calculation_options(now_serial), now)

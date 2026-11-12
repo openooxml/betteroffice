@@ -159,7 +159,6 @@ fn map_error(error: CoreError) -> PyErr {
         | CoreError::CollaborativeSheetPosition
         | CoreError::CollaborativeUndoRefused => CollaborativeStructureError::new_err(message),
         CoreError::Operation(_)
-        | CoreError::TrackMoveUnsupported(_)
         | CoreError::InvalidOperation(_)
         | CoreError::ChartFrameShifted { .. } => operation_error(message),
         CoreError::InvalidRequest(_) => PyValueError::new_err(message),
@@ -989,7 +988,6 @@ impl PyWorkbook {
         now_serial: Option<f64>,
     ) -> PyResult<PyMutation> {
         let args: OpsArgs = wire_args(transaction, "ops")?;
-        CoreWorkbook::refuse_track_moves(&args.ops).map_err(map_error)?;
         let result = py
             .detach(|| {
                 self.inner

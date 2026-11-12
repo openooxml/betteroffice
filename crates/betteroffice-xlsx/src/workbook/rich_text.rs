@@ -65,7 +65,7 @@ impl Workbook {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "unstable-track-moves"))]
 mod tests {
     use super::*;
     use crate::Error;

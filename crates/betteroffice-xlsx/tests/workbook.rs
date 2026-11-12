@@ -12918,6 +12918,7 @@ fn png_targets_validate_sheets_and_scale_all_forms() {
 /// and grows the relocated rectangle past the moved run. Undo has to put that
 /// array back where it was rather than mirror the grown rectangle: the mirror
 /// no longer fits the run it would tear.
+#[cfg(feature = "unstable-track-moves")]
 #[test]
 fn a_row_move_that_recalculation_grows_undoes_and_redoes() {
     let mut model = WorkbookModel::default();
@@ -12994,6 +12995,7 @@ fn a_row_move_that_recalculation_grows_undoes_and_redoes() {
 /// mirror's run does not carry the grown anchor. The inverse has to clip the
 /// rectangle back to the extent the move left before the mirror, or undo is
 /// refused as if a user had tried to tear the array.
+#[cfg(feature = "unstable-track-moves")]
 #[test]
 fn a_row_move_stepping_over_a_grown_array_undoes_and_redoes() {
     let mut model = WorkbookModel::default();
@@ -13058,6 +13060,7 @@ fn a_row_move_stepping_over_a_grown_array_undoes_and_redoes() {
 /// A move may be submitted with `before` naming the gap after the last track
 /// (dropping past XFD, or the mirror of a move to the front). The apply layer
 /// reads that as the terminal insertion gap, so validation must too.
+#[cfg(feature = "unstable-track-moves")]
 #[test]
 fn a_move_to_the_terminal_gap_applies_and_undoes() {
     let mut model = WorkbookModel::default();
@@ -13117,6 +13120,62 @@ fn a_move_to_the_terminal_gap_applies_and_undoes() {
     );
     workbook.undo(options).unwrap();
     assert_eq!(workbook.model(), &base, "the terminal column move undoes");
+}
+
+#[cfg(not(feature = "unstable-track-moves"))]
+#[test]
+fn a_batch_holding_a_track_move_is_refused_whole() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+    let probe = Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("C1"),
+        cell: CellState {
+            value: CellValue::Number { value: 7.0 },
+            ..CellState::default()
+        },
+    };
+    for track_move in [
+        Op::MoveCols {
+            sheet: SheetId(0),
+            col: 0,
+            count: 1,
+            before: 2,
+        },
+        Op::MoveRows {
+            sheet: SheetId(0),
+            row: 0,
+            count: 1,
+            before: 2,
+        },
+    ] {
+        let ops = vec![probe.clone(), track_move];
+        for error in [
+            workbook.apply_ops(ops.clone(), options).unwrap_err(),
+            workbook
+                .apply_ops_profiled(ops, options, &mut || 0.0)
+                .unwrap_err(),
+        ] {
+            assert!(matches!(error, Error::Operation(_)));
+            assert_eq!(
+                error.to_string(),
+                "cannot move sheet 0 tracks: moving rows or columns is not supported yet"
+            );
+        }
+        assert_eq!(workbook.model(), &base);
+        assert!(!workbook.undo(options).unwrap().applied);
+    }
 }
 
 #[cfg(feature = "raster")]

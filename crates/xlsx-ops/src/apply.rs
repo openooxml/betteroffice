@@ -57,6 +57,10 @@ pub enum OpError {
         sheet: SheetId,
         reason: String,
     },
+    /// A track move in a build without the `unstable-track-moves` feature.
+    TrackMovesUnavailable {
+        sheet: SheetId,
+    },
     NumFmtTableFull,
     InvalidStyle(String),
     InvalidConditionalFormat(String),
@@ -102,6 +106,11 @@ impl fmt::Display for OpError {
             OpError::MoveNotSupported { sheet, reason } => {
                 write!(f, "cannot move sheet {} tracks: {reason}", sheet.0)
             }
+            OpError::TrackMovesUnavailable { sheet } => write!(
+                f,
+                "cannot move sheet {} tracks: moving rows or columns is not supported yet",
+                sheet.0
+            ),
             OpError::InvalidStyle(message) | OpError::InvalidDefinedName(message) => {
                 f.write_str(message)
             }
@@ -120,6 +129,7 @@ impl std::error::Error for OpError {}
 /// apply one op, returning its inverse; refused structural ops leave `wb`
 /// untouched.
 pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
+    ensure_op_available(op)?;
     match op {
         Op::InsertRows { .. }
         | Op::DeleteRows { .. }
@@ -131,9 +141,27 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
     }
 }
 
+/// Refuses a track move unless built with `unstable-track-moves`.
+#[cfg(not(feature = "unstable-track-moves"))]
+pub fn ensure_op_available(op: &Op) -> Result<(), OpError> {
+    match op {
+        Op::MoveRows { sheet, .. } | Op::MoveCols { sheet, .. } => {
+            Err(OpError::TrackMovesUnavailable { sheet: *sheet })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Every op is available with `unstable-track-moves`.
+#[cfg(feature = "unstable-track-moves")]
+pub fn ensure_op_available(_op: &Op) -> Result<(), OpError> {
+    Ok(())
+}
+
 /// apply one op directly with no rollback clone; only for models the caller
 /// drops on error.
 pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
+    ensure_op_available(op)?;
     crate::conditional_formats::ensure_conditional_formats_allow_edit(wb, op)?;
     match op {
         Op::SetCell { sheet, at, cell } => {
@@ -4792,7 +4820,7 @@ mod merge_c1300_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "unstable-track-moves"))]
 mod track_move_tests {
     use super::*;
     use xlsx_model::{AutoFilter, CellFormat, CellProvider, CellValue, ColStyle, NumberFormat};
@@ -6084,6 +6112,84 @@ mod track_move_tests {
             "a move clear of the table still applies"
         );
         apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(wb, base);
+    }
+}
+
+#[cfg(all(test, not(feature = "unstable-track-moves")))]
+mod track_moves_unavailable_tests {
+    use super::*;
+    use crate::UndoStack;
+
+    const REFUSAL: &str =
+        "cannot move sheet 0 tracks: moving rows or columns is not supported yet";
+
+    fn moves() -> [Op; 2] {
+        [
+            Op::MoveCols {
+                sheet: SheetId(0),
+                col: 0,
+                count: 1,
+                before: 2,
+            },
+            Op::MoveRows {
+                sheet: SheetId(0),
+                row: 0,
+                count: 1,
+                before: 2,
+            },
+        ]
+    }
+
+    fn filled() -> Workbook {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Sheet1"));
+        wb.sheets[0].set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        wb
+    }
+
+    fn probe() -> Op {
+        Op::SetCell {
+            sheet: SheetId(0),
+            at: CellRef::new(0, 2),
+            cell: CellState {
+                value: CellValue::Number { value: 7.0 },
+                ..CellState::default()
+            },
+        }
+    }
+
+    #[test]
+    fn every_entry_refuses_a_track_move_and_leaves_the_workbook_unchanged() {
+        for op in moves() {
+            let base = filled();
+            let mut wb = base.clone();
+            let refused = OpError::TrackMovesUnavailable { sheet: SheetId(0) };
+            assert_eq!(refused.to_string(), REFUSAL);
+            assert_eq!(apply(&mut wb, &op), Err(refused.clone()));
+            assert_eq!(apply_in_place(&mut wb, &op), Err(refused.clone()));
+            assert_eq!(apply_ops(&mut wb, &[probe(), op]), Err(refused));
+            assert_eq!(wb, base);
+        }
+    }
+
+    #[test]
+    fn a_recovered_history_step_holding_a_move_is_refused() {
+        let base = filled();
+        let mut wb = base.clone();
+        let [cols, rows] = moves();
+        let mut stack = UndoStack::from_recovery_stacks(vec![vec![probe(), cols]], Vec::new());
+        assert_eq!(stack.undo(&mut wb).unwrap_err().to_string(), REFUSAL);
+        assert_eq!((stack.undo_depth(), stack.redo_depth()), (1, 0));
+        let mut stack = UndoStack::from_recovery_stacks(Vec::new(), vec![vec![probe(), rows]]);
+        assert_eq!(stack.redo(&mut wb).unwrap_err().to_string(), REFUSAL);
+        assert_eq!((stack.undo_depth(), stack.redo_depth()), (0, 1));
         assert_eq!(wb, base);
     }
 }
