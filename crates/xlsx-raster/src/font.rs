@@ -319,59 +319,6 @@ fn second_underline(position: f32, thickness: f32, scale: f32) -> f32 {
     position - (line + line.max(1.0)) / scale
 }
 
-/// An accounting underline across `left..left + width`, its top on the descender line.
-#[allow(clippy::too_many_arguments)]
-fn paint_accounting_bars(
-    pixmap: &mut Pixmap,
-    face: RunFace<'_>,
-    baseline: f32,
-    font_size_pt: f32,
-    color: Color,
-    clip: &DlRect,
-    (left, width): (f32, f32),
-    double: bool,
-) {
-    let em = face.units_per_em() as f32;
-    let scale = font_size_pt * PX_PER_PT / em;
-    let thick = face
-        .underline_metrics()
-        .map(|m| m.1 as f32)
-        .unwrap_or(0.05 * em);
-    let h = (thick * scale).max(0.5);
-    let mut top = baseline - face.descender() as f32 * scale;
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = true;
-    for _ in 0..1 + usize::from(double) {
-        if let Some(rect) = Rect::from_ltrb(
-            left.max(clip.x),
-            top.max(clip.y),
-            (left + width).min(clip.x + clip.w),
-            (top + h).min(clip.y + clip.h),
-        ) {
-            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-        }
-        top += h + h.max(1.0);
-    }
-}
-
-#[cfg(not(feature = "fonts"))]
-/// paint `run`'s accounting underline across `span`, a cell's left edge and width.
-pub fn paint_accounting_underline(pixmap: &mut Pixmap, run: &TextRun, span: (f32, f32)) {
-    with_embedded(|face| {
-        paint_accounting_bars(
-            pixmap,
-            face,
-            run.y,
-            run.font_size_pt,
-            run.color,
-            run.clip,
-            span,
-            run.double_underline,
-        )
-    });
-}
-
 #[allow(clippy::too_many_arguments)]
 fn paint_decorations(
     target: &mut Pixmap,
@@ -824,6 +771,4 @@ pub use native::FontStack;
 #[cfg(feature = "fonts")]
 pub(crate) use native::{FontFace, measure_text_with_fonts};
 #[cfg(feature = "fonts")]
-pub use native::{
-    TextRun, paint_accounting_underline, paint_rotated_text, paint_stacked_text, paint_text,
-};
+pub use native::{TextRun, paint_rotated_text, paint_stacked_text, paint_text};

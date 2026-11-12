@@ -240,10 +240,6 @@ fn translate_command(
             if let Some(degrees) = rotation_deg {
                 return Err(format!("text rotated {degrees} degrees is not translated"));
             }
-            let accounting = *underline && accounting_underline(*underline_style);
-            let span = number_format
-                .as_ref()
-                .map_or((clip.x, clip.w), |layout| (layout.left, layout.width));
             let prepare = |x: f32, y: f32, text: &str, align: Align| {
                 PreparedText::new(
                     x,
@@ -254,7 +250,7 @@ fn translate_command(
                     align,
                     *bold,
                     *italic,
-                    *underline && !accounting,
+                    *underline,
                     double_underline(*underline_style),
                     *strike,
                     highlight.as_deref(),
@@ -290,13 +286,6 @@ fn translate_command(
                 for run in &runs {
                     run.paint(scene, font);
                 }
-                if accounting {
-                    let mut lines: Vec<&PreparedText> = runs.iter().collect();
-                    lines.dedup_by_key(|run| run.baseline);
-                    for run in lines {
-                        run.paint_accounting_underline(scene, span);
-                    }
-                }
             })
         }
     }
@@ -306,13 +295,6 @@ fn double_underline(style: Option<RunUnderline>) -> bool {
     matches!(
         style,
         Some(RunUnderline::Double | RunUnderline::DoubleAccounting)
-    )
-}
-
-fn accounting_underline(style: Option<RunUnderline>) -> bool {
-    matches!(
-        style,
-        Some(RunUnderline::SingleAccounting | RunUnderline::DoubleAccounting)
     )
 }
 
@@ -656,26 +638,6 @@ impl PreparedText {
             f64::from(center + height / 2.0),
         );
         scene.fill(Fill::NonZero, Affine::IDENTITY, self.color, None, &rect);
-    }
-
-    /// An accounting underline across `left..left + width`, its top on the descender line.
-    fn paint_accounting_underline(&self, scene: &mut Scene, (left, width): (f32, f32)) {
-        let thickness = FACE
-            .underline_metrics()
-            .map(|metrics| metrics.thickness as f32)
-            .unwrap_or(0.05 * FACE.units_per_em() as f32);
-        let height = (thickness * self.scale).max(0.5);
-        let mut top = self.baseline - FACE.descender() as f32 * self.scale;
-        for _ in 0..1 + usize::from(self.double_underline) {
-            let rect = Rect::new(
-                f64::from(left),
-                f64::from(top),
-                f64::from(left + width),
-                f64::from(top + height),
-            );
-            scene.fill(Fill::NonZero, Affine::IDENTITY, self.color, None, &rect);
-            top += height + height.max(1.0);
-        }
     }
 }
 
@@ -1068,21 +1030,16 @@ mod tests {
     }
 
     #[test]
-    fn underline_kinds_draw_like_the_raster() {
-        let edges = |style: Option<RunUnderline>| {
+    fn underline_kinds_draw_one_or_two_bars() {
+        let edges = |underline: bool, style: Option<RunUnderline>| {
             let mut command = text("Total");
             if let DrawCmd::Text {
-                x,
-                clip,
-                underline,
+                underline: set,
                 underline_style,
                 ..
             } = &mut command
             {
-                *x = 14.0;
-                clip.x = 10.0;
-                clip.w = 80.0;
-                *underline = true;
+                *set = underline;
                 *underline_style = style;
             }
             let page = translate_sheet(&display_list(vec![command])).unwrap();
@@ -1104,23 +1061,14 @@ mod tests {
             ys.dedup();
             (xs, ys)
         };
-        let (_, single) = edges(None);
-        assert_eq!(single.len(), 2);
-        assert_eq!(edges(Some(RunUnderline::Double)).1.len(), 4);
-        let scale = 11.0 * PX_PER_PT / FACE.units_per_em() as f32;
-        let descender = 20.0 - FACE.descender() as f32 * scale;
-        for (style, lines) in [
-            (RunUnderline::SingleAccounting, 1),
-            (RunUnderline::DoubleAccounting, 2),
-        ] {
-            let (xs, ys) = edges(Some(style));
-            assert_eq!(xs, [10.0, 90.0], "{style:?} spans the cell");
-            assert_eq!(ys.len(), 2 * lines);
-            assert!(
-                ys[0] > single[1] && ys[0] >= descender,
-                "{style:?} sits below the descender"
-            );
-        }
+        assert!(edges(false, None).1.is_empty());
+        assert!(edges(false, Some(RunUnderline::Double)).1.is_empty());
+        let single = edges(true, None);
+        assert_eq!(single.1.len(), 2);
+        assert_eq!(edges(true, Some(RunUnderline::SingleAccounting)), single);
+        let double = edges(true, Some(RunUnderline::Double));
+        assert_eq!(double.1.len(), 4);
+        assert_eq!(edges(true, Some(RunUnderline::DoubleAccounting)), double);
     }
 
     #[test]

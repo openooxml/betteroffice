@@ -141,22 +141,6 @@ pub fn paint_text(pixmap: &mut Pixmap, run: &TextRun) {
     }
 }
 
-/// paint `run`'s accounting underline across `span` with the run's first face.
-pub fn paint_accounting_underline(pixmap: &mut Pixmap, run: &TextRun, span: (f32, f32)) {
-    with_face(run.faces, run.stack, 0, |face| {
-        paint_accounting_bars(
-            pixmap,
-            face,
-            run.y,
-            run.font_size_pt,
-            run.color,
-            run.clip,
-            span,
-            run.double_underline,
-        )
-    });
-}
-
 fn paint_text_face(pixmap: &mut Pixmap, run: &TextRun, face: RunFace<'_>) {
     if run.clip.w <= 0.0 || run.clip.h <= 0.0 {
         return;

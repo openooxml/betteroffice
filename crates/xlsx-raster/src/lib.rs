@@ -227,10 +227,6 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 stacked,
                 wrap,
             } => {
-                let accounting = *underline
-                    && !*stacked
-                    && rotation_deg.is_none()
-                    && accounting_underline(*underline_style);
                 let run = font::TextRun {
                     x: *x,
                     y: *y,
@@ -241,7 +237,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     clip,
                     bold: *bold,
                     italic: *italic,
-                    underline: *underline && !accounting,
+                    underline: *underline,
                     double_underline: double_underline(*underline_style),
                     strike: *strike,
                     highlight: highlight.as_deref().map(parse_color).transpose()?,
@@ -283,33 +279,22 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                             )
                         },
                     );
-                    if accounting {
-                        font::paint_accounting_underline(
-                            &mut pixmap,
-                            &run,
-                            (layout.left, layout.width),
-                        );
-                    }
                 } else if let Some(wrap) = wrap {
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text(line, *font_size)
                     });
                     for (index, line) in lines.iter().enumerate() {
-                        let run = font::TextRun {
-                            y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
-                            text: line,
-                            ..run
-                        };
-                        font::paint_text(&mut pixmap, &run);
-                        if accounting {
-                            font::paint_accounting_underline(&mut pixmap, &run, (clip.x, clip.w));
-                        }
+                        font::paint_text(
+                            &mut pixmap,
+                            &font::TextRun {
+                                y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
+                                text: line,
+                                ..run
+                            },
+                        );
                     }
                 } else {
                     font::paint_text(&mut pixmap, &run);
-                    if accounting {
-                        font::paint_accounting_underline(&mut pixmap, &run, (clip.x, clip.w));
-                    }
                 }
             }
         }
@@ -654,11 +639,6 @@ fn path_coord(value: f64) -> Result<f32, String> {
 fn double_underline(style: Option<xlsx_render::RunUnderline>) -> bool {
     use xlsx_render::RunUnderline::{Double, DoubleAccounting};
     matches!(style, Some(Double | DoubleAccounting))
-}
-
-fn accounting_underline(style: Option<xlsx_render::RunUnderline>) -> bool {
-    use xlsx_render::RunUnderline::{DoubleAccounting, SingleAccounting};
-    matches!(style, Some(SingleAccounting | DoubleAccounting))
 }
 
 /// parse a `#rrggbb` string into a tiny-skia color.
@@ -1364,50 +1344,16 @@ mod tests {
         assert_eq!(bands(true, Some(RunUnderline::SingleAccounting)), 1);
         assert_eq!(bands(true, Some(RunUnderline::Double)), 2);
         assert_eq!(bands(true, Some(RunUnderline::DoubleAccounting)), 2);
-
-        let face = rustybuzz::Face::from_slice(include_bytes!("../assets/Carlito-Regular.ttf"), 0)
-            .unwrap();
-        let descender =
-            40.0 - face.descender() as f32 * 40.0 * 96.0 / 72.0 / face.units_per_em() as f32;
-        let single = ink_row_bands(&underlined(true, None))[0];
-        let dark_columns = |dl: &DisplayList, (top, bottom): (u32, u32)| {
-            let pixels = Pixmap::decode_png(&render_png(dl).unwrap()).unwrap();
-            (0..pixels.width())
-                .filter(|&x| pixels.pixel(x, (top + bottom) / 2).unwrap().red() < 128)
-                .collect::<Vec<_>>()
-        };
-        for style in [
-            RunUnderline::SingleAccounting,
-            RunUnderline::DoubleAccounting,
+        for (accounting, plain) in [
+            (RunUnderline::SingleAccounting, None),
+            (RunUnderline::DoubleAccounting, Some(RunUnderline::Double)),
         ] {
-            let dl = underlined(true, Some(style));
-            for band in ink_row_bands(&dl) {
-                assert!(
-                    band.0 > single.1,
-                    "{style:?} sits below the single underline"
-                );
-                assert!(
-                    band.0 as f32 >= descender.floor(),
-                    "{style:?} sits below the descender"
-                );
-                assert_eq!(dark_columns(&dl, band), (0..160).collect::<Vec<_>>());
-            }
+            assert_eq!(
+                render_png(&underlined(true, Some(accounting))).unwrap(),
+                render_png(&underlined(true, plain)).unwrap(),
+                "{accounting:?} draws like {plain:?}"
+            );
         }
-
-        let mut dl = underlined(true, Some(RunUnderline::SingleAccounting));
-        let DrawCmd::Text { number_format, .. } = &mut dl.commands[0] else {
-            unreachable!()
-        };
-        *number_format = Some(xlsx_render::NumberFormatLayout {
-            left: 10.0,
-            width: 140.0,
-            parts: Vec::new(),
-            general: None,
-            overflow: false,
-        });
-        let bands = ink_row_bands(&dl);
-        assert_eq!(bands.len(), 1);
-        assert_eq!(dark_columns(&dl, bands[0]), (10..150).collect::<Vec<_>>());
     }
 
     #[test]
