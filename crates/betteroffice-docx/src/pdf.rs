@@ -24,8 +24,13 @@ impl Document {
             )));
         }
         let images = self.scoped_image_bytes();
-        docx_pdf::export_pdf_with_fonts_and_images(&display_list, &fonts.store, &images)
-            .map_err(|error| Error::Render(error.to_string()))
+        docx_pdf::export_pdf_with_fonts_images_and_chains(
+            &display_list,
+            &fonts.store,
+            &images,
+            fonts.chains(),
+        )
+        .map_err(|error| Error::Render(error.to_string()))
     }
 
     /// Registers script fallback faces for Han/Kana/Hangul after layout.

@@ -5,7 +5,7 @@
 //! list and paints the resulting CIDs with embedded subsets. `GlyphRun`s
 //! already carry ids; they are painted as positioned CIDs and may be rotated.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use docx_layout::display_list::{DisplayPage, GlyphRunPrimitive, PlacedGlyph, TextRunPrimitive};
 use ooxml_text::{FontId, FontStore};
@@ -19,23 +19,93 @@ use crate::units::{PX_TO_PT, f64_to_points, font_size_px, parse_color, points};
 
 /// Base-14 resource registered by the writer for text without embedded fonts.
 const BASE_FONT: Name<'static> = Name(b"F0");
+/// Weight at or above which a CSS request, or a face's OS/2 `usWeightClass`,
+/// counts as bold. Mirrors the browser's numbered-weight threshold.
+const BOLD_WEIGHT: u16 = 600;
+
+/// Bold/italic request parsed from the leading tokens of a CSS font shorthand
+/// such as `bold 16px Roboto` or `italic 700 16px Roboto`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FontStyle {
+    bold: bool,
+    italic: bool,
+}
+
+impl FontStyle {
+    /// Read the style tokens before the font size. `bold` and numeric weights
+    /// at or above [`BOLD_WEIGHT`] request bold; `italic` and `oblique` request
+    /// the slanted face.
+    fn from_css(css: &str) -> Self {
+        let mut style = Self::default();
+        for token in css.split_whitespace() {
+            if token.ends_with("px") {
+                break;
+            }
+            match token {
+                "bold" => style.bold = true,
+                "italic" | "oblique" => style.italic = true,
+                _ => {
+                    style.bold |= token
+                        .parse::<u16>()
+                        .is_ok_and(|weight| weight >= BOLD_WEIGHT);
+                }
+            }
+        }
+        style
+    }
+
+    /// Whether `face` already draws the requested weight and slant, so the
+    /// painter never has to substitute a regular face for a bold run.
+    fn matches(self, face: &Face<'_>) -> bool {
+        let bold = face.is_bold() || face.weight().to_number() >= BOLD_WEIGHT;
+        let italic = face.is_italic() || face.is_oblique();
+        bold == self.bold && italic == self.italic
+    }
+}
+
 /// One parsed face per font id, in registry order.
 ///
 /// Painting and collection must agree on which font supplies each scalar, so
-/// both go through [`FontFaces::resolve`]. Faces whose declared family matches
-/// the run's CSS family are tried before every other face.
+/// both go through [`FontFaces::resolve`]. A run whose CSS family and style
+/// match a facade chain uses that layout-resolved face order first, keeping
+/// application aliases ahead of the bundled faces they shadow. Without a chain
+/// entry, faces whose declared family matches the run's CSS family are tried
+/// before every other face, and among those the faces already in the run's
+/// requested weight and slant come first.
 struct FontFaces<'a> {
     faces: Vec<Option<Face<'a>>>,
-    /// Registry indices of faces declaring the run's requested family.
+    /// Registry indices of the run's preferred faces, in chain order when the
+    /// facade supplied one, otherwise the ones declaring its requested family
+    /// with the matching bold/italic request ahead of the rest.
     preferred: Vec<u32>,
 }
 
 impl<'a> FontFaces<'a> {
     fn new(store: &'a FontStore) -> Self {
-        Self::with_family(store, None)
+        Self::with_style(store, None, FontStyle::default(), None)
     }
 
-    fn with_family(store: &'a FontStore, family: Option<&str>) -> Self {
+    /// Resolve against the run's CSS shorthand, so family and bold/italic
+    /// requests both select the layout chain or order the preference list.
+    fn for_run(
+        store: &'a FontStore,
+        css: &str,
+        chains: Option<&HashMap<String, Vec<FontId>>>,
+    ) -> Self {
+        Self::with_style(
+            store,
+            css_family(css).as_deref(),
+            FontStyle::from_css(css),
+            chains,
+        )
+    }
+
+    fn with_style(
+        store: &'a FontStore,
+        family: Option<&str>,
+        style: FontStyle,
+        chains: Option<&HashMap<String, Vec<FontId>>>,
+    ) -> Self {
         let mut faces = Vec::with_capacity(store.font_count());
         for index in 0..store.font_count() {
             let id = FontId::from_u32(index as u32);
@@ -45,21 +115,44 @@ impl<'a> FontFaces<'a> {
                 .and_then(|bytes| Face::parse(bytes, 0).ok());
             faces.push(face);
         }
-        let preferred = match family.map(str::to_lowercase) {
-            Some(requested) => (0..faces.len())
-                .filter(|&index| faces[index].is_some())
-                .filter(|&index| {
-                    store
-                        .declared_families(FontId::from_u32(index as u32))
-                        .is_ok_and(|declared| {
-                            declared
-                                .iter()
-                                .any(|name| name.trim().to_lowercase() == requested)
-                        })
-                })
-                .map(|index| index as u32)
+        let preferred = match chains.and_then(|chains| {
+            // The facade keys chains exactly like `font.rs::chain_key`.
+            let key = format!(
+                "{}|{}|{}",
+                family.unwrap_or_default().trim().to_lowercase(),
+                u8::from(style.bold),
+                u8::from(style.italic)
+            );
+            chains.get(&key)
+        }) {
+            Some(chain) => chain
+                .iter()
+                .map(|id| id.to_u32())
+                .filter(|&index| faces.get(index as usize).is_some_and(Option::is_some))
                 .collect(),
-            None => Vec::new(),
+            None => match family.map(str::to_lowercase) {
+                Some(requested) => {
+                    let family_faces = (0..faces.len())
+                        .filter(|&index| faces[index].is_some())
+                        .filter(|&index| {
+                            store
+                                .declared_families(FontId::from_u32(index as u32))
+                                .is_ok_and(|declared| {
+                                    declared
+                                        .iter()
+                                        .any(|name| name.trim().to_lowercase() == requested)
+                                })
+                        })
+                        .map(|index| index as u32);
+                    let (styled, others): (Vec<u32>, Vec<u32>) = family_faces.partition(|&index| {
+                        faces[index as usize]
+                            .as_ref()
+                            .is_some_and(|face| style.matches(face))
+                    });
+                    styled.into_iter().chain(others).collect()
+                }
+                None => Vec::new(),
+            },
         };
         Self { faces, preferred }
     }
@@ -228,15 +321,34 @@ fn painted_chars(run: &TextRunPrimitive) -> Vec<PaintedChar> {
     painted
 }
 
+/// Record the glyphs a fallback text run needs, keyed by font id and glyph id.
+///
+/// Scalar resolution follows [`FontFaces::resolve`], so the painter can rely on
+/// every selected glyph being present in the subset.
 pub(crate) fn collect_text_glyphs(
     store: &FontStore,
     run: &TextRunPrimitive,
     out: &mut BTreeMap<u32, BTreeMap<u16, std::collections::BTreeSet<String>>>,
 ) {
+    collect_text_glyphs_with_chains(store, run, None, out);
+}
+
+/// Record the glyphs a fallback text run needs, resolving scalars through the
+/// facade's ordered font chains when supplied.
+///
+/// Casing (all caps and synthesized small caps) is applied here exactly as
+/// [`paint_text_with_chains`] applies it, including the uppercased glyphs small
+/// caps draw.
+pub(crate) fn collect_text_glyphs_with_chains(
+    store: &FontStore,
+    run: &TextRunPrimitive,
+    chains: Option<&HashMap<String, Vec<FontId>>>,
+    out: &mut BTreeMap<u32, BTreeMap<u16, std::collections::BTreeSet<String>>>,
+) {
     if run.hidden || run.text.is_empty() {
         return;
     }
-    let faces = FontFaces::with_family(store, css_family(&run.font).as_deref());
+    let faces = FontFaces::for_run(store, &run.font, chains);
     for painted in painted_chars(run) {
         for ch in painted.chars {
             let Some((font_id, glyph)) = faces.resolve(ch) else {
@@ -391,6 +503,19 @@ pub(crate) fn paint_text(
     fonts: &BTreeMap<u32, EmbeddedFont>,
     store: &FontStore,
 ) -> Result<(), PdfError> {
+    paint_text_with_chains(content, page, text, fonts, store, None)
+}
+
+/// Paint a fallback text run, resolving scalars through the facade's ordered
+/// font chains when supplied.
+pub(crate) fn paint_text_with_chains(
+    content: &mut Content,
+    page: &DisplayPage,
+    text: &TextRunPrimitive,
+    fonts: &BTreeMap<u32, EmbeddedFont>,
+    store: &FontStore,
+    chains: Option<&HashMap<String, Vec<FontId>>>,
+) -> Result<(), PdfError> {
     if text.hidden || text.text.is_empty() {
         return Ok(());
     }
@@ -417,7 +542,7 @@ pub(crate) fn paint_text(
             .actual_text(TextStr(text.text.as_str()));
     }
 
-    let faces = FontFaces::with_family(store, css_family(&text.font).as_deref());
+    let faces = FontFaces::for_run(store, &text.font, chains);
     let segments = shape_text(&faces, text, size_px);
     let usable = !fonts.is_empty()
         && segments
@@ -807,13 +932,14 @@ fn paint_glyph_run_impl(
             content.set_font(Name(target_font.resource.as_bytes()), size);
             current_font = Some(*font_id);
         }
+        // `docx-raster::font::glyph_rect` scales about the run's left edge in
+        // `primitive_visual_transform`, which then rotates about the unscaled
+        // rect centre. So the rotated offsets are measured from that centre
+        // after horizontal scaling, while the matrix stays anchored at it.
+        let scaled_x = left_px + (glyph.x - left_px) * scale;
         let (x, y) = if rotated {
-            // Accepted rotation semantics (HEAD 4a8ae8c2): the matrix is
-            // anchored at the glyph-box centre, but the offsets are measured
-            // from the run's first glyph. Horizontal scale multiplies the
-            // offset once, before the rotation.
-            let dx = (glyph.x - pivot.x) * scale;
-            let dy = glyph.y - pivot.y;
+            let dx = scaled_x - pivot_x_px;
+            let dy = glyph.y - pivot_y_px;
             let rotated_x = dx * display_cos - dy * display_sin;
             let rotated_y = dx * display_sin + dy * display_cos;
             (
@@ -821,9 +947,6 @@ fn paint_glyph_run_impl(
                 pivot_y - f64_to_points(rotated_y, "glyph y")?,
             )
         } else {
-            // Scale about the run's left edge, as `docx-raster::font::glyph_rect`
-            // does through `primitive_visual_transform`.
-            let scaled_x = left_px + (glyph.x - left_px) * scale;
             (
                 f64_to_points(scaled_x, "glyph x")?,
                 page_height - f64_to_points(glyph.y, "glyph y")?,
@@ -1430,23 +1553,21 @@ mod tests {
         let matrices = tm_matrices(&stream);
         assert_eq!(matrices.len(), 2, "{stream}");
 
-        // Accepted behaviour (HEAD 4a8ae8c2): the matrix translation is
-        // anchored at `docx-raster::font::glyph_rect`'s centre — x = min
-        // glyph.x + half the span, y = first.y - 0.2em — while the offsets
-        // rotated are measured from the run's first glyph.
+        // The matrix translation is anchored at `docx-raster::font::glyph_rect`'s
+        // centre — x = min glyph.x + half the span, y = first.y - 0.2em — and
+        // the offsets rotated are measured from that same centre.
         let left = 72.0;
         let right = (72.0f64 + 10.0).max(90.0 + 5.0);
         let center_x = (left + right) / 2.0;
         let center_y = 96.0 - 16.0 * 0.2;
-        let first_x = 72.0;
         let page_height = 792.0;
         for (matrix, glyph_x) in matrices.iter().zip([72.0, 90.0]) {
             assert!(matrix[0].abs() < 1e-4, "{matrix:?}");
             assert!((matrix[1] + 1.0).abs() < 1e-4, "{matrix:?}");
             assert!((matrix[2] - 1.0).abs() < 1e-4, "{matrix:?}");
             assert!(matrix[3].abs() < 1e-4, "{matrix:?}");
-            let dx = glyph_x - first_x;
-            let dy = 0.0;
+            let dx = glyph_x - center_x;
+            let dy = 96.0 - center_y;
             // CSS rotate(90°) in display space, y down.
             let expected_x = center_x - dy;
             let expected_y = center_y + dx;
@@ -1469,15 +1590,18 @@ mod tests {
         let matrices = tm_matrices(&stream);
         assert_eq!(matrices.len(), 2, "{stream}");
 
-        // Rotation keeps the accepted first-glyph offsets; horizontal scale
-        // multiplies each offset once before the rotation.
+        // Horizontal scale multiplies the x offset once about the run's left
+        // edge; the rotated offsets are then measured from the unscaled rect
+        // centre, matching `primitive_visual_transform`'s scale-then-rotate
+        // order.
+        let left = 72.0;
         let center_x = (72.0 + 95.0) / 2.0;
         let center_y = 96.0 - 16.0 * 0.2;
-        let first_x = 72.0;
         let page_height = 792.0;
         for (matrix, glyph_x) in matrices.iter().zip([72.0, 90.0]) {
-            let dx = (glyph_x - first_x) * 2.0;
-            let dy = 0.0;
+            let scaled_x = left + (glyph_x - left) * 2.0;
+            let dx = scaled_x - center_x;
+            let dy = 96.0 - center_y;
             let expected_x = center_x - dy;
             let expected_y = center_y + dx;
             assert!(
@@ -1492,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn rotated_glyph_run_rotates_first_glyph_offsets_by_the_run_angle() {
+    fn rotated_glyph_run_rotates_rect_centre_offsets_by_the_run_angle() {
         let bytes = font_bytes("Roboto-Regular.ttf");
         let mut glyphs = placed_glyphs(&bytes, "Hi", &[(72.0, 10.0), (90.0, 5.0)]);
         glyphs[1].y = 98.0;
@@ -1500,17 +1624,17 @@ mod tests {
         let matrices = tm_matrices(&stream);
         assert_eq!(matrices.len(), 2, "{stream}");
 
-        // Offsets are (glyph - first glyph) in display space, rotated by the
-        // run angle and anchored at the glyph_rect centre. Both terms matter:
-        // a swapped sin/cos pair would move the second glyph right instead of
-        // down-right.
+        // Offsets are (glyph - glyph_rect centre) in display space, rotated by
+        // the run angle and anchored at the same centre. Both terms matter: a
+        // swapped sin/cos pair would move the second glyph right instead of
+        // down-right, and measuring from the first glyph would shift both.
         let center_x = (72.0 + 95.0) / 2.0;
         let center_y = 96.0 - 16.0 * 0.2;
         let page_height = 792.0;
         let (display_sin, display_cos) = 30.0f64.to_radians().sin_cos();
         for (matrix, (glyph_x, glyph_y)) in matrices.iter().zip([(72.0, 96.0), (90.0, 98.0)]) {
-            let dx = glyph_x - 72.0;
-            let dy = glyph_y - 96.0;
+            let dx = glyph_x - center_x;
+            let dy = glyph_y - center_y;
             let expected_x = center_x + dx * display_cos - dy * display_sin;
             let expected_y = center_y + dx * display_sin + dy * display_cos;
             assert!(
@@ -1593,6 +1717,62 @@ mod tests {
             "painting must resolve through the run family: {stream}"
         );
         assert!(!stream.contains("/FA "), "wrong face selected: {stream}");
+    }
+
+    #[test]
+    fn ordered_chains_take_precedence_and_keep_registry_fallback() {
+        let mut store = FontStore::default();
+        let alias = store
+            .register(font_bytes("Carlito-Bold.ttf"))
+            .expect("alias");
+        let bundled = store
+            .register(font_bytes("Roboto-Bold.ttf"))
+            .expect("roboto");
+        let hebrew = store
+            .register(font_bytes("NotoSansHebrew-Bold.ttf"))
+            .expect("hebrew");
+        let chains = HashMap::from([("roboto|1|0".to_owned(), vec![alias, bundled])]);
+        let mut run = text_run("Aש");
+        run.font = "bold 16px Roboto".to_owned();
+
+        // The chain order wins over declared families: the alias face
+        // declares Carlito, but the run asks for Roboto.
+        let faces = FontFaces::for_run(&store, &run.font, Some(&chains));
+        assert_eq!(faces.preferred, vec![alias.to_u32(), bundled.to_u32()]);
+        assert_eq!(
+            faces.resolve('A').map(|(font_id, _)| font_id),
+            Some(alias.to_u32())
+        );
+        // A scalar no chain face covers still falls back to registry order.
+        assert_eq!(
+            faces.resolve('ש').map(|(font_id, _)| font_id),
+            Some(hebrew.to_u32())
+        );
+
+        let mut collected = BTreeMap::new();
+        collect_text_glyphs_with_chains(&store, &run, Some(&chains), &mut collected);
+        assert!(collected.contains_key(&alias.to_u32()));
+        assert!(collected.contains_key(&hebrew.to_u32()));
+        assert!(!collected.contains_key(&bundled.to_u32()));
+
+        let fonts = embed_fonts(&store, &collected);
+        let alias_resource = fonts[&alias.to_u32()].resource.clone();
+        let page = page(vec![Primitive::Text(run.clone())]);
+        let mut content = Content::new();
+        paint_text_with_chains(&mut content, &page, &run, &fonts, &store, Some(&chains))
+            .expect("paint chained text");
+        let stream = String::from_utf8_lossy(&content.finish()).into_owned();
+        assert!(
+            stream.contains(&format!("/{alias_resource} ")),
+            "painter ignored the chain order: {stream}"
+        );
+
+        // No matching chain entry keeps the declared-family preference.
+        let declared = FontFaces::for_run(&store, &run.font, None);
+        assert_eq!(declared.preferred, vec![bundled.to_u32()]);
+        let regular_only = HashMap::from([("roboto|0|0".to_owned(), vec![alias])]);
+        let declared = FontFaces::for_run(&store, &run.font, Some(&regular_only));
+        assert_eq!(declared.preferred, vec![bundled.to_u32()]);
     }
 
     #[test]
@@ -1734,6 +1914,140 @@ mod tests {
     }
 
     #[test]
+    fn css_style_parses_bold_and_italic_tokens() {
+        assert_eq!(
+            FontStyle::from_css("bold 16px Roboto"),
+            FontStyle {
+                bold: true,
+                italic: false
+            }
+        );
+        assert_eq!(
+            FontStyle::from_css("italic small-caps 700 16px Roboto"),
+            FontStyle {
+                bold: true,
+                italic: true
+            }
+        );
+        assert_eq!(
+            FontStyle::from_css("oblique 600 16px Roboto"),
+            FontStyle {
+                bold: true,
+                italic: true
+            }
+        );
+        // A weight under the bold threshold and a normal run request neither.
+        assert_eq!(FontStyle::from_css("599 16px Roboto"), FontStyle::default());
+        assert_eq!(FontStyle::from_css("400 16px Roboto"), FontStyle::default());
+        // Only the leading style tokens count, never the family.
+        assert_eq!(
+            FontStyle::from_css("16px Bold Italic"),
+            FontStyle::default()
+        );
+    }
+
+    #[test]
+    fn bold_and_italic_shorthands_select_the_matching_family_face() {
+        let mut store = FontStore::default();
+        let regular = store
+            .register(font_bytes("Roboto-Regular.ttf"))
+            .expect("regular");
+        let bold = store.register(font_bytes("Roboto-Bold.ttf")).expect("bold");
+        let italic = store
+            .register(font_bytes("Roboto-Italic.ttf"))
+            .expect("italic");
+
+        // Every face declares Roboto, so registry order alone would resolve
+        // the `bold` shorthand to the regular face.
+        let mut run = text_run("ABC");
+        run.font = "bold 16px Roboto".to_owned();
+        run.all_caps = true;
+        let mut collected = BTreeMap::new();
+        collect_text_glyphs(&store, &run, &mut collected);
+        assert!(
+            collected.contains_key(&bold.to_u32()),
+            "bold run resolved to the regular face: {collected:?}"
+        );
+        assert!(
+            !collected.contains_key(&regular.to_u32()),
+            "regular face shadowed the bold one: {collected:?}"
+        );
+
+        // Painting resolves through the same faces, so the content stream must
+        // name the bold subset's `/F` resource.
+        let sheet = page(vec![Primitive::Text(run.clone())]);
+        let display_list = DisplayList {
+            contract_version: None,
+            pages: vec![sheet.clone()],
+        };
+        let uses = crate::font::collect_with_text(&display_list, &store);
+        let mut fonts = BTreeMap::new();
+        for (index, (font_id, glyphs)) in uses.iter().enumerate() {
+            if glyphs.is_empty() {
+                continue;
+            }
+            fonts.insert(
+                *font_id,
+                EmbeddedFont::new(format!("F{}", index + 1), &store, *font_id, glyphs)
+                    .expect("embed"),
+            );
+        }
+        assert!(
+            !fonts.contains_key(&regular.to_u32()),
+            "regular subset was embedded for a bold run"
+        );
+        let bold_resource = fonts
+            .get(&bold.to_u32())
+            .expect("bold subset")
+            .resource
+            .clone();
+        let mut content = Content::new();
+        paint_text(&mut content, &sheet, &run, &fonts, &store).expect("paint bold run");
+        let stream = String::from_utf8_lossy(&content.finish()).into_owned();
+        assert!(
+            stream.contains(&format!("/{bold_resource} ")),
+            "content stream did not select the bold face: {stream}"
+        );
+
+        // `italic` and `oblique` both pick the slanted face.
+        let mut slanted = text_run("A");
+        slanted.font = "italic 16px Roboto".to_owned();
+        let mut collected = BTreeMap::new();
+        collect_text_glyphs(&store, &slanted, &mut collected);
+        assert!(
+            collected.contains_key(&italic.to_u32()),
+            "italic run did not pick the italic face: {collected:?}"
+        );
+        assert!(
+            !collected.contains_key(&regular.to_u32()),
+            "italic run kept the regular face: {collected:?}"
+        );
+        slanted.font = "oblique 400 16px Roboto".to_owned();
+        assert_eq!(
+            FontFaces::for_run(&store, &slanted.font, None)
+                .resolve('A')
+                .map(|(font_id, _)| font_id),
+            Some(italic.to_u32())
+        );
+
+        // A regular run keeps the regular face even when the bold face was
+        // registered first.
+        let mut reversed = FontStore::default();
+        reversed
+            .register(font_bytes("Roboto-Bold.ttf"))
+            .expect("bold");
+        let late_regular = reversed
+            .register(font_bytes("Roboto-Regular.ttf"))
+            .expect("regular");
+        assert_eq!(
+            FontFaces::for_run(&reversed, "16px Roboto", None)
+                .resolve('A')
+                .map(|(font_id, _)| font_id),
+            Some(late_regular.to_u32())
+        );
+    }
+
+    #[test]
     fn small_caps_cases_only_lowercase_and_never_overrides_all_caps() {
         let mut run = text_run("Hi ß");
         run.small_caps = true;
@@ -1792,7 +2106,7 @@ mod tests {
         // A family nobody declares leaves registry order untouched, including
         // the `.notdef` face choice.
         run.font = "16px No Such Family".to_owned();
-        let preferred = FontFaces::with_family(&store, css_family(&run.font).as_deref());
+        let preferred = FontFaces::for_run(&store, &run.font, None);
         assert!(preferred.preferred.is_empty());
         let plain = FontFaces::new(&store);
         for ch in ['A', 'ש', '\u{10FFFD}'] {
@@ -1823,7 +2137,12 @@ mod tests {
         assert!(cff_face.glyph_index('\u{10FFFD}').is_none());
         assert!(roboto_face.glyph_index('\u{10FFFD}').is_none());
 
-        let faces = FontFaces::with_family(&store, Some("source han sans cn"));
+        let faces = FontFaces::with_style(
+            &store,
+            Some("source han sans cn"),
+            FontStyle::default(),
+            None,
+        );
         assert_eq!(faces.preferred, vec![cff.to_u32()]);
         assert_eq!(
             faces.resolve('\u{10FFFD}'),

@@ -7,17 +7,18 @@
 //! images (RGB plus soft masks), shape paths, headers/footers, note areas and
 //! page borders. Links and tagged PDF are follow-up work.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
 
 use docx_layout::display_list::{
-    DecorationPrimitive, DisplayList, DisplayPage, LinePrimitive, PageBorderPrimitive,
-    PageBorderZOrder, Primitive, RectPrimitive, ShapePathCommand, ShapePrimitive, TextRunPrimitive,
+    DecorationPrimitive, DisplayBorderStyle, DisplayList, DisplayPage, LinePrimitive,
+    PageBorderPrimitive, PageBorderZOrder, Primitive, RectPrimitive, ShapePathCommand,
+    ShapePrimitive, TextRunPrimitive,
 };
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use ooxml_text::FontStore;
-use pdf_writer::types::{CidFontType, FontFlags, SystemInfo};
+use ooxml_text::{FontId, FontStore};
+use pdf_writer::types::{CidFontType, FontFlags, LineCapStyle, LineJoinStyle, SystemInfo};
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str};
 use serde_json::Number;
 
@@ -122,7 +123,7 @@ struct FontRefs {
 /// Text primitives use a Base-14 font. Glyph runs require
 /// [`export_pdf_with_fonts`].
 pub fn export_pdf(display_list: &DisplayList) -> Result<Vec<u8>, PdfError> {
-    export_pdf_inner(display_list, None, &BTreeMap::new())
+    export_pdf_inner(display_list, None, &BTreeMap::new(), None)
 }
 
 /// Export a display list with embedded, subset TrueType fonts.
@@ -133,7 +134,7 @@ pub fn export_pdf_with_fonts(
     display_list: &DisplayList,
     store: &FontStore,
 ) -> Result<Vec<u8>, PdfError> {
-    export_pdf_inner(display_list, Some(store), &BTreeMap::new())
+    export_pdf_inner(display_list, Some(store), &BTreeMap::new(), None)
 }
 
 /// Export with embedded fonts and registered image bytes.
@@ -147,13 +148,31 @@ pub fn export_pdf_with_fonts_and_images(
     store: &FontStore,
     images: &BTreeMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>, PdfError> {
-    export_pdf_inner(display_list, Some(store), images)
+    export_pdf_inner(display_list, Some(store), images, None)
+}
+
+/// Export with embedded fonts, registered image bytes, and the facade's
+/// ordered font chains.
+///
+/// `chains` is keyed `family|bold|italic` (trimmed, lowercased family) and
+/// orders the faces layout resolved for each run. Painting and subsetting both
+/// use that order, keeping an application or embedded alias ahead of the
+/// bundled face it shadows. Scalars no chain face covers still fall back to
+/// registry order.
+pub fn export_pdf_with_fonts_images_and_chains(
+    display_list: &DisplayList,
+    store: &FontStore,
+    images: &BTreeMap<String, Vec<u8>>,
+    chains: &HashMap<String, Vec<FontId>>,
+) -> Result<Vec<u8>, PdfError> {
+    export_pdf_inner(display_list, Some(store), images, Some(chains))
 }
 
 fn export_pdf_inner(
     display_list: &DisplayList,
     store: Option<&FontStore>,
     images: &BTreeMap<String, Vec<u8>>,
+    chains: Option<&HashMap<String, Vec<FontId>>>,
 ) -> Result<Vec<u8>, PdfError> {
     if display_list.pages.is_empty() {
         return Err(PdfError::NoPages);
@@ -195,9 +214,12 @@ fn export_pdf_inner(
         pdf.type1_font(text_font_id).base_font(Name(b"Helvetica"));
     }
 
-    let font_uses = match store {
-        Some(store) => font::collect_with_text(display_list, store),
-        None => font::collect(display_list),
+    let font_uses = match (store, chains) {
+        (Some(store), Some(chains)) if !chains.is_empty() => {
+            collect_with_chains(display_list, store, chains)
+        }
+        (Some(store), _) => font::collect_with_text(display_list, store),
+        (None, _) => font::collect(display_list),
     };
     if store.is_none() && !font_uses.is_empty() {
         return Err(PdfError::Unsupported("glyph runs need embedded fonts"));
@@ -240,6 +262,7 @@ fn export_pdf_inner(
                     primitive,
                     ImagePart::Body,
                     images,
+                    store,
                     &mut image_map,
                     &mut image_objects,
                     &mut next_id,
@@ -251,6 +274,7 @@ fn export_pdf_inner(
                         primitive,
                         ImagePart::HeaderFooter(&header.r_id),
                         images,
+                        store,
                         &mut image_map,
                         &mut image_objects,
                         &mut next_id,
@@ -263,6 +287,7 @@ fn export_pdf_inner(
                         primitive,
                         ImagePart::HeaderFooter(&footer.r_id),
                         images,
+                        store,
                         &mut image_map,
                         &mut image_objects,
                         &mut next_id,
@@ -279,6 +304,7 @@ fn export_pdf_inner(
                         primitive,
                         ImagePart::Notes(note.kind.as_deref()),
                         images,
+                        store,
                         &mut image_map,
                         &mut image_objects,
                         &mut next_id,
@@ -333,6 +359,7 @@ fn export_pdf_inner(
             &font_map,
             &image_map,
             store,
+            chains,
             &opacity_map,
         )?);
         pdf.stream(content_id, &content).filter(Filter::FlateDecode);
@@ -380,6 +407,48 @@ fn export_pdf_inner(
         .kids(page_ids.iter().copied())
         .count(page_ids.len() as i32);
     Ok(pdf.finish())
+}
+
+/// Collect every glyph a chain-exported document paints.
+///
+/// Shaped glyph runs keep their run font and `.notdef` fallbacks. Fallback
+/// text resolves through the facade's layout chains, matching the painter's
+/// alias order; glyph runs hidden from painting are left out.
+fn collect_with_chains(
+    display_list: &DisplayList,
+    store: &FontStore,
+    chains: &HashMap<String, Vec<FontId>>,
+) -> BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> {
+    let mut fonts = font::collect(display_list);
+    let mut visible_glyph_fonts = BTreeSet::new();
+    let mut resolved_fonts = BTreeMap::new();
+    for page in &display_list.pages {
+        for primitive in all_primitives(page) {
+            match primitive {
+                Primitive::Text(text) if !text.hidden && !text.text.is_empty() => {
+                    text::collect_text_glyphs_with_chains(
+                        store,
+                        text,
+                        Some(chains),
+                        &mut resolved_fonts,
+                    );
+                }
+                Primitive::GlyphRun(run) if !run.hidden => {
+                    visible_glyph_fonts.insert(run.font_id);
+                    text::collect_glyph_run_fallbacks(store, run, &mut resolved_fonts);
+                }
+                _ => {}
+            }
+        }
+    }
+    fonts.retain(|font_id, _| visible_glyph_fonts.contains(font_id));
+    for (font_id, glyphs) in resolved_fonts {
+        let collected = fonts.entry(font_id).or_default();
+        for (glyph, sources) in glyphs {
+            collected.entry(glyph).or_default().extend(sources);
+        }
+    }
+    fonts
 }
 
 fn deflate(data: &[u8]) -> Vec<u8> {
@@ -471,6 +540,7 @@ fn page_content(
     fonts: &BTreeMap<u32, EmbeddedFont>,
     images: &BTreeMap<String, ImageRefs>,
     store: Option<&FontStore>,
+    chains: Option<&HashMap<String, Vec<FontId>>>,
     opacities: &BTreeMap<u32, (String, Ref)>,
 ) -> Result<Vec<u8>, PdfError> {
     let mut content = Content::new();
@@ -500,6 +570,7 @@ fn page_content(
         fonts,
         images,
         store,
+        chains,
         opacities,
         ImagePart::Body,
     )?;
@@ -511,6 +582,7 @@ fn page_content(
             fonts,
             images,
             store,
+            chains,
             opacities,
             ImagePart::HeaderFooter(&header.r_id),
         )?;
@@ -523,6 +595,7 @@ fn page_content(
             fonts,
             images,
             store,
+            chains,
             opacities,
             ImagePart::HeaderFooter(&footer.r_id),
         )?;
@@ -534,6 +607,7 @@ fn page_content(
         fonts,
         images,
         store,
+        chains,
         opacities,
         ImagePart::Body,
     )?;
@@ -545,6 +619,7 @@ fn page_content(
             fonts,
             images,
             store,
+            chains,
             opacities,
             ImagePart::Notes(note.kind.as_deref()),
         )?;
@@ -555,6 +630,7 @@ fn page_content(
             fonts,
             images,
             store,
+            chains,
             opacities,
             ImagePart::Notes(note.kind.as_deref()),
         )?;
@@ -597,6 +673,7 @@ fn primitive_opacity(primitive: &Primitive) -> Option<u32> {
     let value = match primitive {
         Primitive::Text(text) => text.opacity.as_ref(),
         Primitive::GlyphRun(run) => run.opacity.as_ref(),
+        Primitive::Line(line) => line.opacity.as_ref(),
         Primitive::Image(image) => {
             return image::opacity_alpha(image)
                 .map(|alpha| (alpha * 1000.0).round() as u32)
@@ -622,6 +699,7 @@ fn paint_primitives(
     fonts: &BTreeMap<u32, EmbeddedFont>,
     images: &BTreeMap<String, ImageRefs>,
     store: Option<&FontStore>,
+    chains: Option<&HashMap<String, Vec<FontId>>>,
     opacities: &BTreeMap<u32, (String, Ref)>,
     part: ImagePart<'_>,
 ) -> Result<(), PdfError> {
@@ -634,7 +712,17 @@ fn paint_primitives(
         }
         match primitive {
             Primitive::Text(text) => match store {
-                Some(store) => text::paint_text(content, page, text, fonts, store)?,
+                Some(store) => match chains {
+                    Some(chains) => text::paint_text_with_chains(
+                        content,
+                        page,
+                        text,
+                        fonts,
+                        store,
+                        Some(chains),
+                    )?,
+                    None => text::paint_text(content, page, text, fonts, store)?,
+                },
                 None => paint_text(content, page, text)?,
             },
             Primitive::Rect(rect) => paint_rect(content, page, rect)?,
@@ -672,53 +760,77 @@ fn paint_page_border(
         return Ok(());
     }
     let page_height = points(&page.height, "page height")?;
-    for (side, x1, y1, x2, y2) in [
+    let sides = [
         (
             border.top.as_ref(),
-            x,
-            page_height - y,
-            x + w,
-            page_height - y,
+            BorderSegment {
+                x1: x,
+                y1: page_height - y,
+                x2: x + w,
+                y2: page_height - y,
+            },
         ),
         (
             border.bottom.as_ref(),
-            x,
-            page_height - y - h,
-            x + w,
-            page_height - y - h,
+            BorderSegment {
+                x1: x,
+                y1: page_height - y - h,
+                x2: x + w,
+                y2: page_height - y - h,
+            },
         ),
         (
             border.left.as_ref(),
-            x,
-            page_height - y,
-            x,
-            page_height - y - h,
+            BorderSegment {
+                x1: x,
+                y1: page_height - y,
+                x2: x,
+                y2: page_height - y - h,
+            },
         ),
         (
             border.right.as_ref(),
-            x + w,
-            page_height - y,
-            x + w,
-            page_height - y - h,
+            BorderSegment {
+                x1: x + w,
+                y1: page_height - y,
+                x2: x + w,
+                y2: page_height - y - h,
+            },
         ),
-    ] {
+    ];
+    for (side, segment) in sides {
         let Some(side) = side else {
             continue;
         };
         let Some(color) = parse_color(&side.color) else {
             continue;
         };
-        let width = points(&side.width, "border side width")?;
-        if width <= 0.0 {
-            continue;
-        }
-        content.set_stroke_rgb(color[0], color[1], color[2]);
-        content.set_line_width(width);
-        content.move_to(x1, y1);
-        content.line_to(x2, y2);
-        content.stroke();
+        let Some(style) = page_border_style(&side.style) else {
+            return Err(PdfError::Unsupported("unsupported page border style"));
+        };
+        let width_px = raw_px(&side.width, "border side width")?;
+        content.save_state();
+        paint_border_recipe(content, segment, width_px, color, style, None, None)?;
+        content.restore_state();
     }
     Ok(())
+}
+
+/// The page-border styles the display list can carry (see
+/// `docx_layout::display_list::page_border_style`); everything else is
+/// rejected rather than silently painted as a solid rule.
+fn page_border_style(style: &str) -> Option<DisplayBorderStyle> {
+    Some(match style {
+        "solid" => DisplayBorderStyle::Solid,
+        "double" => DisplayBorderStyle::Double,
+        "dotted" => DisplayBorderStyle::Dotted,
+        "dashed" => DisplayBorderStyle::Dashed,
+        "groove" => DisplayBorderStyle::Groove,
+        "ridge" => DisplayBorderStyle::Ridge,
+        "inset" => DisplayBorderStyle::Inset,
+        "outset" => DisplayBorderStyle::Outset,
+        _ => return None,
+    })
 }
 
 fn paint_text(
@@ -738,21 +850,116 @@ fn paint_text(
     let x = points(&text.x, "text x")?;
     let baseline = points(&text.baseline_y, "text baseline")?;
     let page_height = points(&page.height, "page height")?;
+    let width = points(&text.width, "text width")?;
     let color = parse_color(&text.color).unwrap_or([0.0, 0.0, 0.0]);
+    let rotation = optional_rotation(text.rotation_deg.as_ref());
+    let horizontal_scale = checked_scale(text.horizontal_scale.as_ref())?;
+    let origin_y = page_height - baseline;
+    // The same pivot `text.rs` uses: the measured run box centred on x and
+    // 0.2em above the baseline, which is `baseline - 0.2em` in y-down CSS.
+    let center_x = x + width / 2.0;
+    let center_y = origin_y + size * 0.2;
 
     content.begin_text();
     content.set_font(FONT_NAME, size);
     content.set_fill_rgb(color[0], color[1], color[2]);
-    content.set_text_matrix([1.0, 0.0, 0.0, 1.0, x, page_height - baseline]);
-    content.show(Str(text.text.as_bytes()));
+    // Tz is text state and persists across BT/ET; always write it so one
+    // scaled run cannot stretch every later run on the page.
+    content.set_horizontal_scaling(horizontal_scale);
+    if text.rtl == Some(true) {
+        // `width` already includes the horizontal scale; `Tz` never applies
+        // to a text matrix translation, so the run starts at its measured
+        // right edge and each byte takes an unscaled share of `width`.
+        let advance = f64::from(width) / text.text.len().max(1) as f64;
+        let mut cursor = f64::from(x) + f64::from(width);
+        for byte in text.text.bytes() {
+            cursor -= advance;
+            content.set_text_matrix(base14_text_matrix(
+                x,
+                origin_y,
+                cursor - f64::from(x),
+                rotation,
+                center_x,
+                center_y,
+            ));
+            content.show(Str(&[byte]));
+        }
+    } else {
+        content.set_text_matrix(base14_text_matrix(
+            x, origin_y, 0.0, rotation, center_x, center_y,
+        ));
+        content.show(Str(text.text.as_bytes()));
+    }
     content.end_text();
     Ok(())
+}
+
+/// Absent or non-finite rotation means an unrotated run, like `text.rs`.
+fn optional_rotation(value: Option<&Number>) -> f64 {
+    value
+        .and_then(Number::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+}
+
+/// Validate a CSS `horizontal_scale` percentage.
+///
+/// Absent means the CSS default. A present value must be positive and finite:
+/// `0` would collapse every advance and NaN has no visual meaning, so both are
+/// refused instead of silently defaulted, matching the embedded-font path.
+fn checked_scale(value: Option<&Number>) -> Result<f32, PdfError> {
+    let Some(value) = value else {
+        return Ok(100.0);
+    };
+    let scale = value
+        .as_f64()
+        .ok_or(PdfError::InvalidNumber("horizontal scale"))? as f32;
+    if scale.is_finite() && scale > 0.0 {
+        Ok(scale)
+    } else {
+        Err(PdfError::InvalidNumber("horizontal scale"))
+    }
+}
+
+/// Text matrix for a Base-14 run: the pen origin with `rotation_deg` applied
+/// about the run centre.
+///
+/// CSS rotates clockwise on a y-down page; PDF's y-up space turns the same
+/// visual angle counterclockwise, so the angle is negated. `offset` is the
+/// pen advance along the baseline from `origin_x`; `Tz` never scales a text
+/// matrix translation, so the caller keeps `offset` unscaled.
+fn base14_text_matrix(
+    origin_x: f32,
+    origin_y: f32,
+    offset: f64,
+    rotation_deg: f64,
+    center_x: f32,
+    center_y: f32,
+) -> [f32; 6] {
+    let point_x = origin_x + offset as f32;
+    if rotation_deg.abs() <= f64::EPSILON || !rotation_deg.is_finite() {
+        return [1.0, 0.0, 0.0, 1.0, point_x, origin_y];
+    }
+    let theta = -rotation_deg.to_radians();
+    let (sin, cos) = theta.sin_cos();
+    let (a, b, c, d) = (cos as f32, sin as f32, -sin as f32, cos as f32);
+    let dx = point_x - center_x;
+    let dy = origin_y - center_y;
+    [
+        a,
+        b,
+        c,
+        d,
+        center_x + a * dx + c * dy,
+        center_y + b * dx + d * dy,
+    ]
 }
 
 fn collect_image(
     primitive: &Primitive,
     part: ImagePart<'_>,
     images: &BTreeMap<String, Vec<u8>>,
+    store: Option<&FontStore>,
     image_map: &mut BTreeMap<String, ImageRefs>,
     image_objects: &mut Vec<(ImageRefs, image::DecodedImage)>,
     next_id: &mut i32,
@@ -767,7 +974,7 @@ fn collect_image(
     let Some(bytes) = image_bytes(images, part, &image.rel_id) else {
         return;
     };
-    let Some(decoded) = image::try_decode(bytes.as_ref()) else {
+    let Some(decoded) = image::try_decode_with_fonts(bytes.as_ref(), store) else {
         return;
     };
     let smask = decoded.alpha.as_ref().map(|_| Ref::new(*next_id + 1));
@@ -1015,25 +1222,410 @@ fn paint_line(
     let y1 = points(&line.y1, "line y1")?;
     let x2 = points(&line.x2, "line x2")?;
     let y2 = points(&line.y2, "line y2")?;
-    let width = points(&line.stroke_width, "line width")?;
-    if width <= 0.0 {
+    let width_px = raw_px(&line.stroke_width, "line width")?;
+    if width_px <= 0.0 {
         return Ok(());
     }
     let Some(color) = parse_color(&line.color) else {
         return Ok(());
     };
+    let secondary = line.secondary_color.as_deref().and_then(parse_color);
+    let dash = line
+        .dash
+        .as_deref()
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| raw_px(value, "line dash"))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     let page_height = points(&page.height, "page height")?;
-    content.set_stroke_rgb(color[0], color[1], color[2]);
-    content.set_line_width(width);
-    content.move_to(x1, page_height - y1);
-    content.line_to(x2, page_height - y2);
-    content.stroke();
+    let segment = BorderSegment {
+        x1,
+        y1: page_height - y1,
+        x2,
+        y2: page_height - y2,
+    };
+    content.save_state();
+    paint_border_recipe(
+        content,
+        segment,
+        width_px,
+        color,
+        line.border_style.unwrap_or(DisplayBorderStyle::Solid),
+        secondary,
+        dash.as_deref(),
+    )?;
+    content.restore_state();
     Ok(())
+}
+
+/// One straight border segment in PDF points (y up).
+#[derive(Clone, Copy)]
+struct BorderSegment {
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+}
+
+/// Paint one border segment the way `docx-raster::paint_border_recipe` does:
+/// dash styles for plain rules, parallel stroked lanes for compound styles,
+/// quadratic waves, and the two-tone lanes of the 3-D styles.
+fn paint_border_recipe(
+    content: &mut Content,
+    segment: BorderSegment,
+    width_px: f32,
+    color: [f32; 3],
+    style: DisplayBorderStyle,
+    secondary: Option<[f32; 3]>,
+    dash_px: Option<&[f32]>,
+) -> Result<(), PdfError> {
+    let width_px = width_px.max(0.5);
+    match style {
+        DisplayBorderStyle::Wave | DisplayBorderStyle::DoubleWave => paint_wave(
+            content,
+            segment,
+            width_px,
+            color,
+            style == DisplayBorderStyle::DoubleWave,
+        ),
+        DisplayBorderStyle::Double
+        | DisplayBorderStyle::Triple
+        | DisplayBorderStyle::ThinThick
+        | DisplayBorderStyle::ThickThin => {
+            paint_compound_border(content, segment, width_px, color, style);
+            Ok(())
+        }
+        DisplayBorderStyle::Groove
+        | DisplayBorderStyle::Ridge
+        | DisplayBorderStyle::Inset
+        | DisplayBorderStyle::Outset => {
+            paint_three_d_border(content, segment, width_px, color, secondary, style);
+            Ok(())
+        }
+        DisplayBorderStyle::Solid
+        | DisplayBorderStyle::Dotted
+        | DisplayBorderStyle::Dashed
+        | DisplayBorderStyle::DashDot
+        | DisplayBorderStyle::DashDotDot => {
+            let dash = match dash_px {
+                Some(values) => values.to_vec(),
+                None => style_dash_px(style, width_px).unwrap_or_default(),
+            };
+            paint_border_lane(content, segment, width_px, color, &dash);
+            Ok(())
+        }
+    }
+}
+
+/// The dash arrays the native renderer derives from a border style, in CSS
+/// pixels (the display list's unit); empty means a solid rule.
+fn style_dash_px(style: DisplayBorderStyle, width_px: f32) -> Option<Vec<f32>> {
+    match style {
+        DisplayBorderStyle::Dotted => Some(vec![width_px.max(1.0), (width_px * 1.5).max(1.5)]),
+        DisplayBorderStyle::Dashed => {
+            Some(vec![(width_px * 4.0).max(2.0), (width_px * 2.0).max(2.0)])
+        }
+        DisplayBorderStyle::DashDot => Some(vec![
+            width_px * 4.0,
+            width_px * 1.5,
+            width_px,
+            width_px * 1.5,
+        ]),
+        DisplayBorderStyle::DashDotDot => Some(vec![
+            width_px * 4.0,
+            width_px * 1.5,
+            width_px,
+            width_px * 1.5,
+            width_px,
+            width_px * 1.5,
+        ]),
+        _ => None,
+    }
+}
+
+/// Convert a dash pattern from CSS pixels to PDF points. PDF requires an even,
+/// non-negative array with a positive period; anything else means solid, which
+/// is also how the native renderer treats an invalid pattern.
+fn pdf_dash(values: &[f32]) -> Option<Vec<f32>> {
+    if values.len() < 2 || values.len() % 2 != 0 {
+        return None;
+    }
+    let mut total = 0.0_f32;
+    for value in values {
+        if !value.is_finite() || *value < 0.0 {
+            return None;
+        }
+        total += value;
+    }
+    if !(total > 0.0) || !total.is_finite() {
+        return None;
+    }
+    let converted: Vec<f32> = values.iter().map(|value| value * PX_TO_PT).collect();
+    converted
+        .iter()
+        .all(|value| value.is_finite() && *value >= 0.0)
+        .then_some(converted)
+}
+
+/// Set the stroke parameters shared by every border lane. The dash pattern is
+/// always written (an empty array for solid) so a dashed neighbour cannot leak
+/// its pattern into this stroke.
+fn set_border_stroke_state(content: &mut Content, width_px: f32, color: [f32; 3], dash_px: &[f32]) {
+    content.set_stroke_rgb(color[0], color[1], color[2]);
+    content.set_line_width(width_px * PX_TO_PT);
+    content.set_line_cap(LineCapStyle::ButtCap);
+    content.set_line_join(LineJoinStyle::MiterJoin);
+    content.set_miter_limit(4.0);
+    match pdf_dash(dash_px) {
+        Some(dash) => {
+            content.set_dash_pattern(dash, 0.0);
+        }
+        None => {
+            content.set_dash_pattern([0.0_f32; 0], 0.0);
+        }
+    }
+}
+
+fn paint_border_lane(
+    content: &mut Content,
+    segment: BorderSegment,
+    width_px: f32,
+    color: [f32; 3],
+    dash_px: &[f32],
+) {
+    set_border_stroke_state(content, width_px, color, dash_px);
+    content.move_to(segment.x1, segment.y1);
+    content.line_to(segment.x2, segment.y2);
+    content.stroke();
+}
+
+/// A normal pointing toward the side the native renderer offsets its lanes to.
+/// The display list is y-down while PDF user space is y-up, so the vertical
+/// sign is inverted; otherwise `thinThick`, groove and ridge would render
+/// mirrored.
+fn border_normal(segment: BorderSegment) -> (f32, f32) {
+    let dx = segment.x2 - segment.x1;
+    let dy = segment.y2 - segment.y1;
+    let length = dx.hypot(dy).max(f32::EPSILON);
+    (dy / length, -dx / length)
+}
+
+fn offset_border_segment(
+    segment: BorderSegment,
+    normal: (f32, f32),
+    offset_px: f32,
+) -> BorderSegment {
+    let dx = normal.0 * offset_px * PX_TO_PT;
+    let dy = normal.1 * offset_px * PX_TO_PT;
+    BorderSegment {
+        x1: segment.x1 + dx,
+        y1: segment.y1 + dy,
+        x2: segment.x2 + dx,
+        y2: segment.y2 + dy,
+    }
+}
+
+fn paint_compound_border(
+    content: &mut Content,
+    segment: BorderSegment,
+    width_px: f32,
+    color: [f32; 3],
+    style: DisplayBorderStyle,
+) {
+    let normal = border_normal(segment);
+    let strokes = match style {
+        DisplayBorderStyle::Triple => vec![
+            (-width_px, (width_px / 3.0).max(0.5)),
+            (0.0, (width_px / 3.0).max(0.5)),
+            (width_px, (width_px / 3.0).max(0.5)),
+        ],
+        DisplayBorderStyle::ThinThick => vec![
+            (-width_px * 0.45, (width_px * 0.25).max(0.5)),
+            (width_px * 0.3, (width_px * 0.55).max(0.75)),
+        ],
+        DisplayBorderStyle::ThickThin => vec![
+            (-width_px * 0.3, (width_px * 0.55).max(0.75)),
+            (width_px * 0.45, (width_px * 0.25).max(0.5)),
+        ],
+        DisplayBorderStyle::Double => vec![
+            (-width_px / 2.0, (width_px / 3.0).max(0.5)),
+            (width_px / 2.0, (width_px / 3.0).max(0.5)),
+        ],
+        _ => Vec::new(),
+    };
+    for (offset, lane_width) in strokes {
+        paint_border_lane(
+            content,
+            offset_border_segment(segment, normal, offset),
+            lane_width,
+            color,
+            &[],
+        );
+    }
+}
+
+fn paint_three_d_border(
+    content: &mut Content,
+    segment: BorderSegment,
+    width_px: f32,
+    color: [f32; 3],
+    secondary: Option<[f32; 3]>,
+    style: DisplayBorderStyle,
+) {
+    let light = secondary.unwrap_or_else(|| mix_rgb(color, [1.0, 1.0, 1.0], 0.55));
+    let dark = mix_rgb(color, [0.0, 0.0, 0.0], 0.45);
+    let reverse = matches!(
+        style,
+        DisplayBorderStyle::Ridge | DisplayBorderStyle::Outset
+    );
+    let (first, second) = if reverse {
+        (light, dark)
+    } else {
+        (dark, light)
+    };
+    let normal = border_normal(segment);
+    let offset = width_px / 4.0;
+    for (lane, lane_color) in [(-offset, first), (offset, second)] {
+        paint_border_lane(
+            content,
+            offset_border_segment(segment, normal, lane),
+            (width_px / 2.0).max(0.5),
+            lane_color,
+            &[],
+        );
+    }
+}
+
+/// Cubic segments one wave may expand into before export refuses the border.
+///
+/// PDF 1.6 caps a page side at 14,400 units, so even the diagonal of the
+/// largest legal page is ~20,365 pt. At the smallest half wavelength (1.5 pt)
+/// that is ~13,577 cubics per lane, or ~27,154 for a DoubleWave. 65,536 keeps
+/// generous headroom for content that overhangs the page while bounding one
+/// wave to roughly 4 MB of content stream (a cubic is about 60 bytes), far
+/// below the 2 GiB a PDF stream can address and the native rasterizer's page
+/// budget.
+const MAX_WAVE_CUBICS: u64 = 65_536;
+
+/// Cubics one lane of a wave expands into: one per half wavelength, rounding
+/// a partial half wave up, plus one for the drift of walking the lane in f32.
+/// Computed in f64 so a long segment cannot overflow before the budget check.
+fn wave_cubics(length: f32, wavelength: f32) -> u64 {
+    let half = f64::from(wavelength) / 2.0;
+    let cubics = (f64::from(length) / half).ceil();
+    if !cubics.is_finite() || cubics <= 0.0 {
+        // Unusable geometry, over any budget the caller applies.
+        return u64::MAX;
+    }
+    (cubics as u64).saturating_add(1)
+}
+
+fn paint_wave(
+    content: &mut Content,
+    segment: BorderSegment,
+    width_px: f32,
+    color: [f32; 3],
+    double: bool,
+) -> Result<(), PdfError> {
+    let dx = segment.x2 - segment.x1;
+    let dy = segment.y2 - segment.y1;
+    let length = dx.hypot(dy);
+    if length == 0.0 {
+        return Ok(());
+    }
+    if !length.is_finite() {
+        return Err(PdfError::InvalidNumber("border wave length"));
+    }
+    let tangent_x = dx / length;
+    let tangent_y = dy / length;
+    let normal_x = tangent_y;
+    let normal_y = -tangent_x;
+    let wavelength = (width_px * 4.0).max(4.0) * PX_TO_PT;
+    let amplitude = width_px.max(1.0) * PX_TO_PT;
+    if !wavelength.is_finite() || !(wavelength > 0.0) || !amplitude.is_finite() {
+        return Err(PdfError::InvalidNumber("border wave geometry"));
+    }
+    // Divide only after the wavelength is finite and nonzero, so the walk
+    // below cannot lose its step and spin until the float stalls.
+    let half_wavelength = wavelength / 2.0;
+    if !half_wavelength.is_finite() || !(half_wavelength > 0.0) {
+        return Err(PdfError::InvalidNumber("border wave geometry"));
+    }
+    let lanes: &[f32] = if double { &[-1.0, 1.0] } else { &[0.0] };
+    // Refuse an over-budget wave before the first operator is written: the
+    // walk below then has a point count bounded by the validated budget.
+    let lane_cubics = wave_cubics(length, wavelength);
+    let cubics = lane_cubics.saturating_mul(lanes.len() as u64);
+    if cubics > MAX_WAVE_CUBICS {
+        return Err(PdfError::Unsupported(
+            "border wave exceeds the cubic budget",
+        ));
+    }
+    let lane_width = (width_px / if double { 2.0 } else { 1.0 }).max(0.5);
+    for lane_factor in lanes {
+        let lane = lane_factor * amplitude;
+        content.move_to(segment.x1 + normal_x * lane, segment.y1 + normal_y * lane);
+        let mut distance = 0.0_f32;
+        let mut sign = 1.0_f32;
+        for _ in 0..lane_cubics {
+            if !(distance < length) {
+                break;
+            }
+            let next = length.min(distance + half_wavelength);
+            if !(next > distance) {
+                break;
+            }
+            let midpoint = (distance + next) / 2.0;
+            let start_x = segment.x1 + tangent_x * distance + normal_x * lane;
+            let start_y = segment.y1 + tangent_y * distance + normal_y * lane;
+            let control_x =
+                segment.x1 + tangent_x * midpoint + normal_x * (lane + amplitude * sign);
+            let control_y =
+                segment.y1 + tangent_y * midpoint + normal_y * (lane + amplitude * sign);
+            let end_x = segment.x1 + tangent_x * next + normal_x * lane;
+            let end_y = segment.y1 + tangent_y * next + normal_y * lane;
+            // pdf-writer has no quadratic operator; convert exactly to a cubic
+            // with controls 2/3 of the way from each endpoint to the quad
+            // control point.
+            let c1x = start_x + (control_x - start_x) * 2.0 / 3.0;
+            let c1y = start_y + (control_y - start_y) * 2.0 / 3.0;
+            let c2x = end_x + (control_x - end_x) * 2.0 / 3.0;
+            let c2y = end_y + (control_y - end_y) * 2.0 / 3.0;
+            content.cubic_to(c1x, c1y, c2x, c2y, end_x, end_y);
+            distance = next;
+            sign = -sign;
+        }
+        set_border_stroke_state(content, lane_width, color, &[]);
+        content.stroke();
+    }
+    Ok(())
+}
+
+fn mix_rgb(left: [f32; 3], right: [f32; 3], amount: f32) -> [f32; 3] {
+    let amount = amount.clamp(0.0, 1.0);
+    [
+        left[0] + (right[0] - left[0]) * amount,
+        left[1] + (right[1] - left[1]) * amount,
+        left[2] + (right[2] - left[2]) * amount,
+    ]
 }
 
 fn points(value: &Number, what: &'static str) -> Result<f32, PdfError> {
     let value = value.as_f64().ok_or(PdfError::InvalidNumber(what))?;
     let value = (value * f64::from(PX_TO_PT)) as f32;
+    if !value.is_finite() {
+        return Err(PdfError::InvalidNumber(what));
+    }
+    Ok(value)
+}
+
+/// Parse a display-list length without the CSS-to-point conversion, for
+/// quantities the border recipe derives from the CSS-pixel stroke width.
+fn raw_px(value: &Number, what: &'static str) -> Result<f32, PdfError> {
+    let value = value.as_f64().ok_or(PdfError::InvalidNumber(what))? as f32;
     if !value.is_finite() {
         return Err(PdfError::InvalidNumber(what));
     }
@@ -1097,7 +1689,8 @@ fn channel(value: &str) -> Option<f32> {
 mod tests {
     use super::*;
     use docx_layout::display_list::{
-        DecoKind, DocAttrs, GlyphRunPrimitive, HfKind, HfRegion, ImagePrimitive, PlacedGlyph,
+        DecoKind, DocAttrs, GlyphRunPrimitive, HfKind, HfRegion, ImagePrimitive,
+        PageBorderPrimitive, PageBorderSide, PlacedGlyph,
     };
 
     fn number(value: f64) -> Number {
@@ -1167,6 +1760,26 @@ mod tests {
             border_owner: None,
             attrs: DocAttrs::default(),
         })
+    }
+
+    /// A border line with an explicit style and optional dash override (CSS
+    /// pixels), the way `docx-layout` emits table and paragraph borders.
+    fn border_line(
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        width: f64,
+        color: &str,
+        style: DisplayBorderStyle,
+        dash: Option<Vec<f64>>,
+    ) -> Primitive {
+        let mut primitive = line(x1, y1, x2, y2, width, color);
+        if let Primitive::Line(line) = &mut primitive {
+            line.border_style = Some(style);
+            line.dash = dash.map(|values| values.into_iter().map(number).collect());
+        }
+        primitive
     }
 
     /// A shape with nonempty geometry and neither fill nor stroke.
@@ -1474,6 +2087,37 @@ mod tests {
         decoded
     }
 
+    /// `Tm` matrices in a content stream, in painting order.
+    fn tm_matrices(stream: &str) -> Vec<[f64; 6]> {
+        stream
+            .lines()
+            .filter_map(|line| {
+                let tokens: Vec<&str> = line.split_whitespace().collect();
+                if tokens.last() != Some(&"Tm") {
+                    return None;
+                }
+                let start = tokens.len().checked_sub(7)?;
+                let mut matrix = [0.0; 6];
+                for (slot, token) in matrix.iter_mut().zip(&tokens[start..start + 6]) {
+                    *slot = token.parse().ok()?;
+                }
+                Some(matrix)
+            })
+            .collect()
+    }
+
+    /// The four numbers of the first `/Rect [...]` in the PDF objects.
+    fn first_annotation_rect(pdf: &str) -> Option<[f64; 4]> {
+        let start = pdf.find("/Rect [")? + "/Rect [".len();
+        let end = start + pdf[start..].find(']')?;
+        let values: Vec<f64> = pdf[start..end]
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .ok()?;
+        (values.len() == 4).then(|| [values[0], values[1], values[2], values[3]])
+    }
+
     /// Value of one `/ca` or `/CA` entry in the ExtGState dictionaries.
     fn ext_g_state_alpha(pdf: &str, key: &str) -> Option<f32> {
         let start = pdf.find(key)? + key.len();
@@ -1486,11 +2130,11 @@ mod tests {
         rest[..end].parse().ok()
     }
 
-    #[derive(Debug, Clone, Copy, Default)]
+    #[derive(Debug, Clone, Default)]
     struct GState {
         fill: Option<[f32; 3]>,
         stroke: Option<[f32; 3]>,
-        dashed: bool,
+        dash: Vec<f32>,
     }
 
     enum Operand {
@@ -1507,6 +2151,10 @@ mod tests {
         fill: Option<[f32; 3]>,
         stroke: Option<[f32; 3]>,
         dashed: bool,
+        /// The dash array in effect, in points; empty means solid.
+        dash: Vec<f32>,
+        /// Endpoints of `m`/`l` operands seen since the previous paint.
+        points: Vec<(f32, f32)>,
         /// Subpaths started since the previous paint; a leaked shape path
         /// shows up as an extra subpath on the next fill.
         subpaths: usize,
@@ -1531,6 +2179,7 @@ mod tests {
         let mut state = GState::default();
         let mut stack: Vec<GState> = Vec::new();
         let mut subpaths = 0usize;
+        let mut path_points: Vec<(f32, f32)> = Vec::new();
         let mut ops = Vec::new();
         while let Some(token) = tokens.next() {
             if token == "[" {
@@ -1551,23 +2200,33 @@ mod tests {
                 continue;
             }
             match token {
-                "q" => stack.push(state),
+                "q" => stack.push(state.clone()),
                 "Q" => state = stack.pop().unwrap_or_default(),
                 "rg" => state.fill = operands_rgb(&operands),
                 "RG" => state.stroke = operands_rgb(&operands),
                 "d" => {
-                    state.dashed = matches!(
-                        operands.first(),
-                        Some(Operand::Array(values)) if values.iter().any(|value| *value > 0.0)
-                    );
+                    state.dash = match operands.first() {
+                        Some(Operand::Array(values)) => values.clone(),
+                        _ => Vec::new(),
+                    };
                 }
-                "m" | "l" | "re" => subpaths += 1,
+                "m" | "l" => {
+                    if let (Some(Operand::Num(x)), Some(Operand::Num(y))) =
+                        (operands.first(), operands.get(1))
+                    {
+                        path_points.push((*x, *y));
+                    }
+                    subpaths += 1;
+                }
+                "re" => subpaths += 1,
                 "n" | "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
                     ops.push(PaintOp {
                         op: token.to_owned(),
                         fill: state.fill,
                         stroke: state.stroke,
-                        dashed: state.dashed,
+                        dashed: state.dash.iter().any(|value| *value > 0.0),
+                        dash: state.dash.clone(),
+                        points: std::mem::take(&mut path_points),
                         subpaths,
                     });
                     subpaths = 0;
@@ -1676,6 +2335,260 @@ mod tests {
             "the solid line must not inherit the decoration dash pattern"
         );
         assert_eq!(strokes[1].stroke, Some([1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn dotted_and_dashed_lines_emit_their_dash_patterns() {
+        let display_list = one_page(
+            vec![
+                // Dotted without an explicit array: derive it from the style,
+                // like the native renderer's `border_dash`.
+                border_line(
+                    72.0,
+                    200.0,
+                    172.0,
+                    200.0,
+                    2.0,
+                    "#ff0000",
+                    DisplayBorderStyle::Dotted,
+                    None,
+                ),
+                // An explicit override always wins over the style, in CSS px.
+                border_line(
+                    72.0,
+                    240.0,
+                    172.0,
+                    240.0,
+                    1.0,
+                    "#0000ff",
+                    DisplayBorderStyle::Dashed,
+                    Some(vec![12.0, 6.0]),
+                ),
+                line(72.0, 280.0, 172.0, 280.0, 1.0, "#00ff00"),
+            ],
+            None,
+            None,
+        );
+        let bytes = export_pdf(&display_list).expect("export");
+        let ops = paint_ops(&inflate_page_content(&bytes));
+        let strokes: Vec<&PaintOp> = ops
+            .iter()
+            .filter(|op| op.op == "S" || op.op == "s")
+            .collect();
+        assert_eq!(strokes.len(), 3, "two dashed lines and one solid line");
+        assert!(strokes[0].dashed, "a dotted line must set a dash pattern");
+        assert_eq!(
+            strokes[0].dash,
+            vec![1.5, 2.25],
+            "2px dotted dashes convert to 1.5/2.25pt"
+        );
+        assert_eq!(strokes[0].stroke, Some([1.0, 0.0, 0.0]));
+        assert!(strokes[1].dashed, "a dashed line must set a dash pattern");
+        assert_eq!(
+            strokes[1].dash,
+            vec![9.0, 4.5],
+            "the dash override is used and converted from CSS px to points"
+        );
+        assert_eq!(strokes[1].stroke, Some([0.0, 0.0, 1.0]));
+        assert!(
+            !strokes[2].dashed,
+            "the solid line must not inherit a neighbour's dash pattern"
+        );
+        assert!(strokes[2].dash.is_empty());
+        assert_eq!(strokes[2].stroke, Some([0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn double_border_paints_two_parallel_solid_lanes() {
+        let display_list = one_page(
+            vec![border_line(
+                72.0,
+                200.0,
+                172.0,
+                200.0,
+                4.0,
+                "#ff0000",
+                DisplayBorderStyle::Double,
+                None,
+            )],
+            None,
+            None,
+        );
+        let bytes = export_pdf(&display_list).expect("export");
+        let ops = paint_ops(&inflate_page_content(&bytes));
+        let strokes: Vec<&PaintOp> = ops
+            .iter()
+            .filter(|op| op.op == "S" || op.op == "s")
+            .collect();
+        assert_eq!(strokes.len(), 2, "a double border paints two lanes");
+        for stroke in &strokes {
+            assert!(!stroke.dashed);
+            assert!(stroke.dash.is_empty());
+            assert_eq!(stroke.stroke, Some([1.0, 0.0, 0.0]));
+            assert_eq!(stroke.points.len(), 2, "each lane is one straight segment");
+        }
+        // The page is 1056px (792pt) tall, so y=200px sits at 642pt; a 4px
+        // border offsets each lane by 2px = 1.5pt along the normal.
+        let ys: Vec<f32> = strokes.iter().map(|stroke| stroke.points[0].1).collect();
+        assert!((ys[0] - 643.5).abs() < 0.01, "first lane y: {ys:?}");
+        assert!((ys[1] - 640.5).abs() < 0.01, "second lane y: {ys:?}");
+        for stroke in &strokes {
+            assert_eq!(stroke.points[0].0, 54.0);
+            assert_eq!(stroke.points[1].0, 129.0);
+        }
+    }
+
+    /// Cubics a 300pt wave writes at the minimum 3pt wavelength, and the size
+    /// of the content stream carrying them.
+    fn wave_cubics_and_bytes(double: bool) -> (usize, usize) {
+        let mut content = Content::new();
+        paint_wave(
+            &mut content,
+            BorderSegment {
+                x1: 0.0,
+                y1: 0.0,
+                x2: 300.0,
+                y2: 0.0,
+            },
+            1.0,
+            [0.0, 0.0, 0.0],
+            double,
+        )
+        .expect("a short wave paints");
+        let bytes = content.finish().into_vec();
+        let cubics = String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter(|line| line.split_whitespace().last() == Some("c"))
+            .count();
+        (cubics, bytes.len())
+    }
+
+    #[test]
+    fn short_wave_emits_cubics_and_double_wave_doubles_the_lanes() {
+        let (single, single_bytes) = wave_cubics_and_bytes(false);
+        let (double, double_bytes) = wave_cubics_and_bytes(true);
+        assert_eq!(single, 200, "300pt at a 3pt wavelength is 200 half waves");
+        assert_eq!(double, single * 2, "DoubleWave must paint two lanes");
+        assert!(
+            single_bytes < 64 * 1024 && double_bytes < 64 * 1024,
+            "short waves must stay small: {single_bytes}/{double_bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn over_budget_wave_is_rejected_before_emitting_any_operator() {
+        // 4,000,000 CSS px is 3,000,000pt: finite, but at the 3pt minimum
+        // wavelength one lane alone would need 2,000,000 cubics.
+        let mut content = Content::new();
+        let result = paint_wave(
+            &mut content,
+            BorderSegment {
+                x1: 0.0,
+                y1: 0.0,
+                x2: 3_000_000.0,
+                y2: 0.0,
+            },
+            1.0,
+            [0.0, 0.0, 0.0],
+            true,
+        );
+        assert!(
+            matches!(result, Err(PdfError::Unsupported(_))),
+            "a 3,000,000pt wave must be refused: {result:?}"
+        );
+        let bytes = content.finish().into_vec();
+        assert!(
+            bytes.is_empty(),
+            "the budget check must run before any path operator: {} bytes",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn wave_rejects_non_finite_geometry_before_dividing() {
+        for (x2, width, expected) in [
+            (f32::INFINITY, 1.0, "an infinite length"),
+            (f32::NAN, 1.0, "a NaN length"),
+            (100.0, f32::INFINITY, "an infinite width"),
+            (100.0, f32::MAX, "a width whose wavelength overflows"),
+        ] {
+            let mut content = Content::new();
+            let result = paint_wave(
+                &mut content,
+                BorderSegment {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2,
+                    y2: 0.0,
+                },
+                width,
+                [0.0, 0.0, 0.0],
+                false,
+            );
+            assert!(
+                matches!(result, Err(PdfError::InvalidNumber(_))),
+                "{expected} must be refused: {result:?}"
+            );
+            assert!(
+                content.finish().into_vec().is_empty(),
+                "{expected} must be refused before any operator"
+            );
+        }
+    }
+
+    #[test]
+    fn page_border_side_styles_are_honored() {
+        let mut display_list = one_page(Vec::new(), None, None);
+        display_list.pages[0]
+            .page_borders
+            .push(PageBorderPrimitive {
+                x: Number::from(72),
+                y: Number::from(72),
+                w: Number::from(600),
+                h: Number::from(800),
+                z_order: None,
+                top: Some(PageBorderSide {
+                    width: Number::from(2),
+                    color: "#ff0000".to_owned(),
+                    style: "double".to_owned(),
+                }),
+                right: None,
+                bottom: None,
+                left: None,
+            });
+        let bytes = export_pdf(&display_list).expect("export");
+        let ops = paint_ops(&inflate_page_content(&bytes));
+        let strokes: Vec<&PaintOp> = ops
+            .iter()
+            .filter(|op| op.op == "S" || op.op == "s")
+            .collect();
+        assert_eq!(
+            strokes.len(),
+            2,
+            "a double page border side paints two lanes"
+        );
+        for stroke in strokes {
+            assert!(!stroke.dashed);
+            assert_eq!(stroke.stroke, Some([1.0, 0.0, 0.0]));
+        }
+    }
+
+    #[test]
+    fn line_opacity_uses_a_stroke_alpha_state() {
+        let mut primitive = line(72.0, 200.0, 172.0, 200.0, 1.0, "#ff0000");
+        if let Primitive::Line(line) = &mut primitive {
+            line.opacity = Some(number(0.25));
+        }
+        let bytes = export_pdf(&one_page(vec![primitive], None, None)).expect("export");
+        let pdf = String::from_utf8_lossy(&bytes);
+        assert_eq!(ext_g_state_alpha(&pdf, "/CA "), Some(0.25));
+        let content = inflate_page_content(&bytes);
+        let state = content.find("/GS1 gs").expect("stroke alpha state");
+        let stroke = content.find("S\nQ").expect("isolated stroke");
+        assert!(
+            state < stroke,
+            "the line must paint inside the stroke-alpha graphics state"
+        );
     }
 
     #[test]
@@ -1845,5 +2758,163 @@ mod tests {
             export_pdf(&display_list),
             Err(PdfError::Unsupported(_))
         ));
+    }
+
+    /// One `TextRunPrimitive` with placement overrides, exported through the
+    /// no-font Base-14 path.
+    fn export_base14_text(
+        x: f64,
+        baseline: f64,
+        value: &str,
+        edit: impl FnOnce(&mut TextRunPrimitive),
+    ) -> (Vec<u8>, String) {
+        let mut primitive = text(x, baseline, value);
+        if let Primitive::Text(run) = &mut primitive {
+            edit(run);
+        }
+        let bytes = export_pdf(&one_page(vec![primitive], None, None)).expect("export");
+        let content = inflate_page_content(&bytes);
+        (bytes, content)
+    }
+
+    #[test]
+    fn rotated_base14_text_matrix_pivots_about_the_run_centre() {
+        // A 16px run at (100, 200)px with a 48px measured width, rotated 90°
+        // clockwise in display space.
+        let (_, content) = export_base14_text(100.0, 200.0, "Rotated", |run| {
+            run.width = number(48.0);
+            run.font = "16px Helvetica".to_owned();
+            run.rotation_deg = Some(number(90.0));
+        });
+        let matrices = tm_matrices(&content);
+        assert_eq!(matrices.len(), 1, "one text matrix per run: {content}");
+        // The 48x16px box pivots about (124, 196.8)px = (93, 644.4)pt, so the
+        // glyph origin lands 18pt above and 2.4pt left of that centre. A
+        // non-pivoted matrix would keep the origin at (75, 642)pt.
+        let expected = [0.0, -1.0, 1.0, 0.0, 90.6, 662.4];
+        for (actual, expected) in matrices[0].iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "matrix {:?} should be {expected:?}",
+                matrices[0]
+            );
+        }
+    }
+
+    #[test]
+    fn base14_text_honours_horizontal_scale_once() {
+        let (_, content) = export_base14_text(72.0, 96.0, "AB", |run| {
+            run.horizontal_scale = Some(number(200.0));
+        });
+        assert_eq!(
+            content.matches(" Tz").count(),
+            1,
+            "horizontal scale must be written exactly once: {content}"
+        );
+        assert!(content.contains("200 Tz"), "{content}");
+        assert!(
+            !content.contains("400 Tz"),
+            "the scale must not be squared: {content}"
+        );
+        let matrices = tm_matrices(&content);
+        assert_eq!(matrices.len(), 1);
+        // Tz never scales a text matrix translation, so 72px stays 54pt even
+        // though every glyph advance is doubled.
+        assert!((matrices[0][4] - 54.0).abs() < 1e-3, "{:?}", matrices[0]);
+        assert!((matrices[0][5] - 720.0).abs() < 1e-3, "{:?}", matrices[0]);
+        assert_eq!(
+            [
+                matrices[0][0],
+                matrices[0][1],
+                matrices[0][2],
+                matrices[0][3]
+            ],
+            [1.0, 0.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn rtl_base14_text_starts_at_the_measured_right_edge() {
+        let (_, content) = export_base14_text(72.0, 96.0, "abcd", |run| {
+            run.rtl = Some(true);
+        });
+        let matrices = tm_matrices(&content);
+        assert_eq!(matrices.len(), 4, "one matrix per byte: {content}");
+        // The 100px-wide run has four 25px byte slots. `width` already
+        // includes scale, so the first byte starts at x + width - 25px and
+        // the last byte lands on the left edge, all in unscaled points.
+        let xs: Vec<f64> = matrices.iter().map(|matrix| matrix[4]).collect();
+        for (actual, expected) in xs.iter().zip([110.25, 91.5, 72.75, 54.0]) {
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "byte origins {xs:?} should be {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn base14_text_rejects_invalid_horizontal_scale() {
+        for scale in [0.0, -50.0] {
+            let mut primitive = text(72.0, 96.0, "AB");
+            if let Primitive::Text(run) = &mut primitive {
+                run.horizontal_scale = Some(number(scale));
+            }
+            assert!(
+                matches!(
+                    export_pdf(&one_page(vec![primitive], None, None)),
+                    Err(PdfError::InvalidNumber("horizontal scale"))
+                ),
+                "scale {scale} must be refused like the font path"
+            );
+        }
+    }
+
+    #[test]
+    fn rotated_base14_text_link_annotation_follows_the_painter() {
+        let mut primitive = text(100.0, 200.0, "Rotated");
+        if let Primitive::Text(run) = &mut primitive {
+            run.width = number(48.0);
+            run.font = "16px Helvetica".to_owned();
+            run.rotation_deg = Some(number(90.0));
+            run.attrs.href = Some("https://example.com/rotated".to_owned());
+        }
+        let display_list = one_page(vec![primitive], None, None);
+        let links = crate::link::collect_links(&display_list.pages[0]);
+        assert_eq!(links.len(), 1, "the rotated run must stay clickable");
+
+        let bytes = export_pdf(&display_list).expect("export");
+        let content = inflate_page_content(&bytes);
+        let pdf = String::from_utf8_lossy(&bytes);
+        let rect = first_annotation_rect(&pdf).expect("link annotation rect");
+        for (actual, expected) in rect.iter().zip(links[0].rect) {
+            assert!(
+                (actual - f64::from(expected)).abs() < 0.01,
+                "annotation {rect:?} should match the link box {:?}",
+                links[0].rect
+            );
+        }
+        let matrix = tm_matrices(&content)[0];
+        // The painter pivots the run about (93, 644.4)pt, so both ends of the
+        // rotated baseline (90.6, 662.4) and (90.6, 626.4) must stay inside
+        // the clickable box; an unrotated annotation would miss them.
+        for (x, y) in [
+            (matrix[4], matrix[5]),
+            (matrix[4] + matrix[0] * 36.0, matrix[5] + matrix[1] * 36.0),
+        ] {
+            assert!(
+                x >= rect[0] - 0.01
+                    && x <= rect[2] + 0.01
+                    && y >= rect[1] - 0.01
+                    && y <= rect[3] + 0.01,
+                "painted baseline point ({x}, {y}) must lie inside link rect {rect:?}"
+            );
+        }
+        assert!(
+            (rect[0] - 87.6).abs() < 0.01
+                && (rect[1] - 626.4).abs() < 0.01
+                && (rect[2] - 100.2).abs() < 0.01
+                && (rect[3] - 662.4).abs() < 0.01,
+            "annotation {rect:?} should cover the rotated run"
+        );
     }
 }

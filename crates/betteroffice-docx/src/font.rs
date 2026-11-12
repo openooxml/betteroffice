@@ -29,6 +29,13 @@ pub(crate) struct FontRegistry {
 }
 
 impl FontRegistry {
+    /// Ordered face chains keyed `family|bold|italic`, exactly as layout
+    /// resolved them. PDF text painting follows this order so application and
+    /// embedded aliases keep their priority over bundled faces.
+    pub(crate) fn chains(&self) -> &HashMap<String, Vec<ooxml_text::FontId>> {
+        &self.chains
+    }
+
     fn register(
         &mut self,
         family: &str,
