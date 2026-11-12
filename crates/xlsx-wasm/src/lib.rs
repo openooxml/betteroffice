@@ -546,6 +546,11 @@ impl XlsxDocument {
         self.inner.move_range_json(args).map_err(map_engine_error)
     }
 
+    #[wasm_bindgen(js_name = fillRangeJson)]
+    pub fn fill_range_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.inner.fill_range_json(args).map_err(map_engine_error)
+    }
+
     /// apply a raw op list as one user transaction; returns `SheetInfo` json.
     #[wasm_bindgen(js_name = applyOpsJson)]
     pub fn apply_ops_json(&mut self, transaction_json: &str) -> Result<String, JsValue> {

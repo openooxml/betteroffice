@@ -656,7 +656,7 @@ test('only emitted resolved changes notify the settle machine once', async () =>
   host.close('unmounted');
 });
 
-function queuedSelectionHost(sourceCause?: 'remote' | 'seed') {
+function queuedSelectionHost(sourceCause?: 'remote' | 'seed', published?: (key: string) => void) {
   let offset = 1;
   let ready = true;
   let reads = 0;
@@ -668,7 +668,7 @@ function queuedSelectionHost(sourceCause?: 'remote' | 'seed') {
   const geometry = { layout: frame, getAnchorGeometry: answer,
     readAnchorGeometries: async () => [answer()] } as unknown as DocxPluginGeometry;
   const owner = {};
-  const h = setup(() => geometry, undefined, key => keys.push(key), {
+  const h = setup(() => geometry, undefined, key => { keys.push(key); published?.(key); }, {
     selectionCause: () => sourceCause,
     readSelection(cause) {
       reads += 1;
@@ -684,6 +684,79 @@ function queuedSelectionHost(sourceCause?: 'remote' | 'seed') {
   return { ...h, keys, causes, reads: () => reads, mapped: (next: boolean) => { ready = next; },
     move: (next: number) => { offset = next; } };
 }
+
+async function settlingSelectionHost(run: (h: ReturnType<typeof queuedSelectionHost> & {
+  clock: ReturnType<typeof selectionClock>; settles(): DocxPluginEvent[]; idle(ms?: number): Promise<void>;
+}) => Promise<void>) {
+  const ownsDom = !GlobalRegistrator.isRegistered;
+  if (ownsDom) GlobalRegistrator.register();
+  const clock = selectionClock();
+  let mapped = true;
+  let machine: ReturnType<typeof createSelectionSettle> | null = null;
+  const h = queuedSelectionHost(undefined, key => machine?.notifySelectionChange(key));
+  machine = createSelectionSettle({ root: () => null, canSettle: () => mapped,
+    onUnsettle: () => h.host.selectionUnsettled(),
+    onSettle: source => h.host.selectionSettled(source),
+    onResettle: source => h.host.selectionSettled(source),
+  });
+  const idle = async (ms = 0) => {
+    await h.host.notificationsIdle();
+    if (ms) await clock.tick(ms);
+    await h.host.notificationsIdle();
+  };
+  try {
+    h.host.markSelectionDirty();
+    await idle(350);
+    expect(h.events.filter(event => event.type === 'selection-settle')).toHaveLength(1);
+    h.events.length = 0;
+    await run({ ...h, clock, idle,
+      mapped: (next) => { mapped = next; h.mapped(next); },
+      settles: () => h.events.filter(event => event.type === 'selection-settle') });
+  } finally {
+    machine.dispose();
+    h.host.close('unmounted');
+    clock.restore();
+    if (ownsDom) await GlobalRegistrator.unregister();
+  }
+}
+
+test('a selection whose quiet window passed while its range was not ready settles once as soon as the range is ready', async () => {
+  await settlingSelectionHost(async h => {
+    h.mapped(false);
+    h.move(5);
+    h.host.markSelectionDirty();
+    await h.idle(350);
+    expect(h.events.filter(event => event.type === 'selection-change')).toEqual([]);
+    expect(h.settles()).toEqual([]);
+    h.mapped(true);
+    h.host.markSelectionDirty('refresh');
+    await h.idle();
+    expect(h.settles()).toMatchObject([{ selection: { displayRange: { story: 'body', from: 5, to: 5 } } }]);
+    await h.idle(700);
+    expect(h.settles()).toHaveLength(1);
+  });
+});
+
+test('a selection change after a not-ready selection outlived its quiet window waits for its own window', async () => {
+  await settlingSelectionHost(async h => {
+    h.mapped(false);
+    h.move(5);
+    h.host.markSelectionDirty();
+    await h.idle(350);
+    expect(h.settles()).toEqual([]);
+    h.mapped(true);
+    h.move(7);
+    h.host.markSelectionDirty();
+    await h.idle();
+    expect(h.settles()).toEqual([]);
+    await h.idle(349);
+    expect(h.settles()).toEqual([]);
+    await h.idle(1);
+    expect(h.settles()).toMatchObject([{ selection: { displayRange: { story: 'body', from: 7, to: 7 } } }]);
+    await h.idle(700);
+    expect(h.settles()).toHaveLength(1);
+  });
+});
 
 for (const marks of [['remote', 'remote'], ['remote', undefined], [undefined, 'remote'],
   ['remote', 'refresh'], ['refresh', 'remote'], [undefined, 'refresh'], ['refresh', undefined]] as const) {
@@ -960,7 +1033,7 @@ test('worker mapping publishes the complete caret payload once and retains a loc
   h.host.markSelectionDirty();
   await h.host.notificationsIdle();
   expect(h.events.filter(event => event.type === 'selection-change')).toEqual([]);
-  expect(h.keys).toEqual([]);
+  expect(h.keys).toHaveLength(1);
   let range: DocxPluginSelection['displayRange'] | undefined;
   h.host.guard(h.plugin.id, 'command', context => { range = context.snapshot.selection.displayRange; }, undefined);
   expect(range).toBeNull();
@@ -973,13 +1046,13 @@ test('worker mapping publishes the complete caret payload once and retains a loc
     type: 'selection-change', generation: h.host.generation()!, version: 'v1',
     selection: { formatting: null, displayRange: { story: 'body', from: 8, to: 8, layoutId: 'layout' } },
   }]);
-  expect(h.keys).toHaveLength(1);
+  expect(h.keys).toEqual([h.keys[0]!, h.keys[0]!]);
   h.host.selectionSettled('keyboard');
   await h.host.notificationsIdle();
   h.host.markSelectionDirty();
   await h.host.notificationsIdle();
   expect(h.events.filter(event => event.type === 'selection-change')).toHaveLength(1);
-  expect(h.keys).toHaveLength(1);
+  expect(h.keys).toHaveLength(2);
   h.host.close('unmounted');
 });
 

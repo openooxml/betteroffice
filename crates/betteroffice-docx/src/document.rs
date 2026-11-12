@@ -352,12 +352,13 @@ impl Document {
             .iter()
             .map(|(key, ids)| (key.clone(), ids.iter().map(|id| id.to_u32()).collect()))
             .collect();
-        let config = docx_layout::measure_blocks::MeasurementConfig {
-            font_chains: chains.clone(),
-            defaults: serde_json::json!({ "fontFamily": "Calibri", "fontSize": 11 }),
-            authoritative_shaping: true,
-            ..Default::default()
-        };
+        let package = serde_json::json!({
+            "settings": { "compatibilityFlags": &self.model.settings.compatibility_flags }
+        });
+        let mut config: docx_layout::measure_blocks::MeasurementConfig =
+            serde_json::from_value(docx_edit::layout_request::measurement(&package))
+                .map_err(|error| Error::Render(error.to_string()))?;
+        config.font_chains = chains.clone();
         let widths = crate::font::measurement_widths(&input)?;
         docx_layout::with_measure_font_store(&mut fonts.store, || {
             let has_floats = input

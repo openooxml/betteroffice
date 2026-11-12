@@ -1038,6 +1038,7 @@ pub(crate) fn splice(
     revealable: &mut Vec<LayoutBlock>,
     units: &mut PreviewUnits,
     local: &mut local::LocalLowering,
+    note_numbering: &[docx_layout::footnotes::SectionNoteNumbering],
 ) {
     let mut block_shift = 0_isize;
     let mut revealable_shift = 0_isize;
@@ -1089,6 +1090,7 @@ pub(crate) fn splice(
         record.revealable.end = revealable_end;
         record.ids = Rc::new(replay.ids);
     }
+    docx_layout::footnotes::number_note_references(blocks.as_mut_slice(), note_numbering);
     local.refresh_seeds(blocks, map);
 }
 

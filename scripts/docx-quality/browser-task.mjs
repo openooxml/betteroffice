@@ -3,6 +3,7 @@ import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { basename, extname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { isAllowedFontRequest } from './network-policy.mjs';
+import { fontFaceSummary } from './font-faces.mjs';
 
 const [file, out, fontMode = 'cdn', base = 'http://127.0.0.1:4178'] =
   process.argv.slice(2);
@@ -45,21 +46,28 @@ await writeFile(
 );
 const start = performance.now();
 let browser;
+let timedOut = false;
 const deadline = setTimeout(async () => {
+  timedOut = true;
   console.error('Browser capture exceeded its deadline');
-  await writeFile(
-    resolve(out, 'result.json'),
-    JSON.stringify({ ...metadata, status: 'timeout' })
-  );
-  await browser?.close();
+  await writeFile(resolve(out, 'result.json'), JSON.stringify({ ...metadata, status: 'timeout' }));
+  await Promise.race([browser?.close(), new Promise((done) => setTimeout(done, 10_000))]).catch(() => {});
   process.exit(1);
 }, timeout * 1000);
 const logs = [];
 const externalRequests = [];
 const networkViolations = [];
+let page;
+// Read at the end of the capture, so faces first loaded while pages are drawn count.
+const readFontFaces = async () => {
+  const report = await page.evaluate(() => window.oracleFontReport?.() ?? null).catch(() => null);
+  return report && Array.isArray(report.fontsAdvertised)
+    ? fontFaceSummary(report.fontLoads, report.fontsAdvertised, networkViolations, report.baseLatinAdvertised ?? [])
+    : undefined;
+};
 try {
   browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({
+  page = await browser.newPage({
     viewport: { width: 1400, height: 1200 },
     deviceScaleFactor: 150 / 96,
     serviceWorkers: 'block',
@@ -131,6 +139,7 @@ try {
     );
   }
   const captureMetadata = await page.evaluate(() => window.oracleCaptureMetadata?.() ?? {});
+  const fontFaces = await readFontFaces();
   if (networkViolations.length)
     throw new Error(`Unexpected external requests: ${JSON.stringify(networkViolations)}`);
   const record = {
@@ -138,6 +147,7 @@ try {
     ...metadata,
     ...result,
     ...captureMetadata,
+    ...(fontFaces ? { font_faces: fontFaces } : {}),
     logs,
     externalRequests,
     ms: performance.now() - start,
@@ -147,14 +157,11 @@ try {
   await writeFile(resolve(out, 'result.json'), JSON.stringify(record, null, 2));
   console.log(JSON.stringify(record));
 } catch (error) {
-  await writeFile(
-    resolve(out, 'result.json'),
-    JSON.stringify(
-      { ...metadata, status: 'error', error: String(error), networkViolations },
-      null,
-      2
-    )
-  );
+  if (!timedOut)
+    await writeFile(
+      resolve(out, 'result.json'),
+      JSON.stringify({ ...metadata, status: 'error', error: String(error), networkViolations }, null, 2)
+    );
   console.log(
     JSON.stringify({
       status: 'error',

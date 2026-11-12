@@ -177,13 +177,15 @@ test('hosted Calibri excludes implicit worker substitutes while unhosted Cambria
   } finally { create.mockRestore(); }
 });
 
-test('an unknown worker family gets no implicit substitute', async () => {
+test('an unknown worker family gets the last-resort face unless the host serves it', async () => {
   const custom = Uint8Array.of(3, 4);
-  const load = async () => Uint8Array.of(5, 6).buffer;
+  const standIn = Uint8Array.of(5, 6);
+  const load = async () => standIn.buffer;
   const create = spyOn(fontManager, 'createFontProvider').mockReturnValue({
     resolve: () => load, resolveFamily: () => load,
     resolveScriptFallback: () => undefined, resolveLastResort: () => load,
   });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
   mockFetch = spyOn(globalThis, 'fetch').mockResolvedValue(new Response(custom));
   try {
     for (const hosted of [false, true]) {
@@ -192,11 +194,15 @@ test('an unknown worker family gets no implicit substitute', async () => {
         embedded: [], requirements: [{ key: 'custom|0|0', family: 'Custom', bold: false, italic: false }],
         families: ['Custom'], provider: undefined, compat: undefined, signal: new AbortController().signal,
       });
-      expect(environment.faces).toEqual(hosted ? [{ family: 'Custom', data: custom, weight: 'normal', style: 'normal' }] : []);
-      if (hosted) expect(environment.chains['custom|0|0']).toEqual([0]);
-      else expect(environment.chains['custom|0|0']).toBeUndefined();
+      if (hosted) expect(environment.faces).toEqual([{ family: 'Custom', data: custom, weight: 'normal', style: 'normal' }]);
+      else {
+        expect(environment.faces.filter(face => 'data' in face).map(face => face.data)).toEqual([standIn]);
+        expect(environment.faces[1]).toEqual({ substituteOf: 0, family: 'Custom' });
+      }
+      expect(environment.chains['custom|0|0']).toEqual(hosted ? [0] : [1]);
     }
-  } finally { create.mockRestore(); }
+    expect(warn.mock.calls.filter(([message]) => String(message).includes('stands in'))).toHaveLength(1);
+  } finally { create.mockRestore(); warn.mockRestore(); }
 });
 
 test('a second document using the same face gets it whole after the first went to the worker', async () => {

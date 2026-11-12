@@ -1,4 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
 import type { DisplayPage, DisplayPrimitive, GlyphRunPrimitive } from '../../packages/docx/src/layout/render/displayList';
@@ -2526,3 +2530,54 @@ for (const layout of CONTROL_LAYOUTS) {
     });
   });
 }
+
+describe('docx native panic hook', () => {
+  test('install_panic_hook returns undefined on every call', () => {
+    expect(typeof native.install_panic_hook).toBe('function');
+    expect(native.install_panic_hook()).toBeUndefined();
+    expect(native.install_panic_hook()).toBeUndefined();
+  });
+
+  test.skipIf(process.platform === 'win32')('a panic writes one prefixed line before the default report and throws the same Error', () => {
+    const script = join(mkdtempSync(join(tmpdir(), 'docx-native-panic-')), 'panic.mjs');
+    const loader = (name: string) => JSON.stringify(fileURLToPath(new URL(`./js/${name}.ts`, import.meta.url)));
+    writeFileSync(script, `
+      const edit = await import(${loader('engineEdit')});
+      const parse = await import(${loader('engineParse')});
+      edit.install_panic_hook();
+      parse.install_panic_hook();
+      edit.set_wasm_heap_counting(true);
+      edit.set_wasm_heap_limit(1);
+      let caught;
+      try {
+        edit.unzip_docx(edit.rezip_docx({ data: new Uint8Array([1, 2, 255]) }));
+      } catch (error) {
+        caught = error;
+      } finally {
+        edit.set_wasm_heap_limit(Infinity);
+      }
+      process.stdout.write('\\n' + JSON.stringify({
+        isError: caught instanceof Error,
+        name: caught?.name,
+        message: caught?.message,
+        code: caught?.code,
+      }));
+    `);
+    const child = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+    expect(child.status, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout.trim().split('\n').at(-1)!)).toEqual({
+      isError: true,
+      name: 'Error',
+      message: expect.stringMatching(/^BetterOffice engine memory budget exceeded \(\d+ bytes over a 1-byte budget\)$/),
+      code: 'GenericFailure',
+    });
+    const lines = child.stderr.split('\n');
+    const prefixed = lines.flatMap((line, index) => (line.startsWith('[docx-native] panic: ') ? [index] : []));
+    expect(prefixed, child.stderr).toHaveLength(1);
+    expect(lines[prefixed[0]!]).toContain('panicked at');
+    expect(lines[prefixed[0]!]).toContain('\\n');
+    expect(lines[prefixed[0]!]).toContain('BetterOffice engine memory budget exceeded');
+    const report = lines.findIndex((line, index) => index > prefixed[0]! && /^thread .* panicked at /.test(line));
+    expect(report, child.stderr).toBeGreaterThan(prefixed[0]!);
+  });
+});
