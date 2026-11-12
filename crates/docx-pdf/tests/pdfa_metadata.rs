@@ -279,6 +279,24 @@ fn xmp_mirrors_the_info_entries() {
 }
 
 #[test]
+fn xmp_preserves_carriage_return_as_a_character_reference() {
+    let metadata = PdfMetadata {
+        title: Some("a\rb".to_owned()),
+        ..PdfMetadata::default()
+    };
+    let (_, xml) = xmp_text(PdfConformance::PdfA2u, &metadata).expect("write XMP");
+    assert!(
+        xml.contains(">a&#13;b</rdf:li>"),
+        "carriage return must survive XML line-ending normalization: {xml}"
+    );
+    let info = info_text(&metadata);
+    assert!(
+        info.contains("/Title <FEFF0061000D0062>"),
+        "/Info retains the raw carriage return code unit: {info}"
+    );
+}
+
+#[test]
 fn xmp_omits_absent_fields() {
     let (_, xml) = xmp_text(PdfConformance::PdfA2u, &PdfMetadata::default()).expect("write XMP");
 

@@ -354,8 +354,10 @@ fn xmp_packet(metadata: &PdfMetadata) -> Result<String, PdfError> {
 /// Escape a value for XML text and attribute content and append it to `out`.
 ///
 /// The five XML metacharacters are escaped. Characters that XML 1.0 cannot
-/// represent are rejected instead of producing a malformed packet; tab, line
-/// feed and carriage return remain valid XML characters.
+/// represent are rejected instead of producing a malformed packet. Tab and
+/// line feed remain literal. Carriage return is emitted as a character
+/// reference because XML line-ending normalization would otherwise turn it
+/// into LF and make the XMP value differ from the `/Info` string.
 fn escape_xml(value: &str, out: &mut String) -> Result<(), PdfError> {
     for character in value.chars() {
         match character {
@@ -364,7 +366,8 @@ fn escape_xml(value: &str, out: &mut String) -> Result<(), PdfError> {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            '\t' | '\n' | '\r' => out.push(character),
+            '\t' | '\n' => out.push(character),
+            '\r' => out.push_str("&#13;"),
             '\u{0}'..='\u{8}'
             | '\u{b}'
             | '\u{c}'
