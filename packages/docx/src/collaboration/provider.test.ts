@@ -306,7 +306,16 @@ describe('CollaborationProvider sync', () => {
 describe('CollaborationProvider awareness', () => {
   const cleanups: Array<() => void> = [];
   afterEach(() => {
-    for (const cleanup of cleanups.splice(0).reverse()) cleanup();
+    const errors: unknown[] = [];
+    for (const cleanup of cleanups.splice(0).reverse()) {
+      try {
+        cleanup();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'collaboration test cleanups failed');
   });
 
   for (const leaveArrives of [false, true]) {
