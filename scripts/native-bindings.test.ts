@@ -497,8 +497,8 @@ describe('native package release wiring', () => {
     expect(nativeDeclarations.run).toContain('(cd packages/xlsx && bunx tsup)');
     expect(nativeDeclarations.run).toContain('cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"');
     expect(nativeDeclarations.run).toContain('(cd packages/pptx && bunx tsup)');
-    expect(nativeDeclarations.run).toContain('ls packages/pptx/dist/*.d.ts');
-    expect(nativeDeclarations.run).toContain('ls bindings/pptx-native/dist/*.d.ts');
+    expect(nativeDeclarations.run).toContain('declarations packages/pptx/dist >');
+    expect(nativeDeclarations.run).toContain('declarations bindings/pptx-native/dist >');
     expect(nativeDeclarations.run).toContain('cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"');
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(nativeDeclarations));
     const wasm = job.steps.find((step: any) => step.name === 'Build wasm for parity');
