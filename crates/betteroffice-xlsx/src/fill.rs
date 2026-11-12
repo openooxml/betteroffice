@@ -26,7 +26,10 @@ fn covers_partially(ranges: &[CellRange], area: CellRange) -> bool {
     let mut uncovered = false;
     for row in area.start.row..=area.end.row {
         for col in area.start.col..=area.end.col {
-            if ranges.iter().any(|range| range.contains(CellRef::new(row, col))) {
+            if ranges
+                .iter()
+                .any(|range| range.contains(CellRef::new(row, col)))
+            {
                 covered = true;
             } else {
                 uncovered = true;
@@ -72,9 +75,7 @@ pub(crate) fn preserved_fill_refusal(
         .get(sheet.0 as usize)
         .and_then(Option::as_ref)
         .is_some_and(xlsx_parse::SheetAxes::is_identity);
-    package
-        .fill_unsupported_feature(origin, exact)
-        .map(refuses)
+    package.fill_unsupported_feature(origin, exact).map(refuses)
 }
 
 /// Builds the `SetCell` ops that tile `source` over `destination`.
