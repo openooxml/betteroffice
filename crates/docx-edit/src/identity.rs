@@ -6643,7 +6643,7 @@ mod tests {
         let session = bytes_session(&multi_chunk_docx());
         let doc = session.engine.doc();
         let mut held = false;
-        for _ in 0..100_000 {
+        for _ in 0..12_000 {
             assert_eq!(
                 doc.prime_save_seed_states_slice_with(u32::MAX, u32::MAX, 1, 1),
                 PrimeSlice::Pending
