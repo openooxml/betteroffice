@@ -2646,10 +2646,9 @@ describe('document worker warmup', () => {
     expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 1, 100, 10)).toBe(SAVE_SEED_MIN_SLICE_BYTES);
   });
 
-  test('prime byte budget takes the cap for a byte slice that took no measurable time', () => {
-    const budget = nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 4 * 1024, 0, 10);
-    expect(Number.isFinite(budget)).toBe(true);
-    expect(budget).toBe(SAVE_SEED_MAX_SLICE_BYTES);
+  test('prime byte budget counts a byte slice that took no measurable time as one millisecond', () => {
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 16 * 1024, 0, 10)).toBe(160 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 16 * 1024, 0.25, 10)).toBe(160 * 1024);
   });
 
   test('the first byte slice after zero-byte slices is offered the initial budget', () => {

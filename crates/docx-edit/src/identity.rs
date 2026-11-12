@@ -1809,6 +1809,8 @@ struct StoryFingerprint<'a> {
     position: u32,
     bytes: Vec<u8>,
     section_bytes: Vec<u8>,
+    /// Bytes digested over every [`Self::advance`] call, counted as each segment goes in.
+    hashed: usize,
 }
 
 impl<'a> StoryFingerprint<'a> {
@@ -1859,6 +1861,7 @@ impl<'a> StoryFingerprint<'a> {
             position: 0,
             bytes: Vec::new(),
             section_bytes: Vec::new(),
+            hashed: 0,
         })
     }
 
@@ -1879,7 +1882,9 @@ impl<'a> StoryFingerprint<'a> {
         let mut digested = 0usize;
         while let Some(segment) = self.next_segment(txn, budget)? {
             segment_canonical(&segment, &mut self.bytes, &mut self.section_bytes);
-            digested = digested.saturating_add(self.bytes.len() + PRIME_SEGMENT_COST);
+            let segment_bytes = self.bytes.len() + PRIME_SEGMENT_COST;
+            digested = digested.saturating_add(segment_bytes);
+            self.hashed = self.hashed.saturating_add(segment_bytes);
             self.unit.segment(&self.bytes);
             self.section_content.update(&self.section_bytes);
             self.section_content.update(b"\n");
@@ -3817,17 +3822,16 @@ impl EditingDoc {
         segments_per_slice: usize,
     ) -> PrimeSlice {
         self.prime_last_slice_bytes.store(0, Ordering::Relaxed);
-        let mut left = max_bytes as usize;
+        let mut hashed = 0usize;
         let outcome = self.prime_slice_step(
             max_paragraphs,
             max_inflated_bytes,
             max_bytes,
             segments_per_slice,
-            &mut left,
+            &mut hashed,
         );
-        let digested = (max_bytes as usize).saturating_sub(left) as u64;
         self.prime_last_slice_bytes
-            .store(digested, Ordering::Relaxed);
+            .store(hashed as u64, Ordering::Relaxed);
         outcome
     }
 
@@ -3843,7 +3847,7 @@ impl EditingDoc {
         max_inflated_bytes: u32,
         max_bytes: u32,
         segments_per_slice: usize,
-        left: &mut usize,
+        hashed: &mut usize,
     ) -> PrimeSlice {
         let sliced = max_bytes != u32::MAX;
         let mut progress = self.prime_progress.lock().unwrap();
@@ -3937,6 +3941,7 @@ impl EditingDoc {
                 return PrimeSlice::Pending;
             }
         }
+        let mut left = max_bytes as usize;
         loop {
             if state.current.is_none() {
                 let Some(story) = state.stories.pop_front() else {
@@ -3950,7 +3955,7 @@ impl EditingDoc {
                 };
                 let anchors = state.anchors.remove(&story).unwrap_or_default();
                 let comments = crate::canonical::resolve_comment_anchors(&txn, &anchors);
-                *left = left.saturating_sub(PRIME_STORY_COST);
+                left = left.saturating_sub(PRIME_STORY_COST);
                 match StoryFingerprint::start(
                     self,
                     &txn,
@@ -3973,7 +3978,7 @@ impl EditingDoc {
                             *progress = None;
                             return PrimeSlice::Declined;
                         }
-                        if *left == 0 {
+                        if left == 0 {
                             return PrimeSlice::Pending;
                         }
                         continue;
@@ -3983,13 +3988,14 @@ impl EditingDoc {
             let Some((_, fingerprint)) = state.current.as_mut() else {
                 continue;
             };
-            let advanced = fingerprint.advance(&txn, &mut state.budget, (*left).max(1));
+            let before = fingerprint.hashed;
+            let advanced = fingerprint.advance(&txn, &mut state.budget, left.max(1));
+            *hashed = hashed.saturating_add(fingerprint.hashed - before);
             if fingerprint.vanished {
                 *progress = None;
                 return PrimeSlice::Declined;
             }
-            if let Some((false, used)) = advanced {
-                *left = left.saturating_sub(used);
+            if let Some((false, _)) = advanced {
                 return PrimeSlice::Pending;
             }
             let Some((story, fingerprint)) = state.current.take() else {
@@ -3997,7 +4003,7 @@ impl EditingDoc {
             };
             let comments = state.comments.remove(&story).unwrap_or_default();
             if let Some((true, used)) = advanced {
-                *left = left.saturating_sub(used);
+                left = left.saturating_sub(used);
                 if let Some((fingerprint, units, _)) = fingerprint.finish() {
                     let root = state.roots.get(&story).cloned().unwrap_or_default();
                     let story_state = Arc::new(StoryState {
@@ -4013,7 +4019,7 @@ impl EditingDoc {
                 *progress = None;
                 return PrimeSlice::Declined;
             }
-            if *left == 0 {
+            if left == 0 {
                 return PrimeSlice::Pending;
             }
         }
@@ -6295,38 +6301,48 @@ mod tests {
     #[test]
     fn prime_last_slice_bytes_reports_the_story_bytes_each_slice_digested() {
         let bytes = multi_chunk_docx();
-        let max_bytes = 4096u32;
-        let session = bytes_session(&bytes);
-        let doc = session.engine.doc();
-        assert_eq!(doc.prime_last_slice_bytes(), 0);
-        for step in ["start", "scan", "anchors"] {
+        let whole = bytes_session(&bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let all = whole.engine.doc().prime_last_slice_bytes();
+        assert!(all > 0);
+        for max_bytes in [1u32, 4096] {
+            let session = bytes_session(&bytes);
+            let doc = session.engine.doc();
+            assert_eq!(doc.prime_last_slice_bytes(), 0);
+            for step in ["start", "scan", "anchors"] {
+                assert_eq!(
+                    doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
+                    PrimeSlice::Pending,
+                    "{step} at {max_bytes}"
+                );
+                assert_eq!(doc.prime_last_slice_bytes(), 0, "{step} at {max_bytes}");
+            }
+            let (mut byte_slices, mut total, mut most) = (0, 0u64, 0u64);
+            loop {
+                let outcome = doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes);
+                let digested = doc.prime_last_slice_bytes();
+                if digested > 0 {
+                    byte_slices += 1;
+                }
+                total += digested;
+                most = most.max(digested);
+                match outcome {
+                    PrimeSlice::Pending => {}
+                    PrimeSlice::Known => break,
+                    PrimeSlice::Declined => panic!("declined at {max_bytes}"),
+                }
+            }
+            assert!(byte_slices > 1, "{byte_slices} at {max_bytes}");
+            assert_eq!(total, all, "{max_bytes}");
+            if max_bytes == 1 {
+                assert!(most > u64::from(max_bytes), "{most}");
+            }
             assert_eq!(
                 doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
-                PrimeSlice::Pending,
-                "{step}"
+                PrimeSlice::Known
             );
-            assert_eq!(doc.prime_last_slice_bytes(), 0, "{step}");
+            assert_eq!(doc.prime_last_slice_bytes(), 0);
         }
-        let mut byte_slices = 0;
-        loop {
-            let outcome = doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes);
-            let digested = doc.prime_last_slice_bytes();
-            assert!(digested <= u64::from(max_bytes), "{digested}");
-            if digested > 0 {
-                byte_slices += 1;
-            }
-            match outcome {
-                PrimeSlice::Pending => {}
-                PrimeSlice::Known => break,
-                PrimeSlice::Declined => panic!("declined"),
-            }
-        }
-        assert!(byte_slices > 1, "{byte_slices}");
-        assert_eq!(
-            doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
-            PrimeSlice::Known
-        );
-        assert_eq!(doc.prime_last_slice_bytes(), 0);
     }
 
     #[test]

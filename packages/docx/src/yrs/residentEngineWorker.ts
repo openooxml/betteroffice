@@ -1319,9 +1319,8 @@ const SAVE_SEED_SLICE_TARGET_MS = 10;
  */
 export function nextPrimeByteBudget(current: number, bytesDigested: number, elapsedMs: number, targetMs: number): number {
   if (bytesDigested <= 0) return current;
-  if (elapsedMs <= 0) return SAVE_SEED_MAX_SLICE_BYTES;
   return Math.min(SAVE_SEED_MAX_SLICE_BYTES, Math.max(SAVE_SEED_MIN_SLICE_BYTES,
-    Math.round((targetMs * bytesDigested) / elapsedMs)));
+    Math.round((targetMs * bytesDigested) / Math.max(elapsedMs, 1))));
 }
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
