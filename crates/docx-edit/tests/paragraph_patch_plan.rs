@@ -277,6 +277,15 @@ fn save_paragraph_with_bytes(
         .iter()
         .find(|part| part.part == "word/document.xml")
         .unwrap();
+    save_planned(&plan, Some(part), bytes, edit_model)
+}
+
+fn save_planned(
+    plan: &docx_edit::ParagraphSavePlan,
+    part: Option<&docx_edit::SplicedPart>,
+    bytes: &[u8],
+    edit_model: impl FnOnce(&mut serde_json::Value),
+) -> (String, Vec<String>) {
     let package = docx_parse::parse_docx_s9_wire(
         bytes,
         docx_parse::S9ParseOptions {
@@ -290,18 +299,22 @@ fn save_paragraph_with_bytes(
     let document = save_document(&package.document, |document| {
         edit_model(&mut document["content"][0]);
     });
+    let mut spliced = Vec::new();
+    if let Some(part) = part {
+        spliced.push(json!({
+            "part": part.part, "sha256": part.sha256,
+            "paragraphs": [0], "changed": part.changed,
+            "paragraphPatches": part.paragraph_patches,
+            "legacyParagraphs": part.legacy_paragraphs
+        }));
+    }
     let request = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": document,
         "headerEntries": package.header_entries.unwrap_or_default(),
         "relationshipEntries": package.relationship_entries,
         "options": {"updateModifiedDate": false},
-        "paragraphIds": {"patchedParts": patched_parts(&plan), "splicedParts": [{
-            "part": part.part, "sha256": part.sha256,
-            "paragraphs": [0], "changed": part.changed,
-            "paragraphPatches": part.paragraph_patches,
-            "legacyParagraphs": part.legacy_paragraphs
-        }]}
+        "paragraphIds": {"patchedParts": patched_parts(plan), "splicedParts": spliced}
     }))
     .unwrap();
     let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
@@ -1940,22 +1953,38 @@ fn assert_field_result_kept(saved: &str, result: &str, fields: usize) {
     }
 }
 
-fn assert_typing_in_a_field_run_keeps_the_result(content: &str, at: u32, result: &str) {
+fn run_text(xml: &str) -> String {
+    xml.split("<w:t")
+        .skip(1)
+        .filter_map(|rest| {
+            let (tag, rest) = rest.split_once('>')?;
+            if !tag.is_empty() && (!tag.starts_with(' ') || tag.ends_with('/')) {
+                return None;
+            }
+            Some(rest.split_once("</w:t>").map_or("", |(text, _)| text))
+        })
+        .collect()
+}
+
+fn assert_typing_in_a_field_run_keeps_the_result(
+    content: &str,
+    at: u32,
+    result: &str,
+    source_text: &str,
+) {
     let doc = open(content);
-    doc.insert_text(
-        &ctx(),
-        Position::new("body", at),
-        "X",
-        FormatPolicy::Inherit,
-    )
-    .unwrap();
-    assert_insertion_patch(&doc, at);
-    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
-    assert!(
-        warnings.contains(&"DOCX_MINIMAL_PATCH replace counts {\"field\":1}".to_owned()),
-        "{warnings:?}"
-    );
+    doc.insert_text(&ctx(), Position::new("body", at), "X", FormatPolicy::Inherit)
+        .unwrap();
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml");
+    let (saved, _) = save_planned(&plan, part, &package(content), |_| {});
     assert_field_result_kept(&saved, result, 1);
+    let text = run_text(&saved);
+    assert_eq!(text.matches('X').count(), 1, "{saved}");
+    assert_eq!(text.replacen('X', "", 1), source_text, "{saved}");
 }
 
 #[test]
@@ -1969,6 +1998,7 @@ fn typing_after_a_field_end_in_the_result_run_keeps_the_result_text() {
         ),
         5,
         "2",
+        "abc2def",
     );
 }
 
@@ -1983,6 +2013,7 @@ fn typing_before_a_field_begin_in_the_result_run_keeps_the_result_text() {
         ),
         1,
         "1",
+        "abc1",
     );
 }
 
@@ -1999,13 +2030,8 @@ fn typing_outside_a_nested_field_keeps_both_fields() {
         r#"<w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>def</w:t></w:r>"#,
     );
     let doc = open(content);
-    doc.insert_text(
-        &ctx(),
-        Position::new("body", 1),
-        "X",
-        FormatPolicy::Inherit,
-    )
-    .unwrap();
+    doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
+        .unwrap();
     let plan = doc.paragraph_save_plan();
     let part = plan
         .spliced_parts
@@ -2023,7 +2049,9 @@ fn typing_outside_a_nested_field_keeps_both_fields() {
         assert!(saved.contains(&format!("{expected}</w:p>")), "{saved}");
     } else {
         assert!(
-            warnings.iter().any(|warning| warning.contains("\"field\":1")),
+            warnings
+                .iter()
+                .any(|warning| warning.contains("\"field\":1")),
             "{warnings:?}"
         );
     }
