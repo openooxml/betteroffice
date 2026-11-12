@@ -1099,6 +1099,18 @@ pub fn allocation_failure() -> f64 {
     0.0
 }
 
+#[napi(catch_unwind, js_name = "install_panic_hook")]
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            eprintln!("[xlsx-native] panic: {info}");
+            prev(info);
+        }));
+    });
+}
+
 /// @internal Test hook: the calling thread's live engine bytes.
 #[napi(catch_unwind, js_name = "engineHeapLiveBytes")]
 pub fn engine_heap_live_bytes() -> f64 {

@@ -4033,7 +4033,16 @@ pub fn set_wasm_heap_limit(bytes: f64) {
 }
 
 #[napi(catch_unwind, js_name = "install_panic_hook")]
-pub fn install_panic_hook() {}
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            eprintln!("[docx-native] panic: {info}");
+            prev(info);
+        }));
+    });
+}
 
 #[cfg(test)]
 mod tests {
