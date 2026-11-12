@@ -1760,23 +1760,28 @@ export interface PngUnavailablePicture {
     unit?: 'pixels' | 'bytes' | 'work';
 }
 /**
- * The kinds of effect a PNG export can leave off a page, in the order an
- * `effects-skipped` diagnostic lists them:
+ * The kinds of effect a PNG export can leave off a page:
  * - `text.outline`: a run's classic hollow outline.
  * - `text.emphasisMark`: the dots, commas or circles marking emphasised characters.
  * - `text.effect`: a legacy animated text effect such as a blinking background.
- * - `text.modernEffects`: glow, reflection, gradient fill, outline and 3-D text effects.
- * - `text.shadow`: a run's shadow, emboss or engrave the engine does not draw.
- * - `shape.effects`: a shape effect past the one shadow or glow the engine draws.
+ * - `text.modernEffects`: a run's glow, shadow, reflection, fill or outline text effects.
+ * - `text.shadow`: a run's classic shadow, emboss or engrave.
+ * - `text.leaderGlyphs`: the dots or dashes a tab leader repeats.
+ * - `shape.effects`: a shape's effects, such as a soft edge or a second shadow.
+ * - `image.filter`: a picture's colour filter, such as a watermark washout.
+ * - `image.effects`: a picture's colour or blur effects.
+ *
+ * A page reports a kind when it carries at least one drawing primitive with an
+ * effect of that kind that the engine does not draw on its normal path. A
+ * picture whose bytes cannot be loaded or decoded reports `picture-unavailable`
+ * and nothing else. Kinds come in the order listed here.
+ *
+ * The report describes each engine's normal path, not the pixels of one page.
+ * A degenerate primitive that carries an effect, such as an empty crop, a run
+ * of spaces or a leader with no advance, still reports it.
  */
-export declare const PNG_SKIPPED_EFFECT_KINDS: readonly ["text.outline", "text.emphasisMark", "text.effect", "text.modernEffects", "text.shadow", "shape.effects"];
+export declare const PNG_SKIPPED_EFFECT_KINDS: readonly ["text.outline", "text.emphasisMark", "text.effect", "text.modernEffects", "text.shadow", "text.leaderGlyphs", "shape.effects", "image.filter", "image.effects"];
 export type PngSkippedEffectKind = (typeof PNG_SKIPPED_EFFECT_KINDS)[number];
-/** One kind of effect a page was drawn without, and how many times. */
-export interface PngSkippedEffect {
-    /** One of {@link PNG_SKIPPED_EFFECT_KINDS}; typed as a string so a later kind is not a breaking change. */
-    kind: string;
-    count: number;
-}
 /** Pictures a PNG export drew as a placeholder. */
 export interface PngPictureUnavailableDiagnostic {
     code: 'picture-unavailable';
@@ -1784,20 +1789,16 @@ export interface PngPictureUnavailableDiagnostic {
 }
 /**
  * Effects a PNG export left off a page, sent at most once per page and only
- * when it skipped something. `page` is zero-based, as the export target is.
- * The counts are what the engine skipped, not a statement about pixels:
- * counts are drawing primitives on the page that lost the effect, not runs
- * or objects. A picture that is not drawn reports `picture-unavailable` only.
+ * when `effects` is not empty. `page` is zero-based, as the export target is.
+ * `effects` names each kind once, in {@link PNG_SKIPPED_EFFECT_KINDS} order.
  */
 export interface PngEffectsSkippedDiagnostic {
     code: 'effects-skipped';
     page: number;
-    effects: PngSkippedEffect[];
+    effects: PngSkippedEffectKind[];
 }
 /** A problem a PNG export worked around: the page still exports. */
 export type PngDiagnostic = PngPictureUnavailableDiagnostic | PngEffectsSkippedDiagnostic;
-/** Orders counted kinds as {@link PNG_SKIPPED_EFFECT_KINDS} does, dropping zero counts; throws on a kind the list lacks. */
-export declare function skippedEffects(counts: ReadonlyMap<string, number>): PngSkippedEffect[];
 
 // ---- shared/office-session/protocol.d.ts ----
 import type { SessionFailureCode } from './types';

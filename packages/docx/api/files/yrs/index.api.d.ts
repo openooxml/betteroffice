@@ -39,7 +39,7 @@ import type { DocxLayoutMap, DocxPageExportOptions, DocxPagedStructuredContent, 
 export { decodeDocxHostJson } from './yrsSessionFacade';
 import type { DocxPngOptions, DocxPngTarget } from '../layout/render/png';
 import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
-export { PngExportError, PNG_SKIPPED_EFFECT_KINDS, type PngExportCode, type PngDiagnostic, type PngPictureUnavailableDiagnostic, type PngEffectsSkippedDiagnostic, type PngSkippedEffect, type PngSkippedEffectKind, type PngPictureUnavailableReason, type PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
+export { PngExportError, PNG_SKIPPED_EFFECT_KINDS, type PngExportCode, type PngDiagnostic, type PngPictureUnavailableDiagnostic, type PngEffectsSkippedDiagnostic, type PngSkippedEffectKind, type PngPictureUnavailableReason, type PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 export type { DocxPngFontFace, DocxPngOptions, DocxPngTarget } from '../layout/render/png';
 /** @internal */
 export type { DocxCommandEchoContext, DocxCommandKind, DocxCommandFrame, DocxFrameReservations, DocxCommandPageIdentity, DocxCommandPayloads, DocxCommandSelection, DocxEditState, DocxEchoGlyphLine, DocxEchoGlyphSet, DocxEchoRect, DocxEchoTransform, DocxNavigationIntent, DocxSelectionPointIntent, DocxWorkerEditSession, DocxCommandConnection, DocxCommandInitReply, } from './residentCommandProtocol';
@@ -1474,15 +1474,17 @@ export interface YrsSession extends CollaborationReplica {
     renderPng(target: DocxPngTarget, options?: DocxPngOptions): Promise<Uint8Array>;
     /** The native engine's rasterizer; the wasm engine has none. @internal */
     renderPngTarget?(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array;
-    /** {@link renderPngTarget}, with the pictures it drew as placeholders and the effects it skipped, by rasterizer key. @internal */
+    /** {@link renderPngTarget}, with the pictures it drew as placeholders and the kinds of effect it skipped. @internal */
     renderPngTargetReport?(displayListJson: string, targetJson: string, optionsJson: string): {
         png: Uint8Array;
         pictures: PngUnavailablePicture[];
-        skippedEffects: {
-            key: string;
-            count: number;
-        }[];
+        skippedEffects: string[];
     };
+    /**
+     * The kinds of effect the canvas backend leaves off a resident display page, as bits in
+     * `skippedEffectKinds()` order; `unavailable` holds `(region, area, index)` triples. @internal
+     */
+    canvasSkippedEffects?(pageIndex: number, unavailable: Uint32Array): number;
     /** Drops the observer and frees the wasm-side replica. Idempotent. */
     destroy(): void;
 }

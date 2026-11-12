@@ -53,6 +53,14 @@ export declare class EditSession {
   resident_deleted_units(): number
   apply_delete_profiled(direction: string, expectedFrameEpoch: number, count: number): Uint8Array
   apply_input_profile_json(): string
+  /**
+   * The kinds of effect the web canvas backend leaves off resident display
+   * page `page_index`, as bits in `skippedEffectKinds()` order, the first
+   * kind the lowest bit. `unavailable` holds `(region, area, index)` triples
+   * for the pictures it could not draw: region 0 body, 1 header, 2 footer,
+   * 3 note separator, 4 note, with `area` the note area's index.
+   */
+  canvasSkippedEffects(pageIndex: number, unavailable: Uint32Array): number
   display_hit_test_regions_json(pageIndex: number, x: number, y: number): string
   display_vertical_move_json(position: number, direction: string, goalX: number): string
   display_range_rects_json(from: number, to: number): string
@@ -341,15 +349,10 @@ export interface PngPictureReport {
   unit?: string
 }
 
-export interface PngSkippedEffectReport {
-  key: string
-  count: number
-}
-
 export interface PngTargetReport {
   png: Uint8Array
   pictures: Array<PngPictureReport>
-  skippedEffects: Array<PngSkippedEffectReport>
+  skippedEffects: Array<string>
 }
 
 export declare function range_rects_by_handle(handle: number, from: number, to: number): string
@@ -398,6 +401,9 @@ export declare function set_wasm_heap_counting(on: boolean): boolean
  * has a cap, heap counting is on.
  */
 export declare function set_wasm_heap_limit(bytes: number): void
+
+/** Every kind of effect a PNG export can report as skipped, in reporting order. */
+export declare function skippedEffectKinds(): string[]
 
 export declare function unzip_docx(data: Uint8Array): any
 
