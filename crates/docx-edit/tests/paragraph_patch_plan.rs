@@ -1821,8 +1821,13 @@ fn text_around_page_reference() -> String {
 
 fn assert_typing_beside_a_field_patches(content: &str, at: u32, before: &str, after: &str) {
     let doc = open(content);
-    doc.insert_text(&ctx(), Position::new("body", at), "X", FormatPolicy::Inherit)
-        .unwrap();
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", at),
+        "X",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
     assert_insertion_patch(&doc, at);
     let (saved, warnings) = save_paragraph(&doc, content, |_| {});
     assert!(warnings.is_empty(), "{warnings:?}");
@@ -1854,8 +1859,13 @@ fn typing_after_a_complex_field_patches_and_keeps_the_field_bytes() {
 fn typing_at_either_edge_of_a_complex_field_is_legacy() {
     for at in [3, 4] {
         let doc = open(&text_around_page_reference());
-        doc.insert_text(&ctx(), Position::new("body", at), "X", FormatPolicy::Inherit)
-            .unwrap();
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", at),
+            "X",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
         assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
     }
 }
