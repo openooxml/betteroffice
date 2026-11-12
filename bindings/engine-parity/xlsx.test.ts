@@ -118,6 +118,7 @@ beforeAll(async () => {
 // documentVersion() is "{nonce:32 hex}-{epoch}"; the nonce is minted per open.
 function versionNonce(doc: Doc): string {
   const version = doc.documentVersion();
+  if (!/^[0-9a-f]{32}-\d+$/.test(version)) throw new Error(`documentVersion ${JSON.stringify(version)} is not {nonce:32 hex}-{epoch}`);
   return version.slice(0, version.lastIndexOf('-'));
 }
 
@@ -222,6 +223,7 @@ const rows: Row<Xlsx>[] = [
   {
     method: 'XlsxDocument.fillRangeJson',
     name: 'XlsxDocument.fillRangeJson refuses on a commented sheet',
+    mutates: true,
     throws: { name: 'string', reason: 'fill cannot safely preserve comments' },
     call: ({ doc }) => doc.fillRangeJson(json({ sheet: 0, source: 'C2', destination: 'C2:C4' })),
   },
@@ -377,7 +379,7 @@ describe('xlsx native and wasm parity table', () => {
   for (const row of rows) {
     const known = knownDifferences.find((entry) => entry.method === row.method);
     test(known ? `${rowName(row)} still differs: ${known.reason}` : `${rowName(row)} matches`, async () => {
-      await (known ? runKnownDifference(row, makeWasm, makeNative) : runRow(row, makeWasm, makeNative, MAIN_PART));
+      await (known ? runKnownDifference(row, makeWasm, makeNative, MAIN_PART) : runRow(row, makeWasm, makeNative, MAIN_PART));
     }, 30_000);
   }
 });

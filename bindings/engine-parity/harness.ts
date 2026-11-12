@@ -181,7 +181,12 @@ async function differs(check: () => unknown): Promise<boolean> {
 }
 
 /** A known difference holds only while both engines run the row and their outcomes or saves still differ. */
-export async function runKnownDifference<T>(row: Row<T>, makeWasm: MakeEngine<T>, makeNative: MakeEngine<T>): Promise<void> {
+export async function runKnownDifference<T>(
+  row: Row<T>,
+  makeWasm: MakeEngine<T>,
+  makeNative: MakeEngine<T>,
+  mainPart = 'word/document.xml',
+): Promise<void> {
   const name = rowName(row);
   const observed = await observeBoth(row, makeWasm, makeNative).catch((error: unknown) => {
     throw new Error(`${error instanceof Error ? error.message : String(error)}; a known difference needs both engines to run the row, so fix the setup or remove the knownDifferences entry`);
@@ -191,7 +196,11 @@ export async function runKnownDifference<T>(row: Row<T>, makeWasm: MakeEngine<T>
   if (row.mutates) {
     const [left, right] = [native.saved!, wasm.saved!];
     const savedDiffer = 'value' in left && 'value' in right
-      ? await differs(() => expectSavedPartsEqual(left.value as Uint8Array, right.value as Uint8Array))
+      ? await (async () => {
+        const nativeBytes = await expectPackage(name, 'native', left, mainPart);
+        const wasmBytes = await expectPackage(name, 'wasm', right, mainPart);
+        return differs(() => expectSavedPartsEqual(nativeBytes, wasmBytes));
+      })()
       : await differs(() => expect(left).toStrictEqual(right));
     if (savedDiffer) return;
   }

@@ -139,6 +139,7 @@ const bytes = () => fixture.slice();
 // documentVersion() is "{nonce:016x}-{epoch}"; the nonce is minted per open.
 function versionNonce(doc: Doc): string {
   const version = doc.documentVersion();
+  if (!/^[0-9a-f]{16}-\d+$/.test(version)) throw new Error(`documentVersion ${JSON.stringify(version)} is not {nonce:016x}-{epoch}`);
   return version.slice(0, version.lastIndexOf('-'));
 }
 
@@ -355,15 +356,16 @@ const rows: Row<Pptx>[] = [
     setup: ({ doc }: Pptx) => modernComment(doc),
     call: ({ doc }, commentId) => doc.replyToCommentJson(json({ commentId, author: 'Parity', initials: 'P', text: 'Reply', created: DATE })),
   }),
-  {
+  defineRow({
     method: 'PptxDocument.replyToCommentJson',
-    name: 'PptxDocument.replyToCommentJson refuses the modern switch on a commented deck',
-    throws: FLAVOUR_FIXED,
-    call: ({ doc }) => {
-      doc.setCommentFlavorJson(json({ flavor: 'modern' }));
-      return doc.replyToCommentJson(json({ commentId: addComment(doc), author: 'Parity', initials: 'P', text: 'Reply', created: DATE }));
-    },
-  },
+    name: 'PptxDocument.replyToCommentJson refuses a reply to a reply',
+    mutates: true,
+    throws: { name: 'string', reason: 'invalid comment: replies cannot be nested below a reply' },
+    setup: ({ doc }: Pptx) => (JSON.parse(doc.replyToCommentJson(json({
+      commentId: modernComment(doc), author: 'Parity', initials: 'P', text: 'Reply', created: DATE,
+    }))) as { commentId: string }).commentId,
+    call: ({ doc }, replyId) => doc.replyToCommentJson(json({ commentId: replyId, author: 'Parity', initials: 'P', text: 'Nested', created: DATE })),
+  }),
   { method: 'PptxDocument.setCommentPositionJson', mutates: true, call: ({ doc }) => doc.setCommentPositionJson(json({ commentId: seededComment(doc), xEmu: 95250, yEmu: 127000 })) },
   defineRow({
     method: 'PptxDocument.setCommentStatusJson',
@@ -373,12 +375,10 @@ const rows: Row<Pptx>[] = [
   }),
   {
     method: 'PptxDocument.setCommentStatusJson',
-    name: 'PptxDocument.setCommentStatusJson refuses the modern switch on a commented deck',
-    throws: FLAVOUR_FIXED,
-    call: ({ doc }) => {
-      doc.setCommentFlavorJson(json({ flavor: 'modern' }));
-      return doc.setCommentStatusJson(json({ commentId: addComment(doc), resolved: true }));
-    },
+    name: 'PptxDocument.setCommentStatusJson refuses legacy comments',
+    mutates: true,
+    throws: { name: 'string', reason: 'invalid comment: legacy comments cannot represent status' },
+    call: ({ doc }) => doc.setCommentStatusJson(json({ commentId: seededComment(doc), resolved: true })),
   },
   { method: 'PptxDocument.removeCommentJson', mutates: true, call: ({ doc }) => removeSeededComment(doc) },
   defineRow({
@@ -390,6 +390,7 @@ const rows: Row<Pptx>[] = [
   {
     method: 'PptxDocument.setCommentFlavorJson',
     name: 'PptxDocument.setCommentFlavorJson refuses on a commented deck',
+    mutates: true,
     throws: FLAVOUR_FIXED,
     call: ({ doc }) => doc.setCommentFlavorJson(json({ flavor: 'modern' })),
   },
@@ -468,9 +469,35 @@ const rows: Row<Pptx>[] = [
   { method: 'PptxRenderer.slideLayoutKey', call: ({ doc, renderer }) => [0, 1].map((index) => renderer.slideLayoutKey(doc, index)) },
   { method: 'PptxRenderer.snapshotWithLayoutKeysJson', call: ({ doc, renderer }) => renderer.snapshotWithLayoutKeysJson(doc) },
   { method: 'PptxRenderer.requestedFontFacesJson', call: ({ doc, renderer }) => [renderer.requestedFontFacesJson(doc, null), renderer.requestedFontFacesJson(doc, slideId(doc, 1))] },
-  { method: 'PptxRenderer.setActiveSlide', call: ({ doc, renderer }) => renderer.setActiveSlide(doc, slideId(doc, 1), renderer.slideLayoutKey(doc, 1)) },
-  { method: 'PptxRenderer.registerFont', call: ({ renderer }) => renderer.registerFont('Parity Sans', true, false, fontBytes) },
-  { method: 'PptxRenderer.registerFallbackFont', call: ({ renderer }) => renderer.registerFallbackFont('Parity Sans', false, true, fontBytes) },
+  defineRow({
+    method: 'PptxRenderer.setActiveSlide',
+    setup: ({ doc, renderer }: Pptx) => {
+      renderer.layoutSlideJson(doc, 1);
+      renderer.layoutSlideJson(doc, 0);
+    },
+    call: ({ doc, renderer }) => {
+      const result = renderer.setActiveSlide(doc, slideId(doc, 1), renderer.slideLayoutKey(doc, 1));
+      return { result, hits: [[100, 160], [5, 5]].map(([x, y]) => renderer.hitTestJson(x!, y!)) };
+    },
+  }),
+  {
+    method: 'PptxRenderer.registerFont',
+    mutates: true,
+    call: ({ doc, renderer }) => {
+      const id = renderer.registerFont('Parity Sans', true, false, fontBytes);
+      doc.formatTextJson(json({ storyId: story(doc), start: 0, end: 5, patch: { fontFamily: 'Parity Sans', bold: true } }));
+      return { id, after: renderer.layoutSlideJson(doc, 0) };
+    },
+  },
+  {
+    method: 'PptxRenderer.registerFallbackFont',
+    mutates: true,
+    call: ({ doc, renderer }) => {
+      const id = renderer.registerFallbackFont('Parity Sans', false, true, fontBytes);
+      doc.formatTextJson(json({ storyId: story(doc), start: 0, end: 5, patch: { fontFamily: 'Parity Sans', italic: true } }));
+      return { id, after: renderer.layoutSlideJson(doc, 0) };
+    },
+  },
   {
     method: 'PptxRenderer.setBrowserCoverageFallback',
     call: ({ doc, renderer }) => {
@@ -555,7 +582,7 @@ describe('pptx native and wasm parity table', () => {
   for (const row of rows) {
     const known = knownDifferences.find((entry) => entry.method === row.method);
     test(known ? `${rowName(row)} still differs: ${known.reason}` : `${rowName(row)} matches`, async () => {
-      await (known ? runKnownDifference(row, makeWasm, makeNative) : runRow(row, makeWasm, makeNative, MAIN_PART));
+      await (known ? runKnownDifference(row, makeWasm, makeNative, MAIN_PART) : runRow(row, makeWasm, makeNative, MAIN_PART));
     }, 30_000);
   }
 });
