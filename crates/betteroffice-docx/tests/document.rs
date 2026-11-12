@@ -446,7 +446,11 @@ fn an_unedited_save_keeps_a_chart_in_every_story() {
         "word/footnotes.xml",
         "word/charts/chart1.xml",
     ] {
-        assert_eq!(saved_part(&after, path), saved_part(&before, path), "{path}");
+        assert_eq!(
+            saved_part(&after, path),
+            saved_part(&before, path),
+            "{path}"
+        );
     }
     for path in [
         "word/document.xml",

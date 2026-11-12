@@ -76,7 +76,9 @@ fn without_paragraph_id_values(xml: &str) -> String {
     while let Some(at) = rest.find(ATTRIBUTE) {
         let value = at + ATTRIBUTE.len();
         output.push_str(&rest[..value]);
-        let end = rest[value..].find('"').map_or(rest.len(), |end| value + end);
+        let end = rest[value..]
+            .find('"')
+            .map_or(rest.len(), |end| value + end);
         rest = &rest[end..];
     }
     output.push_str(rest);
@@ -157,13 +159,18 @@ fn replacing_one_paragraph_keeps_other_paragraph_bytes() {
         .concat(),
     );
     let mut document = Document::open(&docx(&source)).unwrap();
-    document.replace_paragraph_text("0000000C", "New text").unwrap();
+    document
+        .replace_paragraph_text("0000000C", "New text")
+        .unwrap();
     let saved = saved_main_part(&document.save().unwrap());
     let (before, after) = (paragraph_slices(&source), paragraph_slices(&saved));
     assert_eq!(after.len(), before.len());
     assert!(after[2].contains("New text"), "{}", after[2]);
     for index in [0, 1, 3, 4] {
-        assert_eq!(after[index], before[index], "source bytes differ in paragraph {index}");
+        assert_eq!(
+            after[index], before[index],
+            "source bytes differ in paragraph {index}"
+        );
     }
 }
 
@@ -201,7 +208,10 @@ fn unedited_save_keeps_table_of_contents_field_marks() {
         .concat(),
     );
     let saved = saved_main_part(&save_unedited(&docx(&source)));
-    assert!(saved.contains(&toc), "source bytes differ in the table of contents field");
+    assert!(
+        saved.contains(&toc),
+        "source bytes differ in the table of contents field"
+    );
     assert_eq!(saved, source, "source bytes differ");
 }
 
@@ -216,7 +226,10 @@ fn unedited_save_keeps_proofing_marks() {
         .concat(),
     );
     let saved = saved_main_part(&save_unedited(&docx(&source)));
-    assert!(saved.contains(marked), "source bytes differ in the proofing marks");
+    assert!(
+        saved.contains(marked),
+        "source bytes differ in the proofing marks"
+    );
     assert_eq!(saved, source, "source bytes differ");
 }
 
@@ -231,6 +244,9 @@ fn unedited_save_keeps_run_revision_ids() {
         .concat(),
     );
     let saved = saved_main_part(&save_unedited(&docx(&source)));
-    assert!(saved.contains(marked), "source bytes differ in the run revision ids");
+    assert!(
+        saved.contains(marked),
+        "source bytes differ in the run revision ids"
+    );
     assert_eq!(saved, source, "source bytes differ");
 }

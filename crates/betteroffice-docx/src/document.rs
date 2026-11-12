@@ -263,15 +263,15 @@ impl Document {
         replace_section_paragraphs(&mut self.model.body, para_id, &replacement);
         self.authored_ids.retain(|_, (fresh, _)| fresh != para_id);
         let mirrored = match (&mut self.session_baseline, replacement.source_ordinal) {
-            (Some(baseline), Some(ordinal)) if context.suggesting.is_none() => {
-                baseline.replace_paragraph(para_id, &replacement).then(|| SessionEdit {
+            (Some(baseline), Some(ordinal)) if context.suggesting.is_none() => baseline
+                .replace_paragraph(para_id, &replacement)
+                .then(|| SessionEdit {
                     para_id: para_id.to_owned(),
                     ordinal,
                     text: text.to_owned(),
                     expected: edited,
                     context: context.clone(),
-                })
-            }
+                }),
             _ => None,
         };
         match mirrored {
@@ -596,8 +596,11 @@ impl Document {
             .filter(|(ordinal, _)| !self.authored_ids.contains_key(*ordinal))
             .filter_map(|(ordinal, (fresh, _))| {
                 let paragraph = paragraphs.get(*ordinal)?;
-                (paragraph.para_id.as_ref() == Some(fresh))
-                    .then(|| paragraph.source_ordinal.map(|source| (source, fresh.clone())))
+                (paragraph.para_id.as_ref() == Some(fresh)).then(|| {
+                    paragraph
+                        .source_ordinal
+                        .map(|source| (source, fresh.clone()))
+                })
             })
             .collect()
     }
@@ -1262,7 +1265,10 @@ mod session_save_tests {
         assert!(saved.contains(edited), "{saved}");
         let source = source();
         for paragraph in unchanged {
-            assert!(source.contains(*paragraph) && saved.contains(*paragraph), "{saved}");
+            assert!(
+                source.contains(*paragraph) && saved.contains(*paragraph),
+                "{saved}"
+            );
         }
     }
 
