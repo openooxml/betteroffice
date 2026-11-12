@@ -10804,6 +10804,63 @@ fn set_chart_anchor_refuses_what_a_save_cannot_write() {
     assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
 }
 
+/// A resize reaches a live peer as the anchor its author wrote: both sides end
+/// on one anchor whose untouched `from` marker still sits on the hidden column.
+#[test]
+fn collaborative_sessions_resize_a_chart_and_converge() {
+    let bytes = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let sheet = test_part_text(&parts, "xl/worksheets/sheet1.xml").replace(
+            "<sheetData>",
+            r#"<cols><col min="3" max="3" width="9" customWidth="1" hidden="1"/></cols><sheetData>"#,
+        );
+        set_test_part(&mut parts, "xl/worksheets/sheet1.xml", sheet.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let mut left = Workbook::open_collaborative(&bytes, 305).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 306).unwrap();
+    let before = left.model().sheets[0].charts[0].anchor;
+    let ChartAnchor::TwoCell { from, .. } = before else {
+        panic!("two-cell anchor");
+    };
+
+    assert!(
+        left.resize_chart(
+            SheetId(0),
+            "xl/drawings/drawing1.xml#0",
+            ChartResize {
+                right: 40.0,
+                bottom: 20.0,
+                ..ChartResize::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap()
+        .applied
+    );
+    let resized = left.model().sheets[0].charts[0].anchor;
+    assert_ne!(resized, before);
+
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    assert!(
+        right
+            .apply_update_v1(&update, CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(right.model().sheets[0].charts[0].anchor, resized);
+    assert_eq!(right.model(), left.model());
+    assert!(
+        matches!(resized, ChartAnchor::TwoCell { from: kept, .. } if kept == from),
+        "{resized:?} must keep the from marker {from:?}"
+    );
+
+    let reopened = Workbook::open(&right.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+}
+
 /// A chart anchor is replicated content, not workbook structure: the freeze
 /// pins which drawing anchors which part, and where that anchor sits travels
 /// through the document like any other edit.
