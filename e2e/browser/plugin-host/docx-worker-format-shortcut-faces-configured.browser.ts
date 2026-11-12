@@ -1,6 +1,6 @@
 import { test, expect, type Page } from 'playwright/test';
 import JSZip from 'jszip';
-import { measure, recordFontRequests, settled, underlinesUnder } from '../docx-run-lines';
+import { measure, recordFontRequests, settled, snapshot, underlinesUnder } from '../docx-run-lines';
 
 const BEFORE = 'The committee reviewed the quarterly figures in detail and agreed that the regional offices should report their results in one format from next year on, so that ';
 const SELECTED = 'every branch manager can compare';
@@ -9,7 +9,7 @@ const TEXT = BEFORE + SELECTED + AFTER;
 const LAST_WORD = 'cycle.';
 const CONTENT_RIGHT = 11906 / 15 - 96;
 
-declare global { interface Window { __configuredFonts: { errors: string[]; load(bytes: number[]): void } } }
+declare global { interface Window { __configuredFonts: { errors: string[]; ready: boolean; fontsReady: number[]; load(bytes: number[]): void } } }
 
 const times = (extra = '') => `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>${extra}<w:sz w:val="24"/></w:rPr>`;
 const run = (text: string, extra = '') => `<w:r>${times(extra)}<w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -25,12 +25,24 @@ async function a4Document(selectedFormat: string) {
 
 async function open(page: Page, selectedFormat: string) {
   await page.goto('/docx-configured-fonts.html');
+  await page.waitForFunction(() => window.__configuredFonts?.ready === true, undefined, { timeout: 60_000 });
   await page.evaluate((bytes) => window.__configuredFonts.load(bytes), await a4Document(selectedFormat));
   await expect(page.locator('.canvas-page-mirror').first()).toContainText(LAST_WORD, { timeout: 60_000 });
   await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false', { timeout: 60_000 });
 }
 
 const bold = (weight: string) => /bold|[6-9]00/.test(weight);
+
+// A font environment committed after the face's bytes arrived carries the face.
+function faceInUse(page: Page, face: string) {
+  return page.evaluate((source) => {
+    const pattern = new RegExp(source);
+    const arrivals = performance.getEntriesByType('resource')
+      .filter((entry) => pattern.test(new URL(entry.name).pathname))
+      .map((entry) => (entry as PerformanceResourceTiming).responseEnd);
+    return arrivals.length > 0 && window.__configuredFonts.fontsReady.some((at) => at >= Math.max(...arrivals));
+  }, `/${face}(?:[.-][\\w-]*)?\\.(?:ttf|otf|woff2?|zst)$`);
+}
 
 const cases = [
   { name: 'bold shortcut', key: 'ControlOrMeta+B', button: 'Bold', format: '', face: 'LiberationSerif-Bold' },
@@ -44,6 +56,11 @@ for (const entry of cases) {
     test.setTimeout(180_000);
     const label = entry.name.replace(/\s+/g, '-');
     const fonts = recordFontRequests(page);
+    const registryWarnings: string[] = [];
+    page.on('console', (message) => {
+      if (message.type() === 'warning' && message.text().startsWith('[fontRegistry]')) registryWarnings.push(message.text());
+    });
+    const formatted = (style: string, weight: string) => entry.button === 'Bold' ? bold(weight) : style === 'italic';
     await open(page, entry.format);
     const before = measure((await settled(page)).runs);
     const pageView = page.locator('.canvas-page, .paged-editor__page').first();
@@ -63,11 +80,14 @@ for (const entry of cases) {
     await expect.poll(() => fonts.loaded(entry.face, entry.key !== ''), {
       message: `${entry.face} fetched`, timeout: 30_000,
     }).toBe(true);
+    await expect.poll(async () => await faceInUse(page, entry.face) &&
+      (!entry.key || (await snapshot(page)).runs.some((item) => item.text.length > 0 && formatted(item.fontStyle, item.fontWeight))), {
+      message: `${entry.face} registered and in use`, timeout: 30_000,
+    }).toBe(true);
     const after = await settled(page);
     const measured = measure(after.runs);
     await pageView.screenshot({ path: info.outputPath(`${label}-after.png`) });
 
-    const formatted = (style: string, weight: string) => entry.button === 'Bold' ? bold(weight) : style === 'italic';
     const ordered = measured.runs.flat();
     const selected = after.runs.filter((item) => item.text.length > 0 && formatted(item.fontStyle, item.fontWeight));
     const selectedLeft = selected.length ? Math.min(...selected.map((item) => item.left)) : 0;
@@ -96,5 +116,6 @@ for (const entry of cases) {
       expect.soft(mark.left + mark.width, 'underline right edge').toBeLessThanOrEqual(selectedRight + 2);
     }
     expect(await page.evaluate(() => window.__configuredFonts.errors)).toEqual([]);
+    expect(registryWarnings, 'font registry fallbacks').toEqual([]);
   });
 }
