@@ -1797,6 +1797,131 @@ fn field_paragraph_is_legacy() {
     assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
 }
 
+const PAGE_REFERENCE: &str = concat!(
+    r#"<w:r w:rsidR="00112233"><w:fldChar w:fldCharType="begin" w:dirty="true"/></w:r>"#,
+    r#"<w:r><w:instrText xml:space="preserve"> PAGEREF _Toc1 \h </w:instrText></w:r>"#,
+    r#"<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>"#,
+    r#"<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:t>2</w:t></w:r>"#,
+    r#"<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>"#,
+);
+
+const PROJECTED_FIELD: &str = concat!(
+    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+    r#"<w:hyperlink w:anchor="top"><w:r><w:t>HYPERLINK</w:t></w:r></w:hyperlink>"#,
+    r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+    r#"<w:hyperlink w:anchor="top"><w:r><w:t>link</w:t></w:r></w:hyperlink>"#,
+    r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+);
+
+fn text_around_page_reference() -> String {
+    format!(
+        r#"<w:r><w:rPr><w:noProof/></w:rPr><w:t>abc</w:t></w:r>{PAGE_REFERENCE}<w:r><w:rPr><w:noProof/></w:rPr><w:t>def</w:t></w:r>"#
+    )
+}
+
+fn assert_typing_beside_a_field_patches(content: &str, at: u32, before: &str, after: &str) {
+    let doc = open(content);
+    doc.insert_text(&ctx(), Position::new("body", at), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_insertion_patch(&doc, at);
+    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let expected = format!("{}</w:p>", content.replacen(before, after, 1));
+    assert!(saved.contains(&expected), "{saved}");
+}
+
+#[test]
+fn typing_before_a_complex_field_patches_and_keeps_the_field_bytes() {
+    assert_typing_beside_a_field_patches(
+        &text_around_page_reference(),
+        1,
+        "<w:t>abc</w:t>",
+        "<w:t>aXbc</w:t>",
+    );
+}
+
+#[test]
+fn typing_after_a_complex_field_patches_and_keeps_the_field_bytes() {
+    assert_typing_beside_a_field_patches(
+        &text_around_page_reference(),
+        5,
+        "<w:t>def</w:t>",
+        "<w:t>dXef</w:t>",
+    );
+}
+
+#[test]
+fn typing_at_either_edge_of_a_complex_field_is_legacy() {
+    for at in [3, 4] {
+        let doc = open(&text_around_page_reference());
+        doc.insert_text(&ctx(), Position::new("body", at), "X", FormatPolicy::Inherit)
+            .unwrap();
+        assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+    }
+}
+
+#[test]
+fn an_edit_across_a_complex_field_boundary_is_legacy() {
+    let doc = open(&text_around_page_reference());
+    replace(&doc, 2, 5, "X");
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn deleting_a_complex_field_is_legacy() {
+    let doc = open(&text_around_page_reference());
+    doc.delete_range(&ctx(), StoryRange::new("body", 3, 4))
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn an_edit_inside_projected_field_code_is_legacy() {
+    let doc = open(&format!("{}{PROJECTED_FIELD}", text("abc")));
+    replace(&doc, 5, 6, "X");
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn an_edit_inside_projected_field_result_text_is_legacy() {
+    let doc = open(&format!("{}{PROJECTED_FIELD}", text("abc")));
+    replace(&doc, 13, 14, "X");
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn typing_beside_a_field_with_projected_code_is_legacy() {
+    let doc = open(&format!("{}{PROJECTED_FIELD}", text("abc")));
+    doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn typing_beside_a_field_continued_in_the_next_paragraph_is_legacy() {
+    let doc = open(concat!(
+        r#"<w:r><w:t>abc</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> TOC \o "1-3" </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>entry</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000003"><w:r><w:t>more</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+    ));
+    doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn typing_beside_a_simple_field_is_legacy() {
+    let doc = open(concat!(
+        r#"<w:r><w:t>abc</w:t></w:r>"#,
+        r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+    ));
+    doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
 #[test]
 fn repeated_text_alignment_is_legacy() {
     let doc = open(&text("aaaa"));

@@ -187,6 +187,70 @@ fn paragraph_patch_s13_unsupported_structure_uses_legacy_replacement() {
     assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
 }
 
+#[test]
+fn paragraph_patch_s13_text_beside_a_seeded_complex_field_keeps_the_field_bytes() {
+    let field = concat!(
+        "<w:r w:rsidR='00112233'><w:fldChar w:fldCharType='begin' w:dirty='true'/></w:r>",
+        "<w:r><w:instrText xml:space='preserve'> PAGEREF _Toc1 \\h </w:instrText></w:r>",
+        "<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType='separate'/></w:r>",
+        "<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:t>12</w:t></w:r>",
+        "<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType='end'/></w:r>"
+    );
+    let paragraph = format!(
+        "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r>{field}<w:r><w:t>tail</w:t></w:r></w:p>"
+    );
+    let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
+    let source = format!("{root}{paragraph}</w:body></w:document>");
+    let atom = UnitV1::Atom {
+        atom_kind: "field".to_owned(),
+        payload: serde_json::from_value(json!({
+            "fieldType": "PAGEREF", "instruction": "PAGEREF _Toc1 \\h", "displayText": "12",
+            "fieldKind": "complex", "fldLock": false, "dirty": true,
+            "displayMode": "result", "hasCachedResult": true, "modelKind": "field"
+        }))
+        .unwrap(),
+        attrs: Attrs::new(),
+    };
+    let units = |text: &str| {
+        vec![
+            UnitV1::Text {
+                text: text.to_owned(),
+                attrs: Attrs::new(),
+            },
+            atom.clone(),
+            UnitV1::Text {
+                text: "tail".to_owned(),
+                attrs: Attrs::new(),
+            },
+        ]
+    };
+    let seed = units("old");
+    let mut edited = text_paragraph("new", None);
+    edited["sourceOrdinal"] = json!(0);
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": determinism(),
+        "document": {"content": [edited]},
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [{
+            "part": "word/document.xml",
+            "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+            "paragraphs": [0], "changed": [0],
+            "paragraphPatches": [{
+                "ordinal": 0, "sessionKey": "source:0",
+                "seed": {"units": seed, "properties": {}, "unitSha256": unit_sha256(&seed)},
+                "textEdits": [{"from": 0, "to": 3, "insert": [{"text": "new", "attrs": {}, "inherit": {}}], "donor": {"kind": "at", "at": 0}}],
+                "runEdits": [], "paraDeltas": [], "paraInherit": {},
+                "resultSha256": result_sha256(&units("new"), &Attrs::new())
+            }]
+        }]}
+    }))
+    .unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+    assert_eq!(output, source.replace(">old<", ">new<"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
 fn mixed_request(middle: &str) -> (String, S13SaveRequest) {
     let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
     let patched = "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r></w:p>";
