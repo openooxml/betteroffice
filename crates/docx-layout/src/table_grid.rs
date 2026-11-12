@@ -546,6 +546,7 @@ fn autofit_content_widths(
     }
     let mut maximums = minimums.clone();
     let mut preferences = minimums.clone();
+    let mut stated_widths = vec![0.0; col_count];
     let mut priced = vec![false; col_count];
     for (grid_cell, _, maximum, preferred, _) in &constraints {
         add_span_constraint(
@@ -557,6 +558,12 @@ fn autofit_content_widths(
         if let Some(preferred) = preferred {
             add_span_constraint(
                 &mut preferences,
+                grid_cell.column_index,
+                grid_cell.col_span,
+                *preferred,
+            );
+            add_span_constraint(
+                &mut stated_widths,
                 grid_cell.column_index,
                 grid_cell.col_span,
                 *preferred,
@@ -641,7 +648,7 @@ fn autofit_content_widths(
     }
     let stated = (0..col_count)
         .filter(|column| priced[*column])
-        .map(|column| maximums[column])
+        .map(|column| stated_widths[column])
         .sum();
     (minimums, maximums, stated)
 }
