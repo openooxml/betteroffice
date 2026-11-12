@@ -4081,7 +4081,35 @@ pub fn set_wasm_heap_limit(bytes: f64) {
 }
 
 #[napi(catch_unwind, js_name = "install_panic_hook")]
-pub fn install_panic_hook() {}
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            #[cfg(unix)]
+            write_panic_line(&panic_line(&info.to_string()));
+            prev(info);
+        }));
+    });
+}
+
+#[cfg(unix)]
+fn panic_line(text: &str) -> String {
+    let mut line = format!("[docx-native] panic: {text}")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n");
+    line.push('\n');
+    line
+}
+
+#[cfg(unix)]
+fn write_panic_line(line: &str) {
+    use std::io::Write;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let fd = std::io::stderr().as_raw_fd();
+    let mut stderr = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    let _ = stderr.write_all(line.as_bytes());
+}
 
 #[cfg(test)]
 mod tests {
@@ -4145,5 +4173,19 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panic_line_escapes_the_message_into_one_prefixed_line() {
+        let prefix = "[docx-native] panic: ";
+        let line = panic_line(&format!("loc\nx\r\n{prefix}forged"));
+        assert_eq!(line.matches('\n').count(), 1);
+        assert!(line.ends_with('\n'));
+        assert!(line.starts_with(prefix));
+        assert_eq!(line.matches(prefix).count(), 2);
+        assert_eq!(line.lines().filter(|l| l.starts_with(prefix)).count(), 1);
+        assert!(line.contains("\\n"));
+        assert!(line.contains("\\r"));
     }
 }

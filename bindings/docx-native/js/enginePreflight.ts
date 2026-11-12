@@ -8,7 +8,8 @@ type Engine = Pick<
   | 'font_preflight'
 >;
 
-const binding = createRequire(import.meta.url)('../index.js') as Engine;
+const binding = createRequire(import.meta.url)('../index.js') as Engine & { install_panic_hook(): void };
+binding.install_panic_hook();
 
 export const font_preflight = binding.font_preflight;
 
