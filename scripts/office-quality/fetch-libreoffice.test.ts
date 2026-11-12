@@ -174,8 +174,8 @@ test('a mirror under the speed floor is abandoned for the next, which resumes th
   const { hits, url } = await serve({ '/slow': trickle(payload, 1024, 100), '/good': file(payload) });
   const { status, log, dest } = await fetchArchive([url('/slow'), url('/good')], { LO_FETCH_FLOOR: '100000', LO_FETCH_FLOOR_SECONDS: '1' });
   expect(status).toBe(0);
-  expect(log).toContain(`mirror ${url('/slow')}: below the floor of 100000 B/s`);
-  expect(log).toMatch(/: below the floor of 100000 B\/s for 1s after [1-9]\d* bytes at an average \d+ B\/s/);
+  expect(log).toContain(`mirror ${url('/slow')}: timed out (below the floor of 100000 B/s`);
+  expect(log).toMatch(/: timed out \(below the floor of 100000 B\/s for 1s, or a connect\/TLS stall\) after [1-9]\d* bytes at an average \d+ B\/s/);
   expect(log).toContain(`mirror ${url('/good')}: ok`);
   expect(hits.find(({ path }) => path === '/good')!.range).toBeGreaterThan(0);
   expect(await digestOf(dest)).toBe(sha);
@@ -194,8 +194,8 @@ test('when every mirror is under the floor the archive host is resumed without o
   });
   const [status, log] = await Promise.all([child.exited, new Response(child.stderr).text()]);
   expect(status).toBe(0);
-  expect(log).toContain(`mirror ${url('/slow-a')}: below the floor`);
-  expect(log).toContain(`mirror ${url('/slow-b')}: below the floor`);
+  expect(log).toContain(`mirror ${url('/slow-a')}: timed out (below the floor`);
+  expect(log).toContain(`mirror ${url('/slow-b')}: timed out (below the floor`);
   expect(log).toContain(`mirror ${url('/slow-b')}: last resort without a floor: ok`);
   expect(await digestOf(dest)).toBe(smallSha);
 }, 60_000);
@@ -215,7 +215,7 @@ test('a slow host that cannot finish inside the budget fails naming the budget',
   const { url } = await serve({ '/slow': trickle(payload, 1024, 100) });
   const { status, log } = await fetchArchive([url('/slow')], { LO_FETCH_FLOOR: '100000', LO_FETCH_FLOOR_SECONDS: '1', LO_FETCH_BUDGET: '5' });
   expect(status).not.toBe(0);
-  expect(log).toContain(`mirror ${url('/slow')}: below the floor`);
+  expect(log).toContain(`mirror ${url('/slow')}: timed out (below the floor`);
   expect(log).toContain(`mirror ${url('/slow')}: last resort without a floor: budget of 5s exhausted`);
 }, 30_000);
 
