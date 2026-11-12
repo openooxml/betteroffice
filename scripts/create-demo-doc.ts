@@ -239,7 +239,7 @@ const NUMBERING_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <w:lvl w:ilvl="0">
       <w:start w:val="1"/>
       <w:numFmt w:val="bullet"/>
-      <w:lvlText w:val="&#8226;"/>
+      <w:lvlText w:val="&#xF0B7;"/>
       <w:lvlJc w:val="left"/>
       <w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>
       <w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol" w:hint="default"/></w:rPr>
