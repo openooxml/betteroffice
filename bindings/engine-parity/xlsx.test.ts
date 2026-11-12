@@ -214,7 +214,13 @@ const rows: Row<Xlsx>[] = [
     mutates: true,
     call: ({ doc }) => doc.applyOpsJson(json({ ops: [{ type: 'insertRows', sheet: 0, at: 1, count: 2 }] })),
   },
-  { method: 'XlsxDocument.fillRangeJson', mutates: true, call: ({ doc }) => doc.fillRangeJson(json({ sheet: 0, source: 'C2', destination: 'C2:C4' })) },
+  { method: 'XlsxDocument.fillRangeJson', mutates: true, call: ({ doc }) => doc.fillRangeJson(json({ sheet: 1, source: 'A1', destination: 'A1:A3' })) },
+  {
+    method: 'XlsxDocument.fillRangeJson',
+    name: 'XlsxDocument.fillRangeJson refuses on a commented sheet',
+    throws: { name: 'string', reason: 'fill cannot safely preserve comments' },
+    call: ({ doc }) => doc.fillRangeJson(json({ sheet: 0, source: 'C2', destination: 'C2:C4' })),
+  },
   { method: 'XlsxDocument.validateEditsJson', call: ({ doc }) => doc.validateEditsJson(editRequest(doc)) },
   { method: 'XlsxDocument.applyEditsJson', mutates: true, call: ({ doc }) => doc.applyEditsJson(editRequest(doc)) },
   defineRow({

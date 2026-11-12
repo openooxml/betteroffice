@@ -201,10 +201,13 @@ const insertText = (doc: Doc, text = 'Inserted ') => doc.insertTextJson(json({ s
 const addComment = (doc: Doc) => (JSON.parse(doc.addCommentJson(json({
   slideId: slideId(doc, 0), author: 'Parity', initials: 'P', text: 'Added comment', created: DATE, xEmu: 31750, yEmu: 63500,
 }))) as { commentId: string }).commentId;
+const removeSeededComment = (doc: Doc) => doc.removeCommentJson(json({ commentId: seededComment(doc) }));
 const modernComment = (doc: Doc) => {
+  removeSeededComment(doc);
   doc.setCommentFlavorJson(json({ flavor: 'modern' }));
   return addComment(doc);
 };
+const FLAVOUR_FIXED = { name: 'string', reason: 'invalid comment: the comment flavour is fixed once a deck has comments' };
 const table = (doc: Doc, extra: Record<string, unknown>) => json({ ...ids(doc, 'Table'), ...extra });
 const editRequest = (doc: Doc) => {
   const body = shape(doc, 'Body');
@@ -348,6 +351,15 @@ const rows: Row<Pptx>[] = [
     setup: ({ doc }: Pptx) => modernComment(doc),
     call: ({ doc }, commentId) => doc.replyToCommentJson(json({ commentId, author: 'Parity', initials: 'P', text: 'Reply', created: DATE })),
   }),
+  {
+    method: 'PptxDocument.replyToCommentJson',
+    name: 'PptxDocument.replyToCommentJson refuses the modern switch on a commented deck',
+    throws: FLAVOUR_FIXED,
+    call: ({ doc }) => {
+      doc.setCommentFlavorJson(json({ flavor: 'modern' }));
+      return doc.replyToCommentJson(json({ commentId: addComment(doc), author: 'Parity', initials: 'P', text: 'Reply', created: DATE }));
+    },
+  },
   { method: 'PptxDocument.setCommentPositionJson', mutates: true, call: ({ doc }) => doc.setCommentPositionJson(json({ commentId: seededComment(doc), xEmu: 95250, yEmu: 127000 })) },
   defineRow({
     method: 'PptxDocument.setCommentStatusJson',
@@ -355,8 +367,28 @@ const rows: Row<Pptx>[] = [
     setup: ({ doc }: Pptx) => modernComment(doc),
     call: ({ doc }, commentId) => doc.setCommentStatusJson(json({ commentId, resolved: true })),
   }),
-  { method: 'PptxDocument.removeCommentJson', mutates: true, call: ({ doc }) => doc.removeCommentJson(json({ commentId: seededComment(doc) })) },
-  { method: 'PptxDocument.setCommentFlavorJson', mutates: true, call: ({ doc }) => doc.setCommentFlavorJson(json({ flavor: 'modern' })) },
+  {
+    method: 'PptxDocument.setCommentStatusJson',
+    name: 'PptxDocument.setCommentStatusJson refuses the modern switch on a commented deck',
+    throws: FLAVOUR_FIXED,
+    call: ({ doc }) => {
+      doc.setCommentFlavorJson(json({ flavor: 'modern' }));
+      return doc.setCommentStatusJson(json({ commentId: addComment(doc), resolved: true }));
+    },
+  },
+  { method: 'PptxDocument.removeCommentJson', mutates: true, call: ({ doc }) => removeSeededComment(doc) },
+  defineRow({
+    method: 'PptxDocument.setCommentFlavorJson',
+    mutates: true,
+    setup: ({ doc }: Pptx) => removeSeededComment(doc),
+    call: ({ doc }) => doc.setCommentFlavorJson(json({ flavor: 'modern' })),
+  }),
+  {
+    method: 'PptxDocument.setCommentFlavorJson',
+    name: 'PptxDocument.setCommentFlavorJson refuses on a commented deck',
+    throws: FLAVOUR_FIXED,
+    call: ({ doc }) => doc.setCommentFlavorJson(json({ flavor: 'modern' })),
+  },
   defineRow({
     method: 'PptxDocument.undoJson',
     mutates: true,
