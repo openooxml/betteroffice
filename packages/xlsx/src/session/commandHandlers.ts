@@ -320,7 +320,6 @@ function resolveReplayOp(handle: WorkbookHandle, state: WorkbookCommandState, co
       case 'applyFormat': op.args[0] = target.sheet; op.args[1] = target.range; break;
       case 'setActiveSheet': op.args[0] = target.sheet; break;
       case 'moveChart':
-      case 'moveChart':
       case 'resizeChart':
       case 'moveRange':
       case 'fillRange': op.args[0] = target.sheet; break;
