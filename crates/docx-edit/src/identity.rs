@@ -3998,10 +3998,12 @@ impl EditingDoc {
         max_bytes: u32,
         segments_per_slice: usize,
     ) -> PrimeSlice {
+        let mut progress = self.prime_progress.lock().unwrap();
         self.prime_last_slice_cost.store(0, Ordering::Relaxed);
         let mut cost = 0u64;
         let mut left = max_bytes as usize;
         let outcome = self.prime_slice_step(
+            &mut progress,
             max_paragraphs,
             max_inflated_bytes,
             max_bytes,
@@ -4025,6 +4027,7 @@ impl EditingDoc {
 
     fn prime_slice_step(
         &self,
+        progress: &mut Option<PrimeProgress>,
         max_paragraphs: u32,
         max_inflated_bytes: u32,
         max_bytes: u32,
@@ -4033,7 +4036,6 @@ impl EditingDoc {
         left: &mut usize,
     ) -> PrimeSlice {
         let sliced = max_bytes != u32::MAX;
-        let mut progress = self.prime_progress.lock().unwrap();
         let bytes = match self.source.lock().unwrap().as_ref() {
             Some(SourcePackage::Ready(index)) if index.seed_states_initialized() => {
                 *progress = None;
