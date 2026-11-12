@@ -337,7 +337,7 @@ jobs:
           cargo fmt --check --all --manifest-path bindings/Cargo.toml
           cargo clippy --locked --manifest-path bindings/Cargo.toml --workspace --all-targets -- -D warnings
 
-      - name: Test the native DOCX heap counters, then free their build for the workspace tests
+      - name: Test the native heap counters and panic lines, then free their build for the workspace tests
         if: steps.ws.outputs.present == 'true'
         run: |
           log="${RUNNER_TEMP:-/tmp}/heap-tests.log"
@@ -355,6 +355,18 @@ jobs:
           test "${PIPESTATUS[0]}" -eq 0
           for name in a_call_past_its_budget_fails_its_checks_and_the_next_call_within_it_passes; do
             grep -q "^test memory::tests::$name \.\.\. ok$" "$log" || { echo "memory test did not run: $name"; exit 1; }
+          done
+          log="${RUNNER_TEMP:-/tmp}/panic-line-docx.log"
+          cargo test --locked --manifest-path bindings/Cargo.toml -p betteroffice-docx-native --lib panic_line 2>&1 | tee "$log"
+          test "${PIPESTATUS[0]}" -eq 0
+          for name in panic_line_escapes_the_message_into_one_prefixed_line; do
+            grep -q "^test engine::tests::$name \.\.\. ok$" "$log" || { echo "docx panic line test did not run: $name"; exit 1; }
+          done
+          log="${RUNNER_TEMP:-/tmp}/panic-line-xlsx.log"
+          cargo test --locked --manifest-path bindings/Cargo.toml -p betteroffice-xlsx-native --lib panic_line 2>&1 | tee "$log"
+          test "${PIPESTATUS[0]}" -eq 0
+          for name in panic_line_escapes_the_message_into_one_prefixed_line; do
+            grep -q "^test engine::tests::$name \.\.\. ok$" "$log" || { echo "xlsx panic line test did not run: $name"; exit 1; }
           done
           rm -rf bindings/target
 
