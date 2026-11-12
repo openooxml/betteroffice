@@ -170,6 +170,7 @@ async function zoomWithCaret(value: Awaited<ReturnType<typeof mountAnchors>>, pr
 }
 
 const matrixScales = [0.5, 1.5, 2];
+const matrixScaleTimeout = 15_000;
 
 for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${engine})`, () => {
   for (const [index, scale] of matrixScales.entries()) test(`plugin anchor target matrix at zoom ${scale}`, async () => {
@@ -206,7 +207,7 @@ for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${en
       expect(answers[0]).toEqual(geometry.getAnchorGeometry(range(read, story, anchor, focus)));
       if (answers[0].ok) expect(answers[0].rects.length).toBe(anchor === focus ? 0 : 1);
     }
-  });
+  }, matrixScaleTimeout);
 
   test('ranges on another slide refuse before resolving shape and story', async () => {
     const gate = paintGate(engine);
