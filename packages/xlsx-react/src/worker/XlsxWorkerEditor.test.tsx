@@ -9568,7 +9568,8 @@ describe('worker fill handle', () => {
 
   it('does not render the legacy worker handle once Ctrl+Shift+Down selects a whole empty column', async () => {
     const { view, press, size } = await legacyHandleAt(144, 12);
-    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+    expect(size()).toEqual({ rows: 1, columns: 1 });
+    expect(view.getByTestId('xlsx-fill-handle')).toBeDefined();
 
     await press({ key: 'ArrowDown', ctrlKey: true, shiftKey: true });
 
@@ -9579,7 +9580,8 @@ describe('worker fill handle', () => {
 
   it('does not render the legacy worker handle once Ctrl+Shift+Right selects a whole empty row', async () => {
     const { view, press, size } = await legacyHandleAt(48, 36);
-    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A2');
+    expect(size()).toEqual({ rows: 1, columns: 1 });
+    expect(view.getByTestId('xlsx-fill-handle')).toBeDefined();
 
     await press({ key: 'ArrowRight', ctrlKey: true, shiftKey: true });
 
