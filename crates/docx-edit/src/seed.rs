@@ -8917,7 +8917,11 @@ mod tests {
         if !look.is_null() {
             table["formatting"]["look"] = look;
         }
-        let baseline = RunInheritance::new(Some(&definitions)).table_attrs(&table);
+        seeded_cells(&definitions, &table)
+    }
+
+    fn seeded_cells(definitions: &Value, table: &Value) -> Vec<Vec<Value>> {
+        let baseline = RunInheritance::new(Some(definitions)).table_attrs(table);
         baseline["rows"]
             .as_array()
             .unwrap()
@@ -8973,6 +8977,69 @@ mod tests {
         assert_eq!(
             cells[2][2]["borders"]["top"]["color"]["rgb"],
             json!("000000")
+        );
+    }
+
+    #[test]
+    fn direct_shading_element_replaces_style_shading() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Shaded",
+                "tblStylePr": [
+                    { "type": "firstRow", "tcPr": { "shading": { "fill": { "rgb": "0000FF" } } } }
+                ]
+            }]
+        });
+        let cell = |shading: Value| {
+            json!({ "type": "tableCell", "formatting": { "shading": shading }, "content": [] })
+        };
+        let nil = cell(json!({ "pattern": "nil" }));
+        let solid = cell(json!({
+            "pattern": "solid", "color": { "rgb": "FF0000" }, "fill": { "auto": true }
+        }));
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Shaded", "look": { "firstRow": true } },
+            "rows": [{ "cells": [nil, solid, plain] }]
+        });
+        let cells = seeded_cells(&definitions, &table);
+        assert!(cells[0][0]["backgroundColor"].is_null());
+        assert_eq!(cells[0][1]["backgroundColor"], json!("FF0000"));
+        assert_eq!(cells[0][2]["backgroundColor"], json!("0000FF"));
+    }
+
+    #[test]
+    fn vertically_merged_cell_takes_its_region_bottom_border() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Edged",
+                "tblStylePr": [{ "type": "firstCol", "tcPr": { "borders": {
+                    "bottom": { "style": "single", "size": 8, "color": { "rgb": "0000FF" } },
+                    "insideH": { "style": "nil" }
+                } } }]
+            }]
+        });
+        let cell = |merge: Option<&str>| match merge {
+            Some(merge) => {
+                json!({ "type": "tableCell", "formatting": { "vMerge": merge }, "content": [] })
+            }
+            None => json!({ "type": "tableCell", "content": [] }),
+        };
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Edged", "look": { "firstColumn": true } },
+            "rows": [
+                { "cells": [cell(None), cell(None)] },
+                { "cells": [cell(Some("restart")), cell(None)] },
+                { "cells": [cell(Some("continue")), cell(None)] }
+            ]
+        });
+        let cells = seeded_cells(&definitions, &table);
+        assert_eq!(cells[1][0]["rowspan"], json!(2));
+        assert_eq!(
+            cells[1][0]["borders"]["bottom"]["color"]["rgb"],
+            json!("0000FF")
         );
     }
 

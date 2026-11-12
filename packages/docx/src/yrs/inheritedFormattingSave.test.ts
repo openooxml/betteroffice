@@ -503,6 +503,60 @@ describe('table style conditional cell properties stay inherited on save', () =>
   }, TIMEOUT);
 });
 
+function bareCellFixture(): Uint8Array {
+  const parts: PartsMap = new Map(Object.entries(unzipContainer(conditionalFixture())));
+  const run = (label: string) => `<w:p><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">${label}<`;
+  const xml = ['Rent', 'Travel'].reduce(
+    (current, label) => current.replace(`<w:tcPr><w:tcW w:w="4500" w:type="dxa"/></w:tcPr>${run(label)}`, run(label)),
+    new TextDecoder().decode(parts.get('word/document.xml'))
+  );
+  parts.set('word/document.xml', toBytes(xml));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+function cellShapes(table: string): Array<Array<{ elements: number; attributes: number }>> {
+  return (table.match(/<w:tr\b[^>]*>[\s\S]*?<\/w:tr>/g) ?? [])
+    .map((row) => row.match(/<w:tc\b[^>]*>[\s\S]*?<\/w:tc>/g) ?? [])
+    .filter((cells) => cells.some((cell) => text(cell) !== ''))
+    .map((cells) =>
+      cells.map((cell) => {
+        const tcPr = cell.match(/<w:tcPr\b[^>]*>[\s\S]*?<\/w:tcPr>/)?.[0] ?? '';
+        return { elements: (tcPr.match(/<w:\w+/g) ?? []).length, attributes: (tcPr.match(/\sw:\w+=/g) ?? []).length };
+      })
+    );
+}
+
+const BARE_CELL_EDITS: Record<string, TableEdit> = {
+  'no edit': () => [],
+  'a body paragraph edit': (engine) => edit(engine, 'heading'),
+  'another cell text edit': (engine) => {
+    const story = 'body:t0:r1c1';
+    const read = engine.readParagraphs({ story, view: 'accepted' });
+    if (!read.ok) throw new Error(`cell read refused: ${JSON.stringify(read)}`);
+    const paraId = read.paragraphs[0]!.paraId;
+    engine.replaceRange({ story, start: { paraId, offset: 0 }, end: { paraId, offset: 1 } }, '4');
+    return [story];
+  },
+  'a row insert': (engine) => edit(engine, 'row'),
+};
+
+describe('table style fills stay inherited on cells with and without tcPr', () => {
+  const source = bareCellFixture();
+  const sourceTable = savedTable(documentXml(source));
+  describe.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s', (path) => {
+    it.each(Object.keys(BARE_CELL_EDITS))('after %s', async (scenario) => {
+      const table = savedTable(await saveTableEdit(path, source, BARE_CELL_EDITS[scenario]!));
+      expect(cellShapes(sourceTable).map((row) => row[0])).toEqual([
+        { elements: 0, attributes: 0 },
+        { elements: 0, attributes: 0 },
+      ]);
+      expect(cellShapes(table)).toEqual(cellShapes(sourceTable));
+      expect((table.match(/<w:shd\b/g) ?? []).length).toBe((sourceTable.match(/<w:shd\b/g) ?? []).length);
+      expect(table).not.toContain('<w:tcBorders');
+    }, TIMEOUT);
+  });
+});
+
 const TOGGLE_CASES = [
   { name: 'paragraph basedOn b+b', paragraph: true, character: false, table: false, chain: 'paragraph', bold: true },
   { name: 'character basedOn b+b', paragraph: false, character: true, table: false, chain: 'character', bold: true },

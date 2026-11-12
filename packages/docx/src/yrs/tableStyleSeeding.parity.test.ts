@@ -298,3 +298,116 @@ it('applies conditional cell shading and borders identically for both seeders', 
     native.destroy();
   }
 });
+
+type SeededCell = { backgroundColor: string | null; borders: Record<string, any> | null; rowspan: number };
+
+async function seedBoth(body: string, styles: string): Promise<Record<string, SeededCell[][][]>> {
+  const bytes = documentFixture(body, styles);
+  const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+  const projected = await createYrsSession({ clientId: 74221 });
+  const native = await createYrsSession({ clientId: 74221 });
+  try {
+    documentToYrs(projected, parsed);
+    native.seedFromDocx(bytes);
+    const seeded = (session: YrsSession) =>
+      Array.from({ length: (body.match(/<w:tbl>/g) ?? []).length }, (_, table) =>
+        (session.tablePayload('body', table)!.rows as Array<{ cells: Array<{ tcPr: Record<string, any> }> }>).map(
+          (row) =>
+            row.cells.map(({ tcPr }) => ({
+              backgroundColor: tcPr.backgroundColor ?? null,
+              borders: tcPr.borders ?? null,
+              rowspan: tcPr.rowspan,
+            }))
+        )
+      );
+    return { projected: seeded(projected), native: seeded(native) };
+  } finally {
+    projected.destroy();
+    native.destroy();
+  }
+}
+
+const styledTable = (style: string, look: string, rows: string[][], columns: number) =>
+  `<w:tbl><w:tblPr><w:tblStyle w:val="${style}"/>${look}</w:tblPr><w:tblGrid>${'<w:gridCol w:w="2000"/>'.repeat(columns)}</w:tblGrid>${rows
+    .map((cells) => `<w:tr>${cells.map((tcPr, column) => `<w:tc>${tcPr ? `<w:tcPr>${tcPr}</w:tcPr>` : ''}${paragraph(`c${column}`)}</w:tc>`).join('')}</w:tr>`)
+    .join('')}</w:tbl>`;
+
+it('lets a direct shd element replace the style shading in both seeders', async () => {
+  const styles =
+    '<w:style w:type="table" w:styleId="Header"><w:tblStylePr w:type="firstRow"><w:tcPr>' +
+    '<w:shd w:val="clear" w:color="auto" w:fill="0000FF"/></w:tcPr></w:tblStylePr></w:style>';
+  const body = styledTable(
+    'Header',
+    '<w:tblLook w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/>',
+    [['<w:shd w:val="nil"/>', '<w:shd w:val="solid" w:color="FF0000" w:fill="auto"/>', '']],
+    3
+  );
+  const seeded = await seedBoth(body, styles);
+  for (const engine of ['projected', 'native']) {
+    expect(seeded[engine]![0]![0]!.map((cell) => cell.backgroundColor)).toEqual([null, 'FF0000', '0000FF']);
+  }
+});
+
+it('gives a vertically merged cell its region bottom border in both seeders', async () => {
+  const styles =
+    '<w:style w:type="table" w:styleId="Edged"><w:tblStylePr w:type="firstCol"><w:tcPr><w:tcBorders>' +
+    '<w:bottom w:val="single" w:sz="8" w:space="0" w:color="0000FF"/><w:insideH w:val="nil"/>' +
+    '</w:tcBorders></w:tcPr></w:tblStylePr></w:style>';
+  const body = styledTable(
+    'Edged',
+    '<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/>',
+    [['', ''], ['<w:vMerge w:val="restart"/>', ''], ['<w:vMerge/>', '']],
+    2
+  );
+  const seeded = await seedBoth(body, styles);
+  for (const engine of ['projected', 'native']) {
+    const anchor = seeded[engine]![0]![1]![0]!;
+    expect(anchor.rowspan).toBe(2);
+    expect(anchor.borders?.bottom).toMatchObject({ size: 8, color: { rgb: '0000FF' } });
+  }
+});
+
+it('seeds identical conditional cell shading and borders in both engines', async () => {
+  const line = (side: string, color: string) =>
+    `<w:${side} w:val="single" w:sz="8" w:space="0" w:color="${color}"/>`;
+  const part = (type: string, fill: string, borders = '') =>
+    `<w:tblStylePr w:type="${type}"><w:tcPr>${borders ? `<w:tcBorders>${borders}</w:tcBorders>` : ''}` +
+    `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"/></w:tcPr></w:tblStylePr>`;
+  const styles =
+    '<w:style w:type="table" w:styleId="Full"><w:tblPr><w:tblStyleRowBandSize w:val="1"/><w:tblStyleColBandSize w:val="1"/>' +
+    `<w:tblBorders>${line('top', '111111')}${line('bottom', '111111')}${line('insideH', '222222')}${line('insideV', '333333')}</w:tblBorders></w:tblPr>` +
+    part('firstRow', 'F00000', line('bottom', 'F00000') + line('insideV', 'F0F0F0')) +
+    part('lastRow', '0F0000', line('top', '0F0000')) +
+    part('firstCol', '00F000', line('right', '00F000') + line('insideH', '00F0F0')) +
+    part('lastCol', '000F00', line('left', '000F00')) +
+    part('band1Horz', '0000F0', line('top', '0000F0') + line('bottom', '0000F0')) +
+    part('band2Horz', '00000F') +
+    part('band1Vert', 'A00000', line('left', 'A00000')) +
+    part('band2Vert', '0A0000') +
+    part('nwCell', '00A000', line('top', '00A000')) +
+    part('neCell', '000A00', line('right', '000A00')) +
+    part('swCell', '0000A0', line('left', '0000A0')) +
+    part('seCell', '00000A', line('bottom', '00000A')) +
+    '</w:style>';
+  const grid = (rows: number, columns: number) =>
+    Array.from({ length: rows }, (_, row) =>
+      Array.from({ length: columns }, (_, column) =>
+        row === 2 && column === 2 ? '<w:shd w:val="clear" w:color="auto" w:fill="ABCDEF"/>' : ''
+      )
+    );
+  const body = [
+    '<w:tblLook w:firstRow="1" w:lastRow="1" w:firstColumn="1" w:lastColumn="1" w:noHBand="0" w:noVBand="0"/>',
+    '<w:tblLook w:val="04A0"/>',
+    '<w:tblLook w:firstRow="0" w:lastRow="1" w:firstColumn="0" w:lastColumn="1" w:noHBand="1" w:noVBand="0"/>',
+  ]
+    .map((look) => styledTable('Full', look, grid(6, 6), 6))
+    .join(paragraph('Between'));
+  const seeded = await seedBoth(body, styles);
+  expect(seeded.projected).toEqual(seeded.native!);
+  const [all] = seeded.native!;
+  expect(all![0]![0]!.backgroundColor).toBe('00A000');
+  expect(all![0]![5]!.backgroundColor).toBe('000A00');
+  expect(all![5]![0]!.backgroundColor).toBe('0000A0');
+  expect(all![5]![5]!.backgroundColor).toBe('00000A');
+  expect(all![2]![2]!.backgroundColor).toBe('ABCDEF');
+});
