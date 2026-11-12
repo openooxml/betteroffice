@@ -527,7 +527,7 @@ const oneEngineOnly: OneEngineOnly[] = [
   { name: 'engineVersion', side: 'native', reason: 'PARKED', note: 'engine build version; not exported by the wasm build yet' },
   { name: '__napiBindingTarget', side: 'native', reason: 'BUILD_METADATA', note: 'napi-rs build target marker' },
   {
-    name: 'MetafileConverter', side: 'wasm', reason: 'GAP',
+    name: 'MetafileConverter', side: 'wasm', reason: 'PACKAGING',
     note: 'separate metafile_svg wasm module for the command host; native converts in the engine through PptxDocument.metafileSvg',
   },
 ];

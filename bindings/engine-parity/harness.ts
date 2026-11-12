@@ -232,7 +232,7 @@ export interface OneEngineExport {
 }
 
 export interface OneEngineOnly extends OneEngineExport {
-  reason: 'BY_DESIGN' | 'PARKED' | 'GAP' | 'BUILD_METADATA';
+  reason: 'BY_DESIGN' | 'PARKED' | 'GAP' | 'BUILD_METADATA' | 'PACKAGING';
   note: string;
 }
 
