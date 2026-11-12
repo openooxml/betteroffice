@@ -2,7 +2,16 @@
 //!
 //! ```text
 //! cargo run -p betteroffice-docx --example export_pdf_batch -- <input_dir> <output_dir>
+//!     [--pdfa-2u] [--title TEXT] [--author TEXT] [--subject TEXT]
+//!     [--keywords TEXT] [--creator TEXT] [--creation-date PDF_DATE]
+//!     [--modification-date PDF_DATE]
 //! ```
+//!
+//! Without flags every fixture is exported as plain PDF 1.7. `--pdfa-2u`
+//! targets PDF/A-2u (ISO 19005-2) for every fixture; a document that would
+//! need the Base-14 fallback fails instead of silently downgrading. The
+//! metadata flags populate `/Info` and XMP for every fixture; dates are PDF
+//! date strings such as `D:20260101120000Z` and are written verbatim.
 //!
 //! Set `BO_PDF_FALLBACK_FONT=<path>` to register one extra face (for example
 //! Noto Color Emoji or a CJK face) in every document before export. Registered
@@ -11,36 +20,46 @@
 //! The scan is recursive and case-insensitive for the `.docx` extension. Word
 //! lock files (`~$*.docx`) and the usual build directories are skipped. Each
 //! document is exported to the same relative path under `output_dir` with a
-//! `.pdf` extension, and `<output_dir>/manifest.json` records one entry per
-//! fixture:
+//! `.pdf` extension, and `<output_dir>/manifest.json` records the export
+//! options and one entry per fixture:
 //!
 //! ```json
 //! {
-//!   "path": "tables/merged.docx",
-//!   "status": "ok",
-//!   "pages": 2,
-//!   "pdf_bytes": 34812,
-//!   "fonts_embedded": 2,
-//!   "text_chars": 517,
-//!   "error": null
+//!   "conformance": "pdfa-2u",
+//!   "metadata": { "title": "Quarterly report" },
+//!   "fixtures": [
+//!     {
+//!       "path": "tables/merged.docx",
+//!       "status": "ok",
+//!       "pages": 2,
+//!       "pdf_bytes": 34812,
+//!       "fonts_embedded": 2,
+//!       "text_chars": 517,
+//!       "error": null
+//!     }
+//!   ]
 //! }
 //! ```
 //!
-//! `fonts_embedded` counts embedded font-program streams (`/FontFile*`);
-//! `text_chars` counts authored characters in the body, headers, footers and
-//! notes, not characters recovered from the PDF. `pages` comes from the PDF
-//! page tree. The command exits 1 when any fixture fails and still writes the
-//! manifest for the fixtures that succeeded.
+//! `conformance` is `standard` or `pdfa-2u`; `metadata` holds only the supplied
+//! metadata flags. `fonts_embedded` counts embedded font-program streams
+//! (`/FontFile*`); `text_chars` counts authored characters in the body,
+//! headers, footers and notes, not characters recovered from the PDF. `pages`
+//! comes from the PDF page tree. The command exits 1 when any fixture fails and
+//! still writes the manifest for the fixtures that succeeded.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use betteroffice_docx::{BlockContent, Document, get_paragraph_text};
+use betteroffice_docx::{
+    BlockContent, Document, PdfConformance, PdfExportOptions, PdfMetadata, get_paragraph_text,
+};
 use serde_json::{Map, Value, json};
 
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".source"];
+const USAGE: &str = "usage: export_pdf_batch <input_dir> <output_dir> [options]";
 
 fn main() {
     if let Err(error) = run() {
@@ -50,17 +69,44 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mut positional = Vec::new();
+    let mut options = PdfExportOptions::default();
     let mut args = std::env::args().skip(1);
-    let input_dir = args
-        .next()
-        .ok_or("usage: export_pdf_batch <input_dir> <output_dir>")?;
-    let output_dir = args
-        .next()
-        .ok_or("usage: export_pdf_batch <input_dir> <output_dir>")?;
-    if args.next().is_some() {
-        return Err("usage: export_pdf_batch <input_dir> <output_dir>".into());
+    while let Some(arg) = args.next() {
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => {
+                (flag.to_owned(), Some(value.to_owned()))
+            }
+            _ if arg.starts_with("--") => (arg.clone(), None),
+            _ => (String::new(), None),
+        };
+        match flag.as_str() {
+            "--pdfa-2u" => {
+                if inline.is_some() {
+                    return Err("--pdfa-2u takes no value".into());
+                }
+                options.conformance = PdfConformance::PdfA2u;
+            }
+            "--title" => options.metadata.title = Some(value("--title", inline, &mut args)?),
+            "--author" => options.metadata.author = Some(value("--author", inline, &mut args)?),
+            "--subject" => options.metadata.subject = Some(value("--subject", inline, &mut args)?),
+            "--keywords" => {
+                options.metadata.keywords = Some(value("--keywords", inline, &mut args)?);
+            }
+            "--creator" => options.metadata.creator = Some(value("--creator", inline, &mut args)?),
+            "--creation-date" => {
+                options.metadata.creation_date = Some(value("--creation-date", inline, &mut args)?);
+            }
+            "--modification-date" => {
+                options.metadata.modification_date =
+                    Some(value("--modification-date", inline, &mut args)?);
+            }
+            _ if flag.starts_with('-') => return Err(format!("unknown option {flag}").into()),
+            _ => positional.push(arg),
+        }
     }
 
+    let [input_dir, output_dir]: [String; 2] = positional.try_into().map_err(|_| USAGE)?;
     let input_dir = PathBuf::from(input_dir);
     let output_dir = PathBuf::from(output_dir);
     let fallback_font = std::env::var_os("BO_PDF_FALLBACK_FONT")
@@ -92,7 +138,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mut record = Map::new();
         record.insert("path".into(), json!(portable(&relative)));
 
-        let result = export_one(&source, &output_dir, &relative, fallback_font.as_deref());
+        let result = export_one(
+            &source,
+            &output_dir,
+            &relative,
+            fallback_font.as_deref(),
+            &options,
+        );
         match result {
             Ok((pages, bytes, fonts, text_chars)) => {
                 eprintln!(
@@ -131,6 +183,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "tool": "export_pdf_batch",
         "input_dir": absolute(&input_dir),
         "output_dir": absolute(&output_dir),
+        "conformance": conformance_name(options.conformance),
+        "metadata": metadata_json(&options.metadata),
         "fixtures": records,
     });
     let manifest_path = output_dir.join("manifest.json");
@@ -152,11 +206,51 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 type Exported = (Option<usize>, usize, Option<usize>, Option<usize>);
 
+/// The manifest name of a conformance profile.
+fn conformance_name(conformance: PdfConformance) -> &'static str {
+    match conformance {
+        PdfConformance::Standard => "standard",
+        PdfConformance::PdfA2u => "pdfa-2u",
+    }
+}
+
+/// The supplied metadata flags, keyed by their CLI name. Absent fields are
+/// omitted, so the manifest records exactly which flags produced the export.
+fn metadata_json(metadata: &PdfMetadata) -> Value {
+    let mut fields = Map::new();
+    for (name, value) in [
+        ("title", &metadata.title),
+        ("author", &metadata.author),
+        ("subject", &metadata.subject),
+        ("keywords", &metadata.keywords),
+        ("creator", &metadata.creator),
+        ("creation-date", &metadata.creation_date),
+        ("modification-date", &metadata.modification_date),
+    ] {
+        if let Some(value) = value {
+            fields.insert(name.to_owned(), json!(value));
+        }
+    }
+    Value::Object(fields)
+}
+
+/// The value for a flag, from `--flag=value` or the next argument.
+fn value(
+    flag: &str,
+    inline: Option<String>,
+    args: &mut impl Iterator<Item = String>,
+) -> Result<String, String> {
+    inline
+        .or_else(|| args.next())
+        .ok_or_else(|| format!("{flag} needs a value"))
+}
+
 fn export_one(
     source: &Path,
     output_dir: &Path,
     relative: &Path,
     fallback_font: Option<&[u8]>,
+    options: &PdfExportOptions,
 ) -> Result<Exported, String> {
     let bytes = fs::read(source).map_err(|error| format!("read: {error}"))?;
     let mut document = Document::open(&bytes).map_err(|error| format!("open: {error}"))?;
@@ -169,7 +263,7 @@ fn export_one(
     // Compute the PDF even when layout fails so the manifest records which
     // stage failed rather than collapsing every failure into "open".
     let pdf = document
-        .export_pdf()
+        .export_pdf_with_options(options)
         .map_err(|error| format!("export: {error}"))?;
     if !pdf.starts_with(b"%PDF-") {
         return Err("export produced a document without a %PDF- header".into());

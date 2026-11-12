@@ -1,6 +1,7 @@
 #![cfg(all(feature = "raster", feature = "fonts"))]
 
-use betteroffice_docx::Document;
+use betteroffice_docx::fonts::FontSource;
+use betteroffice_docx::{Document, OpenOptions, PdfConformance, PdfExportOptions, PdfMetadata};
 
 const CARLITO_BOLD: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Bold.ttf");
 
@@ -25,6 +26,142 @@ fn exports_a_docx_as_a_paginated_pdf_with_embedded_fonts() {
     assert!(
         !text.contains("/BaseFont /Helvetica"),
         "glyph runs need no Base-14 fallback"
+    );
+    assert!(
+        !text.contains("pdfaid") && !text.contains("/OutputIntents"),
+        "standard export must not claim PDF/A conformance"
+    );
+}
+
+/// PDF/A-2u output carries the archival marker, XMP metadata and a color
+/// output intent. The fixture uses embedded/bundled fonts, so it needs no
+/// Base-14 fallback.
+#[test]
+fn pdfa2u_export_embeds_metadata_and_an_output_intent() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/corpus/fixtures/betteroffice-demo.docx");
+    let bytes = std::fs::read(path).expect("demo docx");
+    let document = Document::open(&bytes).expect("open");
+    let options = PdfExportOptions {
+        conformance: PdfConformance::PdfA2u,
+        metadata: PdfMetadata {
+            title: Some("BetterOffice demo".to_owned()),
+            author: Some("BetterOffice".to_owned()),
+            ..PdfMetadata::default()
+        },
+    };
+
+    let pdf = document
+        .export_pdf_with_options(&options)
+        .expect("export PDF/A-2u");
+    let text = String::from_utf8_lossy(&pdf);
+
+    assert!(pdf.starts_with(b"%PDF-"));
+    assert!(
+        text.contains("/Metadata"),
+        "PDF/A-2u needs an XMP metadata stream"
+    );
+    assert!(
+        text.contains("pdfaid"),
+        "PDF/A identification (pdfaid) is missing"
+    );
+    assert!(
+        text.contains("/OutputIntents"),
+        "PDF/A-2u needs a color output intent"
+    );
+    assert!(
+        !text.contains("/BaseFont /Helvetica"),
+        "PDF/A-2u must not fall back to Base-14 text"
+    );
+}
+
+/// A character outside every document and bundled Latin/CJK face must export
+/// under PDF/A-2u through the bundled monochrome emoji fallback instead of
+/// being rejected as an uncovered scalar.
+#[test]
+fn pdfa2u_export_covers_an_emoji_scalar() {
+    let document =
+        Document::open(&minimal_docx(&[run("Calibri", false, false, "Hello 😀")])).expect("open");
+
+    document.export_pdf().expect("standard export");
+    let pdf = document
+        .export_pdf_with_options(&PdfExportOptions {
+            conformance: PdfConformance::PdfA2u,
+            ..PdfExportOptions::default()
+        })
+        .expect("export PDF/A-2u with an emoji");
+    assert!(pdf.starts_with(b"%PDF-1.7"));
+    assert!(String::from_utf8_lossy(&pdf).contains("/Metadata"));
+}
+
+/// A PDF/A fallback face is export-local: a later Standard export of the same
+/// cached document must see the pre-PDF/A font store.
+#[test]
+fn pdfa_emoji_fallback_does_not_leak_into_standard_exports() {
+    let document =
+        Document::open(&minimal_docx(&[run("Calibri", false, false, "Hello 😀")])).expect("open");
+    let before = document.export_pdf().expect("standard export before PDF/A");
+    document
+        .export_pdf_with_options(&PdfExportOptions {
+            conformance: PdfConformance::PdfA2u,
+            ..PdfExportOptions::default()
+        })
+        .expect("PDF/A export");
+    let after = document.export_pdf().expect("standard export after PDF/A");
+    assert_eq!(
+        before, after,
+        "PDF/A must not mutate the cached Standard font store"
+    );
+}
+
+/// `export_pdf` is the `PdfExportOptions::default()` delegate, so both entry
+/// points must produce the same Standard bytes for the same input.
+#[test]
+fn export_pdf_is_the_default_options_delegate() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/corpus/fixtures/betteroffice-demo.docx");
+    let bytes = std::fs::read(path).expect("demo docx");
+    let document = Document::open(&bytes).expect("open");
+
+    let convenience = document.export_pdf().expect("export pdf");
+    let explicit = document
+        .export_pdf_with_options(&PdfExportOptions::default())
+        .expect("export with default options");
+
+    assert_eq!(convenience, explicit);
+}
+
+/// A document opened with no font provider lays text out through the Base-14
+/// fallback. PDF/A-2u forbids that path, so the export must fail instead of
+/// emitting an unlabelled or conformantly wrong file.
+#[test]
+fn pdfa2u_refuses_the_base14_text_fallback() {
+    let options = OpenOptions {
+        font_source: FontSource::Backstop,
+        ..OpenOptions::default()
+    };
+    let document = Document::open_with_options(
+        &minimal_docx(&[run("Calibri", false, false, "Hello")]),
+        &options,
+    )
+    .expect("open without fonts");
+
+    let standard = document.export_pdf().expect("standard export");
+    assert!(
+        String::from_utf8_lossy(&standard).contains("/BaseFont /Helvetica"),
+        "the test document must exercise the Base-14 fallback"
+    );
+
+    let error = document
+        .export_pdf_with_options(&PdfExportOptions {
+            conformance: PdfConformance::PdfA2u,
+            ..PdfExportOptions::default()
+        })
+        .expect_err("PDF/A-2u must refuse Base-14 text");
+    let message = error.to_string();
+    assert!(
+        message.contains("PDF/A-2u"),
+        "unexpected refusal: {message}"
     );
 }
 

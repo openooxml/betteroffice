@@ -467,10 +467,38 @@ impl FontStore {
         self.outline_revision
     }
 
-    /// How many fonts the store holds. Fonts are only ever added, so a store with the same id
-    /// and count holds the same fonts.
+    /// How many fonts the store holds. Fonts are normally only ever added;
+    /// [`Self::truncate_fonts`] exists for a transient export-local face and
+    /// preserves the ids of every retained entry.
     pub fn font_count(&self) -> usize {
         self.fonts.len()
+    }
+
+    /// Drop every entry appended after `count`, restoring the store to an
+    /// earlier `font_count`.
+    ///
+    /// This is only for a transient face registered for one export. Retained
+    /// [`FontId`]s keep their meaning; appended ids become invalid. Returns
+    /// `false` when `count` is not shorter than the current length.
+    pub fn truncate_fonts(&mut self, count: usize) -> bool {
+        if count >= self.fonts.len() {
+            return false;
+        }
+        self.fonts.truncate(count);
+        self.faces.retain(|_, indices| {
+            indices.retain(|&index| index < count);
+            !indices.is_empty()
+        });
+        self.face_count = self.fonts.iter().filter(|entry| entry.entry.bytes_of.is_none()).count();
+        self.shape_cache.borrow_mut().hot.entries.clear();
+        self.shape_cache.borrow_mut().cold.entries.clear();
+        self.missing_base_latin.borrow_mut().clear();
+        self.new_base_latin_miss.set(false);
+        #[cfg(feature = "base-latin")]
+        for cache in &self.base_latin_char_cache {
+            cache.borrow_mut().clear();
+        }
+        true
     }
 
     /// How many distinct font byte buffers the store holds. Aliases and

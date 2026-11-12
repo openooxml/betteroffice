@@ -1,17 +1,39 @@
 //! Whole-document PDF export.
 
-use crate::{Document, Error, Result};
+use crate::{Document, Error, PdfExportOptions, Result};
 
+#[cfg(feature = "fonts")]
+use crate::PdfConformance;
 #[cfg(feature = "fonts")]
 use betteroffice_fonts::LastResortOffice;
 
 impl Document {
-    /// Exports the complete, paginated document as a PDF.
+    /// Exports the complete, paginated document as a plain PDF 1.7.
     ///
+    /// Equivalent to [`Document::export_pdf_with_options`] with
+    /// [`PdfExportOptions::default`], so the historical bytes are unchanged.
     /// Layout runs through the same path as [`Document::render_png`], including
     /// font resolution. Every page must have been built; a display list with an
     /// `unbuilt` page is rejected rather than exported partially.
     pub fn export_pdf(&self) -> Result<Vec<u8>> {
+        self.export_pdf_with_options(&PdfExportOptions::default())
+    }
+
+    /// Exports the complete, paginated document under explicit options.
+    ///
+    /// `options.conformance` selects the output profile.
+    /// [`PdfConformance::Standard`](docx_pdf::PdfConformance::Standard) keeps
+    /// the historical plain PDF 1.7 output, including its Base-14 text
+    /// fallback. [`PdfConformance::PdfA2u`](docx_pdf::PdfConformance::PdfA2u)
+    /// targets ISO 19005-2 (PDF/A-2u): it requires embedded fonts and returns
+    /// an error for content the writer cannot represent conformantly (for
+    /// example text that would need the Base-14 fallback) instead of silently
+    /// downgrading. `options.metadata` populates `/Info` and XMP; absent fields
+    /// are omitted rather than defaulted.
+    ///
+    /// Layout, CJK fallback registration, image scoping and the unbuilt-page
+    /// refusal are the same as [`Document::export_pdf`].
+    pub fn export_pdf_with_options(&self, options: &PdfExportOptions) -> Result<Vec<u8>> {
         let (display_list, fonts) = self.layout_display_list()?;
         #[cfg(feature = "fonts")]
         let mut fonts = fonts;
@@ -23,14 +45,35 @@ impl Document {
                 page.page_index
             )));
         }
+        // A PDF/A painter may not emit `.notdef`, so characters outside every
+        // document, CJK and bundled face need the monochrome emoji fallback.
+        // Standard keeps its historical face priority and never registers it.
+        // The face is export-local: remove it from the cached registry after
+        // both successful and rejected exports so a later Standard export sees
+        // exactly the same store as before.
+        #[cfg(feature = "fonts")]
+        let pdfa_store_len = if options.conformance == PdfConformance::PdfA2u {
+            let len = fonts.store.font_count();
+            fonts.register_pdfa_fallbacks()?;
+            Some(len)
+        } else {
+            None
+        };
         let images = self.scoped_image_bytes();
-        docx_pdf::export_pdf_with_fonts_images_and_chains(
+        let result = docx_pdf::export_pdf_with_options(
             &display_list,
-            &fonts.store,
+            Some(&fonts.store),
             &images,
-            fonts.chains(),
+            Some(fonts.chains()),
+            options,
         )
-        .map_err(|error| Error::Render(error.to_string()))
+        .map_err(|error| Error::Render(error.to_string()));
+        #[cfg(feature = "fonts")]
+        if let Some(len) = pdfa_store_len {
+            fonts.store.truncate_fonts(len);
+            fonts.pdfa_fallbacks = false;
+        }
+        result
     }
 
     /// Registers script fallback faces for Han/Kana/Hangul after layout.

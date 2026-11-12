@@ -19,6 +19,8 @@ mod types;
 
 pub use document::{Document, render_docx_markdown};
 #[cfg(feature = "raster")]
+pub use docx_pdf::{PdfConformance, PdfExportOptions, PdfMetadata};
+#[cfg(feature = "raster")]
 pub use docx_raster::{ImageScope, NoteKind, RenderedPage};
 pub use error::Error;
 #[cfg(feature = "raster")]

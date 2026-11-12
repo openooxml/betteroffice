@@ -25,8 +25,19 @@ pub(crate) struct FontRegistry {
     resolved: HashSet<(String, Vec<String>)>,
     #[cfg(feature = "fonts")]
     pub(crate) cjk_fallbacks: bool,
+    #[cfg(feature = "fonts")]
+    pub(crate) pdfa_fallbacks: bool,
     registrations: usize,
 }
+
+/// Bundled monochrome Noto Emoji (OFL-1.1) for PDF/A painter fallback.
+///
+/// A variable font at its default `wght` instance. The PDF writer subsets it
+/// through `subsetter`'s default-location TrueType path, which keeps the
+/// default outlines and drops `fvar`/`gvar`/`HVAR`, so the embedded program is
+/// a static TrueType face.
+#[cfg(feature = "fonts")]
+const PDFA_EMOJI_FALLBACK: &[u8] = include_bytes!("../assets/NotoEmoji.ttf");
 
 impl FontRegistry {
     /// Ordered face chains keyed `family|bold|italic`, exactly as layout
@@ -72,6 +83,23 @@ impl FontRegistry {
             .register_slice(bytes)
             .map_err(|error| Error::Font(error.to_string()))?;
         self.registrations += 1;
+        Ok(())
+    }
+
+    /// Registers the bundled Noto Emoji face as a PDF/A painter fallback.
+    ///
+    /// The face stays out of [`Self::chains`]: the painter resolves unmatched
+    /// scalars against the store in registration order, so calling this after
+    /// document and CJK registration leaves their priority unchanged. The
+    /// helper is idempotent per registry and goes through
+    /// [`Self::register_export_fallback`], so its resource limits apply.
+    #[cfg(feature = "fonts")]
+    pub(crate) fn register_pdfa_fallbacks(&mut self) -> Result<()> {
+        if self.pdfa_fallbacks {
+            return Ok(());
+        }
+        self.register_export_fallback(PDFA_EMOJI_FALLBACK)?;
+        self.pdfa_fallbacks = true;
         Ok(())
     }
 
@@ -356,6 +384,19 @@ mod tests {
             chain.len(),
             calibri.chains[&chain_key("Calibri", false, false)].len()
         );
+    }
+
+    #[test]
+    fn pdfa_fallbacks_register_the_bundled_emoji_face_once() {
+        use super::FontRegistry;
+        let mut fonts = FontRegistry::default();
+        let before = fonts.store.face_count();
+        fonts.register_pdfa_fallbacks().unwrap();
+        assert_eq!(fonts.store.face_count(), before + 1);
+        assert!(fonts.pdfa_fallbacks);
+        assert!(fonts.chains.is_empty());
+        fonts.register_pdfa_fallbacks().unwrap();
+        assert_eq!(fonts.store.face_count(), before + 1);
     }
 
     fn run(text: &str, scripts: &[&str]) -> TextRunPrimitive {

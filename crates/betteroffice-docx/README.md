@@ -118,8 +118,13 @@ provider's Han/Kana/Hangul fallback faces into the export font store without
 changing chains; a mixed CJK run that picked a Japanese face can therefore
 paint Simplified Chinese glyphs from a covering face, while the document's own
 faces stay ahead of the fallbacks in painter resolution order. A display list with an unbuilt page
-is refused rather than exported partially. The output is a plain, untagged PDF;
-it makes no PDF/A claim.
+is refused rather than exported partially. The default output is a plain,
+untagged PDF and makes no PDF/A claim.
+
+`export_pdf_with_options` opts into PDF/A-2u (ISO 19005-2 level U). It adds
+XMP identification, `/Info`, an sRGB output intent, deterministic trailer IDs,
+CIDSet and a monochrome emoji fallback; it refuses Base-14 or uncovered text
+instead of downgrading. Tagged PDF and PDF/UA are not supported.
 
 ```rust
 use betteroffice_docx::Document;
@@ -127,6 +132,15 @@ use betteroffice_docx::Document;
 let document = Document::open(&docx_bytes)?;
 let pdf = document.export_pdf()?;
 std::fs::write("out.pdf", pdf)?;
+```
+
+```rust
+use betteroffice_docx::{PdfConformance, PdfExportOptions};
+
+let pdf = document.export_pdf_with_options(&PdfExportOptions {
+    conformance: PdfConformance::PdfA2u,
+    ..PdfExportOptions::default()
+})?;
 ```
 
 The batch example exports every `.docx` under a directory and writes a
