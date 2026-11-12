@@ -56,6 +56,7 @@ import {
   type ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 import type { EchoGlyphProvider } from './residentCommandViewProjection';
+import { saveWarmupPolicy } from './saveWarmupPolicy';
 
 let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown, schedule: unknown, unschedule: unknown) => void;
 const retireWorkerTimers: (() => void)[] = [];
@@ -118,6 +119,10 @@ beforeAll(async () => {
     '../layout/render/glyphCache':
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; testHarness.glyphCacheCreations += 1; } }',
     '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => testHarness.memories;',
+    '../wasm/engineEdit': `
+      export let engineKind = 'wasm';
+      testHarness.setEngineKind = (kind) => { engineKind = kind; };
+    `,
     './residentCommandViewProjection':
       'export const projectCommandEchoContext = (input) => testHarness.projectEchoContext?.(input);',
     '../layout/render/frameDelta': `
@@ -266,6 +271,7 @@ function worker() {
       await yieldSave();
       await yieldSave();
     }),
+    setEngineKind: null as ((kind: 'wasm' | 'native') => void) | null,
     saveWarmupState: null as (() => { attempts: number; active: boolean; finished: boolean; record: ResidentSaveRecord; saveDelayMs: number | null }) | null,
     async preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
       await harness.preload((await source) ?? undefined);
@@ -2626,6 +2632,47 @@ describe('document worker warmup', () => {
       client.destroy();
     }
   });
+
+  const MiB = 1024 * 1024;
+  test.each([
+    ['wasm', undefined, { liveBytes: 100 }, { warm: true, primeSeeds: true, reason: 'ok' }],
+    ['wasm', 512 * MiB, { liveBytes: 100 }, { warm: true, primeSeeds: true, reason: 'ok' }],
+    ['wasm', 512 * MiB, { liveBytes: 385 * MiB }, { warm: false, primeSeeds: false, reason: 'low-headroom' }],
+    ['wasm', 512 * MiB, undefined, { warm: false, primeSeeds: false, reason: 'no-stats' }],
+    ['native', undefined, { liveBytes: 100 }, { warm: false, primeSeeds: false, reason: 'no-limit' }],
+    ['native', 512 * MiB, { liveBytes: 100 }, { warm: false, primeSeeds: false, reason: 'engine-native' }],
+    ['native', 512 * MiB, { liveBytes: 385 * MiB }, { warm: false, primeSeeds: false, reason: 'low-headroom' }],
+    ['native', 512 * MiB, undefined, { warm: false, primeSeeds: false, reason: 'no-stats' }],
+  ] as const)('save warmup policy: %s engine, limit=%p, memory=%o', (engine, limit, memory, expected) => {
+    expect(saveWarmupPolicy(engine, limit, memory)).toEqual(expected);
+  });
+
+  test.each([['wasm', 1], ['native', 0]] as const)(
+    '%s engine with a 512 MiB limit and ample headroom warms the save and primes seeds %i times',
+    async (engine, runs) => {
+      const { w, client } = await commandWorker({ heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES });
+      w.harness.setEngineKind!(engine);
+      w.harness.now = () => now;
+      try {
+        await client.commandInit(COMMAND_INIT);
+        client.prepareSave();
+        advanceTimers(0);
+        await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+        advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+        await settleWarmup(() => runs === 0 || (w.harness.saveWarmupState!().finished &&
+          w.harness.session.primeSaveSeedStatesSlice.mock.calls.length === runs));
+        for (let turn = 0; turn < 10; turn += 1) {
+          advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+          await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+        }
+        expect(w.harness.warmSave).toHaveBeenCalledTimes(runs);
+        expect(w.harness.session.primeSaveSeedStatesSlice).toHaveBeenCalledTimes(runs);
+        expect(w.harness.saveWarmupState!().attempts).toBe(runs);
+      } finally {
+        client.destroy();
+      }
+    },
+  );
 
   test('save warmup waits for save intent, wasm loading and command idle, then runs once', async () => {
     const { w, client } = await commandWorker({ heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES });

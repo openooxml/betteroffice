@@ -8,6 +8,14 @@ export interface ProgressiveFontFace {
 
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
 
+const standInKey = Symbol.for('@betteroffice/docx/standInFamily');
+
+/** What the default provider tells the registry about the families it stands in for. */
+interface StandInHook {
+  standsIn(family: string): boolean;
+  report(family: string): boolean;
+}
+
 async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {
   try {
     const words = (await import('./cmapCoverage')).fontCoverageWords(data);
@@ -249,17 +257,21 @@ export class TextMeasureFontRegistry {
   /** Script-fallback faces registered from their skeleton and core, by font id. */
   private progressiveIds = new Map<number, ProgressiveFontFace>();
   private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+  private readonly standInTail: boolean;
 
   /** `progressive` opens sliced faces, which register from their skeleton and core. */
   constructor(sink: TextEngineFontSink, opts?: {
     bundled?: BundledFontProviderSource;
     baseLatin?: BundledFontProviderSource;
     progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+    /** Explicit stand-ins always append the last-resort face. */
+    standInTail?: boolean;
   }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
     this.baseLatinSource = opts?.baseLatin;
     this.progressive = opts?.progressive;
+    this.standInTail = opts?.standInTail === true;
   }
 
   /** The sliced faces registered from their skeleton and core, by font id. */
@@ -549,9 +561,13 @@ export class TextMeasureFontRegistry {
     // bytes to measure with, keeping the block on the native path instead of the
     // browser fallback. Deduped by engine id (a family whose metric-compat IS
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
+    const standIn = (bundled as { [standInKey]?: StandInHook } | undefined)?.[standInKey];
+    const standsIn = standIn?.standsIn(family) === true;
+    const noOtherFace = ids.length === 0;
+    const tail = !standsIn || noOtherFace || this.standInTail;
     let lastResort: BundledFontLoader | undefined;
     try {
-      lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
+      if (tail) lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
     } catch (error) {
       retryable = true;
       this.warnFailure(
@@ -563,10 +579,11 @@ export class TextMeasureFontRegistry {
       const id = await this.registerLastResort(key, lastResort, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
+      else if (standsIn && noOtherFace && standIn?.report(family)) this.warnStandIn(family);
     }
 
     try {
-      const coverage = bundled?.resolveGlyphFallback?.(family, bold, italic, 'word');
+      const coverage = tail ? bundled?.resolveGlyphFallback?.(family, bold, italic, 'word') : undefined;
       if (coverage) {
         const id = await this.registerLastResort(`${key}|coverage`, coverage, family);
         if (id !== null && !ids.includes(id)) ids.push(id);
@@ -585,6 +602,14 @@ export class TextMeasureFontRegistry {
     }
 
     return { ids, retryable };
+  }
+
+  private warnStandIn(family: string): void {
+    console.warn(
+      `[fontRegistry] no font bytes for "${family}": a last-resort face stands in for it, so line ` +
+        'breaks can differ from Word. Pass the font to the editor or embed it in the document. ' +
+        'Reported once per family.'
+    );
   }
 
   /**

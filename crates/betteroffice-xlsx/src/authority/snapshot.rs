@@ -4,7 +4,9 @@ use xlsx_model::styles::{
     Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection,
     Theme, VAlign, Xf,
 };
-use xlsx_model::{AnchorCell, AutoFilter, ChartRefKind, ConditionalFormatRule, DifferentialFormat};
+use xlsx_model::{
+    AnchorCell, AutoFilter, ChartRefKind, ConditionalFormatRule, DifferentialFormat, RunUnderline,
+};
 
 use crate::snapshot::growth::Growth;
 use crate::snapshot::header::{SnapshotHeader, SnapshotMode};
@@ -812,6 +814,10 @@ enum_codec!(HAlign {
     CenterContinuous = 6, Distributed = 7,
 });
 enum_codec!(VAlign { Top = 0, Center = 1, Bottom = 2, Justify = 3, Distributed = 4 });
+// none and single keep the bytes of the boolean they replace.
+enum_codec!(RunUnderline {
+    None = 0, Single = 1, Double = 2, SingleAccounting = 3, DoubleAccounting = 4,
+});
 enum_codec!(AnchorEditAs { TwoCell = 0, OneCell = 1, Absolute = 2 });
 enum_codec!(ChartRefKind {
     SeriesName = 0, Categories = 1, Values = 2, BubbleSize = 3, Title = 4,
@@ -3944,7 +3950,7 @@ mod tests {
                 size_pt: Some(-0.0),
                 bold: true,
                 italic: false,
-                underline: true,
+                underline: RunUnderline::Single,
                 strike: false,
                 color: Some(Color::Theme {
                     idx: 5,

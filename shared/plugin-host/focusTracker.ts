@@ -1,12 +1,15 @@
+/** Disposes the tracker; `recheck` reads focus again now and reports only a change. */
+export type FocusTracker = (() => void) & { recheck(): void };
+
 export function trackFocus(
   roots: () => readonly Element[],
   onChange: (focused: boolean) => void
-): () => void {
+): FocusTracker {
   const document = roots()[0]?.ownerDocument ?? globalThis.document;
   const window = document.defaultView!;
   let focused: boolean | null = null;
   let active = true;
-  let windowFocused = true;
+  let windowFocused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
   let queued = false;
   let observed: readonly Element[] = [];
   const observer = new MutationObserver(() => check());
@@ -19,6 +22,7 @@ export function trackFocus(
   };
   const inside = (target: EventTarget | null) =>
     target instanceof Node && target.isConnected &&
+    !(target instanceof Element ? target : target.parentElement)?.closest('[data-plugin-overlays]') &&
     roots().some((root) => root.isConnected && root.contains(target));
   const change = (next: boolean) => {
     if (!active) return;
@@ -32,7 +36,7 @@ export function trackFocus(
     onChange(next);
   };
   const check = () => change(windowFocused && inside(document.activeElement));
-  const recheck = () => {
+  const queueCheck = () => {
     if (queued) return;
     queued = true;
     queueMicrotask(() => { queued = false; if (active) check(); });
@@ -40,16 +44,16 @@ export function trackFocus(
   const focusIn = (event: FocusEvent) => change(windowFocused && inside(event.target));
   const focusOut = (event: FocusEvent) => {
     if (inside(event.relatedTarget)) change(windowFocused);
-    else recheck();
+    else queueCheck();
   };
   const blur = () => { windowFocused = false; change(false); };
-  const focus = () => { windowFocused = true; recheck(); };
+  const focus = () => { windowFocused = true; queueCheck(); };
   document.addEventListener('focusin', focusIn, true);
   document.addEventListener('focusout', focusOut, true);
   window.addEventListener('blur', blur);
   window.addEventListener('focus', focus);
   check();
-  return () => {
+  const dispose = () => {
     active = false;
     observer.disconnect();
     document.removeEventListener('focusin', focusIn, true);
@@ -57,4 +61,5 @@ export function trackFocus(
     window.removeEventListener('blur', blur);
     window.removeEventListener('focus', focus);
   };
+  return Object.assign(dispose, { recheck: () => { if (active) check(); } });
 }

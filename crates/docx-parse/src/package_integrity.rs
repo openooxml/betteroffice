@@ -209,10 +209,6 @@ fn is_namespace(namespace: &ResolveResult<'_>, expected: &str) -> bool {
     if *namespace == ResolveResult::Bound(Namespace(expected.as_bytes())) {
         return true;
     }
-    let strict = match expected {
-        namespaces::W => "http://purl.oclc.org/ooxml/wordprocessingml/main",
-        namespaces::WP => "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing",
-        _ => return false,
-    };
-    *namespace == ResolveResult::Bound(Namespace(strict.as_bytes()))
+    crate::xml::strict_namespace(expected)
+        .is_some_and(|strict| *namespace == ResolveResult::Bound(Namespace(strict.as_bytes())))
 }
