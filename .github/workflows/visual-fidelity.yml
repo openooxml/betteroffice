@@ -731,6 +731,7 @@ jobs:
           done
           npm install --prefix "$RUNNER_TEMP/docx-published" --no-save --no-package-lock --ignore-scripts --no-audit --no-fund "${packages[@]}"
           report() {
+            # shellcheck disable=SC2016 # JavaScript source: its ${} are template literals for node, not shell expansions
             node --input-type=module -e '
             import { createRequire } from "node:module";
             import { readFileSync } from "node:fs";
