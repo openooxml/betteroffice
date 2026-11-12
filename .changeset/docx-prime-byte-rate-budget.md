@@ -1,5 +1,5 @@
 ---
-'@betteroffice/docx': minor
+'@betteroffice/docx': patch
 ---
 
-Background save seed priming now sizes each slice from the rate the last charging slice measured, growing at most a few times per slice. Slices that charge nothing keep the budget. Adds the `primeLastSliceCost` getter.
+Background save seed priming runs the committed scan in resumable slices. Each slice's byte budget follows the rate at which the last slice charged cost, growing at most twofold per slice; slices that charge nothing keep it. Saved bytes are unchanged.
