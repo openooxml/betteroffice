@@ -2081,6 +2081,10 @@ describe('workbook commands', () => {
       ['applyOps', 'chart xl/charts/chart1.xml cannot change how it follows a grid edit', 'chart'],
       ['applyOps', 'formula at sheet 0, B1 cannot be safely rewritten', 'other'],
       ['applyOps', 'defined name Dynamic cannot be safely rewritten', 'other'],
+      ['fillRange', 'fill cannot safely preserve hyperlinks', 'fill'],
+      ['fillRange', 'fill cannot safely preserve comments', 'fill'],
+      ['fillRange', 'fill cannot safely preserve data validations', 'fill'],
+      ['fillRange', 'fill cannot safely preserve conditional formats', 'fill'],
       ['moveRange', 'range move cannot safely preserve charts', 'chart'],
       ['moveRange', 'range move cannot safely preserve Excel tables', 'table'],
       ['moveRange', 'range move cannot safely preserve merged cells', 'other'],
@@ -2147,6 +2151,36 @@ describe('workbook commands', () => {
     } finally { await session.dispose(); }
   });
 
+  test('fillRange tiles copied cells and refuses protected features without mutating', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      expect(await session.submit(command(session, 1, 'editCell', {
+        args: [0, 0, 0, '7'],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      const before = session.confirmedBasis.version;
+      expect(await session.submit(command(session, 2, 'fillRange', {
+        args: [0, 'A1', 'A1:A3'],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect(session.confirmedBasis.version).not.toBe(before);
+      expect((await session.call.cellInputs(0, 'A1:A3')).cells.map((row) => row[0].input))
+        .toEqual(['7', '7', '7']);
+      expect(await session.submit(command(session, 3, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('');
+    } finally { await session.dispose(); }
+
+    const refusing = await createTestWorkbookSession(bytes);
+    try {
+      const version = refusing.confirmedBasis.version;
+      expect(await refusing.submit(command(refusing, 1, 'fillRange', {
+        args: [0, 'A1', 'A1:E2'],
+      }))).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false });
+      expect(refusing.confirmedBasis.version).toBe(version);
+      expect((await refusing.call.cellInputs(0, 'A1:E2')).cells.flat()
+        .filter((cell) => cell.input !== '').map((cell) => cell.a1)).toEqual(['A1', 'B1']);
+    } finally { await refusing.dispose(); }
+  });
+
   test('moveRange rewrites dependent formulas and undoes through worker commands', async () => {
     const session = await createTestWorkbookSession(plainBytes);
     try {
@@ -2178,7 +2212,7 @@ describe('workbook commands', () => {
 
   for (const kind of Object.keys(WORKBOOK_REPLAY_MUTATORS) as WorkbookReplayMethod[]) {
     test(`applies replay mutator ${kind} without an edit peer`, async () => {
-      const source = kind === 'moveRange' ? plainBytes : bytes;
+      const source = kind === 'moveRange' || kind === 'fillRange' ? plainBytes : bytes;
       const session = await createTestWorkbookSession(source);
       let seq = 0;
       const send = (op: WorkbookCommand) => session.submit(op);
@@ -2204,6 +2238,7 @@ describe('workbook commands', () => {
             break;
           }
           case 'moveRange': payload = { args: [0, 'A1', 'A2'] }; break;
+          case 'fillRange': payload = { args: [0, 'A1', 'A1:A2'] }; break;
           case 'setActiveSheet': payload = { args: [1] }; break;
           case 'undo':
           case 'redo':
@@ -2237,6 +2272,7 @@ describe('workbook commands', () => {
           expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe(kind === 'undo' ? '1' : '7');
         }
         if (kind === 'moveRange') expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('1');
+        if (kind === 'fillRange') expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('1');
         if (kind === 'patchRangeStyle' || kind === 'applyFormat') expect(session.editState.formatting?.bold).toBe(true);
         if (kind === 'setNumberFormat') expect(session.editState.formatting?.numberFormat).toBe('percent');
         if (kind === 'setActiveSheet') expect(session.state.activeSheet).toBe(1);

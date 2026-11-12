@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Không thể áp dụng chỉnh sửa này: một biểu đồ dùng các ô mà chỉnh sửa sẽ di chuyển. Sổ làm việc không thay đổi.",
       "editUnsupportedTable": "Không thể áp dụng chỉnh sửa này: một bảng dùng các ô mà chỉnh sửa sẽ di chuyển. Sổ làm việc không thay đổi.",
       "editUnsupportedPivot": "Không thể áp dụng chỉnh sửa này: một bảng tổng hợp dùng các ô mà chỉnh sửa sẽ di chuyển. Sổ làm việc không thay đổi.",
+      "editUnsupportedFill": "Không thể áp dụng thao tác điền này: thao tác sẽ thay đổi các ô có liên kết, ghi chú hoặc quy tắc. Sổ làm việc không thay đổi.",
       "sheetProtected": "Ô này nằm trên một trang tính được bảo vệ.",
       "hostRefused": "Không được phép chỉnh sửa này.",
       "tooManyToCheck": "Quá nhiều ô để plugin kiểm tra (giới hạn {limit}).",
@@ -227,7 +228,8 @@
     "rangeSelected": "Đã chọn {start} đến {end}, {rows} hàng x {columns} cột",
     "sheetActivated": "{name}, trang tính {index}/{count}",
     "cellInputLabel": "Chỉnh sửa ô {address}",
-    "gridRoleDescription": "trang tính"
+    "gridRoleDescription": "trang tính",
+    "fillHandleLabel": "Tay nắm điền"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
