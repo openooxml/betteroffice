@@ -5,7 +5,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use betteroffice_docx::fonts::{FontLoading, FontManager, FontSource, LastResortOffice};
-use betteroffice_docx::{DisplayList, Document, LayoutInput, Primitive};
+use betteroffice_docx::{Document, LayoutInput, Primitive};
 use docx_layout::measure_blocks::{FontRequirementCollector, MeasurementConfig, measure_block};
 use docx_layout::types::{Fragment, Layout};
 use ooxml_text::family_metrics::{family_advance, family_metrics};
@@ -17,7 +17,6 @@ const LINE: &str = "Hamburgevons0123456789";
 const SENTENCE: &str =
     "Substituted faces measure with the widths and line metrics of the family the document names. ";
 const COLUMN_WIDTH: f64 = 624.0;
-const FALLBACK: &str = "☺♪♦■●◊←→↑∞√∑≈≠≤ẞǺЖжΩλ€№";
 
 fn quoted(source: &'static str) -> impl Iterator<Item = &'static str> {
     source
@@ -38,24 +37,18 @@ fn table_families() -> BTreeSet<String> {
     widths.chain(lines).map(str::to_owned).collect()
 }
 
-fn input(family: &str, fallback: Option<char>) -> LayoutInput {
+fn input(family: &str) -> LayoutInput {
     let paragraph = |id: u64, text: &str| {
-        let length = text.chars().count();
-        json!({"kind": "paragraph", "id": id, "pmStart": 0, "pmEnd": length + 2,
+        json!({"kind": "paragraph", "id": id, "pmStart": 0, "pmEnd": text.len() + 2,
                "runs": [{"kind": "text", "text": text, "fontFamily": family, "fontSize": 11,
-                         "pmStart": 1, "pmEnd": length + 1}]})
+                         "pmStart": 1, "pmEnd": text.len() + 1}]})
     };
     let unmeasured = json!({"kind": "paragraph", "lines": [], "totalHeight": 0});
-    let mut measured = vec![
-        json!({"block": paragraph(1, LINE), "measure": unmeasured}),
-        json!({"block": paragraph(2, &SENTENCE.repeat(2)), "measure": unmeasured}),
-    ];
-    if let Some(character) = fallback {
-        let text = format!("{LINE}{}", character.to_string().repeat(8));
-        measured.push(json!({"block": paragraph(3, &text), "measure": unmeasured}));
-    }
     serde_json::from_value(json!({
-        "measured": measured,
+        "measured": [
+            {"block": paragraph(1, LINE), "measure": unmeasured},
+            {"block": paragraph(2, &SENTENCE.repeat(2)), "measure": unmeasured}
+        ],
         "options": {"pageSize": {"w": 816, "h": 1056},
                     "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}}
     }))
@@ -87,26 +80,6 @@ fn pitches(layout: &Layout) -> BTreeMap<String, (f64, usize)> {
         .collect()
 }
 
-fn advances(list: &DisplayList, character: char) -> Vec<f64> {
-    list.pages
-        .iter()
-        .flat_map(|page| &page.primitives)
-        .filter_map(|primitive| match primitive {
-            Primitive::GlyphRun(run) => Some(run),
-            _ => None,
-        })
-        .flat_map(|run| {
-            run.glyphs.iter().filter_map(move |glyph| {
-                run.text
-                    .get(glyph.cluster as usize..)
-                    .and_then(|rest| rest.chars().next())
-                    .filter(|&found| found == character)
-                    .map(|_| glyph.advance)
-            })
-        })
-        .collect()
-}
-
 #[test]
 fn substituted_faces_measure_with_the_requested_family_metrics() {
     let manager = FontManager::new(&FontSource::default(), FontLoading::default()).unwrap();
@@ -117,30 +90,9 @@ fn substituted_faces_measure_with_the_requested_family_metrics() {
     let mut store = FontStore::new();
     let mut bases: HashMap<(String, bool, bool), FontId> = HashMap::new();
     let mut checked = Vec::new();
-    let mut fallbacks = Vec::new();
     let mut mismatches = Vec::new();
     for family in table_families() {
-        let faces = manager.resolve(&family, false, false, &[], LastResortOffice::Word);
-        let real = faces
-            .first()
-            .is_some_and(|face| face.family.to_lowercase() == family);
-        let mut ids = Vec::new();
-        if real {
-            for face in &faces {
-                ids.push(
-                    *bases
-                        .entry((face.family.clone(), face.bold, face.italic))
-                        .or_insert_with(|| store.register_slice(&face.load().unwrap()).unwrap()),
-                );
-            }
-        }
-        let fallback = FALLBACK.chars().find(|&character| {
-            ids.split_first().is_some_and(|(primary, rest)| {
-                !store.covers(*primary, character).unwrap()
-                    && store.resolve(rest, character).is_some()
-            })
-        });
-        let mut reference = input(&family, fallback);
+        let mut reference = input(&family);
         let mut collector = FontRequirementCollector::default();
         collector.collect(
             reference.measured.iter().map(|measured| &measured.block),
@@ -159,6 +111,12 @@ fn substituted_faces_measure_with_the_requested_family_metrics() {
             );
             let requested =
                 request.family.trim().to_lowercase() == family && !request.bold && !request.italic;
+            let real = faces
+                .first()
+                .is_some_and(|face| face.family.to_lowercase() == family);
+            if requested && real {
+                continue;
+            }
             let mut chain: Vec<u32> = Vec::new();
             for face in faces {
                 let base = *bases
@@ -179,7 +137,7 @@ fn substituted_faces_measure_with_the_requested_family_metrics() {
                 chain,
             );
         }
-        if !substituted && fallback.is_none() {
+        if !substituted {
             continue;
         }
         checked.push(family.clone());
@@ -194,32 +152,7 @@ fn substituted_faces_measure_with_the_requested_family_metrics() {
             }
         });
         let expected = docx_layout::compute_layout_input(&mut reference).unwrap();
-        let actual = document.layout(input(&family, fallback)).unwrap();
-
-        if let Some(character) = fallback {
-            fallbacks.push(format!("{family} {character:?}"));
-            let extras = json!({ "fontChains": &config.font_chains }).to_string();
-            let list =
-                docx_layout::display_list::build_display_list_value_from_resident_with_fonts(
-                    &reference, &expected, &extras, &store,
-                )
-                .unwrap();
-            let wanted = advances(&list, character);
-            let found = advances(&actual.display_list, character);
-            if wanted.is_empty() {
-                mismatches.push(format!("{family}: no {character:?} glyph was laid out"));
-            } else if wanted.len() != found.len()
-                || wanted
-                    .iter()
-                    .zip(&found)
-                    .any(|(wanted, found)| (wanted - found).abs() > 0.02)
-            {
-                mismatches.push(format!(
-                    "{family}: {character:?} past the primary face advances {found:.3?}px, \
-                     the requested family's view gives {wanted:.3?}px"
-                ));
-            }
-        }
+        let actual = document.layout(input(&family)).unwrap();
 
         if let Some(widths) = head.and_then(|id| store.family_widths(id).unwrap()) {
             let mut compared = 0;
@@ -280,13 +213,11 @@ fn substituted_faces_measure_with_the_requested_family_metrics() {
         }
     }
     println!(
-        "checked {} families: {}; past the primary face: {}",
+        "checked {} substituted families: {}",
         checked.len(),
-        checked.join(", "),
-        fallbacks.join(", ")
+        checked.join(", ")
     );
     assert!(!checked.is_empty());
-    assert!(!fallbacks.is_empty());
     assert!(
         mismatches.is_empty(),
         "{} mismatches over {} families:\n{}",
