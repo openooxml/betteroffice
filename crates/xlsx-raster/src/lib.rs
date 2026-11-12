@@ -1319,7 +1319,7 @@ mod tests {
             w: 160.0,
             h: 80.0,
         };
-        let bands = |underline: bool, style: Option<RunUnderline>| {
+        let underlined = |underline: bool, style: Option<RunUnderline>| {
             let mut dl = text_dl("    ", cell, false, None, underline);
             let DrawCmd::Text {
                 font_size,
@@ -1333,7 +1333,10 @@ mod tests {
             *font_size = 40.0;
             *underline_style = style;
             *strike = false;
-            ink_row_bands(&dl).len()
+            dl
+        };
+        let bands = |underline: bool, style: Option<RunUnderline>| {
+            ink_row_bands(&underlined(underline, style)).len()
         };
         assert_eq!(bands(false, None), 0);
         assert_eq!(bands(false, Some(RunUnderline::Double)), 0);
@@ -1341,6 +1344,41 @@ mod tests {
         assert_eq!(bands(true, Some(RunUnderline::SingleAccounting)), 1);
         assert_eq!(bands(true, Some(RunUnderline::Double)), 2);
         assert_eq!(bands(true, Some(RunUnderline::DoubleAccounting)), 2);
+
+        let face = rustybuzz::Face::from_slice(include_bytes!("../assets/Carlito-Regular.ttf"), 0)
+            .unwrap();
+        let descender =
+            40.0 - face.descender() as f32 * 40.0 * 96.0 / 72.0 / face.units_per_em() as f32;
+        let single = ink_row_bands(&underlined(true, None))[0];
+        let dark_columns = |dl: &DisplayList, (top, bottom): (u32, u32)| {
+            let pixels = Pixmap::decode_png(&render_png(dl).unwrap()).unwrap();
+            (0..pixels.width())
+                .filter(|&x| pixels.pixel(x, (top + bottom) / 2).unwrap().red() < 128)
+                .collect::<Vec<_>>()
+        };
+        for style in [RunUnderline::SingleAccounting, RunUnderline::DoubleAccounting] {
+            let dl = underlined(true, Some(style));
+            for band in ink_row_bands(&dl) {
+                assert!(band.0 > single.1, "{style:?} sits below the single underline");
+                assert!(band.0 as f32 >= descender.floor(), "{style:?} sits below the descender");
+                assert_eq!(dark_columns(&dl, band), (0..160).collect::<Vec<_>>());
+            }
+        }
+
+        let mut dl = underlined(true, Some(RunUnderline::SingleAccounting));
+        let DrawCmd::Text { number_format, .. } = &mut dl.commands[0] else {
+            unreachable!()
+        };
+        *number_format = Some(xlsx_render::NumberFormatLayout {
+            left: 10.0,
+            width: 140.0,
+            parts: Vec::new(),
+            general: None,
+            overflow: false,
+        });
+        let bands = ink_row_bands(&dl);
+        assert_eq!(bands.len(), 1);
+        assert_eq!(dark_columns(&dl, bands[0]), (10..150).collect::<Vec<_>>());
     }
 
     #[test]

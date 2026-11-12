@@ -833,7 +833,7 @@ fn loose_extents(x1: f32, y1: f32, x2: f32, y2: f32) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_render::{GridMeta, NumberFormatLayout, PathStroke, TextValign, TextWrap};
+    use xlsx_render::{GridMeta, NumberFormatLayout, PathStroke, RunUnderline, TextValign, TextWrap};
 
     fn display_list(commands: Vec<DrawCmd>) -> DisplayList {
         DisplayList {
@@ -1007,6 +1007,57 @@ mod tests {
         }
         let page = translate_sheet(&display_list(vec![wrapped, formatted, overflowing])).unwrap();
         assert_eq!(page.skipped.total(), 0);
+    }
+
+    #[test]
+    fn underline_kinds_draw_like_the_raster() {
+        let edges = |style: Option<RunUnderline>| {
+            let mut command = text("Total");
+            if let DrawCmd::Text {
+                x,
+                clip,
+                underline,
+                underline_style,
+                ..
+            } = &mut command
+            {
+                *x = 14.0;
+                clip.x = 10.0;
+                clip.w = 80.0;
+                *underline = true;
+                *underline_style = style;
+            }
+            let page = translate_sheet(&display_list(vec![command])).unwrap();
+            let points: Vec<(f32, f32)> = page
+                .scene
+                .encoding()
+                .path_data
+                .chunks_exact(2)
+                .map(|point| (f32::from_bits(point[0]), f32::from_bits(point[1])))
+                .filter(|&(_, y)| y > 0.0 && y < 60.0)
+                .collect();
+            let mut xs: Vec<f32> = points.iter().map(|point| point.0).collect();
+            let mut ys: Vec<f32> = points.iter().map(|point| point.1).collect();
+            xs.sort_by(f32::total_cmp);
+            xs.dedup();
+            ys.sort_by(f32::total_cmp);
+            ys.dedup();
+            (xs, ys)
+        };
+        let (_, single) = edges(None);
+        assert_eq!(single.len(), 2);
+        assert_eq!(edges(Some(RunUnderline::Double)).1.len(), 4);
+        let scale = 11.0 * PX_PER_PT / FACE.units_per_em() as f32;
+        let descender = 20.0 - FACE.descender() as f32 * scale;
+        for (style, lines) in [
+            (RunUnderline::SingleAccounting, 1),
+            (RunUnderline::DoubleAccounting, 2),
+        ] {
+            let (xs, ys) = edges(Some(style));
+            assert_eq!(xs, [10.0, 90.0], "{style:?} spans the cell");
+            assert_eq!(ys.len(), 2 * lines);
+            assert!(ys[0] > single[1] && ys[0] >= descender, "{style:?} sits below the descender");
+        }
     }
 
     #[test]

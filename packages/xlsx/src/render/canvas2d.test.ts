@@ -315,10 +315,33 @@ describe('Canvas2D text', () => {
     expect(underlines({})).toEqual([]);
     expect(underlines({ underline: false, underlineStyle: 'double' })).toEqual([]);
     expect(underlines({ underline: true })).toEqual([[2, top, 40, line]]);
-    expect(underlines({ underline: true, underlineStyle: 'singleAccounting' })).toEqual([[2, top, 40, line]]);
-    const double = [[2, top, 40, line], [2, top + 2 * line, 40, line]];
-    expect(underlines({ underline: true, underlineStyle: 'double' })).toEqual(double);
-    expect(underlines({ underline: true, underlineStyle: 'doubleAccounting' })).toEqual(double);
+    expect(underlines({ underline: true, underlineStyle: 'double' })).toEqual([[2, top, 40, line], [2, top + 2 * line, 40, line]]);
+  });
+
+  it('paints accounting underlines across the cell below the descender line', () => {
+    function underlines(cmd: Partial<TextCmd>) {
+      const rects: number[][] = [];
+      const context = {
+        font: '', fillStyle: '', textAlign: '', textBaseline: '',
+        save() {}, restore() {}, setTransform() {}, clearRect() {},
+        beginPath() {}, rect() {}, clip() {}, fillText() {},
+        measureText(value: string) { return { width: value.length * 10 }; },
+        fillRect(x: number, y: number, w: number, h: number) { rects.push([x, y, w, h]); },
+      };
+      paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+        width: 100, height: 40,
+        commands: [{ op: 'text', x: 2, y: 20, text: 'abcd', fontSize: 30, color: '#000000',
+          align: 'left', underline: true, clip: { x: 0, y: 0, w: 100, h: 40 }, ...cmd } as TextCmd],
+      }, 1);
+      return rects;
+    }
+    const px = 30 * (96 / 72);
+    const top = 20 + px * 0.2;
+    const line = px * 0.05;
+    expect(underlines({ underlineStyle: 'singleAccounting' })).toEqual([[0, top, 100, line]]);
+    expect(underlines({ underlineStyle: 'doubleAccounting' })).toEqual([[0, top, 100, line], [0, top + 2 * line, 100, line]]);
+    const numberFormat = { left: 2, width: 96, parts: [{ offset: 1, kind: 'padding' as const, character: ' ' }], overflow: false };
+    expect(underlines({ underlineStyle: 'singleAccounting', text: '$ 1234', numberFormat })).toEqual([[2, top, 96, line]]);
   });
 
   it('paints a layout without padding, fill or overflow at its aligned edge without measuring', () => {
