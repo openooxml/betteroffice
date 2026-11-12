@@ -1226,6 +1226,47 @@ describe('fill handle with sheet headers', () => {
     await waitFor(() => expect(fill).toHaveBeenCalledTimes(1));
     expect(fill).toHaveBeenCalledWith(0, 'B2:C3', 'B2:C6');
   });
+
+  const headerSelectionSize = (view: Awaited<ReturnType<typeof mountEditor>>) =>
+    view.api().commands.getState('merge').value;
+  const headerGrid = (view: Awaited<ReturnType<typeof mountEditor>>) =>
+    view.surface.closest('[data-testid="xlsx-grid"]')!;
+
+  it('does not render the handle once a column header selects the whole column', async () => {
+    const view = await mountEditor(plain, undefined, true, true);
+    view.click({ row: 2, col: 1 });
+    await waitFor(() => expect(view.view.getByTestId('xlsx-fill-handle')).toBeDefined(), MOUNTED);
+
+    fireEvent.mouseDown(headerGrid(view).querySelector('[data-testid="xlsx-column-headers"] [data-col="0"]')!);
+
+    await waitFor(() => expect(headerSelectionSize(view)).toEqual({ rows: 1_048_576, columns: 1 }), MOUNTED);
+    expect(view.view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the handle once a row header selects the whole row', async () => {
+    const view = await mountEditor(plain, undefined, true, true);
+    view.click({ row: 2, col: 1 });
+    await waitFor(() => expect(view.view.getByTestId('xlsx-fill-handle')).toBeDefined(), MOUNTED);
+
+    fireEvent.mouseDown(headerGrid(view).querySelector('[data-testid="xlsx-row-headers"] [data-row="0"]')!);
+
+    await waitFor(() => expect(headerSelectionSize(view)).toEqual({ rows: 1, columns: 16_384 }), MOUNTED);
+    expect(view.view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the handle once the header corner selects the whole sheet', async () => {
+    const view = await mountEditor(plain, undefined, true, true);
+    view.click({ row: 2, col: 1 });
+    await waitFor(() => expect(view.view.getByTestId('xlsx-fill-handle')).toBeDefined(), MOUNTED);
+
+    fireEvent.click(headerGrid(view).querySelector('[data-testid="xlsx-grid-corner"]')!);
+
+    await waitFor(() => expect(headerSelectionSize(view)).toEqual({ rows: 1_048_576, columns: 16_384 }), MOUNTED);
+    expect(view.view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
 });
 
 function fillHandleElement(view: { view: RenderResult }): HTMLElement {

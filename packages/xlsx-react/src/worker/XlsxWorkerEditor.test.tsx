@@ -10315,4 +10315,118 @@ describe('fill handle with sheet headers', () => {
       },
     });
   });
+
+  async function peerlessHeaderHandle() {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true, fillHandle: true });
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 106, clientY: 34 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 106, clientY: 34 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+    const gesture = async (fire: () => void) => {
+      const before = host.sent.length;
+      await act(async () => { fire(); });
+      const sent = host.sent.slice(before);
+      await act(async () => {
+        for (const command of sent) host.ack(command);
+      });
+      await advance();
+      return sent.filter((command) => command.kind === 'select').pop();
+    };
+    return { view, gesture };
+  }
+
+  async function legacyHeaderHandle() {
+    harness();
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+      showSheetHeaders fillHandle onReady={(ready) => { api = ready; }} />);
+    await opened();
+    await advance();
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 106, clientY: 34 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 106, clientY: 34 });
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+    const size = () => api.commands.getState('merge').value;
+    expect(size()).toEqual({ rows: 1, columns: 1 });
+    const gesture = async (fire: () => void) => {
+      await act(async () => { fire(); });
+      await advance();
+    };
+    return { view, gesture, size };
+  }
+
+  const columnHeader = (view: ReturnType<typeof render>, index: number) =>
+    view.getByTestId('xlsx-column-headers').querySelector(`[data-col="${index}"]`)!;
+  const rowHeader = (view: ReturnType<typeof render>, index: number) =>
+    view.getByTestId('xlsx-row-headers').querySelector(`[data-row="${index}"]`)!;
+
+  it('does not render the peerless handle once a column header selects the whole column', async () => {
+    const { view, gesture } = await peerlessHeaderHandle();
+
+    expect(await gesture(() => fireEvent.mouseDown(columnHeader(view, 0)))).toMatchObject({ kind: 'select', payload: {
+      selection: { range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: XLSX_MAX_ROWS - 1, col: 0 } } },
+    } });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the peerless handle once a row header selects the whole row', async () => {
+    const { view, gesture } = await peerlessHeaderHandle();
+
+    expect(await gesture(() => fireEvent.mouseDown(rowHeader(view, 0)))).toMatchObject({ kind: 'select', payload: {
+      selection: { range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: XLSX_MAX_COLUMNS - 1 } } },
+    } });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the peerless handle once the header corner selects the whole sheet', async () => {
+    const { view, gesture } = await peerlessHeaderHandle();
+
+    expect(await gesture(() => fireEvent.click(view.getByTestId('xlsx-grid-corner')))).toMatchObject({
+      kind: 'select', payload: { selection: { range: { kind: 'rowCol', start: { row: 0, col: 0 },
+        end: { row: XLSX_MAX_ROWS - 1, col: XLSX_MAX_COLUMNS - 1 } } } },
+    });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once a column header selects the whole column', async () => {
+    const { view, gesture, size } = await legacyHeaderHandle();
+
+    await gesture(() => fireEvent.mouseDown(columnHeader(view, 0)));
+
+    expect(size()).toEqual({ rows: 1_048_576, columns: 1 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once a row header selects the whole row', async () => {
+    const { view, gesture, size } = await legacyHeaderHandle();
+
+    await gesture(() => fireEvent.mouseDown(rowHeader(view, 0)));
+
+    expect(size()).toEqual({ rows: 1, columns: 16_384 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once the header corner selects the whole sheet', async () => {
+    const { view, gesture, size } = await legacyHeaderHandle();
+
+    await gesture(() => fireEvent.click(view.getByTestId('xlsx-grid-corner')));
+
+    expect(size()).toEqual({ rows: 1_048_576, columns: 16_384 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
 });
