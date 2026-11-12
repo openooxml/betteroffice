@@ -76,6 +76,7 @@ const GHOST_INS_HIGHLIGHT: &str = "#2e7d321a";
 const GHOST_CHAR_W_RATIO: f32 = 0.6;
 const GHOST_GAP_PX: f32 = 6.0;
 const GHOST_MIN_SCALE: f32 = 0.6;
+const GHOST_FIT_EPSILON_PX: f32 = 1e-3;
 
 /// a pending edit rendered as a ghost pair in place of the cell's committed
 /// text: `old_text` struck in red, `new_text` in green.
@@ -1363,7 +1364,7 @@ fn emit_ghost(
 
     let old_width = ghost_text_width(old, full_size);
     let new_width = ghost_text_width(new, full_size);
-    if old_width + GHOST_GAP_PX + new_width <= avail {
+    if old_width + GHOST_GAP_PX + new_width <= avail + GHOST_FIT_EPSILON_PX {
         let baseline = baseline_y(cy0, ch, full_size, None);
         line(
             x,
@@ -1425,11 +1426,11 @@ fn ghost_text_width(text: &str, size: f32) -> f32 {
 /// `text` unchanged when its estimate fits `budget`, else a truncated prefix
 /// ending in `…`.
 fn ellipsize(text: &str, budget: f32, size: f32) -> String {
-    if ghost_text_width(text, size) <= budget {
+    if ghost_text_width(text, size) <= budget + GHOST_FIT_EPSILON_PX {
         return text.to_string();
     }
     let char_w = size * geometry::PX_PER_PT as f32 * GHOST_CHAR_W_RATIO;
-    let keep = ((budget / char_w) as i32 - 1).max(0) as usize;
+    let keep = (((budget + GHOST_FIT_EPSILON_PX) / char_w) as i32 - 1).max(0) as usize;
     let prefix: String = text.chars().take(keep).collect();
     format!("{prefix}…")
 }
