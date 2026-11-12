@@ -208,13 +208,15 @@ describe('workspace dependency versions', () => {
   });
 
   test('dependencies on native roots fail when the release skips native packages', async () => {
+    const prior = process.env.RELEASE_SKIP_NATIVE;
     process.env.RELEASE_SKIP_NATIVE = 'true';
     try {
       const skipped = await check('--npm', older, repository);
       expect(skipped.status).toBe(1);
       expect(skipped.stderr).toContain('@betteroffice/agents@');
     } finally {
-      delete process.env.RELEASE_SKIP_NATIVE;
+      if (prior === undefined) delete process.env.RELEASE_SKIP_NATIVE;
+      else process.env.RELEASE_SKIP_NATIVE = prior;
     }
   });
 
@@ -670,7 +672,8 @@ describe('the mode argument', () => {
   }, SPAWN_BUDGET_MS);
 
   test('--npm scans the repository itself and reports what the precomputed scan reports', async () => {
-    const cli = await guard('--npm', older, { RELEASE_SKIP_NATIVE: 'true' });
+    const cli = await guard('--npm', older, { RELEASE_SKIP_NATIVE: 'true', NODE_OPTIONS: '', NODE_NO_WARNINGS: '1' });
+    const prior = process.env.RELEASE_SKIP_NATIVE;
     process.env.RELEASE_SKIP_NATIVE = 'true';
     try {
       const precomputed = await check('--npm', older, repository);
@@ -679,7 +682,8 @@ describe('the mode argument', () => {
       expect([cli.status, cli.stdout.trimEnd(), cli.stderr.trimEnd()])
         .toEqual([precomputed.status, precomputed.stdout, precomputed.stderr]);
     } finally {
-      delete process.env.RELEASE_SKIP_NATIVE;
+      if (prior === undefined) delete process.env.RELEASE_SKIP_NATIVE;
+      else process.env.RELEASE_SKIP_NATIVE = prior;
     }
   }, SPAWN_BUDGET_MS);
 
