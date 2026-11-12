@@ -1,11 +1,12 @@
 import { createServer } from 'vite';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { qualityRendererPlugin } from '../office-quality/renderer.mjs';
+import { docxFontsPlugin, qualityRendererPlugin } from '../office-quality/renderer.mjs';
 
 const packageRoot = process.env.QUALITY_PACKAGE_ROOT;
 const reactRoot = process.env.QUALITY_REACT_ROOT;
 const fontsRoot = process.env.QUALITY_FONTS_ROOT;
+const fontsCjkRoot = fontsRoot ? process.env.QUALITY_FONTS_CJK_ROOT : undefined;
 const format = process.env.QUALITY_FORMAT ?? 'docx';
 if (!['docx', 'pptx', 'xlsx', 'vsdx'].includes(format)) throw new Error('Invalid format');
 const aliases = [];
@@ -27,22 +28,26 @@ for (const [name, override] of [
 }
 // Fonts this checkout has not published yet cannot come from the pinned CDN,
 // so an explicit assets directory is served from the viewer's own origin.
-const fontAssets = process.env.QUALITY_FONT_ASSETS?.trim() ||
+// A published release's fonts are served from its unpacked packages instead.
+const fontAssets = fontsRoot ? undefined : process.env.QUALITY_FONT_ASSETS?.trim() ||
   (process.env.QUALITY_LOCAL_ONLY === '1' ? 'packages/fonts-latin/assets' : undefined);
 const latinFiles = Object.fromEntries(JSON.parse(readFileSync(
   resolve('packages/fonts-latin/assets/manifest.json'), 'utf8',
 )).faces.map((face) => [face.file, true]));
 const intlAssets = resolve(process.env.QUALITY_FONT_ASSETS_INTL ?? 'packages/fonts-intl/assets');
+const releaseAssets = (root) => `/@fs${resolve(root, 'assets')}/`;
 const server = await createServer({
   configFile: false,
   define: {
     __QUALITY_FONT_BASE__: JSON.stringify(
-      fontAssets ? `/@fs${resolve(fontAssets)}/` : null
+      fontsRoot ? releaseAssets(fontsRoot) : fontAssets ? `/@fs${resolve(fontAssets)}/` : null
     ),
     __QUALITY_FONT_BASE_CJK__: JSON.stringify(
-      fontAssets
-        ? `/@fs${resolve(process.env.QUALITY_FONT_ASSETS_CJK ?? 'packages/fonts-cjk/assets')}/`
-        : null
+      fontsRoot
+        ? fontsCjkRoot ? releaseAssets(fontsCjkRoot) : null
+        : fontAssets
+          ? `/@fs${resolve(process.env.QUALITY_FONT_ASSETS_CJK ?? 'packages/fonts-cjk/assets')}/`
+          : null
     ),
   },
   plugins: [
@@ -62,7 +67,9 @@ const server = await createServer({
         });
       },
     }] : []),
-    ...(format === 'docx' ? [] : [qualityRendererPlugin(format, { publishedFonts: Boolean(fontsRoot) })]),
+    format === 'docx'
+      ? docxFontsPlugin({ publishedFonts: Boolean(fontsRoot) })
+      : qualityRendererPlugin(format, { publishedFonts: Boolean(fontsRoot) }),
   ],
   cacheDir: resolve(
     `.source/docx-quality/vite-cache-${process.env.QUALITY_PORT ?? 4178}`
@@ -91,6 +98,7 @@ const server = await createServer({
         ...(packageRoot ? [packageRoot] : []),
         ...(reactRoot ? [reactRoot] : []),
         ...(fontsRoot ? [fontsRoot] : []),
+        ...(fontsCjkRoot ? [fontsCjkRoot] : []),
       ],
     },
   },

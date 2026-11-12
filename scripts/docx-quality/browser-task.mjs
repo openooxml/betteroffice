@@ -3,6 +3,7 @@ import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { basename, extname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { isAllowedFontRequest } from './network-policy.mjs';
+import { fontFaceSummary } from './font-faces.mjs';
 
 const [file, out, fontMode = 'cdn', base = 'http://127.0.0.1:4178'] =
   process.argv.slice(2);
@@ -57,6 +58,7 @@ const deadline = setTimeout(async () => {
 const logs = [];
 const externalRequests = [];
 const networkViolations = [];
+let fontFaces;
 try {
   browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({
@@ -121,6 +123,8 @@ try {
     },
     [fontMode === 'cdn', profile]
   );
+  if (Array.isArray(result.fontsAdvertised))
+    fontFaces = fontFaceSummary(result.fontLoads, result.fontsAdvertised, networkViolations);
   console.error(`paint ${result.pages}`);
   await mkdir(out, { recursive: true });
   for (let index = 0; index < result.pages; index++) {
@@ -138,6 +142,7 @@ try {
     ...metadata,
     ...result,
     ...captureMetadata,
+    ...(fontFaces ? { font_faces: fontFaces } : {}),
     logs,
     externalRequests,
     ms: performance.now() - start,
@@ -150,7 +155,7 @@ try {
   await writeFile(
     resolve(out, 'result.json'),
     JSON.stringify(
-      { ...metadata, status: 'error', error: String(error), networkViolations },
+      { ...metadata, status: 'error', error: String(error), networkViolations, ...(fontFaces ? { font_faces: fontFaces } : {}) },
       null,
       2
     )

@@ -34,7 +34,7 @@ function validateSample(sample) {
   validateReferenceMetadata(sample.metadata, sample.id);
 }
 
-export function createPlan({ source_sha, commit, versions, react_version, published_fonts, fonts_basis, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
+export function createPlan({ source_sha, commit, versions, react_version, published_fonts, fonts_basis, published_fonts_cjk, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
   if (!isSha(source_sha) || !isSha(commit))
     throw new Error('Invalid fidelity plan revision');
   if (
@@ -45,7 +45,9 @@ export function createPlan({ source_sha, commit, versions, react_version, publis
     (published_fonts !== undefined && (typeof published_fonts !== 'object' || published_fonts === null ||
       !Object.entries(published_fonts).every(([format, version]) => FONT_FORMATS.includes(format) && isVersion(version)))) ||
     (fonts_basis !== undefined && (typeof fonts_basis !== 'object' || fonts_basis === null ||
-      !Object.entries(fonts_basis).every(([format, basis]) => published_fonts?.[format] && ['release-commit', 'latest-before-release'].includes(basis))))
+      !Object.entries(fonts_basis).every(([format, basis]) => published_fonts?.[format] && ['release-commit', 'latest-before-release'].includes(basis)))) ||
+    (published_fonts_cjk !== undefined && (typeof published_fonts_cjk !== 'object' || published_fonts_cjk === null ||
+      !Object.entries(published_fonts_cjk).every(([format, version]) => published_fonts?.[format] && isVersion(version))))
   )
     throw new Error('Invalid fidelity plan versions');
   if (!Array.isArray(samples) || !samples.length || samples.length > MAX_SAMPLES)
@@ -73,6 +75,7 @@ export function createPlan({ source_sha, commit, versions, react_version, publis
     react_version,
     ...(published_fonts === undefined ? {} : { published_fonts }),
     ...(fonts_basis === undefined ? {} : { fonts_basis }),
+    ...(published_fonts_cjk === undefined ? {} : { published_fonts_cjk }),
     formats,
     samples,
     ...(docx_published_source_sha === undefined ? {} : { docx_published_source_sha }),
@@ -123,7 +126,7 @@ export async function mapPool(values, limit, task) {
   return results;
 }
 
-export const FONT_FORMATS = ['pptx', 'xlsx'];
+export const FONT_FORMATS = ['docx', 'pptx', 'xlsx'];
 
 const STABLE = /^\d+\.\d+\.\d+$/;
 const released = (version) => STABLE.test(version) && version !== '0.0.0';
@@ -133,17 +136,17 @@ const semverOrder = (left, right) => {
   return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 };
 
-export function releasedFonts(fonts, releases) {
+export function releasedFonts(fonts, releases, { packageName = '@betteroffice/fonts', releaseName = (format) => `@betteroffice/${format}` } = {}) {
   const versions = Object.entries(fonts?.versions ?? {});
   const fonts_basis = {};
   const published_fonts = {};
   for (const [format, release] of Object.entries(releases)) {
-    const label = `@betteroffice/${format}@${release?.version}`;
+    const label = `${releaseName(format)}@${release?.version}`;
     const sameCommit = versions
       .filter(([version, manifest]) => released(version) && /^[a-f0-9]{40}$/.test(release?.gitHead ?? '') && manifest?.gitHead === release.gitHead)
       .map(([version]) => version);
     if (sameCommit.length > 1)
-      throw new Error(`Expected at most one @betteroffice/fonts release from the release commit of ${label}, found ${sameCommit.length}`);
+      throw new Error(`Expected at most one ${packageName} release from the release commit of ${label}, found ${sameCommit.length}`);
     if (sameCommit.length === 1) {
       published_fonts[format] = sameCommit[0];
       fonts_basis[format] = 'release-commit';
@@ -155,11 +158,30 @@ export function releasedFonts(fonts, releases) {
       .filter((version) => released(version) && Date.parse(fonts?.time?.[version] ?? '') < releasedAt)
       .sort(semverOrder);
     if (!Number.isFinite(releasedAt) || !earlier.length)
-      throw new Error(`No @betteroffice/fonts release from the release commit of ${label} or published before it`);
+      throw new Error(`No ${packageName} release from the release commit of ${label} or published before it`);
     published_fonts[format] = earlier.at(-1);
     fonts_basis[format] = 'latest-before-release';
   }
   return { published_fonts, fonts_basis };
+}
+
+/**
+ * The fonts release of each published format package, and the @betteroffice/fonts-cjk release its CDN
+ * provider points at: built from the same commit as that fonts release, else the latest published before it.
+ */
+export async function releasedFontPackages(packument, releases) {
+  const fonts = await packument('@betteroffice/fonts');
+  const choice = releasedFonts(fonts, releases);
+  const cjk = releasedFonts(
+    await packument('@betteroffice/fonts-cjk'),
+    Object.fromEntries(Object.entries(choice.published_fonts).map(([format, version]) => [format, {
+      version,
+      gitHead: fonts?.versions?.[version]?.gitHead,
+      time: fonts?.time?.[version],
+    }])),
+    { packageName: '@betteroffice/fonts-cjk', releaseName: () => '@betteroffice/fonts' }
+  );
+  return { ...choice, published_fonts_cjk: cjk.published_fonts };
 }
 
 export function registryLoaders(download) {
@@ -197,7 +219,7 @@ export async function preparePlan(environment, dependencies) {
   ]);
   const fontFormats = FONT_FORMATS.filter((format) => samples.some((sample) => sample.format === format));
   const fontsChoice = fontFormats.length
-    ? releasedFonts(await packument('@betteroffice/fonts'), Object.fromEntries(await Promise.all(fontFormats.map(async (format) => {
+    ? await releasedFontPackages(packument, Object.fromEntries(await Promise.all(fontFormats.map(async (format) => {
         const release = published[FORMATS.indexOf(format)];
         const document = await packument(`@betteroffice/${format}`);
         return [format, { ...release, time: document?.time?.[release.version] }];

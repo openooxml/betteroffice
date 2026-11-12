@@ -77,6 +77,22 @@ test('the published channel loads fonts from the release package, the commit cha
     for (const name of ['createFontProvider', 'resolveMetricCompatFace', 'resolveLastResortFace', 'maxDigitWidth'])
       expect(source).toContain(name);
   }
+  const { docxFontsPlugin } = await import('./renderer.mjs');
+  for (const [publishedFonts, expected, absent] of [
+    [true, ["from '@betteroffice/fonts/cdn'", "from '@betteroffice/fonts';"], 'packages/fonts/src'],
+    [false, ['packages/fonts/src/cdn.ts', 'packages/fonts/src/manifest.ts'], '@betteroffice/fonts'],
+  ] as const) {
+    const plugin: any = docxFontsPlugin({ publishedFonts });
+    expect(plugin.resolveId('virtual:office-quality-fonts')).toBeUndefined();
+    const source = String(plugin.load(plugin.resolveId('virtual:docx-quality-fonts')));
+    for (const text of expected) expect(source).toContain(text);
+    expect(source).not.toContain(absent);
+    for (const name of ['createFontProvider', 'BUNDLED_FONTS', 'resolveMetricCompatFace', 'resolveScriptFallbackFace', 'resolveGlyphFallbackFace', 'resolveLastResortChoice'])
+      expect(source).toContain(name);
+  }
+  const harness = await Bun.file(new URL('../docx-quality/harness.tsx', import.meta.url)).text();
+  expect(harness).toContain("from 'virtual:docx-quality-fonts'");
+  expect(harness).not.toContain('packages/fonts/src/cdn');
   const renderer: any = (qualityRendererPlugin as any)('xlsx');
   expect(String(renderer.load(renderer.resolveId('virtual:office-quality-renderer')))).toBe("export * from '@betteroffice/xlsx';");
 });

@@ -3,7 +3,14 @@ import { createRoot } from 'react-dom/client';
 import { DocxEditor } from '@betteroffice/docx-react';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import '@betteroffice/docx-react/styles.css';
-import { createFontProvider } from '../../packages/fonts/src/cdn';
+import {
+  BUNDLED_FONTS,
+  createFontProvider,
+  resolveGlyphFallbackFace,
+  resolveLastResortChoice,
+  resolveMetricCompatFace,
+  resolveScriptFallbackFace,
+} from 'virtual:docx-quality-fonts';
 import { measuredFontProvider, type FontLoad } from './measured-fonts';
 import { MAX_LOCAL_REFERENCE_PAGES } from '../office-quality/reference.mjs';
 import {
@@ -33,7 +40,17 @@ const provider = createFontProvider(
 );
 setGoogleFontsEnabled(false);
 const fontLoads: FontLoad[] = [];
-const measuredFonts = measuredFontProvider(provider, fontLoads);
+const fontsAdvertised: string[] = BUNDLED_FONTS.map((face: { file: string }) => face.file);
+const faceOf = (kind: string, args: unknown[]) => {
+  const [name, bold, italic, extra] = args as [string, boolean, boolean, string | undefined];
+  const face =
+    kind === 'family' ? resolveMetricCompatFace(name, bold, italic)
+    : kind === 'script' ? resolveScriptFallbackFace(name, bold, italic, extra)
+    : kind === 'glyph' ? resolveGlyphFallbackFace(name, bold, italic, extra ?? 'powerpoint')
+    : resolveLastResortChoice(name, bold, italic, extra)?.face;
+  return face?.file as string | undefined;
+};
+const measuredFonts = measuredFontProvider(provider, fontLoads, faceOf);
 let editor: React.RefObject<any>;
 let root: ReturnType<typeof createRoot>;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -95,7 +112,7 @@ api.oracleInit = async (input: number[], fonts: boolean, profile?: unknown) => {
     if (pages > 0 && pages === last && canvas?.width && canvas?.height) {
       if (Date.now() - stable >= 3000) {
         api.stage = 'ready';
-        return { pages, errors: api.errors, fontLoads };
+        return { pages, errors: api.errors, fontLoads, fontsAdvertised };
       }
     } else {
       last = pages;

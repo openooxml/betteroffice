@@ -71,6 +71,53 @@ function score(samples, channel, revision) {
   };
 }
 
+const fontSourceLabel = (fonts) =>
+  `${fonts.package}${fonts.cjk ? ` and ${fonts.cjk}` : ''} (${fonts.copy})`;
+
+/** One arm's font source and how the faces its provider advertises loaded across the arm's captures. */
+export function fontSummary(samples, channel) {
+  const sources = new Set();
+  const loaded = new Set();
+  const failed = new Map();
+  let advertised = 0;
+  let captures = 0;
+  for (const sample of samples) {
+    const fonts = sample.comparisons?.find((result) => result.channel === channel)?.fonts;
+    if (!fonts) continue;
+    if (typeof fonts.package === 'string') sources.add(fontSourceLabel(fonts));
+    if (!Number.isInteger(fonts.advertised)) continue;
+    captures++;
+    advertised = Math.max(advertised, fonts.advertised);
+    for (const face of fonts.loaded_faces ?? []) loaded.add(face);
+    for (const [face, reason] of Object.entries(fonts.failed_faces ?? {}))
+      if (!failed.has(face)) failed.set(face, reason);
+  }
+  for (const face of failed.keys()) loaded.delete(face);
+  const reasons = {};
+  for (const reason of failed.values()) reasons[reason] = (reasons[reason] ?? 0) + 1;
+  return { sources: [...sources].sort(), captures, advertised, loaded: loaded.size, failed: failed.size, reasons };
+}
+
+const reasonText = (reasons) =>
+  Object.entries(reasons).sort(([a], [b]) => a.localeCompare(b)).map(([reason, total]) => `${reason} ${total}`).join(', ') || 'none';
+
+export function fontArmLine(channel, summary) {
+  return `${channel} arm: ${summary.failed} of ${summary.advertised} advertised faces did not load, by reason: ${reasonText(summary.reasons)}`;
+}
+
+function fontNote(samples) {
+  const lines = [];
+  for (const [channel, label] of [['published', 'Published'], ['commit', 'Commit']]) {
+    const summary = fontSummary(samples, channel);
+    if (!summary.sources.length) continue;
+    const loads = summary.captures
+      ? `; ${summary.advertised} advertised faces, ${summary.loaded} loaded, ${summary.failed} did not load${summary.failed ? ` (${reasonText(summary.reasons)})` : ''}`
+      : '';
+    lines.push(`- ${label} fonts: ${summary.sources.join('; ')}${loads}`);
+  }
+  return lines.length ? `\n\n${lines.join('\n')}` : '';
+}
+
 const count = (value) => value.toLocaleString('en-US');
 const NOUNS = { docx: ['DOCX documents', 'pages'], pptx: ['PPTX presentations', 'slides'], xlsx: ['XLSX workbooks', 'printed pages'] };
 
@@ -262,6 +309,7 @@ export function renderSection(report, { privateCorpus = false } = {}) {
   ]);
   const xlsxTable = table('xlsx');
   const versionOf = (format) => report.versions[format];
+  const formatSamples = (format) => report.samples.filter((sample) => sample.format === format);
   const notes = {
     corpus: corpusNote(report.corpus),
     recalc: calculation ? recalcNote(calculation, report.xlsx_benchmark, versionOf('xlsx'), short) : '',
@@ -282,16 +330,16 @@ ${notes.corpus ? `${notes.corpus}\n\n` : ''}${chart(headline, perf)}
 
 Page agreement is reported separately from SSIM.
 
-${docxTable}
+${docxTable}${fontNote(formatSamples('docx'))}
 
 
 ### PPTX
 
-${pptxTable}
+${pptxTable}${fontNote(formatSamples('pptx'))}
 
 ### XLSX
 
-${xlsxTable}${note(notes.recalc)}${note(notes.timing)}
+${xlsxTable}${fontNote(formatSamples('xlsx'))}${note(notes.recalc)}${note(notes.timing)}
 
 </details>
 
@@ -327,6 +375,10 @@ export function aggregateReport(report) {
       },
     };
     if (report.corpus?.[format]) entry.corpus = { ...report.corpus[format] };
+    const fonts = Object.fromEntries(['published', 'commit']
+      .map((channel) => [channel, fontSummary(samples, channel)])
+      .filter(([, summary]) => summary.sources.length || summary.captures));
+    if (Object.keys(fonts).length) entry.fonts = fonts;
     if (format !== 'xlsx' && report[`${format}_benchmark`]) {
       const timing = timingSummary(report.samples, format);
       entry.render_ms = Object.fromEntries(['published', 'commit', 'libreoffice'].map((channel) =>

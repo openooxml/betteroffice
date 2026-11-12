@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { FORMATS, renderSection } from './readme.mjs';
+import { FORMATS, fontArmLine, fontSummary, renderSection } from './readme.mjs';
 import { measureSamples } from './results.mjs';
 import { validateReferenceMetadata } from './reference.mjs';
 import { download } from './download.mjs';
@@ -99,11 +99,36 @@ async function reference({ id, format, metadata }) {
   };
 }
 
-function publishedFontsVersion(format) {
-  const version = plan.published_fonts?.[format];
+function publishedFontsVersion(format, record = 'published_fonts', name = '@betteroffice/fonts') {
+  const version = plan[record]?.[format];
   if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version ?? ''))
-    throw new Error(`The plan does not record the @betteroffice/fonts release of published ${format}`);
+    throw new Error(`The plan does not record the ${name} release of published ${format}`);
   return version;
+}
+
+const publishedFontsCjkVersion = (format) =>
+  publishedFontsVersion(format, 'published_fonts_cjk', '@betteroffice/fonts-cjk');
+
+async function fontSource(format, channel) {
+  if (channel === 'published')
+    return {
+      package: `@betteroffice/fonts@${publishedFontsVersion(format)}`,
+      cjk: `@betteroffice/fonts-cjk@${publishedFontsCjkVersion(format)}`,
+      copy: 'local release copy',
+    };
+  const { version } = JSON.parse(await readFile(resolve('packages/fonts/package.json'), 'utf8'));
+  return { package: `@betteroffice/fonts@${version}`, copy: 'workspace' };
+}
+
+async function recordFonts(samples, format, channel) {
+  const source = await fontSource(format, channel);
+  for (const sample of samples) {
+    const capture = JSON.parse(
+      await readFile(resolve(sample.directory, channel, 'result.json'), 'utf8').catch(() => 'null')
+    );
+    const comparison = sample.comparisons.find((entry) => entry.channel === channel);
+    if (comparison) comparison.fonts = { ...source, ...(capture?.font_faces ?? {}) };
+  }
 }
 
 async function packageRoot(name, version) {
@@ -143,6 +168,8 @@ async function viewer(overrides = {}) {
   delete env.QUALITY_PACKAGE_ROOT;
   delete env.QUALITY_REACT_ROOT;
   delete env.QUALITY_FONT_ASSETS;
+  delete env.QUALITY_FONTS_ROOT;
+  delete env.QUALITY_FONTS_CJK_ROOT;
   Object.assign(env, overrides);
   const child = spawn(process.execPath, ['scripts/docx-quality/server.mjs'], {
     env,
@@ -204,9 +231,8 @@ for (const format of selectedFormats) {
           ),
         }
       : {}),
-    ...(format === 'docx'
-      ? {}
-      : { QUALITY_FONTS_ROOT: await packageRoot('@betteroffice/fonts', publishedFontsVersion(format)) }),
+    QUALITY_FONTS_ROOT: await packageRoot('@betteroffice/fonts', publishedFontsVersion(format)),
+    QUALITY_FONTS_CJK_ROOT: await packageRoot('@betteroffice/fonts-cjk', publishedFontsCjkVersion(format)),
   };
   for (const channel of ['published', 'commit']) {
     const server = await viewer({
@@ -240,7 +266,7 @@ for (const format of selectedFormats) {
                 env: {
                   ...process.env,
                   QUALITY_CAPTURE_CONFIG: JSON.stringify(sample.capture_profile),
-                  ...(channel === 'published' && format !== 'docx'
+                  ...(channel === 'published'
                     ? { QUALITY_PUBLISHED_FONTS: publishedFontsVersion(format) }
                     : {}),
                   QUALITY_ENGINE_LABEL:
@@ -270,8 +296,18 @@ for (const format of selectedFormats) {
     } finally {
       server.child.kill();
     }
+    await recordFonts(samples.filter((sample) => sample.format === format), format, channel);
   }
 }
+const fontFailures = [];
+for (const format of selectedFormats)
+  for (const channel of ['published', 'commit']) {
+    const summary = fontSummary(samples.filter((sample) => sample.format === format), channel);
+    if (!summary.advertised) continue;
+    const line = `${format.toUpperCase()} ${fontArmLine(channel, summary)}`;
+    console.log(line);
+    if (summary.failed) fontFailures.push(line);
+  }
 const report = {
   source_sha: plan.source_sha,
   commit: plan.commit,
@@ -284,3 +320,4 @@ const report = {
 await writeFile(resolve(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');
 await writeFile(resolve(output, 'section.md'), renderSection(report));
 console.log(`Generated ${resolve(output, 'section.md')}`);
+if (fontFailures.length) throw new Error(`Advertised font faces did not load: ${fontFailures.join('; ')}`);
