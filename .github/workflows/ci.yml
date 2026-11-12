@@ -14,6 +14,10 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # The router fills the account's free GitHub-hosted runners first; a job that does not fit, or every job when
   # the router cannot count, runs on a fresh self-hosted runner of the leanest class that fits. The router itself
@@ -637,7 +641,7 @@ jobs:
             done <<< "$asset_chunks"
           done
           for package in packages/docx bindings/docx-native; do
-            (cd "$package/dist" && find . -type f \( -name '*.d.ts' -o -name '*.d.mts' \) | LC_ALL=C sort) > "$RUNNER_TEMP/$(basename "$package")-declarations.txt"
+            (set -o pipefail; cd "$package/dist" && find . -type f \( -name '*.d.ts' -o -name '*.d.mts' \) | LC_ALL=C sort) > "$RUNNER_TEMP/$(basename "$package")-declarations.txt"
           done
           test -s "$RUNNER_TEMP/docx-declarations.txt"
           cmp "$RUNNER_TEMP/docx-declarations.txt" "$RUNNER_TEMP/docx-native-declarations.txt"

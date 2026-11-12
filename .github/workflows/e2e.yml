@@ -13,6 +13,10 @@ concurrency:
   group: e2e-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Free GitHub-hosted runners first, then a fresh self-hosted runner per job; the router and the variables work as in ci.yml.
   route:

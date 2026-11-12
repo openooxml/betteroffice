@@ -60,6 +60,10 @@ concurrency:
   group: visual-fidelity-${{ inputs.branch }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   prepare:
     if: github.ref == 'refs/heads/main'
