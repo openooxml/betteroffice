@@ -441,28 +441,63 @@ pub struct SeedParagraph {
 }
 
 /// A story's segments still to read, from the diff taken when it was opened, which no commit
-/// since has changed.
+/// since has changed. It holds no shared type, only hooks resolved in the reading transaction.
 pub(crate) enum StorySegmentCursor {
-    Diffs(std::vec::IntoIter<yrs::types::text::Diff<YChange>>),
+    Diffs(std::vec::IntoIter<PendingSegment>),
     Segments(std::vec::IntoIter<StorySegment>),
 }
 
+/// One diff entry of a [`StorySegmentCursor`], owned apart from the transaction that read it.
+pub(crate) struct PendingSegment {
+    insert: PendingInsert,
+    attributes: Option<Box<Attrs>>,
+}
+
+enum PendingInsert {
+    Value(Any),
+    Map(yrs::Hook<MapRef>),
+}
+
+impl PendingSegment {
+    fn new(diff: yrs::types::text::Diff<YChange>) -> Self {
+        let insert = match diff.insert {
+            Out::Any(value) => PendingInsert::Value(value),
+            Out::YMap(map) => PendingInsert::Map(yrs::SharedRef::hook(&map)),
+            // Every other shared type reads as the empty embed `segment_content` gives it.
+            _ => PendingInsert::Value(Any::Null),
+        };
+        Self {
+            insert,
+            attributes: diff.attributes,
+        }
+    }
+}
+
 impl StorySegmentCursor {
-    /// The next `limit` segments, fewer at the end of the story.
-    pub(crate) fn next_chunk<T: ReadTxn>(&mut self, txn: &T, limit: usize) -> Vec<StorySegment> {
+    /// The next `limit` segments, fewer at the end of the story; `None` where a map it holds is
+    /// gone from `txn`.
+    pub(crate) fn next_chunk<T: ReadTxn>(
+        &mut self,
+        txn: &T,
+        limit: usize,
+    ) -> Option<Vec<StorySegment>> {
         match self {
             Self::Diffs(diffs) => diffs
                 .by_ref()
                 .take(limit)
-                .map(|diff| {
+                .map(|pending| {
                     ooxml_opc::progress::tick();
-                    StorySegment {
-                        content: segment_content(diff.insert, txn),
-                        attributes: ordered_attrs(diff.attributes.as_deref()),
-                    }
+                    let insert = match pending.insert {
+                        PendingInsert::Value(value) => Out::Any(value),
+                        PendingInsert::Map(hook) => Out::YMap(hook.get(txn)?),
+                    };
+                    Some(StorySegment {
+                        content: segment_content(insert, txn),
+                        attributes: ordered_attrs(pending.attributes.as_deref()),
+                    })
                 })
                 .collect(),
-            Self::Segments(segments) => segments.by_ref().take(limit).collect(),
+            Self::Segments(segments) => Some(segments.by_ref().take(limit).collect()),
         }
     }
 
@@ -1899,9 +1934,9 @@ impl EditingDoc {
         txn: &T,
         story_id: &str,
     ) -> EditResult<Vec<StorySegment>> {
-        Ok(self
-            .story_segment_cursor_in(txn, story_id)?
-            .next_chunk(txn, usize::MAX))
+        self.story_segment_cursor_in(txn, story_id)?
+            .next_chunk(txn, usize::MAX)
+            .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))
     }
 
     /// [`Self::story_segments_in`], read a chunk at a time from the story's diff.
@@ -1921,7 +1956,12 @@ impl EditingDoc {
             Err(error) => return Err(error),
         };
         Ok(StorySegmentCursor::Diffs(
-            story.diff(txn, YChange::identity).into_iter(),
+            story
+                .diff(txn, YChange::identity)
+                .into_iter()
+                .map(PendingSegment::new)
+                .collect::<Vec<_>>()
+                .into_iter(),
         ))
     }
 

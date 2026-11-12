@@ -1789,6 +1789,7 @@ struct StoryFingerprint<'a> {
     story: String,
     seeded: Option<SaveSeeds<'a>>,
     cursor: crate::StorySegmentCursor,
+    vanished: bool,
     chunk: usize,
     media: Option<Arc<docx_parse::media::MediaTable>>,
     urls: crate::media::SegmentDataUrls,
@@ -1838,6 +1839,7 @@ impl<'a> StoryFingerprint<'a> {
             story: story.to_owned(),
             seeded,
             cursor,
+            vanished: false,
             chunk: chunk.max(1),
             media: doc.media_table(),
             urls: crate::media::SegmentDataUrls::new(budget),
@@ -1960,7 +1962,10 @@ impl<'a> StoryFingerprint<'a> {
         budget: &mut Option<usize>,
     ) -> Option<Option<crate::StorySegment>> {
         if self.segments.as_slice().is_empty() {
-            let mut chunk = self.cursor.next_chunk(txn, self.chunk);
+            let Some(mut chunk) = self.cursor.next_chunk(txn, self.chunk) else {
+                self.vanished = true;
+                return None;
+            };
             if chunk.is_empty() {
                 return Some(None);
             }
@@ -1999,7 +2004,10 @@ impl<'a> StoryFingerprint<'a> {
         }
         if let Some(media) = self.media.clone() {
             while !self.urls.spent() {
-                let mut chunk = self.cursor.next_chunk(txn, self.chunk);
+                let Some(mut chunk) = self.cursor.next_chunk(txn, self.chunk) else {
+                    self.vanished = true;
+                    return None;
+                };
                 if chunk.is_empty() {
                     break;
                 }
@@ -3953,6 +3961,10 @@ impl EditingDoc {
                 continue;
             };
             let advanced = fingerprint.advance(&txn, &mut state.budget, left.max(1));
+            if fingerprint.vanished {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
             if let Some((false, _)) = advanced {
                 return PrimeSlice::Pending;
             }
@@ -6406,6 +6418,46 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn a_map_collected_behind_the_observer_declines_the_prime() {
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        let mut held = false;
+        for _ in 0..10_000 {
+            assert_eq!(
+                doc.prime_save_seed_states_slice_with(u32::MAX, u32::MAX, 1, 1),
+                PrimeSlice::Pending
+            );
+            held = doc
+                .prime_progress
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|progress| progress.current.as_ref())
+                .is_some_and(|(story, fingerprint)| {
+                    story == "body" && fingerprint.cursor.len() > 100
+                });
+            if held {
+                break;
+            }
+        }
+        assert!(held);
+        let epoch = doc.committed_epoch();
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.commit();
+            let body = crate::story_text(&txn, "body").unwrap();
+            let len = body.len(&txn);
+            body.remove_range(&mut txn, len - 5, 5);
+            txn.gc(None);
+        }
+        assert_eq!(doc.committed_epoch(), epoch);
+        assert_eq!(prime_in_slices(doc, u32::MAX, 1, 1).0, PrimeSlice::Declined);
+        assert!(doc.prime_progress.lock().unwrap().is_none());
+        let source = doc.source_index().unwrap();
+        assert!(!source.seed_states_initialized());
     }
 
     #[test]
