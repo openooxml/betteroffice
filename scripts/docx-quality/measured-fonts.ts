@@ -1,4 +1,4 @@
-import type { BundledFontSource } from '../../packages/fonts/src/provider';
+import type { BundledFontLoader, BundledFontSource } from '../../packages/fonts/src/provider';
 
 export type FontLoad = {
   kind: string;
@@ -13,11 +13,11 @@ export type FontLoad = {
 export type FaceOf = (kind: string, args: unknown[]) => string | undefined;
 
 const track =
-  <A extends unknown[], L extends () => Promise<ArrayBuffer>>(
+  <A extends unknown[], L extends BundledFontLoader>(
     fontLoads: FontLoad[],
     kind: string,
     resolve: (...args: A) => L | undefined,
-    faceOf?: FaceOf,
+    faceOf: FaceOf | undefined,
   ) =>
   (...args: A) => {
     const load = resolve(...args);
@@ -26,29 +26,40 @@ const track =
     const family = kind === 'base-latin' ? 'BetterOffice Base Latin' : String(args[0]);
     const record = (entry: Omit<FontLoad, 'kind' | 'family'>) =>
       fontLoads.push({ kind, family, ...entry, ...(face === undefined ? {} : { face }) });
-    return Object.assign(async () => {
+    const recorded = <T>(run: () => Promise<T>) => async () => {
       try {
-        const bytes = await load();
+        const result = await run();
         record({ ok: true });
-        return bytes;
+        return result;
       } catch (error) {
         record({ ok: false, error: String(error) });
         throw error;
       }
-    }, load);
+    };
+    const { readOnlyBytes } = load;
+    return Object.assign(
+      recorded(() => load()),
+      load,
+      readOnlyBytes ? { readOnlyBytes: recorded(() => readOnlyBytes.call(load)) } : {},
+    );
   };
 
 /** The provider the harness measures with, recording every font load. */
 export function measuredFontProvider(provider: BundledFontSource, fontLoads: FontLoad[], faceOf?: FaceOf) {
+  const tracked = <A extends unknown[], L extends BundledFontLoader>(
+    kind: string,
+    resolve: (...args: A) => L | undefined,
+    attributed = true,
+  ) => track(fontLoads, kind, resolve, attributed ? faceOf : undefined);
   return {
-    resolve: track(fontLoads, 'family', provider.resolve, faceOf),
-    resolveScriptFallback: track(fontLoads, 'script', provider.resolveScriptFallback, faceOf),
-    ...(provider.resolveGlyphFallback
-      ? { resolveGlyphFallback: track(fontLoads, 'glyph', provider.resolveGlyphFallback, faceOf) }
-      : {}),
-    resolveLastResort: track(fontLoads, 'fallback', provider.resolveLastResort, faceOf),
-    ...(provider.resolveBaseLatin
-      ? { resolveBaseLatin: track(fontLoads, 'base-latin', provider.resolveBaseLatin, faceOf) }
+    resolve: tracked('family', provider.resolve),
+    ...(provider.resolveFamily ? { resolveFamily: tracked('bundled-family', provider.resolveFamily, false) } : {}),
+    resolveScriptFallback: tracked('script', provider.resolveScriptFallback),
+    ...(provider.resolveGlyphFallback ? { resolveGlyphFallback: tracked('glyph', provider.resolveGlyphFallback) } : {}),
+    resolveLastResort: tracked('fallback', provider.resolveLastResort),
+    ...(provider.resolveBaseLatin ? { resolveBaseLatin: tracked('base-latin', provider.resolveBaseLatin) } : {}),
+    ...(provider.resolveLightVariant
+      ? { resolveLightVariant: tracked('light-variant', provider.resolveLightVariant, false) }
       : {}),
   };
 }

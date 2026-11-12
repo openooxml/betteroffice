@@ -71,6 +71,7 @@ import { useSaveRequest } from './commands/useSaveRequest';
 import { useXlsxCommandBinding, type XlsxEditorBridge } from './commands/useXlsxCommands';
 import { XlsxCommandContext } from './commands/XlsxCommandProvider';
 import { EditorToolbar } from './components/EditorToolbar';
+import { FillHandle, fillHandleAnchor } from './components/FillHandle';
 import { EditorChromeContext } from './components/EditorToolbarContext';
 import type { BorderStyle } from './components/Toolbar';
 import { FormulaBarContext, type FormulaBarBinding } from './components/toolbar/FormulaBar';
@@ -421,6 +422,7 @@ export function XlsxEditorContent({
   onReady,
   className,
   readOnly = false,
+  fillHandle = false,
   allowHostProposals = false,
   defaultFonts,
   toolbar,
@@ -1496,6 +1498,37 @@ export function XlsxEditorContent({
     [zoom]
   );
 
+  const fillPreviewRect = useCallback((range: CellRange) => {
+    const currentGrid = frameRef.current?.grid;
+    if (!currentGrid) return null;
+    const rect = rangeRect(currentGrid, range);
+    return rect ? scaledRect(rect, zoomRef.current) : null;
+  }, []);
+
+  // tile the selection into the dragged rectangle as one engine undo step.
+  // a refusal leaves workbook and selection untouched and only reports why.
+  const fillSelection = useCallback(
+    (source: CellRange, destination: CellRange) => {
+      const handle = handleRef.current;
+      if (!handle || readOnlyRef.current) return;
+      const sheet = activeSheetRef.current;
+      void coordinator.input(() => {
+        if (handleRef.current !== handle || readOnlyRef.current) return;
+        try {
+          const from = handle.cell(sheet, source.top, source.left).a1;
+          const sourceEnd = handle.cell(sheet, source.bottom, source.right).a1;
+          const end = handle.cell(sheet, destination.bottom, destination.right).a1;
+          applyResult(handle.fillRange(sheet, from === sourceEnd ? from : `${from}:${sourceEnd}`, `${from}:${end}`));
+          return true;
+        } catch (error) {
+          setRefusal(error instanceof Error ? error.message : String(error));
+          return true;
+        }
+      });
+    },
+    [applyResult, coordinator]
+  );
+
   // which chart a pointer event lands on. containment runs over the regions the
   // painted frame published, engine geometry, engine clipping, engine paint
   // order, so no geometry is rebuilt here and the answer cannot drift from the
@@ -2320,6 +2353,13 @@ export function XlsxEditorContent({
   const focusRect = grid && renderedFocus ? rangeRect(grid, renderedFocus) : null;
   const editRect = grid && editing ? cellRect(grid, editing.row, editing.col) : null;
   const scaledSelectionRect = selRect ? scaledRect(selRect, zoom) : null;
+  const selectionBottomRight = grid && renderedSelection
+    ? cellRect(grid, renderedSelection.bottom, renderedSelection.right)
+    : null;
+  const fillHandleRect = fillHandleAnchor(
+    scaledSelectionRect,
+    selectionBottomRight ? scaledRect(selectionBottomRight, zoom) : null
+  );
   const scaledFocusRect = focusRect ? scaledRect(focusRect, zoom) : null;
   const scaledEditRect = editRect ? scaledRect(editRect, zoom) : null;
   const editColors = editRect ? cellEditorColors(frameRef.current, editRect) : null;
@@ -2679,6 +2719,17 @@ export function XlsxEditorContent({
                       border: `1px solid ${BRAND}`,
                       background: 'rgba(33, 115, 70, 0.12)',
                     }}
+                  />
+                )}
+                {fillHandle && !readOnly && !editing && !coordinator.draft && !selectedChart &&
+                  fillHandleRect && renderedSelection && (
+                  <FillHandle
+                    rect={fillHandleRect}
+                    source={renderedSelection}
+                    rectForRange={fillPreviewRect}
+                    cellAt={pointToCell}
+                    onFill={fillSelection}
+                    ariaLabel={t('a11y.fillHandleLabel')}
                   />
                 )}
                 {chartOutlineRect && (

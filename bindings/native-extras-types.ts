@@ -41,7 +41,7 @@ export interface DocxNativeExtras {
   members: {
     EditSession: {
       renderPngTarget(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array;
-      renderPngTargetReport(displayListJson: string, targetJson: string, optionsJson: string): { png: Uint8Array; pictures: PngUnavailablePicture[] };
+      renderPngTargetReport(displayListJson: string, targetJson: string, optionsJson: string): { png: Uint8Array; pictures: PngUnavailablePicture[]; skippedEffects: string[] };
     };
   };
 }

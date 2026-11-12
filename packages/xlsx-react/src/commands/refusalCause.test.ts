@@ -36,6 +36,15 @@ describe('refusal banner mapping', () => {
     }
   });
 
+  test('a fill refusal names the fill message and says nothing changed', () => {
+    const error = new PeerlessWorkerCommandRefusal(structural('fill'), null, null,
+      { kind: 'fillRange', payload: { args: [0, 'A1', 'A1:A2'] } } as never);
+    expect(error.code).toBe('edit-unsupported');
+    expect(error.cause).toBe('fill');
+    expect(t(REFUSAL_CAUSE_KEYS[error.cause!]))
+      .toBe("This fill can't be applied: it would change cells with links, notes or rules. The workbook is unchanged.");
+  });
+
   test('an unsupported refusal without a known cause gets the generic message, never the cell entry one', () => {
     for (const status of [
       refused('unsupported'),

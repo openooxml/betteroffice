@@ -461,9 +461,9 @@ test('the arm line states how many advertised faces did not load and why', async
   const { fontArmLine, fontSummary } = await import('./readme.mjs');
   const { samples } = fontsReport();
   expect(fontArmLine('published', fontSummary(samples, 'published'))).toBe(
-    "published arm: 3 of 5 faces did not load (M = faces the documents requested that the arm's provider offers, base latin: none in this release), by reason: blocked 1, error 1, http 404 1"
+    "published arm: 3 of 5 faces did not load (M = faces the documents requested that the arm's provider offers, base latin: none in this release), by reason: blocked 1, error 1, http 404 1; sliced faces are observed only through their whole-face fallback at open; a chunk that fails or times out after open paints blank glyphs and is not observed"
   );
   expect(fontArmLine('commit', fontSummary(samples, 'commit'))).toBe(
-    "commit arm: 0 of 2 faces did not load (M = faces the documents requested that the arm's provider offers, base latin included), by reason: none"
+    "commit arm: 0 of 2 faces did not load (M = faces the documents requested that the arm's provider offers, base latin included), by reason: none; sliced faces are observed only through their whole-face fallback at open; a chunk that fails or times out after open paints blank glyphs and is not observed"
   );
 });
