@@ -1,5 +1,5 @@
 ---
-'@betteroffice/docx': patch
+'@betteroffice/docx': minor
 ---
 
-Background save seed priming now sizes each slice from the byte rate the last digesting slice measured. Slices that digest no bytes keep the budget, so the first story slice no longer starts at the 1 MiB cap.
+Background save seed priming now sizes each slice from the byte rate the last digesting slice measured. Slices that digest no bytes keep the budget. Adds the `primeLastSliceBytes` getter.

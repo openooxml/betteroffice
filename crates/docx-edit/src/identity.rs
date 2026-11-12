@@ -3826,7 +3826,8 @@ impl EditingDoc {
             &mut left,
         );
         let digested = (max_bytes as usize).saturating_sub(left) as u64;
-        self.prime_last_slice_bytes.store(digested, Ordering::Relaxed);
+        self.prime_last_slice_bytes
+            .store(digested, Ordering::Relaxed);
         outcome
     }
 
