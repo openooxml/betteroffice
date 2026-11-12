@@ -6684,7 +6684,11 @@ mod tests {
         let mut scan_slices = 0;
         while prime_phase(doc) == Some(PrimePhase::Scan) {
             let slice = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
-            assert_eq!(slice, (PrimeSlice::Pending, 0, 0), "scan slice {scan_slices}");
+            assert_eq!(
+                slice,
+                (PrimeSlice::Pending, 0, 0),
+                "scan slice {scan_slices}"
+            );
             scan_slices += 1;
         }
         assert!(scan_slices > 1, "{scan_slices}");
@@ -6711,8 +6715,7 @@ mod tests {
         prime_to_stories(doc, WIDE_BUDGET, 7);
         let mut starts = 0;
         loop {
-            let (outcome, reported, spent) =
-                charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+            let (outcome, reported, spent) = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
             assert_eq!(reported, spent);
             match outcome {
                 PrimeSlice::Pending => {
