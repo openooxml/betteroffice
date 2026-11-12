@@ -61,9 +61,7 @@ fn tiled_source(source: CellRange, row: u32, col: u32) -> CellRef {
     )
 }
 
-/// Refuses a fill on a sheet whose source part keeps data validations,
-/// extension rules or comments, or whose own conditional formats rows or
-/// columns may have moved away from since opening.
+/// Refuses a fill on a sheet keeping rules or comments it cannot carry.
 pub(crate) fn preserved_fill_refusal(
     package: &xlsx_parse::PreservedPackage,
     preserved: &PreservedSheetState,

@@ -431,10 +431,7 @@ impl PreservedPackage {
         None
     }
 
-    /// What of source sheet `index` a fill cannot keep: any data validation,
-    /// extension or alternate-content block, or comment part the sheet keeps
-    /// outside the model, and, unless `exact`, any conditional format of its
-    /// own whose cells rows or columns moved since opening may have left.
+    /// What of source sheet `index` a fill cannot keep, if anything.
     #[doc(hidden)]
     pub fn fill_unsupported_feature(&self, index: usize, exact: bool) -> Option<&'static str> {
         let sheet = self.sheets.get(index)?;
@@ -675,8 +672,7 @@ fn comment_move_unsupported(
     }
 }
 
-/// The first element of a worksheet part that refuses a fill, as the feature
-/// a refusal names.
+/// The first worksheet element that refuses a fill, named as its feature.
 fn source_fill_blocker(bytes: &[u8], exact: bool) -> Result<Option<&'static str>, ParseError> {
     let mut xml = reader(bytes);
     let mut buffer = Vec::new();
