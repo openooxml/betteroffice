@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::sync::Arc;
 #[cfg(any(feature = "fonts", feature = "raster"))]
 use std::sync::Mutex;
@@ -18,7 +18,7 @@ use docx_edit::structured::{
 };
 use docx_edit::{
     EditCtx, EditingDoc, ParagraphIdentities, ParagraphRef, ParagraphSavePlan, Receipt,
-    SegmentContent, SpliceAnchor, StoryRange, is_opaque_seed_budget_error,
+    SegmentContent, SpliceAnchor, StoryRange, StorySegment, is_opaque_seed_budget_error,
     seed_from_docx_with_generation,
 };
 use docx_layout::types::Input as LayoutInput;
@@ -520,8 +520,19 @@ impl Document {
         }
         let identities = session.paragraph_identities();
         let body_part = body_part(&identities);
-        for edit in &self.session_edits {
-            edit.replay(&session, &identities, &body_part)?;
+        let Some(seeded) = session_paragraphs(&session, &body_part) else {
+            return Ok(None);
+        };
+        let replayed = self
+            .session_edits
+            .iter()
+            .all(|edit| edit.replay(&session, &identities, &body_part).is_ok());
+        if !replayed {
+            return Ok(None);
+        }
+        match session_paragraphs(&session, &body_part) {
+            Some(replayed) if self.session_agrees(&seeded, &replayed) => {}
+            _ => return Ok(None),
         }
         let mut plan = session_paragraph_ids(session.paragraph_save_plan());
         if !reassigned.is_empty() {
@@ -539,6 +550,41 @@ impl Document {
             patched.para_ids.sort_by_key(|(ordinal, _)| *ordinal);
         }
         Ok(Some(plan))
+    }
+
+    /// Whether each changed body paragraph saves from the session as the model holds it.
+    fn session_agrees(&self, seeded: &SessionParagraphs, replayed: &SessionParagraphs) -> bool {
+        if seeded.count != replayed.count || seeded.body.len() != replayed.body.len() {
+            return false;
+        }
+        let mut model = BTreeMap::new();
+        for paragraph in self.paragraphs() {
+            if let Some(ordinal) = paragraph.source_ordinal
+                && model.insert(ordinal, paragraph).is_some()
+            {
+                return false;
+            }
+        }
+        let edited: BTreeSet<u32> = self
+            .session_edits
+            .iter()
+            .map(|session_edit| session_edit.ordinal)
+            .collect();
+        if !edited.iter().all(|at| seeded.body.contains_key(at)) {
+            return false;
+        }
+        seeded.body.iter().all(|(ordinal, before)| {
+            let Some(after) = replayed.body.get(ordinal) else {
+                return false;
+            };
+            if after == before && !edited.contains(ordinal) {
+                return true;
+            }
+            model
+                .get(ordinal)
+                .is_some_and(|paragraph| get_paragraph_text(paragraph) == after.text)
+                && after.keeps_formatting_of(before)
+        })
     }
 
     /// `(source ordinal, ID)` of each body paragraph that saves with the fresh
@@ -670,6 +716,95 @@ impl SessionEdit {
         }
         Ok(())
     }
+}
+
+/// An editing session's paragraphs: how many, and the body part's by source ordinal.
+struct SessionParagraphs {
+    count: usize,
+    body: BTreeMap<u32, SessionParagraph>,
+}
+
+#[derive(PartialEq)]
+struct SessionParagraph {
+    text: String,
+    runs: Vec<StorySegment>,
+}
+
+impl SessionParagraph {
+    fn new(runs: Vec<StorySegment>) -> Self {
+        let text: String = runs
+            .iter()
+            .filter_map(|run| match &run.content {
+                SegmentContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        Self { text, runs }
+    }
+
+    /// Every run carries the one formatting `before` had, none when it had no text.
+    fn keeps_formatting_of(&self, before: &SessionParagraph) -> bool {
+        match before.runs.first() {
+            Some(first) => before
+                .runs
+                .iter()
+                .chain(&self.runs)
+                .all(|run| run.attributes == first.attributes),
+            None => self.runs.iter().all(|run| run.attributes.is_empty()),
+        }
+    }
+}
+
+fn session_paragraphs(session: &EditingDoc, body_part: &str) -> Option<SessionParagraphs> {
+    let identities = session.paragraph_identities();
+    let mut stories: BTreeMap<String, BTreeMap<String, SessionParagraph>> = BTreeMap::new();
+    let mut paragraphs = SessionParagraphs {
+        count: 0,
+        body: BTreeMap::new(),
+    };
+    for identity in &identities.paragraphs {
+        let ParagraphRef::Session { story, para_id } = &identity.paragraph else {
+            continue;
+        };
+        paragraphs.count += 1;
+        let Some(source) = identity
+            .source
+            .as_ref()
+            .filter(|source| part_path(&source.part_uri) == body_part)
+        else {
+            continue;
+        };
+        let in_story = match stories.entry(story.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(story_paragraphs(session, story).ok()?),
+        };
+        let paragraph = in_story.remove(para_id)?;
+        let ordinal = source.paragraph_ordinal;
+        if paragraphs.body.insert(ordinal, paragraph).is_some() {
+            return None;
+        }
+    }
+    Some(paragraphs)
+}
+
+/// The text runs of each paragraph in `story`, by pilcrow key.
+fn story_paragraphs(
+    session: &EditingDoc,
+    story: &str,
+) -> Result<BTreeMap<String, SessionParagraph>> {
+    let mut paragraphs = BTreeMap::new();
+    let mut runs = Vec::new();
+    for segment in session.story_segments(story)? {
+        if matches!(segment.content, SegmentContent::Text(_)) {
+            runs.push(segment);
+        } else if let SegmentContent::Pilcrow(properties) = segment.content {
+            paragraphs.insert(
+                properties.para_id,
+                SessionParagraph::new(std::mem::take(&mut runs)),
+            );
+        }
+    }
+    Ok(paragraphs)
 }
 
 /// The content of the paragraph closed by the pilcrow `key` in `story`.
@@ -1058,6 +1193,189 @@ fn has_floating_zones(
             has_floating_zones(&LayoutBlock::Paragraph(paragraph.clone()), width, config)
         }),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod session_save_tests {
+    use super::{
+        Document, EditCtx, SessionEdit, find_paragraph_mut, replace_plain_run,
+        replace_section_paragraphs,
+    };
+
+    const NAMESPACES: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
+
+    fn paragraph(id: &str, content: &str) -> String {
+        format!(
+            r#"<w:p w14:paraId="{id}" w14:textId="77777777" w:rsidR="00A1B2C3" w:rsidRDefault="00A1B2C3"><w:pPr><w:spacing w:after="120"/></w:pPr>{content}</w:p>"#
+        )
+    }
+
+    fn run(text: &str) -> String {
+        format!(r#"<w:r w:rsidRPr="00D4E5F6"><w:t xml:space="preserve">{text}</w:t></w:r>"#)
+    }
+
+    fn source() -> String {
+        let body = [
+            first_paragraph(),
+            paragraph("0000000B", &run("Charlie")),
+            paragraph("0000000C", &run("Delta")),
+        ]
+        .concat();
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n<w:document {NAMESPACES}><w:body>{body}<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr></w:body></w:document>"
+        )
+    }
+
+    fn open() -> Document {
+        let parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+            ),
+            ("word/document.xml".to_owned(), source().into_bytes()),
+        ];
+        Document::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+    }
+
+    fn main_part(document: &Document) -> String {
+        let parts = ooxml_opc::unzip_parts(&document.save().unwrap()).unwrap();
+        let (_, bytes) = parts
+            .into_iter()
+            .find(|(name, _)| name == "word/document.xml")
+            .unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn full_write(mut document: Document) -> String {
+        document.session_baseline = None;
+        main_part(&document)
+    }
+
+    fn assert_plan_keeps(document: &Document, unchanged: &[&str], edited: &str) {
+        assert!(document.session_save_plan().unwrap().is_some());
+        let saved = main_part(document);
+        assert!(saved.contains(edited), "{saved}");
+        let source = source();
+        for paragraph in unchanged {
+            assert!(source.contains(*paragraph) && saved.contains(*paragraph), "{saved}");
+        }
+    }
+
+    fn logged(document: &Document, index: usize, text: &str) -> SessionEdit {
+        let paragraph = document.paragraphs()[index];
+        SessionEdit {
+            para_id: paragraph.para_id.clone().unwrap(),
+            ordinal: paragraph.source_ordinal.unwrap(),
+            text: text.to_owned(),
+            expected: text.to_owned(),
+            context: EditCtx::local("betteroffice-docx", "1970-01-01T00:00:00.000Z"),
+        }
+    }
+
+    fn first_paragraph() -> String {
+        paragraph(
+            "0000000A",
+            &format!(
+                r#"{}<w:proofErr w:type="spellStart"/>{}<w:proofErr w:type="spellEnd"/>"#,
+                run("Alpha "),
+                run("bravvo")
+            ),
+        )
+    }
+
+    #[test]
+    fn replace_paragraph_text_saves_through_the_plan() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        let unchanged = [first_paragraph(), paragraph("0000000C", &run("Delta"))];
+        let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
+        assert_plan_keeps(&document, &unchanged, "Charlie edited");
+    }
+
+    #[test]
+    fn replace_paragraph_text_with_saves_through_the_plan() {
+        let mut document = open();
+        let context = EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z");
+        document
+            .replace_paragraph_text_with("0000000C", "Delta edited", 7, &context)
+            .unwrap();
+        document
+            .replace_paragraph_text_with("0000000C", "Delta edited twice", 7, &context)
+            .unwrap();
+        let unchanged = [first_paragraph(), paragraph("0000000B", &run("Charlie"))];
+        let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
+        assert_plan_keeps(&document, &unchanged, "Delta edited twice");
+    }
+
+    #[test]
+    fn diverging_session_takes_the_full_write() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        let planted = logged(&document, 2, "Planted");
+        document.session_edits.push(planted);
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = main_part(&document);
+        assert!(!saved.contains("Planted"), "{saved}");
+        let mut expected = open();
+        expected
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert_eq!(saved, full_write(expected));
+    }
+
+    #[test]
+    fn failed_replay_takes_the_full_write() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        let mut missing = logged(&document, 2, "Missing");
+        missing.ordinal = 99;
+        document.session_edits.push(missing);
+        assert!(document.session_save_plan().unwrap().is_none());
+        let mut expected = open();
+        expected
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert_eq!(main_part(&document), full_write(expected));
+    }
+
+    #[test]
+    fn model_mut_edit_after_logged_edits_is_saved() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        let body = &mut document.model_mut().body;
+        let paragraph = find_paragraph_mut(&mut body.content, "0000000C").unwrap();
+        replace_plain_run(paragraph, "Delta by model".to_owned(), None);
+        let replacement = paragraph.clone();
+        replace_section_paragraphs(body, "0000000C", &replacement);
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = main_part(&document);
+        assert!(saved.contains("Charlie edited"), "{saved}");
+        assert!(saved.contains("Delta by model"), "{saved}");
+    }
+
+    #[test]
+    fn unchanged_model_mut_keeps_the_plan() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        document.model_mut();
+        let unchanged = [first_paragraph(), paragraph("0000000C", &run("Delta"))];
+        let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
+        assert_plan_keeps(&document, &unchanged, "Charlie edited");
     }
 }
 
