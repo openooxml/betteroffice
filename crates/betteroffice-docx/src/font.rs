@@ -23,6 +23,8 @@ pub(crate) struct FontRegistry {
     application: HashMap<String, usize>,
     #[cfg(feature = "fonts")]
     resolved: HashSet<(String, Vec<String>)>,
+    #[cfg(feature = "fonts")]
+    views: HashMap<(ooxml_text::FontId, String), ooxml_text::FontId>,
     registrations: usize,
 }
 
@@ -44,6 +46,11 @@ impl FontRegistry {
     /// Registers `bytes` into the chain under `key`, ahead of bundled faces for
     /// embedded (`0`) and application (`1`) priorities.
     fn register_keyed(&mut self, key: String, bytes: &[u8], priority: u8) -> Result<u32> {
+        let id = self.register_bytes(bytes)?;
+        Ok(self.insert(key, id, priority))
+    }
+
+    fn register_bytes(&mut self, bytes: &[u8]) -> Result<ooxml_text::FontId> {
         if bytes.len() > 32 * 1024 * 1024 {
             return Err(Error::ResourceLimit("font exceeds 33554432 bytes".into()));
         }
@@ -55,13 +62,15 @@ impl FontRegistry {
         if self.store.face_count() >= 256 && self.store.find_face(bytes).is_none() {
             return Err(Error::ResourceLimit("more than 256 font faces".into()));
         }
-        let id = self
-            .store
+        self.store
             .register_slice(bytes)
-            .map_err(|error| Error::Font(error.to_string()))?;
+            .map_err(|error| Error::Font(error.to_string()))
+    }
+
+    fn insert(&mut self, key: String, id: ooxml_text::FontId, priority: u8) -> u32 {
         let chain = self.chains.entry(key.clone()).or_default();
         if priority == 2 && chain.contains(&id) {
-            return Ok(id.to_u32());
+            return id.to_u32();
         }
         let embedded = *self.embedded.get(&key).unwrap_or(&0);
         let application = *self.application.get(&key).unwrap_or(&0);
@@ -77,7 +86,24 @@ impl FontRegistry {
             _ => chain.push(id),
         }
         self.registrations += 1;
-        Ok(id.to_u32())
+        id.to_u32()
+    }
+
+    /// The view of `base` that measures as Word measures `family`, or `base`
+    /// when there are no metrics for `family`.
+    #[cfg(feature = "fonts")]
+    fn measured_as(&mut self, base: ooxml_text::FontId, family: &str) -> ooxml_text::FontId {
+        let owner = self.store.byte_owner(base).unwrap_or(base);
+        let key = (owner, family.trim().to_lowercase());
+        if let Some(view) = self.views.get(&key) {
+            return *view;
+        }
+        let view = self
+            .store
+            .register_named_substitute(base, family)
+            .unwrap_or(base);
+        self.views.insert(key, view);
+        view
     }
 
     #[cfg(feature = "fonts")]
@@ -104,8 +130,30 @@ impl FontRegistry {
                 &request.scripts,
                 LastResortOffice::Word,
             );
+            let own = (!request.scripts.is_empty()).then(|| {
+                manager.resolve(
+                    family,
+                    request.bold,
+                    request.italic,
+                    &[],
+                    LastResortOffice::Word,
+                )
+            });
             for face in faces {
-                self.register_keyed(key.clone(), &face.load()?, 2)?;
+                let base = self.register_bytes(&face.load()?)?;
+                let script = own.as_ref().is_some_and(|own| {
+                    !own.iter().any(|known| {
+                        known.family == face.family
+                            && known.bold == face.bold
+                            && known.italic == face.italic
+                    })
+                });
+                let id = if script {
+                    base
+                } else {
+                    self.measured_as(base, face.measure_as.as_deref().unwrap_or(family))
+                };
+                self.insert(key.clone(), id, 2);
             }
             self.resolved.insert(resolved_key);
         }
