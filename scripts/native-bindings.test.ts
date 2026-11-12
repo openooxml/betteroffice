@@ -497,8 +497,8 @@ describe('native package release wiring', () => {
     expect(nativeDeclarations.run).toContain('(cd packages/xlsx && bunx tsup)');
     expect(nativeDeclarations.run).toContain('cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"');
     expect(nativeDeclarations.run).toContain('(cd packages/pptx && bunx tsup)');
-    expect(nativeDeclarations.run).toContain('ls packages/pptx/dist/*.d.ts');
-    expect(nativeDeclarations.run).toContain('ls bindings/pptx-native/dist/*.d.ts');
+    expect(nativeDeclarations.run).toContain('declarations packages/pptx/dist >');
+    expect(nativeDeclarations.run).toContain('declarations bindings/pptx-native/dist >');
     expect(nativeDeclarations.run).toContain('cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"');
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(nativeDeclarations));
     const wasm = job.steps.find((step: any) => step.name === 'Build wasm for parity');
@@ -507,7 +507,7 @@ describe('native package release wiring', () => {
     expect(wasm.run).toContain('bun run --filter @betteroffice/docx build:wasm');
     const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
     expect(parity.run).toBe(
-      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts\nbun test bindings/raw-surface.test.ts\n'
+      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts bindings/engine-parity/docx.test.ts\nbun test bindings/raw-surface.test.ts\n'
     );
     expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
