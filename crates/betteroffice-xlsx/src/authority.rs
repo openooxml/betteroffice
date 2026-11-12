@@ -8296,6 +8296,43 @@ mod tests {
     }
 
     #[test]
+    fn recovery_state_without_gridless_sheets_keeps_the_released_layout() {
+        use super::snapshot::Codec;
+        use crate::snapshot::wire::Writer;
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Plain"));
+        model.sheets.push(Sheet::new("Rules"));
+        let mut ruled = model.clone();
+        ruled.sheets[1].conditional_formats = source_conditional_formats();
+        for (client, model) in [(106, model), (107, ruled)] {
+            let authority = WorkbookAuthority::from_model_with_client_id(&model, client).unwrap();
+            let base = &authority.base;
+            assert!(base.formats.iter().all(|format| !format.hide_gridlines));
+            let mut released = Writer::new();
+            base.row_styles.write(&mut released);
+            let filtered = base.auto_filters.iter().any(Option::is_some);
+            if filtered || base.conditional_formats.iter().any(|formats| !formats.is_empty()) {
+                released.bytes(&serde_json::to_vec(&base.conditional_formats).unwrap());
+                if filtered {
+                    released.bytes(&serde_json::to_vec(&base.auto_filters).unwrap());
+                }
+            }
+            let [_, _, tail] = authority.recovery_state_parts().unwrap();
+            assert_eq!(tail, released.into_bytes());
+
+            let mut formats = base.formats.clone();
+            let mut plain = Writer::new();
+            formats.write(&mut plain);
+            for format in &mut formats {
+                format.hide_gridlines = true;
+            }
+            let mut flagged = Writer::new();
+            formats.write(&mut flagged);
+            assert_eq!(plain.into_bytes(), flagged.into_bytes());
+        }
+    }
+
+    #[test]
     fn yrs_without_conditional_format_key_retains_source_rules() {
         let mut model = WorkbookModel::default();
         model.sheets.push(Sheet::new("Data"));
