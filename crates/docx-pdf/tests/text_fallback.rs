@@ -411,7 +411,7 @@ fn one_glyph_with_two_texts_gets_two_cids() {
     let roboto = store.register(bytes).expect("roboto");
     let face_bytes = font_bytes("Roboto-Regular.ttf");
     let face = Face::parse(&face_bytes, 0).expect("face");
-    let gid = u16::from(face.glyph_index('A').expect("A").0);
+    let gid = face.glyph_index('A').expect("A").0;
     let uses = BTreeMap::from([(gid, BTreeSet::from(["A".to_owned(), "B".to_owned()]))]);
     let font =
         font::EmbeddedFont::new("F1".to_owned(), &store, roboto.to_u32(), &uses).expect("embed");
@@ -441,4 +441,41 @@ fn cff_duplicate_texts_fall_back_to_one_cid() {
     assert!(font.is_cff);
     assert!(font.cid_to_gid.is_none(), "CFF has no CIDToGIDMap");
     assert_eq!(font.cid(1, "A"), font.cid(1, "B"));
+}
+
+#[test]
+fn font_streams_use_length1_only_for_truetype_programs() {
+    let mut store = FontStore::default();
+    store
+        .register(font_bytes("Roboto-Regular.ttf"))
+        .expect("roboto");
+    let display_list = DisplayList {
+        contract_version: None,
+        pages: vec![page(vec![Primitive::Text(text_run("Hi"))])],
+    };
+    let pdf = betteroffice_docx_pdf::export_pdf_with_fonts(&display_list, &store)
+        .expect("truetype export");
+    let pdf = String::from_utf8_lossy(&pdf);
+    assert!(pdf.contains("/FontFile2"), "{pdf:.500}");
+    assert!(pdf.contains("/Length1"), "FontFile2 needs /Length1");
+
+    let cff_path =
+        std::path::Path::new("/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Normal.otf");
+    let Ok(cff) = std::fs::read(cff_path) else {
+        return;
+    };
+    let mut store = FontStore::default();
+    store.register(cff).expect("cff font");
+    let display_list = DisplayList {
+        contract_version: None,
+        pages: vec![page(vec![Primitive::Text(text_run("中"))])],
+    };
+    let pdf =
+        betteroffice_docx_pdf::export_pdf_with_fonts(&display_list, &store).expect("cff export");
+    let pdf = String::from_utf8_lossy(&pdf);
+    assert!(pdf.contains("/Subtype /OpenType"), "{pdf:.500}");
+    assert!(
+        !pdf.contains("/Length1"),
+        "CFF/OpenType streams must not carry /Length1"
+    );
 }

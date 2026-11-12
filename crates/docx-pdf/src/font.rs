@@ -62,7 +62,7 @@ fn subset_tag(mut id: u32) -> String {
 }
 
 fn has_outlines(face: &Face) -> bool {
-    face.tables().glyf.is_some() || face.tables().cff.is_some()
+    face.tables().glyf.is_some() || face.tables().cff.is_some() || face.tables().cff2.is_some()
 }
 
 fn push_u16(out: &mut Vec<u8>, value: u16) {
@@ -297,11 +297,21 @@ impl EmbeddedFont {
         let upem = f32::from(original.units_per_em().max(1));
         let scale = 1000.0 / upem;
 
+        if uses.len() > usize::from(u16::MAX) {
+            return Err(FontError::Subset("too many glyphs".into()));
+        }
         let mut remapper = GlyphRemapper::new();
         for old in uses.keys().copied() {
             remapper.remap(old);
         }
-        let (subset, remap, widths) = match subsetter::subset(bytes, 0, &remapper) {
+        let subset_result = if original.tables().cff2.is_some() {
+            // CFF2 has no direct PDF embedding path; the subsetter converts it
+            // to a TrueType program so its outlines survive as FontFile2.
+            subsetter::subset_with_variations(bytes, 0, &[], &remapper)
+        } else {
+            subsetter::subset(bytes, 0, &remapper)
+        };
+        let (subset, remap, widths) = match subset_result {
             Ok(subset) => {
                 let face =
                     Face::parse(&subset, 0).map_err(|error| FontError::Font(error.to_string()))?;
@@ -313,10 +323,10 @@ impl EmbeddedFont {
                     .filter_map(|old| remapper.get(old).map(|new| (old, new)))
                 {
                     remap.insert(old, new);
-                    if let Some(advance) = face.glyph_hor_advance(GlyphId(new)) {
-                        if let Some(width) = widths.get_mut(usize::from(new)) {
-                            *width = f32::from(advance) * scale;
-                        }
+                    if let Some(advance) = face.glyph_hor_advance(GlyphId(new))
+                        && let Some(width) = widths.get_mut(usize::from(new))
+                    {
+                        *width = f32::from(advance) * scale;
                     }
                 }
                 (subset, remap, widths)
@@ -334,7 +344,9 @@ impl EmbeddedFont {
         let is_cff = original.tables().cff.is_some();
         let mut widths = widths;
         let max_glyph = remap.values().copied().max().unwrap_or(0);
-        let mut next_cid = max_glyph.saturating_add(1);
+        let mut next_cid = max_glyph
+            .checked_add(1)
+            .ok_or_else(|| FontError::Subset("too many glyphs".into()))?;
         let mut cid_map = BTreeMap::new();
         // Identity for every subset glyph: non-base dot components still
         // paint, so their CID must resolve to their own glyph. Duplicate CIDs
@@ -501,7 +513,7 @@ pub fn collect_with_text(
     let mut fonts: BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> = BTreeMap::new();
     each_primitive(display_list, |primitive| match primitive {
         Primitive::Text(text) if !text.hidden && !text.text.is_empty() => {
-            crate::text::collect_text_glyphs(store, &text.text, &mut fonts);
+            crate::text::collect_text_glyphs(store, text, &mut fonts);
         }
         Primitive::GlyphRun(run) if !run.hidden => {
             collect_run(&mut fonts, run);

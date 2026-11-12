@@ -19,7 +19,7 @@ serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
 flate2 = "1.1"
-subsetter = { version = "0.2.6", default-features = false }
+subsetter = { version = "0.2.6", default-features = false, features = ["variable-fonts"] }
 ttf-parser = "0.25.1"
 
 [dev-dependencies]
