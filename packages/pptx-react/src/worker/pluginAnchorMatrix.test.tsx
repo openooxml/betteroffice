@@ -163,40 +163,38 @@ async function groupedDeck() {
 }
 
 for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${engine})`, () => {
-  test('plugin anchor target matrix at non-unit zoom', async () => {
+  for (const scale of [0.5, 1.5, 2]) test(`plugin anchor target matrix at zoom ${scale}`, async () => {
     const probe = anchorProbe();
     const value = await mountAnchors(engine, { plugins: [probe.plugin] });
     await waitFor(() => expect(probe.context()?.geometry).toBeTruthy());
     const read = await content(value);
     const story = read.stories[0]!;
     await selectText(probe, read, story);
-    for (const scale of [0.5, 1.5, 2]) {
-      await act(async () => { expect(await value.api().commands.execute('zoom', { scale })).toMatchObject({ ok: true }); });
-      await waitFor(() => expect(probe.context().geometry?.layout.zoom).toBe(scale));
-      await act(async () => { await value.api().clearSelection(); });
-      await waitFor(() => expect(probe.context().snapshot.selection?.target).toEqual({ kind: 'slide' }));
-      await waitFor(() => expect(probe.context().geometry).toBeTruthy());
-      const slide = probe.context().geometry!.getAnchorGeometry({ kind: 'selection' });
-      expect(slide).toMatchObject({ ok: true });
-      if (!slide.ok) throw new Error(slide.failure.message);
-      expect(slide.rects).toEqual([slide.pageRect]);
-      expect(slide.anchor).toEqual(slide.pageRect);
-      await act(async () => { expect(await probe.context().navigation.selectShape({ slideId: story.slideId,
-        shapeId: story.shapeId }, { expectVersion: read.version })).toEqual({ ok: true }); });
-      await waitFor(() => expect(probe.context().snapshot.selection?.target).toEqual({ kind: 'shape', shapeId: story.shapeId }));
-      await waitFor(() => expect(probe.context().geometry).toBeTruthy());
+    await act(async () => { expect(await value.api().commands.execute('zoom', { scale })).toMatchObject({ ok: true }); });
+    await waitFor(() => expect(probe.context().geometry?.layout.zoom).toBe(scale));
+    await act(async () => { await value.api().clearSelection(); });
+    await waitFor(() => expect(probe.context().snapshot.selection?.target).toEqual({ kind: 'slide' }));
+    await waitFor(() => expect(probe.context().geometry).toBeTruthy());
+    const slide = probe.context().geometry!.getAnchorGeometry({ kind: 'selection' });
+    expect(slide).toMatchObject({ ok: true });
+    if (!slide.ok) throw new Error(slide.failure.message);
+    expect(slide.rects).toEqual([slide.pageRect]);
+    expect(slide.anchor).toEqual(slide.pageRect);
+    await act(async () => { expect(await probe.context().navigation.selectShape({ slideId: story.slideId,
+      shapeId: story.shapeId }, { expectVersion: read.version })).toEqual({ ok: true }); });
+    await waitFor(() => expect(probe.context().snapshot.selection?.target).toEqual({ kind: 'shape', shapeId: story.shapeId }));
+    await waitFor(() => expect(probe.context().geometry).toBeTruthy());
+    const geometry = probe.context().geometry!;
+    const shapeRect = geometry.getShapeRect(story.shapeId);
+    expect(shapeRect).not.toBeNull();
+    expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [shapeRect], anchor: shapeRect });
+    for (const [anchor, focus] of [[1, 4], [4, 1], [2, 2]]) {
+      await selectText(probe, read, story, anchor, focus);
       const geometry = probe.context().geometry!;
-      const shapeRect = geometry.getShapeRect(story.shapeId);
-      expect(shapeRect).not.toBeNull();
-      expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [shapeRect], anchor: shapeRect });
-      for (const [anchor, focus] of [[1, 4], [4, 1], [2, 2]]) {
-        await selectText(probe, read, story, anchor, focus);
-        const geometry = probe.context().geometry!;
-        const values = targets(read, story);
-        const answers = await parity(geometry, values, normalCodes);
-        expect(answers[0]).toEqual(geometry.getAnchorGeometry(range(read, story, anchor, focus)));
-        if (answers[0].ok) expect(answers[0].rects.length).toBe(anchor === focus ? 0 : 1);
-      }
+      const values = targets(read, story);
+      const answers = await parity(geometry, values, normalCodes);
+      expect(answers[0]).toEqual(geometry.getAnchorGeometry(range(read, story, anchor, focus)));
+      if (answers[0].ok) expect(answers[0].rects.length).toBe(anchor === focus ? 0 : 1);
     }
   });
 
