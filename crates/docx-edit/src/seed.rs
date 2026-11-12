@@ -5161,7 +5161,7 @@ fn table_cell_style_formatting(
         return result;
     }
     for (region, _) in
-        table_style_regions(table, style, row_index, start_column, end_column, columns)
+        table_style_regions(table, style, row_index, start_column, end_column, columns, 1)
     {
         if region == "wholeTable" && property != "rPr" {
             continue;
@@ -5183,6 +5183,7 @@ fn table_cell_style_properties(
     start_column: usize,
     end_column: usize,
     columns: usize,
+    rowspan: usize,
 ) -> Option<Value> {
     let parts = array(field(style, "tblStylePr"));
     if field(style, "tcPr").is_none()
@@ -5190,7 +5191,15 @@ fn table_cell_style_properties(
     {
         return None;
     }
-    let regions = table_style_regions(table, style, row_index, start_column, end_column, columns);
+    let regions = table_style_regions(
+        table,
+        style,
+        row_index,
+        start_column,
+        end_column,
+        columns,
+        rowspan,
+    );
     let layers = std::iter::once((field(style, "tcPr"), [true; 4])).chain(regions.into_iter().map(
         |(region, edges)| {
             let conditional = parts
@@ -5230,6 +5239,7 @@ fn table_style_regions(
     start_column: usize,
     end_column: usize,
     columns: usize,
+    rowspan: usize,
 ) -> Vec<(&'static str, [bool; 4])> {
     let formatting = field(Some(table), "formatting");
     let style_formatting = field(style, "tblPr");
@@ -5260,7 +5270,8 @@ fn table_style_regions(
     let row_band_size = band_size("styleRowBandSize");
     let column_band_size = band_size("styleColBandSize");
     let top = row_index == 0;
-    let bottom = row_index + 1 == rows.len();
+    let last_spanned_row = row_index + rowspan.max(1) - 1;
+    let bottom = last_spanned_row + 1 >= rows.len();
     let left = start_column == 0;
     let right = end_column == columns;
     let band_of = |position: usize, size: f64| (position as f64 / size).floor();
@@ -5277,7 +5288,9 @@ fn table_style_regions(
             },
             [
                 position == 0 || band_of(position - 1, row_band_size) != band,
-                row_index + 1 >= body_end || band_of(position + 1, row_band_size) != band,
+                last_spanned_row + 1 >= body_end
+                    || band_of(position + last_spanned_row - row_index + 1, row_band_size)
+                        != band_of(position + last_spanned_row - row_index, row_band_size),
                 left,
                 right,
             ],
@@ -5398,6 +5411,7 @@ fn project_row<'a>(
             start_column,
             column,
             style_context.column_count,
+            span.map(|(rowspan, _)| *rowspan).unwrap_or(1),
         );
         let mut projected = project_cell(
             cell,
@@ -5460,6 +5474,7 @@ fn project_row<'a>(
             0,
             total_columns,
             style_context.column_count,
+            1,
         );
         let projected = project_cell(
             &synthetic,

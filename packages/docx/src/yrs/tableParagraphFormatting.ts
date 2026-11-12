@@ -41,12 +41,13 @@ export function tableCellStyleProperties(
   rowIndex: number,
   startColumn: number,
   endColumn: number,
-  columns: number
+  columns: number,
+  rowspan = 1
 ): Pick<TableCellFormatting, 'shading' | 'borders'> | undefined {
   if (!style?.tcPr && !style?.tblStylePr?.some((part) => part.tcPr)) return undefined;
   const layers: Array<[TableCellFormatting | undefined, RegionEdges]> = [
     [style.tcPr, [true, true, true, true]],
-    ...tableStyleRegions(table, style, rowIndex, startColumn, endColumn, columns).map(
+    ...tableStyleRegions(table, style, rowIndex, startColumn, endColumn, columns, rowspan).map(
       ([region, edges]): [TableCellFormatting | undefined, RegionEdges] => [
         style.tblStylePr?.find((part) => part.type === region)?.tcPr,
         edges,
@@ -105,7 +106,8 @@ function tableStyleRegions(
   rowIndex: number,
   startColumn: number,
   endColumn: number,
-  columns: number
+  columns: number,
+  rowspan = 1
 ): Array<[string, RegionEdges]> {
   const look = table.formatting?.look ?? style.tblPr?.look;
   const flag = (key: Exclude<keyof TableLook, 'value'>, mask: number) =>
@@ -124,7 +126,8 @@ function tableStyleRegions(
   const rowBandSize = table.formatting?.styleRowBandSize ?? style.tblPr?.styleRowBandSize ?? 1;
   const columnBandSize = table.formatting?.styleColBandSize ?? style.tblPr?.styleColBandSize ?? 1;
   const top = rowIndex === 0;
-  const bottom = rowIndex === table.rows.length - 1;
+  const lastSpannedRow = rowIndex + Math.max(1, rowspan) - 1;
+  const bottom = lastSpannedRow >= table.rows.length - 1;
   const left = startColumn === 0;
   const right = endColumn === columns;
   const bandOf = (position: number, size: number) => Math.floor(position / size);
@@ -137,7 +140,9 @@ function tableStyleRegions(
       band % 2 === 0 ? 'band1Horz' : 'band2Horz',
       [
         position === 0 || bandOf(position - 1, rowBandSize) !== band,
-        rowIndex + 1 >= bodyEnd || bandOf(position + 1, rowBandSize) !== band,
+        lastSpannedRow + 1 >= bodyEnd ||
+          bandOf(position + lastSpannedRow - rowIndex + 1, rowBandSize) !==
+            bandOf(position + lastSpannedRow - rowIndex, rowBandSize),
         left,
         right,
       ],

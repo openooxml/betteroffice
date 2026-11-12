@@ -1657,7 +1657,15 @@ function projectRow(
         firstColumn: startColumn === 0,
         lastColumn: column === totalColumns,
         tableBorders,
-        styleCell: tableCellStyleProperties(table, tableStyle, rowIndex, startColumn, column, styleColumns),
+        styleCell: tableCellStyleProperties(
+          table,
+          tableStyle,
+          rowIndex,
+          startColumn,
+          column,
+          styleColumns,
+          rowSpan?.rowSpan ?? 1
+        ),
         defaultMargins,
         theme,
         tableBidi: Boolean(table.formatting?.bidi),
