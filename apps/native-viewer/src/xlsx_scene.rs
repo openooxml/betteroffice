@@ -303,11 +303,17 @@ fn translate_command(
 }
 
 fn double_underline(style: Option<RunUnderline>) -> bool {
-    matches!(style, Some(RunUnderline::Double | RunUnderline::DoubleAccounting))
+    matches!(
+        style,
+        Some(RunUnderline::Double | RunUnderline::DoubleAccounting)
+    )
 }
 
 fn accounting_underline(style: Option<RunUnderline>) -> bool {
-    matches!(style, Some(RunUnderline::SingleAccounting | RunUnderline::DoubleAccounting))
+    matches!(
+        style,
+        Some(RunUnderline::SingleAccounting | RunUnderline::DoubleAccounting)
+    )
 }
 
 fn paint_clipped(
@@ -883,7 +889,9 @@ fn loose_extents(x1: f32, y1: f32, x2: f32, y2: f32) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_render::{GridMeta, NumberFormatLayout, PathStroke, RunUnderline, TextValign, TextWrap};
+    use xlsx_render::{
+        GridMeta, NumberFormatLayout, PathStroke, RunUnderline, TextValign, TextWrap,
+    };
 
     fn display_list(commands: Vec<DrawCmd>) -> DisplayList {
         DisplayList {
@@ -1082,7 +1090,9 @@ mod tests {
                 .scene
                 .encoding()
                 .path_data
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|point| (f32::from_bits(point[0]), f32::from_bits(point[1])))
                 .filter(|&(_, y)| y > 0.0 && y < 60.0)
                 .collect();
@@ -1106,7 +1116,10 @@ mod tests {
             let (xs, ys) = edges(Some(style));
             assert_eq!(xs, [10.0, 90.0], "{style:?} spans the cell");
             assert_eq!(ys.len(), 2 * lines);
-            assert!(ys[0] > single[1] && ys[0] >= descender, "{style:?} sits below the descender");
+            assert!(
+                ys[0] > single[1] && ys[0] >= descender,
+                "{style:?} sits below the descender"
+            );
         }
     }
 

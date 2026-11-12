@@ -333,7 +333,10 @@ fn paint_accounting_bars(
 ) {
     let em = face.units_per_em() as f32;
     let scale = font_size_pt * PX_PER_PT / em;
-    let thick = face.underline_metrics().map(|m| m.1 as f32).unwrap_or(0.05 * em);
+    let thick = face
+        .underline_metrics()
+        .map(|m| m.1 as f32)
+        .unwrap_or(0.05 * em);
     let h = (thick * scale).max(0.5);
     let mut top = baseline - face.descender() as f32 * scale;
     let mut paint = Paint::default();

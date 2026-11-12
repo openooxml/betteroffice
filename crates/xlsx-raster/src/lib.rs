@@ -1376,11 +1376,20 @@ mod tests {
                 .filter(|&x| pixels.pixel(x, (top + bottom) / 2).unwrap().red() < 128)
                 .collect::<Vec<_>>()
         };
-        for style in [RunUnderline::SingleAccounting, RunUnderline::DoubleAccounting] {
+        for style in [
+            RunUnderline::SingleAccounting,
+            RunUnderline::DoubleAccounting,
+        ] {
             let dl = underlined(true, Some(style));
             for band in ink_row_bands(&dl) {
-                assert!(band.0 > single.1, "{style:?} sits below the single underline");
-                assert!(band.0 as f32 >= descender.floor(), "{style:?} sits below the descender");
+                assert!(
+                    band.0 > single.1,
+                    "{style:?} sits below the single underline"
+                );
+                assert!(
+                    band.0 as f32 >= descender.floor(),
+                    "{style:?} sits below the descender"
+                );
                 assert_eq!(dark_columns(&dl, band), (0..160).collect::<Vec<_>>());
             }
         }
