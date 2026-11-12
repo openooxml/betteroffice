@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
+import { docxFontsPlugin } from '../../../scripts/office-quality/renderer.mjs';
 
 const root = resolve(import.meta.dirname, '../../..');
 const fromReact = createRequire(resolve(root, 'packages/docx-react/package.json'));
@@ -25,6 +26,7 @@ export default defineConfig({
   define: { 'globalThis.__DOCX_PEERLESS_HARNESS__': JSON.stringify(process.env.DOCX_PEERLESS_HARNESS === '1') },
   plugins: [
     sourceSessionWorker,
+    docxFontsPlugin(),
     {
       name: 'main-document-load-probe',
       enforce: 'pre',

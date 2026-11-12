@@ -46,7 +46,7 @@ test('a docx PNG follows the picture outcome table shared with the native engine
           session.openDocx(bytes, true);
           const png: Uint8Array = await session.renderPng({ page: 0 }, {
             strictPictures,
-            onDiagnostic: ({ code, pictures }: { code: string; pictures: { id: string; reason: string }[] }) => diagnostics.push({ code, pictures: pictures.map(({ id, reason }) => ({ id, reason })) }),
+            onDiagnostic: ({ code, pictures }: { code: string; pictures?: { id: string; reason: string }[] }) => diagnostics.push({ code, pictures: (pictures ?? []).map(({ id, reason }) => ({ id, reason })) }),
           });
           const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(png)));
           out[name] = { png: Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join(''), diagnostics };

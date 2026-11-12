@@ -183,6 +183,16 @@ afterEach(() => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('workbook session viewer', () => {
+  it('shows the selection without a fill handle in the read-only viewer', async () => {
+    const { viewer } = session();
+    open(viewer);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    await opened();
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+    expect(view.queryByTestId('xlsx-fill-preview')).toBeNull();
+  });
+
   it('uses model bounds for Ctrl+End and grows the viewport extent before scrolling', async () => {
     const { viewer, call } = session();
     call.selectionData.mockResolvedValue({ usedRange: { top: 0, left: 0, bottom: 9_999, right: 701 } });

@@ -18,6 +18,7 @@ on:
       - 'scripts/*wasm*'
       - 'bun.lock'
       - '.github/workflows/macos-app.yml'
+      - '.github/actions/wasm-toolchain/**'
 
 concurrency:
   group: macos-app-${{ github.ref }}
@@ -48,8 +49,10 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
-      - name: Install Binaryen
-        run: brew install binaryen
+      - name: Install the pinned Binaryen
+        uses: ./.github/actions/wasm-toolchain
+        with:
+          wasm-pack-cache: 'false'
 
       - name: Build shared desktop editors
         run: apps/native-viewer/macos/build-editor.sh

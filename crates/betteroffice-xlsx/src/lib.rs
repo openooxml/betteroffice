@@ -9,6 +9,7 @@ pub use open_options::OpenOptions;
 
 mod authority;
 mod error;
+mod fill;
 #[cfg(all(feature = "fonts", feature = "raster"))]
 mod font;
 mod move_range;

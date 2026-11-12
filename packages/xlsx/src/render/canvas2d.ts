@@ -366,7 +366,8 @@ function paintRotatedText(ctx: CanvasRenderingContext2D, cmd: TextCmd, deg: numb
   }
   const thickness = Math.max(fontSize * 0.05, 0.5);
   ctx.fillStyle = cmd.color;
-  if (cmd.underline || cmd.dashedUnderline) ctx.fillRect(-width / 2, baseline + fontSize * 0.1, width, thickness);
+  if (cmd.underline) fillUnderline(ctx, cmd, -width / 2, baseline + fontSize * 0.1, width, thickness);
+  else if (cmd.dashedUnderline) ctx.fillRect(-width / 2, baseline + fontSize * 0.1, width, thickness);
   if (cmd.strike) ctx.fillRect(-width / 2, baseline - fontSize * 0.26, width, thickness);
   ctx.restore();
 }
@@ -400,7 +401,7 @@ function paintStackedText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     ctx.fillText(cluster, x, baseline);
     const thickness = Math.max(fontSize * 0.05, 0.5);
     ctx.fillStyle = cmd.color;
-    if (cmd.underline) ctx.fillRect(x, baseline + fontSize * 0.1, w, thickness);
+    if (cmd.underline) fillUnderline(ctx, cmd, x, baseline + fontSize * 0.1, w, thickness);
     if (cmd.strike) ctx.fillRect(x, baseline - fontSize * 0.26, w, thickness);
     if (cmd.dashedUnderline) {
       ctx.save();
@@ -439,7 +440,7 @@ function paintDecorations(
   const fontSize = fontSizePx(cmd);
   const thickness = Math.max(fontSize * 0.05, 0.5);
   ctx.fillStyle = cmd.color;
-  if (cmd.underline) ctx.fillRect(x0, cmd.y + fontSize * 0.1, width, thickness);
+  if (cmd.underline) fillUnderline(ctx, cmd, x0, cmd.y + fontSize * 0.1, width, thickness);
   if (cmd.strike) ctx.fillRect(x0, cmd.y - fontSize * 0.26, width, thickness);
   if (cmd.dashedUnderline) {
     ctx.save();
@@ -448,6 +449,21 @@ function paintDecorations(
     ctx.setLineDash([3, 2]);
     strokeSegment(ctx, x0, cmd.y + fontSize * 0.1, x0 + width, cmd.y + fontSize * 0.1);
     ctx.restore();
+  }
+}
+
+/** A double kind adds a second line one line width and at least a pixel below the first. */
+function fillUnderline(
+  ctx: CanvasRenderingContext2D,
+  cmd: TextCmd,
+  x: number,
+  y: number,
+  width: number,
+  thickness: number
+): void {
+  ctx.fillRect(x, y, width, thickness);
+  if (cmd.underlineStyle === 'double' || cmd.underlineStyle === 'doubleAccounting') {
+    ctx.fillRect(x, y + thickness + Math.max(thickness, 1), width, thickness);
   }
 }
 

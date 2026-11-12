@@ -155,6 +155,8 @@ export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHost
   className?: string;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
+  /** Shows the fill handle on the selection corner. */
+  fillHandle?: boolean;
   allowHostProposals?: boolean;
   /**
    * Replaces the default toolbar: omitted keeps it (hidden when read-only),

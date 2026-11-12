@@ -139,6 +139,7 @@
       "editUnsupportedChart": "無法套用此編輯：圖表使用了此編輯會移動的儲存格。活頁簿未變更。",
       "editUnsupportedTable": "無法套用此編輯：表格使用了此編輯會移動的儲存格。活頁簿未變更。",
       "editUnsupportedPivot": "無法套用此編輯：樞紐分析表使用了此編輯會移動的儲存格。活頁簿未變更。",
+      "editUnsupportedFill": "無法套用此填滿：它會變更含有連結、附註或規則的儲存格。活頁簿未變更。",
       "sheetProtected": "此儲存格位於受保護的工作表上。",
       "hostRefused": "不允許此編輯。",
       "tooManyToCheck": "儲存格過多，外掛程式無法檢查（上限 {limit}）。",
@@ -227,7 +228,8 @@
     "rangeSelected": "已選取 {start} 到 {end}，{rows} 列 × {columns} 欄",
     "sheetActivated": "{name}，第 {index} 個工作表，共 {count} 個",
     "cellInputLabel": "編輯儲存格 {address}",
-    "gridRoleDescription": "工作表"
+    "gridRoleDescription": "工作表",
+    "fillHandleLabel": "填滿控點"
   },
   "plugins": {
     "toolbarGroup": "外掛程式",

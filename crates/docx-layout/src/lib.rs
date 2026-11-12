@@ -100,6 +100,7 @@ pub mod measure_blocks;
 pub mod section_breaks;
 pub mod sequence_fields;
 pub mod session;
+pub mod skipped_effects;
 pub mod table_grid;
 pub mod table_row_break;
 

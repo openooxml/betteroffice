@@ -107,7 +107,7 @@ test('native builds and paired DOCX shards are isolated from browser measurement
   expect(build.needs).toBe('prepare');
   expect(build.strategy.matrix.channel).toEqual(['published', 'commit']);
   expect(build.steps[1].with.ref).toContain('needs.prepare.outputs.docx-published-source');
-  expect(benchmark.needs).toEqual(['prepare', 'native-build']);
+  expect(benchmark.needs).toEqual(['prepare', 'native-build', 'libreoffice-archive']);
   expect(benchmark.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.docx-shards) }}');
   expect(benchmark['runs-on']).toBe('ubuntu-24.04');
   expect(benchmark.steps.some((step: any) => step.run?.includes('playwright'))).toBe(false);
@@ -121,9 +121,9 @@ test('native builds and paired DOCX shards are isolated from browser measurement
 test('XLSX calculation and PPTX LibreOffice run independently and gate publication', () => {
   const xlsx = workflow.jobs['xlsx-benchmark'];
   const pptx = workflow.jobs['pptx-benchmark'];
-  expect(xlsx.needs).toEqual(['prepare', 'xlsx-native-build']);
+  expect(xlsx.needs).toEqual(['prepare', 'xlsx-native-build', 'libreoffice-archive']);
   expect(xlsx.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}');
-  expect(pptx.needs).toEqual(['prepare', 'pptx-native-build']);
+  expect(pptx.needs).toEqual(['prepare', 'pptx-native-build', 'libreoffice-archive']);
   expect(pptx.strategy).toEqual({ 'fail-fast': false, 'max-parallel': "${{ fromJSON(needs.prepare.outputs.parallel)['pptx-benchmark'] }}",
     matrix: { shard: '${{ fromJSON(needs.prepare.outputs.pptx-shards) }}' } });
   expect(prepare.outputs['pptx-shards']).toBe('${{ steps.plan.outputs.pptx-shards }}');
@@ -146,7 +146,7 @@ test('XLSX calculation and PPTX LibreOffice run independently and gate publicati
 
 test('XLSX fidelity covers every planned workbook independently of calculation workers', () => {
   const fidelity = workflow.jobs['xlsx-fidelity'];
-  expect(fidelity.needs).toBe('prepare');
+  expect(fidelity.needs).toEqual(['prepare', 'libreoffice-archive']);
   expect(fidelity.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.xlsx-fidelity-shards) }}');
   expect(fidelity.if).toBe("contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')");
   expect(publish.if).toContain("needs.xlsx-fidelity.result == 'success'");
@@ -163,7 +163,7 @@ test('native parse/edit/save probes run independently and gate the final report'
   const [first, second] = ['a', 'b'].map(half => {
     const probe = workflow.jobs[`roundtrip-${half}`];
     expect(prepare.outputs[`roundtrip-shards-${half}`]).toBe(`\${{ steps.plan.outputs.roundtrip-shards-${half} }}`);
-    expect(probe.needs).toEqual(['prepare', 'roundtrip-build']);
+    expect(probe.needs).toEqual(['prepare', 'roundtrip-build', 'libreoffice-archive']);
     expect(probe.strategy).toEqual({'fail-fast': false, 'max-parallel': `\${{ fromJSON(needs.prepare.outputs.parallel)['roundtrip-${half}'] }}`,
       matrix: {include: `\${{ fromJSON(needs.prepare.outputs.roundtrip-shards-${half}) }}`}});
     expect(probe.env.LO_PYTHON).toBe('/opt/libreoffice26.2/program/python');
@@ -212,7 +212,7 @@ test('a custom corpus origin never publishes renders, and a dispatch asking for 
 const steps = Object.entries<any>(workflow.jobs).flatMap(([job, definition]) =>
   (definition.steps ?? []).map((step: any) => ({ job, step })));
 const CORPUS_FREE = new Set(['build-native.mjs', 'build-format.mjs', 'build-roundtrip.mjs', 'native-fonts.ts',
-  'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs', 'shards.mjs']);
+  'install-libreoffice.sh', 'fetch-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs', 'shards.mjs']);
 const BINARY_ARTIFACTS = /^(docx-native-\$\{\{ matrix\.channel \}\}|docx-native-fonts|xlsx-native-\$\{\{ matrix\.channel \}\}|pptx-native-\$\{\{ matrix\.channel \}\}|roundtrip-native-\$\{\{ matrix\.format \}\}-\$\{\{ matrix\.channel \}\})$/;
 const README = "${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}";
 const PRIVATE_OFF = /(^|&& |^\$\{\{ )!inputs\.private_corpus( &&|$| \}\}$)/;
@@ -436,7 +436,7 @@ test('the reconciled artifact always carries the aggregate, and the private bund
 
 test('private runs time a seeded sample per format, sequentially on one runner each, and gate the report on it', () => {
   const timing = workflow.jobs.timing;
-  expect(timing.needs).toEqual(['prepare', 'native-build', 'xlsx-native-build', 'pptx-native-build']);
+  expect(timing.needs).toEqual(['prepare', 'native-build', 'xlsx-native-build', 'pptx-native-build', 'libreoffice-archive']);
   expect(timing.if).toContain('inputs.private_corpus');
   expect(timing.if).toContain("needs.prepare.outputs.timing-formats != '[]'");
   expect(timing.if).toStartWith('!cancelled()');
@@ -523,4 +523,67 @@ test('planning states which font package each channel renders with', () => {
   expect(plan).toContain("published channel: @betteroffice/fonts@${version}, ${plan.fonts_basis?.[format] === 'release-commit' ? 'the fonts release from the same release commit as' : 'the latest fonts release published before'} @betteroffice/${format}@${plan.versions[format]}");
   expect(plan).toContain('commit channel: the font packages of this checkout');
   expect(plan).toContain('### Font sources');
+});
+
+test('one job fetches the LibreOffice archive into a cache every LibreOffice job restores before installing', () => {
+  const CACHE = 'actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
+  const archive = workflow.jobs['libreoffice-archive'];
+  expect(archive.needs).toBeUndefined();
+  expect(archive.if).toBe("github.ref == 'refs/heads/main'");
+  expect(archive['runs-on']).toBe('ubuntu-24.04');
+  expect(archive['timeout-minutes']).toBe(130);
+  expect(archive.outputs.key).toBe('${{ steps.pin.outputs.key }}');
+  const names = archive.steps.map((step: any) => step.name ?? step.uses);
+  const restore = archive.steps.find((step: any) => step.id === 'restore');
+  const fetch = archive.steps.find((step: any) => String(step.run ?? '').includes('fetch-libreoffice.sh'));
+  const save = archive.steps.find((step: any) => String(step.uses ?? '').startsWith('actions/cache/save@'));
+  expect(archive.steps.find((step: any) => step.id === 'pin').run).toContain('key=libreoffice-${LO_VERSION}-${LO_SHA256}');
+  expect(restore).toMatchObject({ uses: CACHE, with: { path: '~/.cache/libreoffice-archive', key: '${{ steps.pin.outputs.key }}' } });
+  expect(fetch.if).toBe("steps.restore.outputs.cache-hit != 'true'");
+  expect(save).toMatchObject({ if: fetch.if, with: { path: '~/.cache/libreoffice-archive', key: '${{ steps.pin.outputs.key }}' } });
+  expect(names.indexOf(save.name)).toBe(names.indexOf(fetch.name) + 1);
+  const installers = Object.entries<any>(workflow.jobs).filter(([, job]) =>
+    (job.steps ?? []).some((step: any) => String(step.run ?? '').includes('install-libreoffice.sh')));
+  expect(installers.map(([name]) => name).sort()).toEqual(
+    ['docx-benchmark', 'pptx-benchmark', 'roundtrip-a', 'roundtrip-b', 'timing', 'xlsx-benchmark', 'xlsx-fidelity']);
+  for (const [name, job] of installers) {
+    expect({ name, needs: job.needs }).toEqual({ name, needs: expect.arrayContaining(['prepare', 'libreoffice-archive']) });
+    expect(job['runs-on']).toBe(archive['runs-on']);
+    const install = job.steps.findIndex((step: any) => String(step.run ?? '').includes('install-libreoffice.sh'));
+    expect({ name, restore: job.steps[install - 2] }).toEqual({ name, restore: {
+      name: 'Restore the LibreOffice archive', id: 'restore-libreoffice', uses: CACHE,
+      with: { path: '~/.cache/libreoffice-archive', key: '${{ needs.libreoffice-archive.outputs.key }}' } } });
+    const fallback = job.steps[install - 1];
+    expect({ name, fallback: fallback.name, if: fallback.if, env: fallback.env }).toEqual({
+      name, fallback: 'Fetch and verify the LibreOffice archive on a cache miss', if: undefined, env: {
+        CACHE_HIT: '${{ steps.restore-libreoffice.outputs.cache-hit }}', CACHE_KEY: '${{ needs.libreoffice-archive.outputs.key }}',
+        LO_FETCH_BUDGET: '1200' } });
+    expect(fallback['timeout-minutes'] * 60).toBeGreaterThan(Number(fallback.env.LO_FETCH_BUDGET));
+    expect(fallback.run).toContain('if [ "$CACHE_HIT" = "true" ]; then');
+    expect(fallback.run).toContain('echo "LibreOffice archive $CACHE_KEY restored from cache"');
+    expect(fallback.run).toContain('echo "::warning::cache miss for $CACHE_KEY: fetching and verifying the pinned archive"');
+    expect(fallback.run.indexOf('bash scripts/office-quality/fetch-libreoffice.sh')).toBeGreaterThan(fallback.run.indexOf('else'));
+  }
+});
+
+test('every restore of the LibreOffice archive falls back to the verified fetch on a miss and only the archive job saves it', () => {
+  const uses = (step: any, action: string) => String(step.uses ?? '').startsWith(`actions/cache/${action}@`)
+    && step.with?.path === '~/.cache/libreoffice-archive';
+  const jobs = Object.entries<any>(workflow.jobs).map(([name, job]) => ({ name, steps: job.steps ?? [] }));
+  for (const { steps } of jobs)
+    for (const step of steps) expect({ name: step.name, failOnMiss: step.with?.['fail-on-cache-miss'] }).toEqual({ name: step.name, failOnMiss: undefined });
+  const restores = jobs.flatMap(({ name, steps }) => steps.flatMap((step: any, index: number) => uses(step, 'restore') ? [{ name, steps, index }] : []));
+  expect(restores.length).toBe(8);
+  for (const { name, steps, index } of restores) {
+    const restore = steps[index];
+    const fetch = steps[index + 1];
+    expect({ name, fetches: String(fetch.run ?? '').includes('bash scripts/office-quality/fetch-libreoffice.sh') }).toEqual({ name, fetches: true });
+    const gate = name === 'libreoffice-archive' ? fetch.if : fetch.env?.CACHE_HIT;
+    const expected = name === 'libreoffice-archive'
+      ? `steps.${restore.id}.outputs.cache-hit != 'true'`
+      : `\${{ steps.${restore.id}.outputs.cache-hit }}`;
+    expect({ name, gate }).toEqual({ name, gate: expected });
+  }
+  const savers = jobs.filter(({ steps }) => steps.some((step: any) => uses(step, 'save'))).map(({ name }) => name);
+  expect(savers).toEqual(['libreoffice-archive']);
 });

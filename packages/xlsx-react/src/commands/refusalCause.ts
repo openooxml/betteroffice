@@ -2,14 +2,15 @@ import type { TranslationKey } from '@betteroffice/xlsx-i18n';
 import type { CommandStatus } from '@betteroffice/xlsx/worker';
 
 /** What a refused structural edit would have broken, as the refusal banner names it. */
-export type XlsxRefusalCause = 'chart' | 'table' | 'pivot' | 'other';
+export type XlsxRefusalCause = 'chart' | 'table' | 'pivot' | 'fill' | 'other';
 
-const CAUSES: ReadonlySet<string> = new Set<XlsxRefusalCause>(['chart', 'table', 'pivot', 'other']);
+const CAUSES: ReadonlySet<string> = new Set<XlsxRefusalCause>(['chart', 'table', 'pivot', 'fill', 'other']);
 
 export const REFUSAL_CAUSE_KEYS: Record<XlsxRefusalCause, TranslationKey> = {
   chart: 'commands.reasons.editUnsupportedChart',
   table: 'commands.reasons.editUnsupportedTable',
   pivot: 'commands.reasons.editUnsupportedPivot',
+  fill: 'commands.reasons.editUnsupportedFill',
   other: 'commands.reasons.editUnsupported',
 };
 
@@ -25,7 +26,7 @@ export function refusalCause(status: CommandStatus): XlsxRefusalCause {
 /** The worker commands that change the workbook, whose refusal the banner reports as a declined edit. */
 const EDIT_COMMANDS: ReadonlySet<string> = new Set([
   'editCell', 'editCells', 'applyEdits', 'applyOps', 'patchRangeStyle', 'setNumberFormat', 'applyFormat',
-  'moveChart', 'moveRange', 'undo', 'redo', 'acceptProposal', 'rejectProposal',
+  'moveChart', 'moveRange', 'fillRange', 'undo', 'redo', 'acceptProposal', 'rejectProposal',
 ]);
 
 /** `applyOps` toolbar commands that read or capture rather than edit. */

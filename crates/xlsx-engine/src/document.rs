@@ -430,6 +430,13 @@ impl Document {
             .map_err(message)
     }
 
+    pub fn fill_range_json(&mut self, args: &str) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session
+            .fill_range_json(args, now_serial)
+            .map_err(message)
+    }
+
     pub fn apply_ops_json(&mut self, transaction_json: &str) -> Result<String, EngineError> {
         let now_serial = (self.host.now_serial)()?;
         self.session

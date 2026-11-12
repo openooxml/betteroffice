@@ -1030,6 +1030,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect, end_aligned: bool) -> Result<Optio
                 bold: font.weight >= 600,
                 italic: false,
                 underline: false,
+                underline_style: None,
                 strike: false,
                 highlight: None,
                 dashed_underline: false,

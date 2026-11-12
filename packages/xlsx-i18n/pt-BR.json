@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Esta edição não pode ser aplicada: um gráfico usa células que ela moveria. A pasta de trabalho não foi alterada.",
       "editUnsupportedTable": "Esta edição não pode ser aplicada: uma tabela usa células que ela moveria. A pasta de trabalho não foi alterada.",
       "editUnsupportedPivot": "Esta edição não pode ser aplicada: uma tabela dinâmica usa células que ela moveria. A pasta de trabalho não foi alterada.",
+      "editUnsupportedFill": "Este preenchimento não pode ser aplicado: ele alteraria células com links, notas ou regras. A pasta de trabalho não foi alterada.",
       "sheetProtected": "Esta célula está em uma planilha protegida.",
       "hostRefused": "Esta edição não é permitida.",
       "tooManyToCheck": "Células demais para os plug-ins verificarem (limite {limit}).",
@@ -227,7 +228,8 @@
     "rangeSelected": "{start} a {end} selecionado, {rows, plural, one {# linha} many {# linhas} other {# linhas}} por {columns, plural, one {# coluna} many {# colunas} other {# colunas}}",
     "sheetActivated": "{name}, planilha {index} de {count}",
     "cellInputLabel": "Editar célula {address}",
-    "gridRoleDescription": "planilha"
+    "gridRoleDescription": "planilha",
+    "fillHandleLabel": "Alça de preenchimento"
   },
   "plugins": {
     "toolbarGroup": "Plugins",

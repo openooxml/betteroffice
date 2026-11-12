@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Esta edición no se puede aplicar: un gráfico usa celdas que movería. El libro no ha cambiado.",
       "editUnsupportedTable": "Esta edición no se puede aplicar: una tabla usa celdas que movería. El libro no ha cambiado.",
       "editUnsupportedPivot": "Esta edición no se puede aplicar: una tabla dinámica usa celdas que movería. El libro no ha cambiado.",
+      "editUnsupportedFill": "Este relleno no se puede aplicar: cambiaría celdas con vínculos, notas o reglas. El libro no ha cambiado.",
       "sheetProtected": "Esta celda está en una hoja protegida.",
       "hostRefused": "Esta edición no está permitida.",
       "tooManyToCheck": "Demasiadas celdas para que los complementos las comprueben (límite {limit}).",
@@ -227,7 +228,8 @@
     "rangeSelected": "{start} a {end} seleccionado, {rows, plural, one {# fila} many {# filas} other {# filas}} por {columns, plural, one {# columna} many {# columnas} other {# columnas}}",
     "sheetActivated": "{name}, hoja {index} de {count}",
     "cellInputLabel": "Editar celda {address}",
-    "gridRoleDescription": "hoja de cálculo"
+    "gridRoleDescription": "hoja de cálculo",
+    "fillHandleLabel": "Controlador de relleno"
   },
   "plugins": {
     "toolbarGroup": "Complementos",

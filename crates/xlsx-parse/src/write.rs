@@ -17,7 +17,7 @@ use xlsx_model::sort::sort_by_shared;
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, DifferentialFormat,
-    Sheet, SheetChart, SheetId, Workbook,
+    RunUnderline, Sheet, SheetChart, SheetId, Workbook,
 };
 
 use crate::ParseError;
@@ -4384,8 +4384,19 @@ fn write_font(w: &mut Writer<Vec<u8>>, font: &Font) -> io::Result<()> {
         if font.italic {
             w.create_element("i").write_empty()?;
         }
-        if font.underline {
-            w.create_element("u").write_empty()?;
+        let underline = match font.underline {
+            RunUnderline::None => None,
+            RunUnderline::Single => Some(None),
+            RunUnderline::Double => Some(Some("double")),
+            RunUnderline::SingleAccounting => Some(Some("singleAccounting")),
+            RunUnderline::DoubleAccounting => Some(Some("doubleAccounting")),
+        };
+        if let Some(val) = underline {
+            let element = w.create_element("u");
+            match val {
+                Some(val) => element.with_attribute(("val", val)).write_empty()?,
+                None => element.write_empty()?,
+            };
         }
         if font.strike {
             w.create_element("strike").write_empty()?;

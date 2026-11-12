@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } fr
 import * as xlsx from '@betteroffice/xlsx';
 import * as xlsxWorker from '@betteroffice/xlsx/worker';
 import type { DisplayList, EditResult, WorkbookHandle, WorkbookSession, XlsxEditRequest } from '@betteroffice/xlsx';
+import type { RenderResult } from '@testing-library/react';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { SessionFailure } from '../../../../shared/office-session';
 import { workbookEditPeerInternals } from '../../../xlsx/src/session/editPeerInternals';
@@ -178,6 +179,10 @@ function harness(realFacade = false, normalizeInput = false) {
       for (const edit of edits) mutate(sheet, edit.row, edit.col, edit.input);
       return result();
     }),
+    fillRange: mock((sheet: number, source: string, destination: string) => {
+      log.push(`fill:${sheet}:${source}:${destination}`);
+      return result();
+    }),
     applyEdits: mock((_request: XlsxEditRequest): xlsx.XlsxEditResult => {
       log.push('plugin:batch');
       mutate(0, 0, 0, 'plugin');
@@ -262,11 +267,13 @@ function harness(realFacade = false, normalizeInput = false) {
       if (op.method === 'applyEdits') return editMethods.applyEdits(op.args[0]);
       if (op.method === 'editCell') return editMethods.editCell(...op.args);
       if (op.method === 'editCells') return editMethods.editCells(...op.args);
+      if (op.method === 'fillRange') return editMethods.fillRange(...op.args);
       throw new Error('Unexpected mock operation');
     },
     applyRecoveryOp: (op) => {
       if (op.method === 'editCell') return xlsxWorker.createWorkbookRecoveryMutators(edits).editCell(...op.args);
       if (op.method === 'editCells') return peerMethods.editCells(...op.args);
+      if (op.method === 'fillRange') return editMethods.fillRange(...op.args);
       throw new Error('Unexpected mock recovery operation');
     },
   });
@@ -8528,7 +8535,7 @@ describe('peerless keyboard navigation and proposal freshness', () => {
         expect(host.cellInputs).toHaveBeenLastCalledWith(0, reverse ? 'C4' : 'B2');
         expect(view.getByTestId('xlsx-selection').style.width).toBe('192px');
         expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
-        const outline = view.getByTestId('xlsx-overlay-host').children[1] as HTMLElement;
+        const outline = view.getByTestId('xlsx-focus') as HTMLElement;
         expect(outline.style.left).toBe(`${anchor.col * 96}px`);
         expect(outline.style.top).toBe(`${anchor.row * 24}px`);
         fireEvent.keyDown(scroll, { key: reverse ? 'ArrowDown' : 'ArrowUp', shiftKey: true });
@@ -8609,7 +8616,7 @@ describe('peerless keyboard navigation and proposal freshness', () => {
     host.frame.mockImplementation(async (...args) => ({ ...await frame(...args),
       mergedRanges: [{ start: { row: 0, col: 0 }, end: { row: 1, col: 1 } }] }));
     const view = await host.mount();
-    const outline = view.getByTestId('xlsx-overlay-host').children[1] as HTMLElement;
+    const outline = view.getByTestId('xlsx-focus') as HTMLElement;
     expect(outline.style.width).toBe('192px');
     expect(outline.style.height).toBe('48px');
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
@@ -9278,4 +9285,308 @@ it('T20: XL chart selection settles with missing-target', async () => {
     await act(async () => { await clock.tick(700); });
     expect(anchors).toHaveLength(1);
   } finally { cleanup(); }
+});
+
+describe('worker fill handle', () => {
+  function dragHandle(
+    view: RenderResult,
+    from: { clientX: number; clientY: number },
+    to: { clientX: number; clientY: number }
+  ) {
+    const handle = view.getByTestId('xlsx-fill-handle');
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, ...from });
+    fireEvent.pointerMove(handle, { pointerId: 1, ...to });
+    fireEvent.pointerUp(handle, { pointerId: 1, ...to });
+  }
+
+  it('sends one fillRange op through the legacy edit peer for a drag down', async () => {
+    const host = harness();
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} fillHandle
+      onReady={() => {}} />);
+    await opened();
+    await advance();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+
+    await act(async () => {
+      dragHandle(view, { clientX: 144, clientY: 12 }, { clientX: 144, clientY: 60 });
+    });
+    await advance();
+
+    expect(host.editMethods.fillRange).toHaveBeenCalledTimes(1);
+    expect(host.editMethods.fillRange).toHaveBeenCalledWith(0, 'B1', 'B1:B3');
+    expect(host.log).toContain('fill:0:B1:B1:B3');
+  });
+
+  it('previews and cancels a legacy worker drag on Escape without an engine op', async () => {
+    const host = harness();
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} fillHandle
+      onReady={() => {}} />);
+    await opened();
+    await advance();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    const handle = await waitFor(() => view.getByTestId('xlsx-fill-handle'));
+    const from = { clientX: 144, clientY: 12 };
+    const to = { clientX: 144, clientY: 60 };
+
+    await act(async () => {
+      fireEvent.pointerDown(handle, { button: 0, pointerId: 1, ...from });
+      fireEvent.pointerMove(handle, { pointerId: 1, ...to });
+    });
+    expect(view.getByTestId('xlsx-fill-preview')).toBeDefined();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(view.queryByTestId('xlsx-fill-preview')).toBeNull();
+    await act(async () => { fireEvent.pointerUp(handle, { pointerId: 1, ...to }); });
+    await advance();
+
+    expect(host.editMethods.fillRange).not.toHaveBeenCalled();
+  });
+
+  it('sends one fillRange command through the peerless coordinator for a drag right', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+
+    await act(async () => {
+      dragHandle(view, { clientX: 144, clientY: 12 }, { clientX: 250, clientY: 12 });
+    });
+    await waitFor(() => expect(host.sent.some((command) => command.kind === 'fillRange')).toBe(true));
+
+    expect(host.sent.find((command) => command.kind === 'fillRange')).toMatchObject({
+      kind: 'fillRange',
+      payload: {
+        args: [0, 'B1', 'B1:C1'],
+        target: { sheetId: 'sheet:0' },
+      },
+    });
+  });
+
+  it('does not render the handle in a worker editor by default', async () => {
+    harness();
+    const legacy = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={() => {}} />);
+    await opened();
+    await advance();
+    await act(async () => {
+      fireEvent.mouseDown(legacy.getByTestId('xlsx-scroll'), { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await waitFor(() => expect(legacy.getByTestId('xlsx-selection')).toBeDefined());
+    await advance();
+    expect(legacy.queryByTestId('xlsx-fill-handle')).toBeNull();
+    cleanup();
+    await advance();
+
+    const host = peerlessHarness();
+    const view = await host.mount();
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-selection')).toBeDefined());
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('reports a refused peerless fill without selecting past the source', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+
+    await act(async () => {
+      dragHandle(view, { clientX: 144, clientY: 12 }, { clientX: 144, clientY: 60 });
+    });
+    const fill = await waitFor(() => {
+      const command = host.sent.find((entry) => entry.kind === 'fillRange');
+      expect(command).toBeDefined();
+      return command!;
+    });
+    await act(async () => {
+      host.ack(fill, {
+        status: 'refused',
+        result: { failure: { code: 'unsupported', cause: 'table', message: 'fill cannot safely preserve Excel tables' } },
+      });
+    });
+
+    await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
+      .toBe("This edit can't be applied: a table uses cells it would move. The workbook is unchanged."));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+  });
+
+  it('reports a refused peerless fill over linked cells with the fill message', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+
+    await act(async () => {
+      dragHandle(view, { clientX: 144, clientY: 12 }, { clientX: 144, clientY: 60 });
+    });
+    const fill = await waitFor(() => {
+      const command = host.sent.find((entry) => entry.kind === 'fillRange');
+      expect(command).toBeDefined();
+      return command!;
+    });
+    await act(async () => {
+      host.ack(fill, {
+        status: 'refused',
+        result: { failure: { code: 'unsupported', cause: 'fill', message: 'fill cannot safely preserve hyperlinks' } },
+      });
+    });
+
+    await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
+      .toBe("This fill can't be applied: it would change cells with links, notes or rules. The workbook is unchanged."));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+  });
+
+  type TrackKey = { key: string; ctrlKey?: boolean; shiftKey?: boolean };
+
+  async function peerlessHandleAt(clientX: number, clientY: number) {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX, clientY });
+      fireEvent.mouseUp(window, { button: 0, clientX, clientY });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+    const press = async (init: TrackKey) => {
+      const before = host.sent.length;
+      await act(async () => { fireEvent.keyDown(scroll, init); });
+      const sent = host.sent.slice(before);
+      await act(async () => {
+        for (const command of sent) host.ack(command);
+      });
+      await advance();
+      return sent.filter((command) => command.kind === 'select').pop();
+    };
+    return { view, press };
+  }
+
+  async function legacyHandleAt(clientX: number, clientY: number) {
+    harness();
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} fillHandle
+      onReady={(ready) => { api = ready; }} />);
+    await opened();
+    await advance();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX, clientY });
+      fireEvent.mouseUp(window, { button: 0, clientX, clientY });
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+    const press = async (init: TrackKey) => {
+      await act(async () => { fireEvent.keyDown(scroll, init); });
+      await advance();
+    };
+    return { view, press, size: () => api.commands.getState('merge').value };
+  }
+
+  it('does not render the peerless handle once Ctrl+A selects the whole sheet', async () => {
+    const { view, press } = await peerlessHandleAt(144, 12);
+
+    expect(await press({ key: 'a', ctrlKey: true })).toMatchObject({ kind: 'select', payload: { selection: {
+      range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 1_048_575, col: 16_383 } },
+    } } });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the peerless handle once Ctrl+Shift+Down selects a whole empty column', async () => {
+    const { view, press } = await peerlessHandleAt(144, 12);
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+
+    expect(await press({ key: 'ArrowDown', ctrlKey: true, shiftKey: true })).toMatchObject({ kind: 'select', payload: {
+      selection: { range: { kind: 'rowCol', start: { row: 0, col: 1 }, end: { row: 1_048_575, col: 1 } } },
+    } });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the peerless handle once Ctrl+Shift+Right selects a whole empty row', async () => {
+    const { view, press } = await peerlessHandleAt(48, 36);
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A2');
+
+    expect(await press({ key: 'ArrowRight', ctrlKey: true, shiftKey: true })).toMatchObject({ kind: 'select', payload: {
+      selection: { range: { kind: 'rowCol', start: { row: 1, col: 0 }, end: { row: 1, col: 16_383 } } },
+    } });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once Ctrl+A selects the whole sheet', async () => {
+    const { view, press, size } = await legacyHandleAt(144, 12);
+
+    for (let attempt = 0; attempt < 2 && size()?.rows !== 1_048_576; attempt++) {
+      await press({ key: 'a', ctrlKey: true });
+    }
+
+    expect(size()).toEqual({ rows: 1_048_576, columns: 16_384 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once Ctrl+Shift+Down selects a whole empty column', async () => {
+    const { view, press, size } = await legacyHandleAt(144, 12);
+    expect(size()).toEqual({ rows: 1, columns: 1 });
+    expect(view.getByTestId('xlsx-fill-handle')).toBeDefined();
+
+    await press({ key: 'ArrowDown', ctrlKey: true, shiftKey: true });
+
+    expect(size()).toEqual({ rows: 1_048_576, columns: 1 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once Ctrl+Shift+Right selects a whole empty row', async () => {
+    const { view, press, size } = await legacyHandleAt(48, 36);
+    expect(size()).toEqual({ rows: 1, columns: 1 });
+    expect(view.getByTestId('xlsx-fill-handle')).toBeDefined();
+
+    await press({ key: 'ArrowRight', ctrlKey: true, shiftKey: true });
+
+    expect(size()).toEqual({ rows: 1, columns: 16_384 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
 });

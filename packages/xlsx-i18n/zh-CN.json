@@ -139,6 +139,7 @@
       "editUnsupportedChart": "无法应用此编辑：图表使用了此编辑会移动的单元格。工作簿未更改。",
       "editUnsupportedTable": "无法应用此编辑：表格使用了此编辑会移动的单元格。工作簿未更改。",
       "editUnsupportedPivot": "无法应用此编辑：数据透视表使用了此编辑会移动的单元格。工作簿未更改。",
+      "editUnsupportedFill": "无法应用此填充：它会更改包含链接、批注或规则的单元格。工作簿未更改。",
       "sheetProtected": "此单元格位于受保护的工作表上。",
       "hostRefused": "不允许此编辑。",
       "tooManyToCheck": "单元格过多，插件无法检查（上限 {limit}）。",
@@ -227,7 +228,8 @@
     "rangeSelected": "已选择 {start} 到 {end}，{rows} 行 × {columns} 列",
     "sheetActivated": "{name}，第 {index} 个工作表，共 {count} 个",
     "cellInputLabel": "编辑单元格 {address}",
-    "gridRoleDescription": "工作表"
+    "gridRoleDescription": "工作表",
+    "fillHandleLabel": "填充柄"
   },
   "plugins": {
     "toolbarGroup": "插件",

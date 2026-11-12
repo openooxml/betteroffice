@@ -89,7 +89,7 @@ describe('font network policy', () => {
   });
 });
 
-async function serverConfiguration(env: Record<string, string>) {
+async function serverConfiguration(env: Record<string, string>, files: Record<string, string> = {}) {
   const source = readFileSync(new URL('./server.mjs', import.meta.url), 'utf8')
     .replace(/^import .*;\n/gm, '');
   let config: any;
@@ -98,9 +98,10 @@ async function serverConfiguration(env: Record<string, string>) {
       config = options;
       return { listen: async () => {}, resolvedUrls: { local: ['http://127.0.0.1:4178/'] } };
     },
-    readFileSync,
+    readFileSync: (path: string, ...rest: any[]) => files[String(path)] ?? (readFileSync as any)(path, ...rest),
     resolve,
-    qualityRendererPlugin: () => ({ name: 'quality-renderer' }),
+    qualityRendererPlugin: (_format: string, options: unknown) => ({ name: 'quality-renderer', options }),
+    docxFontsPlugin: (options: unknown) => ({ name: 'docx-fonts', options }),
     process: { env, cwd: () => process.cwd() },
     console: { log() {} },
   });
@@ -132,6 +133,7 @@ for (const format of ['docx', 'pptx', 'xlsx', 'vsdx']) {
       for (const [file, target] of [
         ['decoder/fontpack.wasm', `/@fs${resolve('packages/fonts/dist/decoder/fontpack.wasm')}`],
         ['NotoSansThai-Regular.ttf.zst', `/@fs${resolve('packages/fonts-intl/assets/NotoSansThai-Regular.ttf.zst')}`],
+        ['BetterOfficeBaseLatin-Regular.ttf.zst', `/@fs${resolve('packages/fonts/assets')}/BetterOfficeBaseLatin-Regular.ttf.zst`],
         ['Carlito-Regular.ttf.zst', `${prefix}Carlito-Regular.ttf.zst`],
         ['decoder/other.wasm', `${prefix}decoder/other.wasm`],
       ]) {
@@ -145,21 +147,56 @@ for (const format of ['docx', 'pptx', 'xlsx', 'vsdx']) {
   });
 }
 
-test('a published-channel capture may load only the fonts of the recorded published release', () => {
+test('a published-channel capture fetches no font remotely: its release packages are served locally', () => {
   const published = { QUALITY_PUBLISHED_FONTS: '0.4.2' };
-  const ok = (url: string, environment: Record<string, string> = published) =>
-    isAllowedFontRequest({ url, method: 'GET', bodyBytes: 0 } as any, environment as any);
-  expect(ok('https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf')).toBe(true);
-  expect(ok('https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@0.4.2/assets/NotoSansJP-Regular.otf')).toBe(true);
   for (const url of [
-    'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.3/assets/LiberationSans-Regular.ttf',
-    'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/dist/index.js',
-    'https://cdn.jsdelivr.net/npm/@betteroffice/fonts-latin@0.4.2/assets/LiberationSans-Regular.ttf',
-    'https://cdn.jsdelivr.net/npm/@betteroffice/docx@0.4.2/assets/LiberationSans-Regular.ttf',
-    'https://cdn.jsdelivr.net/npm/other@0.4.2/assets/LiberationSans-Regular.ttf',
-    'https://evil.example/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf',
-  ]) expect({ url, allowed: ok(url) }).toEqual({ url, allowed: false });
-  expect(ok('https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf', {})).toBe(false);
-  expect(ok('https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf', { QUALITY_PUBLISHED_FONTS: '0.0.0-stage' })).toBe(false);
-  expect(isAllowedFontRequest({ url: 'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf', method: 'POST', bodyBytes: 0 } as any, published as any)).toBe(false);
+    'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf',
+    'https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@0.4.2/assets/NotoSansJP-Regular.otf',
+    latin(),
+    cjk(),
+    intl(),
+    decoder(),
+  ]) {
+    expect({ url, allowed: isAllowedFontRequest(request(url), published as any) }).toEqual({ url, allowed: false });
+    expect({ url, allowed: isAllowedFontRequest(request(url), { QUALITY_PUBLISHED_FONTS: '0.0.0-stage' } as any) }).toEqual({ url, allowed: false });
+  }
+  expect(isAllowedFontRequest(request(latin()), {} as any)).toBe(true);
+  expect(isAllowedFontRequest(request('https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.4.2/assets/LiberationSans-Regular.ttf'), {} as any)).toBe(false);
+});
+
+for (const format of ['docx', 'pptx', 'xlsx']) {
+  test(`a ${format} published capture serves the release's fonts and fonts-cjk packages from the viewer`, async () => {
+    const fontsRoot = resolve('/tmp/quality-packages/fonts');
+    const cjkRoot = resolve('/tmp/quality-packages/fonts-cjk');
+    const config = await serverConfiguration({
+      QUALITY_FORMAT: format,
+      QUALITY_FONTS_ROOT: fontsRoot,
+      QUALITY_FONTS_CJK_ROOT: cjkRoot,
+      QUALITY_FONT_ASSETS: resolve('/tmp/quality-font-assets'),
+      QUALITY_LOCAL_ONLY: '1',
+    }, {
+      [resolve(fontsRoot, 'package.json')]: JSON.stringify({ exports: { '.': { import: './dist/index.js' }, './cdn': { import: './dist/cdn.js' } } }),
+    });
+    expect(Array.from(config.resolve.alias, (alias: any) => `${String(alias.find)} ${alias.replacement}`))
+      .toContain(`${String(/^@betteroffice\/fonts\/cdn$/)} ${resolve(fontsRoot, 'dist/cdn.js')}`);
+    expect(JSON.parse(config.define.__QUALITY_FONT_BASE__)).toBe(`/@fs${fontsRoot}/assets/`);
+    expect(JSON.parse(config.define.__QUALITY_FONT_BASE_CJK__)).toBe(`/@fs${cjkRoot}/assets/`);
+    expect(Array.from(config.server.fs.allow)).toEqual(expect.arrayContaining([fontsRoot, cjkRoot]));
+    expect(Array.from(config.plugins, (plugin: any) => plugin.name)).toEqual([format === 'docx' ? 'docx-fonts' : 'quality-renderer']);
+    expect(config.plugins[0].options).toEqual({ publishedFonts: true });
+  });
+}
+
+test('a published font root without its CJK package refuses to start', async () => {
+  await expect(serverConfiguration({ QUALITY_FORMAT: 'docx', QUALITY_FONTS_ROOT: resolve('/tmp/quality-packages/fonts') }))
+    .rejects.toThrow('QUALITY_FONTS_ROOT needs QUALITY_FONTS_CJK_ROOT');
+});
+
+test('a docx commit capture takes the checkout font sources and the workspace font assets', async () => {
+  const assets = resolve('/tmp/quality-font-assets');
+  const config = await serverConfiguration({ QUALITY_FORMAT: 'docx', QUALITY_FONT_ASSETS: assets, QUALITY_FONTS_CJK_ROOT: resolve('/tmp/ignored') });
+  expect(JSON.parse(config.define.__QUALITY_FONT_BASE__)).toBe(`/@fs${assets}/`);
+  expect(JSON.parse(config.define.__QUALITY_FONT_BASE_CJK__)).toBe(`/@fs${resolve('packages/fonts-cjk/assets')}/`);
+  expect(Array.from(config.server.fs.allow)).not.toContain(resolve('/tmp/ignored'));
+  expect(config.plugins.at(-1)).toEqual({ name: 'docx-fonts', options: { publishedFonts: false } });
 });

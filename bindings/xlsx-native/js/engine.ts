@@ -16,6 +16,7 @@ type Engine = Pick<
   | 'displayListCellLimit'
   | 'exportXlsxMarkdownJson'
   | 'exportXlsxStructuredJson'
+  | 'install_panic_hook'
   | 'renderXlsxMarkdownJson'
 >;
 
@@ -23,6 +24,7 @@ type NativeFontLoader = Pick<XlsxNativeExtras['functions'], 'configureFontPacks'
 
 const require = createRequire(import.meta.url);
 const binding = require('../index.js') as Engine & NativeFontLoader;
+binding.install_panic_hook();
 installDispose(binding.XlsxDocument, binding.XlsxSnapshotBuilder);
 
 function packDirectory(pack: 'latin' | 'intl' | 'cjk'): string | undefined {
@@ -51,6 +53,7 @@ export const decodeFontFace = binding.decodeFontFace;
 export const displayListCellLimit = binding.displayListCellLimit;
 export const exportXlsxMarkdownJson = binding.exportXlsxMarkdownJson;
 export const exportXlsxStructuredJson = binding.exportXlsxStructuredJson;
+export const install_panic_hook = binding.install_panic_hook;
 export const renderXlsxMarkdownJson = binding.renderXlsxMarkdownJson;
 
 export const engineKind: 'wasm' | 'native' = 'native';

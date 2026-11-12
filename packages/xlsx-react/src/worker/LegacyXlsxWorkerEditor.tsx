@@ -34,6 +34,7 @@ import {
 } from '../commands/workerInputCoordinator';
 import { XlsxCommandContext } from '../commands/XlsxCommandProvider';
 import { EditorToolbar } from '../components/EditorToolbar';
+import { FillHandle, fillHandleAnchor } from '../components/FillHandle';
 import { EditorChromeContext } from '../components/EditorToolbarContext';
 import type { BorderStyle } from '../components/Toolbar';
 import { FormulaBarContext, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
@@ -48,7 +49,7 @@ import { frozenGridExtent } from '../plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
-import { cellInViewport, deriveLimits, expandRangeToMergedCells, extendScrollExtent, laidOutCellRect, nearestCellScroll, positionAtPoint, scaledRect } from '../viewer/sessionGeometry';
+import { cellInViewport, coversWholeTrack, deriveLimits, expandRangeToMergedCells, extendScrollExtent, laidOutCellRect, nearestCellScroll, positionAtPoint, scaledRect } from '../viewer/sessionGeometry';
 import { cellEditorColors } from '../viewer/cellEditorColors';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 
@@ -1276,6 +1277,45 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     return { cell: painted.geometry ? cellAtPoint(painted.geometry, x, y) : null,
       chart: chartRegionAtPoint(painted.displayList.charts, x, y) };
   };
+  const cellAtPointForFill = useCallback((clientX: number, clientY: number): CellAddr | null => {
+    const painted = sourceRef.current?.painted;
+    const canvas = canvasRef.current;
+    if (!painted || painted.request.sheet !== activeRef.current || !canvas || !painted.geometry) return null;
+    const rect = canvas.getBoundingClientRect();
+    return cellAtPoint(painted.geometry, (clientX - rect.left) / painted.request.zoom,
+      (clientY - rect.top) / painted.request.zoom);
+  }, []);
+  const fillPreviewRect = useCallback((range: CellRange) => {
+    const painted = sourceRef.current?.painted;
+    if (!painted?.displayList.grid) return null;
+    const rect = rangeRect(painted.displayList.grid, range);
+    return rect ? scaledRect(rect, painted.request.zoom) : null;
+  }, []);
+  const fillSelection = useCallback((source: CellRange, destination: CellRange) => {
+    const owner = runRef.current;
+    if (!acceptInput() || !owner?.ready || !owner.peer || !owner.editPeer) return;
+    const sheet = activeRef.current;
+    const from = address({ row: source.top, col: source.left });
+    const sourceEnd = address({ row: source.bottom, col: source.right });
+    const end = address({ row: destination.bottom, col: destination.right });
+    const sourceA1 = from === sourceEnd ? from : `${from}:${sourceEnd}`;
+    const destinationA1 = `${from}:${end}`;
+    const op: WorkbookReplayOp = { method: 'fillRange', args: [sheet, sourceA1, destinationA1] };
+    void coordinator.runAfterPendingInput((_, markApplied) => {
+      const current = runRef.current;
+      const peer = current?.recovering ? operationPeer.current : current?.editPeer;
+      if (!current?.current || current.retiring || current.failure || !peer || !acceptInput()) return;
+      markApplied.check();
+      try {
+        const operations = workbookEditPeerOperations(peer);
+        const result = (current.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
+        markApplied();
+        apply(result, op);
+      } catch (error) {
+        setRefusal(error instanceof Error ? error.message : String(error));
+      }
+    }, { kind: 'input', target: { sheet, target: destinationA1 } }).catch(reportInputError);
+  }, [acceptInput, apply, coordinator, operationPeer, reportInputError]);
   const onMouseDown = (event: MouseEvent) => {
     if (fromPlugin(event) || runRef.current?.failure || editorInputRef.current?.contains(event.target as Node)) return;
     const { cell, chart } = point(event);
@@ -1746,6 +1786,11 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const focused = visibleSelection ? expandRangeToMergedCells({ top: visibleSelection.focus.row,
     left: visibleSelection.focus.col, bottom: visibleSelection.focus.row, right: visibleSelection.focus.col }, merged) : null;
   const selectionRect = grid && selected ? rangeRect(grid, selected) : null;
+  const selectionBottomRight = grid && selected ? cellRect(grid, selected.bottom, selected.right) : null;
+  const fillHandleRect = fillHandleAnchor(
+    selectionRect ? scaledRect(selectionRect, paintedZoom) : null,
+    selectionBottomRight ? scaledRect(selectionBottomRight, paintedZoom) : null
+  );
   const focusRect = grid && focused ? rangeRect(grid, focused) : null;
   const editRect = editing ? (grid && editing.sheet === painted?.request.sheet ?
     cellRect(grid, editing.row, editing.col) : null) ?? editorRectRef.current ?? { x: 0, y: 0, w: 96, h: 24 } : null;
@@ -1820,6 +1865,12 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                   <div data-testid="xlsx-overlay-host" style={{ position: 'absolute', top: 0, left: 0, width: 0, height: 0, pointerEvents: 'none' }}>
                     {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
                       style={outline(selectionRect, `1px solid ${BRAND}`, 'rgba(33, 115, 70, 0.12)')} />}
+                    {props.fillHandle && !props.readOnly && !editing && !coordinator.draft && !selectedChart && acceptInput() &&
+                      fillHandleRect && selected && !coversWholeTrack(selected, limits()) && (
+                      <FillHandle rect={fillHandleRect} source={selected}
+                        rectForRange={fillPreviewRect} cellAt={cellAtPointForFill} onFill={fillSelection}
+                        ariaLabel={t('a11y.fillHandleLabel')} />
+                    )}
                     {focusRect && !selectedChart && !editing && <div style={outline(focusRect, `2px solid ${BRAND}`)} />}
                     {chartRect && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart?.id} aria-hidden
                       style={{ ...outline(chartRect, `2px solid ${BRAND}`),

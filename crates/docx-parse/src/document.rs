@@ -1513,6 +1513,34 @@ mod tests {
         assert!(body_prefix(xml, 1).is_some());
     }
 
+    fn paragraph_texts(body: &DocumentBody) -> Vec<String> {
+        body.content
+            .iter()
+            .filter_map(|block| match block {
+                BlockContent::Paragraph(paragraph) => Some(get_paragraph_text(paragraph)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_root_binding_a_standard_prefix_to_the_main_namespace_reads_the_body() {
+        let w = crate::xml::namespaces::W;
+        let body = parse(&format!(
+            r#"<w:document xmlns:w="{w}" xmlns:w14="{w}"><w14:body><w14:p><w14:r><w14:t>rebound</w14:t></w14:r></w14:p></w14:body></w:document>"#
+        ));
+        assert_eq!(paragraph_texts(&body), ["rebound"]);
+    }
+
+    #[test]
+    fn a_nested_binding_of_a_standard_prefix_to_the_main_namespace_reads_the_body() {
+        let w = crate::xml::namespaces::W;
+        let body = parse(&format!(
+            r#"<w:document xmlns:w="{w}"><w14:body xmlns:w14="{w}"><w14:p><w14:r><w14:t>rebound</w14:t></w14:r></w14:p></w14:body></w:document>"#
+        ));
+        assert_eq!(paragraph_texts(&body), ["rebound"]);
+    }
+
     #[test]
     fn normalizes_an_empty_body_to_one_default_empty_section() {
         let body = parse(r#"<w:document xmlns:w="w"><w:body/></w:document>"#);

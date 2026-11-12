@@ -438,12 +438,20 @@ impl JsonWindow<'_> {
         for (key, value) in [
             (b",\"bold\":".as_slice(), font.bold),
             (b",\"italic\":".as_slice(), font.italic),
-            (b",\"underline\":".as_slice(), font.underline),
-            (b",\"strike\":".as_slice(), font.strike),
+            (
+                b",\"underline\":".as_slice(),
+                font.underline != xlsx_model::RunUnderline::None,
+            ),
         ] {
             self.raw(key)?;
             self.small(&value)?;
         }
+        if let Some(style) = font.underline_style() {
+            self.raw(b",\"underline_style\":")?;
+            self.small(&style)?;
+        }
+        self.raw(b",\"strike\":")?;
+        self.small(&font.strike)?;
         self.raw(b",\"color\":")?;
         self.optional_color(font.color.as_ref())?;
         self.raw(b"},\"fill\":")?;

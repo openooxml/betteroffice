@@ -139,6 +139,7 @@
       "editUnsupportedChart": "This edit can't be applied: a chart uses cells it would move. The workbook is unchanged.",
       "editUnsupportedTable": "This edit can't be applied: a table uses cells it would move. The workbook is unchanged.",
       "editUnsupportedPivot": "This edit can't be applied: a pivot table uses cells it would move. The workbook is unchanged.",
+      "editUnsupportedFill": "This fill can't be applied: it would change cells with links, notes or rules. The workbook is unchanged.",
       "sheetProtected": "This cell is on a protected sheet.",
       "hostRefused": "This edit is not allowed.",
       "tooManyToCheck": "Too many cells for plugins to check (limit {limit}).",
@@ -227,7 +228,8 @@
     "rangeSelected": "{start} to {end} selected, {rows, plural, one {# row} other {# rows}} by {columns, plural, one {# column} other {# columns}}",
     "sheetActivated": "{name}, sheet {index} of {count}",
     "cellInputLabel": "Edit cell {address}",
-    "gridRoleDescription": "worksheet"
+    "gridRoleDescription": "worksheet",
+    "fillHandleLabel": "Fill handle"
   },
   "plugins": {
     "toolbarGroup": "Plugins",

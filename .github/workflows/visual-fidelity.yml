@@ -235,6 +235,42 @@ jobs:
         env: *private-write
         run: cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-prepare private-logs
 
+  libreoffice-archive:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 130
+    outputs:
+      key: ${{ steps.pin.outputs.key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/office-quality
+
+      - name: Read the LibreOffice pin
+        id: pin
+        run: |
+          source scripts/office-quality/libreoffice-pin.sh
+          echo "key=libreoffice-${LO_VERSION}-${LO_SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the LibreOffice archive
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/libreoffice-archive
+          key: ${{ steps.pin.outputs.key }}
+
+      - name: Fetch and verify the LibreOffice archive
+        if: steps.restore.outputs.cache-hit != 'true'
+        run: bash scripts/office-quality/fetch-libreoffice.sh
+
+      - name: Save the LibreOffice archive
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/libreoffice-archive
+          key: ${{ steps.pin.outputs.key }}
+
   measure:
     needs: prepare
     runs-on: ubuntu-24.04
@@ -532,7 +568,7 @@ jobs:
           PY
 
   docx-benchmark:
-    needs: [prepare, native-build]
+    needs: [prepare, native-build, libreoffice-archive]
     if: contains(fromJSON(needs.prepare.outputs.formats), 'docx')
     runs-on: ubuntu-24.04
     environment: *private-environment
@@ -595,6 +631,29 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.13"
+
+      - &restore-libreoffice
+        name: Restore the LibreOffice archive
+        id: restore-libreoffice
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/libreoffice-archive
+          key: ${{ needs.libreoffice-archive.outputs.key }}
+
+      - &fetch-libreoffice-on-miss
+        name: Fetch and verify the LibreOffice archive on a cache miss
+        timeout-minutes: 25
+        env:
+          CACHE_HIT: ${{ steps.restore-libreoffice.outputs.cache-hit }}
+          CACHE_KEY: ${{ needs.libreoffice-archive.outputs.key }}
+          LO_FETCH_BUDGET: "1200"
+        run: |
+          if [ "$CACHE_HIT" = "true" ]; then
+            echo "LibreOffice archive $CACHE_KEY restored from cache"
+          else
+            echo "::warning::cache miss for $CACHE_KEY: fetching and verifying the pinned archive"
+            bash scripts/office-quality/fetch-libreoffice.sh
+          fi
 
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
@@ -717,7 +776,7 @@ jobs:
           retention-days: 7
 
   xlsx-benchmark:
-    needs: [prepare, xlsx-native-build]
+    needs: [prepare, xlsx-native-build, libreoffice-archive]
     if: needs.prepare.outputs.xlsx-shards != '[]'
     runs-on: ubuntu-24.04
     environment: *private-environment
@@ -770,6 +829,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.13"
+      - *restore-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -873,7 +934,7 @@ jobs:
           retention-days: 7
 
   pptx-benchmark:
-    needs: [prepare, pptx-native-build]
+    needs: [prepare, pptx-native-build, libreoffice-archive]
     if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
     runs-on: ubuntu-24.04
     environment: *private-environment
@@ -929,6 +990,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.4.3"
+      - *restore-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -996,7 +1059,7 @@ jobs:
         run: node scripts/office-quality/shards.mjs wall pptx-benchmark "${{ matrix.shard }}"
 
   xlsx-fidelity:
-    needs: prepare
+    needs: [prepare, libreoffice-archive]
     if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
     runs-on: ubuntu-24.04
     environment: *private-environment
@@ -1044,6 +1107,8 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.4.3"
+      - *restore-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -1148,7 +1213,7 @@ jobs:
           retention-days: 7
 
   roundtrip-a:
-    needs: [prepare, roundtrip-build]
+    needs: [prepare, roundtrip-build, libreoffice-archive]
     runs-on: ubuntu-24.04
     environment: *private-environment
     timeout-minutes: 90
@@ -1198,6 +1263,8 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.13"
+      - *restore-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install the pinned LibreOffice release
         timeout-minutes: 15
         run: bash scripts/office-quality/install-libreoffice.sh
@@ -1261,7 +1328,7 @@ jobs:
           cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-roundtrip-${{ matrix.format }}-${{ matrix.shard }} private-logs
 
   roundtrip-b:
-    needs: [prepare, roundtrip-build]
+    needs: [prepare, roundtrip-build, libreoffice-archive]
     if: needs.prepare.outputs.roundtrip-shards-b != '[]'
     runs-on: ubuntu-24.04
     environment: *private-environment
@@ -1275,7 +1342,7 @@ jobs:
     steps: *roundtrip-steps
 
   timing:
-    needs: [prepare, native-build, xlsx-native-build, pptx-native-build]
+    needs: [prepare, native-build, xlsx-native-build, pptx-native-build, libreoffice-archive]
     if: >-
       !cancelled() && inputs.private_corpus && needs.prepare.result == 'success' &&
       needs.prepare.outputs.timing-formats != '[]'
@@ -1330,6 +1397,9 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.4.3"
+
+      - *restore-libreoffice
+      - *fetch-libreoffice-on-miss
 
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15

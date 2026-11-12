@@ -139,6 +139,7 @@
       "editUnsupportedChart": "لا يمكن تطبيق هذا التعديل: يستخدم مخطط خلايا سينقلها التعديل. لم يتغير المصنف.",
       "editUnsupportedTable": "لا يمكن تطبيق هذا التعديل: يستخدم جدول خلايا سينقلها التعديل. لم يتغير المصنف.",
       "editUnsupportedPivot": "لا يمكن تطبيق هذا التعديل: يستخدم جدول محوري خلايا سينقلها التعديل. لم يتغير المصنف.",
+      "editUnsupportedFill": "لا يمكن تطبيق هذه التعبئة: ستغيّر خلايا تحتوي على ارتباطات أو ملاحظات أو قواعد. لم يتغير المصنف.",
       "sheetProtected": "هذه الخلية في ورقة محمية.",
       "hostRefused": "هذا التعديل غير مسموح به.",
       "tooManyToCheck": "عدد الخلايا كبير جدًا بحيث لا يمكن للإضافات التحقق منها (الحد {limit}).",
@@ -227,7 +228,8 @@
     "rangeSelected": "تم تحديد {start} إلى {end}، {rows, plural, zero {# صفوف} one {صف واحد} two {صفان} few {# صفوف} many {# صفًا} other {# صف}} × {columns, plural, zero {# أعمدة} one {عمود واحد} two {عمودان} few {# أعمدة} many {# عمودًا} other {# عمود}}",
     "sheetActivated": "{name}، ورقة عمل {index} من {count}",
     "cellInputLabel": "تحرير الخلية {address}",
-    "gridRoleDescription": "ورقة عمل"
+    "gridRoleDescription": "ورقة عمل",
+    "fillHandleLabel": "مقبض التعبئة"
   },
   "plugins": {
     "toolbarGroup": "المكونات الإضافية",

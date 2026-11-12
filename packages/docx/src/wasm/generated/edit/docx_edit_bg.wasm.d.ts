@@ -43,6 +43,7 @@ export const editsession_build_display_list_json: (a: number, b: number, c: numb
 export const editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_can_redo: (a: number) => number;
 export const editsession_can_undo: (a: number) => number;
+export const editsession_canvasSkippedEffects: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const editsession_cell_selection: (a: number) => [number, number, number, number];
 export const editsession_clear_cell_selection: (a: number) => [number, number];
 export const editsession_clear_content_control_value: (a: number, b: number, c: number) => [number, number];
@@ -302,6 +303,7 @@ export const serialize_docx_s11: (a: number, b: number) => [number, number, numb
 export const serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
 export const set_wasm_heap_counting: (a: number) => number;
 export const set_wasm_heap_limit: (a: number) => void;
+export const skippedEffectKinds: () => [number, number];
 export const unzip_docx: (a: number, b: number) => [number, number, number];
 export const update_display_list: (a: number, b: number, c: number) => [number, number];
 export const vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

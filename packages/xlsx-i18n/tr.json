@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Bu düzenleme uygulanamıyor: bir grafik, düzenlemenin taşıyacağı hücreleri kullanıyor. Çalışma kitabı değişmedi.",
       "editUnsupportedTable": "Bu düzenleme uygulanamıyor: bir tablo, düzenlemenin taşıyacağı hücreleri kullanıyor. Çalışma kitabı değişmedi.",
       "editUnsupportedPivot": "Bu düzenleme uygulanamıyor: bir pivot tablo, düzenlemenin taşıyacağı hücreleri kullanıyor. Çalışma kitabı değişmedi.",
+      "editUnsupportedFill": "Bu doldurma uygulanamıyor: bağlantı, not veya kural içeren hücreleri değiştirir. Çalışma kitabı değişmedi.",
       "sheetProtected": "Bu hücre korumalı bir sayfada.",
       "hostRefused": "Bu düzenlemeye izin verilmiyor.",
       "tooManyToCheck": "Eklentilerin denetlemesi için çok fazla hücre var (sınır {limit}).",
@@ -227,7 +228,8 @@
     "rangeSelected": "{start} ile {end} arası seçildi, {rows} satır x {columns} sütun",
     "sheetActivated": "{name}, sayfa {index} / {count}",
     "cellInputLabel": "{address} hücresini düzenle",
-    "gridRoleDescription": "çalışma sayfası"
+    "gridRoleDescription": "çalışma sayfası",
+    "fillHandleLabel": "Doldurma tutamacı"
   },
   "plugins": {
     "toolbarGroup": "Eklentiler",

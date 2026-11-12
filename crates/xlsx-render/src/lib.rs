@@ -12,7 +12,7 @@ pub mod wrap;
 
 pub use ooxml_drawingml::GeometryPathCommand;
 use std::sync::Arc;
-pub use xlsx_model::PatternType;
+pub use xlsx_model::{PatternType, RunUnderline};
 
 use hashbrown::HashMap;
 use ooxml_drawingml::chart::ChartSpace;
@@ -76,6 +76,7 @@ const GHOST_INS_HIGHLIGHT: &str = "#2e7d321a";
 const GHOST_CHAR_W_RATIO: f32 = 0.6;
 const GHOST_GAP_PX: f32 = 6.0;
 const GHOST_MIN_SCALE: f32 = 0.6;
+const GHOST_FIT_EPSILON_PX: f32 = 1e-3;
 
 /// a pending edit rendered as a ghost pair in place of the cell's committed
 /// text: `old_text` struck in red, `new_text` in green.
@@ -94,6 +95,7 @@ struct GhostFont {
     bold: bool,
     italic: bool,
     underline: bool,
+    underline_style: Option<RunUnderline>,
 }
 
 #[derive(Clone, Copy)]
@@ -1002,6 +1004,7 @@ where
         let bold = font.is_some_and(|f| f.bold);
         let italic = font.is_some_and(|f| f.italic);
         let underline = font.is_some_and(|f| f.underline);
+        let underline_style = font.and_then(|f| f.underline_style);
         let strike = font.is_some_and(|f| f.strike);
         let font_family = font
             .and_then(|f| f.family.clone())
@@ -1147,6 +1150,7 @@ where
             bold,
             italic,
             underline: hyperlink.is_some() || underline,
+            underline_style,
             strike,
             highlight: None,
             dashed_underline: false,
@@ -1187,6 +1191,7 @@ where
             bold: false,
             italic: false,
             underline: true,
+            underline_style: None,
             strike: false,
             highlight: None,
             dashed_underline: false,
@@ -1218,6 +1223,7 @@ where
             bold: font.is_some_and(|font| font.bold),
             italic: font.is_some_and(|font| font.italic),
             underline: font.is_some_and(|font| font.underline),
+            underline_style: font.and_then(|font| font.underline_style),
         };
         let Some(bx) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
@@ -1315,6 +1321,7 @@ fn emit_ghost(
             bold: font.bold,
             italic: font.italic,
             underline: font.underline,
+            underline_style: font.underline_style,
             strike,
             highlight: Some(
                 if preview {
@@ -1363,7 +1370,7 @@ fn emit_ghost(
 
     let old_width = ghost_text_width(old, full_size);
     let new_width = ghost_text_width(new, full_size);
-    if old_width + GHOST_GAP_PX + new_width <= avail {
+    if old_width + GHOST_GAP_PX + new_width <= avail + GHOST_FIT_EPSILON_PX {
         let baseline = baseline_y(cy0, ch, full_size, None);
         line(
             x,
@@ -1425,11 +1432,11 @@ fn ghost_text_width(text: &str, size: f32) -> f32 {
 /// `text` unchanged when its estimate fits `budget`, else a truncated prefix
 /// ending in `…`.
 fn ellipsize(text: &str, budget: f32, size: f32) -> String {
-    if ghost_text_width(text, size) <= budget {
+    if ghost_text_width(text, size) <= budget + GHOST_FIT_EPSILON_PX {
         return text.to_string();
     }
     let char_w = size * geometry::PX_PER_PT as f32 * GHOST_CHAR_W_RATIO;
-    let keep = ((budget / char_w) as i32 - 1).max(0) as usize;
+    let keep = (((budget + GHOST_FIT_EPSILON_PX) / char_w) as i32 - 1).max(0) as usize;
     let prefix: String = text.chars().take(keep).collect();
     format!("{prefix}…")
 }
@@ -2055,6 +2062,7 @@ struct ResolvedFont {
     bold: bool,
     italic: bool,
     underline: bool,
+    underline_style: Option<RunUnderline>,
     strike: bool,
     color: Option<Arc<str>>,
 }
@@ -2118,7 +2126,8 @@ impl<'a> FrameStyles<'a> {
                 family: font.name.as_deref().map(Arc::from),
                 bold: font.bold,
                 italic: font.italic,
-                underline: font.underline,
+                underline: font.underline != RunUnderline::None,
+                underline_style: font.underline_style(),
                 strike: font.strike,
                 color: font
                     .color
@@ -3105,6 +3114,67 @@ mod tests {
     }
 
     #[test]
+    fn text_commands_carry_the_font_underline_kind() {
+        let kinds = [
+            RunUnderline::None,
+            RunUnderline::Single,
+            RunUnderline::Double,
+            RunUnderline::SingleAccounting,
+            RunUnderline::DoubleAccounting,
+        ];
+        let mut sheet = Sheet::new("Sheet1");
+        let mut wb = Workbook::default();
+        for (index, underline) in kinds.into_iter().enumerate() {
+            let index = index as u32;
+            sheet.set_cell(
+                CellRef::new(index, 0),
+                Cell {
+                    style: Some(index),
+                    ..text_cell(&format!("t{index}"))
+                },
+            );
+            wb.styles.fonts.push(xlsx_model::styles::Font {
+                underline,
+                ..Default::default()
+            });
+            wb.styles.cell_xfs.push(xlsx_model::styles::Xf {
+                font: Some(index),
+                ..Default::default()
+            });
+        }
+        wb.sheets.push(sheet);
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 200.0,
+        };
+        let drawn: Vec<_> = build_display_list(&wb, SheetId(0), &viewport)
+            .unwrap()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                DrawCmd::Text {
+                    underline,
+                    underline_style,
+                    ..
+                } => Some((underline, underline_style)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                (false, None),
+                (true, None),
+                (true, Some(RunUnderline::Double)),
+                (true, Some(RunUnderline::SingleAccounting)),
+                (true, Some(RunUnderline::DoubleAccounting)),
+            ]
+        );
+    }
+
+    #[test]
     fn grid_meta_covers_visible_boundaries() {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Sheet1"));
@@ -3492,6 +3562,40 @@ mod tests {
         assert_eq!(lines[0].1, lines[1].1);
         assert!(lines[0].1 < FONT_SIZE_PT);
         assert!(lines[0].1 >= FONT_SIZE_PT * GHOST_MIN_SCALE);
+    }
+
+    fn default_cell_ghost_texts(old: &str, new: &str) -> Vec<String> {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell(old));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl =
+            build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, old, new)]).unwrap();
+        text_cmds(&dl)
+            .into_iter()
+            .map(|(text, ..)| text.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn stacked_ghost_exactly_filling_a_default_column_stays_whole() {
+        let texts = default_cell_ghost_texts("$1,000.00", "$2,000.00");
+        assert_eq!(texts, vec!["$2,000.00", "$1,000.00"]);
+    }
+
+    #[test]
+    fn stacked_ghost_one_char_past_a_default_column_is_shortened() {
+        let texts = default_cell_ghost_texts("$1,000.00", "$20,000.00");
+        assert_eq!(texts.len(), 2);
+        assert!(texts[0].ends_with('…'));
+        assert_eq!(texts[1], "$1,000.00");
     }
 
     #[test]

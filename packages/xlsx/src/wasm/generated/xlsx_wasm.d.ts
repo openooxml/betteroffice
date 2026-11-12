@@ -82,6 +82,7 @@ export class XlsxDocument {
      * Export the committed workbook with the version it was read at; nothing recalculates.
      */
     exportStructuredJson(options: string): string;
+    fillRangeJson(args: string): string;
     findTextJson(request: string): string;
     historyStateJson(): string;
     listDefinedNamesJson(request: string): string;
@@ -278,6 +279,7 @@ export interface InitOutput {
     readonly xlsxdocument_endPeerSnapshot: (a: number) => void;
     readonly xlsxdocument_exportMarkdownJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly xlsxdocument_exportStructuredJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_fillRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listDefinedNamesJson: (a: number, b: number, c: number) => [number, number, number, number];
