@@ -27,6 +27,7 @@ export function PluginOverlays({
     <div
       ref={layerRef}
       className="docx-plugin-overlays"
+      data-plugin-overlays=""
       data-testid="plugin-overlays"
       style={{
         position: 'absolute',

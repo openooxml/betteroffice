@@ -10,6 +10,7 @@ use std::thread::{self, ThreadId};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use docx_engine::{Document, EngineError, EngineErrorKind, Host};
+use docx_layout::skipped_effects::{self, PrimitiveAt, SkippedEffect};
 use napi::bindgen_prelude::{
     Array, ArrayBuffer, Either, Float64Array, FnArgs, Function, FunctionRef, JsObjectValue, Null,
     Object, Uint8Array, Uint8ArraySlice, Uint32Array, Undefined,
@@ -27,6 +28,7 @@ pub struct DecodedFontFace {
 pub struct PngTargetReport {
     pub png: Uint8Array,
     pub pictures: Vec<PngPictureReport>,
+    pub skipped_effects: Vec<String>,
 }
 
 #[napi(object)]
@@ -59,6 +61,25 @@ pub fn decode_font_face(
         font: Uint8Array::new(decoded.font),
         payload: decoded.payload.map(Uint8Array::new),
     })
+}
+
+/// Every kind of effect a PNG export can report as skipped, in reporting order.
+#[napi(
+    catch_unwind,
+    js_name = "skippedEffectKinds",
+    ts_args_type = "",
+    ts_return_type = "string[]"
+)]
+pub fn skipped_effect_kinds(env: Env) -> Vec<String> {
+    let _call = EngineCall::function(env);
+    effect_names(SkippedEffect::ALL.to_vec())
+}
+
+fn effect_names(effects: Vec<SkippedEffect>) -> Vec<String> {
+    effects
+        .into_iter()
+        .map(|effect| effect.name().to_owned())
+        .collect()
 }
 
 #[napi(catch_unwind, js_name = "font_preflight")]
@@ -575,7 +596,7 @@ impl EditSession {
         display_list_json: String,
         target_json: String,
         options_json: String,
-    ) -> Result<docx_raster::RenderedPage> {
+    ) -> Result<(docx_raster::RenderedPage, Vec<SkippedEffect>)> {
         let document = self.document(env)?;
         #[cfg(feature = "test-hooks")]
         if self.panic_png.replace(false) {
@@ -658,7 +679,7 @@ impl EditSession {
             collect_png_images(&document, &area.separator_primitives, scope, &mut images);
             collect_png_images(&document, &area.primitives, scope, &mut images);
         }
-        document
+        let rendered = document
             .with_measure_fonts_ref(|fonts| {
                 let resources = docx_raster::RenderResources::new(fonts, &chains, &images);
                 docx_raster::render_page_cached_scaled(
@@ -682,7 +703,15 @@ impl EditSession {
                     "png-invalid:"
                 };
                 throw_error(&env, &format!("{prefix} {error}"))
-            })
+            })?;
+        let missing: Vec<PrimitiveAt> = rendered
+            .skipped_pictures
+            .iter()
+            .map(|picture| picture.at)
+            .collect();
+        let effects =
+            skipped_effects::skipped_effects(display_page, &missing, &skipped_effects::NATIVE);
+        Ok((rendered, effects))
     }
 
     fn clear_observer(&self, env: Env) -> Result<()> {
@@ -1028,7 +1057,7 @@ impl EditSession {
     ) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
         self.render_png_target_page(env, display_list_json, target_json, options_json)
-            .and_then(|page| byte_result(env, page.bytes))
+            .and_then(|(page, _)| byte_result(env, page.bytes))
     }
 
     #[napi(catch_unwind, js_name = "renderPngTargetReport")]
@@ -1040,7 +1069,7 @@ impl EditSession {
         options_json: String,
     ) -> Result<PngTargetReport> {
         let _call = EngineCall::new(env);
-        let page =
+        let (page, effects) =
             self.render_png_target_page(env, display_list_json, target_json, options_json)?;
         Ok(PngTargetReport {
             png: byte_result(env, page.bytes)?,
@@ -1055,6 +1084,7 @@ impl EditSession {
                     unit: picture.unit.map(str::to_owned),
                 })
                 .collect(),
+            skipped_effects: effect_names(effects),
         })
     }
 
@@ -1225,6 +1255,24 @@ impl EditSession {
     pub fn apply_input_profile_json(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         Ok(self.document(env)?.apply_input_profile_json())
+    }
+
+    /// The kinds of effect the web canvas backend leaves off resident display
+    /// page `page_index`, as bits in `skippedEffectKinds()` order, the first
+    /// kind the lowest bit. `unavailable` holds `(region, area, index)` triples
+    /// for the pictures it could not draw: region 0 body, 1 header, 2 footer,
+    /// 3 note separator, 4 note, with `area` the note area's index.
+    #[napi(catch_unwind, js_name = "canvasSkippedEffects")]
+    pub fn canvas_skipped_effects(
+        &self,
+        env: Env,
+        page_index: u32,
+        unavailable: Uint32Array,
+    ) -> Result<u32> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .display_canvas_skipped_effects(page_index, &unavailable)
+            .map_err(|error| map_error(env, error))
     }
 
     #[napi(catch_unwind, js_name = "display_hit_test_regions_json")]

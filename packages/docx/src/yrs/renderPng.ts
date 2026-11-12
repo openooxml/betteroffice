@@ -1,10 +1,12 @@
 import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv } from '../editor/computeLayout';
-import { createRustMeasureSource, resolveCompleteFontProvider, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
+import { createRustMeasureSource, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
+import { resolveCompleteFontSelection } from '../layout/measure/defaultFontProvider';
 import type { EmbeddedFaceInput } from '../layout/measure/fontRegistry';
 import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngOptions, type DocxPngTarget } from '../layout/render/png';
 import { openPagedDisplay } from '../layout/render/rustDisplayList';
 import { extractEmbeddedFontFaces } from '../utils';
-import { engineKind, renderPng as renderEnginePng } from '../wasm/enginePng';
+import { renderPng as renderEnginePng } from '../wasm/enginePng';
+import { faceLoadFailure, recordProviderFaceLoads, untilAborted } from '../wasm/enginePngFonts';
 import { createYrsSession, type YrsSession } from './index';
 import { sessionMediaSources } from './sessionInternals';
 
@@ -57,17 +59,28 @@ export function createPngExporter(session: YrsSession) {
       copy.rebuildMediaSources();
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
-      const bundled = fontProvider ?? (engineKind === 'native' ? await resolveCompleteFontProvider() : undefined);
-      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : { standIns: true }) });
+      const complete = fontProvider ? undefined : await resolveCompleteFontSelection();
+      const recorded = complete?.provider && !complete.configured
+        ? await recordProviderFaceLoads(complete.provider) : undefined;
+      const bundled = fontProvider ?? recorded?.provider ?? complete?.provider;
+      const rejectFailedLoads = async () => {
+        if (!recorded) return;
+        await recorded.settled();
+        const failed = faceLoadFailure(recorded.failures);
+        if (failed) throw failed;
+      };
+      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : {}) });
       measure.setCompat(document.package.settings?.compatibilityFlags);
       measure.setEmbeddedFaces(await extractEmbeddedFontFaces(document), appFaces(fonts));
       const renderEnv = documentRenderEnv(document);
       const request = buildResidentRegionLayoutRequest(document, 0, renderEnv);
       const requirements = JSON.parse(copy.layoutFontRequirementsJson(JSON.stringify(request))) as ResidentFontRequirement[];
       await measure.prepareFontRequirements(requirements);
+      await rejectFailedLoads();
       const measurement = measure.measurementConfigForRequirements(requirements);
       if (!measurement) throw fontUnavailable('The fonts this document lays out with could not be loaded. Install @betteroffice/fonts, or pass them in `fonts`.');
       computeLayout({ document, pageGap: 0, session: copy, renderEnv, measurement });
+      await rejectFailedLoads();
       return { copy, display: openPagedDisplay(copy, measurement.fontChains), fontChains: measurement.fontChains ?? {} };
     } catch (error) {
       try { copy.destroy(); } catch { /* the layout failure is the one to report */ }
@@ -101,7 +114,7 @@ export function createPngExporter(session: YrsSession) {
       if (idle !== undefined) clearTimeout(idle);
       idle = undefined;
       try {
-        const { copy, display, fontChains } = await entry.laidOut;
+        const { copy, display, fontChains } = await untilAborted(entry.laidOut, options.signal);
         assertAlive();
         const page = display.page(index);
         if (!page) throw new RangeError(`page index ${index} out of range for ${display.pageCount} page(s)`);

@@ -283,6 +283,7 @@ export interface CapturedCellFormat {
     bold?: boolean;
     italic?: boolean;
     underline?: boolean;
+    underline_style?: 'double' | 'singleAccounting' | 'doubleAccounting';
     strike?: boolean;
     color?: CapturedColor | null;
   };
@@ -600,6 +601,14 @@ export interface WorkbookHandle extends CollaborationReplica {
   editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
   /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
+  /**
+   * Fill copies `source` over the complete rectangle `destination` as one undo
+   * step. `destination` includes the source and must start at its top-left
+   * corner; values and styles are copied, formulas are translated with `$`
+   * preserved. Array formulas, merged cells, tables, and charts anchored in
+   * either rectangle are refused without changing the workbook.
+   */
+  fillRange(sheet: number, source: string, destination: string): EditResult;
   /** Move a range within one sheet and rewrite references in one native undo step. */
   moveRange(sheet: number, source: string, destination: string): EditResult;
   setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult;
@@ -1214,6 +1223,9 @@ function wrapWorkbookDocument(
     },
     editCells(sheet: number, edits: CellInputEdit[]): EditResult {
       return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
+    },
+    fillRange(sheet: number, source: string, destination: string): EditResult {
+      return parseJson(() => doc.fillRangeJson(JSON.stringify({ sheet, source, destination })), true);
     },
     moveRange(sheet: number, source: string, destination: string): EditResult {
       return parseJson(() => doc.moveRangeJson(JSON.stringify({ sheet, source, destination })), true);

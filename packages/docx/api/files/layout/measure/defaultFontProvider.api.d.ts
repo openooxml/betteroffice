@@ -44,6 +44,13 @@ export declare function resolveDefaultFontProvider(runtime?: {
 export declare function resolveCompleteFontProvider(runtime?: {
     decoder?: FontDecoder;
 }): Promise<BundledFontProvider | undefined>;
+/** @internal {@link resolveCompleteFontProvider}, with whether the provider is the configured one. */
+export declare function resolveCompleteFontSelection(runtime?: {
+    decoder?: FontDecoder;
+}): Promise<{
+    provider: BundledFontProvider | undefined;
+    configured: boolean;
+}>;
 /** @internal State the lazily loaded backstop provider resolves against. */
 export declare function baseLatinFontState(): {
     baseUrl: string | URL | undefined;

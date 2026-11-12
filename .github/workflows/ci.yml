@@ -686,7 +686,7 @@ jobs:
 
       - name: Check native and wasm parity
         run: |
-          bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts
+          bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts
           bun test bindings/raw-surface.test.ts
 
       - name: Check generated declarations

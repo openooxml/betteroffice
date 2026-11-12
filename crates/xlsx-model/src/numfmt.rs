@@ -846,6 +846,7 @@ fn render_decimal_tokens(toks: &[Tok], mag: f64, apply_scaling: bool) -> Formatt
     };
 
     let (grouping, scale) = scan_commas(int_toks);
+    let scale = scale + scan_commas(frac_toks).1;
     let percent = toks.iter().filter(|t| matches!(t, Tok::Percent)).count() as i32;
 
     let mut v = mag;
@@ -1083,8 +1084,8 @@ fn render_fraction(sec: &Section, mag: f64, pattern: FractionPattern) -> Formatt
     out
 }
 
-/// classify integer-side commas: flanked by digits turns on thousands
-/// grouping; trailing ones scale the value down by 1000 each.
+/// classify the commas on one side of the decimal point: flanked by digits turns on thousands
+/// grouping; only the unbroken run of commas directly after the last digit scales by 1000 each.
 fn scan_commas(int_toks: &[Tok]) -> (bool, u32) {
     let digit_positions: Vec<usize> = int_toks
         .iter()
@@ -1092,8 +1093,10 @@ fn scan_commas(int_toks: &[Tok]) -> (bool, u32) {
         .filter(|(_, t)| matches!(t, Tok::Digit(_)))
         .map(|(i, _)| i)
         .collect();
+    let Some(&last) = digit_positions.last() else {
+        return (false, 0);
+    };
     let mut grouping = false;
-    let mut scale = 0u32;
     for (idx, t) in int_toks.iter().enumerate() {
         if !matches!(t, Tok::Comma) {
             continue;
@@ -1102,9 +1105,14 @@ fn scan_commas(int_toks: &[Tok]) -> (bool, u32) {
         let after = digit_positions.iter().any(|&p| p > idx);
         if before && after {
             grouping = true;
-        } else if before {
-            scale += 1;
         }
+    }
+    let mut scale = 0u32;
+    for t in &int_toks[last + 1..] {
+        if !matches!(t, Tok::Comma) {
+            break;
+        }
+        scale += 1;
     }
     (grouping, scale)
 }

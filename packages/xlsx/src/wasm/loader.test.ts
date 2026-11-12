@@ -635,6 +635,36 @@ describe('wasm loader', () => {
     }
   });
 
+  it('fills a copied range with translated formulas and one undo', () => {
+    const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5034 });
+    try {
+      handle.editCells(0, [
+        { row: 9, col: 0, input: '10' },
+        { row: 9, col: 1, input: '=A10+$A$10' },
+      ]);
+      const before = handle.historyState().undoDepth;
+      const originalA11 = handle.cell(0, 10, 0).input;
+      const originalB12 = handle.cell(0, 11, 1).input;
+      expect(handle.fillRange(0, 'A10:B10', 'A10:B12').applied).toBe(true);
+      expect(handle.historyState().undoDepth).toBe(before + 1);
+      expect(handle.cell(0, 10, 0).input).toBe('10');
+      expect(handle.cell(0, 10, 1).input).toBe('=A11+$A$10');
+      expect(handle.cell(0, 11, 1).input).toBe('=A12+$A$10');
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect(reopened.cell(0, 11, 1).input).toBe('=A12+$A$10');
+      } finally {
+        reopened.dispose();
+      }
+      handle.undo();
+      expect(handle.cell(0, 10, 0).input).toBe(originalA11);
+      expect(handle.cell(0, 11, 1).input).toBe(originalB12);
+      expect(handle.cell(0, 9, 1).input).toBe('=A10+$A$10');
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('moves a formula range with one collaborative undo and an XLSX round trip', () => {
     const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5032 });
     const peer = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5033 });

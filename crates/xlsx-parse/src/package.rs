@@ -431,6 +431,35 @@ impl PreservedPackage {
         None
     }
 
+    /// What of source sheet `index` a fill cannot keep, if anything.
+    #[doc(hidden)]
+    pub fn fill_unsupported_feature(&self, index: usize, exact: bool) -> Option<&'static str> {
+        let sheet = self.sheets.get(index)?;
+        let Some(bytes) = find_part(&self.parts, &sheet.path).filter(|bytes| !bytes.contains(&0))
+        else {
+            return Some("data validations");
+        };
+        match source_fill_blocker(bytes, exact) {
+            Ok(None) => {}
+            Ok(Some(feature)) => return Some(feature),
+            Err(_) => return Some("data validations"),
+        }
+        let relationships = match find_part(&self.parts, &relationship_part_path(&sheet.path)) {
+            Some(bytes) if bytes.contains(&0) => return Some("comments"),
+            Some(bytes) => match parse_relationships(bytes) {
+                Ok(relationships) => relationships,
+                Err(_) => return Some("comments"),
+            },
+            None => return None,
+        };
+        relationships
+            .iter()
+            .any(|relationship| {
+                relationship.has_type("comments") || relationship.has_type("threadedComment")
+            })
+            .then_some("comments")
+    }
+
     fn stranded(&self, disturbed: impl Fn(&UnpatchableReference) -> bool) -> Option<&str> {
         self.unpatchable_references
             .iter()
@@ -638,6 +667,25 @@ fn comment_move_unsupported(
                 }
             }
             Event::Eof => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
+/// The first worksheet element that refuses a fill, named as its feature.
+fn source_fill_blocker(bytes: &[u8], exact: bool) -> Result<Option<&'static str>, ParseError> {
+    let mut xml = reader(bytes);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    loop {
+        match next_event(&mut xml, &mut buffer, &mut depth)? {
+            Event::Start(start) => match local_name(&start).as_slice() {
+                b"dataValidations" | b"dataValidation" => return Ok(Some("data validations")),
+                b"extLst" | b"AlternateContent" => return Ok(Some("conditional formats")),
+                b"conditionalFormatting" if !exact => return Ok(Some("conditional formats")),
+                _ => {}
+            },
+            Event::Eof => return Ok(None),
             _ => {}
         }
     }

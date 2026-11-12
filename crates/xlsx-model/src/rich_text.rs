@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::Color;
 
 /// A half-open UTF-8 byte range into the cell's existing plain string.
@@ -29,9 +31,11 @@ impl RichRun {
     }
 }
 
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `ST_UnderlineValues`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RunUnderline {
+    #[default]
     None,
     Single,
     Double,

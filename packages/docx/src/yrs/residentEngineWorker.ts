@@ -117,7 +117,8 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
-import { WASM32_MEMORY_LIMIT_BYTES, wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { saveWarmupPolicy, type SaveWarmupPolicy } from './saveWarmupPolicy';
 import {
   encodeDisplayListFrameExtras,
   loadRustDisplayListQueryEngine,
@@ -1305,8 +1306,6 @@ interface SaveWarmup {
 let saveWarmup: SaveWarmup | null = null;
 const SAVE_WARMUP_IDLE_MS = 300;
 const SAVE_WARMUP_INPUT_IDLE_MS = 600;
-const SAVE_WARMUP_MIN_HEADROOM_BYTES = 64 * 1024 * 1024;
-const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
 const SAVE_SEED_MAX_PARAGRAPHS = 4096;
 const SAVE_SEED_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
 const SAVE_SEED_SLICE_BYTES = 16 * 1024;
@@ -4078,7 +4077,7 @@ function primeSaveSeedStatesOnce(): void {
   if (saveSeedStatesPrimed || !session || !commandHost || !canPreloadSaveWasm() || slicedCompletion ||
     incompleteLayout || commandLayout?.certifiedPages() != null) return;
   saveSeedStatesPrimed = true;
-  if (!saveWarmupHasHeadroom()) return;
+  if (!currentSaveWarmupPolicy().primeSeeds) return;
   const owner = session;
   let maxBytes = SAVE_SEED_SLICE_BYTES;
   scheduler.schedule({
@@ -4144,27 +4143,21 @@ function interruptSaveWarmup(type: string): void {
 
 function saveWarmupCurrent(attempt: SaveWarmup): boolean {
   return !attempt.cancelled && session === attempt.owner && saveWarmupOwner === attempt.owner &&
-    canPreloadSaveWasm() && saveWarmupHasHeadroom();
+    canPreloadSaveWasm() && currentSaveWarmupPolicy().warm;
 }
 
-function saveWarmupHasHeadroom(): boolean {
-  // Save warmup is sized against a wasm32 memory; the native engine does not run it.
-  if (engineKind === 'native') return false;
+function currentSaveWarmupPolicy(): SaveWarmupPolicy {
   const configured = openedDocument?.heapLimitBytes;
-  if (configured !== undefined && (!Number.isSafeInteger(configured) || configured <= 0)) return false;
+  const unread = saveWarmupPolicy(engineKind, configured, undefined);
+  if (unread.reason === 'no-limit') return unread;
   let memory: ReturnType<typeof wasmModuleMemories>[number] | undefined;
   try {
     memory = wasmModuleMemories().find((module) => module.label === 'docx-edit');
   } catch (error) {
     if (isEngineTrap(error)) trapped(0, error as Error);
-    return false;
+    return unread;
   }
-  const limit = Math.min(configured ?? WASM32_MEMORY_LIMIT_BYTES,
-    memory?.maximumBytes ?? WASM32_MEMORY_LIMIT_BYTES, WASM32_MEMORY_LIMIT_BYTES);
-  if (!Number.isSafeInteger(limit) || limit <= 0) return false;
-  const live = memory?.liveBytes;
-  return typeof live === 'number' && Number.isSafeInteger(live) && live >= 0 &&
-    limit - live >= Math.max(SAVE_WARMUP_MIN_HEADROOM_BYTES, limit * SAVE_WARMUP_HEADROOM_FRACTION);
+  return saveWarmupPolicy(engineKind, configured, memory);
 }
 
 function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
@@ -4191,13 +4184,13 @@ function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
 
 function scheduleSaveWarmup(): void {
   if (saveWarmupTimer !== null || saveWarmup || !saveWarmupOwner || session !== saveWarmupOwner ||
-    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm() || !saveWarmupHasHeadroom()) return;
+    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm() || !currentSaveWarmupPolicy().warm) return;
   const owner = saveWarmupOwner;
   const delay = Math.max(0, saveWarmupRequestAt + SAVE_WARMUP_IDLE_MS - performance.now(),
     saveWarmupInputAt + SAVE_WARMUP_INPUT_IDLE_MS - performance.now());
   saveWarmupTimer = setTimeout(() => {
     saveWarmupTimer = null;
-    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished || !saveWarmupHasHeadroom()) return;
+    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished || !currentSaveWarmupPolicy().warm) return;
     const attempt: SaveWarmup = { owner, cancelled: false };
     saveWarmup = attempt;
     void yieldSaveWarmup(attempt).then(async () => {
