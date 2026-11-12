@@ -4,8 +4,8 @@ use std::ops::Bound::{Excluded, Unbounded};
 use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Border, BorderEdge, BorderStyle,
     Cell, CellRef, ChartAnchor, ChartRef, ChartRefKind, ColStyle, Color, DefinedName, Fill, Font,
-    FreezePane, HAlign, Hyperlink, PatternType, Protection, Sheet, SheetChart, SheetFormat,
-    SheetId, Table, Theme, VAlign, Workbook, Xf,
+    FreezePane, HAlign, Hyperlink, PatternType, Protection, RunUnderline, Sheet, SheetChart,
+    SheetFormat, SheetId, Table, Theme, VAlign, Workbook, Xf,
 };
 
 use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, write_ref};
@@ -1755,7 +1755,7 @@ fn write_font(w: &mut Writer, value: &Font) {
     w.option(*size_pt, Writer::f64);
     w.bool(*bold);
     w.bool(*italic);
-    w.bool(*underline);
+    write_underline(w, underline);
     w.bool(*strike);
     w.option(color.as_ref(), write_color);
 }
@@ -1766,7 +1766,7 @@ fn read_font(r: &mut Reader<'_>) -> SnapshotResult<Font> {
         size_pt: r.option(Reader::f64)?,
         bold: r.bool()?,
         italic: r.bool()?,
-        underline: r.bool()?,
+        underline: read_underline(r)?,
         strike: r.bool()?,
         color: r.option(read_color)?,
     })
@@ -1858,6 +1858,15 @@ enum_codec!(write_valign, read_valign, VAlign, {
     Bottom => 2,
     Justify => 3,
     Distributed => 4,
+});
+
+// none and single keep the bytes of the boolean they replace.
+enum_codec!(write_underline, read_underline, RunUnderline, {
+    None => 0,
+    Single => 1,
+    Double => 2,
+    SingleAccounting => 3,
+    DoubleAccounting => 4,
 });
 
 enum_codec!(write_edit_as, read_edit_as, AnchorEditAs, {
@@ -3165,7 +3174,7 @@ mod tests {
                 size_pt: None,
                 bold: false,
                 italic: false,
-                underline: false,
+                underline: RunUnderline::None,
                 strike: false,
                 color: None,
             },
@@ -3174,7 +3183,7 @@ mod tests {
                 size_pt: Some(-0.0),
                 bold: true,
                 italic: true,
-                underline: true,
+                underline: RunUnderline::DoubleAccounting,
                 strike: true,
                 color: Some(Color::Theme { idx: 0, tint: -0.0 }),
             },
@@ -3183,7 +3192,7 @@ mod tests {
                 size_pt: Some(11.25),
                 bold: true,
                 italic: false,
-                underline: true,
+                underline: RunUnderline::Single,
                 strike: false,
                 color: Some(Color::Rgb(String::new())),
             },

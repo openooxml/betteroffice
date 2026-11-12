@@ -283,6 +283,7 @@ export interface CapturedCellFormat {
     bold?: boolean;
     italic?: boolean;
     underline?: boolean;
+    underline_style?: 'double' | 'singleAccounting' | 'doubleAccounting';
     strike?: boolean;
     color?: CapturedColor | null;
   };
