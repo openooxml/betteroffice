@@ -4057,25 +4057,40 @@ impl EditingDoc {
             } else {
                 usize::MAX
             };
-            let builder = state.scan.get_or_insert_with(|| ScanBuilder::new(&txn));
-            match builder.advance(&txn, limit) {
-                Some(true) => {}
-                Some(false) => return PrimeSlice::Pending,
-                None => {
-                    *progress = None;
-                    return PrimeSlice::Declined;
-                }
-            }
-            let finished = state.scan.take().and_then(|builder| builder.finish(&txn));
-            let Some((scan, kept)) = finished else {
-                *progress = None;
-                return PrimeSlice::Declined;
+            let cached = if state.scan.is_none() {
+                self.scan_cache
+                    .0
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|(cached, _)| *cached == epoch)
+                    .map(|(_, scan)| Arc::clone(scan))
+            } else {
+                None
             };
-            let scan = Arc::new(scan);
-            if epoch == state.epoch {
-                *self.scan_cache.0.lock().unwrap() = Some((state.epoch, Arc::clone(&scan)));
-            }
-            state.kept = kept;
+            let scan = match cached {
+                Some(scan) => scan,
+                None => {
+                    let builder = state.scan.get_or_insert_with(|| ScanBuilder::new(&txn));
+                    match builder.advance(&txn, limit) {
+                        Some(true) => {}
+                        Some(false) => return PrimeSlice::Pending,
+                        None => {
+                            *progress = None;
+                            return PrimeSlice::Declined;
+                        }
+                    }
+                    let finished = state.scan.take().and_then(|builder| builder.finish(&txn));
+                    let Some((scan, kept)) = finished else {
+                        *progress = None;
+                        return PrimeSlice::Declined;
+                    };
+                    let scan = Arc::new(scan);
+                    *self.scan_cache.0.lock().unwrap() = Some((epoch, Arc::clone(&scan)));
+                    state.kept = kept;
+                    scan
+                }
+            };
             if scan.pilcrows.len() > state.max_paragraphs as usize {
                 *progress = None;
                 return PrimeSlice::Declined;
@@ -6864,11 +6879,26 @@ mod tests {
             let whole_source = whole.engine.doc().source_index().unwrap();
             let whole_plan = whole.paragraph_save_plan().unwrap();
             for segments_per_slice in [1, 2, 7, 1 << 20] {
-                for max_bytes in [1, u32::MAX] {
+                for max_bytes in [1, u32::MAX - 1] {
                     let label = format!("{segments_per_slice} segments, {max_bytes} bytes");
                     let sliced = open();
                     let doc = sliced.engine.doc();
                     *doc.scan_cache.0.lock().unwrap() = None;
+                    let slice = || {
+                        doc.prime_save_seed_states_slice_with(
+                            u32::MAX,
+                            u32::MAX,
+                            max_bytes,
+                            segments_per_slice,
+                        )
+                    };
+                    assert_eq!(slice(), PrimeSlice::Pending, "{label}");
+                    let mut scan_slices = 0;
+                    while prime_phase(doc) == Some(PrimePhase::Scan) {
+                        assert_eq!(slice(), PrimeSlice::Pending, "{label}");
+                        scan_slices += 1;
+                    }
+                    assert_eq!(scan_slices > 1, segments_per_slice < 1 << 20, "{label}");
                     let (outcome, _) =
                         prime_in_slices(doc, u32::MAX, max_bytes, segments_per_slice);
                     assert_eq!(outcome, PrimeSlice::Known, "{label}");
@@ -6884,6 +6914,23 @@ mod tests {
                     assert_eq!(sliced.paragraph_save_plan().unwrap(), whole_plan, "{label}");
                 }
             }
+            let reused = open();
+            let doc = reused.engine.doc();
+            let txn = doc.yrs_doc().transact();
+            let scan = doc.committed_scan(&txn);
+            drop(txn);
+            let before = cached_scan(doc);
+            assert_eq!(prime_slice(doc, 1), PrimeSlice::Pending);
+            assert_eq!(prime_phase(doc), Some(PrimePhase::Scan));
+            assert_eq!(prime_slice(doc, 1), PrimeSlice::Pending);
+            assert_eq!(prime_phase(doc), Some(PrimePhase::Anchors));
+            assert_eq!(prime_in_slices(doc, u32::MAX, 1, 1).0, PrimeSlice::Known);
+            assert!(same_cache(&cached_scan(doc), &before));
+            assert!(Arc::ptr_eq(&cached_scan(doc).unwrap().1, &scan));
+            let source = doc.source_index().unwrap();
+            assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+            assert_same_seed_states(&source, &whole_source);
+            assert_eq!(reused.paragraph_save_plan().unwrap(), whole_plan);
         }
     }
 
