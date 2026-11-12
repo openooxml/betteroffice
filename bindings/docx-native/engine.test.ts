@@ -2575,6 +2575,8 @@ describe('docx native panic hook', () => {
     const prefixed = lines.flatMap((line, index) => (line.startsWith('[docx-native] panic: ') ? [index] : []));
     expect(prefixed, child.stderr).toHaveLength(1);
     expect(lines[prefixed[0]!]).toContain('panicked at');
+    expect(lines[prefixed[0]!]).toContain('\\n');
+    expect(lines[prefixed[0]!]).toContain('BetterOffice engine memory budget exceeded');
     const report = lines.findIndex((line, index) => index > prefixed[0]! && /^thread .* panicked at /.test(line));
     expect(report, child.stderr).toBeGreaterThan(prefixed[0]!);
   });

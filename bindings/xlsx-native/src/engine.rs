@@ -1105,14 +1105,18 @@ pub fn install_panic_hook() {
     INSTALLED.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let mut line = format!("[xlsx-native] panic: {info}")
-                .replace('\r', "\\r")
-                .replace('\n', "\\n");
-            line.push('\n');
-            write_panic_line(&line);
+            write_panic_line(&panic_line(&info.to_string()));
             prev(info);
         }));
     });
+}
+
+fn panic_line(text: &str) -> String {
+    let mut line = format!("[xlsx-native] panic: {text}")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n");
+    line.push('\n');
+    line
 }
 
 fn write_panic_line(line: &str) {
@@ -1134,10 +1138,7 @@ fn write_panic_line(line: &str) {
         let _ = stderr.write_all(line.as_bytes());
     }
     #[cfg(not(any(unix, windows)))]
-    {
-        use std::io::Write;
-        let _ = write!(std::io::stderr(), "{line}");
-    }
+    let _ = line;
 }
 
 /// @internal Test hook: the calling thread's live engine bytes.
@@ -1194,4 +1195,22 @@ pub fn render_xlsx_markdown_json(env: Env, content: String, options: String) -> 
 pub fn engine_version(env: Env) -> String {
     let _call = EngineCall::new(env);
     env!("CARGO_PKG_VERSION").to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panic_line_escapes_the_message_into_one_prefixed_line() {
+        let prefix = "[xlsx-native] panic: ";
+        let line = panic_line(&format!("loc\nx\r\n{prefix}forged"));
+        assert_eq!(line.matches('\n').count(), 1);
+        assert!(line.ends_with('\n'));
+        assert!(line.starts_with(prefix));
+        assert_eq!(line.matches(prefix).count(), 2);
+        assert_eq!(line.lines().filter(|l| l.starts_with(prefix)).count(), 1);
+        assert!(line.contains("\\n"));
+        assert!(line.contains("\\r"));
+    }
 }
