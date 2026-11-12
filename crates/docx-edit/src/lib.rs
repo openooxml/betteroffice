@@ -440,6 +440,44 @@ pub struct SeedParagraph {
     pub alignment: String,
 }
 
+/// A story's segments still to read, from the diff taken when it was opened, which no commit
+/// since has changed.
+pub(crate) enum StorySegmentCursor {
+    Diffs(std::vec::IntoIter<yrs::types::text::Diff<YChange>>),
+    Segments(std::vec::IntoIter<StorySegment>),
+}
+
+impl StorySegmentCursor {
+    /// The next `limit` segments, fewer at the end of the story.
+    pub(crate) fn next_chunk<T: ReadTxn>(&mut self, txn: &T, limit: usize) -> Vec<StorySegment> {
+        match self {
+            Self::Diffs(diffs) => diffs
+                .by_ref()
+                .take(limit)
+                .map(|diff| {
+                    ooxml_opc::progress::tick();
+                    StorySegment {
+                        content: segment_content(diff.insert, txn),
+                        attributes: ordered_attrs(diff.attributes.as_deref()),
+                    }
+                })
+                .collect(),
+            Self::Segments(segments) => segments.by_ref().take(limit).collect(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Diffs(diffs) => diffs.len(),
+            Self::Segments(segments) => segments.len(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommentAnchor {
     pub story: StoryId,
@@ -1861,26 +1899,30 @@ impl EditingDoc {
         txn: &T,
         story_id: &str,
     ) -> EditResult<Vec<StorySegment>> {
+        Ok(self
+            .story_segment_cursor_in(txn, story_id)?
+            .next_chunk(txn, usize::MAX))
+    }
+
+    /// [`Self::story_segments_in`], read a chunk at a time from the story's diff.
+    pub(crate) fn story_segment_cursor_in<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story_id: &str,
+    ) -> EditResult<StorySegmentCursor> {
         let story = match story_ref(txn, story_id) {
             Ok(story) => story,
             Err(EditError::CellHasNoStory(_)) => {
                 return empty_cells::EmptyCell::new(story_id)
                     .doc()
-                    .story_segments(story_id);
+                    .story_segments(story_id)
+                    .map(|segments| StorySegmentCursor::Segments(segments.into_iter()));
             }
             Err(error) => return Err(error),
         };
-        Ok(story
-            .diff(txn, YChange::identity)
-            .into_iter()
-            .map(|diff| {
-                ooxml_opc::progress::tick();
-                StorySegment {
-                    content: segment_content(diff.insert, txn),
-                    attributes: ordered_attrs(diff.attributes.as_deref()),
-                }
-            })
-            .collect())
+        Ok(StorySegmentCursor::Diffs(
+            story.diff(txn, YChange::identity).into_iter(),
+        ))
     }
 
     pub fn paragraphs(&self, story_id: &str) -> EditResult<Vec<ParagraphSnapshot>> {

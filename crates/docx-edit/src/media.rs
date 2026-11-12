@@ -315,6 +315,7 @@ fn draws_same(_table: &MediaTable, _a: usize, _b: usize) -> bool {
     true
 }
 
+#[cfg(test)]
 pub(crate) fn write_segment_data_urls(
     segments: &mut [StorySegment],
     table: &MediaTable,
@@ -327,22 +328,52 @@ pub(crate) fn write_segment_data_urls(
     }
 }
 
-/// [`write_segment_data_urls`] writing at most `budget` bytes of URLs, each
-/// counted at every value it is written into, and of rewritten payloads,
-/// taking them off `budget`; false once it runs out, leaving `segments`
-/// partly written.
-pub(crate) fn write_segment_data_urls_within(
-    segments: &mut [StorySegment],
-    table: &MediaTable,
-    budget: &mut usize,
-) -> Result<bool, String> {
-    let mut writer = DataUrls::new(table);
-    writer.budget = Some(*budget);
-    writer.segments(segments);
-    *budget = writer.budget.unwrap_or(0);
-    match writer.error {
-        Some(error) => Err(error),
-        None => Ok(!writer.spent),
+/// Writes the `data:` URLs of a story's segments a chunk at a time, as one pass over all of
+/// them would: within `budget`, when given one, of URLs, each counted at every value it is
+/// written into, and of rewritten payloads, writing nothing more once it runs out.
+pub(crate) struct SegmentDataUrls {
+    urls: HashMap<usize, Option<Arc<str>>>,
+    budget: Option<usize>,
+    spent: bool,
+    error: Option<String>,
+}
+
+impl SegmentDataUrls {
+    pub(crate) fn new(budget: Option<usize>) -> Self {
+        Self {
+            urls: HashMap::new(),
+            budget,
+            spent: false,
+            error: None,
+        }
+    }
+
+    pub(crate) fn write(&mut self, segments: &mut [StorySegment], table: &MediaTable) {
+        let mut writer = DataUrls::new(table);
+        writer.urls = std::mem::take(&mut self.urls);
+        writer.budget = self.budget;
+        writer.spent = self.spent;
+        writer.error = self.error.take();
+        writer.segments(segments);
+        self.urls = writer.urls;
+        self.budget = writer.budget;
+        self.spent = writer.spent;
+        self.error = writer.error;
+    }
+
+    /// What is left of the budget.
+    pub(crate) fn budget(&self) -> Option<usize> {
+        self.budget
+    }
+
+    /// Whether the budget ran out.
+    pub(crate) fn spent(&self) -> bool {
+        self.spent
+    }
+
+    /// Whether a part's URL could not be read.
+    pub(crate) fn failed(&self) -> bool {
+        self.error.is_some()
     }
 }
 
