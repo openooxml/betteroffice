@@ -102,7 +102,6 @@ fn line(
         style: style.map(Into::into),
         rail: None,
         clip: None,
-        hairline: false,
     }
 }
 

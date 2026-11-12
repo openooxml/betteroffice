@@ -52,7 +52,6 @@ fn original_grid_commands(
             style: None,
             rail: None,
             clip: None,
-            hairline: true,
         });
     }
     for &y in &row_offsets {
@@ -66,7 +65,6 @@ fn original_grid_commands(
             style: None,
             rail: None,
             clip: None,
-            hairline: true,
         });
     }
     grid_commands
@@ -128,7 +126,6 @@ fn append_frame_edges(
                 style: None,
                 rail: None,
                 clip: None,
-                hairline: false,
             });
         }
     }
@@ -143,7 +140,6 @@ fn append_frame_edges(
             style: None,
             rail: None,
             clip: None,
-            hairline: true,
         });
     }
     if let Some(y) = rows.divider {
@@ -156,7 +152,6 @@ fn append_frame_edges(
             color: PANE_DIVIDER_COLOR.into(),
             style: None,
             rail: None,
-            hairline: true,
             clip: None,
         });
     }

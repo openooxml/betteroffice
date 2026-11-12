@@ -84,11 +84,6 @@ pub enum DrawCmd {
         /// `width`. Without it, painters keep the legacy rails derived from `width`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rail: Option<f32>,
-        /// Gridlines and the frozen-pane divider are hairlines in sheet space: the
-        /// painter snaps them to whole CSS pixels and keeps them one CSS pixel wide
-        /// at any zoom. A real cell border is not, even when it has no dash style.
-        #[serde(default, skip_serializing_if = "is_false")]
-        hairline: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         clip: Option<Rect>,
     },
@@ -302,7 +297,6 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 color,
                 style,
                 rail,
-                hairline,
                 clip,
             } => DrawCmd::Line {
                 x1: x1 * factor,
@@ -313,7 +307,6 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 color,
                 style,
                 rail: rail.map(|rail| rail * factor),
-                hairline,
                 clip: clip.map(|clip| scale_rect(clip, factor)),
             },
             DrawCmd::Path {
@@ -523,7 +516,6 @@ mod tests {
                     color: "#d4d4d4".into(),
                     style: None,
                     rail: None,
-                    hairline: true,
                     clip: None,
                 },
                 DrawCmd::Path {

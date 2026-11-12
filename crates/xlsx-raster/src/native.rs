@@ -232,7 +232,6 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
                 color,
                 style,
                 rail,
-                hairline: _,
                 clip,
             } => {
                 let paint =
