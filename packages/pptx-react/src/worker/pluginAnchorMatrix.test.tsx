@@ -162,14 +162,24 @@ async function groupedDeck() {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
+async function zoomWithCaret(value: Awaited<ReturnType<typeof mountAnchors>>, probe: ReturnType<typeof anchorProbe>,
+  read: ReadContent, story: TextTarget, scale: number) {
+  await act(async () => { expect(await value.api().commands.execute('zoom', { scale })).toMatchObject({ ok: true }); });
+  await waitFor(() => expect(probe.context().geometry?.layout.zoom).toBe(scale));
+  await selectText(probe, read, story, 2, 2);
+}
+
+const matrixScales = [0.5, 1.5, 2];
+
 for (const engine of ['IN', 'PL'] as const) describe(`plugin anchor matrix (${engine})`, () => {
-  for (const scale of [0.5, 1.5, 2]) test(`plugin anchor target matrix at zoom ${scale}`, async () => {
+  for (const [index, scale] of matrixScales.entries()) test(`plugin anchor target matrix at zoom ${scale}`, async () => {
     const probe = anchorProbe();
     const value = await mountAnchors(engine, { plugins: [probe.plugin] });
     await waitFor(() => expect(probe.context()?.geometry).toBeTruthy());
     const read = await content(value);
     const story = read.stories[0]!;
     await selectText(probe, read, story);
+    for (const earlier of matrixScales.slice(0, index)) await zoomWithCaret(value, probe, read, story, earlier);
     await act(async () => { expect(await value.api().commands.execute('zoom', { scale })).toMatchObject({ ok: true }); });
     await waitFor(() => expect(probe.context().geometry?.layout.zoom).toBe(scale));
     await act(async () => { await value.api().clearSelection(); });
