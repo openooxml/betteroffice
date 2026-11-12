@@ -75,7 +75,7 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
   const scale = painted?.request.zoom ?? zoom;
   const visible = painted?.request.sheet === active ? selection : null;
   const grid = painted?.displayList.grid;
-  const expanded = visible ? expandRangeToMergedCells(normalizeRange(visible), painted?.mergedRanges ?? []) : null;
+  const expanded = visible ? expandRangeToMergedCells(normalizeRange(visible), painted?.mergedRanges ?? [], showSheetHeaders) : null;
   const selectionRect = grid && expanded ? rangeRect(grid, expanded) : null;
   const focused = visible ? expandRangeToMergedCells({ top: visible.anchor.row, left: visible.anchor.col,
     bottom: visible.anchor.row, right: visible.anchor.col }, painted?.mergedRanges ?? []) : null;

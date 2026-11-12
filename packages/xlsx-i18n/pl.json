@@ -166,9 +166,7 @@
       "lastSheet": "Skoroszyt musi mieć co najmniej jeden arkusz.",
       "sheetAtEdge": "Arkusza nie można przenieść dalej.",
       "sheetNameInvalid": "Nazwy arkuszy muszą mieć od 1 do 31 znaków, być unikatowe i nie mogą zawierać : \\ / ? * [ ].",
-      "clipboardDenied": "Przeglądarka nie zezwoliła na dostęp do schowka.",
-      "clipboardInsecure": "Schowek wymaga bezpiecznej strony (HTTPS).",
-      "clipboardWriteUnavailable": "Ta przeglądarka nie pozwala kopiować do schowka."
+      "clipboardDenied": "Przeglądarka nie zezwoliła na dostęp do schowka."
     },
     "cut": "Wytnij",
     "copy": "Kopiuj",

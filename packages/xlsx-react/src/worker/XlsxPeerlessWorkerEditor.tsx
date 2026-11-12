@@ -23,7 +23,7 @@ import { useContextMenu } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
 import { xlsxContextMenuEntries, type XlsxContextFreezeTarget } from '../contextMenu/menus';
 import { commandReason, initialZoomScale } from '../commands/evaluate';
-import { engineStructuralRefusal, REFUSAL_CAUSE_KEYS, type XlsxRefusalCause } from '../commands/refusalCause';
+import { REFUSAL_CAUSE_KEYS, type XlsxRefusalCause } from '../commands/refusalCause';
 import type { XlsxCommandFailureCode } from '../commands/types';
 import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
@@ -66,11 +66,7 @@ import {
   PeerlessWorkerPaintSource, type WorkerFramePaint, type WorkerPaintRequest, type WorkerPaintResult,
 } from './PeerlessWorkerPaintSource';
 
-import {
-  CellClipboard, clipboardHtml, clipboardRefusalMessage, ClipboardRefusalError, clipboardUnavailable,
-  guardedClipboard, newClipboardMarker, parseCellClipboardText, readCellClipboard, readClipboardText,
-  writeClipboardText, type CellPaste,
-} from '../clipboard';
+import { CellClipboard, clipboardHtml, newClipboardMarker, parseCellClipboardText, readCellClipboard, type CellPaste } from '../clipboard';
 import { WorkerCellEcho } from './WorkerCellEcho';
 import { WorkerDraftController, type WorkerNativeDraft } from './WorkerDraftController';
 import { PeerlessWorkerInputs } from './PeerlessWorkerInputs';
@@ -169,16 +165,6 @@ interface NeighborFrame {
   proposals: string;
   request: WorkerPaintRequest;
   paint: WorkerFramePaint;
-}
-
-/** The clipboard call started in a gesture, plus the deferred payload copy writes through it. */
-interface ClipboardAccess {
-  read?: Promise<{ text: string; html?: string | null }>;
-  write?: Promise<void>;
-  resolve?: (blob: Blob) => void;
-  reject?: (error: unknown) => void;
-  refused?: { error: unknown };
-  marker?: string;
 }
 
 function sameFrameRequest(left: WorkerPaintRequest, right: WorkerPaintRequest): boolean {
@@ -333,8 +319,6 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const editable = () => Boolean(ownerRef.current?.ready && !ownerRef.current.retiring &&
     !ownerRef.current.failure && !ownerRef.current.readOnly && !propsRef.current.readOnly && !coordinatorRef.current?.readOnly);
-  const tRef = useRef(t);
-  tRef.current = t;
   const report = useCallback((error: unknown) => {
     if (error instanceof XlsxHostRefusalError) {
       setRefusal({ code: error.code, message: error.message });
@@ -342,16 +326,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       setRefusal({ code: 'read-only' });
     } else if (error instanceof PeerlessWorkerCommandRefusal && error.code === 'edit-unsupported') {
       setRefusal({ code: error.code, cause: error.cause ?? 'other' });
-    } else if (error instanceof ClipboardRefusalError) {
-      setRefusal({ code: error.code, message: clipboardRefusalMessage(error, tRef.current) ?? error.message });
     } else if (error instanceof WorkerInputRefusal) {
       setRefusal({ code: error.code, detail: error.code === 'sheet-protected' ? undefined : error.message });
     } else if (error instanceof XlsxCommandAdmissionError) setRefusal({ code: error.code });
-    else {
-      const structural = engineStructuralRefusal(error);
-      if (structural) setRefusal({ code: 'edit-unsupported', cause: structural.cause });
-      else setRefusal({ code: 'input-failed', detail: error instanceof Error ? error.message : String(error) });
-    }
+    else setRefusal({ code: 'input-failed', detail: error instanceof Error ? error.message : String(error) });
   }, []);
   const rangeTarget = (sheet: number, selected: Selection): WorkbookCommandSelection => {
     const sheetId = ownerRef.current?.session.editState.sheets?.find((entry) => entry.index === sheet)?.id ??
@@ -1370,7 +1348,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const owner = ownerRef.current;
     return Boolean(owner?.ready && !owner.failure && selectionRef.current && (kind === 'copy' || editable()));
   };
-  const clipboardAccess = (kind: 'copy' | 'cut' | 'paste'): ClipboardAccess => {
+  const clipboardAccess = (kind: 'copy' | 'cut' | 'paste'): { read?: Promise<{ text: string; html?: string | null }>;
+    write?: Promise<void>; resolve?: (blob: Blob) => void; reject?: (error: unknown) => void; refused?: { error: unknown };
+    marker?: string } => {
     if (kind === 'paste') {
       const read = readCellClipboard();
       void read.catch(() => {});
@@ -1383,27 +1363,22 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     void payload.catch(() => {});
     let write: Promise<void> | undefined;
     let refused: { error: unknown } | undefined;
-    const rich = typeof ClipboardItem === 'function'
-      ? guardedClipboard('write', () => navigator.clipboard.write([new ClipboardItem({
-        'text/plain': payload, 'text/html': clipboardHtml({ marker }, payload),
-      })]))
-      : { unavailable: 'unsupported' as const };
-    if ('call' in rich) {
-      write = rich.call;
-      void write.catch(() => {});
-    } else if (kind === 'cut') {
-      // A cut only clears its cells once the text can be copied; a copy may still fall back later.
-      const textRefusal = clipboardUnavailable('writeText');
-      if (textRefusal) refused = { error: new ClipboardRefusalError(textRefusal, 'write') };
-    }
+    try {
+      if (typeof ClipboardItem === 'function' && typeof navigator.clipboard?.write === 'function') {
+        write = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload, 'text/html': clipboardHtml({ marker }, payload) })]);
+        void write.catch(() => {});
+      } else if (kind === 'cut' && typeof navigator.clipboard?.writeText !== 'function') {
+        throw new WorkerInputRefusal('Cut requires clipboard write access');
+      }
+    } catch (error) { refused = { error }; }
     return { write, resolve, reject, refused, marker };
   };
-  const plainClipboardAccess = (): ClipboardAccess => {
-    const read = readClipboardText().then((text) => ({ text, html: null }));
+  const plainClipboardAccess = (): ReturnType<typeof clipboardAccess> => {
+    const read = navigator.clipboard.readText().then((text) => ({ text, html: null }));
     void read.catch(() => {});
     return { read };
   };
-  const clipboard = (kind: 'copy' | 'cut' | 'paste', access: ClipboardAccess): Promise<unknown> => {
+  const clipboard = (kind: 'copy' | 'cut' | 'paste', access: ReturnType<typeof clipboardAccess>): Promise<unknown> => {
     if (!clipboardAllowed(kind)) {
       const refusal = new XlsxCommandAdmissionError('editor-unavailable');
       access.reject?.(refusal);
@@ -1466,7 +1441,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       checkOwner();
       const text = toTsv(cells);
       if (write) { resolve!(new Blob([text], { type: 'text/plain' })); await write; }
-      else await writeClipboardText(text);
+      else await navigator.clipboard.writeText(text);
       checkOwner();
       if (kind === 'copy') cellClipboard.capture(token, { owner, sheet, range, cells, cut: false }, Boolean(write));
     });

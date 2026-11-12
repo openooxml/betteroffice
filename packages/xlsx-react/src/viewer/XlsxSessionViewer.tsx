@@ -9,7 +9,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { CSSProperties, KeyboardEvent, MouseEvent } from 'react';
 import type { XlsxWorkerViewerProps } from '../XlsxEditor';
 import { createXlsxCommandController } from '../commands/createXlsxCommandStore';
-import { writeClipboardText } from '../clipboard';
 import type { XlsxCommandBinding } from '../commands/createXlsxCommandStore';
 import { DEFAULT_FONT_FAMILIES, DEFAULT_FONT_SIZES } from '../commands/evaluate';
 import type { XlsxCommandEnvironment } from '../commands/evaluate';
@@ -392,7 +391,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
     if (!run?.current || !selection) return;
     try {
       const inputs = await run.session.call.cellInputs(active, rangeA1(await copiedSelection(run.session, active, selection)));
-      if (run.current) await writeClipboardText(toTsv(inputs.cells));
+      if (run.current) await navigator.clipboard.writeText(toTsv(inputs.cells));
     } catch {}
   };
   const onKeyDown = (event: KeyboardEvent) => {
@@ -447,7 +446,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
 
   const merged = painted?.frame.mergedRanges?.slice(0, 1024) ?? [];
   const grid = frame?.grid;
-  const selected = visibleSelection ? expandRangeToMergedCells(normalizeRange(visibleSelection), merged) : null;
+  const selected = visibleSelection ? expandRangeToMergedCells(normalizeRange(visibleSelection), merged, Boolean(props.showSheetHeaders)) : null;
   const focused = visibleSelection ? expandRangeToMergedCells({
     top: visibleSelection.focus.row, left: visibleSelection.focus.col,
     bottom: visibleSelection.focus.row, right: visibleSelection.focus.col,

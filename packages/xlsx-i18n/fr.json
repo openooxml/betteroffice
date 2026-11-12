@@ -166,9 +166,7 @@
       "lastSheet": "Un classeur doit contenir au moins une feuille.",
       "sheetAtEdge": "La feuille ne peut pas être déplacée plus loin.",
       "sheetNameInvalid": "Les noms de feuille comptent 1 à 31 caractères, doivent être uniques et ne peuvent pas contenir : \\ / ? * [ ].",
-      "clipboardDenied": "Le navigateur n’a pas autorisé l’accès au presse-papiers.",
-      "clipboardInsecure": "Le presse-papiers nécessite une page sécurisée (HTTPS).",
-      "clipboardWriteUnavailable": "Ce navigateur ne permet pas de copier dans le presse-papiers."
+      "clipboardDenied": "Le navigateur n’a pas autorisé l’accès au presse-papiers."
     },
     "cut": "Couper",
     "copy": "Copier",

@@ -166,9 +166,7 @@
       "lastSheet": "活頁簿至少需要一個工作表。",
       "sheetAtEdge": "無法再移動此工作表。",
       "sheetNameInvalid": "工作表名稱需為 1 到 31 個字元、不能重複，且不能包含 : \\ / ? * [ ]。",
-      "clipboardDenied": "瀏覽器不允許存取剪貼簿。",
-      "clipboardInsecure": "剪貼簿需要安全 (HTTPS) 頁面。",
-      "clipboardWriteUnavailable": "此瀏覽器不允許複製到剪貼簿。"
+      "clipboardDenied": "瀏覽器不允許存取剪貼簿。"
     },
     "cut": "剪下",
     "copy": "複製",

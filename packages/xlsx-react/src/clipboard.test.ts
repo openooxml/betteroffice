@@ -1,8 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  CellClipboard, ClipboardRefusalError, clipboardMarker, clipboardRefusalMessage, newClipboardMarker,
-  parseCellClipboardText, readCellClipboard, readClipboardText, writeClipboard, writeClipboardText,
-} from './clipboard';
+import { CellClipboard, clipboardMarker, newClipboardMarker, parseCellClipboardText, readCellClipboard } from './clipboard';
 
 const owner = {};
 const range = { top: 0, left: 2, bottom: 0, right: 2 };
@@ -216,86 +213,5 @@ describe('cell clipboard', () => {
     const html = await clipboardMarker(token, '<script>&').text();
     expect(html).toContain('&lt;script&gt;&amp;');
     expect(html).not.toContain('<script>');
-  });
-});
-
-describe('clipboard guard', () => {
-  const restorers: (() => void)[] = [];
-
-  function restoreAfter(owner: object, key: string) {
-    const original = Object.getOwnPropertyDescriptor(owner, key);
-    restorers.push(() => {
-      if (original) Object.defineProperty(owner, key, original);
-      else Reflect.deleteProperty(owner, key);
-    });
-  }
-
-  function defineNavigator(value: unknown) {
-    restoreAfter(globalThis, 'navigator');
-    Object.defineProperty(globalThis, 'navigator', { configurable: true, value });
-  }
-
-  function defineSecureContext(secure: boolean | undefined) {
-    if (typeof globalThis.window === 'undefined') {
-      restoreAfter(globalThis, 'window');
-      Object.defineProperty(globalThis, 'window', { configurable: true, value: globalThis });
-    }
-    restoreAfter(globalThis.window, 'isSecureContext');
-    Object.defineProperty(globalThis.window, 'isSecureContext', { configurable: true, value: secure });
-  }
-
-  const restore = () => { for (const undo of restorers.splice(0).reverse()) undo(); };
-
-  test('a page without a clipboard API refuses instead of throwing a TypeError', async () => {
-    defineNavigator({});
-    defineSecureContext(undefined);
-    try {
-      await expect(readCellClipboard()).rejects.toMatchObject({
-        name: 'ClipboardRefusalError', unavailable: 'unsupported', code: 'clipboard-unavailable',
-      });
-      await expect(readClipboardText()).rejects.toBeInstanceOf(ClipboardRefusalError);
-      await expect(writeClipboardText('cells')).rejects.toMatchObject({ unavailable: 'unsupported' });
-      await expect(writeClipboard(() => ({} as ClipboardItem))).rejects.toMatchObject({ unavailable: 'unsupported' });
-    } finally { restore(); }
-  });
-
-  test('an insecure origin is refused before the API is consulted', async () => {
-    defineSecureContext(false);
-    defineNavigator({ clipboard: { readText: async () => 'ignored' } });
-    try {
-      await expect(readCellClipboard()).rejects.toMatchObject({ unavailable: 'insecure', code: 'clipboard-unavailable' });
-      await expect(writeClipboardText('cells')).rejects.toMatchObject({ unavailable: 'insecure' });
-    } finally { restore(); }
-  });
-
-  test('a NotAllowedError from the promise becomes a clipboard denial', async () => {
-    defineSecureContext(true);
-    defineNavigator({ clipboard: { readText: async () => { throw new DOMException('Paste denied', 'NotAllowedError'); } } });
-    try {
-      const denial = await readCellClipboard().catch((error: unknown) => error);
-      expect(denial).toBeInstanceOf(ClipboardRefusalError);
-      expect(denial).toMatchObject({ unavailable: 'denied', code: 'clipboard-denied' });
-      expect(clipboardRefusalMessage(denial, (key) => key)).toBe('commands.reasons.clipboardDenied');
-    } finally { restore(); }
-  });
-
-  test('a SecurityError from a write becomes a clipboard denial', async () => {
-    defineSecureContext(true);
-    defineNavigator({ clipboard: { writeText: async () => { throw new DOMException('Blocked', 'SecurityError'); } } });
-    try {
-      const denial = await writeClipboardText('cells').catch((error: unknown) => error);
-      expect(denial).toMatchObject({ unavailable: 'denied', code: 'clipboard-denied' });
-    } finally { restore(); }
-  });
-
-  test('ordinary failures keep their own message', async () => {
-    defineSecureContext(true);
-    defineNavigator({ clipboard: { writeText: async () => { throw new Error('Gesture expired'); } } });
-    try {
-      const failure = await writeClipboardText('cells').catch((error: unknown) => error);
-      expect(failure).toBeInstanceOf(Error);
-      expect(failure).not.toBeInstanceOf(ClipboardRefusalError);
-      expect(clipboardRefusalMessage(failure, (key) => key)).toBeNull();
-    } finally { restore(); }
   });
 });

@@ -60,10 +60,7 @@ import type {
 } from '@betteroffice/xlsx';
 import type { AwarenessPeer, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from './sheetLimits';
-import {
-  CellClipboard, clipboardMarker, clipboardRefusalMessage, clipboardUnavailable, parseCellClipboardText,
-  readCellClipboard, writeClipboard, writeClipboardText,
-} from './clipboard';
+import { CellClipboard, clipboardMarker, parseCellClipboardText, readCellClipboard } from './clipboard';
 import { useTranslation } from './i18n';
 import { editorExportFaces, useDefaultFonts } from './useDefaultFonts';
 import {
@@ -1769,20 +1766,20 @@ export function XlsxEditorContent({
     const token = cellClipboard.begin();
     try {
       const { range, cells } = copiedCells(target);
-      const marked = !cut && typeof ClipboardItem === 'function' && clipboardUnavailable('write') === null;
-      if (marked) await writeClipboard(() => new ClipboardItem({
+      const marked = !cut && typeof ClipboardItem === 'function' && typeof navigator.clipboard.write === 'function';
+      if (marked) await navigator.clipboard.write([new ClipboardItem({
         'text/plain': new Blob([toTsv(cells)], { type: 'text/plain' }), 'text/html': clipboardMarker(token, toTsv(cells)),
-      }));
-      else await writeClipboardText(toTsv(cells));
+      })]);
+      else await navigator.clipboard.writeText(toTsv(cells));
       if (marked && handleRef.current === handle) {
         cellClipboard.capture(token, { owner: handle, sheet, range, cells, cut: false }, marked);
       }
       return true;
     } catch (e) {
-      setError(clipboardRefusalMessage(e, t) ?? (e instanceof Error ? e.message : String(e)));
+      setError(e instanceof Error ? e.message : String(e));
       return false;
     }
-  }, [cellClipboard, t]);
+  }, [cellClipboard]);
 
   const copySelection = useCallback(async () => {
     const target = captureTarget();
@@ -1808,11 +1805,18 @@ export function XlsxEditorContent({
         return null;
       }
     };
+    const writeText = (text: string): Promise<void> => {
+      try {
+        return navigator.clipboard.writeText(text);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    };
     const clear = async (written: Promise<void>, cleared: CellInputEdit[]) => {
       try {
         await written;
       } catch (e) {
-        setError(clipboardRefusalMessage(e, t) ?? (e instanceof Error ? e.message : String(e)));
+        setError(e instanceof Error ? e.message : String(e));
         return;
       }
       if (!current()) return;
@@ -1828,7 +1832,7 @@ export function XlsxEditorContent({
       const decided = decide();
       if (!decided) return;
       cellClipboard.begin();
-      const written = writeClipboardText(decided.text);
+      const written = writeText(decided.text);
       void written.catch(() => {});
       void coordinator.input(() => clear(written, decided.cleared));
       return;
@@ -1838,9 +1842,9 @@ export function XlsxEditorContent({
     const payload = new Promise<Blob>((done, fail) => { resolve = done; reject = fail; });
     void payload.catch(() => {});
     let write: Promise<void> | null = null;
-    if (typeof ClipboardItem === 'function' && clipboardUnavailable('write') === null) {
+    if (typeof ClipboardItem === 'function' && typeof navigator.clipboard?.write === 'function') {
       try {
-        write = writeClipboard(() => new ClipboardItem({ 'text/plain': payload }));
+        write = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload })]);
         void write.catch(() => {});
       } catch {
         write = null;
@@ -1854,9 +1858,9 @@ export function XlsxEditorContent({
       }
       cellClipboard.begin();
       if (write) resolve(new Blob([decided.text], { type: 'text/plain' }));
-      return clear(write ?? writeClipboardText(decided.text), decided.cleared);
+      return clear(write ?? writeText(decided.text), decided.cleared);
     });
-  }, [captureTarget, cellClipboard, copyTarget, gatedClear, applyResult, readOnly, coordinator, t]);
+  }, [captureTarget, cellClipboard, copyTarget, gatedClear, applyResult, readOnly, coordinator]);
 
   const pasteSelection = useCallback((plain = false) => {
     const handle = handleRef.current;
@@ -1870,7 +1874,7 @@ export function XlsxEditorContent({
         const data = await readCellClipboard();
         return plain ? { text: data.text, html: null } : data;
       } catch (e) {
-        setError(clipboardRefusalMessage(e, t) ?? (e instanceof Error ? e.message : String(e)));
+        setError(e instanceof Error ? e.message : String(e));
         return null;
       }
     })();
@@ -2519,7 +2523,7 @@ export function XlsxEditorContent({
 
   const grid = frame?.grid;
   const renderedSelection = selection
-    ? expandRangeToMergedCells(normalizeRange(selection), visibleMergedRanges)
+    ? expandRangeToMergedCells(normalizeRange(selection), visibleMergedRanges, showSheetHeaders)
     : null;
   const renderedFocus = selection
     ? expandRangeToMergedCells(

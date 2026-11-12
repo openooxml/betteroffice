@@ -105,13 +105,19 @@ describe('selection overlay geometry', () => {
       .toEqual({ top: 0, left: 0, bottom: 0, right: 3 });
   });
 
-  it('leaves a whole column exactly as selected, merged cells included', () => {
+  it('leaves a whole column exactly as selected with sheet headers shown', () => {
     const column = { top: 0, left: 2, bottom: 1_048_575, right: 2 };
-    expect(expandRangeToMergedCells(column, merged)).toEqual(column);
+    expect(expandRangeToMergedCells(column, merged, true)).toEqual(column);
   });
 
-  it('leaves a whole row exactly as selected, merged cells included', () => {
+  it('leaves a whole row exactly as selected with sheet headers shown', () => {
     const row = { top: 0, left: 0, bottom: 0, right: 16_383 };
-    expect(expandRangeToMergedCells(row, merged)).toEqual(row);
+    expect(expandRangeToMergedCells(row, merged, true)).toEqual(row);
+  });
+
+  it('widens a whole column over a crossing merge only while sheet headers are hidden', () => {
+    const column = { top: 0, left: 1, bottom: 1_048_575, right: 1 };
+    expect(expandRangeToMergedCells(column, merged)).toEqual({ top: 0, left: 0, bottom: 1_048_575, right: 3 });
+    expect(expandRangeToMergedCells(column, merged, true)).toEqual(column);
   });
 });

@@ -166,9 +166,7 @@
       "lastSheet": "Eine Arbeitsmappe braucht mindestens ein Blatt.",
       "sheetAtEdge": "Das Blatt kann nicht weiter verschoben werden.",
       "sheetNameInvalid": "Blattnamen brauchen 1 bis 31 Zeichen, müssen eindeutig sein und dürfen : \\ / ? * [ ] nicht enthalten.",
-      "clipboardDenied": "Der Browser hat den Zugriff auf die Zwischenablage nicht erlaubt.",
-      "clipboardInsecure": "Die Zwischenablage benötigt eine sichere (HTTPS)-Seite.",
-      "clipboardWriteUnavailable": "Dieser Browser erlaubt das Kopieren in die Zwischenablage nicht."
+      "clipboardDenied": "Der Browser hat den Zugriff auf die Zwischenablage nicht erlaubt."
     },
     "cut": "Ausschneiden",
     "copy": "Kopieren",

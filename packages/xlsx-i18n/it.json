@@ -166,9 +166,7 @@
       "lastSheet": "Una cartella di lavoro richiede almeno un foglio.",
       "sheetAtEdge": "Il foglio non può essere spostato oltre.",
       "sheetNameInvalid": "I nomi dei fogli richiedono da 1 a 31 caratteri, devono essere univoci e non possono contenere : \\ / ? * [ ].",
-      "clipboardDenied": "Il browser non ha consentito l’accesso agli appunti.",
-      "clipboardInsecure": "Gli appunti richiedono una pagina sicura (HTTPS).",
-      "clipboardWriteUnavailable": "Questo browser non consente di copiare negli appunti."
+      "clipboardDenied": "Il browser non ha consentito l’accesso agli appunti."
     },
     "cut": "Taglia",
     "copy": "Copia",

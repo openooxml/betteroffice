@@ -166,9 +166,7 @@
       "lastSheet": "A workbook needs at least one sheet.",
       "sheetAtEdge": "The sheet cannot move any further.",
       "sheetNameInvalid": "Sheet names need 1 to 31 characters, must be unique and cannot contain : \\ / ? * [ ].",
-      "clipboardDenied": "The browser did not allow access to the clipboard.",
-      "clipboardInsecure": "The clipboard needs a secure (HTTPS) page.",
-      "clipboardWriteUnavailable": "This browser does not allow copying to the clipboard."
+      "clipboardDenied": "The browser did not allow access to the clipboard."
     },
     "cut": "Cut",
     "copy": "Copy",

@@ -2718,7 +2718,7 @@ mod tests {
     fn track_moves_are_refused_before_the_batch_applies() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         let saved = session.save().unwrap();
-        let set = r#"{"type":"setCell","sheet":0,"at":{"row":0,"col":2},"cell":{}}"#;
+        let set = r#"{"type":"setCell","sheet":0,"at":{"row":0,"col":2},"cell":{"value":{"kind":"text","value":"Probe"}}}"#;
         for mv in [
             r#"{"type":"moveCols","sheet":0,"col":0,"count":1,"before":2}"#,
             r#"{"type":"moveRows","sheet":0,"row":0,"count":1,"before":2}"#,
@@ -2731,6 +2731,12 @@ mod tests {
                 assert_eq!(
                     result.unwrap_err(),
                     "cannot move sheet 0 tracks: moving rows or columns is not supported yet"
+                );
+                assert!(
+                    !session
+                        .cell_json(r#"{"sheet":0,"row":0,"col":2}"#)
+                        .unwrap()
+                        .contains(r#""input":"Probe""#)
                 );
             }
             assert!(

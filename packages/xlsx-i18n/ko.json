@@ -166,9 +166,7 @@
       "lastSheet": "통합 문서에는 시트가 하나 이상 있어야 합니다.",
       "sheetAtEdge": "시트를 더 이상 이동할 수 없습니다.",
       "sheetNameInvalid": "시트 이름은 1~31자이고 고유해야 하며 : \\ / ? * [ ]를 포함할 수 없습니다.",
-      "clipboardDenied": "브라우저에서 클립보드 액세스를 허용하지 않았습니다.",
-      "clipboardInsecure": "클립보드에는 보안(HTTPS) 페이지가 필요합니다.",
-      "clipboardWriteUnavailable": "이 브라우저에서는 클립보드로 복사할 수 없습니다."
+      "clipboardDenied": "브라우저에서 클립보드 액세스를 허용하지 않았습니다."
     },
     "cut": "잘라내기",
     "copy": "복사",

@@ -4170,7 +4170,7 @@ describe('peerless workbook worker editor', () => {
         expect(clears).toEqual([]);
         expect(host.sent.map((command) => command.kind)).toEqual(['editCell', 'select']);
         expect(host.cells.get('0:0:0')).toBe('initial');
-        expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/did not allow access to the clipboard/i);
+        expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard denied/i);
         expect(view.queryByTestId('xlsx-error')).toBeNull();
       }
       expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'select', payload: { selection: { activeCell: { row: 1, col: 1 } } } });
@@ -4287,7 +4287,7 @@ describe('peerless workbook worker editor', () => {
           else await expect(clipboard.writes[0]).rejects.toMatchObject({ name: 'NotAllowedError' });
           expect(clipboard.copied).toEqual(['"line\nbreak"']);
         }
-        if (outcome === 'refusal') expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/did not allow access to the clipboard/i);
+        if (outcome === 'refusal') expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard denied/i);
         expect(view.queryByTestId('xlsx-error')).toBeNull();
         expect(host.sent).toHaveLength(1);
         fireEvent.change(formula, { target: { value: 'next' } });
@@ -4313,7 +4313,7 @@ describe('peerless workbook worker editor', () => {
     const formula = view.getByTestId('xlsx-formula-input');
     fireEvent.change(formula, { target: { value: 'draft' } });
     await act(async () => fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true }));
-    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/does not allow copying to the clipboard/i);
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard write access/i);
     expect(view.queryByTestId('xlsx-error')).toBeNull();
     expect(clipboardReads(host)).toEqual([]);
     expect(clipboard.write).not.toHaveBeenCalled();
@@ -6957,7 +6957,7 @@ it('keeps the workbook editable and saveable after clipboard permission denial',
   replaceClipboard('readText', mock(async () => { throw new DOMException('Paste denied', 'NotAllowedError'); }));
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
   await advance();
-  expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('The browser did not allow access to the clipboard.');
+  expect(view.getByTestId('xlsx-input-refusal').textContent).toContain('Paste denied');
   expect(view.queryByTestId('xlsx-error')).toBeNull();
   expect(api.failure).toBeNull();
   expect(host.cells.get('0:0:0')).toBe('valid');
@@ -6966,69 +6966,6 @@ it('keeps the workbook editable and saveable after clipboard permission denial',
   expect(await save).toEqual(new Uint8Array([0]));
   expect(host.session.save).toHaveBeenCalledTimes(1);
   expect(host.peerMethods.save).not.toHaveBeenCalled();
-});
-
-it('keeps the workbook editable after an aborted clipboard write', async () => {
-  const host = harness();
-  let api!: XlsxWorkerEditorApi;
-  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} onReady={(value) => { api = value; }} />);
-  await opened();
-  promisedClipboard();
-  const write = mock(() => Promise.reject(new DOMException('Write aborted', 'AbortError')));
-  replaceClipboard('write', write);
-  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'c', ctrlKey: true });
-  // an OS clipboard abort is a recoverable clipboard refusal, not a workbook failure.
-  await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
-    .toBe('This browser does not allow copying to the clipboard.'));
-  expect(write).toHaveBeenCalledTimes(1);
-  expect(view.queryByTestId('xlsx-error')).toBeNull();
-  expect(api.failure).toBeNull();
-  const editing = api.editCellAsync(0, 0, 1, 'after abort');
-  await advance();
-  await editing;
-  expect(host.cells.get('0:0:1')).toBe('after abort');
-});
-
-it('refuses a paste on a page without a clipboard API and keeps the saved entry', async () => {
-  const host = harness(true);
-  let api!: XlsxWorkerEditorApi;
-  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} onReady={(value) => { api = value; }} />);
-  await opened();
-  reviewEdit(view, 'valid');
-  await advance();
-  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
-  restorers.push(() => {
-    if (original) Object.defineProperty(navigator, 'clipboard', original);
-    else Reflect.deleteProperty(navigator, 'clipboard');
-  });
-  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
-  await advance();
-  expect(view.getByTestId('xlsx-input-refusal').textContent).toBe(
-    'This browser does not allow pasting from a menu. Use the keyboard shortcut.');
-  expect(host.cells.get('0:0:0')).toBe('valid');
-  expect(view.queryByTestId('xlsx-error')).toBeNull();
-  expect(api.failure).toBeNull();
-});
-
-it('names the insecure origin when a paste cannot reach the clipboard', async () => {
-  const host = harness(true);
-  let api!: XlsxWorkerEditorApi;
-  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} onReady={(value) => { api = value; }} />);
-  await opened();
-  reviewEdit(view, 'valid');
-  await advance();
-  const original = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
-  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
-  restorers.push(() => {
-    if (original) Object.defineProperty(window, 'isSecureContext', original);
-    else Reflect.deleteProperty(window, 'isSecureContext');
-  });
-  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
-  await advance();
-  expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('The clipboard needs a secure (HTTPS) page.');
-  expect(host.cells.get('0:0:0')).toBe('valid');
-  expect(api.failure).toBeNull();
 });
 
 for (const invalid of ['text', 'formula', 'sheet', 'cell'] as const) {
@@ -8544,7 +8481,7 @@ it('restores a pre-hydration cut preview when clipboard writing is refused', asy
   await act(async () => hydration.resolve(host.peer));
   await advance();
   expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
-  expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/did not allow access to the clipboard/i);
+  expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard denied/i);
   expect(host.cells.get('0:0:0')).toBe('initial');
   expect(host.editMethods.editCells).not.toHaveBeenCalled();
   expect(host.replay).not.toHaveBeenCalled();

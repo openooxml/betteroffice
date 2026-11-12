@@ -2108,7 +2108,7 @@ describe('workbook commands', () => {
     }
   });
 
-  test('a merged range crossing a column move is an ordinary structural refusal', async () => {
+  test('an unsupported column move is an ordinary structural refusal', async () => {
     const session = await createTestWorkbookSession(bytes);
     try {
       const saved = await session.save();

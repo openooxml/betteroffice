@@ -56,10 +56,6 @@ import { ProposalsPanel } from '../proposals/ProposalsPanel';
 import { cellInViewport, deriveLimits, expandRangeToMergedCells, extendScrollExtent, laidOutCellRect, nearestCellScroll, positionAtPoint, scaledRect } from '../viewer/sessionGeometry';
 import { cellEditorColors } from '../viewer/cellEditorColors';
 import { ACTIVE_CELL_WIDTH, marqueeBox, marqueeFills, MARQUEE_COLOR, MARQUEE_WIDTH, SELECTION_FILL } from '../selectionOutline';
-import {
-  clipboardRefusalMessage, ClipboardRefusalError, clipboardUnavailable, readClipboardText, writeClipboard,
-  writeClipboardText,
-} from '../clipboard';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 
 import { useLegacySessionWorkbook, EditableWorkbookSession, type EditableSessionWorkbookProps } from './useEditableSessionWorkbook';
@@ -191,11 +187,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const draftRevision = useRef(0);
   const settledDraftRevision = useRef(0);
   const focus = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
-  const tRef = useRef(t);
-  tRef.current = t;
   const reportInputError = useCallback((error: unknown) => {
-    const clipboard = clipboardRefusalMessage(error, tRef.current);
-    if (clipboard) { setRefusal(clipboard); return; }
     const local = inputRefusal(error);
     if (local || error instanceof XlsxCommandAdmissionError) {
       setRefusal((local ?? error as Error).message);
@@ -1103,29 +1095,23 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const usedRange = () => run!.peer?.selectionData(sheet, 0, 0, 'usedRange').usedRange;
     let clipboardWrite: { resolve(payload: Blob): void; reject(error: unknown): void; done: Promise<boolean> } | undefined;
     if (kind !== 'paste') {
-      const writeRefusal = typeof ClipboardItem === 'function' ? clipboardUnavailable('write') : 'unsupported';
-      if (writeRefusal) {
-        if (kind === 'cut') { reportInputError(new ClipboardRefusalError(writeRefusal, 'write')); return; }
+      if (typeof ClipboardItem !== 'function' || typeof navigator.clipboard.write !== 'function') {
+        if (kind === 'cut') { reportInputError(new WorkerInputRefusal('Cut requires clipboard write access')); return; }
       } else {
         let resolve!: (payload: Blob) => void;
         let reject!: (error: unknown) => void;
         const payload = new Promise<Blob>((done, failed) => { resolve = done; reject = failed; });
         void payload.catch(() => {});
         try {
-          const done = writeClipboard(() => new ClipboardItem({ 'text/plain': payload })).then(
-            () => true, (error) => {
-              const refusal = error instanceof ClipboardRefusalError
-                ? new ClipboardRefusalError(error.unavailable, error.method, kind === 'cut') : error;
-              reject(refusal);
-              throw refusal;
-            }
+          const done = navigator.clipboard.write([new ClipboardItem({ 'text/plain': payload })]).then(
+            () => true, (error) => { reject(error); throw new WorkerInputRefusal(error instanceof Error ? error.message : 'Clipboard write failed', kind === 'cut'); }
           );
           void done.catch(() => {});
           clipboardWrite = { resolve, reject, done };
-        } catch (error) { reject(error); reportInputError(error); return; }
+        } catch (error) { reject(error); reportInputError(new WorkerInputRefusal(error instanceof Error ? error.message : 'Clipboard write failed')); return; }
       }
     }
-    const captureClipboard = () => kind === 'paste' ? readClipboardText() : '';
+    const captureClipboard = () => kind === 'paste' ? navigator.clipboard.readText() : '';
     let mutation: Extract<WorkbookReplayOp, { method: 'editCells' }> | undefined;
     let discardPreview: (() => Promise<void>) | undefined;
     let clipboardRefusal: unknown;
@@ -1160,7 +1146,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
           clipboardWrite.resolve(new Blob([copied], { type: 'text/plain' }));
           written = await clipboardWrite.done;
         } else {
-          await writeClipboardText(copied); written = true;
+          try { await navigator.clipboard.writeText(copied); written = true; }
+          catch (error) { throw new WorkerInputRefusal(error instanceof Error ? error.message : 'Clipboard write failed'); }
         }
         if (!owner.current) throw new XlsxCommandAdmissionError('document-replaced');
         markApplied.check();
@@ -1765,7 +1752,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const visibleSelection = painted?.request.sheet === active ? selection : null;
   const merged = painted?.mergedRanges ?? [];
   const grid = frame?.grid;
-  const selected = visibleSelection ? expandRangeToMergedCells(normalizeRange(visibleSelection), merged) : null;
+  const selected = visibleSelection ? expandRangeToMergedCells(normalizeRange(visibleSelection), merged, Boolean(props.showSheetHeaders)) : null;
   const focused = visibleSelection ? expandRangeToMergedCells({ top: visibleSelection.focus.row,
     left: visibleSelection.focus.col, bottom: visibleSelection.focus.row, right: visibleSelection.focus.col }, merged) : null;
   const selectionRect = grid && selected ? rangeRect(grid, selected) : null;

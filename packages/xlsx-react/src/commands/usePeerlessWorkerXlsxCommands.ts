@@ -19,7 +19,6 @@ import {
 } from './evaluate';
 import { XLSX_COMMAND_DESCRIPTORS } from './descriptors';
 import { REFUSAL_CAUSE_KEYS } from './refusalCause';
-import { clipboardUnavailable } from '../clipboard';
 
 import {
   PeerlessWorkerCommandRefusal, type PeerlessWorkerCommandInput, type PeerlessWorkerCommandSession,
@@ -218,7 +217,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
       workbook: current.menu && state.sheets ? {
         sheets: [...state.sheets].sort((a, b) => a.index - b.index).map((entry) => entry.name),
         active: view.sheet,
-        clipboardRead: clipboardUnavailable('readText') === null,
+        clipboardRead: typeof navigator !== 'undefined' && typeof navigator.clipboard?.readText === 'function',
       } : undefined,
       hostDisabled: state.selectionEditable === false ? new Set(
         (Object.keys(XLSX_COMMAND_DESCRIPTORS) as XlsxCommandId[]).filter(isCellCommand)

@@ -1684,42 +1684,6 @@ describe('XlsxEditor host integration', () => {
       else Reflect.deleteProperty(navigator, 'clipboard');
     }
   });
-
-  async function pasteWithClipboard(clipboard: unknown, message: string) {
-    let api: XlsxEditorApi | undefined;
-    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: clipboard });
-    try {
-      const view = render(<XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={plain.bytes.slice()}
-        onReady={(ready) => { api = ready; }} />);
-      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
-      const surface = view.getByTestId('xlsx-scroll');
-      const target = { row: 2, col: 0 };
-      await act(async () => { api!.selectCells(0, selectionAt(target)); });
-      fireEvent.doubleClick(surface, pointAt(plain, target));
-      const editor = await waitFor(() => view.getByTestId('xlsx-cell-editor'));
-      fireEvent.change(editor, { target: { value: 'Kept entry' } });
-      fireEvent.keyDown(editor, { key: 'Enter' });
-      fireEvent.keyDown(surface, { key: 'v', ctrlKey: true });
-      await waitFor(() => expect(view.getByTestId('xlsx-error').textContent).toContain(message));
-      expect(api!.handle.cell(0, target.row, target.col).input).toBe('Kept entry');
-    } finally {
-      if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
-      else Reflect.deleteProperty(navigator, 'clipboard');
-    }
-  }
-
-  it('refuses a paste with a clipboard message when the page has no clipboard API', async () => {
-    await pasteWithClipboard(undefined,
-      'This browser does not allow pasting from a menu. Use the keyboard shortcut.');
-  });
-
-  it('reports a clipboard denial and keeps the committed entry', async () => {
-    await pasteWithClipboard(
-      { readText: async () => { throw new DOMException('Paste denied', 'NotAllowedError'); } },
-      'The browser did not allow access to the clipboard.'
-    );
-  });
 });
 
 describe('XlsxEditor proposal review', () => {

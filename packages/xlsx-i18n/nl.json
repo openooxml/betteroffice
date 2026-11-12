@@ -166,9 +166,7 @@
       "lastSheet": "Een werkmap heeft ten minste één blad nodig.",
       "sheetAtEdge": "Het blad kan niet verder worden verplaatst.",
       "sheetNameInvalid": "Bladnamen hebben 1 tot 31 tekens nodig, moeten uniek zijn en mogen geen : \\ / ? * [ ] bevatten.",
-      "clipboardDenied": "De browser heeft geen toegang tot het klembord toegestaan.",
-      "clipboardInsecure": "Het klembord vereist een beveiligde (HTTPS)-pagina.",
-      "clipboardWriteUnavailable": "Deze browser staat kopiëren naar het klembord niet toe."
+      "clipboardDenied": "De browser heeft geen toegang tot het klembord toegestaan."
     },
     "cut": "Knippen",
     "copy": "Kopiëren",

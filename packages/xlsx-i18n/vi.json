@@ -166,9 +166,7 @@
       "lastSheet": "Sổ làm việc cần ít nhất một trang tính.",
       "sheetAtEdge": "Không thể di chuyển trang tính xa hơn.",
       "sheetNameInvalid": "Tên trang tính cần từ 1 đến 31 ký tự, không trùng lặp và không chứa : \\ / ? * [ ].",
-      "clipboardDenied": "Trình duyệt không cho phép truy cập bảng tạm.",
-      "clipboardInsecure": "Bảng tạm cần một trang bảo mật (HTTPS).",
-      "clipboardWriteUnavailable": "Trình duyệt này không cho phép sao chép vào bảng tạm."
+      "clipboardDenied": "Trình duyệt không cho phép truy cập bảng tạm."
     },
     "cut": "Cắt",
     "copy": "Sao chép",

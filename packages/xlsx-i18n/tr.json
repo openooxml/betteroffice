@@ -166,9 +166,7 @@
       "lastSheet": "Bir çalışma kitabında en az bir sayfa olmalıdır.",
       "sheetAtEdge": "Sayfa daha fazla taşınamaz.",
       "sheetNameInvalid": "Sayfa adları 1 ile 31 karakter arasında ve benzersiz olmalı, : \\ / ? * [ ] içeremez.",
-      "clipboardDenied": "Tarayıcı panoya erişime izin vermedi.",
-      "clipboardInsecure": "Pano için güvenli (HTTPS) bir sayfa gerekir.",
-      "clipboardWriteUnavailable": "Bu tarayıcı panoya kopyalamaya izin vermiyor."
+      "clipboardDenied": "Tarayıcı panoya erişime izin vermedi."
     },
     "cut": "Kes",
     "copy": "Kopyala",

@@ -166,9 +166,7 @@
       "lastSheet": "Buku kerja memerlukan setidaknya satu lembar.",
       "sheetAtEdge": "Lembar tidak dapat dipindahkan lebih jauh.",
       "sheetNameInvalid": "Nama lembar harus 1 hingga 31 karakter, unik, dan tidak boleh berisi : \\ / ? * [ ].",
-      "clipboardDenied": "Browser tidak mengizinkan akses ke papan klip.",
-      "clipboardInsecure": "Papan klip memerlukan halaman aman (HTTPS).",
-      "clipboardWriteUnavailable": "Browser ini tidak mengizinkan penyalinan ke papan klip."
+      "clipboardDenied": "Browser tidak mengizinkan akses ke papan klip."
     },
     "cut": "Potong",
     "copy": "Salin",
