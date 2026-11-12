@@ -205,3 +205,58 @@ fn a_family_without_a_bundled_face_keeps_its_own_line_box_and_latin_face_next_to
         mismatches.join("\n")
     );
 }
+
+#[test]
+fn a_character_both_faces_cover_keeps_the_family_face_next_to_kana() {
+    let package = common::sample_docx();
+    let family = "Century";
+    let mut checked = Vec::new();
+    let mut mismatches = Vec::new();
+    for shared in ['\u{2026}', '\u{201C}', '\u{00D7}'] {
+        checked.push(format!("{family} {shared:?}"));
+        let alone = Document::open(&package)
+            .unwrap()
+            .layout(input(json!({"text": format!("A{shared}A"),
+                                 "fontFamily": family, "fontSize": FONT_SIZE_PT})))
+            .unwrap();
+        let mixed = Document::open(&package)
+            .unwrap()
+            .layout(input(json!({"text": format!("ひ{shared}か"),
+                                 "fontFamily": family, "fontSize": FONT_SIZE_PT})))
+            .unwrap();
+        let Some((_, own_font, own_id, own_advance)) = glyphs(&alone)
+            .into_iter()
+            .find(|&(character, ..)| character == shared)
+        else {
+            mismatches.push(format!("{family}: {shared:?} drew no glyph on its own"));
+            continue;
+        };
+        let drawn = glyphs(&mixed);
+        let kana_fonts: BTreeSet<u32> = drawn
+            .iter()
+            .filter(|(character, ..)| "ひか".contains(*character))
+            .map(|&(_, font, ..)| font)
+            .collect();
+        match drawn.iter().find(|&&(character, ..)| character == shared) {
+            Some(&(_, font, id, advance))
+                if font == own_font
+                    && id == own_id
+                    && (advance - own_advance).abs() <= 0.02
+                    && !kana_fonts.contains(&font) => {}
+            Some(&(_, font, id, advance)) => mismatches.push(format!(
+                "{family}: {shared:?} next to kana draws font {font} glyph {id} advancing \
+                 {advance:.3}px, the family's own face draws font {own_font} glyph {own_id} \
+                 advancing {own_advance:.3}px; kana draw with {kana_fonts:?}"
+            )),
+            None => mismatches.push(format!("{family}: {shared:?} next to kana drew no glyph")),
+        }
+    }
+    println!("checked {} rows: {}", checked.len(), checked.join(", "));
+    assert!(
+        mismatches.is_empty(),
+        "{} mismatches over {} rows:\n{}",
+        mismatches.len(),
+        checked.len(),
+        mismatches.join("\n")
+    );
+}
