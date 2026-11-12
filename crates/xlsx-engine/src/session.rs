@@ -946,6 +946,7 @@ impl Session {
     ) -> Result<String, String> {
         let args: OpsArgs =
             serde_json::from_str(transaction_json).map_err(|error| format!("bad ops: {error}"))?;
+        Workbook::refuse_track_moves(&args.ops).map_err(|error| error.to_string())?;
         let result = self
             .workbook
             .apply_ops(args.ops, self.calculation_options(now_serial))
@@ -962,6 +963,7 @@ impl Session {
     ) -> Result<String, String> {
         let args: OpsArgs =
             serde_json::from_str(transaction_json).map_err(|error| format!("bad ops: {error}"))?;
+        Workbook::refuse_track_moves(&args.ops).map_err(|error| error.to_string())?;
         let (result, profile) = self
             .workbook
             .apply_ops_profiled(args.ops, self.calculation_options(now_serial), now)
@@ -2710,6 +2712,47 @@ mod tests {
                 .unwrap()
                 .contains(r#""input":"=SUM(A1:A2)""#)
         );
+    }
+
+    #[test]
+    fn track_moves_are_refused_before_the_batch_applies() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let saved = session.save().unwrap();
+        let set = r#"{"type":"setCell","sheet":0,"at":{"row":0,"col":2},"cell":{}}"#;
+        for mv in [
+            r#"{"type":"moveCols","sheet":0,"col":0,"count":1,"before":2}"#,
+            r#"{"type":"moveRows","sheet":0,"row":0,"count":1,"before":2}"#,
+        ] {
+            let transaction = format!(r#"{{"ops":[{set},{mv}]}}"#);
+            for result in [
+                session.apply_ops_json(&transaction, None),
+                session.apply_ops_profiled_json(&transaction, None, &mut || 0.0),
+            ] {
+                assert_eq!(
+                    result.unwrap_err(),
+                    "cannot move sheet 0 tracks: moving rows or columns is not supported yet"
+                );
+            }
+            assert!(
+                session
+                    .cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
+                    .unwrap()
+                    .contains(r#""input":"Hello""#)
+            );
+            assert!(
+                session
+                    .cell_json(r#"{"sheet":0,"row":1,"col":1}"#)
+                    .unwrap()
+                    .contains(r#""input":"42""#)
+            );
+            assert!(
+                session
+                    .undo_json(None)
+                    .unwrap()
+                    .contains(r#""applied":false"#)
+            );
+            assert_eq!(session.save().unwrap(), saved);
+        }
     }
 
     #[test]

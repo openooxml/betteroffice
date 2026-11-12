@@ -2085,6 +2085,7 @@ describe('workbook commands', () => {
       ['applyOps', 'cannot move sheet 0 tracks: table Sales covers the moved tracks', 'table'],
       ['applyOps', 'cannot move sheet 1 tracks: the run or its destination is outside the worksheet', 'other'],
       ['applyOps', 'cannot move sheet 0 tracks: the source run is outside the worksheet', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: moving rows or columns is not supported yet', 'other'],
       ['moveRange', 'range move cannot safely preserve charts', 'chart'],
       ['moveRange', 'range move cannot safely preserve Excel tables', 'table'],
       ['moveRange', 'range move cannot safely preserve merged cells', 'other'],
@@ -2116,7 +2117,7 @@ describe('workbook commands', () => {
         { type: 'moveCols', sheet: 0, col: 3, count: 1, before: 5 },
       ]] }))).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false,
         result: { failure: { code: 'unsupported', cause: 'other',
-          message: 'cannot move sheet 0 tracks: merged range D1:E1 crosses the moved tracks' } } });
+          message: 'cannot move sheet 0 tracks: moving rows or columns is not supported yet' } } });
       expect(await session.save()).toEqual(saved);
       expect(session.confirmedBasis.version).toBe(version);
       expect(await session.submit(command(session, 2, 'editCell', { args: [0, 0, 0, '2'] })))

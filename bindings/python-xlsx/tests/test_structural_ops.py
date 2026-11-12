@@ -123,6 +123,24 @@ def test_apply_ops_refuses_the_internal_ops_as_every_binding_does(sample_bytes):
     assert workbook.save() == before
 
 
+def test_apply_ops_refuses_track_moves_before_the_batch_applies(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    before = workbook.save()
+    version = workbook.version()
+    for move in (
+        {"type": "moveCols", "sheet": 0, "col": 0, "count": 1, "before": 2},
+        {"type": "moveRows", "sheet": 0, "row": 0, "count": 1, "before": 2},
+    ):
+        with pytest.raises(
+            bo.OperationError,
+            match="^cannot move sheet 0 tracks: moving rows or columns is not supported yet$",
+        ):
+            workbook.apply_ops([{"type": "setCell", "sheet": 0, "at": {"row": 0, "col": 9}, "cell": {}}, move])
+    assert workbook.version() == version
+    assert workbook.can_undo is False
+    assert workbook.save() == before
+
+
 @pytest.mark.parametrize(
     "ops,error,message",
     [
