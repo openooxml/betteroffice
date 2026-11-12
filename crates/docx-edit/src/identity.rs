@@ -6536,14 +6536,17 @@ mod tests {
     /// The cost each story slice of a sliced prime charged, the last one answering `Known`.
     fn story_slice_costs(doc: &EditingDoc, max_bytes: u32) -> Vec<u64> {
         assert_eq!(doc.prime_last_slice_cost(), 0);
-        for step in ["start", "scan", "anchors"] {
+        let mut setup = 0;
+        while prime_phase(doc) != Some(PrimePhase::Stories) {
             assert_eq!(
                 doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
                 PrimeSlice::Pending,
-                "{step} at {max_bytes}"
+                "setup slice {setup} at {max_bytes}"
             );
-            assert_eq!(doc.prime_last_slice_cost(), 0, "{step} at {max_bytes}");
+            assert_eq!(doc.prime_last_slice_cost(), 0, "setup slice {setup}");
+            setup += 1;
         }
+        assert!(setup >= 3, "{setup}");
         let mut costs = Vec::new();
         loop {
             let outcome = doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes);
@@ -6626,6 +6629,194 @@ mod tests {
             let bound = all.div_ceil(u64::from(max_bytes)) + 2;
             assert!(costs.len() as u64 <= bound, "{} > {bound}", costs.len());
         }
+    }
+
+    const WIDE_BUDGET: u32 = 1 << 30;
+
+    /// One prime slice: its outcome, the cost it reported and what it spent of `max_bytes`.
+    fn charged_slice(
+        doc: &EditingDoc,
+        paragraphs: u32,
+        inflated: u32,
+        max_bytes: u32,
+        segments_per_slice: usize,
+    ) -> (PrimeSlice, u64, u64) {
+        let outcome = doc.prime_save_seed_states_slice_with(
+            paragraphs,
+            inflated,
+            max_bytes,
+            segments_per_slice,
+        );
+        let left = doc.prime_last_slice_left.load(Ordering::Relaxed);
+        (
+            outcome,
+            doc.prime_last_slice_cost(),
+            u64::from(max_bytes) - left,
+        )
+    }
+
+    /// The story the prime is part way through, and what it charged so far.
+    fn current_charge(doc: &EditingDoc) -> Option<(String, u64)> {
+        let progress = doc.prime_progress.lock().unwrap();
+        let (story, fingerprint) = progress.as_ref()?.current.as_ref()?;
+        Some((story.clone(), fingerprint.charged))
+    }
+
+    fn unscanned_session(bytes: &[u8]) -> crate::session::EditSessionCore {
+        let session = bytes_session(bytes);
+        *session.engine.doc().scan_cache.0.lock().unwrap() = None;
+        session
+    }
+
+    fn prime_to_stories(doc: &EditingDoc, max_bytes: u32, segments_per_slice: usize) {
+        while prime_phase(doc) != Some(PrimePhase::Stories) {
+            let slice = charged_slice(doc, u32::MAX, u32::MAX, max_bytes, segments_per_slice);
+            assert_eq!(slice, (PrimeSlice::Pending, 0, 0));
+        }
+    }
+
+    #[test]
+    fn a_scan_slice_reports_the_nothing_it_charges() {
+        let session = unscanned_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        let start = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+        assert_eq!(start, (PrimeSlice::Pending, 0, 0));
+        let mut scan_slices = 0;
+        while prime_phase(doc) == Some(PrimePhase::Scan) {
+            let slice = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+            assert_eq!(slice, (PrimeSlice::Pending, 0, 0), "scan slice {scan_slices}");
+            scan_slices += 1;
+        }
+        assert!(scan_slices > 1, "{scan_slices}");
+        assert_eq!(prime_phase(doc), Some(PrimePhase::Anchors));
+    }
+
+    #[test]
+    fn the_anchors_slice_reports_the_nothing_it_charges() {
+        let session = unscanned_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        while prime_phase(doc) != Some(PrimePhase::Anchors) {
+            let slice = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+            assert_eq!(slice.0, PrimeSlice::Pending);
+        }
+        let anchors = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+        assert_eq!(anchors, (PrimeSlice::Pending, 0, 0));
+        assert_eq!(prime_phase(doc), Some(PrimePhase::Stories));
+    }
+
+    #[test]
+    fn a_story_start_slice_reports_the_story_cost_it_charged() {
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        prime_to_stories(doc, WIDE_BUDGET, 7);
+        let mut starts = 0;
+        loop {
+            let (outcome, reported, spent) =
+                charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 7);
+            assert_eq!(reported, spent);
+            match outcome {
+                PrimeSlice::Pending => {
+                    let started = current_charge(doc);
+                    assert!(started.as_ref().is_some_and(|(_, charged)| *charged == 0));
+                    assert!(reported >= PRIME_STORY_COST as u64, "{reported}");
+                    starts += 1;
+                }
+                PrimeSlice::Known => break,
+                PrimeSlice::Declined => panic!("declined"),
+            }
+        }
+        assert!(starts > 0, "{starts}");
+    }
+
+    #[test]
+    fn a_partial_story_slice_reports_what_its_story_charged() {
+        let max_bytes = 4096u32;
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        prime_to_stories(doc, max_bytes, 512);
+        let mut partials = 0;
+        loop {
+            let before = current_charge(doc);
+            let (outcome, reported, spent) = charged_slice(doc, u32::MAX, u32::MAX, max_bytes, 512);
+            let after = current_charge(doc);
+            if outcome == PrimeSlice::Pending
+                && let (Some((was, from)), Some((is, to))) = (&before, &after)
+                && was == is
+                && to > from
+            {
+                assert_eq!(reported, to - from, "{was}");
+                assert!(reported >= u64::from(max_bytes), "{reported}");
+                assert_eq!(spent, u64::from(max_bytes));
+                partials += 1;
+            }
+            match outcome {
+                PrimeSlice::Pending => assert!(reported > 0),
+                PrimeSlice::Known => break,
+                PrimeSlice::Declined => panic!("declined"),
+            }
+        }
+        assert!(partials > 1, "{partials}");
+    }
+
+    #[test]
+    fn a_story_finishing_slice_reports_what_it_charged() {
+        let bytes = multi_chunk_docx();
+        let session = bytes_session(&bytes);
+        let doc = session.engine.doc();
+        prime_to_stories(doc, WIDE_BUDGET, 512);
+        let mut total = 0;
+        loop {
+            let (outcome, reported, spent) =
+                charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 512);
+            assert_eq!(reported, spent);
+            total += reported;
+            match outcome {
+                PrimeSlice::Pending => {}
+                PrimeSlice::Known => {
+                    assert!(reported > 0);
+                    break;
+                }
+                PrimeSlice::Declined => panic!("declined"),
+            }
+        }
+        assert_eq!(total, one_shot_prime_cost(&bytes));
+    }
+
+    #[test]
+    fn a_known_slice_reports_the_nothing_it_charges() {
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        assert!(session.prime_save_seed_states(u32::MAX, u32::MAX));
+        assert!(doc.prime_last_slice_cost() > 0);
+        let known = charged_slice(doc, u32::MAX, u32::MAX, WIDE_BUDGET, 512);
+        assert_eq!(known, (PrimeSlice::Known, 0, 0));
+    }
+
+    #[test]
+    fn a_declined_slice_reports_what_it_charged() {
+        let bytes = multi_chunk_docx();
+        let session = bytes_session(&bytes);
+        let declined = charged_slice(session.engine.doc(), u32::MAX, 1, WIDE_BUDGET, 512);
+        assert_eq!(declined, (PrimeSlice::Declined, 0, 0));
+        let session = unscanned_session(&bytes);
+        let doc = session.engine.doc();
+        loop {
+            let (outcome, reported, spent) = charged_slice(doc, 1, u32::MAX, WIDE_BUDGET, 7);
+            assert_eq!((reported, spent), (0, 0));
+            if outcome != PrimeSlice::Pending {
+                assert_eq!(outcome, PrimeSlice::Declined);
+                break;
+            }
+        }
+        let session = bytes_session(&bytes);
+        let doc = session.engine.doc();
+        prime_to_stories(doc, 4096, 512);
+        let (outcome, reported, _) = charged_slice(doc, u32::MAX, u32::MAX, 4096, 512);
+        assert_eq!(outcome, PrimeSlice::Pending);
+        assert!(reported > 0);
+        edit_body(&session);
+        let declined = charged_slice(doc, u32::MAX, u32::MAX, 4096, 512);
+        assert_eq!(declined, (PrimeSlice::Declined, 0, 0));
     }
 
     #[test]
