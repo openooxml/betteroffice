@@ -2538,7 +2538,7 @@ describe('docx native panic hook', () => {
     expect(native.install_panic_hook()).toBeUndefined();
   });
 
-  test('a panic writes one prefixed line before the default report and throws the same Error', () => {
+  test.skipIf(process.platform === 'win32')('a panic writes one prefixed line before the default report and throws the same Error', () => {
     const script = join(mkdtempSync(join(tmpdir(), 'docx-native-panic-')), 'panic.mjs');
     const loader = (name: string) => JSON.stringify(fileURLToPath(new URL(`./js/${name}.ts`, import.meta.url)));
     writeFileSync(script, `

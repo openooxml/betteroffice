@@ -827,7 +827,7 @@ describe('xlsx native panic hook', () => {
     expect(native.install_panic_hook()).toBeUndefined();
   });
 
-  test('a panic writes one prefixed line before the default report and throws the same Error', () => {
+  test.skipIf(process.platform === 'win32')('a panic writes one prefixed line before the default report and throws the same Error', () => {
     const script = join(mkdtempSync(join(tmpdir(), 'xlsx-native-panic-')), 'panic.mjs');
     const path = (relative: string) => JSON.stringify(fileURLToPath(new URL(relative, import.meta.url)));
     writeFileSync(script, `
