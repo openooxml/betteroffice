@@ -143,26 +143,31 @@ async function observeBoth<T>(row: Row<T>, makeWasm: MakeEngine<T>, makeNative: 
   return { wasm, native };
 }
 
-async function expectDocxPackage(name: string, side: string, saved: Outcome): Promise<Uint8Array> {
+async function expectPackage(name: string, side: string, saved: Outcome, mainPart: string): Promise<Uint8Array> {
   if ('error' in saved) throw new Error(`${name}: ${side} save threw ${saved.error.name}: ${saved.error.message}`);
   const bytes = saved.value;
   if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) throw new Error(`${name}: ${side} save returned no bytes`);
   const zip = await JSZip.loadAsync(bytes, { checkCRC32: true }).catch((error: unknown) => {
     throw new Error(`${name}: ${side} save is not a valid zip: ${String(error)}`);
   });
-  if (!zip.file('word/document.xml')) throw new Error(`${name}: ${side} save has no word/document.xml`);
+  if (!zip.file(mainPart)) throw new Error(`${name}: ${side} save has no ${mainPart}`);
   return bytes;
 }
 
 /** Runs one row on a fresh wasm and a fresh native session and requires equal outcomes and saves. */
-export async function runRow<T>(row: Row<T>, makeWasm: MakeEngine<T>, makeNative: MakeEngine<T>): Promise<void> {
+export async function runRow<T>(
+  row: Row<T>,
+  makeWasm: MakeEngine<T>,
+  makeNative: MakeEngine<T>,
+  mainPart = 'word/document.xml',
+): Promise<void> {
   const { wasm, native } = await observeBoth(row, makeWasm, makeNative);
   const name = rowName(row);
   expect(native.outcome, name).toStrictEqual(wasm.outcome);
   expectDeclaredOutcome(row, wasm.outcome as Outcome);
   if (!row.mutates) return;
-  const nativeBytes = await expectDocxPackage(name, 'native', native.saved!);
-  const wasmBytes = await expectDocxPackage(name, 'wasm', wasm.saved!);
+  const nativeBytes = await expectPackage(name, 'native', native.saved!, mainPart);
+  const wasmBytes = await expectPackage(name, 'wasm', wasm.saved!, mainPart);
   await expectSavedPartsEqual(nativeBytes, wasmBytes);
 }
 
