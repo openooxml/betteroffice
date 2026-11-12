@@ -93,6 +93,7 @@ fn run() -> Result<()> {
             "source_sha256": format!("{:x}", Sha256::digest(&bytes)),
             "png_sha256": format!("{:x}", Sha256::digest(&rendered.bytes)),
             "font_path": if args.len() == 4 { "product-registry" } else { "bench-manifest" },
+            "faces": fonts.faces,
             "font_faces": fonts.ids.iter().map(|(key, chain)| {
                 (key.clone(), chain.iter().map(|id| fonts.faces[*id as usize].clone()).collect::<Vec<_>>())
             }).collect::<BTreeMap<_, _>>()

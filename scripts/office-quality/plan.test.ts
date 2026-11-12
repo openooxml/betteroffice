@@ -132,6 +132,7 @@ test('freezes canonical metadata and every package version in one plan', async (
   expect(plan.react_version).toBe('4.5.6');
   expect(plan.published_fonts).toEqual({ docx: '1.0.0', pptx: '1.0.0' });
   expect(plan.published_fonts_cjk).toEqual({ docx: '1.0.0', pptx: '1.0.0' });
+  expect(plan.published_fonts_intl).toEqual({ docx: '1.0.0' });
   expect(plan.docx_published_source_sha).toBe('d'.repeat(40));
   expect(plan.pptx_published_source_sha).toBe('d'.repeat(40));
   expect(plan.samples.map((sample) => sample.id)).toEqual([
@@ -219,6 +220,8 @@ test('a DOCX plan pairs the published docx release with the fonts and fonts-cjk 
         return { versions: { '0.4.1': { gitHead: 'b'.repeat(40) }, '0.4.2': { gitHead: release } }, time: { '0.4.1': '2026-10-26T00:00:00Z', '0.4.2': '2026-10-27T11:27:19Z' } };
       if (name === '@betteroffice/fonts-cjk')
         return { versions: { '0.4.1': { gitHead: 'b'.repeat(40) }, '0.4.2': { gitHead: release }, '0.5.0': { gitHead: 'f'.repeat(40) } }, time: { '0.4.2': '2026-10-27T11:27:27Z' } };
+      if (name === '@betteroffice/fonts-intl')
+        return { versions: { '0.4.1': { gitHead: 'b'.repeat(40) }, '0.4.2': { gitHead: release }, '0.5.0': { gitHead: 'f'.repeat(40) } }, time: { '0.4.2': '2026-10-27T11:27:23Z' } };
       return { time: { '0.5.1': '2026-10-27T11:28:38Z' } };
     },
     poolSize: 1,
@@ -227,10 +230,14 @@ test('a DOCX plan pairs the published docx release with the fonts and fonts-cjk 
   expect(plan.fonts_basis).toEqual({ docx: 'release-commit' });
   expect(plan.published_fonts_cjk).toEqual({ docx: '0.4.2' });
   expect(plan.fonts_cjk_basis).toEqual({ docx: 'release-commit' });
-  expect(requested).toEqual(expect.arrayContaining(['@betteroffice/docx', '@betteroffice/fonts', '@betteroffice/fonts-cjk']));
+  expect(plan.published_fonts_intl).toEqual({ docx: '0.4.2' });
+  expect(plan.fonts_intl_basis).toEqual({ docx: 'release-commit' });
+  expect(requested).toEqual(expect.arrayContaining(['@betteroffice/docx', '@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl']));
   expect(validatePlan(plan)).toEqual(plan);
   expect(() => createPlan({ ...input(), published_fonts: { pptx: '0.4.2' }, published_fonts_cjk: { docx: '0.4.2' } })).toThrow('Invalid fidelity plan versions');
   expect(() => createPlan({ ...input(), published_fonts: { docx: '0.4.2' }, published_fonts_cjk: { docx: 'latest' } })).toThrow('Invalid fidelity plan versions');
+  expect(() => createPlan({ ...input(), published_fonts: { docx: '0.4.2', pptx: '0.4.2' }, published_fonts_intl: { pptx: '0.4.2' } })).toThrow('Invalid fidelity plan versions');
+  expect(() => createPlan({ ...input(), published_fonts: { docx: '0.4.2' }, published_fonts_intl: { docx: 'latest' } })).toThrow('Invalid fidelity plan versions');
 });
 
 test('the local runner plans PPTX and XLSX collections through the registry loaders it shares with planning', async () => {

@@ -31,7 +31,7 @@ export interface Requirement {
   scripts?: string[];
 }
 
-export const ADDONS = { 'fonts-intl': 'INTL_FONT_ASSET_URLS', 'fonts-cjk': 'CJK_FONT_ASSET_URLS' } as const;
+export const ADDONS = { 'fonts-latin': 'LATIN_FONT_ASSET_URLS', 'fonts-intl': 'INTL_FONT_ASSET_URLS', 'fonts-cjk': 'CJK_FONT_ASSET_URLS' } as const;
 export type AddonName = keyof typeof ADDONS;
 
 export interface Addon {
@@ -60,6 +60,8 @@ export interface Product {
 export class MissingExport extends Error {}
 
 export class MissingAddon extends Error {}
+
+export class FailedRegistration extends Error {}
 
 const repo = resolve(import.meta.dir, '../..');
 const MEASUREMENT_KEYS = new Set(['defaults', 'compat', 'authoritativeShaping']);
@@ -115,6 +117,7 @@ export async function loadFontPackages(root: string): Promise<FontPackages> {
   const missing = ['resolveBundledFamilyFace', 'resolveScriptFallbackFace'].filter((name) => typeof fonts[name] !== 'function');
   if (missing.length) throw new Error(`@betteroffice/fonts@${version} lacks ${missing.join(', ')}`);
   const fromFonts = createRequire(fontsManifest);
+  const fontsPackage = JSON.parse(await readFile(fontsManifest, 'utf8'));
   const addons = {} as Record<AddonName, Addon>;
   for (const [name, exported] of Object.entries(ADDONS) as Array<[AddonName, string]>) {
     const id = `@betteroffice/${name}`;
@@ -123,6 +126,10 @@ export async function loadFontPackages(root: string): Promise<FontPackages> {
       addonRoot = dirname(fromFonts.resolve(`${id}/package.json`));
     } catch {}
     const addon: Addon = { files: new Set(), manifest: join(addonRoot ?? join(repo, 'packages', name), 'assets', 'manifest.json') };
+    if (!addonRoot && !['dependencies', 'peerDependencies', 'optionalDependencies'].some((field) => fontsPackage[field]?.[id])) {
+      addons[name] = addon;
+      continue;
+    }
     if (addonRoot) {
       addon.version = await packageVersion(addonRoot);
       try {
@@ -193,13 +200,70 @@ export function recordingEngine(engine: Engine): { engine: Engine; faces: Record
   };
 }
 
+const RESOLVERS: Record<string, (args: any[]) => string> = {
+  resolve: ([family]) => family,
+  resolveLastResort: ([family]) => `${family} (last resort)`,
+  resolveGlyphFallback: ([family]) => `${family} (coverage)`,
+  resolveScriptFallback: ([script, , , family]) => `${family ?? 'no family'} (${script} script)`,
+  resolveBaseLatin: () => 'base Latin',
+};
+
+export function guardRegistrations(bundled: Module | undefined, engine: Engine) {
+  const failures = new Set<string>();
+  const sources = new WeakMap<object, string>();
+  const guarded = new WeakMap<Function, Function>();
+  const read = (source: () => Promise<ArrayBuffer>, label: string) => async () => {
+    try {
+      const bytes = await source();
+      sources.set(bytes, label);
+      return bytes;
+    } catch (error) {
+      failures.add(`${label}: ${message(error)}`);
+      throw error;
+    }
+  };
+  const guard = (loader: any, label: string) => {
+    if (typeof loader !== 'function') return loader;
+    if (!guarded.has(loader))
+      guarded.set(loader, Object.assign(read(loader, label), loader, loader.readOnlyBytes ? { readOnlyBytes: read(loader.readOnlyBytes, label) } : {}));
+    return guarded.get(loader);
+  };
+  const provider = bundled && new Proxy(bundled, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      const label = typeof property === 'string' && Object.hasOwn(RESOLVERS, property) ? RESOLVERS[property] : undefined;
+      return label && typeof value === 'function' ? (...args: any[]) => guard(Reflect.apply(value, target, args), label(args)) : value;
+    },
+  });
+  return {
+    failures,
+    bundled: provider,
+    engine: {
+      registerFont: (bytes, face) => {
+        try {
+          return face ? engine.registerFont(bytes, face) : engine.registerFont(bytes);
+        } catch (error) {
+          const label = sources.get(bytes.buffer);
+          if (label) failures.add(`${label}: ${message(error)}`);
+          throw error;
+        }
+      },
+      ...(engine.registerSubstituteFont && {
+        registerSubstituteFont: (id: number, family: string, ...style: [bold?: boolean, italic?: boolean]) => engine.registerSubstituteFont!(id, family, ...style),
+      }),
+      clearFonts: () => engine.clearFonts(),
+    } satisfies Engine,
+  };
+}
+
 export async function layOutFonts(product: Product, bytes: Uint8Array, engineOf: (session: any) => Engine = (session) => session) {
   const session = await product.yrs.createYrsSession();
   try {
     const host = session.openDocx(bytes, true);
     const document = session.materializeDocx() ?? host.document;
-    const bundled = await product.layout.resolveCompleteFontProvider();
-    const measure = product.layout.createRustMeasureSource({ engine: engineOf(session), ...(bundled ? { bundled } : {}) });
+    const registrations = guardRegistrations(await product.layout.resolveCompleteFontProvider(), engineOf(session));
+    const { bundled } = registrations;
+    const measure = product.layout.createRustMeasureSource({ engine: registrations.engine, ...(bundled ? { bundled } : {}) });
     measure.setCompat(document.package?.settings?.compatibilityFlags);
     measure.setEmbeddedFaces(await product.utils.extractEmbeddedFontFaces(document), []);
     const renderEnv = product.editor.documentRenderEnv(document);
@@ -208,6 +272,8 @@ export async function layOutFonts(product: Product, bytes: Uint8Array, engineOf:
     const missing = missingAddons(product.fonts, requirements);
     if (missing.length) throw new MissingAddon(missing.join('; '));
     await measure.prepareFontRequirements(requirements);
+    if (registrations.failures.size)
+      throw new FailedRegistration(`${product.version}: the product's registry dropped fonts it failed to register: ${[...registrations.failures].join('; ')}`);
     const measurement = measure.measurementConfigForRequirements(requirements);
     if (!measurement) throw new Error(`${product.version}: the product could not load the fonts this document lays out with`);
     return { session, document, renderEnv, requirements, measurement: measurement as Measurement };
@@ -260,6 +326,40 @@ export async function writeDocumentChains(product: Product, bytes: Uint8Array, d
   return path;
 }
 
+export const REGISTRY_EXPORTS_SINCE = '0.6.0';
+
+const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+
+export function compareSemver(left: string, right: string): number {
+  const parse = (version: string) => {
+    const match = SEMVER.exec(version);
+    if (!match) throw new Error(`${version} is not a semver version`);
+    return match;
+  };
+  const [a, b] = [parse(left), parse(right)];
+  for (const index of [1, 2, 3]) {
+    const difference = Number(a[index]) - Number(b[index]);
+    if (difference) return Math.sign(difference);
+  }
+  if (!a[4] || !b[4]) return (a[4] ? -1 : 0) + (b[4] ? 1 : 0);
+  const [x, y] = [a[4].split('.'), b[4].split('.')];
+  for (let index = 0; index < Math.max(x.length, y.length); index++) {
+    if (x[index] === undefined) return -1;
+    if (y[index] === undefined) return 1;
+    const [numericX, numericY] = [/^\d+$/.test(x[index]), /^\d+$/.test(y[index])];
+    if (numericX && numericY) {
+      const difference = Number(x[index]) - Number(y[index]);
+      if (difference) return Math.sign(difference);
+    } else if (numericX !== numericY) return numericX ? -1 : 1;
+    else if (x[index] !== y[index]) return x[index] < y[index] ? -1 : 1;
+  }
+  return 0;
+}
+
+export function fontPathFor(channel: string, version: string): 'bench-manifest' | 'product-registry' {
+  return channel === 'published' && compareSemver(version, REGISTRY_EXPORTS_SINCE) < 0 ? 'bench-manifest' : 'product-registry';
+}
+
 export function checkPublishedVersion(installed: string, source: unknown, planned: unknown) {
   if (installed !== source || installed !== planned)
     throw new Error(`published @betteroffice/docx ${installed} differs from the published native source's ${String(source)} (planned ${String(planned)})`);
@@ -276,21 +376,25 @@ async function main(env: NodeJS.ProcessEnv) {
   const job = JSON.parse(await readFile(join(output, 'job.json'), 'utf8'));
   const build = JSON.parse(await readFile(join(required('QUALITY_NATIVE'), 'published', 'build.json'), 'utf8'));
   const roots = { published: required('QUALITY_PRODUCT_PUBLISHED'), commit: required('QUALITY_PRODUCT_COMMIT') };
-  const paths: Record<string, { path: string; version: string }> = {};
+  const paths: Record<string, { path: string; version: string; registry_exports_since?: string }> = {};
   const lines: string[] = [];
   const failures: string[] = [];
   for (const [channel, root] of Object.entries(roots)) {
     const version = await packageVersion(root);
     if (channel === 'published') checkPublishedVersion(version, build.package_version, job.published_version);
+    if (fontPathFor(channel, version) === 'bench-manifest') {
+      paths[channel] = { path: 'bench-manifest', version, registry_exports_since: REGISTRY_EXPORTS_SINCE };
+      lines.push(`${channel}: bench-manifest, @betteroffice/docx@${version} predates ${REGISTRY_EXPORTS_SINCE}, the first release with the registry exports (semver ${version} < ${REGISTRY_EXPORTS_SINCE}); its native column stays on the old font map until the next release`);
+      console.log(lines.at(-1));
+      continue;
+    }
     let product: Product;
     try {
       product = await loadProduct(root);
     } catch (error) {
-      if (channel !== 'published' || !(error instanceof MissingExport)) throw error;
-      paths[channel] = { path: 'bench-manifest', version };
-      lines.push(`${channel}: bench-manifest (registry export missing in ${version}): ${error.message}`);
-      console.log(lines.at(-1));
-      continue;
+      if (!(error instanceof MissingExport)) throw error;
+      const reason = channel === 'published' ? `is not older than ${REGISTRY_EXPORTS_SINCE}` : 'is the commit under test';
+      throw new Error(`${channel}: @betteroffice/docx@${version} ${reason}, so it must carry the registry exports the recorder needs: ${error.message}`);
     }
     lines.push(`${channel}: @betteroffice/fonts@${product.fonts.version}, ${describeAddons(product.fonts)}`);
     console.log(lines.at(-1));
@@ -304,7 +408,7 @@ async function main(env: NodeJS.ProcessEnv) {
       }
     }
     paths[channel] = { path: 'product-registry', version };
-    lines.push(`${channel}: product-registry, @betteroffice/docx@${version}`);
+    lines.push(`${channel}: product-registry, @betteroffice/docx@${version}${channel === 'published' ? ` (semver ${version} >= ${REGISTRY_EXPORTS_SINCE})` : ' (workspace)'}`);
     console.log(lines.at(-1));
   }
   const summary = [...lines, ...failures.map((failure) => `FAILED ${failure}`)];

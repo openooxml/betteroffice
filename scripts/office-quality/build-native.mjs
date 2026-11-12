@@ -4,6 +4,7 @@ import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { assertNoBackstop } from '../native-feature-guard.mjs';
 
 const execute = promisify(execFile);
 const harness = resolve(dirname(fileURLToPath(import.meta.url)), 'native/main.rs');
@@ -13,6 +14,12 @@ export function nativeFeatures(layoutSource) {
   if (!signature) return [];
   if (layoutSource.includes('.register_named_substitute(')) return ['substitute-widths'];
   return [/\bbold\s*:/.test(signature) ? 'substitute-styles' : 'substitute-metrics'];
+}
+
+export function dependencyLine(name, path, manifest) {
+  const features = /^tiff\s*=/m.test(manifest) ? ', features = ["tiff"]' : '';
+  const defaults = name === 'docx-raster' ? ', default-features = false' : '';
+  return `${name} = { package = ${JSON.stringify(`betteroffice-${name}`)}, path = ${JSON.stringify(path)}${defaults}${features} }`;
 }
 
 export async function buildNative(source, output) {
@@ -26,9 +33,7 @@ export async function buildNative(source, output) {
   const names = ['docx-edit', 'docx-layout', 'docx-parse', 'docx-raster', 'ooxml-text'];
   const dependencies = await Promise.all(names.map(async (name) => {
     const path = resolve(source, 'crates', name);
-    const manifest = await readFile(resolve(path, 'Cargo.toml'), 'utf8');
-    const features = /^tiff\s*=/m.test(manifest) ? ', features = ["tiff"]' : '';
-    return `${name} = { package = ${JSON.stringify(`betteroffice-${name}`)}, path = ${JSON.stringify(path)}${features} }`;
+    return dependencyLine(name, path, await readFile(resolve(path, 'Cargo.toml'), 'utf8'));
   }));
   const features = nativeFeatures(await readFile(resolve(source, 'crates/docx-layout/src/lib.rs'), 'utf8'));
   await writeFile(resolve(build, 'Cargo.toml'), `[package]
@@ -62,6 +67,7 @@ lto = "thin"
     child.on('error', reject);
     child.on('exit', (code) => code === 0 ? accept() : reject(new Error(`Native build failed: ${code}`)));
   });
+  assertNoBackstop(resolve(build, 'Cargo.toml'), 'docx-native-bench', ...(features.length ? ['--features', features.join(',')] : []));
   const binary = resolve(output, 'docx-native-bench');
   await copyFile(resolve(target, 'release/docx-native-bench'), binary);
   const sha = (await execute('git', ['-C', source, 'rev-parse', 'HEAD'])).stdout.trim();

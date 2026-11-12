@@ -6,7 +6,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import JSZip from 'jszip';
-import { describeAddons, layOutFonts, loadProduct, missingAddons, serializeChains, writeDocumentChains, type FontPackages, type Product } from './native-chains';
+import {
+  REGISTRY_EXPORTS_SINCE, compareSemver, describeAddons, fontPathFor, guardRegistrations, layOutFonts, loadProduct, missingAddons,
+  serializeChains, writeDocumentChains, type FontPackages, type Product,
+} from './native-chains';
 
 type Faces = Record<string, string[]>;
 
@@ -166,6 +169,7 @@ test('a document fails only when it needs an add-on its channel lacks', () => {
       resolveScriptFallbackFace: (script: string) => ({ file: script === 'cjk-sc' ? 'sc.ttf' : 'arabic.ttf' }),
     },
     addons: {
+      'fonts-latin': { version: '1.0.0', files: new Set(['latin.ttf']), manifest: 'latin' },
       'fonts-intl': { version: '1.0.0', files: new Set(['thai.ttf']), manifest: 'intl' },
       'fonts-cjk': { files: new Set(['jp.ttf', 'sc.ttf']), manifest: 'cjk' },
     },
@@ -174,5 +178,57 @@ test('a document fails only when it needs an add-on its channel lacks', () => {
   expect(missingAddons(packages, [requirement('Calibri', ['arabic'])])).toEqual([]);
   expect(missingAddons(packages, [requirement('Calibri', ['cjk-sc'])])).toEqual(['Calibri (cjk-sc script, sc.ttf) needs @betteroffice/fonts-cjk, which is absent']);
   expect(missingAddons(packages, [requirement('Noto Serif JP')])[0]).toContain('Noto Serif JP (family face');
-  expect(describeAddons(packages)).toBe('fonts-intl 1.0.0, fonts-cjk absent');
+  expect(describeAddons(packages)).toBe('fonts-latin 1.0.0, fonts-intl 1.0.0, fonts-cjk absent');
+  const withoutLatin = { ...packages, addons: { ...packages.addons, 'fonts-latin': { files: new Set(['latin.ttf']), manifest: 'latin', error: 'broken' } } };
+  expect(missingAddons(withoutLatin, [requirement('Calibri')])).toEqual(['Calibri (family face, latin.ttf) needs @betteroffice/fonts-latin, which is broken']);
+});
+
+test('the old font map is chosen only for a published release older than the first one with the registry exports', () => {
+  expect(REGISTRY_EXPORTS_SINCE).toBe('0.6.0');
+  expect(fontPathFor('published', '0.5.1')).toBe('bench-manifest');
+  expect(fontPathFor('published', '0.6.0-next.3')).toBe('bench-manifest');
+  expect(fontPathFor('published', '0.6.0')).toBe('product-registry');
+  expect(fontPathFor('published', '0.10.0')).toBe('product-registry');
+  expect(fontPathFor('commit', '0.5.1')).toBe('product-registry');
+  expect(() => fontPathFor('published', 'latest')).toThrow('not a semver version');
+  expect(compareSemver('0.6.0-next.2', '0.6.0-next.10')).toBe(-1);
+  expect(compareSemver('0.6.0-next', '0.6.0-next.1')).toBe(-1);
+  expect(compareSemver('0.6.0-1', '0.6.0-alpha')).toBe(-1);
+  expect(compareSemver('1.0.0+build', '1.0.0')).toBe(0);
+  expect(compareSemver('0.5.10', '0.6.0')).toBe(-1);
+});
+
+test('the bench reads the same first release with the registry exports as the recorder', async () => {
+  const python = await readFile(join(import.meta.dir, 'docx_benchmark.py'), 'utf8');
+  expect(python).toContain(`REGISTRY_EXPORTS_SINCE = '${REGISTRY_EXPORTS_SINCE}'`);
+});
+
+test('a registration the product registry drops fails the recording, naming the family', async () => {
+  const registered: number[] = [];
+  const engine = {
+    registerFont: (bytes: Uint8Array) => {
+      if (bytes[0] === 0) throw new Error('rejected');
+      registered.push(bytes[0]);
+      return registered.length - 1;
+    },
+    clearFonts: () => {},
+  };
+  const loader = (byte: number | Error) => Object.assign(async () => {
+    if (byte instanceof Error) throw byte;
+    return new Uint8Array([byte]).buffer;
+  }, { measureAs: 'Carlito' });
+  const loaders: Record<string, ReturnType<typeof loader>> = { Calibri: loader(1), Cambria: loader(new Error('offline')), Consolas: loader(0) };
+  const marker = Symbol.for('@betteroffice/docx/hostedFontFamilies');
+  const provider = { [marker]: undefined, resolve: (family: string) => loaders[family], resolveLastResort: (family: string) => loaders[family] };
+  const guard = guardRegistrations(provider, engine);
+  expect(guard.bundled!.resolve('Calibri')).toBe(guard.bundled!.resolve('Calibri'));
+  expect(guard.bundled!.resolve('Calibri').measureAs).toBe('Carlito');
+  expect(marker in guard.bundled!).toBe(true);
+  const register = async (loaded: any) => guard.engine.registerFont(new Uint8Array(await loaded()));
+  expect(await register(guard.bundled!.resolve('Calibri'))).toBe(0);
+  expect(guard.failures.size).toBe(0);
+  await expect(register(guard.bundled!.resolve('Cambria'))).rejects.toThrow('offline');
+  await expect(register(guard.bundled!.resolveLastResort('Consolas'))).rejects.toThrow('rejected');
+  expect(() => guard.engine.registerFont(new Uint8Array([0]))).toThrow('rejected');
+  expect([...guard.failures]).toEqual(['Cambria: offline', 'Consolas (last resort): rejected']);
 });
