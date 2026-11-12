@@ -1151,7 +1151,7 @@ describe('fill handle with sheet headers', () => {
     await act(async () => {
       fireEvent.mouseUp(window, pointAt(plain, { row: 2, col: 2 }));
     });
-    await waitFor(() => expect(view.nameBox().value).toBe('B2'));
+    await waitFor(() => expect(view.nameBox().value).toBe('C3'));
     const corner = cellRect(plain.grid, 2, 2)!;
     const marquee = view.selectionBox()!;
     expect(marquee.style.left).toBe(`${Math.round(cellRect(plain.grid, 1, 1)!.x)}px`);

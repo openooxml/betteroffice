@@ -9867,13 +9867,13 @@ describe('workbook worker editor header interactions', () => {
   });
 
   // Without headers the marquee keeps its bordered, washed box on the cell rect.
-  const expectBorderedMarquee = (view: ReturnType<typeof render>) => {
+  const expectBorderedMarquee = (view: ReturnType<typeof render>, activeTestId: string) => {
     const marquee = view.getByTestId('xlsx-selection') as HTMLElement;
     expect([marquee.style.border, marquee.style.background, marquee.style.boxShadow])
       .toEqual(['1px solid #217346', 'rgba(33, 115, 70, 0.12)', '']);
     expect([marquee.style.left, marquee.style.top, marquee.style.width, marquee.style.height])
       .toEqual(['0px', '0px', '96px', '24px']);
-    const active = view.getByTestId('xlsx-active-cell') as HTMLElement;
+    const active = view.getByTestId(activeTestId) as HTMLElement;
     expect([active.style.border, active.style.boxShadow, active.style.left, active.style.width, active.style.height])
       .toEqual(['2px solid #217346', '', '0px', '96px', '24px']);
     expect(view.queryAllByTestId('xlsx-selection-fill')).toHaveLength(0);
@@ -9884,14 +9884,14 @@ describe('workbook worker editor header interactions', () => {
     const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
     await opened();
     await waitFor(() => view.getByTestId('xlsx-selection'));
-    expectBorderedMarquee(view);
+    expectBorderedMarquee(view, 'xlsx-active-cell');
   });
 
   it('keeps the bordered peerless marquee without headers', async () => {
     const host = peerlessHarness();
     const view = await host.mount();
     await waitFor(() => view.getByTestId('xlsx-selection'));
-    expectBorderedMarquee(view);
+    expectBorderedMarquee(view, 'xlsx-focus');
   });
 
   for (const showSheetHeaders of [false, true]) {
