@@ -804,6 +804,12 @@ fn parse_worksheet(
                             .is_some_and(|value| is_truthy(&value)),
                         zero_height: attr(&e, b"zeroHeight")?
                             .is_some_and(|value| is_truthy(&value)),
+                        default_col_width: attr(&e, b"defaultColWidth")?
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .filter(|w| w.is_finite() && (0.0..=MAX_COL_WIDTH_CHARS).contains(w)),
+                        base_col_width: attr(&e, b"baseColWidth")?
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .filter(|w| f64::from(*w) <= MAX_COL_WIDTH_CHARS),
                     };
                 }
                 _ => {}

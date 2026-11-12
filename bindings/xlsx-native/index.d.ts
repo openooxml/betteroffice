@@ -136,6 +136,8 @@ export declare function font_preflight(bytes: Uint8Array): string
 /** Internal: the installed font packs `configureFontPacks` left out, and why, as JSON. */
 export declare function fontPackDiagnosticsJson(): string
 
+export declare function install_panic_hook(): void
+
 /** A face one PNG export paints with. */
 export interface PngFontFace {
   family: string

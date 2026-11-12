@@ -1107,6 +1107,37 @@ pub fn allocation_failure() -> f64 {
     0.0
 }
 
+#[napi(catch_unwind, js_name = "install_panic_hook")]
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            #[cfg(unix)]
+            write_panic_line(&panic_line(&info.to_string()));
+            prev(info);
+        }));
+    });
+}
+
+#[cfg(unix)]
+fn panic_line(text: &str) -> String {
+    let mut line = format!("[xlsx-native] panic: {text}")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n");
+    line.push('\n');
+    line
+}
+
+#[cfg(unix)]
+fn write_panic_line(line: &str) {
+    use std::io::Write;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let fd = std::io::stderr().as_raw_fd();
+    let mut stderr = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    let _ = stderr.write_all(line.as_bytes());
+}
+
 /// @internal Test hook: the calling thread's live engine bytes.
 #[napi(catch_unwind, js_name = "engineHeapLiveBytes")]
 pub fn engine_heap_live_bytes() -> f64 {
@@ -1161,4 +1192,22 @@ pub fn render_xlsx_markdown_json(env: Env, content: String, options: String) -> 
 pub fn engine_version(env: Env) -> String {
     let _call = EngineCall::new(env);
     env!("CARGO_PKG_VERSION").to_owned()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panic_line_escapes_the_message_into_one_prefixed_line() {
+        let prefix = "[xlsx-native] panic: ";
+        let line = panic_line(&format!("loc\nx\r\n{prefix}forged"));
+        assert_eq!(line.matches('\n').count(), 1);
+        assert!(line.ends_with('\n'));
+        assert!(line.starts_with(prefix));
+        assert_eq!(line.matches(prefix).count(), 2);
+        assert_eq!(line.lines().filter(|l| l.starts_with(prefix)).count(), 1);
+        assert!(line.contains("\\n"));
+        assert!(line.contains("\\r"));
+    }
 }
