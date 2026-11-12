@@ -10,6 +10,7 @@
 
 use pdf_writer::{Finish, Name, Pdf, Ref, TextStr};
 
+use crate::pdfa_limits::{PDFA_STRING_TOO_LONG, text_too_long};
 use crate::{PdfConformance, PdfError, PdfMetadata};
 
 /// Fixed `/Producer` value shared by `/Info` and `pdf:Producer`.
@@ -44,6 +45,25 @@ pub(crate) fn write_document_info(
         .as_deref()
         .map(parse_pdf_date)
         .transpose()?;
+
+    // PDF/A-2 6.1.13 limits every PDF string. Validate all fields before
+    // touching the writer so a rejected export cannot leave a partial object.
+    for value in [
+        metadata.title.as_deref(),
+        metadata.author.as_deref(),
+        metadata.subject.as_deref(),
+        metadata.keywords.as_deref(),
+        metadata.creator.as_deref(),
+        creation.as_ref().map(|date| date.raw),
+        modification.as_ref().map(|date| date.raw),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if text_too_long(value) {
+            return Err(PdfError::Unsupported(PDFA_STRING_TOO_LONG));
+        }
+    }
 
     let mut info = pdf.document_info(id);
     if let Some(title) = &metadata.title {

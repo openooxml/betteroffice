@@ -35,6 +35,7 @@ mod link;
 // PDF/A-2u seam: `/Info` + XMP generation is owned by the metadata slice.
 mod metadata;
 pub(crate) mod options;
+mod pdfa_limits;
 // PDF/A-2u seam: sRGB ICC profile + `/OutputIntents` is owned by the color
 // slice.
 mod pdfa_color;

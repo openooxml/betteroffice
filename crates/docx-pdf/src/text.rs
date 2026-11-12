@@ -19,6 +19,7 @@ use crate::font::{
     PDFA_NO_SOURCE_TEXT, PDFA_NOTDEF, PDFA_UNMAPPED_CODE,
 };
 use crate::options::PdfConformance;
+use crate::pdfa_limits::{MAX_PDF_STRING_BYTES, text_string_bytes};
 use crate::units::{PX_TO_PT, f64_to_points, font_size_px, parse_color, points};
 
 /// Base-14 resource registered by the writer for text without embedded fonts.
@@ -734,7 +735,11 @@ pub(crate) fn paint_text_with_chains_policy(
     let horizontal_scale = checked_scale(text.horizontal_scale.as_ref())?;
     let rtl = text.rtl == Some(true);
 
-    let actual_text = !text.text.is_empty();
+    // ActualText is optional; ToUnicode still maps every painted glyph. Drop
+    // it when the source string alone exceeds the PDF/A string limit.
+    let actual_text = !text.text.is_empty()
+        && (!conformance.is_pdfa()
+            || text_string_bytes(text.text.as_str()) <= MAX_PDF_STRING_BYTES);
     if actual_text {
         content
             .begin_marked_content_with_properties(Name(b"Span"))
@@ -832,7 +837,16 @@ pub(crate) fn paint_text_with_chains_policy(
                 center_x,
                 center_y,
             ));
-            content.show(Str(&bytes));
+            if conformance.is_pdfa() {
+                // A single `Tj` string is limited to 32767 bytes. Split into
+                // even-sized chunks so no string operand exceeds the limit;
+                // consecutive `Tj` operators continue from the same matrix.
+                for chunk in bytes.chunks(MAX_PDF_STRING_BYTES - 1) {
+                    content.show(Str(chunk));
+                }
+            } else {
+                content.show(Str(&bytes));
+            }
             cursor += segment
                 .glyphs
                 .iter()

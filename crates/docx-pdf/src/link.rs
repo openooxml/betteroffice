@@ -16,6 +16,9 @@ use docx_layout::display_list::{
 use pdf_writer::types::{ActionType, AnnotationFlags, AnnotationType};
 use pdf_writer::{Name, Pdf, Rect, Ref, Str, TextStr};
 
+use crate::pdfa_limits::PDFA_STRING_TOO_LONG;
+use crate::pdfa_limits::{bytes_too_long, text_too_long};
+
 use crate::units::{PX_TO_PT, font_size_px};
 use crate::{PdfConformance, PdfError};
 
@@ -195,6 +198,14 @@ pub(crate) fn write_annotation(
         .page(page);
     if conformance.is_pdfa() {
         writer.flags(AnnotationFlags::PRINT);
+        if let Some(title) = annotation.title.as_deref() {
+            if text_too_long(title) {
+                return Err(crate::PdfError::Unsupported(PDFA_STRING_TOO_LONG));
+            }
+        }
+        if bytes_too_long(uri.as_bytes()) {
+            return Err(crate::PdfError::Unsupported(PDFA_STRING_TOO_LONG));
+        }
     }
     if let Some(title) = annotation.title.as_deref() {
         writer.pair(Name(b"T"), TextStr(title));

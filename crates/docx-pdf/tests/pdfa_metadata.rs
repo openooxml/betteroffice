@@ -8,6 +8,9 @@ use pdf_writer::{Pdf, Ref};
 
 pub use betteroffice_docx_pdf::{PdfConformance, PdfError, PdfMetadata};
 
+#[path = "../src/pdfa_limits.rs"]
+mod pdfa_limits;
+
 #[path = "../src/metadata.rs"]
 mod metadata;
 
@@ -385,4 +388,32 @@ fn identical_metadata_produces_identical_bytes() {
     };
 
     assert_eq!(render(), render(), "metadata output must be deterministic");
+}
+
+#[test]
+fn info_rejects_a_pdfa_text_string_over_the_limit() {
+    for title in ["A".repeat(32_768), "é".repeat(16_383)] {
+        let metadata = PdfMetadata {
+            title: Some(title),
+            ..PdfMetadata::default()
+        };
+        let mut pdf = Pdf::new();
+        let error = metadata::write_document_info(&mut pdf, Ref::new(1), &metadata)
+            .expect_err("oversized PDF/A text string must be rejected");
+        assert!(
+            error.to_string().contains("32767"),
+            "unexpected oversized-string error: {error}"
+        );
+    }
+}
+
+#[test]
+fn info_accepts_the_largest_fitting_unicode_string() {
+    let metadata = PdfMetadata {
+        title: Some("é".repeat(16_382)),
+        ..PdfMetadata::default()
+    };
+    let mut pdf = Pdf::new();
+    metadata::write_document_info(&mut pdf, Ref::new(1), &metadata)
+        .expect("32766-byte UTF-16 text string fits the PDF/A limit");
 }

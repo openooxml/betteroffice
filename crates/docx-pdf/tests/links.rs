@@ -15,6 +15,9 @@ use serde_json::{Number, json};
 use ttf_parser::Face;
 
 #[allow(dead_code)]
+#[path = "../src/pdfa_limits.rs"]
+mod pdfa_limits;
+
 #[path = "../src/units.rs"]
 mod units;
 
@@ -310,6 +313,36 @@ fn writes_pdfa_link_annotations_with_print_flag_and_no_appearance() {
     assert!(text.contains("/T (Example)"), "{text}");
     assert!(text.contains("/S /URI"), "{text}");
     assert!(text.contains("/URI (https://example.com/a\\(b)"), "{text}");
+}
+
+#[test]
+fn rejects_pdfa_link_strings_over_the_limit() {
+    for annotation in [
+        LinkAnnotation {
+            rect: [10.0, 20.0, 30.0, 40.0],
+            action: LinkAction::Uri("https://example.com".into()),
+            title: Some("A".repeat(32_768)),
+        },
+        LinkAnnotation {
+            rect: [10.0, 20.0, 30.0, 40.0],
+            action: LinkAction::Uri(format!("https://example.com/{}", "A".repeat(32_768))),
+            title: None,
+        },
+    ] {
+        let mut pdf = Pdf::new();
+        let error = link::write_annotation(
+            &mut pdf,
+            Ref::new(1),
+            Ref::new(2),
+            &annotation,
+            PdfConformance::PdfA2u,
+        )
+        .expect_err("oversized PDF/A link string must be rejected");
+        assert!(
+            matches!(error, PdfError::Unsupported(message) if message.contains("32767")),
+            "unexpected oversized-link error: {error:?}"
+        );
+    }
 }
 
 #[test]

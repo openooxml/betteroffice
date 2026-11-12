@@ -17,6 +17,9 @@ use pdf_writer::Content;
 use serde_json::Number;
 use ttf_parser::Face;
 
+#[path = "../src/pdfa_limits.rs"]
+mod pdfa_limits;
+
 #[path = "../src/font.rs"]
 mod font;
 #[path = "../src/options.rs"]
@@ -699,6 +702,47 @@ fn pdfa_rejects_a_bitmap_only_face_instead_of_synthesizing_blank_outlines() {
         Err(other) => panic!("unexpected bitmap embed error: {other:?}"),
         Ok(_) => panic!("PDF/A-2u embedded a bitmap-only face as outlines"),
     }
+}
+
+#[test]
+fn pdfa_splits_long_tj_strings_and_omits_an_oversized_actual_text() {
+    let bytes = font_bytes("Roboto-Regular.ttf");
+    let mut store = FontStore::default();
+    store.register(bytes.clone()).expect("roboto");
+    let text = "A".repeat(40_000);
+    let mut run = text_run(&text);
+    run.width = Number::from_f64(400_000.0).unwrap();
+    let page = page(vec![Primitive::Text(run)]);
+    let display_list = DisplayList {
+        contract_version: None,
+        pages: vec![page.clone()],
+    };
+    let uses = font::collect_with_text_policy(&display_list, &store, PdfConformance::PdfA2u)
+        .expect("roboto covers the long text");
+    let fonts = embed_policy(&store, &uses, PdfConformance::PdfA2u).expect("embed");
+    let mut content = Content::new();
+    text::paint_text_policy(
+        &mut content,
+        &page,
+        &match &display_list.pages[0].primitives[0] {
+            Primitive::Text(run) => run.clone(),
+            _ => unreachable!(),
+        },
+        &fonts,
+        &store,
+        PdfConformance::PdfA2u,
+    )
+    .expect("paint long PDF/A text");
+    let stream = String::from_utf8_lossy(&content.finish()).into_owned();
+    assert!(
+        !stream.contains("/ActualText"),
+        "oversized ActualText must be omitted: {} bytes",
+        stream.len()
+    );
+    assert!(
+        stream.matches("Tj").count() >= 3,
+        "long Tj must be split into multiple string operands: {stream}"
+    );
 }
 
 #[test]
