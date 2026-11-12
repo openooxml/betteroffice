@@ -1456,10 +1456,43 @@ pub(crate) fn any_from_value(value: Value) -> Result<Any, String> {
 struct SeedAttrs {
     strings: HashSet<Arc<str>>,
     composites: HashMap<String, Any>,
+    #[cfg(test)]
+    unshared: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static UNSHARED_SEED_ATTRS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl SeedAttrs {
+    #[cfg(not(test))]
+    fn for_seed() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    fn for_seed() -> Self {
+        Self {
+            unshared: UNSHARED_SEED_ATTRS.with(std::cell::Cell::get),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(not(test))]
+    fn unshared(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn unshared(&self) -> bool {
+        self.unshared
+    }
+
     fn text(&mut self, value: String) -> Arc<str> {
+        if self.unshared() {
+            return Arc::from(value);
+        }
         if let Some(shared) = self.strings.get(value.as_str()) {
             return Arc::clone(shared);
         }
@@ -1469,6 +1502,9 @@ impl SeedAttrs {
     }
 
     fn value(&mut self, value: Value) -> Result<Any, String> {
+        if self.unshared() {
+            return any_from_value(value);
+        }
         match value {
             Value::String(value) => Ok(Any::String(self.text(value))),
             Value::Array(_) | Value::Object(_) => {
@@ -6902,7 +6938,7 @@ fn seed_lowered(
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
     let mut deletes = Vec::with_capacity(context.plans.len());
-    let mut shared = SeedAttrs::default();
+    let mut shared = SeedAttrs::for_seed();
     for plan in context.plans {
         let (story_id, mut ops, fonts) =
             seed_plan_sharing(plan, script_fonts.as_mut(), &mut shared)?;
@@ -7114,7 +7150,7 @@ pub(crate) fn seed_blocks(
     .map_err(|error| error.to_string())?;
     let mut provenance = std::mem::take(&mut context.provenance);
     let mut batches = Vec::with_capacity(context.plans.len());
-    let mut shared = SeedAttrs::default();
+    let mut shared = SeedAttrs::for_seed();
     for plan in context.plans {
         let (story_id, ops, _) = seed_plan_sharing(plan, None, &mut shared)?;
         batches.push((story_id, ops));
@@ -10065,6 +10101,89 @@ mod tests {
     }
 
     use super::*;
+
+    fn seeded_sharing(bytes: &[u8], sharing: bool) -> EditingDoc {
+        let doc = EditingDoc::new(1);
+        UNSHARED_SEED_ATTRS.with(|unshared| unshared.set(!sharing));
+        let seeded = seed_from_docx(&doc, bytes);
+        UNSHARED_SEED_ATTRS.with(|unshared| unshared.set(false));
+        seeded.unwrap();
+        doc
+    }
+
+    fn body_attributes(doc: &EditingDoc, text: &str) -> Attrs {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .find_map(|op| match op.insert {
+                Out::Any(Any::String(chunk)) if chunk.contains(text) => {
+                    Some(op.attributes.map(|attrs| *attrs).unwrap_or_default())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no body text holds {text:?}"))
+    }
+
+    fn font_family(doc: &EditingDoc, text: &str) -> Arc<HashMap<String, Any>> {
+        match body_attributes(doc, text).remove("fontFamily") {
+            Some(Any::Map(font)) => font,
+            other => panic!("{text}: fontFamily is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seeded_bytes_match_with_and_without_shared_attributes() {
+        let formatted = concat!(
+            r#"<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/><w:color w:val="C00000"/>"#,
+            r#"<w:sz w:val="28"/><w:highlight w:val="yellow"/><w:u w:val="single" w:color="00B050"/>"#,
+            r#"<w:rPrChange w:id="8" w:author="A" w:date="2024-01-01T00:00:00Z"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>"#,
+        );
+        let other = r#"<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:i/><w:color w:val="0000FF"/></w:rPr>"#;
+        let spaced = r#"<w:pPr><w:spacing w:before="120" w:after="240"/><w:ind w:left="720"/></w:pPr>"#;
+        let body = [
+            fixture::para(
+                "00000001",
+                &format!(
+                    r#"{spaced}<w:r>{formatted}<w:t>First</w:t></w:r>{plain}<w:r>{formatted}<w:t>Second</w:t></w:r><w:r>{other}<w:t>Other</w:t></w:r><w:r>{formatted}<w:br/></w:r>{image}"#,
+                    plain = fixture::run(" plain "),
+                    image = fixture::image("rIdImage", "Picture"),
+                ),
+            ),
+            fixture::para(
+                "00000002",
+                &format!(
+                    r#"{spaced}<w:r>{formatted}<w:t>Third</w:t></w:r><w:r>{other}<w:t>Again</w:t></w:r>"#
+                ),
+            ),
+            fixture::para(
+                "00000003",
+                &format!(
+                    r#"<w:ins w:id="7" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>{formatted}<w:t>Inserted</w:t></w:r></w:ins>"#
+                ),
+            ),
+        ]
+        .concat();
+        let custom = fixture::Package::new(&body)
+            .rel("rIdImage", "image", "media/image1.png")
+            .bytes();
+        for bytes in [custom.clone(), fixture::principal_docx()] {
+            assert!(
+                seeded_sharing(&bytes, true).encode_state_as_update_v1()
+                    == seeded_sharing(&bytes, false).encode_state_as_update_v1(),
+                "sharing attribute allocations changed the seeded bytes"
+            );
+        }
+        let shared = seeded_sharing(&custom, true);
+        let shared_first = font_family(&shared, "First");
+        let shared_third = font_family(&shared, "Third");
+        assert!(Arc::ptr_eq(&shared_first, &shared_third));
+        let unshared = seeded_sharing(&custom, false);
+        let unshared_first = font_family(&unshared, "First");
+        let unshared_third = font_family(&unshared, "Third");
+        assert_eq!(unshared_first, unshared_third);
+        assert!(!Arc::ptr_eq(&unshared_first, &unshared_third));
+    }
 
     #[test]
     fn a_passed_package_digest_parses_like_the_parser_hashing_it() {
