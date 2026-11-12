@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use xlsx_model::styles::{Font, Stylesheet};
 use xlsx_model::value::CellValue;
-use xlsx_model::workbook::Sheet;
+use xlsx_model::workbook::{Sheet, SheetFormat};
 use xlsx_model::{CellRef, ColId, HAlign, MAX_COLS, MAX_ROWS, RowId};
 
 use crate::{Viewport, wrap};
@@ -50,8 +50,9 @@ pub fn geometry_row_storage_allocations() -> u64 {
     ROW_STORAGE_ALLOCATIONS.get()
 }
 
-/// default column width in characters of max-digit-width (excel default).
-pub const DEFAULT_COL_WIDTH_CHARS: f64 = 8.43;
+/// the stored `<col width>` of excel's default 64px calibri 11 column: 8.43
+/// digits plus padding.
+pub const DEFAULT_COL_WIDTH_CHARS: f64 = 9.140625;
 /// default row height in points (excel default for 11pt calibri).
 pub const DEFAULT_ROW_HEIGHT_PT: f64 = 15.0;
 /// excel's tallest row.
@@ -66,14 +67,56 @@ pub const MAX_DIGIT_WIDTH_PX: f64 = 7.0;
 pub const PX_PER_PT: f64 = 96.0 / 72.0;
 pub const EMU_PER_PT: f64 = 12_700.0;
 
-/// column width in characters -> pixels per ecma-376 §18.3.1.13: the stored
-/// width folds in 5px of padding; reverse it and snap to excel's 1/256 grid.
+/// a stored column width -> pixels in the default face (calibri 11), see [`ColumnScale`].
 pub fn col_chars_to_px(chars: f64) -> f32 {
-    if chars == 0.0 {
-        return 0.0;
+    ColumnScale::DEFAULT.pixels(chars)
+}
+
+/// how stored column widths become pixels: `digit` is the normal font's
+/// widest digit in device pixels at `dpi`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ColumnScale {
+    digit: f64,
+    dpi: f64,
+}
+
+impl ColumnScale {
+    const DEFAULT: Self = Self {
+        digit: MAX_DIGIT_WIDTH_PX,
+        dpi: 96.0,
+    };
+
+    /// the screen scale of `normal`: its widest digit rounded to whole pixels.
+    fn screen(normal: NormalFace<'_>) -> Self {
+        Self {
+            digit: (digit_advance_em(normal.family) * normal.size_pt * PX_PER_PT)
+                .round()
+                .max(1.0),
+            dpi: 96.0,
+        }
     }
-    let mdw = MAX_DIGIT_WIDTH_PX;
-    (((chars * mdw + 5.0) / mdw * 256.0).round() / 256.0 * mdw) as f32
+
+    /// ecma-376 §18.3.1.13: a stored width already folds in the padding, so
+    /// excel truncates it to whole device pixels; returned in 96dpi pixels.
+    fn pixels(self, width: f64) -> f32 {
+        (((256.0 * width + (128.0 / self.digit).floor()) / 256.0 * self.digit).floor() * 96.0
+            / self.dpi) as f32
+    }
+
+    /// a screen column no `<col>` sizes: `defaultColWidth`, else `baseColWidth`
+    /// digits plus 5 pixels of padding and gridline, rounded up to a multiple
+    /// of 8 (ecma-376 §18.3.1.81).
+    fn default_pixels(self, format: &SheetFormat) -> f32 {
+        format.default_col_width.map_or_else(
+            || {
+                let base = format
+                    .base_col_width
+                    .map_or(DEFAULT_BASE_COL_WIDTH, f64::from);
+                (((base * self.digit + 5.0) / 8.0).ceil() * 8.0) as f32
+            },
+            |width| self.pixels(width),
+        )
+    }
 }
 
 /// row height in points -> pixels at 96dpi.
@@ -233,6 +276,30 @@ fn space_advance_em(family: Option<&str>) -> f64 {
 }
 
 const CALIBRI_SPACE_EM: f64 = 0.2261;
+
+/// the widest digit advance in em of common office faces and their metric
+/// twins; others count in calibri's.
+fn digit_advance_em(family: Option<&str>) -> f64 {
+    let Some(family) = family else {
+        return CALIBRI_DIGIT_EM;
+    };
+    match family.trim().to_ascii_lowercase().as_str() {
+        "arial" | "helvetica" | "liberation sans" | "arimo" => 0.5562,
+        "times new roman" | "liberation serif" | "tinos" => 0.5,
+        "courier new" | "liberation mono" | "cousine" => 0.6001,
+        "cambria" | "caladea" => 0.554,
+        "aptos" => 0.534,
+        "verdana" => 0.6362,
+        "tahoma" => 0.5464,
+        "trebuchet ms" => 0.524,
+        "century gothic" => 0.554,
+        "arial narrow" => 0.456,
+        "consolas" => 0.5498,
+        _ => CALIBRI_DIGIT_EM,
+    }
+}
+
+const CALIBRI_DIGIT_EM: f64 = 1038.0 / 2048.0;
 
 /// the factor excel applies to every stored `ht` when `defaultRowHeight` is a
 /// cached hint it recomputes; `None` keeps stored heights. gated on calibri
@@ -537,9 +604,14 @@ impl PrintMetrics {
     }
 
     pub fn column_pixels(&self, width: f64) -> f32 {
-        let digit = self.max_digit_width as f64;
-        (((256.0 * width + (128.0 / digit).floor()) / 256.0 * digit).floor() * 96.0
-            / self.dpi as f64) as f32
+        self.column_scale().pixels(width)
+    }
+
+    fn column_scale(&self) -> ColumnScale {
+        ColumnScale {
+            digit: self.max_digit_width as f64,
+            dpi: self.dpi as f64,
+        }
     }
 }
 
@@ -859,21 +931,24 @@ pub struct GridGeometry {
     spanned: Arc<HashSet<(RowId, ColId)>>,
     anchors: Arc<HashSet<(RowId, ColId)>>,
     inset: TextInset,
+    column_scale: ColumnScale,
 }
 
 impl GridGeometry {
     /// build cumulative offset tables from a sheet's custom widths/heights.
     pub fn new(sheet: &Sheet, styles: &Stylesheet) -> Self {
+        let normal = NormalFace::from_styles(styles);
+        let scale = ColumnScale::screen(normal);
         Self::with_sizes(
             sheet,
             styles,
-            col_chars_to_px(DEFAULT_COL_WIDTH_CHARS),
+            scale.default_pixels(&sheet.format),
             sheet
                 .format
                 .default_row_height_pt
                 .unwrap_or(DEFAULT_ROW_HEIGHT_PT),
-            NormalFace::from_styles(styles),
-            col_chars_to_px,
+            normal,
+            scale,
             RowFit::Screen,
         )
     }
@@ -889,7 +964,7 @@ impl GridGeometry {
                 }),
             metrics.default_row_height_pt as f64,
             NormalFace::from_metrics(metrics),
-            |width| metrics.column_pixels(width),
+            metrics.column_scale(),
             RowFit::Print {
                 dpi: metrics.dpi as f64,
             },
@@ -902,7 +977,7 @@ impl GridGeometry {
         default_col_px: f32,
         declared_row_pt: f64,
         normal: NormalFace<'_>,
-        column_pixels: impl Fn(f64) -> f32,
+        column_scale: ColumnScale,
         fit: RowFit,
     ) -> Self {
         let inset = TextInset::of(fit, normal);
@@ -924,7 +999,7 @@ impl GridGeometry {
                     if sheet.col_hidden(col) {
                         0.0
                     } else {
-                        column_pixels(width)
+                        column_scale.pixels(width)
                     },
                 )
             })
@@ -977,6 +1052,7 @@ impl GridGeometry {
             spanned: Arc::new(merge_anchors(sheet, true)),
             anchors: Arc::new(merge_anchors(sheet, false)),
             inset,
+            column_scale,
         }
     }
 
@@ -1067,7 +1143,7 @@ impl GridGeometry {
                 if sheet.col_hidden(col) {
                     0.0
                 } else {
-                    col_chars_to_px(width)
+                    self.column_scale.pixels(width)
                 }
             });
             if self.columns.value(col) != size {
@@ -1291,7 +1367,7 @@ mod tests {
                 row_pt_to_px(default_pt),
                 default_pt,
                 NormalFace::from_styles(&styles()),
-                col_chars_to_px,
+                ColumnScale::DEFAULT,
                 RowFit::Screen,
             );
             for col in 0..xlsx_model::MAX_COLS {
@@ -1658,6 +1734,66 @@ mod tests {
         assert_eq!(emu_to_px(9_525), 1.0);
     }
 
+    fn normal_styles(name: &str, size_pt: f64) -> Stylesheet {
+        let mut styles = Stylesheet::default();
+        styles.fonts = vec![Font {
+            name: Some(name.into()),
+            size_pt: Some(size_pt),
+            ..Default::default()
+        }];
+        styles
+    }
+
+    #[test]
+    fn screen_columns_count_in_the_normal_fonts_digit() {
+        let sheet = sheet_with(&[(0, 17.0), (2, 0.0)], &[]);
+        let calibri = GridGeometry::new(&sheet, &normal_styles("Calibri", 11.0));
+        assert_eq!(calibri.col_x(1), 119.0);
+        assert_eq!(calibri.col_x(2) - calibri.col_x(1), 64.0);
+        assert_eq!(calibri.col_x(3), calibri.col_x(2));
+        let verdana = GridGeometry::new(&sheet, &normal_styles("Verdana", 10.0));
+        assert_eq!(verdana.col_x(1), 136.0);
+        assert_eq!(verdana.col_x(2) - verdana.col_x(1), 72.0);
+        let arial = GridGeometry::new(&sheet, &normal_styles("Arial", 10.0));
+        assert_eq!(arial.col_x(1), 119.0);
+        assert_eq!(arial.col_x(2) - arial.col_x(1), 64.0);
+    }
+
+    #[test]
+    fn unsized_screen_columns_take_the_sheets_default_width() {
+        let calibri = normal_styles("Calibri", 11.0);
+        let mut sheet = sheet_with(&[(0, 17.0), (2, 0.0)], &[]);
+        sheet.format.default_col_width = Some(22.86);
+        let grid = GridGeometry::new(&sheet, &calibri);
+        assert_eq!(grid.col_x(1), 119.0);
+        assert_eq!(grid.col_x(2) - grid.col_x(1), 160.0);
+        assert_eq!(grid.col_x(3), grid.col_x(2));
+        assert_eq!(grid.col_x(4) - grid.col_x(3), 160.0);
+        sheet.format.base_col_width = Some(20);
+        assert_eq!(GridGeometry::new(&sheet, &calibri).col_x(2), 279.0);
+
+        sheet.format.default_col_width = None;
+        sheet.format.base_col_width = Some(10);
+        let grid = GridGeometry::new(&sheet, &calibri);
+        assert_eq!(grid.col_x(2) - grid.col_x(1), 80.0);
+        let verdana = GridGeometry::new(&sheet, &normal_styles("Verdana", 10.0));
+        assert_eq!(verdana.col_x(2) - verdana.col_x(1), 88.0);
+        sheet.format.default_col_width = Some(10.66);
+        let verdana = GridGeometry::new(&sheet, &normal_styles("Verdana", 10.0));
+        assert_eq!(verdana.col_x(2) - verdana.col_x(1), 85.0);
+    }
+
+    #[test]
+    fn resized_columns_keep_the_normal_fonts_digit() {
+        let styles = normal_styles("Verdana", 10.0);
+        let mut sheet = sheet_with(&[(0, 17.0)], &[]);
+        let mut grid = GridGeometry::new(&sheet, &styles);
+        sheet.col_widths.insert(0, 10.0);
+        grid.update_columns(&sheet, &styles, [0]);
+        assert_eq!(grid.col_x(1), GridGeometry::new(&sheet, &styles).col_x(1));
+        assert_eq!(grid.col_x(1), 80.0);
+    }
+
     #[test]
     fn all_default_grid_extrapolates() {
         let g = GridGeometry::new(&Sheet::new("S"), &styles());
@@ -1715,7 +1851,7 @@ mod tests {
             0.0,
             DEFAULT_ROW_HEIGHT_PT,
             NormalFace::from_styles(&styles()),
-            col_chars_to_px,
+            ColumnScale::DEFAULT,
             RowFit::Screen,
         );
         let first_width = col_chars_to_px(12.0);
