@@ -97,6 +97,8 @@ pub struct TextRun<'a> {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    /// `underline` draws two lines.
+    pub double_underline: bool,
     pub strike: bool,
     pub highlight: Option<Color>,
     pub dashed_underline: bool,
@@ -371,10 +373,12 @@ fn paint_rotated_text_with_face(
         };
         if run.underline || run.dashed_underline {
             let m = face.underline_metrics();
-            bar(
-                m.map(|m| m.0 as f32).unwrap_or(-0.1 * em),
-                m.map(|m| m.1 as f32).unwrap_or(0.05 * em),
-            );
+            let pos = m.map(|m| m.0 as f32).unwrap_or(-0.1 * em);
+            let thick = m.map(|m| m.1 as f32).unwrap_or(0.05 * em);
+            bar(pos, thick);
+            if run.underline && run.double_underline {
+                bar(second_underline(pos, thick, scale), thick);
+            }
         }
         if run.strike {
             let m = face.strikeout_metrics();
@@ -436,6 +440,7 @@ pub fn paint_stacked_text(pixmap: &mut Pixmap, run: &TextRun, cell: &DlRect, val
             bold: run.bold,
             italic: run.italic,
             underline: run.underline,
+            double_underline: run.double_underline,
             strike: run.strike,
             highlight: run.highlight,
             dashed_underline: run.dashed_underline,

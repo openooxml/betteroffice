@@ -5,7 +5,7 @@ use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, AutoFilter, Border, BorderEdge,
     BorderStyle, ChartRef, ChartRefKind, ColStyle, Color, ConditionalFormatRule,
     ConditionalFormatting, DefinedName, DifferentialFormat, Fill, Font, HAlign, PatternType,
-    Protection, Table, VAlign,
+    Protection, RunUnderline, Table, VAlign,
 };
 
 use super::*;
@@ -130,7 +130,13 @@ fn font() -> S<Font> {
         size_pt: opt(finite()),
         bold: any::<bool>(),
         italic: any::<bool>(),
-        underline: any::<bool>(),
+        underline: select(vec![
+            RunUnderline::None,
+            RunUnderline::Single,
+            RunUnderline::Double,
+            RunUnderline::SingleAccounting,
+            RunUnderline::DoubleAccounting,
+        ]),
         strike: any::<bool>(),
         color: opt(color()),
     })
