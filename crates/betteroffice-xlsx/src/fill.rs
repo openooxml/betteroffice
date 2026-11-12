@@ -43,7 +43,7 @@ fn rule_ranges(sqref: &str) -> Option<Vec<CellRange>> {
     let ranges = sqref
         .split_whitespace()
         .map(CellRange::parse_a1)
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<std::result::Result<Vec<_>, _>>()
         .ok()?;
     (!ranges.is_empty()).then_some(ranges)
 }
