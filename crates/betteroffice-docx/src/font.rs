@@ -592,6 +592,60 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    fn assert_resolvers_agree(
+        manager: &super::FontManager,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        scripts: &[String],
+    ) {
+        use super::LastResortOffice;
+        let describe = |faces: &[betteroffice_fonts::FontFaceHandle]| -> Vec<(String, Vec<u8>)> {
+            faces
+                .iter()
+                .map(|face| (format!("{face:?}"), face.load().unwrap()))
+                .collect()
+        };
+        for office in [LastResortOffice::PowerPoint, LastResortOffice::Word] {
+            let faces = manager.resolve(family, bold, italic, scripts, office);
+            let (fallback_faces, glyph) =
+                manager.resolve_with_glyph_fallback(family, bold, italic, scripts, office);
+            let case = format!("{family} bold={bold} italic={italic} {scripts:?} {office:?}");
+            assert!(!faces.is_empty(), "{case}");
+            assert!(describe(&faces) == describe(&fallback_faces), "{case}");
+            assert!(glyph.is_none_or(|index| index < faces.len()), "{case}");
+        }
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn resolve_and_resolve_with_glyph_fallback_return_the_same_faces() {
+        use betteroffice_fonts::BundledFonts;
+        let fonts = BundledFonts::new(Default::default()).unwrap();
+        let provider = std::sync::Arc::new(LastResortCarlito(fonts));
+        let sources = [
+            crate::OpenOptions::default().font_source,
+            betteroffice_fonts::FontSource::Provider(provider),
+        ];
+        let families = ["Cambria", "Calibri", "Segoe UI", "Segoe UI Heavy", "Arial"];
+        let scripts = [
+            Vec::new(),
+            vec!["hebrew".to_owned()],
+            vec!["cjk-jp".to_owned()],
+        ];
+        for source in &sources {
+            let manager = super::FontManager::new(source, Default::default()).unwrap();
+            for family in families {
+                for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                    for scripts in &scripts {
+                        assert_resolvers_agree(&manager, family, bold, italic, scripts);
+                    }
+                }
+            }
+        }
+    }
+
     fn run(text: &str, scripts: &[&str]) -> TextRunPrimitive {
         serde_json::from_value(serde_json::json!({
             "text": text, "x": 0.0, "baselineY": 0.0, "width": 10.0,
