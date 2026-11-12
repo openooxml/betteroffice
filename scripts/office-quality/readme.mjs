@@ -158,8 +158,11 @@ const unattributedText = ({ unattributed }) =>
     ? `; unattributed loads (not named in the advertised set, never a failure): ${unattributed.loaded} loaded, ${unattributed.failed} failed`
     : '';
 
+const slicedText =
+  '; sliced faces are observed only through their whole-face fallback at open; a chunk that fails or times out after open paints blank glyphs and is not observed';
+
 export function fontArmLine(channel, summary) {
-  return `${channel} arm: ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)}), by reason: ${reasonText(summary.reasons)}${summary.missing ? `; ${summary.missing} captures recorded no font loads` : ''}${unattributedText(summary)}${notMeasuredText(summary)}`;
+  return `${channel} arm: ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)}), by reason: ${reasonText(summary.reasons)}${summary.missing ? `; ${summary.missing} captures recorded no font loads` : ''}${slicedText}${unattributedText(summary)}${notMeasuredText(summary)}`;
 }
 
 function fontNote(samples) {

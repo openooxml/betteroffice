@@ -100,7 +100,7 @@ import {
   RemoteSelections,
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
-import { cellInViewport, deriveLimits, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
+import { cellInViewport, coversWholeTrack, deriveLimits, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
 import { cellEditorColors } from './viewer/cellEditorColors';
 import type {
   XlsxAdmission,
@@ -2982,7 +2982,7 @@ export function XlsxEditorContent({
                   </>
                 )}
                 {fillHandle && !readOnly && !editing && !coordinator.draft && !selectedChart &&
-                  fillHandleRect && renderedSelection && (
+                  fillHandleRect && renderedSelection && !coversWholeTrack(renderedSelection, limits()) && (
                   <FillHandle
                     rect={fillHandleRect}
                     source={renderedSelection}

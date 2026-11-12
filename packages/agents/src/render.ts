@@ -15,7 +15,7 @@ const previewWarning = 'Preview uses BetterOffice layout and bundled substitute 
 export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
   try {
     let placeholders = 0;
-    const png = await session.renderPng({ page: pageNumber - 1 }, { onDiagnostic: (diagnostic) => { placeholders += diagnostic.pictures.length; } });
+    const png = await session.renderPng({ page: pageNumber - 1 }, { onDiagnostic: (diagnostic) => { if (diagnostic.code === 'picture-unavailable') placeholders += diagnostic.pictures.length; } });
     const prepared = await layoutDocxPage(session);
     const release = cleanupGuard(prepared.dispose);
     try {
