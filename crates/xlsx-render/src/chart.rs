@@ -310,13 +310,19 @@ pub fn resized_chart_anchor(
     let new_to = anchor_cell_at(x2, y2, geometry)?;
     let ((from_col, from_col_off), (to_col, to_col_off)) = kept_marker_axis(
         ((from.col, from.col_off), (to.col, to.col_off)),
-        ((new_from.col, new_from.col_off), (new_to.col, new_to.col_off)),
+        (
+            (new_from.col, new_from.col_off),
+            (new_to.col, new_to.col_off),
+        ),
         x1 == rect.x,
         x2 == rect.x + rect.w,
     );
     let ((from_row, from_row_off), (to_row, to_row_off)) = kept_marker_axis(
         ((from.row, from.row_off), (to.row, to.row_off)),
-        ((new_from.row, new_from.row_off), (new_to.row, new_to.row_off)),
+        (
+            (new_from.row, new_from.row_off),
+            (new_to.row, new_to.row_off),
+        ),
         y1 == rect.y,
         y2 == rect.y + rect.h,
     );
