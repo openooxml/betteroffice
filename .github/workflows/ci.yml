@@ -605,7 +605,7 @@ jobs:
             local path
             for path in "$1"/*.d.ts; do
               if [ ! -e "$path" ]; then
-                echo "::error::$1 has no .d.ts file"
+                echo "::error::$1 has no .d.ts file" >&2
                 exit 1
               fi
               printf '%s\n' "${path##*/}"
