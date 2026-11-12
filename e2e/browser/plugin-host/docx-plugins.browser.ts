@@ -771,13 +771,14 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
 
     const fractional = await operate(page, async ({ worker, hit }: { worker: boolean; hit: PointHit }) => {
       const { editor, geometry } = (window as unknown as LooseProbe).__probe;
-      const read = await editor.readParagraphs({ story: 'body', view: 'accepted' });
-      const paragraph = read.paragraphs.find((value) => value.paraId === hit.target.start.paraId)!;
+      const read = await editor.readParagraphs({ story: hit.target.story, view: 'accepted' });
+      const paragraph = read.paragraphs.find((value) => value.paraId === hit.target.start.paraId);
+      if (!paragraph) throw new Error(`Paragraph not found for paraId ${hit.target.start.paraId} in story ${hit.target.story}`);
       const targets = Array.from({ length: paragraph.text.length }, (_, offset) => ({
         kind: 'range',
         version: read.version,
         range: {
-          story: 'body',
+          story: hit.target.story,
           view: 'accepted',
           start: { paraId: paragraph.paraId, offset },
           end: { paraId: paragraph.paraId, offset: offset + 1 },
