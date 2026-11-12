@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Number formats with commas after the decimal digits, such as `0.0,,"M"` and `#,##0.0,"K"`, now divide by 1,000 per comma in cell display and `TEXT()`, as Excel does.
+Number formats with commas after the decimal digits, such as `0.0,,"M"` and `#,##0.0,"K"`, now divide by 1,000 per comma in cell display and `TEXT()`, as Excel does. A comma after a literal or percent sign no longer scales.
