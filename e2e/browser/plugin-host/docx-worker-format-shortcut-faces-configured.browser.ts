@@ -9,7 +9,7 @@ const TEXT = BEFORE + SELECTED + AFTER;
 const LAST_WORD = 'cycle.';
 const CONTENT_RIGHT = 11906 / 15 - 96;
 
-declare global { interface Window { __configuredFonts: { errors: string[]; ready: boolean; fontsReady: number[]; load(bytes: number[]): void } } }
+declare global { interface Window { __configuredFonts: { errors: string[]; ready: boolean; fontsReady: number[]; mirrorMutatedAt: number; load(bytes: number[]): void } } }
 
 const times = (extra = '') => `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>${extra}<w:sz w:val="24"/></w:rPr>`;
 const run = (text: string, extra = '') => `<w:r>${times(extra)}<w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -24,6 +24,7 @@ async function a4Document(selectedFormat: string) {
 }
 
 async function open(page: Page, selectedFormat: string) {
+  await page.addInitScript(() => performance.setResourceTimingBufferSize(100_000));
   await page.goto('/docx-configured-fonts.html');
   await page.waitForFunction(() => window.__configuredFonts?.ready === true, undefined, { timeout: 60_000 });
   await page.evaluate((bytes) => window.__configuredFonts.load(bytes), await a4Document(selectedFormat));
@@ -33,14 +34,15 @@ async function open(page: Page, selectedFormat: string) {
 
 const bold = (weight: string) => /bold|[6-9]00/.test(weight);
 
-// A font environment committed after the face's bytes arrived carries the face.
+// A font environment committed after the face's bytes arrived carries the face, and the mirror redrew after it.
 function faceInUse(page: Page, face: string) {
   return page.evaluate((source) => {
     const pattern = new RegExp(source);
     const arrivals = performance.getEntriesByType('resource')
       .filter((entry) => pattern.test(new URL(entry.name).pathname))
       .map((entry) => (entry as PerformanceResourceTiming).responseEnd);
-    return arrivals.length > 0 && window.__configuredFonts.fontsReady.some((at) => at >= Math.max(...arrivals));
+    const { fontsReady, mirrorMutatedAt } = window.__configuredFonts;
+    return arrivals.length > 0 && fontsReady.some((at) => at >= Math.max(...arrivals) && mirrorMutatedAt > at);
   }, `/${face}(?:[.-][\\w-]*)?\\.(?:ttf|otf|woff2?|zst)$`);
 }
 
