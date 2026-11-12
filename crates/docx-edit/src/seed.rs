@@ -1451,13 +1451,48 @@ pub(crate) fn any_from_value(value: Value) -> Result<Any, String> {
     }
 }
 
-fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
-    let mut entries = values
-        .into_iter()
-        .map(|(key, value)| Ok((Arc::<str>::from(key), any_from_value(value)?)))
-        .collect::<Result<Vec<_>, String>>()?;
-    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    Ok(entries.into_iter().collect())
+/// One seed's attribute keys and values, so equal ones share an allocation.
+#[derive(Default)]
+struct SeedAttrs {
+    strings: HashSet<Arc<str>>,
+    composites: HashMap<String, Any>,
+}
+
+impl SeedAttrs {
+    fn text(&mut self, value: String) -> Arc<str> {
+        if let Some(shared) = self.strings.get(value.as_str()) {
+            return Arc::clone(shared);
+        }
+        let shared = Arc::<str>::from(value);
+        self.strings.insert(Arc::clone(&shared));
+        shared
+    }
+
+    fn value(&mut self, value: Value) -> Result<Any, String> {
+        match value {
+            Value::String(value) => Ok(Any::String(self.text(value))),
+            Value::Array(_) | Value::Object(_) => {
+                // JSON text keeps 1, 1.0, -0.0, "1" and true apart.
+                let text = value.to_string();
+                if let Some(shared) = self.composites.get(&text) {
+                    return Ok(shared.clone());
+                }
+                let shared = any_from_value(value)?;
+                self.composites.insert(text, shared.clone());
+                Ok(shared)
+            }
+            value => any_from_value(value),
+        }
+    }
+
+    fn attrs(&mut self, values: JsonObject) -> Result<Attrs, String> {
+        let mut entries = values
+            .into_iter()
+            .map(|(key, value)| Ok((self.text(key), self.value(value)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        Ok(entries.into_iter().collect())
+    }
 }
 
 pub(crate) fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
@@ -6440,6 +6475,7 @@ fn units_to_raw_ops(
     units: Vec<InlineUnit>,
     referenced_fonts: &mut BTreeSet<String>,
     mut script_fonts: Option<&mut ScriptFontUse>,
+    shared: &mut SeedAttrs,
 ) -> Result<Vec<RawOp>, String> {
     let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
     let mut index = 0u32;
@@ -6448,7 +6484,8 @@ fn units_to_raw_ops(
     let flush = |ops: &mut Vec<RawOp>,
                  index: &mut u32,
                  text: &mut String,
-                 attrs: &mut JsonObject|
+                 attrs: &mut JsonObject,
+                 shared: &mut SeedAttrs|
      -> Result<(), String> {
         if text.is_empty() {
             return Ok(());
@@ -6458,7 +6495,7 @@ fn units_to_raw_ops(
         ops.push(RawOp::Insert {
             index: *index,
             text: inserted,
-            attrs: yrs_attrs(std::mem::take(attrs))?,
+            attrs: shared.attrs(std::mem::take(attrs))?,
         });
         *index += len;
         Ok(())
@@ -6486,7 +6523,7 @@ fn units_to_raw_ops(
                 if text.is_empty() {
                     attrs = unit.attrs;
                 } else if unit.attrs != attrs {
-                    flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+                    flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
                     attrs = unit.attrs;
                 }
                 text.push_str(&value);
@@ -6495,24 +6532,33 @@ fn units_to_raw_ops(
                 kind,
                 payload: values,
             } => {
-                flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+                flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
                 ops.push(RawOp::InsertEmbed {
                     index,
                     kind,
                     payload: payload(values)?,
-                    attrs: yrs_attrs(unit.attrs)?,
+                    attrs: shared.attrs(unit.attrs)?,
                 });
                 index += 1;
             }
         }
     }
-    flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+    flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
     Ok(ops)
 }
 
+#[cfg(test)]
 fn seed_plan(
     plan: StoryPlan,
     script_fonts: Option<&mut ScriptFontUse>,
+) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
+    seed_plan_sharing(plan, script_fonts, &mut SeedAttrs::default())
+}
+
+fn seed_plan_sharing(
+    plan: StoryPlan,
+    script_fonts: Option<&mut ScriptFontUse>,
+    shared: &mut SeedAttrs,
 ) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
     let StoryPlan {
         story_id,
@@ -6521,7 +6567,7 @@ fn seed_plan(
         ..
     } = plan;
     let mut referenced_fonts = BTreeSet::new();
-    let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts)?;
+    let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts, shared)?;
     if !comment_coverage.is_empty() {
         ops.extend(
             comment_coverage
@@ -6856,8 +6902,10 @@ fn seed_lowered(
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
     let mut deletes = Vec::with_capacity(context.plans.len());
+    let mut shared = SeedAttrs::default();
     for plan in context.plans {
-        let (story_id, mut ops, fonts) = seed_plan(plan, script_fonts.as_mut())?;
+        let (story_id, mut ops, fonts) =
+            seed_plan_sharing(plan, script_fonts.as_mut(), &mut shared)?;
         deletes.push((story_id.clone(), vec![ops.remove(0)]));
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
@@ -7066,8 +7114,9 @@ pub(crate) fn seed_blocks(
     .map_err(|error| error.to_string())?;
     let mut provenance = std::mem::take(&mut context.provenance);
     let mut batches = Vec::with_capacity(context.plans.len());
+    let mut shared = SeedAttrs::default();
     for plan in context.plans {
-        let (story_id, ops, _) = seed_plan(plan, None)?;
+        let (story_id, ops, _) = seed_plan_sharing(plan, None, &mut shared)?;
         batches.push((story_id, ops));
     }
     let ranges = doc
