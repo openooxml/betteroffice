@@ -122,7 +122,7 @@ impl FontRegistry {
             } else {
                 request.family.as_str()
             };
-            let faces = manager.resolve(
+            let (faces, glyph) = manager.resolve_with_glyph_fallback(
                 family,
                 request.bold,
                 request.italic,
@@ -138,15 +138,9 @@ impl FontRegistry {
                     LastResortOffice::Word,
                 )
             });
-            let glyph = betteroffice_fonts::resolve_glyph_fallback_face(
-                family,
-                request.bold,
-                request.italic,
-                LastResortOffice::Word,
-            );
-            let mut deferred = Vec::new();
+            let mut deferred = None;
             let mut scripts = Vec::new();
-            for face in faces {
+            for (index, face) in faces.into_iter().enumerate() {
                 let base = self.register_bytes(&face.load()?)?;
                 let script = own.as_ref().is_some_and(|own| {
                     !own.iter().any(|known| {
@@ -159,12 +153,8 @@ impl FontRegistry {
                     scripts.push(base);
                 } else {
                     let id = self.measured_as(base, face.measure_as.as_deref().unwrap_or(family));
-                    if glyph.is_some_and(|glyph| {
-                        glyph.family == face.family
-                            && (glyph.weight == 700) == face.bold
-                            && (glyph.style == "italic") == face.italic
-                    }) {
-                        deferred.push(id);
+                    if glyph == Some(index) {
+                        deferred = Some(id);
                     } else {
                         self.insert(key.clone(), id, 2);
                     }
