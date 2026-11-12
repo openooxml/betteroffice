@@ -12,6 +12,8 @@
 //!   preferred cell widths before fitting any explicit table width.
 //! - **autofit** — accumulate per-column minimum and maximum content widths
 //!   from every cell, bounded by preferred cell widths and the content budget.
+//!   In a table that states no width, cell widths that alone exceed the
+//!   budget widen it, as in Word.
 //!   Distribute room above minimums in proportion to column flex (`max - min`),
 //!   or shrink minimums proportionally when they exceed the budget.
 //! - otherwise — normalize the declared grid and uniformly scale it to an
@@ -450,6 +452,8 @@ fn resolve_fixed_column_widths(
     widths
 }
 
+/// Per-column minimum and maximum widths, and the total of the columns a
+/// cell's stated width prices.
 fn autofit_content_widths(
     table_block: &TableBlock,
     content_width: f64,
@@ -457,7 +461,7 @@ fn autofit_content_widths(
     explicit_width_px: Option<f64>,
     content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
     nowrap_base_minimums: bool,
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Vec<f64>, Vec<f64>, f64) {
     let source = table_block
         .grid_widths
         .as_deref()
@@ -607,7 +611,7 @@ fn autofit_content_widths(
             table_width = table_width.max(natural / (1.0 - percentage_total));
         }
         table_width = table_width.min(content_width);
-        let (_, resolved) = autofit_content_widths(
+        let (_, resolved, _) = autofit_content_widths(
             table_block,
             content_width,
             col_count,
@@ -635,7 +639,11 @@ fn autofit_content_widths(
             }
         }
     }
-    (minimums, maximums)
+    let stated = (0..col_count)
+        .filter(|column| priced[*column])
+        .map(|column| maximums[column])
+        .sum();
+    (minimums, maximums, stated)
 }
 
 fn legacy_fixed_column_widths(
@@ -795,7 +803,7 @@ fn autofit_column_widths(
     nowrap_base_minimums: bool,
 ) -> Option<Vec<f64>> {
     let budget = table_width_budget(table_block, content_width);
-    let (minimums, maximums) = autofit_content_widths(
+    let (minimums, maximums, stated) = autofit_content_widths(
         table_block,
         budget,
         col_count,
@@ -805,7 +813,12 @@ fn autofit_column_widths(
     );
     let min_total: f64 = minimums.iter().sum();
     let max_total: f64 = maximums.iter().sum();
-    let target = budget.min(
+    let limit = if explicit_width_px.is_some() {
+        budget
+    } else {
+        budget.max(stated)
+    };
+    let target = limit.min(
         min_total.max(explicit_width_px.unwrap_or(if max_total > 0.0 {
             max_total
         } else {
