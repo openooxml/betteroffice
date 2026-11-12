@@ -280,7 +280,7 @@ pub fn resized_chart_anchor(
     geometry: &GridGeometry,
     edges: ChartResize,
 ) -> Option<ChartAnchor> {
-    let ChartAnchor::TwoCell { edit_as, .. } = anchor else {
+    let ChartAnchor::TwoCell { from, to, edit_as } = anchor else {
         return None;
     };
     if !edges.is_finite() {
@@ -306,11 +306,47 @@ pub fn resized_chart_anchor(
         f64::from(edges.top),
         f64::from(edges.bottom),
     );
+    let new_from = anchor_cell_at(x1, y1, geometry)?;
+    let new_to = anchor_cell_at(x2, y2, geometry)?;
+    let ((from_col, from_col_off), (to_col, to_col_off)) = kept_marker_axis(
+        ((from.col, from.col_off), (to.col, to.col_off)),
+        ((new_from.col, new_from.col_off), (new_to.col, new_to.col_off)),
+        x1 == rect.x,
+        x2 == rect.x + rect.w,
+    );
+    let ((from_row, from_row_off), (to_row, to_row_off)) = kept_marker_axis(
+        ((from.row, from.row_off), (to.row, to.row_off)),
+        ((new_from.row, new_from.row_off), (new_to.row, new_to.row_off)),
+        y1 == rect.y,
+        y2 == rect.y + rect.h,
+    );
     Some(ChartAnchor::TwoCell {
-        from: anchor_cell_at(x1, y1, geometry)?,
-        to: anchor_cell_at(x2, y2, geometry)?,
+        from: AnchorCell {
+            col: from_col,
+            col_off: from_col_off,
+            row: from_row,
+            row_off: from_row_off,
+        },
+        to: AnchorCell {
+            col: to_col,
+            col_off: to_col_off,
+            row: to_row,
+            row_off: to_row_off,
+        },
         edit_as,
     })
+}
+
+/// An edge that did not move keeps its marker as read, unless that would invert the axis.
+fn kept_marker_axis<T: Copy + PartialOrd>(
+    original: ((T, i64), (T, i64)),
+    resized: ((T, i64), (T, i64)),
+    start_still: bool,
+    end_still: bool,
+) -> ((T, i64), (T, i64)) {
+    let start = if start_still { original.0 } else { resized.0 };
+    let end = if end_still { original.1 } else { resized.1 };
+    if end > start { (start, end) } else { resized }
 }
 
 /// Applies one axis of a resize: both edges slide by their deltas, stay on the
