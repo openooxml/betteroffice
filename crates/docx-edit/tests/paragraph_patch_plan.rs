@@ -1973,8 +1973,13 @@ fn assert_typing_in_a_field_run_keeps_the_result(
     source_text: &str,
 ) {
     let doc = open(content);
-    doc.insert_text(&ctx(), Position::new("body", at), "X", FormatPolicy::Inherit)
-        .unwrap();
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", at),
+        "X",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
     let plan = doc.paragraph_save_plan();
     let part = plan
         .spliced_parts
