@@ -2512,7 +2512,10 @@ mod tests {
         .unwrap();
         let root = doc.root().unwrap();
         assert!(!root.matches_local_names);
-        assert!(root.child_elements().all(|child| !child.matches_local_names));
+        assert!(
+            root.child_elements()
+                .all(|child| !child.matches_local_names)
+        );
         assert_eq!(root.child("w", "shadow").unwrap().name, "w:shadow");
         assert_eq!(root.child("w14", "shadow").unwrap().name, "w14:shadow");
         assert_eq!(root.children_named("w", "shadow").count(), 1);
@@ -2532,7 +2535,10 @@ mod tests {
             let Some(strict) = standard.strict else {
                 continue;
             };
-            assert!(strict.starts_with("http://purl.oclc.org/ooxml/"), "{strict}");
+            assert!(
+                strict.starts_with("http://purl.oclc.org/ooxml/"),
+                "{strict}"
+            );
             assert_ne!(strict, standard.transitional);
             let xml = format!(
                 r#"<x:rPr xmlns:x="{}" xmlns:{}="{strict}"><x:shadow/></x:rPr>"#,

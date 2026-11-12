@@ -336,7 +336,10 @@ fn strict_drawing_and_relationship_namespaces_report_the_same_duplicates_as_tran
         "DOCX contains 1 drawing doc properties with duplicate `wp:docPr id` values.",
         "DOCX contains 1 bookmark starts with duplicate `w:bookmarkStart w:id` values.",
     ] {
-        assert!(transitional.iter().any(|warning| warning == expected), "{transitional:?}");
+        assert!(
+            transitional.iter().any(|warning| warning == expected),
+            "{transitional:?}"
+        );
     }
     assert_eq!(strict, transitional);
 }

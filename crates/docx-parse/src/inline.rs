@@ -3081,7 +3081,12 @@ mod tests {
         let formatting = parse_run(&run, None, None, None).run.formatting.unwrap();
         assert_eq!(formatting.shadow, None);
         assert_eq!(
-            formatting.modern_effects.unwrap().shadow.unwrap().blur_radius,
+            formatting
+                .modern_effects
+                .unwrap()
+                .shadow
+                .unwrap()
+                .blur_radius,
             Some(4.0)
         );
     }
