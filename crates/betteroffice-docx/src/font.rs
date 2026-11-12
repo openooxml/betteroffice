@@ -390,17 +390,20 @@ mod tests {
         );
     }
 
-    /// The family of every face in the chain a run of `family` with `scripts` resolves to.
+    /// Each chain entry for a run of `family` as "<face family> <style> <view|raw>".
     #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
-    fn chain_families(family: &str, scripts: &[&str]) -> Vec<String> {
-        use super::{FontRegistry, LastResortOffice, chain_key};
+    fn chain(
+        source: &betteroffice_fonts::FontSource,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        scripts: &[&str],
+    ) -> Vec<String> {
+        use super::{FontManager, FontRegistry, LastResortOffice, chain_key};
         use docx_layout::measure_blocks::FontRequirement;
-        let options = crate::OpenOptions::default();
-        let manager =
-            betteroffice_fonts::FontManager::new(&options.font_source, options.font_loading)
-                .unwrap();
+        let manager = FontManager::new(source, Default::default()).unwrap();
         let scripts: Vec<String> = scripts.iter().map(|script| (*script).to_owned()).collect();
-        let key = chain_key(family, false, false);
+        let key = chain_key(family, bold, italic);
         let mut registry = FontRegistry::default();
         registry
             .resolve(
@@ -408,36 +411,58 @@ mod tests {
                 &[FontRequirement {
                     key: key.clone(),
                     family: family.to_owned(),
-                    bold: false,
-                    italic: false,
+                    bold,
+                    italic,
                     scripts: scripts.clone(),
                     characters: Default::default(),
                 }],
             )
             .unwrap();
         let faces: Vec<_> = manager
-            .resolve(family, false, false, &scripts, LastResortOffice::Word)
+            .resolve(family, bold, italic, &scripts, LastResortOffice::Word)
             .into_iter()
-            .map(|face| (registry.store.find_face(&face.load().unwrap()), face.family))
+            .map(|face| (registry.store.find_face(&face.load().unwrap()), face))
             .collect();
         registry.chains[&key]
             .iter()
             .map(|&id| {
                 let owner = registry.store.byte_owner(id).unwrap_or(id);
-                faces
+                let (_, face) = faces
                     .iter()
                     .find(|(known, _)| *known == Some(owner))
-                    .map_or_else(|| format!("font {}", id.to_u32()), |(_, name)| name.clone())
+                    .expect("every chain entry is a resolved face");
+                let style = match (face.bold, face.italic) {
+                    (false, false) => "regular",
+                    (true, false) => "bold",
+                    (false, true) => "italic",
+                    (true, true) => "bold italic",
+                };
+                let kind = if registry.views.values().any(|view| *view == id) {
+                    "view"
+                } else {
+                    "raw"
+                };
+                format!("{} {style} {kind}", face.family)
             })
             .collect()
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    fn bundled_chain(family: &str, bold: bool, scripts: &[&str]) -> Vec<String> {
+        let source = crate::OpenOptions::default().font_source;
+        chain(&source, family, bold, false, scripts)
     }
 
     #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
     #[test]
     fn a_bundled_family_with_hebrew_text_chains_its_face_then_the_last_resort_then_hebrew() {
         assert_eq!(
-            chain_families("Cambria", &["hebrew"]),
-            ["Caladea", "Liberation Serif", "Noto Sans Hebrew"]
+            bundled_chain("Cambria", false, &["hebrew"]),
+            [
+                "Caladea regular view",
+                "Liberation Serif regular view",
+                "Noto Sans Hebrew regular raw"
+            ]
         );
     }
 
@@ -445,18 +470,25 @@ mod tests {
     #[test]
     fn a_bundled_family_with_cjk_text_chains_its_face_then_the_last_resort_then_cjk() {
         assert_eq!(
-            chain_families("Calibri", &["cjk-jp"]),
-            ["Carlito", "Liberation Sans", "Noto Sans JP"]
+            bundled_chain("Calibri", false, &["cjk-jp"]),
+            [
+                "Carlito regular view",
+                "Liberation Sans regular view",
+                "Noto Sans JP regular raw"
+            ]
         );
     }
 
     #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
     #[test]
     fn an_unbundled_family_with_cjk_text_chains_the_last_resort_then_the_glyph_fallback_then_cjk() {
-        // The last resort is Selawik, so Liberation Sans is the glyph fallback.
         assert_eq!(
-            chain_families("Segoe UI Heavy", &["cjk-jp"]),
-            ["Selawik", "Liberation Sans", "Noto Sans JP"]
+            bundled_chain("Segoe UI Heavy", false, &["cjk-jp"]),
+            [
+                "Selawik bold view",
+                "Liberation Sans regular view",
+                "Noto Sans JP regular raw"
+            ]
         );
     }
 
@@ -465,8 +497,108 @@ mod tests {
     fn an_unbundled_family_with_hebrew_text_chains_the_last_resort_then_the_glyph_fallback_then_hebrew()
      {
         assert_eq!(
-            chain_families("Segoe UI Black", &["hebrew"]),
-            ["Selawik", "Liberation Sans", "Noto Sans Hebrew"]
+            bundled_chain("Segoe UI Black", false, &["hebrew"]),
+            [
+                "Selawik bold view",
+                "Liberation Sans regular view",
+                "Noto Sans Hebrew regular raw"
+            ]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn a_family_whose_face_is_the_base_face_drops_the_last_resort() {
+        assert_eq!(
+            bundled_chain("Arial", true, &[]),
+            ["Liberation Sans bold view"]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn a_glyph_fallback_that_is_the_last_resort_chains_once() {
+        assert_eq!(
+            bundled_chain("Segoe UI", false, &[]),
+            ["Selawik regular view", "Liberation Sans regular view"]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    struct LastResortCarlito(betteroffice_fonts::BundledFonts);
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    impl LastResortCarlito {
+        fn face(
+            &self,
+            family: &str,
+            bold: bool,
+            italic: bool,
+        ) -> betteroffice_fonts::FontFaceHandle {
+            use betteroffice_fonts::resolve_bundled_family_face;
+            let face = resolve_bundled_family_face(family, bold, italic).unwrap();
+            let fonts = self.0.clone();
+            betteroffice_fonts::FontFaceHandle::new(family, bold, italic, move || {
+                fonts.load_face(face)
+            })
+        }
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    impl betteroffice_fonts::FontProvider for LastResortCarlito {
+        fn resolve_family(
+            &self,
+            family: &str,
+            bold: bool,
+            italic: bool,
+        ) -> Option<betteroffice_fonts::FontFaceHandle> {
+            if family == "Segoe UI" {
+                Some(self.face("Liberation Sans", bold, italic))
+            } else {
+                None
+            }
+        }
+
+        fn resolve_script_fallback(
+            &self,
+            _script: &str,
+            _bold: bool,
+            _italic: bool,
+        ) -> Option<betteroffice_fonts::FontFaceHandle> {
+            None
+        }
+
+        fn resolve_glyph_fallback(
+            &self,
+            _family: &str,
+            _bold: bool,
+            _italic: bool,
+            _office: super::LastResortOffice,
+        ) -> Option<betteroffice_fonts::FontFaceHandle> {
+            None
+        }
+
+        fn resolve_last_resort(
+            &self,
+            _family: &str,
+            bold: bool,
+            italic: bool,
+            _office: super::LastResortOffice,
+        ) -> betteroffice_fonts::FontFaceHandle {
+            self.face("Carlito", bold, italic)
+        }
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn a_provider_without_a_glyph_fallback_keeps_its_primary_first() {
+        use betteroffice_fonts::BundledFonts;
+        let fonts = BundledFonts::new(Default::default()).unwrap();
+        let provider = std::sync::Arc::new(LastResortCarlito(fonts));
+        let source = betteroffice_fonts::FontSource::Provider(provider);
+        assert_eq!(
+            chain(&source, "Segoe UI", false, false, &[]),
+            ["Liberation Sans regular view", "Carlito regular view"]
         );
     }
 
