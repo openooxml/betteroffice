@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -9,6 +11,7 @@ from pdf_matrix import (
     DocxInfo,
     group_for,
     load_manifest,
+    main,
     make_large_docx,
     is_emoji_char,
     make_text_docx,
@@ -23,6 +26,60 @@ from pdf_matrix import (
 def write_docx(path: Path, document_xml: str) -> None:
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as archive:
         archive.writestr('word/document.xml', document_xml)
+
+
+def minimal_pdf() -> bytes:
+    """A one-page A4 PDF with no content and a byte-accurate cross-reference."""
+    objects = [
+        b'<< /Type /Catalog /Pages 2 0 R >>',
+        b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        b'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>',
+    ]
+    output = bytearray(b'%PDF-1.4\n')
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output += f'{number} 0 obj\n'.encode() + body + b'\nendobj\n'
+    xref = len(output)
+    output += f'xref\n0 {len(objects) + 1}\n'.encode()
+    output += b'0000000000 65535 f \n'
+    for offset in offsets:
+        output += f'{offset:010d} 00000 n \n'.encode()
+    output += (
+        f'trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n'
+        f'startxref\n{xref}\n%%EOF\n'
+    ).encode()
+    return bytes(output)
+
+
+def write_pdf(path: Path) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = minimal_pdf()
+    path.write_bytes(data)
+    return len(data)
+
+
+def write_manifest(path: Path, entries: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({'fixtures': entries}))
+
+
+def ok_entry(relative: str, pdf_bytes: int) -> dict[str, object]:
+    return {
+        'path': relative,
+        'status': 'ok',
+        'pages': 1,
+        'pdf_bytes': pdf_bytes,
+        'fonts_embedded': 0,
+        'text_chars': 0,
+    }
+
+
+def run_main(arguments: list[str]) -> tuple[int, str, str]:
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        code = main(arguments)
+    return code, stdout.getvalue(), stderr.getvalue()
 
 
 class ScriptTests(unittest.TestCase):
@@ -157,6 +214,87 @@ class PdffontsTests(unittest.TestCase):
         self.assertEqual(fonts[0]['emb'], 'yes')
         self.assertEqual(fonts[0]['uni'], 'yes')
         self.assertEqual(fonts[1]['emb'], 'no')
+
+
+class MainTests(unittest.TestCase):
+    def test_same_relative_path_in_different_export_roots_is_checked_per_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first, second = root / 'first', root / 'second'
+            size = write_pdf(first / 'report.pdf')
+            write_pdf(second / 'report.pdf')
+            write_manifest(first / 'manifest.json', [ok_entry('report.docx', size)])
+            write_manifest(second / 'manifest.json', [
+                {'path': 'report.docx', 'status': 'error', 'error': 'export failed'},
+            ])
+            report_path = root / 'report.json'
+            code, stdout, stderr = run_main([
+                str(first / 'manifest.json'),
+                str(second / 'manifest.json'),
+                '--json', str(report_path),
+            ])
+            report = json.loads(report_path.read_text())
+
+            self.assertEqual(code, 1, (stdout, stderr))
+            self.assertEqual(len(report['fixtures']), 2)
+            self.assertEqual(
+                [fixture['status'] for fixture in report['fixtures']], ['ok', 'error']
+            )
+            self.assertEqual(len(report['failures']), 1, report['failures'])
+            check, message = report['failures'][0]['checks'][0]
+            self.assertEqual(check, 'export')
+            self.assertIn('export failed', message)
+            self.assertFalse(
+                any('duplicate fixture path' in warning for warning in report['warnings'])
+            )
+
+    def test_expectations_apply_to_the_relative_path_across_export_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'fixtures'
+            source.mkdir()
+            (source / 'expected.json').write_text(
+                json.dumps({'report.docx': {'text': ['MUST APPEAR']}})
+            )
+            manifests = []
+            for name in ('first', 'second'):
+                size = write_pdf(root / name / 'report.pdf')
+                manifest = root / name / 'manifest.json'
+                write_manifest(manifest, [ok_entry('report.docx', size)])
+                manifests.append(str(manifest))
+            report_path = root / 'report.json'
+            code, stdout, stderr = run_main([
+                *manifests,
+                '--fixtures-dir', str(source),
+                '--json', str(report_path),
+            ])
+            report = json.loads(report_path.read_text())
+
+            self.assertEqual(code, 1, (stdout, stderr))
+            self.assertEqual(len(report['fixtures']), 2)
+            self.assertEqual(len(report['failures']), 2, report['failures'])
+            for failure in report['failures']:
+                check, message = failure['checks'][0]
+                self.assertEqual(check, 'text')
+                self.assertIn('MUST APPEAR', message)
+
+    def test_same_manifest_entry_is_still_deduplicated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            size = write_pdf(root / 'report.pdf')
+            manifest = root / 'manifest.json'
+            write_manifest(manifest, [ok_entry('report.docx', size)])
+            report_path = root / 'report.json'
+            code, stdout, stderr = run_main([
+                str(manifest), str(manifest), '--json', str(report_path),
+            ])
+            report = json.loads(report_path.read_text())
+
+            self.assertEqual(code, 0, (stdout, stderr))
+            self.assertEqual(len(report['fixtures']), 1)
+            self.assertTrue(
+                any('duplicate fixture path' in warning for warning in report['warnings'])
+            )
 
 
 if __name__ == '__main__':

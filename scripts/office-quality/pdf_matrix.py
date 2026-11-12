@@ -617,10 +617,10 @@ def main(argv: list[str] | None = None) -> int:
         pdf_root = args.pdf_dir or manifest_path.parent
         for entry in entries:
             relative = Path(entry['path'])
-            key = str(relative)
+            key = f"{pdf_root}\0{relative}"
             if key in seen:
                 report['warnings'].append(
-                    f'duplicate fixture path across manifests: {key} (first in {seen[key]})'
+                    f'duplicate fixture path across manifests: {relative} (first in {seen[key]})'
                 )
                 continue
             seen[key] = len(report['fixtures'])
@@ -633,7 +633,7 @@ def main(argv: list[str] | None = None) -> int:
                 tools,
                 args.page_size,
                 args.large_bytes,
-                expectations.get(key.replace('\\', '/')),
+                expectations.get(str(relative).replace('\\', '/')),
                 args.strict_fonts,
                 report['warnings'],
             )
