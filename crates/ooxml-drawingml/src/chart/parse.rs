@@ -687,9 +687,11 @@ fn label_switches<E: ChartXml>(labels: &E) -> ChartDataLabels {
             .and_then(|value| (!value.is_empty()).then_some(value)),
         position: val_attr(child(labels, "dLblPos")).map(str::to_owned),
         number_format: child(labels, "numFmt")
-            .filter(|format| !source_linked(*format))
             .and_then(|value| value.attribute(None, "formatCode"))
             .map(decode_xstring),
+        source_linked: child(labels, "numFmt")
+            .is_some_and(source_linked)
+            .then_some(true),
         text: parse_text_properties(child(labels, "txPr")),
         points: None,
     }
@@ -775,8 +777,8 @@ fn parse_legend<E: ChartXml>(chart_space: &E) -> Option<ChartLegend> {
 }
 
 /// The format a source-linked value axis reads: the one its first series'
-/// values were cached with. A percent-stacked axis plots shares and an x-y
-/// axis may plot `c:xVal`, so both keep the code they were saved with.
+/// values were cached with. A percent-stacked axis plots shares and the x axis
+/// of an x-y group plots `c:xVal`, so both keep the code they were saved with.
 fn linked_value_format<E: ChartXml>(
     element: &E,
     axis: &ChartAxis,
@@ -790,7 +792,8 @@ fn linked_value_format<E: ChartXml>(
         .iter()
         .find(|group| group.axis_ids.iter().any(|axis_id| axis_id == id))?;
     if group.grouping.as_deref() == Some("percentStacked")
-        || matches!(group.chart_type.as_deref(), Some("scatter" | "bubble"))
+        || (matches!(group.chart_type.as_deref(), Some("scatter" | "bubble"))
+            && group.axis_ids.first().map(String::as_str) == Some(id))
     {
         return None;
     }

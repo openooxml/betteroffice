@@ -85,7 +85,8 @@ use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
     PlotDataLabels, PlotGroup, PlotLegend, PlotLine, PlotMarker, PlotMarkerSymbol, PlotOp,
     PlotPoint, PlotRect, PlotSeries, PlotSink, PlotTextAlign, PlotTextStyle, blank_numbers,
-    chart_aria_label, chart_data, chart_plots_no_points, fallback_label_width, plot_chart_into,
+    chart_aria_label, chart_data, chart_plots_no_points, fallback_label_width, label_number_format,
+    plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -2781,6 +2782,8 @@ struct ChartDataLabelsIn {
     position: Option<String>,
     #[serde(default)]
     number_format: Option<String>,
+    #[serde(default)]
+    source_linked: Option<bool>,
     #[serde(default)]
     text: Option<ChartTextIn>,
 }
@@ -10686,6 +10689,7 @@ fn plot_text_from(text: Option<&ChartTextIn>) -> PlotTextStyle<'_> {
 fn plot_labels_from<'a>(
     group: Option<&'a ChartDataLabelsIn>,
     series: Option<&'a ChartDataLabelsIn>,
+    cached: Option<&'a str>,
 ) -> Option<PlotDataLabels<'a>> {
     let levels = [series, group];
     levels.iter().copied().flatten().next()?;
@@ -10707,6 +10711,11 @@ fn plot_labels_from<'a>(
     let text = |read: fn(&ChartDataLabelsIn) -> Option<&str>| {
         series.and_then(read).or_else(|| group.and_then(read))
     };
+    let formats = levels
+        .iter()
+        .copied()
+        .flatten()
+        .map(|labels| (labels.number_format.as_deref(), labels.source_linked == Some(true)));
     Some(PlotDataLabels {
         show_value: switch(|labels| labels.show_value),
         show_category_name: switch(|labels| labels.show_category_name),
@@ -10716,7 +10725,7 @@ fn plot_labels_from<'a>(
         show_bubble_size: switch(|labels| labels.show_bubble_size),
         separator: text(|labels| labels.separator.as_deref()),
         position: text(|labels| labels.position.as_deref()),
-        number_format: text(|labels| labels.number_format.as_deref()),
+        number_format: label_number_format(formats, cached),
         text: plot_text_from(
             series
                 .and_then(|labels| labels.text.as_ref())
@@ -10770,7 +10779,11 @@ fn plot_series_from<'a>(
     series: &'a ChartSeriesIn,
     group_labels: Option<&'a ChartDataLabelsIn>,
 ) -> PlotSeries<'a> {
-    let labels = plot_labels_from(group_labels, series.data_labels.as_ref());
+    let labels = plot_labels_from(
+        group_labels,
+        series.data_labels.as_ref(),
+        series.value_format.as_deref(),
+    );
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,
@@ -18176,21 +18189,21 @@ mod tests {
             show_value: Some(true),
             ..Default::default()
         };
-        assert!(plot_labels_from(Some(&group), Some(&series)).is_none());
+        assert!(plot_labels_from(Some(&group), Some(&series), None).is_none());
 
         let restoring = ChartDataLabelsIn {
             delete: Some(false),
             show_value: Some(true),
             ..Default::default()
         };
-        let resolved = plot_labels_from(Some(&group), Some(&restoring)).unwrap();
+        let resolved = plot_labels_from(Some(&group), Some(&restoring), None).unwrap();
         assert!(resolved.show_value);
 
         let series_only = ChartDataLabelsIn {
             delete: Some(true),
             ..Default::default()
         };
-        assert!(plot_labels_from(None, Some(&series_only)).is_none());
+        assert!(plot_labels_from(None, Some(&series_only), None).is_none());
     }
 
     #[test]

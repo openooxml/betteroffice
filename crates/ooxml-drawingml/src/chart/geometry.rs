@@ -488,8 +488,8 @@ pub struct PlotDataLabels<'a> {
     /// `c:dLblPos`: `ctr`, `inEnd`, `inBase`, `outEnd`, `bestFit`, `l`, `r`,
     /// `t` or `b`.
     pub position: Option<&'a str>,
-    /// The label's own `c:numFmt`. Without one, a value reads the series'
-    /// `value_format`, which is what makes 0.86 read as 86% (#797).
+    /// The code [`label_number_format`] resolves. Without one, a value reads
+    /// the series' `value_format`, which is what makes 0.86 read as 86% (#797).
     pub number_format: Option<&'a str>,
     /// `c:txPr` on this `c:dLbls`.
     pub text: PlotTextStyle<'a>,
@@ -733,7 +733,14 @@ fn plot_series_from_model<'a>(
     series: &'a super::model::ChartSeries,
     group_labels: Option<&'a super::model::ChartDataLabels>,
 ) -> PlotSeries<'a> {
-    let labels = plot_labels_from_model(None, series.data_labels.as_ref(), None, group_labels);
+    let cached = series.value_format.as_deref();
+    let labels = plot_labels_from_model(
+        None,
+        series.data_labels.as_ref(),
+        None,
+        group_labels,
+        cached,
+    );
     let mut points: Vec<PlotPoint<'a>> = series
         .points
         .iter()
@@ -751,7 +758,12 @@ fn plot_series_from_model<'a>(
             })
         })
         .collect();
-    merge_point_labels(&mut points, group_labels, series.data_labels.as_ref());
+    merge_point_labels(
+        &mut points,
+        group_labels,
+        series.data_labels.as_ref(),
+        cached,
+    );
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,
@@ -769,16 +781,18 @@ fn plot_series_from_model<'a>(
             color: line.color.as_deref(),
             width_emu: line.width_emu,
         }),
-        value_format: series.value_format.as_deref(),
+        value_format: cached,
     }
 }
 
-/// Resolves the four-level `c:dLbls` cascade.
+/// Resolves the four-level `c:dLbls` cascade. `cached` is the format the
+/// series' values were cached with, which a source-linked level reads.
 fn plot_labels_from_model<'a>(
     series_point: Option<&'a super::model::ChartDataLabels>,
     series: Option<&'a super::model::ChartDataLabels>,
     group_point: Option<&'a super::model::ChartDataLabels>,
     group: Option<&'a super::model::ChartDataLabels>,
+    cached: Option<&'a str>,
 ) -> Option<PlotDataLabels<'a>> {
     let levels = [series_point, series, group_point, group];
     levels.iter().copied().flatten().next()?;
@@ -803,6 +817,11 @@ fn plot_labels_from_model<'a>(
     for labels in levels.iter().rev().flatten() {
         style = plot_text_from_model(labels.text.as_ref()).over(style);
     }
+    let formats = levels
+        .iter()
+        .copied()
+        .flatten()
+        .map(|labels| (labels.number_format.as_deref(), labels.source_linked == Some(true)));
     Some(PlotDataLabels {
         show_value: switch(|labels| labels.show_value),
         show_category_name: switch(|labels| labels.show_category_name),
@@ -812,9 +831,22 @@ fn plot_labels_from_model<'a>(
         show_bubble_size: switch(|labels| labels.show_bubble_size),
         separator: text(|labels| labels.separator.as_deref()),
         position: text(|labels| labels.position.as_deref()),
-        number_format: text(|labels| labels.number_format.as_deref()),
+        number_format: label_number_format(formats, cached),
         text: style,
     })
+}
+
+/// The code a label cascade formats its values with: the nearest level that
+/// declares a `c:numFmt` decides, and a source-linked one reads `cached`
+/// before its own code.
+pub fn label_number_format<'a>(
+    levels: impl IntoIterator<Item = (Option<&'a str>, bool)>,
+    cached: Option<&'a str>,
+) -> Option<&'a str> {
+    let (code, linked) = levels
+        .into_iter()
+        .find(|(code, linked)| code.is_some() || *linked)?;
+    if linked { cached.or(code) } else { code }
 }
 
 /// Folds cascade-resolved `c:dLbl` overrides into `points`.
@@ -822,6 +854,7 @@ fn merge_point_labels<'a>(
     points: &mut Vec<PlotPoint<'a>>,
     group: Option<&'a super::model::ChartDataLabels>,
     series: Option<&'a super::model::ChartDataLabels>,
+    cached: Option<&'a str>,
 ) {
     let group_overrides = group
         .and_then(|labels| labels.points.as_deref())
@@ -850,6 +883,7 @@ fn merge_point_labels<'a>(
             Some(over),
             group,
             series,
+            cached,
         );
     }
     let mut merged_group_points = HashSet::new();
@@ -858,7 +892,16 @@ fn merge_point_labels<'a>(
             continue;
         };
         if !series_points.contains(&index) && merged_group_points.insert(index) {
-            merge_point_label(points, wildcard, index, Some(over), None, group, series);
+            merge_point_label(
+                points,
+                wildcard,
+                index,
+                Some(over),
+                None,
+                group,
+                series,
+                cached,
+            );
         }
     }
 }
@@ -872,12 +915,14 @@ fn merge_point_label<'a>(
     series_point: Option<&'a super::model::ChartPointLabel>,
     group: Option<&'a super::model::ChartDataLabels>,
     series: Option<&'a super::model::ChartDataLabels>,
+    cached: Option<&'a str>,
 ) {
     let resolved = plot_labels_from_model(
         series_point.map(|point| &point.labels),
         series,
         group_point.map(|point| &point.labels),
         group,
+        cached,
     );
     let label = resolved.and_then(|_| {
         series_point
@@ -3526,10 +3571,10 @@ fn label_field(
     }
 }
 
-/// A share as a percentage label reads it: through the label's own
-/// `c:numFmt`, else as [`format_percent`] writes it, as `General` does too.
+/// A share as a percentage label reads it: through the label's `c:numFmt`
+/// when that is a percent code, else as [`format_percent`] writes it.
 fn format_share(share: f64, code: Option<&str>) -> String {
-    code.filter(|code| !code.eq_ignore_ascii_case("general"))
+    code.filter(|code| code.contains('%'))
         .and_then(|code| format_with_code(share, code))
         .unwrap_or_else(|| format_percent(share))
 }
@@ -11878,7 +11923,7 @@ mod tests {
             delete: Some(true),
             ..ChartDataLabels::default()
         };
-        assert!(plot_labels_from_model(None, Some(&series), None, Some(&group)).is_none());
+        assert!(plot_labels_from_model(None, Some(&series), None, Some(&group), None).is_none());
         let space = labelled_space("pie", Some(group), Some(series));
         let labels = texts(&plot_chart(&PlotChart::from(&space), rect()));
         assert!(!labels.contains(&"3".to_owned()));
@@ -11933,6 +11978,7 @@ mod tests {
             Some(&series),
             Some(&group_point),
             Some(&group),
+            None,
         )
         .expect("labels resolve");
 
