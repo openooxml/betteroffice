@@ -103,6 +103,21 @@ impl FontRegistry {
         Ok(())
     }
 
+    /// Drops the export-local PDF/A face and its registration budget.
+    ///
+    /// `font_count` is the count captured before
+    /// [`Self::register_pdfa_fallbacks`]. Removing the face without returning
+    /// its one registration would make repeated PDF/A exports of the same
+    /// document consume the 4096-registration budget.
+    #[cfg(feature = "fonts")]
+    pub(crate) fn release_pdfa_fallbacks(&mut self, font_count: usize) {
+        if self.pdfa_fallbacks {
+            self.store.truncate_fonts(font_count);
+            self.registrations = self.registrations.saturating_sub(1);
+            self.pdfa_fallbacks = false;
+        }
+    }
+
     /// Registers `bytes` into the chain under `key`, ahead of bundled faces for
     /// embedded (`0`) and application (`1`) priorities.
     fn register_keyed(&mut self, key: String, bytes: &[u8], priority: u8) -> Result<u32> {
@@ -391,12 +406,18 @@ mod tests {
         use super::FontRegistry;
         let mut fonts = FontRegistry::default();
         let before = fonts.store.face_count();
+        let font_count = fonts.store.font_count();
         fonts.register_pdfa_fallbacks().unwrap();
         assert_eq!(fonts.store.face_count(), before + 1);
         assert!(fonts.pdfa_fallbacks);
         assert!(fonts.chains.is_empty());
         fonts.register_pdfa_fallbacks().unwrap();
         assert_eq!(fonts.store.face_count(), before + 1);
+        let registrations = fonts.registrations;
+        fonts.release_pdfa_fallbacks(font_count);
+        assert!(!fonts.pdfa_fallbacks);
+        assert_eq!(fonts.store.face_count(), before);
+        assert_eq!(fonts.registrations, registrations.saturating_sub(1));
     }
 
     fn run(text: &str, scripts: &[&str]) -> TextRunPrimitive {

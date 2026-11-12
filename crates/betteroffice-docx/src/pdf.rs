@@ -70,8 +70,7 @@ impl Document {
         .map_err(|error| Error::Render(error.to_string()));
         #[cfg(feature = "fonts")]
         if let Some(len) = pdfa_store_len {
-            fonts.store.truncate_fonts(len);
-            fonts.pdfa_fallbacks = false;
+            fonts.release_pdfa_fallbacks(len);
         }
         result
     }
