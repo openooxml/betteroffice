@@ -1803,7 +1803,17 @@ fn plan_paragraph(
             "tc: run property revision",
         ));
     }
-    validate_markers(&before, &after, &text_edits, &context)?;
+    validate_markers(&before, &after, &text_edits, &context).map_err(|legacy| {
+        // A field paragraph declines as one so the save keeps its source.
+        if old.iter().any(complex_field) {
+            context.legacy(
+                PatchErrorCode::UnsupportedStructure,
+                "field: markers around a field",
+            )
+        } else {
+            legacy
+        }
+    })?;
     let mut seed_properties = verification_properties(&before, context.seeded_markers);
     let mut result_properties = verification_properties(&after, context.live_markers);
     let para_deltas = if patchable_restyle && plain_restyle {
