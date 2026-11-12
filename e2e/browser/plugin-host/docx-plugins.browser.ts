@@ -738,8 +738,8 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
       let found: { x: number; y: number; hit: PointHit } | null = null;
       for (let fy = 0.1; fy < 0.9 && !found; fy += 0.01) {
         for (let fx = 0.15; fx < 0.8 && !found; fx += 0.02) {
-          const x = canvas.left + canvas.width * fx;
-          const y = canvas.top + canvas.height * fy;
+          const x = Math.trunc(canvas.left + canvas.width * fx);
+          const y = Math.trunc(canvas.top + canvas.height * fy);
           if (y < 0 || y > window.innerHeight) continue;
           if (document.elementFromPoint(x, y) !== surface) continue;
           const hit = worker ? await editor.readPositionAtPoint(x, y) : editor.getPositionAtPoint(x, y);
