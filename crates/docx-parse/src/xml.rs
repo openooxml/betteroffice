@@ -430,9 +430,7 @@ pub struct XmlElement {
     /// For a block-level bookmark, its source slice plus the namespace
     /// bindings it needs when replayed outside its source ancestors.
     pub bookmark_replay_xml: Option<String>,
-    /// Set on every element of a part that binds a standard prefix to a
-    /// namespace other than its own, where prefixes no longer tell namespaces
-    /// apart and [`XmlElement::matches_name`] compares local names alone.
+    /// Set when the part rebinds a standard prefix.
     pub(crate) matches_local_names: bool,
 }
 
@@ -453,12 +451,7 @@ impl XmlElement {
         namespace_prefix(&self.name)
     }
 
-    /// Whether this element is `namespace:local`. An element under another
-    /// prefix still matches on its local name, as a document may bind the
-    /// namespace to any prefix, unless that prefix is itself one of the
-    /// standard prefixes and so names a different namespace, which holds only
-    /// in a part that binds every standard prefix it declares to its own
-    /// namespace.
+    /// Matches namespace:local; other prefixes, or a rebound standard prefix, match by local name.
     pub fn matches_name(&self, namespace: &str, local: &str) -> bool {
         self.local_name() == local
             && (self.matches_local_names
@@ -784,10 +777,7 @@ pub fn reads_as_written(xml: &[u8]) -> bool {
     matches!(repaired(xml), std::borrow::Cow::Borrowed(_)) && PlainXml::new(xml).accepts()
 }
 
-/// A prefix the loader reads by name, with the transitional namespace it
-/// stands for and, where ISO/IEC 29500 Strict renames that namespace, the
-/// Strict one. VML, markup compatibility and the Microsoft extensions keep a
-/// single namespace in both conformance classes.
+/// Prefix, transitional namespace and Strict namespace.
 struct StandardNamespace {
     prefix: &'static str,
     transitional: &'static str,
@@ -1525,8 +1515,7 @@ pub(crate) fn strict_namespace(namespace: &str) -> Option<&'static str> {
         .and_then(|standard| standard.strict)
 }
 
-/// Whether `element` declares a standard prefix for a namespace other than the
-/// prefix's own or its Strict counterpart.
+/// Whether `element` binds a standard prefix to a foreign namespace.
 fn rebinds_a_standard_prefix(element: &XmlElement) -> bool {
     element.attributes.iter().any(|(key, uri)| {
         key.strip_prefix("xmlns:").is_some_and(|prefix| {
