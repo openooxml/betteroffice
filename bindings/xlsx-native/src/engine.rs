@@ -1105,7 +1105,8 @@ pub fn install_panic_hook() {
     INSTALLED.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            eprintln!("[xlsx-native] panic: {info}");
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "[xlsx-native] panic: {info}");
             prev(info);
         }));
     });
