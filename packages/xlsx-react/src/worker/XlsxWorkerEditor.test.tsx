@@ -10128,3 +10128,73 @@ describe('worker fill handle', () => {
     expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
   });
 });
+
+describe('fill handle with sheet headers', () => {
+  it('renders no handle with headers and the fill handle both off', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: false, fillHandle: false });
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-selection')).toBeDefined());
+    expect(view.queryByTestId('xlsx-grid')).toBeNull();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+    expect(view.getByTestId('xlsx-focus')).toBeDefined();
+    expect(view.queryByTestId('xlsx-active-cell')).toBeNull();
+  });
+
+  it('renders no handle with headers on and the fill handle off', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true, fillHandle: false });
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-selection')).toBeDefined());
+    expect(view.getByTestId('xlsx-grid')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('anchors the handle on the range corner and fills B2:C3 down to B2:C4 with headers on', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true, fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 106, clientY: 34 });
+      fireEvent.mouseMove(scroll, { clientX: 202, clientY: 58 });
+      fireEvent.mouseUp(window);
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    const handle = await waitFor(() => view.getByTestId('xlsx-fill-handle'));
+    const marquee = view.getByTestId('xlsx-selection');
+    expect([marquee.style.left, marquee.style.top, marquee.style.width, marquee.style.height])
+      .toEqual(['96px', '24px', '192px', '48px']);
+    expect([handle.style.left, handle.style.top]).toEqual(['284px', '68px']);
+    expect(parseFloat(handle.style.left) + 4).toBe(parseFloat(marquee.style.left) + parseFloat(marquee.style.width));
+    expect(parseFloat(handle.style.top) + 4).toBe(parseFloat(marquee.style.top) + parseFloat(marquee.style.height));
+
+    await act(async () => {
+      fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 284, clientY: 68 });
+      fireEvent.pointerMove(handle, { pointerId: 1, clientX: 240, clientY: 84 });
+      fireEvent.pointerUp(handle, { pointerId: 1, clientX: 240, clientY: 84 });
+    });
+    await waitFor(() => expect(host.sent.some((command) => command.kind === 'fillRange')).toBe(true));
+
+    expect(host.sent.find((command) => command.kind === 'fillRange')).toMatchObject({
+      kind: 'fillRange',
+      payload: {
+        args: [0, 'B2:C3', 'B2:C4'],
+        target: { sheetId: 'sheet:0' },
+      },
+    });
+  });
+});

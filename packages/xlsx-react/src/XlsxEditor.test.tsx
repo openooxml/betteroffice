@@ -1122,6 +1122,60 @@ describe('XlsxEditor fill handle', () => {
   });
 });
 
+describe('fill handle with sheet headers', () => {
+  it('renders no handle with headers and the fill handle both off', async () => {
+    const view = await mountEditor(plain, undefined, false, false);
+    view.click({ row: 2, col: 1 });
+    await waitFor(() => expect(view.view.getByTestId('xlsx-selection')).toBeDefined());
+    expect(view.view.queryByTestId('xlsx-grid')).toBeNull();
+    expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+    expect(view.view.queryByTestId('xlsx-focus')).toBeNull();
+    expect(view.view.getByTestId('xlsx-active-cell').style.border).toBe('2px solid #217346');
+  });
+
+  it('renders no handle with headers on and the fill handle off', async () => {
+    const view = await mountEditor(plain, undefined, true, false);
+    view.click({ row: 2, col: 1 });
+    await waitFor(() => expect(view.view.getByTestId('xlsx-selection')).toBeDefined());
+    expect(view.view.getByTestId('xlsx-grid')).toBeDefined();
+    expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('anchors the handle on the range corner and fills B2:C3 down to B2:C6 with headers on', async () => {
+    const view = await mountEditor(plain, undefined, true, true);
+    const workbook = view.workbook();
+    fireEvent.mouseDown(view.surface, pointAt(plain, { row: 1, col: 1 }));
+    await act(async () => {
+      fireEvent.mouseMove(view.surface, { ...pointAt(plain, { row: 2, col: 2 }), buttons: 1 });
+    });
+    await act(async () => {
+      fireEvent.mouseUp(window, pointAt(plain, { row: 2, col: 2 }));
+    });
+    await waitFor(() => expect(view.nameBox().value).toBe('B2'));
+    const corner = cellRect(plain.grid, 2, 2)!;
+    const marquee = view.selectionBox()!;
+    expect(marquee.style.left).toBe(`${Math.round(cellRect(plain.grid, 1, 1)!.x)}px`);
+    expect(marquee.style.top).toBe(`${Math.round(cellRect(plain.grid, 1, 1)!.y)}px`);
+    const handle = fillHandleElement(view);
+    expect(parseFloat(handle.style.left)).toBeCloseTo(corner.x + corner.w - 4);
+    expect(parseFloat(handle.style.top)).toBeCloseTo(corner.y + corner.h - 4);
+    expect(Math.abs(parseFloat(handle.style.left) + 4
+      - (parseFloat(marquee.style.left) + parseFloat(marquee.style.width)))).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(parseFloat(handle.style.top) + 4
+      - (parseFloat(marquee.style.top) + parseFloat(marquee.style.height)))).toBeLessThanOrEqual(0.5);
+    const fill = spyOn(workbook, 'fillRange').mockImplementation(() => ({
+      applied: true, sheetInfo: workbook.sheetInfo(),
+    }));
+
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, ...pointAt(plain, { row: 2, col: 2 }) });
+    fireEvent.pointerMove(handle, { pointerId: 1, ...pointAt(plain, { row: 5, col: 2 }) });
+    fireEvent.pointerUp(handle, { pointerId: 1, ...pointAt(plain, { row: 5, col: 2 }) });
+
+    await waitFor(() => expect(fill).toHaveBeenCalledTimes(1));
+    expect(fill).toHaveBeenCalledWith(0, 'B2:C3', 'B2:C6');
+  });
+});
+
 function fillHandleElement(view: { view: RenderResult }): HTMLElement {
   return view.view.getByTestId('xlsx-fill-handle');
 }
