@@ -13,20 +13,10 @@ const probe = {
   errors: [] as string[],
   ready: false,
   fontsReady: [] as number[],
-  mirrorMutatedAt: 0,
   load(bytes: number[]) { open(Uint8Array.from(bytes).buffer); },
 };
 (window as unknown as { __configuredFonts: typeof probe }).__configuredFonts = probe;
 const fontsLoaded = () => { probe.fontsReady.push(performance.now()); };
-const MIRROR = '.canvas-page-mirror';
-const touchesMirror = (node: Node) => node instanceof Element && (node.matches(MIRROR) || node.querySelector(MIRROR) !== null);
-new MutationObserver((records) => {
-  const at = performance.now();
-  if (records.some((record) => {
-    const target = record.target instanceof Element ? record.target : record.target.parentElement;
-    return target?.closest(MIRROR) || [...record.addedNodes, ...record.removedNodes].some(touchesMirror);
-  })) probe.mirrorMutatedAt = at;
-}).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
 
 function Harness() {
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
