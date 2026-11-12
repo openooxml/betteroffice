@@ -130,8 +130,6 @@ struct FontRefs {
     file: Ref,
     to_unicode: Ref,
     cid_to_gid: Ref,
-    /// PDF/A-2u `/CIDSet` stream; `None` for Standard output.
-    cid_set: Option<Ref>,
 }
 
 /// Object ids reserved for the PDF/A structures the catalog and trailer must
@@ -489,12 +487,8 @@ fn export_pdf_inner(
                 file: Ref::new(next_id + 3),
                 to_unicode: Ref::new(next_id + 4),
                 cid_to_gid: Ref::new(next_id + 5),
-                // PDF/A-2u seam: `/CIDSet` needs its own stream. Reserve it
-                // only for archival output so Standard ref numbering (and
-                // therefore bytes) stay unchanged.
-                cid_set: options.conformance.is_pdfa().then(|| Ref::new(next_id + 6)),
             };
-            next_id += if options.conformance.is_pdfa() { 7 } else { 6 };
+            next_id += 6;
             font_objects.push((*font_id, refs));
             font_map.insert(*font_id, embedded);
         }
@@ -731,9 +725,6 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs, conformance: P
         } else if !font.is_cff {
             cid.cid_to_gid_map_predefined(Name(b"Identity"));
         }
-        // PDF/A-2u seam: `/CIDSet` is allocated with the font refs and
-        // written below from the final subset plan; Standard has no ref and
-        // writes no descriptor entry.
         cid.widths().consecutive(0, font.widths.iter().copied());
     }
 
@@ -753,11 +744,6 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs, conformance: P
             .descent(font.descent)
             .cap_height(font.cap_height)
             .stem_v(80.0);
-        if conformance.is_pdfa()
-            && let Some(cid_set) = refs.cid_set
-        {
-            descriptor.cid_set(cid_set);
-        }
         if font.is_cff {
             descriptor.font_file3(refs.file);
         } else {
@@ -784,13 +770,6 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs, conformance: P
         stream.filter(Filter::FlateDecode);
     }
     pdf.cmap(refs.to_unicode, &font.tounicode);
-    if conformance.is_pdfa()
-        && let Some(cid_set) = refs.cid_set
-    {
-        // PDF/A-2u seam: deterministic one-bit-per-CID payload computed from
-        // the final subset, including duplicate CIDs for distinct sources.
-        pdf.stream(cid_set, &font.cid_set());
-    }
 }
 
 fn page_content(

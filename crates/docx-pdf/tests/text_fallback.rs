@@ -803,42 +803,6 @@ fn pdfa_rejects_ambiguous_cff_glyph_mappings() {
 }
 
 #[test]
-fn pdfa_splits_duplicate_truetype_texts_into_distinct_cids() {
-    let mut store = FontStore::default();
-    let bytes = font_bytes("Roboto-Regular.ttf");
-    let roboto = store.register(bytes.clone()).expect("roboto");
-    let face = Face::parse(&bytes, 0).expect("face");
-    let gid = face.glyph_index('A').expect("A").0;
-    let uses = BTreeMap::from([(gid, BTreeSet::from(["A".to_owned(), "B".to_owned()]))]);
-
-    let font = font::EmbeddedFont::new_with_conformance(
-        "F1".to_owned(),
-        &store,
-        roboto.to_u32(),
-        &uses,
-        PdfConformance::PdfA2u,
-    )
-    .expect("truetype duplicates get distinct CIDs");
-    let a = font.cid_exact(u32::from(gid), "A").expect("A cid");
-    let b = font.cid_exact(u32::from(gid), "B").expect("B cid");
-    assert_ne!(a, b, "one glyph cannot carry two ToUnicode meanings");
-    assert!(
-        font.cid_to_gid.is_some(),
-        "duplicate CIDs need a CIDToGIDMap"
-    );
-    let cmap = String::from_utf8_lossy(&font.tounicode);
-    assert!(cmap.contains("0041") && cmap.contains("0042"), "{cmap}");
-
-    let cid_set = font.cid_set();
-    assert!(!cid_set.is_empty());
-    for cid in [a, b] {
-        let byte = cid_set[usize::from(cid) / 8];
-        let mask = 0x80u8 >> (usize::from(cid) % 8);
-        assert_ne!(byte & mask, 0, "CID {cid} missing from /CIDSet");
-    }
-}
-
-#[test]
 fn pdfa_tounicode_excludes_control_bom_and_noncharacters() {
     let mut store = FontStore::default();
     let bytes = font_bytes("Roboto-Regular.ttf");

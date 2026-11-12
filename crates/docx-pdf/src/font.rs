@@ -637,31 +637,6 @@ impl EmbeddedFont {
         }
         Some(cid)
     }
-
-    /// PDF `/CIDSet` payload: one bit per addressable CID, most significant bit
-    /// first, covering the identity range (including `.notdef` at CID 0),
-    /// every duplicate CID allocated for a distinct source string, and every
-    /// extra glyph a `CIDToGIDMap` identity relation exposes.
-    ///
-    /// Computed from the final subset data, so the writer can emit it for
-    /// PDF/A-2u without a second planning pass; the bytes are deterministic.
-    pub(crate) fn cid_set(&self) -> Vec<u8> {
-        // With an explicit map the legal CIDs are exactly its indices; with
-        // Identity every glyph in the subset is addressable, including
-        // component glyphs no run paints.
-        let max_cid = match &self.cid_to_gid {
-            Some(map) => map.len().saturating_sub(1),
-            None => self.widths.len().saturating_sub(1),
-        }
-        .max(usize::from(
-            self.cid_map.values().copied().max().unwrap_or(0),
-        ));
-        let mut bits = vec![0u8; max_cid / 8 + 1];
-        for cid in 0..=max_cid {
-            bits[cid / 8] |= 0x80u8 >> (cid % 8);
-        }
-        bits
-    }
 }
 
 /// Visit every primitive a page paints, in paint order, stopping at the first

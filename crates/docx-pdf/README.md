@@ -34,7 +34,7 @@ Supported today:
   glyph runs, images and shapes; merged per target
 - opt-in PDF/A-2u (ISO 19005-2 level U): embedded sRGB output intent, XMP
   `pdfaid` identification, matching document information, deterministic trailer
-  IDs, CIDSet, nonzero glyph codes and Unicode mappings for every painted
+  IDs, nonzero glyph codes and Unicode mappings for every painted
   scalar. Standard exports remain plain PDF 1.7 and make no PDF/A claim.
 - PDF/A-2u registers a bundled monochrome Noto Emoji fallback so emoji scalars
   are painted from a real outline instead of `.notdef`
