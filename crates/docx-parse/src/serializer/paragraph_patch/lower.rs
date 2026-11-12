@@ -573,7 +573,7 @@ pub(super) fn decode(text: &str) -> Result<String, Failure> {
         .map_err(|_| Failure::structure("invalid XML entity"))
 }
 
-fn decoded_scalars(
+pub(super) fn decoded_scalars(
     source: &str,
     span: Range<usize>,
 ) -> Result<Vec<(String, Range<usize>)>, Failure> {
