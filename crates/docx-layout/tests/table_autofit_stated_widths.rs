@@ -74,7 +74,10 @@ fn label_lines(table: &TableExtent) -> usize {
 fn assert_widths(actual: &[f64], expected: &[f64]) {
     assert_eq!(actual.len(), expected.len(), "{actual:?} vs {expected:?}");
     for (actual_width, expected_width) in actual.iter().zip(expected) {
-        assert!((actual_width - expected_width).abs() < 1e-6, "{actual:?} vs {expected:?}");
+        assert!(
+            (actual_width - expected_width).abs() < 1e-6,
+            "{actual:?} vs {expected:?}"
+        );
     }
 }
 
