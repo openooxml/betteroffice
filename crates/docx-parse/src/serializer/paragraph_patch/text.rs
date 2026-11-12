@@ -370,6 +370,14 @@ pub(super) fn write(
             changed_runs.insert(cell.run);
         }
     }
+    if changed_runs
+        .iter()
+        .any(|run| lowered.field_text_runs.contains(run))
+    {
+        return Err(Failure::structure(
+            "field: edit changes a run holding field result text",
+        ));
+    }
     let mut result_units = Vec::new();
     for (at, cell) in lowered.cells.iter().enumerate() {
         #[cfg(test)]

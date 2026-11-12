@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use serde_json::json;
@@ -204,6 +204,7 @@ pub(super) struct Lowered {
     pub markers: Vec<u32>,
     pub len: u32,
     pub ppr: Option<usize>,
+    pub field_text_runs: BTreeSet<usize>,
     fields: Vec<bool>,
     seeded_field: bool,
 }
@@ -271,6 +272,7 @@ pub(super) fn lower(
         markers: Vec::new(),
         len: 0,
         ppr,
+        field_text_runs: BTreeSet::new(),
         fields: Vec::new(),
         seeded_field: false,
     };
@@ -399,6 +401,9 @@ fn lower_run(
             return Err(Failure::structure("field: unsupported field code content"));
         }
         if result.seeded_field {
+            if node.word("t") {
+                result.field_text_runs.insert(run);
+            }
             continue;
         }
         if drawing(node) {
