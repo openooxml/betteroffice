@@ -3451,6 +3451,10 @@ impl EditingDoc {
                     }
                 }
             }
+            let mut by_id: HashMap<u32, Vec<&str>> = HashMap::new();
+            for (holder, now) in &current {
+                by_id.entry(*now).or_default().push(holder.as_str());
+            }
             let captured: HashSet<(&str, u32)> = saved
                 .iter()
                 .filter_map(|(owner, id)| Some((owner.as_str(), parse_paragraph_id(id)?)))
@@ -3469,10 +3473,11 @@ impl EditingDoc {
                 };
                 let moved = current.get(owner).is_some_and(|now| *now != id);
                 let viewed = occurrence(owner);
-                let taken = current.iter().any(|(holder, now)| {
-                    *now == id
-                        && !captured.contains(&(holder.as_str(), id))
-                        && (viewed.is_none() || occurrence(holder) != viewed)
+                let taken = by_id.get(&id).is_some_and(|holders| {
+                    holders.iter().any(|&holder| {
+                        !captured.contains(&(holder, id))
+                            && (viewed.is_none() || occurrence(holder) != viewed)
+                    })
                 });
                 if moved || taken {
                     stale.push((owner.clone(), text.clone()));
