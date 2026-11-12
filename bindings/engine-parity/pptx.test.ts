@@ -8,6 +8,7 @@ import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
 import {
   coverageProblems,
   defineRow,
+  printParityCounts,
   rowName,
   runKnownDifference,
   runRow,
@@ -516,7 +517,10 @@ function pptxSurface(): string[] {
 
 describe('pptx native and wasm parity table', () => {
   test('every method on both engines is a row, an exclusion or not yet covered', () => {
-    expect(coverageProblems(pptxSurface(), { rows, exclusions, notYetCovered, knownDifferences })).toEqual([]);
+    const surface = pptxSurface();
+    const plan = { rows, exclusions, notYetCovered, knownDifferences };
+    printParityCounts('pptx', surface, plan);
+    expect(coverageProblems(surface, plan)).toEqual([]);
   });
 
   test('the not yet covered list only shrinks', () => {

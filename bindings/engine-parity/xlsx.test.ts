@@ -8,6 +8,7 @@ import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
 import {
   coverageProblems,
   defineRow,
+  printParityCounts,
   rowName,
   runKnownDifference,
   runRow,
@@ -346,7 +347,10 @@ function xlsxSurface(): string[] {
 
 describe('xlsx native and wasm parity table', () => {
   test('every method on both engines is a row, an exclusion or not yet covered', () => {
-    expect(coverageProblems(xlsxSurface(), { rows, exclusions, notYetCovered, knownDifferences })).toEqual([]);
+    const surface = xlsxSurface();
+    const plan = { rows, exclusions, notYetCovered, knownDifferences };
+    printParityCounts('xlsx', surface, plan);
+    expect(coverageProblems(surface, plan)).toEqual([]);
   });
 
   test('the not yet covered list only shrinks', () => {

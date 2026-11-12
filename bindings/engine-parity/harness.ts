@@ -224,15 +224,27 @@ export function surfaceMethods(wasm: readonly Surface[], native: Surface): strin
   return [...new Set(wasm.flatMap(names))].filter((name) => nativeNames.has(name)).sort();
 }
 
-export function coverageProblems(
-  surface: readonly string[],
-  plan: {
-    rows: readonly RowExpectation[];
-    exclusions: readonly Exclusion[];
-    notYetCovered: readonly string[];
-    knownDifferences: readonly KnownDifference[];
-  },
-): string[] {
+export interface CoveragePlan {
+  rows: readonly RowExpectation[];
+  exclusions: readonly Exclusion[];
+  notYetCovered: readonly string[];
+  knownDifferences: readonly KnownDifference[];
+}
+
+export function printParityCounts(format: string, surface: readonly string[], plan: CoveragePlan): void {
+  console.log([
+    `PARITY-COUNTS ${format}`,
+    `surface=${surface.length}`,
+    `rows=${plan.rows.length}`,
+    `methodsCovered=${new Set(plan.rows.map((row) => row.method)).size}`,
+    `excluded=${plan.exclusions.length}`,
+    `notYetCovered=${plan.notYetCovered.length}`,
+    `errorRows=${plan.rows.filter((row) => row.throws).length}`,
+    `knownDifferences=${plan.knownDifferences.length}`,
+  ].join(' '));
+}
+
+export function coverageProblems(surface: readonly string[], plan: CoveragePlan): string[] {
   const problems: string[] = [];
   const declared = new Set(surface);
   const rowMethods = [...new Set(plan.rows.map((row) => row.method))];

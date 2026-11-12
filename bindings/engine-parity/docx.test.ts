@@ -13,6 +13,7 @@ import {
   coverageProblems,
   defineRow,
   FramedZipReturn,
+  printParityCounts,
   rowName,
   runKnownDifference,
   runRow,
@@ -638,7 +639,10 @@ function docxSurface(): string[] {
 
 describe('docx native and wasm parity table', () => {
   test('every method on both engines is a row, an exclusion or not yet covered', () => {
-    expect(coverageProblems(docxSurface(), { rows, exclusions, notYetCovered, knownDifferences })).toEqual([]);
+    const surface = docxSurface();
+    const plan = { rows, exclusions, notYetCovered, knownDifferences };
+    printParityCounts('docx', surface, plan);
+    expect(coverageProblems(surface, plan)).toEqual([]);
   });
 
   test('the not yet covered list only shrinks', () => {
