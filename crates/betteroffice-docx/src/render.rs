@@ -122,9 +122,7 @@ impl Document {
         let package =
             serde_json::to_value(package).map_err(|error| Error::Render(error.to_string()))?;
         let mut request = docx_edit::layout_request::region_layout_request(&package, 24.0);
-        request["measurement"] = serde_json::json!({
-            "defaults": {"fontFamily": "Calibri", "fontSize": 11}
-        });
+        request["measurement"] = docx_edit::layout_request::measurement(&package);
         let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
         #[cfg(feature = "fonts")]
         {

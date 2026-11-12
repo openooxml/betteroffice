@@ -731,6 +731,14 @@ impl XlsxDocument {
     }
 
     #[napi(catch_unwind)]
+    pub fn fill_range_json(&mut self, env: Env, args: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document_mut(env)?
+            .fill_range_json(&args)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
     pub fn apply_ops_json(&mut self, env: Env, transaction_json: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
