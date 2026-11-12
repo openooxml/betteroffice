@@ -50,6 +50,7 @@ export declare class XlsxDocument {
   /** @internal */
   translateFormulasJson(args: string): string
   moveRangeJson(args: string): string
+  fillRangeJson(args: string): string
   applyOpsJson(transactionJson: string): string
   chartsJson(sheet: number): string
   editChartsJson(edits: string): string
