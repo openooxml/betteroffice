@@ -1,9 +1,4 @@
-/**
- * Faces a capture's font provider offers and how each load ended. A load is recorded only when the provider
- * offered a face for the request, so a document asking for a family the pack does not carry records nothing and
- * falls back without a failure. Only faces in the provider's advertised set count; a load whose face cannot be
- * named from that set is reported apart as unattributed and never fails the arm.
- */
+/** Summary of the faces a capture's font provider advertises and how each load of them ended. */
 
 const fileOf = (url) => {
   try {

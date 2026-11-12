@@ -74,12 +74,7 @@ function score(samples, channel, revision) {
 const fontSourceLabel = (fonts) =>
   `${fonts.package}${fonts.cjk ? ` and ${fonts.cjk}` : ''} (${fonts.copy})`;
 
-/**
- * One arm's font source and how the faces it requested from its provider loaded across the arm's captures.
- * `requested` counts the faces the documents requested that the provider offers (base Latin included when the
- * release ships it); `missing` counts completed captures that recorded no face loads at all. Only completed
- * captures are measured: a capture that timed out or errored is never scored, so it is counted in `not_measured`.
- */
+/** One arm's font source and face load counts across its captures. */
 export function fontSummary(samples, channel) {
   const sources = new Set();
   const loaded = new Set();

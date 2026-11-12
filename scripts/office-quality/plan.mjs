@@ -168,10 +168,7 @@ export function releasedFonts(fonts, releases, { packageName = '@betteroffice/fo
   return { published_fonts, fonts_basis };
 }
 
-/**
- * The fonts release of each published format package, and the @betteroffice/fonts-cjk release its CDN
- * provider points at: built from the same commit as that fonts release, else the latest published before it.
- */
+/** The @betteroffice/fonts and @betteroffice/fonts-cjk releases paired with each published format package. */
 export async function releasedFontPackages(packument, releases) {
   const fonts = await packument('@betteroffice/fonts');
   const choice = releasedFonts(fonts, releases);
