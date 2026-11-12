@@ -552,13 +552,38 @@ test('one job fetches the LibreOffice archive into a cache every LibreOffice job
     const install = job.steps.findIndex((step: any) => String(step.run ?? '').includes('install-libreoffice.sh'));
     expect({ name, restore: job.steps[install - 2] }).toEqual({ name, restore: {
       name: 'Restore the LibreOffice archive', id: 'restore-libreoffice', uses: CACHE,
-      with: { path: '~/.cache/libreoffice-archive', key: '${{ needs.libreoffice-archive.outputs.key }}', 'fail-on-cache-miss': true } } });
-    const check = job.steps[install - 1];
-    expect({ name, check: check.name, env: check.env }).toEqual({ name, check: 'Require the exact LibreOffice archive cache entry', env: {
-      CACHE_HIT: '${{ steps.restore-libreoffice.outputs.cache-hit }}', CACHE_KEY: '${{ needs.libreoffice-archive.outputs.key }}' } });
-    expect(check.run).toContain('if [ "$CACHE_HIT" != "true" ]; then');
-    expect(check.run).toContain('::error::the LibreOffice archive cache entry $CACHE_KEY was not restored exactly; rerun the whole workflow so libreoffice-archive fetches it');
-    expect(check.run).toContain('exit 1');
-    expect(check.run).not.toMatch(/curl|wget|fetch-libreoffice/);
+      with: { path: '~/.cache/libreoffice-archive', key: '${{ needs.libreoffice-archive.outputs.key }}' } } });
+    const fallback = job.steps[install - 1];
+    expect({ name, fallback: fallback.name, if: fallback.if, env: fallback.env }).toEqual({
+      name, fallback: 'Fetch and verify the LibreOffice archive on a cache miss', if: undefined, env: {
+        CACHE_HIT: '${{ steps.restore-libreoffice.outputs.cache-hit }}', CACHE_KEY: '${{ needs.libreoffice-archive.outputs.key }}',
+        LO_FETCH_BUDGET: '1200' } });
+    expect(fallback['timeout-minutes'] * 60).toBeGreaterThan(Number(fallback.env.LO_FETCH_BUDGET));
+    expect(fallback.run).toContain('if [ "$CACHE_HIT" = "true" ]; then');
+    expect(fallback.run).toContain('echo "LibreOffice archive $CACHE_KEY restored from cache"');
+    expect(fallback.run).toContain('echo "::warning::cache miss for $CACHE_KEY: fetching and verifying the pinned archive"');
+    expect(fallback.run.indexOf('bash scripts/office-quality/fetch-libreoffice.sh')).toBeGreaterThan(fallback.run.indexOf('else'));
   }
+});
+
+test('every restore of the LibreOffice archive falls back to the verified fetch on a miss and only the archive job saves it', () => {
+  const uses = (step: any, action: string) => String(step.uses ?? '').startsWith(`actions/cache/${action}@`)
+    && step.with?.path === '~/.cache/libreoffice-archive';
+  const jobs = Object.entries<any>(workflow.jobs).map(([name, job]) => ({ name, steps: job.steps ?? [] }));
+  for (const { steps } of jobs)
+    for (const step of steps) expect({ name: step.name, failOnMiss: step.with?.['fail-on-cache-miss'] }).toEqual({ name: step.name, failOnMiss: undefined });
+  const restores = jobs.flatMap(({ name, steps }) => steps.flatMap((step: any, index: number) => uses(step, 'restore') ? [{ name, steps, index }] : []));
+  expect(restores.length).toBe(8);
+  for (const { name, steps, index } of restores) {
+    const restore = steps[index];
+    const fetch = steps[index + 1];
+    expect({ name, fetches: String(fetch.run ?? '').includes('bash scripts/office-quality/fetch-libreoffice.sh') }).toEqual({ name, fetches: true });
+    const gate = name === 'libreoffice-archive' ? fetch.if : fetch.env?.CACHE_HIT;
+    const expected = name === 'libreoffice-archive'
+      ? `steps.${restore.id}.outputs.cache-hit != 'true'`
+      : `\${{ steps.${restore.id}.outputs.cache-hit }}`;
+    expect({ name, gate }).toEqual({ name, gate: expected });
+  }
+  const savers = jobs.filter(({ steps }) => steps.some((step: any) => uses(step, 'save'))).map(({ name }) => name);
+  expect(savers).toEqual(['libreoffice-archive']);
 });

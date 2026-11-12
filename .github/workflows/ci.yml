@@ -221,6 +221,27 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      - name: Lint the workflows
+        if: matrix.shard == 1
+        run: |
+          set -euo pipefail
+          actionlint_version=1.7.12
+          actionlint_sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          shellcheck_version=v0.11.0
+          shellcheck_sha256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          actionlint_archive="actionlint_${actionlint_version}_linux_amd64.tar.gz"
+          shellcheck_archive="shellcheck-$shellcheck_version.linux.x86_64.tar.xz"
+          tools=$(mktemp -d "$RUNNER_TEMP/workflow-lint.XXXXXX")
+          curl -fsSL --retry 5 --retry-all-errors -o "$tools/$actionlint_archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v$actionlint_version/$actionlint_archive"
+          curl -fsSL --retry 5 --retry-all-errors -o "$tools/$shellcheck_archive" \
+            "https://github.com/koalaman/shellcheck/releases/download/$shellcheck_version/$shellcheck_archive"
+          printf '%s  %s\n' "$actionlint_sha256" "$actionlint_archive" "$shellcheck_sha256" "$shellcheck_archive" > "$tools/SHA256SUMS"
+          (cd "$tools" && sha256sum -c SHA256SUMS)
+          tar -xzf "$tools/$actionlint_archive" -C "$tools" actionlint
+          tar -xJf "$tools/$shellcheck_archive" -C "$tools" --strip-components=1 "shellcheck-$shellcheck_version/shellcheck"
+          "$tools/actionlint" -shellcheck="$tools/shellcheck" -pyflakes=
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.3"
@@ -588,13 +609,25 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=8192
         run: |
+          declarations() {
+            local path
+            for path in "$1"/*.d.ts; do
+              if [ ! -e "$path" ]; then
+                echo "::error::$1 has no .d.ts file" >&2
+                exit 1
+              fi
+              printf '%s\n' "${path##*/}"
+            done
+          }
           (cd packages/xlsx && bunx tsup)
-          ls packages/xlsx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/wasm-declarations"
-          ls bindings/xlsx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/wasm-declarations" -
+          declarations packages/xlsx/dist > "$RUNNER_TEMP/wasm-declarations"
+          declarations bindings/xlsx-native/dist > "$RUNNER_TEMP/native-declarations"
+          diff "$RUNNER_TEMP/wasm-declarations" "$RUNNER_TEMP/native-declarations"
           while read -r file; do cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"; done < "$RUNNER_TEMP/wasm-declarations"
           (cd packages/pptx && bunx tsup)
-          ls packages/pptx/dist/*.d.ts | sed 's#.*/##' > "$RUNNER_TEMP/pptx-wasm-declarations"
-          ls bindings/pptx-native/dist/*.d.ts | sed 's#.*/##' | diff "$RUNNER_TEMP/pptx-wasm-declarations" -
+          declarations packages/pptx/dist > "$RUNNER_TEMP/pptx-wasm-declarations"
+          declarations bindings/pptx-native/dist > "$RUNNER_TEMP/pptx-native-declarations"
+          diff "$RUNNER_TEMP/pptx-wasm-declarations" "$RUNNER_TEMP/pptx-native-declarations"
           while read -r file; do cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"; done < "$RUNNER_TEMP/pptx-wasm-declarations"
           for format in pptx xlsx; do
             asset_chunks=$(grep -rlF --include='*.js' "./generated/preflight/${format}_preflight_bg.wasm" "packages/$format/dist")
@@ -651,7 +684,7 @@ jobs:
 
       - name: Check native and wasm parity
         run: |
-          bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts
+          bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts bindings/engine-parity/docx.test.ts
           bun test bindings/raw-surface.test.ts
 
       - name: Check generated declarations
@@ -668,6 +701,7 @@ jobs:
           timeout 300 bun scripts/node-worker-sessions-smoke.mjs
           timeout 300 deno run --no-config --node-modules-dir=manual --allow-read --allow-env --allow-ffi scripts/node-worker-sessions-smoke.mjs
           bun scripts/worker-bundling-smoke.mjs
+          # shellcheck disable=SC2046 # repository paths contain no spaces
           node scripts/check-webpack-exports.mjs --node-import $(node scripts/native-bindings.mjs --paths)
           bun scripts/native-bindings-smoke.mjs
           smoke_dir=$(mktemp -d)
