@@ -1064,7 +1064,7 @@ struct_codec!(SheetFormat {
 });
 
 /// `SheetFormat` as laid out before column defaults, which it reads as absent.
-struct LegacyFormat {
+pub(super) struct LegacyFormat {
     default_row_height_pt: Option<f64>,
     custom_height: bool,
     zero_height: bool,

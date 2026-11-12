@@ -1043,7 +1043,11 @@ impl WorkbookAuthority {
         base.fingerprint.write(&mut writer);
         base.fingerprints.write(&mut writer);
         base.freeze_panes.write(&mut writer);
-        base.formats.write(&mut writer);
+        base.formats
+            .iter()
+            .map(snapshot::LegacyFormat::from)
+            .collect::<Vec<_>>()
+            .write(&mut writer);
         base.col_styles.write(&mut writer);
         base.hyperlinks.write(&mut writer);
         base.charts.write(&mut writer);
@@ -1057,7 +1061,11 @@ impl WorkbookAuthority {
         writer.var_usize(update.len());
         let mut tail = Writer::new();
         base.row_styles.write(&mut tail);
-        if base.auto_filters.iter().any(Option::is_some)
+        let sized = base.formats.iter().any(|format| {
+            format.default_col_width.is_some() || format.base_col_width.is_some()
+        });
+        if sized
+            || base.auto_filters.iter().any(Option::is_some)
             || base
                 .conditional_formats
                 .iter()
@@ -1066,10 +1074,17 @@ impl WorkbookAuthority {
             let formats = serde_json::to_vec(&base.conditional_formats)
                 .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
             tail.bytes(&formats);
-            if base.auto_filters.iter().any(Option::is_some) {
+            if sized || base.auto_filters.iter().any(Option::is_some) {
                 let filters = serde_json::to_vec(&base.auto_filters)
                     .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
                 tail.bytes(&filters);
+            }
+            if sized {
+                base.formats
+                    .iter()
+                    .map(|format| (format.default_col_width, format.base_col_width))
+                    .collect::<Vec<_>>()
+                    .write(&mut tail);
             }
         }
         Ok([writer.into_bytes(), update, tail.into_bytes()])
@@ -1136,7 +1151,10 @@ impl WorkbookAuthority {
             fingerprint: Codec::read(&mut reader)?,
             fingerprints: Codec::read(&mut reader)?,
             freeze_panes: Codec::read(&mut reader)?,
-            formats: Codec::read(&mut reader)?,
+            formats: Vec::<snapshot::LegacyFormat>::read(&mut reader)?
+                .into_iter()
+                .map(SheetFormat::from)
+                .collect(),
             col_styles: Codec::read(&mut reader)?,
             row_styles: Vec::new(),
             conditional_formats: Vec::new(),
@@ -1165,6 +1183,18 @@ impl WorkbookAuthority {
         if !reader.is_empty() {
             base.auto_filters = serde_json::from_str(reader.str()?)
                 .map_err(|error| SnapshotError::new(error.to_string()))?;
+        }
+        if !reader.is_empty() {
+            let defaults = Vec::<(Option<f64>, Option<u32>)>::read(&mut reader)?;
+            if defaults.len() != base.formats.len() {
+                return Err(SnapshotError::new(
+                    "Recovery column defaults do not match the sheets",
+                ));
+            }
+            for (format, (width, digits)) in base.formats.iter_mut().zip(defaults) {
+                format.default_col_width = width;
+                format.base_col_width = digits;
+            }
         }
         reader.finish()?;
         let doc = loop {
