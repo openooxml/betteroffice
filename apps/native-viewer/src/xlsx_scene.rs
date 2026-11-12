@@ -10,7 +10,8 @@ use vello::peniko::{
 };
 use vello::{Glyph, Scene};
 use xlsx_render::{
-    Align, DisplayList, DrawCmd, GeometryPathCommand, PatternType, Rect as DisplayRect, border_dash,
+    Align, DisplayList, DrawCmd, GeometryPathCommand, PatternType, Rect as DisplayRect,
+    RunUnderline, border_dash,
 };
 
 use crate::scene_shared::{
@@ -63,6 +64,7 @@ pub fn paint_cell_editor(scene: &mut Scene, rect: DisplayRect, value: &str) -> R
         11.0,
         "#000000",
         Align::Left,
+        false,
         false,
         false,
         false,
@@ -218,6 +220,7 @@ fn translate_command(
             bold,
             italic,
             underline,
+            underline_style,
             strike,
             highlight,
             dashed_underline,
@@ -248,6 +251,7 @@ fn translate_command(
                     *bold,
                     *italic,
                     *underline,
+                    double_underline(*underline_style),
                     *strike,
                     highlight.as_deref(),
                     *dashed_underline,
@@ -285,6 +289,13 @@ fn translate_command(
             })
         }
     }
+}
+
+fn double_underline(style: Option<RunUnderline>) -> bool {
+    matches!(
+        style,
+        Some(RunUnderline::Double | RunUnderline::DoubleAccounting)
+    )
 }
 
 fn paint_clipped(
@@ -449,6 +460,7 @@ struct PreparedText {
     bold: bool,
     italic: bool,
     underline: bool,
+    double_underline: bool,
     strike: bool,
     dashed_underline: bool,
 }
@@ -465,6 +477,7 @@ impl PreparedText {
         bold: bool,
         italic: bool,
         underline: bool,
+        double_underline: bool,
         strike: bool,
         highlight: Option<&str>,
         dashed_underline: bool,
@@ -513,6 +526,7 @@ impl PreparedText {
             bold,
             italic,
             underline,
+            double_underline,
             strike,
             dashed_underline,
         })
@@ -570,6 +584,11 @@ impl PreparedText {
                 .map(|metrics| metrics.thickness as f32)
                 .unwrap_or(0.05 * em);
             self.paint_bar(scene, position, thickness);
+            if self.double_underline {
+                let line = (thickness * self.scale).max(0.5);
+                let second = position - (line + line.max(1.0)) / self.scale;
+                self.paint_bar(scene, second, thickness);
+            }
         }
         if self.strike {
             let metrics = FACE.strikeout_metrics();
@@ -832,7 +851,9 @@ fn loose_extents(x1: f32, y1: f32, x2: f32, y2: f32) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_render::{GridMeta, NumberFormatLayout, PathStroke, TextValign, TextWrap};
+    use xlsx_render::{
+        GridMeta, NumberFormatLayout, PathStroke, RunUnderline, TextValign, TextWrap,
+    };
 
     fn display_list(commands: Vec<DrawCmd>) -> DisplayList {
         DisplayList {
@@ -928,6 +949,7 @@ mod tests {
             bold: true,
             italic: true,
             underline: true,
+            underline_style: None,
             strike: true,
             highlight: Some("#ffff0080".into()),
             dashed_underline: true,
@@ -962,6 +984,7 @@ mod tests {
             bold: false,
             italic: false,
             underline: false,
+            underline_style: None,
             strike: false,
             highlight: None,
             dashed_underline: false,
@@ -1004,6 +1027,48 @@ mod tests {
         }
         let page = translate_sheet(&display_list(vec![wrapped, formatted, overflowing])).unwrap();
         assert_eq!(page.skipped.total(), 0);
+    }
+
+    #[test]
+    fn underline_kinds_draw_one_or_two_bars() {
+        let edges = |underline: bool, style: Option<RunUnderline>| {
+            let mut command = text("Total");
+            if let DrawCmd::Text {
+                underline: set,
+                underline_style,
+                ..
+            } = &mut command
+            {
+                *set = underline;
+                *underline_style = style;
+            }
+            let page = translate_sheet(&display_list(vec![command])).unwrap();
+            let points: Vec<(f32, f32)> = page
+                .scene
+                .encoding()
+                .path_data
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|point| (f32::from_bits(point[0]), f32::from_bits(point[1])))
+                .filter(|&(_, y)| y > 0.0 && y < 60.0)
+                .collect();
+            let mut xs: Vec<f32> = points.iter().map(|point| point.0).collect();
+            let mut ys: Vec<f32> = points.iter().map(|point| point.1).collect();
+            xs.sort_by(f32::total_cmp);
+            xs.dedup();
+            ys.sort_by(f32::total_cmp);
+            ys.dedup();
+            (xs, ys)
+        };
+        assert!(edges(false, None).1.is_empty());
+        assert!(edges(false, Some(RunUnderline::Double)).1.is_empty());
+        let single = edges(true, None);
+        assert_eq!(single.1.len(), 2);
+        assert_eq!(edges(true, Some(RunUnderline::SingleAccounting)), single);
+        let double = edges(true, Some(RunUnderline::Double));
+        assert_eq!(double.1.len(), 4);
+        assert_eq!(edges(true, Some(RunUnderline::DoubleAccounting)), double);
     }
 
     #[test]

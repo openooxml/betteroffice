@@ -4,7 +4,7 @@ import { buildA11yGrid, cellRect, normalizeRange, rangeRect } from '@betteroffic
 import type { CellAddr, CellRange, WorkbookSheetSummary } from '@betteroffice/xlsx';
 import type { CollaborationAwareness } from '@betteroffice/xlsx/collaboration';
 import { useTranslation } from '../i18n';
-import { expandRangeToMergedCells, scaledRect } from '../viewer/sessionGeometry';
+import { coversWholeTrack, deriveLimits, expandRangeToMergedCells, scaledRect } from '../viewer/sessionGeometry';
 import { FillHandle, fillHandleAnchor } from '../components/FillHandle';
 import { PeerlessWorkerCellInput, usePeerlessReadOnly } from './PeerlessWorkerInputs';
 import { cellEditorColors } from '../viewer/cellEditorColors';
@@ -82,7 +82,8 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
     style={{ position: 'absolute', top: 0, left: 0, width: 0, height: 0, pointerEvents: 'none' }}>
     {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
       style={outline(selectionRect, '1px solid #217346', 'rgba(33, 115, 70, 0.12)')} />}
-    {fillHandle && !unavailable && !selectedChart && !drafting && fillHandleRect && expanded && onFill && cellAt && (
+    {fillHandle && !unavailable && !selectedChart && !drafting && fillHandleRect && expanded && onFill && cellAt &&
+      !coversWholeTrack(expanded, deriveLimits(painted?.displayList ?? null, 0)) && (
       <FillHandle rect={fillHandleRect} source={expanded}
         rectForRange={fillRect} cellAt={cellAt} onFill={onFill}
         ariaLabel={t('a11y.fillHandleLabel')} />

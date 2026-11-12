@@ -49,7 +49,7 @@ import { frozenGridExtent } from '../plugins/geometry';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
-import { cellInViewport, deriveLimits, expandRangeToMergedCells, extendScrollExtent, laidOutCellRect, nearestCellScroll, positionAtPoint, scaledRect } from '../viewer/sessionGeometry';
+import { cellInViewport, coversWholeTrack, deriveLimits, expandRangeToMergedCells, extendScrollExtent, laidOutCellRect, nearestCellScroll, positionAtPoint, scaledRect } from '../viewer/sessionGeometry';
 import { cellEditorColors } from '../viewer/cellEditorColors';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 
@@ -1866,7 +1866,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                     {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
                       style={outline(selectionRect, `1px solid ${BRAND}`, 'rgba(33, 115, 70, 0.12)')} />}
                     {props.fillHandle && !props.readOnly && !editing && !coordinator.draft && !selectedChart && acceptInput() &&
-                      fillHandleRect && selected && (
+                      fillHandleRect && selected && !coversWholeTrack(selected, limits()) && (
                       <FillHandle rect={fillHandleRect} source={selected}
                         rectForRange={fillPreviewRect} cellAt={cellAtPointForFill} onFill={fillSelection}
                         ariaLabel={t('a11y.fillHandleLabel')} />
