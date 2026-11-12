@@ -1833,9 +1833,12 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       bottom: previewDraft.row, right: previewDraft.col }, merged)) : null;
   const chartRegion = selectedChart
     ? frame?.charts?.find((chart) => chart.id === selectedChart.id) ?? null : null;
+  const chartFrozen = painted && view
+    ? frozenGridExtent(painted.displayList.grid, view.frozenRows, view.frozenCols) : null;
   const chartSpace = chartRegion && painted && view ? chartResizeSpace(chartRegion, {
     x: painted.request.viewport.x, y: painted.request.viewport.y,
     frozenRows: view.frozenRows, frozenCols: view.frozenCols,
+    frozenWidth: chartFrozen?.width, frozenHeight: chartFrozen?.height,
   }) : undefined;
   const shownChart = chartRegion && chartPreview?.kind === 'resize'
     ? chartResizeRect(chartRegion.rect, chartPreview.handle, chartPreview.dx, chartPreview.dy, chartSpace)

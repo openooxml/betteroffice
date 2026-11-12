@@ -59,6 +59,9 @@ export interface ChartResizeViewport {
   y: number;
   frozenRows: number;
   frozenCols: number;
+  /** frozen pane extent in content pixels, when the caller can read it. */
+  frozenWidth?: number;
+  frozenHeight?: number;
   /** worksheet extent in content pixels, when the caller can read it. */
   sheetWidth?: number;
   sheetHeight?: number;
@@ -76,16 +79,18 @@ export interface ChartResizeSpace {
  * Recover the sheet-space origin of a painted chart. A chart pinned inside a
  * frozen pane (the resolver pins it when its first cell is frozen) already has
  * sheet coordinates; every other chart is painted relative to the viewport and
- * needs the scroll origin added back. A pinned pane clips from 0, an unpinned
- * one clips from the frozen edge, which is how the two are told apart from the
- * published region alone.
+ * needs the scroll origin added back. An unpinned chart's clip starts at or
+ * past the frozen edge, a pinned one's inside the pane; without the pane extent
+ * only a clip at 0 reads as pinned.
  */
 export function chartResizeSpace(
   chart: { clip: Rect },
   viewport: ChartResizeViewport
 ): ChartResizeSpace {
-  const pinnedX = viewport.frozenCols > 0 && chart.clip.x <= 0.5;
-  const pinnedY = viewport.frozenRows > 0 && chart.clip.y <= 0.5;
+  const inPane = (clip: number, extent: number | undefined) =>
+    extent !== undefined && extent > 0 ? clip < extent - 0.5 : clip <= 0.5;
+  const pinnedX = viewport.frozenCols > 0 && inPane(chart.clip.x, viewport.frozenWidth);
+  const pinnedY = viewport.frozenRows > 0 && inPane(chart.clip.y, viewport.frozenHeight);
   return {
     originX: pinnedX ? 0 : viewport.x,
     originY: pinnedY ? 0 : viewport.y,

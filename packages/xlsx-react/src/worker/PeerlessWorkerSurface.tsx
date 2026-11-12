@@ -8,6 +8,7 @@ import { coversWholeTrack, deriveLimits, expandRangeToMergedCells, scaledRect } 
 import { FillHandle, fillHandleAnchor } from '../components/FillHandle';
 import { PeerlessWorkerCellInput, usePeerlessReadOnly } from './PeerlessWorkerInputs';
 import { cellEditorColors } from '../viewer/cellEditorColors';
+import { frozenGridExtent } from '../plugins/geometry';
 import { chartResizeRect, chartResizeSpace, type ChartDragPreview, type ChartResizeHandle,
   type SelectedChart } from './chartResize';
 import { ChartResizeHandles } from './ChartResizeHandles';
@@ -79,9 +80,12 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
   };
   const chartRegion = selectedChart
     ? painted?.displayList.charts?.find((chart) => chart.id === selectedChart.id) ?? null : null;
+  const chartFrozen = painted && view
+    ? frozenGridExtent(painted.displayList.grid, view.frozenRows, view.frozenCols) : null;
   const chartSpace = chartRegion && painted && view ? chartResizeSpace(chartRegion, {
     x: painted.request.viewport.x, y: painted.request.viewport.y,
     frozenRows: view.frozenRows, frozenCols: view.frozenCols,
+    frozenWidth: chartFrozen?.width, frozenHeight: chartFrozen?.height,
     sheetWidth: chartSheetExtent?.width, sheetHeight: chartSheetExtent?.height,
   }) : undefined;
   const shownChart = chartRegion && chartPreview?.kind === 'resize'

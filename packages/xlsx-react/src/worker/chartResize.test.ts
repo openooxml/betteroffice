@@ -57,4 +57,14 @@ describe('chart resize geometry', () => {
     const scrolled = chartResizeSpace({ clip: { x: 210, y: 130, w: 40, h: 30 } }, viewport);
     expect(scrolled).toEqual({ originX: 200, originY: 120, width: Infinity, height: Infinity });
   });
+
+  it('treats a frozen chart away from the pane origin as pinned and clamps it at the sheet origin', () => {
+    const rect = { x: 50, y: 40, w: 40, h: 30 };
+    const frozen = { ...viewport, frozenWidth: 100, frozenHeight: 80 };
+    const pinned = chartResizeSpace({ clip: rect }, frozen);
+    expect(pinned).toEqual({ originX: 0, originY: 0, width: Infinity, height: Infinity });
+    expect(chartResizeRect(rect, 'nw', -100, -100, pinned)).toEqual({ x: 0, y: 0, w: 90, h: 70 });
+    const scrolled = chartResizeSpace({ clip: { x: 100, y: 80, w: 40, h: 30 } }, frozen);
+    expect(scrolled).toEqual({ originX: 200, originY: 120, width: Infinity, height: Infinity });
+  });
 });
