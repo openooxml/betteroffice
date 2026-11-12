@@ -7847,7 +7847,8 @@ mod tests {
             payload: vec![("paraId".to_owned(), Any::from("body-p"))],
             attrs: Attrs::new(),
         });
-        doc.apply_raw_ops("body", ops, &EditCtx::local("", DATE)).unwrap();
+        doc.apply_raw_ops("body", ops, &EditCtx::local("", DATE))
+            .unwrap();
         doc
     }
 

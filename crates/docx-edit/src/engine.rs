@@ -5741,9 +5741,10 @@ impl EngineSession {
             let blocks = Rc::get_mut(&mut lowered.blocks)?;
             let map = Rc::get_mut(&mut lowered.map)?;
             let revealable = Rc::get_mut(&mut lowered.revealable_blocks)?;
-            let shift = lowered
-                .local
-                .patch(blocks.shared_mut(), map, revealable, &txn, env, &edit)?;
+            let shift =
+                lowered
+                    .local
+                    .patch(blocks.shared_mut(), map, revealable, &txn, env, &edit)?;
             let renumbered = docx_layout::footnotes::number_note_references(
                 blocks.shared_mut().as_mut_slice(),
                 &env.note_numbering,
@@ -21817,7 +21818,13 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         }
         notes.push_str("</w:footnotes>");
         let bytes = Package::new(body)
-            .part("footnotes.xml", "rIdNotes", "footnotes", "footnotes", &notes)
+            .part(
+                "footnotes.xml",
+                "rIdNotes",
+                "footnotes",
+                "footnotes",
+                &notes,
+            )
             .bytes();
         let engine = EngineSession::new(client_id);
         crate::seed_from_docx(engine.doc(), &bytes).unwrap();
@@ -21888,11 +21895,18 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             ),
             para(
                 "10000002",
-                &format!(r#"{}<w:r><w:footnoteReference w:id="4"/></w:r>"#, run("Later")),
+                &format!(
+                    r#"{}<w:r><w:footnoteReference w:id="4"/></w:r>"#,
+                    run("Later")
+                ),
             ),
         );
         let engine = revision_preview_note_engine(9678, &body, &[2, 3, 4], font);
-        let shown = vec![(2, "1".to_owned()), (3, "2".to_owned()), (4, "3".to_owned())];
+        let shown = vec![
+            (2, "1".to_owned()),
+            (3, "2".to_owned()),
+            (4, "3".to_owned()),
+        ];
         let hidden = vec![(3, "1".to_owned()), (4, "2".to_owned())];
         assert_eq!(resident_footnote_marks(&engine), shown);
         for (decision, expected) in [
@@ -21933,7 +21947,13 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         }
         notes.push_str("</w:footnotes>");
         let bytes = Package::new(&body)
-            .part("footnotes.xml", "rIdNotes", "footnotes", "footnotes", &notes)
+            .part(
+                "footnotes.xml",
+                "rIdNotes",
+                "footnotes",
+                "footnotes",
+                &notes,
+            )
             .bytes();
         let (engine, _) = local_patch_laid_out(&bytes, 9679, true);
         let env = engine.render.borrow().stories["body"].env.clone();
@@ -26926,7 +26946,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 payload: vec![
                     ("tblPr".to_owned(), Any::from_json("{}").unwrap()),
                     ("grid".to_owned(), Any::from_json("[]").unwrap()),
-                    ("rows".to_owned(), Any::from_json(&rows.to_string()).unwrap()),
+                    (
+                        "rows".to_owned(),
+                        Any::from_json(&rows.to_string()).unwrap(),
+                    ),
                 ],
                 attrs: Attrs::new(),
             });
@@ -26934,7 +26957,11 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         }
         engine
             .doc()
-            .apply_raw_ops("body", ops, &crate::EditCtx::local("", "2026-07-18T00:00:00Z"))
+            .apply_raw_ops(
+                "body",
+                ops,
+                &crate::EditCtx::local("", "2026-07-18T00:00:00Z"),
+            )
             .unwrap();
         let body = engine.doc().paragraphs("body").unwrap();
         for &index in section_breaks {
@@ -27091,7 +27118,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_marks_follow_notes(
             note_ordinal_layout(
                 7317,
-                &[&[("footnote", 2.0), ("footnote", 3.0)], &[("footnote", 4.0)]],
+                &[
+                    &[("footnote", 2.0), ("footnote", 3.0)],
+                    &[("footnote", 4.0)],
+                ],
                 &[0],
                 json!({
                     "noteSettings": {"footnote": {"numRestart": "eachSect"}},
