@@ -869,6 +869,7 @@ impl Workbook {
     /// Opens keeping the results the file cached. Recalculates every formula, as
     /// [`Workbook::open_recalculated_with_seed`] does, only when a formula has no cached
     /// result or `calcPr` asks for a full calculation on load.
+    /// A blank formula result, or a blank or missing array follower, counts as uncached.
     pub fn open_recalculating_stale(
         bytes: &[u8],
         options: CalculationOptions,
@@ -880,7 +881,10 @@ impl Workbook {
             Some(package) => package.materialize()?.requests_full_calculation(),
             None => false,
         };
-        if full_calculation || workbook.has_uncached_source_formulas() {
+        if full_calculation
+            || workbook.has_uncached_source_formulas()
+            || workbook.has_blank_formula_results()
+        {
             workbook.recalculate(options);
         } else {
             workbook.derive_unevaluated(Some(options));
@@ -1758,6 +1762,25 @@ impl Workbook {
         self.source_package
             .as_ref()
             .is_some_and(|package| package.facts().has_uncached_source_formulas())
+    }
+
+    fn has_blank_formula_results(&self) -> bool {
+        self.model().sheets.iter().any(|sheet| {
+            sheet
+                .iter_cells()
+                .any(|(_, cell)| cell.formula.is_some() && cell.value == CellValue::Empty)
+                || sheet.array_formulas().any(|(anchor, range)| {
+                    (range.start.row..=range.end.row).any(|row| {
+                        (range.start.col..=range.end.col).any(|col| {
+                            let at = CellRef::new(row, col);
+                            at != anchor
+                                && sheet
+                                    .cell(at)
+                                    .is_none_or(|cell| cell.value == CellValue::Empty)
+                        })
+                    })
+                })
+        })
     }
 
     /// The committed state a structured export reads.

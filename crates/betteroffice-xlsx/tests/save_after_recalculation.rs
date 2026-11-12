@@ -190,8 +190,15 @@ fn a_stale_open_keeps_cached_results_until_an_edit_reaches_them() {
 #[test]
 fn a_stale_open_recalculates_a_file_with_an_uncached_formula_or_a_full_calculation_request() {
     let uncached = CACHED.replace("</row>", r#"<c r="D1"><f>1+1</f></c></row>"#);
+    let empty_cached = CACHED.replace("</row>", r#"<c r="D1"><f>1+1</f><v/></c></row>"#);
+    let array_follower = CACHED.replace(
+        "</row>",
+        r#"<c r="D1"><f t="array" ref="D1:E1">A1:B1</f><v>5</v></c></row>"#,
+    );
     for (sheet_data, calc_pr) in [
         (uncached.as_str(), ""),
+        (empty_cached.as_str(), ""),
+        (array_follower.as_str(), ""),
         (CACHED, r#"<calcPr fullCalcOnLoad="1"/>"#),
         (CACHED, r#"<calcPr forceFullCalc="1"/>"#),
     ] {
@@ -203,6 +210,45 @@ fn a_stale_open_recalculates_a_file_with_an_uncached_formula_or_a_full_calculati
             "{sheet_data} {calc_pr}"
         );
     }
+}
+
+#[test]
+fn a_stale_open_keeps_an_empty_string_result_cached() {
+    let source = package(
+        &CACHED.replace(
+            "</row>",
+            r#"<c r="D1" t="str"><f>""</f><v></v></c></row>"#,
+        ),
+        "",
+    );
+    let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+    assert_eq!(values(&workbook), numbers(&[5.0, 999.0, 7.0]));
+    assert_eq!(
+        workbook.model().value(SheetId(0), CellRef::new(0, 3)),
+        CellValue::Text {
+            value: String::new()
+        }
+    );
+}
+
+#[test]
+fn a_stale_open_with_an_empty_cached_result_saves_dependents_from_the_calculated_value() {
+    let source = package(
+        &CACHED.replace(
+            "</row>",
+            r#"<c r="D1"><f>1+1</f><v/></c><c r="E1"><f>D1+1</f><v>1</v></c></row>"#,
+        ),
+        "",
+    );
+    let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+    assert_eq!(
+        workbook.model().value(SheetId(0), CellRef::new(0, 3)),
+        CellValue::Number { value: 2.0 }
+    );
+    assert_eq!(
+        workbook.model().value(SheetId(0), CellRef::new(0, 4)),
+        CellValue::Number { value: 3.0 }
+    );
 }
 
 #[test]
