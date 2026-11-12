@@ -22,7 +22,10 @@ export interface DocxPngOptions {
     fonts?: ReadonlyArray<DocxPngFontFace>;
     /** The provider the editor showing this document measures with, where it has one. */
     fontProvider?: BundledFontProvider;
-    /** Told, once per page, about pictures drawn as a placeholder because they could not be drawn. */
+    /**
+     * Told, once per page, about pictures drawn as a placeholder because they could not be drawn,
+     * and, in a separate `effects-skipped` diagnostic, about effects the engine left off the page.
+     */
     onDiagnostic?: (diagnostic: PngDiagnostic) => void;
     /**
      * Reject with `picture-unavailable` instead of drawing a placeholder when a

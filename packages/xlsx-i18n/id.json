@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Pengeditan ini tidak dapat diterapkan: sebuah bagan menggunakan sel yang akan dipindahkannya. Buku kerja tidak berubah.",
       "editUnsupportedTable": "Pengeditan ini tidak dapat diterapkan: sebuah tabel menggunakan sel yang akan dipindahkannya. Buku kerja tidak berubah.",
       "editUnsupportedPivot": "Pengeditan ini tidak dapat diterapkan: sebuah tabel pivot menggunakan sel yang akan dipindahkannya. Buku kerja tidak berubah.",
+      "editUnsupportedFill": "Isian ini tidak dapat diterapkan: isian akan mengubah sel yang memiliki tautan, catatan, atau aturan. Buku kerja tidak berubah.",
       "sheetProtected": "Sel ini berada di lembar yang dilindungi.",
       "hostRefused": "Pengeditan ini tidak diizinkan.",
       "tooManyToCheck": "Terlalu banyak sel untuk diperiksa plugin (batas {limit}).",
@@ -227,7 +228,8 @@
     "rangeSelected": "{start} sampai {end} dipilih, {rows} baris kali {columns} kolom",
     "sheetActivated": "{name}, lembar {index} dari {count}",
     "cellInputLabel": "Edit sel {address}",
-    "gridRoleDescription": "lembar kerja"
+    "gridRoleDescription": "lembar kerja",
+    "fillHandleLabel": "Gagang isi"
   },
   "plugins": {
     "toolbarGroup": "Plugin",

@@ -292,6 +292,36 @@ describe('Canvas2D text', () => {
     expect(rects).toEqual([[98 - 40, 15 + px * 0.1, 40, Math.max(px * 0.05, 0.5)]]);
   });
 
+  it('paints one underline, two for the double kinds, and none without underline', () => {
+    function underlines(cmd: Partial<TextCmd>) {
+      const rects: number[][] = [];
+      const context = {
+        font: '', fillStyle: '', textAlign: '', textBaseline: '',
+        save() {}, restore() {}, setTransform() {}, clearRect() {},
+        beginPath() {}, rect() {}, clip() {}, fillText() {},
+        measureText(value: string) { return { width: value.length * 10 }; },
+        fillRect(x: number, y: number, w: number, h: number) { rects.push([x, y, w, h]); },
+      };
+      paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+        width: 100, height: 40,
+        commands: [{ op: 'text', x: 2, y: 20, text: 'abcd', fontSize: 30, color: '#000000',
+          align: 'left', clip: { x: 0, y: 0, w: 100, h: 40 }, ...cmd } as TextCmd],
+      }, 1);
+      return rects;
+    }
+    const px = 30 * (96 / 72);
+    const top = 20 + px * 0.1;
+    const line = px * 0.05;
+    expect(underlines({})).toEqual([]);
+    expect(underlines({ underline: false, underlineStyle: 'double' })).toEqual([]);
+    const single = underlines({ underline: true });
+    expect(single).toEqual([[2, top, 40, line]]);
+    expect(underlines({ underline: true, underlineStyle: 'singleAccounting' })).toEqual(single);
+    const double = underlines({ underline: true, underlineStyle: 'double' });
+    expect(double).toEqual([[2, top, 40, line], [2, top + 2 * line, 40, line]]);
+    expect(underlines({ underline: true, underlineStyle: 'doubleAccounting' })).toEqual(double);
+  });
+
   it('paints a layout without padding, fill or overflow at its aligned edge without measuring', () => {
     for (const [align, x] of [['left', 2], ['center', 50], ['right', 98]] as const) {
       const runs: { text: string; x: number; align: string }[] = [];
