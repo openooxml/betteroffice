@@ -237,6 +237,16 @@ class SetColVisibilityOp(TypedDict):
     hidden: bool
 
 
+class SetColsVisibilityOp(TypedDict):
+    """``setColVisibility`` over ``count`` columns from ``col``."""
+
+    type: Literal["setColsVisibility"]
+    sheet: int
+    col: int
+    count: int
+    hidden: bool
+
+
 class _SetRowHeightOp(TypedDict):
     type: Literal["setRowHeight"]
     sheet: int
@@ -253,6 +263,16 @@ class SetRowVisibilityOp(TypedDict):
     type: Literal["setRowVisibility"]
     sheet: int
     row: int
+    hidden: bool
+
+
+class SetRowsVisibilityOp(TypedDict):
+    """``setRowVisibility`` over ``count`` rows from ``row``."""
+
+    type: Literal["setRowsVisibility"]
+    sheet: int
+    row: int
+    count: int
     hidden: bool
 
 
@@ -412,8 +432,10 @@ XlsxOp = Union[
     DeleteColsOp,
     SetColWidthOp,
     SetColVisibilityOp,
+    SetColsVisibilityOp,
     SetRowHeightOp,
     SetRowVisibilityOp,
+    SetRowsVisibilityOp,
     SetFreezePaneOp,
     SetHyperlinksOp,
     SetHyperlinkOp,

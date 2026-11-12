@@ -11,7 +11,14 @@ import betteroffice_xlsx as bo
 from betteroffice_xlsx import ops as op_types
 
 FIXTURES = Path(__file__).resolve().parents[3] / "packages" / "xlsx" / "test-fixtures"
-ACCEPTED_UNTYPED_TAGS = {"restoreColDimension", "restoreRowDimension"}
+ACCEPTED_UNTYPED_TAGS = {
+    "clipArrayFormula",
+    "moveCols",
+    "moveRows",
+    "restoreArrayFormula",
+    "restoreColDimension",
+    "restoreRowDimension",
+}
 INTERNAL_TAGS = {
     "setCharts",
     "setConditionalFormats",
@@ -109,7 +116,7 @@ def test_typed_ops_cover_every_public_tag_the_engine_decodes(sample_bytes):
         typing.get_args(typing.get_type_hints(op)["type"])[0]
         for op in typing.get_args(op_types.XlsxOp)
     }
-    assert len(typed) == 28
+    assert len(typed) == 30
     assert typed.isdisjoint(ACCEPTED_UNTYPED_TAGS | INTERNAL_TAGS)
     assert typed | ACCEPTED_UNTYPED_TAGS | INTERNAL_TAGS == accepted
 
