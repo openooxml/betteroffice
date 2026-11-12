@@ -270,12 +270,6 @@ export interface LineCmd {
      * `width`. Absent, painters keep the legacy rails derived from `width`.
      */
     rail?: number;
-    /**
-     * Gridlines and the frozen-pane divider: a hairline in sheet space. The painter
-     * snaps it to whole CSS pixels and keeps it one CSS pixel wide at any zoom.
-     * Absent/false on real cell borders, including solid ones without a style.
-     */
-    hairline?: boolean;
     clip?: Rect;
 }
 export type GeometryPathCommand = {
