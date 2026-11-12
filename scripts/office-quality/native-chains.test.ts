@@ -1,0 +1,130 @@
+import { afterAll, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import JSZip from 'jszip';
+import { layOutFonts, loadProduct, writeDocumentChains, type Product } from './native-chains';
+
+type Faces = Record<string, string[]>;
+
+const repo = resolve(import.meta.dir, '../..');
+const productRoot = resolve(process.env.NATIVE_CHAINS_PRODUCT ?? join(repo, 'packages/docx'));
+const built = existsSync(join(productRoot, 'dist'));
+const binary = process.env.NATIVE_BENCH_BINARY;
+const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
+
+const latin = (family: string) => `<w:rFonts w:ascii="${family}" w:hAnsi="${family}" w:cs="${family}"/>`;
+const RUNS = [
+  ['Consolas monospace 0123', latin('Consolas'), ''],
+  ['Rockwell slab serif', latin('Rockwell'), ''],
+  ['Microsoft Sans Serif text', latin('Microsoft Sans Serif'), ''],
+  ['Verdana humanist sans', latin('Verdana'), ''],
+  ['Arial Black heavy face', latin('Arial Black'), ''],
+  ['日本語の明朝体の本文です', '<w:rFonts w:ascii="Noto Serif JP" w:hAnsi="Noto Serif JP" w:eastAsia="Noto Serif JP"/>', '<w:lang w:eastAsia="ja-JP"/>'],
+  ['مرحبا بالعالم', latin('Times New Roman'), '<w:rtl/><w:lang w:bidi="ar-SA"/>'],
+  ['Calibri body text', latin('Calibri'), ''],
+];
+
+async function fontDocx(): Promise<Uint8Array> {
+  const body = RUNS.map(([text, fonts, extra]) =>
+    `<w:p><w:r><w:rPr>${fonts}${extra}</w:rPr><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`).join('');
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+  zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+  zip.file('word/document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`);
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+async function productFaces(product: Product, bytes: Uint8Array): Promise<Faces> {
+  const laid = await layOutFonts(product, bytes);
+  try {
+    product.editor.computeLayout({ document: laid.document, pageGap: 0, session: laid.session, renderEnv: laid.renderEnv, measurement: laid.measurement });
+    const fonts = laid.session.residentWorkerSnapshot()?.fonts as Array<Uint8Array | { substituteOf: number; family: string }> | undefined;
+    if (!fonts) throw new Error('the session handed no resident fonts to wasm');
+    const names: string[] = [];
+    for (const font of fonts) names.push(ArrayBuffer.isView(font) ? hash(font) : `${names[font.substituteOf]}~${font.family}`);
+    return Object.fromEntries(Object.entries(laid.measurement.fontChains).map(([key, chain]) => [key, chain.map((id) => names[id])]));
+  } finally {
+    laid.session.destroy();
+  }
+}
+
+async function chainsFaces(path: string): Promise<Faces> {
+  const chains = JSON.parse(await readFile(path, 'utf8'));
+  const names: string[] = [];
+  for (const face of chains.faces) {
+    if ('substituteOf' in face) {
+      expect(face.substituteOf).toBeLessThan(names.length);
+      names.push(`${names[face.substituteOf]}~${face.family}`);
+      continue;
+    }
+    expect(face.file).toMatch(/^[^/\\]+$/);
+    const bytes = new Uint8Array(await readFile(join(dirname(path), face.file)));
+    expect(hash(bytes)).toBe(face.sha256);
+    names.push(hash(bytes));
+  }
+  return Object.fromEntries(Object.entries<number[]>(chains.fontChains).map(([key, chain]) => [key, chain.map((id) => names[id])]));
+}
+
+let directory: string | undefined;
+const prepared = built ? (async () => {
+  directory = await mkdtemp(join(tmpdir(), 'native-chains-'));
+  const product = await loadProduct(productRoot);
+  const bytes = await fontDocx();
+  const docx = join(directory, 'fonts.docx');
+  await writeFile(docx, bytes);
+  const expected = await productFaces(product, bytes);
+  const chainsPath = await writeDocumentChains(product, bytes, join(directory, 'chains'), 'fonts');
+  return { directory, docx, chainsPath, expected };
+})() : undefined;
+prepared?.catch(() => {});
+
+afterAll(async () => {
+  if (directory) await rm(directory, { recursive: true, force: true });
+});
+
+test('the recorded chains file replays the product registry face for face', async () => {
+  if (!prepared) {
+    console.log(`native-chains: ${productRoot} has no dist build, skipping the product chain checks`);
+    return;
+  }
+  const { chainsPath, expected } = await prepared;
+  const keys = Object.keys(expected);
+  for (const family of ['consolas', 'rockwell', 'microsoft sans serif', 'verdana', 'arial black', 'noto serif jp', 'times new roman', 'calibri'])
+    expect({ family, present: keys.some((key) => key.toLowerCase().startsWith(`${family}|`)) }).toEqual({ family, present: true });
+  expect(await chainsFaces(chainsPath)).toEqual(expected);
+}, 300_000);
+
+test('the native binary measures with the product chains it is handed', async () => {
+  if (!binary) {
+    console.log('native-chains: NATIVE_BENCH_BINARY is unset, skipping the native binary checks');
+    return;
+  }
+  if (!prepared) throw new Error(`NATIVE_BENCH_BINARY needs the product built at ${productRoot}`);
+  const { directory, docx, chainsPath, expected } = await prepared;
+  let manifest = process.env.NATIVE_BENCH_FONTS;
+  if (!manifest) {
+    const fonts = spawnSync(process.execPath, [join(import.meta.dir, 'native-fonts.ts'), join(directory, 'fonts')], { encoding: 'utf8' });
+    if (fonts.status !== 0) throw new Error(`native-fonts.ts exited ${fonts.status}: ${fonts.stderr}`);
+    manifest = join(directory, 'fonts', 'manifest.json');
+  }
+  const run = (...chains: string[]) => {
+    const result = spawnSync(binary, [docx, join(directory, 'page.png'), manifest!, ...chains], { encoding: 'utf8' });
+    if (result.status !== 0) throw new Error(`${binary} exited ${result.status}: ${result.stderr}`);
+    return JSON.parse(result.stdout) as { font_path: string; font_faces: Faces };
+  };
+  const replayed = run(chainsPath);
+  expect(replayed.font_path).toBe('product-registry');
+  expect(replayed.font_faces).toEqual(expected);
+  const old = run();
+  expect(old.font_path).toBe('bench-manifest');
+  const files = new Map<string, string>(JSON.parse(await readFile(manifest, 'utf8')).faces.map((face: any) => [face.sha256, face.file]));
+  const label = (chain: string[] | undefined) => chain?.map((face) =>
+    face.split('~').map((part, index) => index ? part : files.get(part) ?? part.slice(0, 12)).join('~')).join(' > ') ?? '-';
+  console.log(['family | old face | product face', ...[...new Set([...Object.keys(old.font_faces), ...Object.keys(expected)])].sort()
+    .map((key) => `${key.split('|')[0]} | ${label(old.font_faces[key])} | ${label(expected[key])}`)].join('\n'));
+  if (process.env.NATIVE_CHAINS_RED === '1') expect(old.font_faces).toEqual(expected);
+}, 300_000);

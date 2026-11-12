@@ -67,6 +67,7 @@ lto = "thin"
   const sha = (await execute('git', ['-C', source, 'rev-parse', 'HEAD'])).stdout.trim();
   const metadata = {
     source_sha: sha,
+    package_version: JSON.parse(await readFile(resolve(source, 'packages/docx/package.json'), 'utf8')).version,
     binary_sha256: createHash('sha256').update(await readFile(binary)).digest('hex'),
     harness_sha256: harnessHash,
     rustc: (await execute('rustc', ['--version'])).stdout.trim(),

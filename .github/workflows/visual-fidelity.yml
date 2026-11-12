@@ -680,11 +680,56 @@ jobs:
           PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
         run: node scripts/office-quality/private-step.mjs docx-benchmark-stage -- node scripts/office-quality/docx-benchmark.mjs
 
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.4.3"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-docx
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Build this checkout's DOCX package and install the published one
+        timeout-minutes: 30
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+        run: |
+          bun install --frozen-lockfile
+          bun run build:fonts
+          bun run build:docx
+          packages=("@betteroffice/docx@$(jq -r '.versions.docx' "$QUALITY_PLAN")")
+          fonts=$(jq -r '.published_fonts.docx // empty' "$QUALITY_PLAN")
+          cjk=$(jq -r '.published_fonts_cjk.docx // empty' "$QUALITY_PLAN")
+          if [ -n "$fonts" ]; then packages+=("@betteroffice/fonts@$fonts"); fi
+          if [ -n "$cjk" ]; then packages+=("@betteroffice/fonts-cjk@$cjk"); fi
+          npm install --prefix "$RUNNER_TEMP/docx-published" --no-save --no-package-lock --ignore-scripts --no-audit --no-fund "${packages[@]}"
+
+      - name: Record the font chains the product's registry builds per document
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          QUALITY_OUTPUT: ${{ runner.temp }}/docx-benchmark
+          QUALITY_NATIVE: ${{ runner.temp }}/native
+          QUALITY_CHAINS: ${{ runner.temp }}/native-chains
+          QUALITY_PRODUCT_PUBLISHED: ${{ runner.temp }}/docx-published/node_modules/@betteroffice/docx
+          QUALITY_PRODUCT_COMMIT: ${{ github.workspace }}/packages/docx
+        run: node scripts/office-quality/private-step.mjs docx-native-chains -- bun scripts/office-quality/native-chains.ts
+
       - name: Measure native CLI times and LibreOffice fidelity
         env:
           QUALITY_OUTPUT: ${{ runner.temp }}/docx-benchmark
           QUALITY_NATIVE: ${{ runner.temp }}/native
           QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
+          QUALITY_CHAINS: ${{ runner.temp }}/native-chains
         run: node scripts/office-quality/private-step.mjs docx-benchmark -- python scripts/office-quality/docx_benchmark.py
 
       - if: ${{ !inputs.private_corpus }}

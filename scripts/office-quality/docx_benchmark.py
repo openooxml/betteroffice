@@ -140,7 +140,7 @@ def validate_png(path, size, require_ink):
                     grayscale_variance=variance)
 
 
-def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0, directory='timing'):
+def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0, directory='timing', chains=None):
     format = sample.get('format', 'docx')
     output = root / directory
     output.mkdir()
@@ -151,7 +151,9 @@ def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0, 
                [('PixelWidth', size[0]), ('PixelHeight', size[1]), ('PageNumber', 1)]}
     options['Translucent'] = dict(type='boolean', value=False)
     commands = {channel: [str(binary), str(root / f'source.{format}'), str(output / f'{channel}.png'), str(manifest)]
+                + ([str(chains[channel])] if chains and channel in chains else [])
                 for channel, binary in binaries.items()}
+    font_paths = {channel: 'product-registry' if chains and channel in chains else 'bench-manifest' for channel in binaries}
     commands['libreoffice'] = lo_command(soffice, root / 'profile-timing', output, root / f'source.{format}',
                                        f'png:{"impress" if format == "pptx" else "writer"}_png_Export:' + json.dumps(options, separators=(',', ':')))
     paths = {channel: output / (f'{channel}.png' if channel != 'libreoffice' else 'source.png') for channel in CHANNELS}
@@ -174,6 +176,8 @@ def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0, 
                             or metadata.get('png_sha256') != png['sha256'] or metadata.get('page') != 1
                             or metadata.get('dpi') != 96 or metadata.get('pages', 0) < 1):
                         raise ValueError('Native CLI returned invalid render metadata')
+                    if chains is not None and metadata.get('font_path') != font_paths[channel]:
+                        raise ValueError(f"Native CLI took the {metadata.get('font_path')} font path, expected {font_paths[channel]}")
                     results[channel]['native'] = metadata
                 results[channel]['png'] = png
                 if repeat:
@@ -182,7 +186,36 @@ def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0, 
             except Exception as error:
                 results[channel] = dict(status='failed', error=str(error), command=commands[channel])
                 print(f"{sample['id']}: {channel} FAILED: {error}", flush=True)
+    if chains is not None:
+        for channel in binaries:
+            results[channel]['font_path'] = font_paths[channel]
     return results
+
+
+def product_chains(chains_root, sample):
+    paths = json.loads((chains_root / 'paths.json').read_text())
+    if set(paths) != {'published', 'commit'} or paths['commit']['path'] != 'product-registry':
+        raise ValueError(f'Invalid product font chain paths: {paths}')
+    chains = {}
+    for channel, entry in paths.items():
+        if entry['path'] == 'product-registry':
+            path = chains_root / channel / f"{sample['id']}.chains.json"
+            if not path.is_file():
+                raise ValueError(f'Missing product font chains for the {channel} channel: {path.name}')
+            chains[channel] = path
+        elif entry['path'] != 'bench-manifest':
+            raise ValueError(f"Unknown font path for the {channel} channel: {entry['path']}")
+    return chains
+
+
+def summarize_font_paths(samples):
+    lines = [f"- {channel}: {', '.join(sorted({row['timings'][channel].get('font_path', 'bench-manifest') for row in samples})) or 'no documents'}"
+             for channel in CHANNELS[:2]]
+    text = '### DOCX native font path\n\n' + '\n'.join(lines) + '\n'
+    print(text, flush=True)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+            summary.write(text)
 
 
 def main():
@@ -190,6 +223,8 @@ def main():
     job = json.loads((root / 'job.json').read_text())
     native = Path(os.environ['QUALITY_NATIVE']).resolve()
     manifest = Path(os.environ['QUALITY_FONTS']).resolve()
+    chains_root = Path(os.environ['QUALITY_CHAINS']).resolve() if os.environ.get('QUALITY_CHAINS') else None
+    font_paths = json.loads((chains_root / 'paths.json').read_text()) if chains_root else None
     soffice = os.environ.get('SOFFICE', 'libreoffice')
     os.environ['SAL_USE_VCLPLUGIN'] = 'svp'
     fonts_hash = font_environment(manifest, root)
@@ -206,7 +241,7 @@ def main():
                   benchmark=dict(method=job['method'], trials=job['trials'], dpi=96,
                                  published_version=job['published_version'],
                                  libreoffice_version=version, libreoffice_build=version_text.strip(),
-                                 fonts_sha256=fonts_hash, builds=builds, environment=dict(
+                                 fonts_sha256=fonts_hash, font_paths=font_paths, builds=builds, environment=dict(
                                      os=platform.system(), architecture=platform.machine(),
                                      image_os=os.environ.get('ImageOS', 'local'),
                                      image_version=os.environ.get('ImageVersion', 'local'),
@@ -223,13 +258,15 @@ def main():
             if sha256(directory / 'reference' / f'page_{page:04d}.png') != asset['sha256']:
                 raise ValueError('Reference hash mismatch')
         print(f"DOCX shard {job['shard']}: {index + 1}/{len(job['samples'])} {sample['id']}", flush=True)
-        timings = measure_sample(sample, directory, binaries, manifest, soffice, job['trials'], index)
+        chains = product_chains(chains_root, sample) if chains_root else None
+        timings = measure_sample(sample, directory, binaries, manifest, soffice, job['trials'], index, chains=chains)
         print(f"{sample['id']}: LibreOffice fidelity", flush=True)
         fidelity = libreoffice_fidelity(sample, directory, soffice, version)
         report['samples'].append(dict(id=sample['id'], source_sha256=sample['metadata']['source']['sha256'],
                                       libreoffice=fidelity, timings=timings))
         write_json(root / 'report.json', report)
         print(f"{sample['id']}: fidelity {fidelity['status']}, SSIM {fidelity.get('penalized_ssim', '—')}", flush=True)
+    summarize_font_paths(report['samples'])
 
 
 if __name__ == '__main__':
