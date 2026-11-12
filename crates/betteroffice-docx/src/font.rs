@@ -375,6 +375,86 @@ mod tests {
         );
     }
 
+    /// The family of every face in the chain a run of `family` with `scripts` resolves to.
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    fn chain_families(family: &str, scripts: &[&str]) -> Vec<String> {
+        use super::{FontRegistry, LastResortOffice, chain_key};
+        use docx_layout::measure_blocks::FontRequirement;
+        let options = crate::OpenOptions::default();
+        let manager =
+            betteroffice_fonts::FontManager::new(&options.font_source, options.font_loading)
+                .unwrap();
+        let scripts: Vec<String> = scripts.iter().map(|script| (*script).to_owned()).collect();
+        let key = chain_key(family, false, false);
+        let mut registry = FontRegistry::default();
+        registry
+            .resolve(
+                &manager,
+                &[FontRequirement {
+                    key: key.clone(),
+                    family: family.to_owned(),
+                    bold: false,
+                    italic: false,
+                    scripts: scripts.clone(),
+                    characters: Default::default(),
+                }],
+            )
+            .unwrap();
+        let faces: Vec<_> = manager
+            .resolve(family, false, false, &scripts, LastResortOffice::Word)
+            .into_iter()
+            .map(|face| (registry.store.find_face(&face.load().unwrap()), face.family))
+            .collect();
+        registry.chains[&key]
+            .iter()
+            .map(|&id| {
+                let owner = registry.store.byte_owner(id).unwrap_or(id);
+                faces
+                    .iter()
+                    .find(|(known, _)| *known == Some(owner))
+                    .map_or_else(|| format!("font {}", id.to_u32()), |(_, name)| name.clone())
+            })
+            .collect()
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn a_bundled_family_with_hebrew_text_chains_its_face_then_the_last_resort_then_hebrew() {
+        assert_eq!(
+            chain_families("Cambria", &["hebrew"]),
+            ["Caladea", "Liberation Serif", "Noto Sans Hebrew"]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn a_bundled_family_with_cjk_text_chains_its_face_then_the_last_resort_then_cjk() {
+        assert_eq!(
+            chain_families("Calibri", &["cjk-jp"]),
+            ["Carlito", "Liberation Sans", "Noto Sans JP"]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn an_unbundled_family_with_cjk_text_chains_the_last_resort_then_the_glyph_fallback_then_cjk() {
+        // The last resort is Selawik, so Liberation Sans is the glyph fallback.
+        assert_eq!(
+            chain_families("Segoe UI Heavy", &["cjk-jp"]),
+            ["Selawik", "Liberation Sans", "Noto Sans JP"]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn an_unbundled_family_with_hebrew_text_chains_the_last_resort_then_the_glyph_fallback_then_hebrew()
+    {
+        assert_eq!(
+            chain_families("Segoe UI Black", &["hebrew"]),
+            ["Selawik", "Liberation Sans", "Noto Sans Hebrew"]
+        );
+    }
+
     fn run(text: &str, scripts: &[&str]) -> TextRunPrimitive {
         serde_json::from_value(serde_json::json!({
             "text": text, "x": 0.0, "baselineY": 0.0, "width": 10.0,
