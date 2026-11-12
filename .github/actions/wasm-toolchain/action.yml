@@ -5,9 +5,18 @@ inputs:
   binaryen:
     description: Binaryen release tag.
     default: version_132
-  sha256:
+  sha256-x86_64-linux:
     description: Checksum of the x86_64-linux tarball.
     default: 195ddc94f9bc89f45abdabb0b9eea86023d727ba90eac8b35b80f2544fc30572
+  sha256-arm64-macos:
+    description: Checksum of the arm64-macos tarball.
+    default: 98aad827847af7ef990ed7098d885725c8e5b5aae75073403635617ae4e259aa
+  sha256-x86_64-macos:
+    description: Checksum of the x86_64-macos tarball.
+    default: 40c3de90bb3766bd0282a895e139a6f50253dba49b4f5bb89e66faca162d832e
+  wasm-pack-cache:
+    description: Also cache wasm-pack's tool downloads under ~/.cache/.wasm-pack, where wasm-pack keeps them on Linux.
+    default: 'true'
 
 runs:
   using: composite
@@ -16,27 +25,52 @@ runs:
       id: binaryen
       with:
         path: ~/.cache/binaryen/${{ inputs.binaryen }}
-        key: binaryen-${{ runner.os }}-${{ inputs.binaryen }}
+        key: binaryen-${{ runner.os }}-${{ runner.arch }}-${{ inputs.binaryen }}
 
-    - if: steps.binaryen.outputs.cache-hit != 'true'
+    - name: Install binaryen
+      if: steps.binaryen.outputs.cache-hit != 'true'
       shell: bash
+      env:
+        BINARYEN: ${{ inputs.binaryen }}
+        SHA256_X86_64_LINUX: ${{ inputs.sha256-x86_64-linux }}
+        SHA256_ARM64_MACOS: ${{ inputs.sha256-arm64-macos }}
+        SHA256_X86_64_MACOS: ${{ inputs.sha256-x86_64-macos }}
       run: |
-        if [ "$(uname -m)" != "x86_64" ]; then
-          echo "::error::no pinned binaryen for $(uname -m); add its checksum to .github/actions/wasm-toolchain"
+        case "$(uname -s)-$(uname -m)" in
+          Linux-x86_64) platform=x86_64-linux expected="$SHA256_X86_64_LINUX" ;;
+          Darwin-arm64) platform=arm64-macos expected="$SHA256_ARM64_MACOS" ;;
+          Darwin-x86_64) platform=x86_64-macos expected="$SHA256_X86_64_MACOS" ;;
+          *)
+            echo "::error::no pinned binaryen for $(uname -s) $(uname -m); add its checksum to .github/actions/wasm-toolchain"
+            exit 1
+            ;;
+        esac
+        archive="binaryen-$BINARYEN-$platform.tar.gz"
+        tarball="$RUNNER_TEMP/$archive"
+        curl -fsSL --retry 5 --retry-all-errors -o "$tarball" \
+          "https://github.com/WebAssembly/binaryen/releases/download/$BINARYEN/$archive"
+        if command -v sha256sum >/dev/null; then
+          actual="$(sha256sum "$tarball" | cut -d' ' -f1)"
+        else
+          actual="$(shasum -a 256 "$tarball" | cut -d' ' -f1)"
+        fi
+        if [ "$actual" != "$expected" ]; then
+          echo "::error::$archive has sha256 $actual, expected $expected"
           exit 1
         fi
-        tarball="$RUNNER_TEMP/binaryen.tar.gz"
-        curl -fsSL --retry 5 --retry-all-errors -o "$tarball" \
-          "https://github.com/WebAssembly/binaryen/releases/download/${{ inputs.binaryen }}/binaryen-${{ inputs.binaryen }}-x86_64-linux.tar.gz"
-        echo "${{ inputs.sha256 }}  $tarball" | sha256sum -c -
-        mkdir -p "$HOME/.cache/binaryen/${{ inputs.binaryen }}"
-        tar -xzf "$tarball" -C "$HOME/.cache/binaryen/${{ inputs.binaryen }}" --strip-components=1
+        mkdir -p "$HOME/.cache/binaryen/$BINARYEN"
+        tar -xzf "$tarball" -C "$HOME/.cache/binaryen/$BINARYEN" --strip-components=1
 
     - shell: bash
-      run: echo "$HOME/.cache/binaryen/${{ inputs.binaryen }}/bin" >> "$GITHUB_PATH"
+      env:
+        BINARYEN: ${{ inputs.binaryen }}
+      run: |
+        "$HOME/.cache/binaryen/$BINARYEN/bin/wasm-opt" --version
+        echo "$HOME/.cache/binaryen/$BINARYEN/bin" >> "$GITHUB_PATH"
 
     # wasm-pack's own tool cache: uncached, it recompiles the wasm-bindgen CLI every run.
     - uses: actions/cache@v6
+      if: inputs.wasm-pack-cache == 'true'
       with:
         path: ~/.cache/.wasm-pack
         key: wasm-pack-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
