@@ -1,6 +1,7 @@
 ---
 '@betteroffice/xlsx': minor
 '@betteroffice/xlsx-react': minor
+'@betteroffice/rust-crates': minor
 ---
 
-Selected cell ranges now show a fill handle; dragging it down or right copies the block into the dragged cells, adjusting relative formulas. The copy is one undo step. Arrays, merged cells, tables and chart anchors refuse the drag and leave the sheet unchanged.
+Selected ranges can show an opt-in fill handle (`fillHandle` prop); dragging it down or right copies the block, adjusting relative formulas, as one undo step. Fills refuse arrays, merged cells, tables, chart anchors, hyperlinks, comments and partial validation or conditional-format coverage, leaving the sheet unchanged.

@@ -32,7 +32,7 @@ export const PeerlessWorkerExtent = memo(function PeerlessWorkerExtent({ store, 
 });
 
 export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store, active, zoom, selectedChart,
-  chartOffset, controller, disabled, run, onFill, cellAt }: {
+  chartOffset, controller, disabled, run, onFill, cellAt, fillHandle }: {
   store: WorkerPresentationStore;
   active: number;
   zoom: number;
@@ -43,6 +43,7 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
   run: PeerlessWorkbookSession | null;
   onFill?(source: CellRange, destination: CellRange): void;
   cellAt?(clientX: number, clientY: number): CellAddr | null;
+  fillHandle?: boolean;
 }) {
   const unavailable = usePeerlessReadOnly(run, disabled);
   const { t } = useTranslation();
@@ -81,7 +82,7 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
     style={{ position: 'absolute', top: 0, left: 0, width: 0, height: 0, pointerEvents: 'none' }}>
     {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
       style={outline(selectionRect, '1px solid #217346', 'rgba(33, 115, 70, 0.12)')} />}
-    {!unavailable && !selectedChart && !drafting && fillHandleRect && expanded && onFill && cellAt && (
+    {fillHandle && !unavailable && !selectedChart && !drafting && fillHandleRect && expanded && onFill && cellAt && (
       <FillHandle rect={fillHandleRect} source={expanded}
         rectForRange={fillRect} cellAt={cellAt} onFill={onFill}
         ariaLabel={t('a11y.fillHandleLabel')} />

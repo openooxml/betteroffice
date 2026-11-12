@@ -422,6 +422,7 @@ export function XlsxEditorContent({
   onReady,
   className,
   readOnly = false,
+  fillHandle = false,
   allowHostProposals = false,
   defaultFonts,
   toolbar,
@@ -2720,7 +2721,7 @@ export function XlsxEditorContent({
                     }}
                   />
                 )}
-                {!readOnly && !editing && !coordinator.draft && !selectedChart &&
+                {fillHandle && !readOnly && !editing && !coordinator.draft && !selectedChart &&
                   fillHandleRect && renderedSelection && (
                   <FillHandle
                     rect={fillHandleRect}

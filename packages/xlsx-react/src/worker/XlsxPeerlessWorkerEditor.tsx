@@ -2000,7 +2000,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
               <canvas ref={canvasRef} style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} />
               <PeerlessWorkerOverlay store={presentation} active={active} zoom={zoom} selectedChart={selectedChart}
                 chartOffset={chartOffset} controller={draftController} run={run} disabled={Boolean(error) || Boolean(props.readOnly)}
-                onFill={fillSelection} cellAt={fillCellAt} />
+                onFill={fillSelection} cellAt={fillCellAt} fillHandle={props.fillHandle} />
               <PeerlessWorkerPresence store={presentation} run={run} provider={props.collaboration?.provider}
                 active={active} sheets={sheets} />
               {pluginHost.managed && <PluginOverlays host={pluginHost.host} activations={pluginHost.activations}

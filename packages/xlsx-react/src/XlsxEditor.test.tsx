@@ -185,10 +185,10 @@ function pointAt(fixture: Fixture, addr: CellAddr): { clientX: number; clientY: 
   return { clientX: rect.x + rect.w / 2, clientY: rect.y + rect.h / 2 };
 }
 
-async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array) => void) {
+async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array) => void, fillHandle = true) {
   const ready: { handle: WorkbookHandle | null; api: XlsxEditorApi | null } = { handle: null, api: null };
   const view = render(
-    <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
+    <XlsxEditor legacySyncApi experimentalWorkerOpen={false} fillHandle={fillHandle}
       file={fixture.bytes.slice()}
       onSave={onSave}
       onReady={(api) => {
@@ -216,7 +216,7 @@ async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array
     reopenWith: (next: Fixture) =>
       act(async () => {
         view.rerender(
-          <XlsxEditor legacySyncApi experimentalWorkerOpen={false}
+          <XlsxEditor legacySyncApi experimentalWorkerOpen={false} fillHandle={fillHandle}
             file={next.bytes.slice()}
             onSave={onSave}
             onReady={(api) => {
@@ -515,6 +515,13 @@ describe('XlsxEditor fill handle', () => {
     expect(view.nameBox().value).toBe('B3');
   });
 
+  it('does not render the handle by default', async () => {
+    const editor = await mountEditor(plain, undefined, false);
+    editor.click({ row: 2, col: 1 });
+    expect(editor.view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(editor.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
   it('renders the handle only for an editable selection', async () => {
     const editable = await mountEditor();
     editable.click({ row: 2, col: 1 });
@@ -522,7 +529,7 @@ describe('XlsxEditor fill handle', () => {
     await act(async () => { editable.view.unmount(); });
 
     const readOnly = render(
-      <XlsxEditor legacySyncApi experimentalWorkerOpen={false} readOnly
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false} readOnly fillHandle
         file={plain.bytes.slice()} onReady={() => {}} />
     );
     await waitFor(() => expect(readOnly.getByTestId('xlsx-selection')).toBeDefined(), MOUNTED);

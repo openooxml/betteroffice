@@ -9301,7 +9301,7 @@ describe('worker fill handle', () => {
 
   it('sends one fillRange op through the legacy edit peer for a drag down', async () => {
     const host = harness();
-    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} fillHandle
       onReady={() => {}} />);
     await opened();
     await advance();
@@ -9324,7 +9324,7 @@ describe('worker fill handle', () => {
 
   it('previews and cancels a legacy worker drag on Escape without an engine op', async () => {
     const host = harness();
-    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} fillHandle
       onReady={() => {}} />);
     await opened();
     await advance();
@@ -9352,7 +9352,7 @@ describe('worker fill handle', () => {
 
   it('sends one fillRange command through the peerless coordinator for a drag right', async () => {
     const host = peerlessHarness();
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { fillHandle: true });
     const scroll = view.getByTestId('xlsx-scroll');
     await act(async () => {
       fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
@@ -9377,9 +9377,38 @@ describe('worker fill handle', () => {
     });
   });
 
-  it('reports a refused peerless fill without selecting past the source', async () => {
+  it('does not render the handle in a worker editor by default', async () => {
+    harness();
+    const legacy = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={() => {}} />);
+    await opened();
+    await advance();
+    await act(async () => {
+      fireEvent.mouseDown(legacy.getByTestId('xlsx-scroll'), { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await waitFor(() => expect(legacy.getByTestId('xlsx-selection')).toBeDefined());
+    await advance();
+    expect(legacy.queryByTestId('xlsx-fill-handle')).toBeNull();
+    cleanup();
+    await advance();
+
     const host = peerlessHarness();
     const view = await host.mount();
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-selection')).toBeDefined());
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('reports a refused peerless fill without selecting past the source', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { fillHandle: true });
     const scroll = view.getByTestId('xlsx-scroll');
     await act(async () => {
       fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
@@ -9407,6 +9436,39 @@ describe('worker fill handle', () => {
 
     await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
       .toBe("This edit can't be applied: a table uses cells it would move. The workbook is unchanged."));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+  });
+
+  it('reports a refused peerless fill over linked cells with the fill message', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+
+    await act(async () => {
+      dragHandle(view, { clientX: 144, clientY: 12 }, { clientX: 144, clientY: 60 });
+    });
+    const fill = await waitFor(() => {
+      const command = host.sent.find((entry) => entry.kind === 'fillRange');
+      expect(command).toBeDefined();
+      return command!;
+    });
+    await act(async () => {
+      host.ack(fill, {
+        status: 'refused',
+        result: { failure: { code: 'unsupported', cause: 'fill', message: 'fill cannot safely preserve hyperlinks' } },
+      });
+    });
+
+    await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
+      .toBe("This fill can't be applied: it would change cells with links, notes or rules. The workbook is unchanged."));
     expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
   });
 });

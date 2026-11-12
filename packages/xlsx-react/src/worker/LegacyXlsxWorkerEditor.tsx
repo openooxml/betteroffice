@@ -1865,7 +1865,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                   <div data-testid="xlsx-overlay-host" style={{ position: 'absolute', top: 0, left: 0, width: 0, height: 0, pointerEvents: 'none' }}>
                     {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
                       style={outline(selectionRect, `1px solid ${BRAND}`, 'rgba(33, 115, 70, 0.12)')} />}
-                    {!props.readOnly && !editing && !coordinator.draft && !selectedChart && acceptInput() &&
+                    {props.fillHandle && !props.readOnly && !editing && !coordinator.draft && !selectedChart && acceptInput() &&
                       fillHandleRect && selected && (
                       <FillHandle rect={fillHandleRect} source={selected}
                         rectForRange={fillPreviewRect} cellAt={cellAtPointForFill} onFill={fillSelection}
