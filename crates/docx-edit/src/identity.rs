@@ -7099,6 +7099,57 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_id_another_uncaptured_holder_shares_is_taken_without_moving() {
+        let base = EditingDoc::new(1);
+        for story in ["first", "second", "other"] {
+            base.create_story(story, "one", "Normal", "left").unwrap();
+        }
+        let update = base.encode_state_as_update_v1();
+        let (left, right) = (EditingDoc::new(2), EditingDoc::new(3));
+        left.apply_update_v1(&update).unwrap();
+        right.apply_update_v1(&update).unwrap();
+        let key = |story: &str| base.paragraphs(story).unwrap()[0].para_id.clone();
+        let (first, second, other) = (key("first"), key("second"), key("other"));
+        claim_id(&right, &first, "0000D001", true);
+        claim_id(&left, &second, "0000D001", true);
+        claim_id(&left, &other, "0000E001", false);
+        left.apply_update_v1(&right.encode_state_as_update_v1())
+            .unwrap();
+        for holder in [&first, &second] {
+            assert_eq!(
+                doc_identity(&left, holder).ooxml_para_id.as_deref(),
+                Some("0000D001")
+            );
+        }
+        let published = |id: &str, owner: &str| {
+            let txn = left.yrs_doc().transact();
+            claim(&claims(&txn), id, owner).unwrap().published
+        };
+
+        let taken_only = vec![
+            (first.clone(), "0000D001".to_owned()),
+            (other.clone(), "0000E001".to_owned()),
+        ];
+        assert_eq!(
+            left.record_saved_paragraph_ids(&taken_only),
+            [(first.clone(), "0000D001".to_owned())]
+        );
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+        assert!(published("0000E001", &other));
+
+        let before = left.encode_state_vector_v1();
+        let both = vec![
+            (first.clone(), "0000D001".to_owned()),
+            (second.clone(), "0000D001".to_owned()),
+        ];
+        assert!(left.record_saved_paragraph_ids(&both).is_empty());
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+        assert_eq!(left.encode_state_vector_v1(), before);
+    }
+
+    #[test]
     fn a_synthetic_paragraph_is_promoted_by_authoring_into_it() {
         let doc = EditingDoc::new(7);
         doc.create_story("body", "", "Normal", "left").unwrap();
