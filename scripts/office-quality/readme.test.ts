@@ -375,7 +375,7 @@ test('the timing note states how many timed documents had notes whose layout did
 function fontsReport() {
   const input = report();
   const published = { package: '@betteroffice/fonts@0.4.2', cjk: '@betteroffice/fonts-cjk@0.4.2', copy: 'local release copy' };
-  const workspace = { package: '@betteroffice/fonts@0.5.0', copy: 'workspace' };
+  const workspace = { package: '@betteroffice/fonts@0.5.0', copy: 'workspace', base_latin: 4 };
   const second = {
     ...input.samples[0],
     id: 'second',
@@ -393,9 +393,25 @@ function fontsReport() {
 
 test('the section names each arm font source and counts its advertised faces across captures', () => {
   const section = renderSection(fontsReport());
-  expect(section).toContain('- Published fonts: @betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy); 90 advertised faces, 2 loaded, 3 did not load (blocked 1, error 1, http 404 1)');
-  expect(section).toContain('- Commit fonts: @betteroffice/fonts@0.5.0 (workspace); 120 advertised faces, 2 loaded, 0 did not load');
+  expect(section).toContain("- Published fonts: @betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy); 3 of 5 faces did not load (M = faces the documents requested that the arm's provider offers, base latin: none in this release), by reason: blocked 1, error 1, http 404 1");
+  expect(section).toContain("- Commit fonts: @betteroffice/fonts@0.5.0 (workspace); 0 of 2 faces did not load (M = faces the documents requested that the arm's provider offers, base latin included)");
   expect(renderSection(report())).not.toContain('fonts:');
+});
+
+test('PPTX and XLSX arms name their font source and say face loads are counted for DOCX only', () => {
+  const input = report();
+  input.samples.push({
+    ...input.samples[0],
+    id: 'deck',
+    format: 'pptx',
+    comparisons: [
+      { ...input.samples[0].comparisons[0], version: '0.0.4', fonts: { package: '@betteroffice/fonts@0.4.2', cjk: '@betteroffice/fonts-cjk@0.4.2', copy: 'local release copy' } },
+      { ...input.samples[0].comparisons[1], fonts: { package: '@betteroffice/fonts@0.5.0', copy: 'workspace' } },
+    ],
+  } as any);
+  const section = renderSection(input);
+  expect(section).toContain('- Published fonts: @betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy); face loads are counted for DOCX captures only');
+  expect(section).toContain('- Commit fonts: @betteroffice/fonts@0.5.0 (workspace); face loads are counted for DOCX captures only');
 });
 
 test('the aggregate counts advertised, loaded and failed faces per arm by reason, without names', () => {
@@ -404,12 +420,27 @@ test('the aggregate counts advertised, loaded and failed faces per arm by reason
     published: {
       sources: ['@betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy)'],
       captures: 2,
+      missing: 0,
       advertised: 90,
+      base_latin: 0,
+      requested: 5,
       loaded: 2,
       failed: 3,
       reasons: { 'http 404': 1, blocked: 1, error: 1 },
+      unattributed: { loaded: 0, failed: 0 },
     },
-    commit: { sources: ['@betteroffice/fonts@0.5.0 (workspace)'], captures: 2, advertised: 120, loaded: 2, failed: 0, reasons: {} },
+    commit: {
+      sources: ['@betteroffice/fonts@0.5.0 (workspace)'],
+      captures: 2,
+      missing: 0,
+      advertised: 120,
+      base_latin: 4,
+      requested: 2,
+      loaded: 2,
+      failed: 0,
+      reasons: {},
+      unattributed: { loaded: 0, failed: 0 },
+    },
   });
   const text = JSON.stringify(aggregateReport(fontsReport()));
   for (const leak of ['Carlito', 'Gelasio', 'NotoSansJP', 'second', 'demo'])
@@ -421,9 +452,9 @@ test('the arm line states how many advertised faces did not load and why', async
   const { fontArmLine, fontSummary } = await import('./readme.mjs');
   const { samples } = fontsReport();
   expect(fontArmLine('published', fontSummary(samples, 'published'))).toBe(
-    'published arm: 3 of 90 advertised faces did not load, by reason: blocked 1, error 1, http 404 1'
+    "published arm: 3 of 5 faces did not load (M = faces the documents requested that the arm's provider offers, base latin: none in this release), by reason: blocked 1, error 1, http 404 1"
   );
   expect(fontArmLine('commit', fontSummary(samples, 'commit'))).toBe(
-    'commit arm: 0 of 120 advertised faces did not load, by reason: none'
+    "commit arm: 0 of 2 faces did not load (M = faces the documents requested that the arm's provider offers, base latin included), by reason: none"
   );
 });

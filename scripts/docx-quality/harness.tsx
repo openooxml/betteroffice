@@ -4,6 +4,7 @@ import { DocxEditor } from '@betteroffice/docx-react';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import '@betteroffice/docx-react/styles.css';
 import {
+  BASE_LATIN_FONTS,
   BUNDLED_FONTS,
   createFontProvider,
   resolveGlyphFallbackFace,
@@ -41,7 +42,13 @@ const provider = createFontProvider(
 setGoogleFontsEnabled(false);
 const fontLoads: FontLoad[] = [];
 const fontsAdvertised: string[] = BUNDLED_FONTS.map((face: { file: string }) => face.file);
+const baseLatinAdvertised: string[] = BASE_LATIN_FONTS.map((face: { file: string }) => face.file);
 const faceOf = (kind: string, args: unknown[]) => {
+  if (kind === 'base-latin') {
+    const [bold, italic] = args as [boolean, boolean];
+    return BASE_LATIN_FONTS.find((face: { weight: number; style: string }) =>
+      face.weight === (bold ? 700 : 400) && face.style === (italic ? 'italic' : 'normal'))?.file as string | undefined;
+  }
   const [name, bold, italic, extra] = args as [string, boolean, boolean, string | undefined];
   const face =
     kind === 'family' ? resolveMetricCompatFace(name, bold, italic)
@@ -51,6 +58,7 @@ const faceOf = (kind: string, args: unknown[]) => {
   return face?.file as string | undefined;
 };
 const measuredFonts = measuredFontProvider(provider, fontLoads, faceOf);
+(window as any).oracleFontReport = () => ({ fontLoads, fontsAdvertised, baseLatinAdvertised });
 let editor: React.RefObject<any>;
 let root: ReturnType<typeof createRoot>;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -112,7 +120,7 @@ api.oracleInit = async (input: number[], fonts: boolean, profile?: unknown) => {
     if (pages > 0 && pages === last && canvas?.width && canvas?.height) {
       if (Date.now() - stable >= 3000) {
         api.stage = 'ready';
-        return { pages, errors: api.errors, fontLoads, fontsAdvertised };
+        return { pages, errors: api.errors, fontLoads };
       }
     } else {
       last = pages;

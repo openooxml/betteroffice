@@ -34,7 +34,7 @@ function validateSample(sample) {
   validateReferenceMetadata(sample.metadata, sample.id);
 }
 
-export function createPlan({ source_sha, commit, versions, react_version, published_fonts, fonts_basis, published_fonts_cjk, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
+export function createPlan({ source_sha, commit, versions, react_version, published_fonts, fonts_basis, published_fonts_cjk, fonts_cjk_basis, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
   if (!isSha(source_sha) || !isSha(commit))
     throw new Error('Invalid fidelity plan revision');
   if (
@@ -47,7 +47,9 @@ export function createPlan({ source_sha, commit, versions, react_version, publis
     (fonts_basis !== undefined && (typeof fonts_basis !== 'object' || fonts_basis === null ||
       !Object.entries(fonts_basis).every(([format, basis]) => published_fonts?.[format] && ['release-commit', 'latest-before-release'].includes(basis)))) ||
     (published_fonts_cjk !== undefined && (typeof published_fonts_cjk !== 'object' || published_fonts_cjk === null ||
-      !Object.entries(published_fonts_cjk).every(([format, version]) => published_fonts?.[format] && isVersion(version))))
+      !Object.entries(published_fonts_cjk).every(([format, version]) => published_fonts?.[format] && isVersion(version)))) ||
+    (fonts_cjk_basis !== undefined && (typeof fonts_cjk_basis !== 'object' || fonts_cjk_basis === null ||
+      !Object.entries(fonts_cjk_basis).every(([format, basis]) => published_fonts_cjk?.[format] && ['release-commit', 'latest-before-release'].includes(basis))))
   )
     throw new Error('Invalid fidelity plan versions');
   if (!Array.isArray(samples) || !samples.length || samples.length > MAX_SAMPLES)
@@ -76,6 +78,7 @@ export function createPlan({ source_sha, commit, versions, react_version, publis
     ...(published_fonts === undefined ? {} : { published_fonts }),
     ...(fonts_basis === undefined ? {} : { fonts_basis }),
     ...(published_fonts_cjk === undefined ? {} : { published_fonts_cjk }),
+    ...(fonts_cjk_basis === undefined ? {} : { fonts_cjk_basis }),
     formats,
     samples,
     ...(docx_published_source_sha === undefined ? {} : { docx_published_source_sha }),
@@ -156,7 +159,7 @@ export function releasedFonts(fonts, releases, { packageName = '@betteroffice/fo
     const earlier = versions
       .map(([version]) => version)
       .filter((version) => released(version) && Date.parse(fonts?.time?.[version] ?? '') < releasedAt)
-      .sort(semverOrder);
+      .sort((left, right) => Date.parse(fonts.time[left]) - Date.parse(fonts.time[right]) || semverOrder(left, right));
     if (!Number.isFinite(releasedAt) || !earlier.length)
       throw new Error(`No ${packageName} release from the release commit of ${label} or published before it`);
     published_fonts[format] = earlier.at(-1);
@@ -181,7 +184,7 @@ export async function releasedFontPackages(packument, releases) {
     }])),
     { packageName: '@betteroffice/fonts-cjk', releaseName: () => '@betteroffice/fonts' }
   );
-  return { ...choice, published_fonts_cjk: cjk.published_fonts };
+  return { ...choice, published_fonts_cjk: cjk.published_fonts, fonts_cjk_basis: cjk.fonts_basis };
 }
 
 export function registryLoaders(download) {

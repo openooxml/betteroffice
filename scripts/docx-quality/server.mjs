@@ -6,7 +6,9 @@ import { docxFontsPlugin, qualityRendererPlugin } from '../office-quality/render
 const packageRoot = process.env.QUALITY_PACKAGE_ROOT;
 const reactRoot = process.env.QUALITY_REACT_ROOT;
 const fontsRoot = process.env.QUALITY_FONTS_ROOT;
-const fontsCjkRoot = fontsRoot ? process.env.QUALITY_FONTS_CJK_ROOT : undefined;
+const fontsCjkRoot = fontsRoot ? process.env.QUALITY_FONTS_CJK_ROOT?.trim() : undefined;
+if (fontsRoot && !fontsCjkRoot)
+  throw new Error('QUALITY_FONTS_ROOT needs QUALITY_FONTS_CJK_ROOT: a published release serves its own CJK package');
 const format = process.env.QUALITY_FORMAT ?? 'docx';
 if (!['docx', 'pptx', 'xlsx', 'vsdx'].includes(format)) throw new Error('Invalid format');
 const aliases = [];
@@ -34,6 +36,9 @@ const fontAssets = fontsRoot ? undefined : process.env.QUALITY_FONT_ASSETS?.trim
 const latinFiles = Object.fromEntries(JSON.parse(readFileSync(
   resolve('packages/fonts-latin/assets/manifest.json'), 'utf8',
 )).faces.map((face) => [face.file, true]));
+const baseLatinFiles = Object.fromEntries(JSON.parse(readFileSync(
+  resolve('packages/fonts/assets/base-latin.json'), 'utf8',
+)).faces.map((face) => [face.file, true]));
 const intlAssets = resolve(process.env.QUALITY_FONT_ASSETS_INTL ?? 'packages/fonts-intl/assets');
 const releaseAssets = (root) => `/@fs${resolve(root, 'assets')}/`;
 const server = await createServer({
@@ -44,7 +49,7 @@ const server = await createServer({
     ),
     __QUALITY_FONT_BASE_CJK__: JSON.stringify(
       fontsRoot
-        ? fontsCjkRoot ? releaseAssets(fontsCjkRoot) : null
+        ? releaseAssets(fontsCjkRoot)
         : fontAssets
           ? `/@fs${resolve(process.env.QUALITY_FONT_ASSETS_CJK ?? 'packages/fonts-cjk/assets')}/`
           : null
@@ -57,7 +62,9 @@ const server = await createServer({
         const prefix = `/@fs${resolve(fontAssets)}/`;
         server.middlewares.use((request, _response, next) => {
           const file = request.url?.startsWith(prefix) ? request.url.slice(prefix.length) : '';
-          if (/^[A-Za-z0-9-]+\.ttf\.zst$/.test(file) &&
+          if (Object.hasOwn(baseLatinFiles, file)) {
+            request.url = `/@fs${resolve('packages/fonts/assets')}/${file}`;
+          } else if (/^[A-Za-z0-9-]+\.ttf\.zst$/.test(file) &&
               !Object.hasOwn(latinFiles, file)) {
             request.url = `/@fs${intlAssets}/${file}`;
           } else if (file === 'decoder/fontpack.wasm') {

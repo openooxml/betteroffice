@@ -143,7 +143,7 @@ test('freezes canonical metadata and every package version in one plan', async (
 test('the published channel uses the fonts release from the format release commit, else the latest stable fonts published before it', async () => {
   const release = 'a'.repeat(40);
   const formatTime = '2026-10-27T11:28:38.352Z';
-  const dependencies = (fonts: any) => ({
+  const dependencies = (fonts: any, cjk: any) => ({
     download: async (url: string) => {
       if (url.endsWith('/collections/office-quality.json'))
         return JSON.stringify({ schema_version: 1, id: 'office-quality', samples: ['pptarena-001-original'] });
@@ -152,7 +152,8 @@ test('the published channel uses the fonts release from the format release commi
     },
     command: async (_program: string, args: string[]) => (args[0] === 'rev-parse' ? `${hash}\n` : `${'c'.repeat(40)}\n`),
     registry: async (name: string) => ({ version: name.endsWith('docx-react') ? '4.5.6' : '0.5.1', gitHead: release }),
-    packument: async (name: string) => (name.startsWith('@betteroffice/fonts') ? fonts : { time: { '0.5.1': formatTime } }),
+    packument: async (name: string) =>
+      name === '@betteroffice/fonts' ? fonts : name === '@betteroffice/fonts-cjk' ? cjk : { time: { '0.5.1': formatTime } },
     poolSize: 1,
   });
   const fonts = (versions: Record<string, [string, string]>) => ({
@@ -160,7 +161,14 @@ test('the published channel uses the fonts release from the format release commi
     versions: Object.fromEntries(Object.entries(versions).map(([version, [gitHead]]) => [version, { gitHead }])),
     time: Object.fromEntries(Object.entries(versions).map(([version, [, time]]) => [version, time])),
   });
-  const plan = async (versions: Record<string, [string, string]>) => preparePlan({}, dependencies(fonts(versions)) as any);
+  const cjkVersions = {
+    '0.3.10': ['4'.repeat(40), '2026-10-01T00:00:00Z'],
+    '0.3.5': ['5'.repeat(40), '2026-10-20T00:00:00Z'],
+    '0.4.2': [release, '2026-10-27T11:29:10Z'],
+    '0.6.0': ['6'.repeat(40), '2026-10-30T00:00:00Z'],
+  } satisfies Record<string, [string, string]>;
+  const plan = async (versions: Record<string, [string, string]>) =>
+    preparePlan({}, dependencies(fonts(versions), fonts(cjkVersions)) as any);
   const sameCommit = await plan({
     '0.4.1': ['b'.repeat(40), '2026-10-26T00:00:00Z'],
     '0.4.2': [release, '2026-10-27T11:29:00Z'],
@@ -169,6 +177,7 @@ test('the published channel uses the fonts release from the format release commi
   expect(sameCommit.published_fonts).toEqual({ pptx: '0.4.2' });
   expect(sameCommit.fonts_basis).toEqual({ pptx: 'release-commit' });
   expect(sameCommit.published_fonts_cjk).toEqual({ pptx: '0.4.2' });
+  expect(sameCommit.fonts_cjk_basis).toEqual({ pptx: 'release-commit' });
   const formatOnly = await plan({
     '0.0.0': ['0'.repeat(40), '2026-10-27T11:00:00Z'],
     '0.0.0-stage': ['1'.repeat(40), '2026-10-27T11:10:00Z'],
@@ -179,7 +188,13 @@ test('the published channel uses the fonts release from the format release commi
   });
   expect(formatOnly.published_fonts).toEqual({ pptx: '0.4.1' });
   expect(formatOnly.fonts_basis).toEqual({ pptx: 'latest-before-release' });
-  expect(formatOnly.published_fonts_cjk).toEqual({ pptx: '0.4.1' });
+  expect(formatOnly.published_fonts_cjk).toEqual({ pptx: '0.3.5' });
+  expect(formatOnly.fonts_cjk_basis).toEqual({ pptx: 'latest-before-release' });
+  const backport = await plan({
+    '0.4.1': ['b'.repeat(40), '2026-10-20T00:00:00Z'],
+    '0.3.9': ['9'.repeat(40), '2026-10-25T00:00:00Z'],
+  });
+  expect(backport.published_fonts).toEqual({ pptx: '0.3.9' });
   await expect(plan({ '0.0.0': ['0'.repeat(40), '2026-10-01T00:00:00Z'], '0.9.0': ['f'.repeat(40), '2026-11-01T00:00:00Z'] }))
     .rejects.toThrow('No @betteroffice/fonts release from the release commit of @betteroffice/pptx@0.5.1 or published before it');
   await expect(plan({ '0.4.2': [release, '2026-10-27T11:00:00Z'], '0.4.3': [release, '2026-10-27T11:01:00Z'] }))
@@ -211,6 +226,7 @@ test('a DOCX plan pairs the published docx release with the fonts and fonts-cjk 
   expect(plan.published_fonts).toEqual({ docx: '0.4.2' });
   expect(plan.fonts_basis).toEqual({ docx: 'release-commit' });
   expect(plan.published_fonts_cjk).toEqual({ docx: '0.4.2' });
+  expect(plan.fonts_cjk_basis).toEqual({ docx: 'release-commit' });
   expect(requested).toEqual(expect.arrayContaining(['@betteroffice/docx', '@betteroffice/fonts', '@betteroffice/fonts-cjk']));
   expect(validatePlan(plan)).toEqual(plan);
   expect(() => createPlan({ ...input(), published_fonts: { pptx: '0.4.2' }, published_fonts_cjk: { docx: '0.4.2' } })).toThrow('Invalid fidelity plan versions');

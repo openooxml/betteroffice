@@ -74,20 +74,33 @@ function score(samples, channel, revision) {
 const fontSourceLabel = (fonts) =>
   `${fonts.package}${fonts.cjk ? ` and ${fonts.cjk}` : ''} (${fonts.copy})`;
 
-/** One arm's font source and how the faces its provider advertises loaded across the arm's captures. */
+/**
+ * One arm's font source and how the faces it requested from its provider loaded across the arm's captures.
+ * `requested` counts the faces the documents requested that the provider offers (base Latin included when the
+ * release ships it); `missing` counts captures that recorded no face loads at all.
+ */
 export function fontSummary(samples, channel) {
   const sources = new Set();
   const loaded = new Set();
   const failed = new Map();
   let advertised = 0;
+  let baseLatin = 0;
   let captures = 0;
+  let missing = 0;
+  const unattributed = { loaded: 0, failed: 0 };
   for (const sample of samples) {
     const fonts = sample.comparisons?.find((result) => result.channel === channel)?.fonts;
     if (!fonts) continue;
     if (typeof fonts.package === 'string') sources.add(fontSourceLabel(fonts));
-    if (!Number.isInteger(fonts.advertised)) continue;
+    if (!Number.isInteger(fonts.advertised)) {
+      if (fonts.measured) missing++;
+      continue;
+    }
     captures++;
     advertised = Math.max(advertised, fonts.advertised);
+    baseLatin = Math.max(baseLatin, fonts.base_latin ?? 0);
+    unattributed.loaded += fonts.unattributed?.loaded ?? 0;
+    unattributed.failed += fonts.unattributed?.failed ?? 0;
     for (const face of fonts.loaded_faces ?? []) loaded.add(face);
     for (const [face, reason] of Object.entries(fonts.failed_faces ?? {}))
       if (!failed.has(face)) failed.set(face, reason);
@@ -95,24 +108,43 @@ export function fontSummary(samples, channel) {
   for (const face of failed.keys()) loaded.delete(face);
   const reasons = {};
   for (const reason of failed.values()) reasons[reason] = (reasons[reason] ?? 0) + 1;
-  return { sources: [...sources].sort(), captures, advertised, loaded: loaded.size, failed: failed.size, reasons };
+  return {
+    sources: [...sources].sort(),
+    captures,
+    missing,
+    advertised,
+    base_latin: baseLatin,
+    requested: loaded.size + failed.size,
+    loaded: loaded.size,
+    failed: failed.size,
+    reasons,
+    unattributed,
+  };
 }
 
 const reasonText = (reasons) =>
   Object.entries(reasons).sort(([a], [b]) => a.localeCompare(b)).map(([reason, total]) => `${reason} ${total}`).join(', ') || 'none';
 
+const requestedDefinition = (summary) =>
+  `M = faces the documents requested that the arm's provider offers, ${summary.base_latin ? 'base latin included' : 'base latin: none in this release'}`;
+
+const unattributedText = ({ unattributed }) =>
+  unattributed.loaded || unattributed.failed
+    ? `; unattributed loads (not named in the advertised set, never a failure): ${unattributed.loaded} loaded, ${unattributed.failed} failed`
+    : '';
+
 export function fontArmLine(channel, summary) {
-  return `${channel} arm: ${summary.failed} of ${summary.advertised} advertised faces did not load, by reason: ${reasonText(summary.reasons)}`;
+  return `${channel} arm: ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)}), by reason: ${reasonText(summary.reasons)}${summary.missing ? `; ${summary.missing} captures recorded no font loads` : ''}${unattributedText(summary)}`;
 }
 
-function fontNote(samples) {
+function fontNote(samples, format) {
   const lines = [];
   for (const [channel, label] of [['published', 'Published'], ['commit', 'Commit']]) {
     const summary = fontSummary(samples, channel);
     if (!summary.sources.length) continue;
     const loads = summary.captures
-      ? `; ${summary.advertised} advertised faces, ${summary.loaded} loaded, ${summary.failed} did not load${summary.failed ? ` (${reasonText(summary.reasons)})` : ''}`
-      : '';
+      ? `; ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)})${summary.failed ? `, by reason: ${reasonText(summary.reasons)}` : ''}${unattributedText(summary)}`
+      : format === 'docx' ? '' : '; face loads are counted for DOCX captures only';
     lines.push(`- ${label} fonts: ${summary.sources.join('; ')}${loads}`);
   }
   return lines.length ? `\n\n${lines.join('\n')}` : '';
@@ -330,16 +362,16 @@ ${notes.corpus ? `${notes.corpus}\n\n` : ''}${chart(headline, perf)}
 
 Page agreement is reported separately from SSIM.
 
-${docxTable}${fontNote(formatSamples('docx'))}
+${docxTable}${fontNote(formatSamples('docx'), 'docx')}
 
 
 ### PPTX
 
-${pptxTable}${fontNote(formatSamples('pptx'))}
+${pptxTable}${fontNote(formatSamples('pptx'), 'pptx')}
 
 ### XLSX
 
-${xlsxTable}${fontNote(formatSamples('xlsx'))}${note(notes.recalc)}${note(notes.timing)}
+${xlsxTable}${fontNote(formatSamples('xlsx'), 'xlsx')}${note(notes.recalc)}${note(notes.timing)}
 
 </details>
 

@@ -23,8 +23,9 @@ const track =
     const load = resolve(...args);
     if (!load) return undefined;
     const face = faceOf?.(kind, args);
+    const family = kind === 'base-latin' ? 'BetterOffice Base Latin' : String(args[0]);
     const record = (entry: Omit<FontLoad, 'kind' | 'family'>) =>
-      fontLoads.push({ kind, family: String(args[0]), ...entry, ...(face === undefined ? {} : { face }) });
+      fontLoads.push({ kind, family, ...entry, ...(face === undefined ? {} : { face }) });
     return Object.assign(async () => {
       try {
         const bytes = await load();
@@ -46,5 +47,8 @@ export function measuredFontProvider(provider: BundledFontSource, fontLoads: Fon
       ? { resolveGlyphFallback: track(fontLoads, 'glyph', provider.resolveGlyphFallback, faceOf) }
       : {}),
     resolveLastResort: track(fontLoads, 'fallback', provider.resolveLastResort, faceOf),
+    ...(provider.resolveBaseLatin
+      ? { resolveBaseLatin: track(fontLoads, 'base-latin', provider.resolveBaseLatin, faceOf) }
+      : {}),
   };
 }

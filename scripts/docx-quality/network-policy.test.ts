@@ -133,6 +133,7 @@ for (const format of ['docx', 'pptx', 'xlsx', 'vsdx']) {
       for (const [file, target] of [
         ['decoder/fontpack.wasm', `/@fs${resolve('packages/fonts/dist/decoder/fontpack.wasm')}`],
         ['NotoSansThai-Regular.ttf.zst', `/@fs${resolve('packages/fonts-intl/assets/NotoSansThai-Regular.ttf.zst')}`],
+        ['BetterOfficeBaseLatin-Regular.ttf.zst', `/@fs${resolve('packages/fonts/assets')}/BetterOfficeBaseLatin-Regular.ttf.zst`],
         ['Carlito-Regular.ttf.zst', `${prefix}Carlito-Regular.ttf.zst`],
         ['decoder/other.wasm', `${prefix}decoder/other.wasm`],
       ]) {
@@ -185,6 +186,11 @@ for (const format of ['docx', 'pptx', 'xlsx']) {
     expect(config.plugins[0].options).toEqual({ publishedFonts: true });
   });
 }
+
+test('a published font root without its CJK package refuses to start', async () => {
+  await expect(serverConfiguration({ QUALITY_FORMAT: 'docx', QUALITY_FONTS_ROOT: resolve('/tmp/quality-packages/fonts') }))
+    .rejects.toThrow('QUALITY_FONTS_ROOT needs QUALITY_FONTS_CJK_ROOT');
+});
 
 test('a docx commit capture takes the checkout font sources and the workspace font assets', async () => {
   const assets = resolve('/tmp/quality-font-assets');

@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
@@ -127,8 +128,29 @@ async function recordFonts(samples, format, channel) {
       await readFile(resolve(sample.directory, channel, 'result.json'), 'utf8').catch(() => 'null')
     );
     const comparison = sample.comparisons.find((entry) => entry.channel === channel);
-    if (comparison) comparison.fonts = { ...source, ...(capture?.font_faces ?? {}) };
+    if (comparison)
+      comparison.fonts = { ...source, ...(format === 'docx' ? { measured: true } : {}), ...(capture?.font_faces ?? {}) };
   }
+}
+
+/** DOCX arms whose advertised faces did not load, or whose captures recorded no font loads (named). */
+function fontFailures(samples) {
+  const failures = [];
+  for (const channel of ['published', 'commit']) {
+    const summary = fontSummary(samples, channel);
+    const line = `DOCX ${fontArmLine(channel, summary)}`;
+    console.log(line);
+    const unrecorded = samples
+      .filter((sample) => {
+        const fonts = sample.comparisons.find((entry) => entry.channel === channel)?.fonts;
+        return !Number.isInteger(fonts?.advertised);
+      })
+      .map((sample) => sample.id);
+    if (summary.failed) failures.push(line);
+    if (unrecorded.length)
+      failures.push(`DOCX ${channel} arm: ${unrecorded.length} captures recorded no font loads: ${unrecorded.slice(0, 10).join(', ')}${unrecorded.length > 10 ? ', …' : ''}`);
+  }
+  return failures;
 }
 
 async function packageRoot(name, version) {
@@ -146,6 +168,11 @@ async function packageRoot(name, version) {
   );
   const archive = result[0].filename;
   if (!/^[\w.-]+\.tgz$/.test(archive)) throw new Error('Invalid npm tarball filename');
+  const integrity = `sha512-${createHash('sha512').update(await readFile(resolve(directory, archive))).digest('base64')}`;
+  const registered = (await command('npm', ['view', `${name}@${version}`, 'dist.integrity'])).trim();
+  if (integrity !== registered)
+    throw new Error(`${name}@${version} tarball integrity ${integrity} does not match the registry's ${registered || 'missing value'}`);
+  console.log(`${name}@${version} integrity ${integrity} (matches the registry)`);
   await command('tar', [
     '-xzf',
     resolve(directory, archive),
@@ -299,15 +326,8 @@ for (const format of selectedFormats) {
     await recordFonts(samples.filter((sample) => sample.format === format), format, channel);
   }
 }
-const fontFailures = [];
-for (const format of selectedFormats)
-  for (const channel of ['published', 'commit']) {
-    const summary = fontSummary(samples.filter((sample) => sample.format === format), channel);
-    if (!summary.advertised) continue;
-    const line = `${format.toUpperCase()} ${fontArmLine(channel, summary)}`;
-    console.log(line);
-    if (summary.failed) fontFailures.push(line);
-  }
+const docxSamples = samples.filter((sample) => sample.format === 'docx');
+const fontProblems = docxSamples.length ? fontFailures(docxSamples) : [];
 const report = {
   source_sha: plan.source_sha,
   commit: plan.commit,
@@ -320,4 +340,4 @@ const report = {
 await writeFile(resolve(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');
 await writeFile(resolve(output, 'section.md'), renderSection(report));
 console.log(`Generated ${resolve(output, 'section.md')}`);
-if (fontFailures.length) throw new Error(`Advertised font faces did not load: ${fontFailures.join('; ')}`);
+if (fontProblems.length) throw new Error(`Font check failed: ${fontProblems.join('; ')}`);

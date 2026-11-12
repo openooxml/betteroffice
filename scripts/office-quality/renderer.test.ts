@@ -87,6 +87,7 @@ test('the published channel loads fonts from the release package, the commit cha
     const source = String(plugin.load(plugin.resolveId('virtual:docx-quality-fonts')));
     for (const text of expected) expect(source).toContain(text);
     expect(source).not.toContain(absent);
+    expect(source).toContain('export const BASE_LATIN_FONTS = manifest.BASE_LATIN_FONTS ?? [];');
     for (const name of ['createFontProvider', 'BUNDLED_FONTS', 'resolveMetricCompatFace', 'resolveScriptFallbackFace', 'resolveGlyphFallbackFace', 'resolveLastResortChoice'])
       expect(source).toContain(name);
   }

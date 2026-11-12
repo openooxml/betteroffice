@@ -32,9 +32,13 @@ export function qualityRendererPlugin(format, { publishedFonts = false } = {}) {
   });
 }
 
-/** The DOCX harness's font provider and manifest: the published release's package, or this checkout's sources. */
+/**
+ * The DOCX harness's font provider and manifest: the published release's package, or this checkout's sources.
+ * BASE_LATIN_FONTS is empty for a release that ships no base Latin faces.
+ */
 export function docxFontsPlugin({ publishedFonts = false } = {}) {
+  const manifest = publishedFonts ? "'@betteroffice/fonts'" : JSON.stringify(resolve(checkoutFonts, 'manifest.ts'));
   return virtualModules('docx-quality-fonts', {
-    'virtual:docx-quality-fonts': fontsModuleSource(publishedFonts, DOCX_FONT_EXPORTS),
+    'virtual:docx-quality-fonts': `${fontsModuleSource(publishedFonts, DOCX_FONT_EXPORTS)}import * as manifest from ${manifest};\nexport const BASE_LATIN_FONTS = manifest.BASE_LATIN_FONTS ?? [];\n`,
   });
 }

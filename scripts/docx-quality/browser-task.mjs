@@ -48,9 +48,10 @@ const start = performance.now();
 let browser;
 const deadline = setTimeout(async () => {
   console.error('Browser capture exceeded its deadline');
+  const faces = await readFontFaces().catch(() => undefined);
   await writeFile(
     resolve(out, 'result.json'),
-    JSON.stringify({ ...metadata, status: 'timeout' })
+    JSON.stringify({ ...metadata, status: 'timeout', ...(faces ? { font_faces: faces } : {}) })
   );
   await browser?.close();
   process.exit(1);
@@ -59,9 +60,17 @@ const logs = [];
 const externalRequests = [];
 const networkViolations = [];
 let fontFaces;
+let page;
+// Read at the end of the capture, so faces first loaded while pages are drawn count, and after a failure.
+const readFontFaces = async () => {
+  const report = await page?.evaluate(() => window.oracleFontReport?.() ?? null).catch(() => null);
+  return report && Array.isArray(report.fontsAdvertised)
+    ? fontFaceSummary(report.fontLoads, report.fontsAdvertised, networkViolations, report.baseLatinAdvertised ?? [])
+    : undefined;
+};
 try {
   browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({
+  page = await browser.newPage({
     viewport: { width: 1400, height: 1200 },
     deviceScaleFactor: 150 / 96,
     serviceWorkers: 'block',
@@ -123,8 +132,6 @@ try {
     },
     [fontMode === 'cdn', profile]
   );
-  if (Array.isArray(result.fontsAdvertised))
-    fontFaces = fontFaceSummary(result.fontLoads, result.fontsAdvertised, networkViolations);
   console.error(`paint ${result.pages}`);
   await mkdir(out, { recursive: true });
   for (let index = 0; index < result.pages; index++) {
@@ -135,6 +142,7 @@ try {
     );
   }
   const captureMetadata = await page.evaluate(() => window.oracleCaptureMetadata?.() ?? {});
+  fontFaces = await readFontFaces();
   if (networkViolations.length)
     throw new Error(`Unexpected external requests: ${JSON.stringify(networkViolations)}`);
   const record = {
@@ -152,6 +160,7 @@ try {
   await writeFile(resolve(out, 'result.json'), JSON.stringify(record, null, 2));
   console.log(JSON.stringify(record));
 } catch (error) {
+  fontFaces = (await readFontFaces()) ?? fontFaces;
   await writeFile(
     resolve(out, 'result.json'),
     JSON.stringify(
