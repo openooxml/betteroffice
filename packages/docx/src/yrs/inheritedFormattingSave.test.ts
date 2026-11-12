@@ -526,6 +526,9 @@ function cellShapes(table: string): Array<Array<{ elements: number; attributes: 
     );
 }
 
+const shadingAttributes = (table: string) =>
+  (table.match(/<w:shd\b[^>]*>/g) ?? []).join('').match(/\sw:\w+=/g)?.length ?? 0;
+
 const BARE_CELL_EDITS: Record<string, TableEdit> = {
   'no edit': () => [],
   'a body paragraph edit': (engine) => edit(engine, 'heading'),
@@ -552,6 +555,7 @@ describe('table style fills stay inherited on cells with and without tcPr', () =
       ]);
       expect(cellShapes(table)).toEqual(cellShapes(sourceTable));
       expect((table.match(/<w:shd\b/g) ?? []).length).toBe((sourceTable.match(/<w:shd\b/g) ?? []).length);
+      expect(shadingAttributes(table)).toBe(shadingAttributes(sourceTable));
       expect(table).not.toContain('<w:tcBorders');
     }, TIMEOUT);
   });
