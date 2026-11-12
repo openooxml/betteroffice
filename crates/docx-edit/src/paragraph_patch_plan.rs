@@ -950,6 +950,7 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
             } => {
                 let comment = atom_kind == "field"
                     && payload.get("modelKind").and_then(Value::as_str) == Some("commentReference");
+                let exempt = comment || (atom_kind == "field" && closed_complex_field(payload));
                 if !matches!(
                     atom_kind.as_str(),
                     "break"
@@ -960,7 +961,7 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
                         | "chart"
                         | "opaqueDrawing"
                         | "horizontalRule"
-                ) && !comment
+                ) && !exempt
                 {
                     let kind = match atom_kind.as_str() {
                         "field" => "field",
@@ -993,6 +994,35 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
         return Some("tc: paragraph revision".to_owned());
     }
     None
+}
+
+fn closed_complex_field(payload: &Attrs) -> bool {
+    let data = payload
+        .get("fieldData")
+        .and_then(Value::as_str)
+        .and_then(|data| serde_json::from_str::<Value>(data).ok());
+    payload.get("modelKind").and_then(Value::as_str) == Some("field")
+        && payload.get("fieldKind").and_then(Value::as_str) == Some("complex")
+        && ![
+            "fieldCodeMarks",
+            "fieldCodeTarget",
+            "fieldResultBlocks",
+            "resultProjection",
+        ]
+        .iter()
+        .any(|key| payload.contains_key(*key))
+        && data.is_some_and(|data| {
+            ["structuredCode", "structuredResult"].iter().all(|key| {
+                data.get(*key)
+                    .and_then(|content| content.get("blocks"))
+                    .is_none_or(Value::is_null)
+            })
+        })
+}
+
+fn complex_field(token: &Token) -> bool {
+    matches!(&token.content, Content::Atom(kind, payload)
+        if kind == "field" && payload.get("modelKind").and_then(Value::as_str) == Some("field"))
 }
 
 fn has_run_revisions(snapshot: &Snapshot) -> bool {
@@ -1584,6 +1614,21 @@ fn plan_paragraph(
         if i != previous.0 || j != previous.1 {
             let removed = &old[previous.0..i];
             let inserted = &new[previous.1..j];
+            if removed.iter().chain(inserted).any(complex_field) {
+                return Err(context.legacy(
+                    PatchErrorCode::UnsupportedStructure,
+                    "field: edit touches a field",
+                ));
+            }
+            if i == previous.0
+                && (old[..i].last().is_some_and(complex_field)
+                    || old.get(i).is_some_and(complex_field))
+            {
+                return Err(context.legacy(
+                    PatchErrorCode::UnsupportedStructure,
+                    "field: insertion at field edge",
+                ));
+            }
             if removed.iter().chain(inserted).any(|token| !token.is_text()) {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
