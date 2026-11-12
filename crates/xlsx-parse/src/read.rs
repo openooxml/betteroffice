@@ -644,7 +644,8 @@ fn push_item_text(text: &mut Option<(usize, String)>, out: &mut String, value: &
 pub struct SourceCellFacts {
     /// Formula cells written without a cached `<v>` result.
     pub uncached_formulas: BTreeSet<(u32, u32)>,
-    /// Cells with a formula or a `t` type written without a cached result.
+    /// Cells with a formula or a `t` type and no cached result: neither a `<v>` with text
+    /// nor, for `t="inlineStr"`, an `<is>` with text.
     pub blank_results: BTreeSet<(u32, u32)>,
     /// Whether an array formula's range was too large or malformed to keep.
     pub dropped_array_ranges: bool,
@@ -1192,14 +1193,13 @@ fn finalize_cell(
     if c.formula.is_some() && c.value_text.is_none() && c.inline_text.is_none() {
         facts.uncached_formulas.insert((addr.row, addr.col));
     }
-    if (c.formula.is_some() || c.ty.is_some())
-        && c.inline_text.is_none()
-        && (c.value_text.is_none()
-            || (c.ty.as_deref() != Some("str")
-                && c.value_text
-                    .as_deref()
-                    .is_some_and(|value| value.trim().is_empty())))
-    {
+    let cached = c
+        .value_text
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || (c.ty.as_deref() == Some("inlineStr")
+            && c.inline_text.as_deref().is_some_and(|text| !text.is_empty()));
+    if (c.formula.is_some() || c.ty.is_some()) && !cached {
         facts.blank_results.insert((addr.row, addr.col));
     }
     if c.inline_runs

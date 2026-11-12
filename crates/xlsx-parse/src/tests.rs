@@ -1450,7 +1450,7 @@ fn records_blank_results() {
     let facts = parsed.package.source_cell_facts(0).unwrap();
     assert_eq!(
         facts.blank_results.iter().copied().collect::<Vec<_>>(),
-        [(0, 0), (0, 2)]
+        [(0, 0), (0, 1), (0, 2)]
     );
 }
 

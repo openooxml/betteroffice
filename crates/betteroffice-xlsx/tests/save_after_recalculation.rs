@@ -249,32 +249,62 @@ fn a_stale_open_recalculates_an_array_follower_written_without_a_value() {
 }
 
 #[test]
-fn a_stale_open_keeps_an_empty_string_array_follower_cached() {
-    let source = package(
-        &CACHED.replace(
-            "</row>",
-            r#"<c r="D1" t="str"><f t="array" ref="D1:E1">""&amp;""</f><v></v></c><c r="E1" t="str"><v></v></c></row>"#,
-        ),
-        "",
-    );
-    let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
-    assert_eq!(values(&workbook), numbers(&[5.0, 999.0, 7.0]));
-}
-
-#[test]
-fn a_stale_open_keeps_an_empty_string_result_cached() {
-    let source = package(
-        &CACHED.replace("</row>", r#"<c r="D1" t="str"><f>""</f><v></v></c></row>"#),
-        "",
-    );
-    let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
-    assert_eq!(values(&workbook), numbers(&[5.0, 999.0, 7.0]));
-    assert_eq!(
-        workbook.model().value(SheetId(0), CellRef::new(0, 3)),
-        CellValue::Text {
-            value: String::new()
+fn a_stale_open_keeps_a_result_only_on_a_value_or_an_inline_string_with_text() {
+    const K: bool = true;
+    const R: bool = false;
+    let evidence = ["text", "empty", "absent"];
+    let table = [
+        ("n", "1", [K, K, K, R, R, R, R, R, R]),
+        ("b", "1", [K, K, K, R, R, R, R, R, R]),
+        ("str", "x", [K, K, K, R, R, R, R, R, R]),
+        ("e", "#N/A", [K, K, K, R, R, R, R, R, R]),
+        // the package has no shared-string part, so an index reads as no value
+        ("s", "0", [R; 9]),
+        ("inlineStr", "x", [K, K, R, K, R, R, K, R, R]),
+        ("", "1", [K, K, K, R, R, R, R, R, R]),
+    ];
+    let mut wrong = Vec::new();
+    for (ty, text, expected) in table {
+        let t = if ty.is_empty() {
+            String::new()
+        } else {
+            format!(r#" t="{ty}""#)
+        };
+        for (index, kept) in expected.into_iter().enumerate() {
+            let v = match index / 3 {
+                0 => format!("<v>{text}</v>"),
+                1 => "<v></v>".to_owned(),
+                _ => String::new(),
+            };
+            let is = ["<is><t>x</t></is>", "<is/>", ""][index % 3];
+            for (role, cells) in [
+                ("formula", format!(r#"<c r="D1"{t}><f>1+1</f>{v}{is}</c>"#)),
+                (
+                    "array follower",
+                    format!(
+                        r#"<c r="D1"><f t="array" ref="D1:E1">A1:B1</f><v>5</v></c><c r="E1"{t}>{v}{is}</c>"#
+                    ),
+                ),
+            ] {
+                let source = package(&CACHED.replace("</row>", &format!("{cells}</row>")), "");
+                let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+                let expected_values = if kept {
+                    [5.0, 999.0, 7.0]
+                } else {
+                    [5.0, 10.0, 5.0]
+                };
+                if values(&workbook) != numbers(&expected_values) {
+                    wrong.push(format!(
+                        "{role} t={ty:?} v={} is={}: expected {}",
+                        evidence[index / 3],
+                        evidence[index % 3],
+                        if kept { "kept" } else { "recalculated" }
+                    ));
+                }
+            }
         }
-    );
+    }
+    assert_eq!(wrong, Vec::<String>::new());
 }
 
 #[test]
