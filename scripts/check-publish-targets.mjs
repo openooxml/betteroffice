@@ -193,6 +193,11 @@ export function siblingReferences(packages = publishedPackageVersions(), workspa
   return references;
 }
 
+/** The release set, the workspaces and the sibling references `checkNpm` would otherwise read from the repository. */
+export function repositoryScan(packages = publishedPackageVersions(), workspaces = workspaceEntries()) {
+  return { packages, workspaces, references: siblingReferences(packages, workspaces) };
+}
+
 /** `missing` (the crate is unclaimed) or `present`. Versions are the publisher's job. */
 export async function auditCrates(names, registry = CRATES_REGISTRY, timeoutMs = REQUEST_TIMEOUT_MS) {
   const audit = [];
@@ -209,7 +214,8 @@ export async function checkNpm({
   timeoutMs = REQUEST_TIMEOUT_MS,
   packages = publishedPackageVersions(),
   workspaces = workspaceEntries(),
-  later = process.env.RELEASE_SKIP_NATIVE === 'true' ? [] : nativeReleaseVersions(workspaces)
+  later = process.env.RELEASE_SKIP_NATIVE === 'true' ? [] : nativeReleaseVersions(workspaces),
+  references
 } = {}) {
   const fetchPackage = npmPackages(registry, timeoutMs);
   const audit = await auditPackages(packages, fetchPackage);
@@ -241,7 +247,7 @@ export async function checkNpm({
     out.error(`${name}@${version} depends on ${dependency}@${range}, which is neither in this release nor on npm`);
     failed = true;
   }
-  for (const { dependent, name, version, file, line } of siblingReferences(packages, workspaces)) {
+  for (const { dependent, name, version, file, line } of references ?? siblingReferences(packages, workspaces)) {
     if (await available(name, version, true)) continue;
     out.error(`${dependent} builds references to ${name}@${version} (${file}:${line}), which is neither in this release nor on npm`);
     failed = true;
