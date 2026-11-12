@@ -534,13 +534,14 @@ describe('xlsx native engine parity', () => {
   test('resizeChartJson lands the same anchor on both engines and keeps the untouched marker', async () => {
     const zip = await JSZip.loadAsync(readFileSync(new URL('../../packages/xlsx/test-fixtures/charts.xlsx', import.meta.url)));
     const original = await zip.file('xl/drawings/drawing1.xml')!.async('string');
-    const drawing = original.replace(/(<(\w+:)?from>[\s\S]*?<\2rowOff>)0(<\/\2rowOff>)/, 
-      (_, open: string, _prefix: string | undefined, close: string) => `${open}762000${close}`);
-    expect(drawing).not.toBe(original);
-    zip.file('xl/drawings/drawing1.xml', drawing);
-    const source = await zip.generateAsync({ type: 'uint8array' });
     const fromMarker = (xml: string) => [...(xml.match(/<(\w+:)?from>[\s\S]*?<\/\1from>/)?.[0] ?? '')
       .matchAll(/<(?:\w+:)?(col|colOff|row|rowOff)>(\d+)</g)].map(([, name, value]) => `${name}=${value}`);
+    const drawing = original.replace(/<(\w+:)?from>[\s\S]*?<\/\1from>/, (marker) =>
+      marker.replace(/(<(?:\w+:)?rowOff>)\d+(<\/(?:\w+:)?rowOff>)/, '$1381000$2'));
+    expect(fromMarker(drawing)).toContain('rowOff=381000');
+    expect(fromMarker(drawing)).not.toEqual(fromMarker(original));
+    zip.file('xl/drawings/drawing1.xml', drawing);
+    const source = await zip.generateAsync({ type: 'uint8array' });
     const args = JSON.stringify({ sheet: 0, chart: 'xl/drawings/drawing1.xml#0', left: 0, top: 0, right: 0, bottom: 30 });
     const wasmDoc = WasmDocument.openWithCalculationJson(source, context) as EngineDocument;
     const nativeDoc = native.XlsxDocument.openWithCalculationJson(source, context) as EngineDocument;
@@ -552,7 +553,6 @@ describe('xlsx native engine parity', () => {
       const wasmSaved = new Uint8Array(wasmDoc.saveBytes());
       expect(new Uint8Array(nativeDoc.saveBytes())).toEqual(wasmSaved);
       const saved = await (await JSZip.loadAsync(wasmSaved)).file('xl/drawings/drawing1.xml')!.async('string');
-      expect(fromMarker(drawing)).toContain('rowOff=762000');
       expect(fromMarker(saved)).toEqual(fromMarker(drawing));
     } finally {
       wasmDoc.free();
