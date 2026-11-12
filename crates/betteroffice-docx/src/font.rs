@@ -89,8 +89,7 @@ impl FontRegistry {
         id.to_u32()
     }
 
-    /// The view of `base` that measures as Word measures `family`, or `base`
-    /// when there are no metrics for `family`.
+    /// `base` measured as Word measures `family`; `base` itself when `family` has no metrics.
     #[cfg(feature = "fonts")]
     fn measured_as(&mut self, base: ooxml_text::FontId, family: &str) -> ooxml_text::FontId {
         let owner = self.store.byte_owner(base).unwrap_or(base);
