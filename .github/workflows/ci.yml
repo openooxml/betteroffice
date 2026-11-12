@@ -383,7 +383,15 @@ jobs:
 
       - name: Remove the workspace test binaries
         if: steps.ws.outputs.present == 'true'
-        run: find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete
+        run: |
+          set -euo pipefail
+          mapfile -t bins < <(find target/debug -regextype posix-extended -type f -executable \
+            -regex 'target/debug/(deps|build/[^/]+/[^/]+/out)/[^/]+' \
+            ! -name '*.so' ! -name 'build-script-build*' ! -name 'build_script_build-*')
+          [ "${#bins[@]}" -gt 0 ] || { echo "::error::no test binaries under target/debug/deps or target/debug/build/*/*/out"; exit 1; }
+          mb=$(du -cm "${bins[@]}" | tail -n 1 | cut -f 1)
+          rm -f "${bins[@]}"
+          echo "Removed ${#bins[@]} test binaries, ${mb} MB"
 
       # Optional features are only unified into `cargo test` while some other
       # workspace member enables them.
