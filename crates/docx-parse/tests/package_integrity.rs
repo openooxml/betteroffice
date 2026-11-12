@@ -288,6 +288,59 @@ fn integrity_categories_are_additive_to_existing_warnings() {
     );
 }
 
+#[test]
+fn strict_drawing_and_relationship_namespaces_report_the_same_duplicates_as_transitional_ones() {
+    let warnings = |w: &str, wp: &str, a: &str, r: &str, pic: &str| {
+        let drawing = |id: &str| {
+            format!(
+                r#"<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="{id}" name="Picture"/><a:graphic><a:graphicData uri="{pic}"><pic:pic><pic:blipFill><a:blip r:embed="missing"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#
+            )
+        };
+        let xml = format!(
+            r#"<w:document xmlns:w="{w}" xmlns:wp="{wp}" xmlns:a="{a}" xmlns:r="{r}" xmlns:pic="{pic}"><w:body><w:p>{}{}{}{}</w:p></w:body></w:document>"#,
+            drawing("1"),
+            drawing("01"),
+            bookmark("5", "first"),
+            bookmark("5", "second")
+        );
+        let parts = main_package(
+            "word/document.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+            &xml,
+            w != W,
+        );
+        parse_docx_s9_wire(
+            &ooxml_opc::rezip_parts(&parts).unwrap(),
+            S9ParseOptions::default(),
+        )
+        .unwrap()
+        .document
+        .warnings
+        .unwrap_or_default()
+    };
+    let transitional = warnings(
+        W,
+        WP,
+        A,
+        R,
+        "http://schemas.openxmlformats.org/drawingml/2006/picture",
+    );
+    let strict = warnings(
+        "http://purl.oclc.org/ooxml/wordprocessingml/main",
+        "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing",
+        "http://purl.oclc.org/ooxml/drawingml/main",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships",
+        "http://purl.oclc.org/ooxml/drawingml/picture",
+    );
+    for expected in [
+        "DOCX contains 1 drawing doc properties with duplicate `wp:docPr id` values.",
+        "DOCX contains 1 bookmark starts with duplicate `w:bookmarkStart w:id` values.",
+    ] {
+        assert!(transitional.iter().any(|warning| warning == expected), "{transitional:?}");
+    }
+    assert_eq!(strict, transitional);
+}
+
 fn main_package(path: &str, content_type: &str, xml: &str, strict: bool) -> Vec<(String, Vec<u8>)> {
     let relationship = if strict {
         "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument"
