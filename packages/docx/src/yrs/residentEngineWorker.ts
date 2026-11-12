@@ -1312,7 +1312,7 @@ export const SAVE_SEED_SLICE_BYTES = 16 * 1024;
 export const SAVE_SEED_MIN_SLICE_BYTES = 2 * 1024;
 export const SAVE_SEED_MAX_SLICE_BYTES = 1024 * 1024;
 const SAVE_SEED_SLICE_TARGET_MS = 10;
-export const SAVE_SEED_MAX_GROWTH = 4;
+export const SAVE_SEED_MAX_GROWTH = 2;
 
 /**
  * The budget of the next save seed prime slice: `targetMs` at the rate the last slice charged
