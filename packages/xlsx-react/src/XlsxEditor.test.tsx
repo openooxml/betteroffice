@@ -616,6 +616,58 @@ describe('XlsxEditor fill handle', () => {
     expect(destination).toMatch(/^A1:[A-Z]{1,3}100$/);
     expect(destination).not.toBe(source);
   });
+
+  function selectionSize(view: Awaited<ReturnType<typeof mountEditor>>) {
+    return view.api().commands.getState('merge').value;
+  }
+
+  it('does not render the handle once Ctrl+A selects the whole sheet', async () => {
+    const view = await mountEditor();
+    view.click({ row: 2, col: 1 });
+    expect(view.view.getByTestId('xlsx-fill-handle')).toBeDefined();
+
+    for (let press = 0; press < 2 && selectionSize(view)?.rows !== 1_048_576; press++) {
+      await act(async () => { fireEvent.keyDown(view.surface, { key: 'a', ctrlKey: true }); });
+    }
+
+    expect(selectionSize(view)).toEqual({ rows: 1_048_576, columns: 16_384 });
+    expect(view.view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the handle once Ctrl+Shift+Down selects a whole empty column', async () => {
+    const view = await mountEditor();
+    view.click({ row: 0, col: 4 });
+    expect(view.nameBox().value).toBe('E1');
+    expect(view.view.getByTestId('xlsx-fill-handle')).toBeDefined();
+
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'ArrowDown', ctrlKey: true, shiftKey: true });
+    });
+    await act(async () => { fireEvent.scroll(view.surface); });
+
+    expect(selectionSize(view)).toEqual({ rows: 1_048_576, columns: 1 });
+    expect(view.view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the handle once Ctrl+Shift+Right selects a whole empty row', async () => {
+    const view = await mountEditor();
+    await act(async () => { view.api().selectCells(0, selectionAt({ row: 63, col: 0 })); });
+    await waitFor(() => expect(view.surface.scrollTop).toBeGreaterThan(0), MOUNTED);
+    await act(async () => { fireEvent.scroll(view.surface); });
+    expect(view.nameBox().value).toBe('A64');
+    await waitFor(() => expect(view.view.getByTestId('xlsx-fill-handle')).toBeDefined(), MOUNTED);
+
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'ArrowRight', ctrlKey: true, shiftKey: true });
+    });
+    await act(async () => { fireEvent.scroll(view.surface); });
+
+    expect(selectionSize(view)).toEqual({ rows: 1, columns: 16_384 });
+    expect(view.view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
 });
 
 function fillHandleElement(view: { view: RenderResult }): HTMLElement {
