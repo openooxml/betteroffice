@@ -138,6 +138,13 @@ impl FontRegistry {
                     LastResortOffice::Word,
                 )
             });
+            let glyph = betteroffice_fonts::resolve_glyph_fallback_face(
+                family,
+                request.bold,
+                request.italic,
+                LastResortOffice::Word,
+            );
+            let mut deferred = Vec::new();
             let mut scripts = Vec::new();
             for face in faces {
                 let base = self.register_bytes(&face.load()?)?;
@@ -152,10 +159,18 @@ impl FontRegistry {
                     scripts.push(base);
                 } else {
                     let id = self.measured_as(base, face.measure_as.as_deref().unwrap_or(family));
-                    self.insert(key.clone(), id, 2);
+                    if glyph.is_some_and(|glyph| {
+                        glyph.family == face.family
+                            && (glyph.weight == 700) == face.bold
+                            && (glyph.style == "italic") == face.italic
+                    }) {
+                        deferred.push(id);
+                    } else {
+                        self.insert(key.clone(), id, 2);
+                    }
                 }
             }
-            for id in scripts {
+            for id in deferred.into_iter().chain(scripts) {
                 self.insert(key.clone(), id, 2);
             }
             self.resolved.insert(resolved_key);
