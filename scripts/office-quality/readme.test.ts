@@ -391,14 +391,20 @@ function fontsReport() {
   return input;
 }
 
-test('the section names each arm font source and counts its advertised faces across captures', () => {
+const noFontCounts = (section: string) => {
+  for (const text of ['did not load', 'M = ', 'by reason', 'not measured', 'nothing was measured', 'unattributed', 'face loads'])
+    expect(section.includes(text) && text).toBe(false);
+};
+
+test('the section names each arm font source only, without face counts', () => {
   const section = renderSection(fontsReport());
-  expect(section).toContain("- Published fonts: @betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy); 3 of 5 faces did not load (M = faces the documents requested that the arm's provider offers, base latin: none in this release), by reason: blocked 1, error 1, http 404 1");
-  expect(section).toContain("- Commit fonts: @betteroffice/fonts@0.5.0 (workspace); 0 of 2 faces did not load (M = faces the documents requested that the arm's provider offers, base latin included)");
+  expect(section).toContain('\n- Published fonts: @betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy)\n');
+  expect(section).toContain('\n- Commit fonts: @betteroffice/fonts@0.5.0 (workspace)\n');
+  noFontCounts(section);
   expect(renderSection(report())).not.toContain('fonts:');
 });
 
-test('PPTX and XLSX arms name their font source and say face loads are counted for DOCX only', () => {
+test('PPTX and XLSX arms name their font source only', () => {
   const input = report();
   input.samples.push({
     ...input.samples[0],
@@ -410,8 +416,9 @@ test('PPTX and XLSX arms name their font source and say face loads are counted f
     ],
   } as any);
   const section = renderSection(input);
-  expect(section).toContain('- Published fonts: @betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy); face loads are counted for DOCX captures only');
-  expect(section).toContain('- Commit fonts: @betteroffice/fonts@0.5.0 (workspace); face loads are counted for DOCX captures only');
+  expect(section).toContain('\n- Published fonts: @betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy)\n');
+  expect(section).toContain('\n- Commit fonts: @betteroffice/fonts@0.5.0 (workspace)\n');
+  noFontCounts(section);
 });
 
 test('the aggregate counts advertised, loaded and failed faces per arm by reason, without names', () => {

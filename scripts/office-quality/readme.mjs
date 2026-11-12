@@ -167,15 +167,11 @@ export function fontArmLine(channel, summary) {
   return `${channel} arm: ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)}), by reason: ${reasonText(summary.reasons)}${summary.missing ? `; ${summary.missing} captures recorded no font loads` : ''}${unattributedText(summary)}${notMeasuredText(summary)}`;
 }
 
-function fontNote(samples, format) {
+function fontNote(samples) {
   const lines = [];
   for (const [channel, label] of [['published', 'Published'], ['commit', 'Commit']]) {
-    const summary = fontSummary(samples, channel);
-    if (!summary.sources.length) continue;
-    const loads = summary.captures || summary.missing
-      ? `; ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)})${summary.failed ? `, by reason: ${reasonText(summary.reasons)}` : ''}${unattributedText(summary)}${notMeasuredText(summary)}`
-      : format === 'docx' ? `; nothing was measured${notMeasuredText(summary)}` : '; face loads are counted for DOCX captures only';
-    lines.push(`- ${label} fonts: ${summary.sources.join('; ')}${loads}`);
+    const { sources } = fontSummary(samples, channel);
+    if (sources.length) lines.push(`- ${label} fonts: ${sources.join('; ')}`);
   }
   return lines.length ? `\n\n${lines.join('\n')}` : '';
 }
@@ -392,16 +388,16 @@ ${notes.corpus ? `${notes.corpus}\n\n` : ''}${chart(headline, perf)}
 
 Page agreement is reported separately from SSIM.
 
-${docxTable}${fontNote(formatSamples('docx'), 'docx')}
+${docxTable}${fontNote(formatSamples('docx'))}
 
 
 ### PPTX
 
-${pptxTable}${fontNote(formatSamples('pptx'), 'pptx')}
+${pptxTable}${fontNote(formatSamples('pptx'))}
 
 ### XLSX
 
-${xlsxTable}${fontNote(formatSamples('xlsx'), 'xlsx')}${note(notes.recalc)}${note(notes.timing)}
+${xlsxTable}${fontNote(formatSamples('xlsx'))}${note(notes.recalc)}${note(notes.timing)}
 
 </details>
 
