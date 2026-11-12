@@ -109,9 +109,8 @@ fn substituted_faces_measure_with_the_requested_family_metrics() {
                 &request.scripts,
                 LastResortOffice::Word,
             );
-            let requested = request.family.trim().to_lowercase() == family
-                && !request.bold
-                && !request.italic;
+            let requested =
+                request.family.trim().to_lowercase() == family && !request.bold && !request.italic;
             let real = faces
                 .first()
                 .is_some_and(|face| face.family.to_lowercase() == family);
@@ -133,7 +132,10 @@ fn substituted_faces_measure_with_the_requested_family_metrics() {
                     chain.push(view.to_u32());
                 }
             }
-            chains.insert(chain_key(&request.family, request.bold, request.italic), chain);
+            chains.insert(
+                chain_key(&request.family, request.bold, request.italic),
+                chain,
+            );
         }
         if !substituted {
             continue;
@@ -161,7 +163,9 @@ fn substituted_faces_measure_with_the_requested_family_metrics() {
                 .iter()
                 .flat_map(|page| &page.primitives)
                 .filter_map(|primitive| match primitive {
-                    Primitive::GlyphRun(run) if !run.text.is_empty() && LINE.contains(&run.text) => {
+                    Primitive::GlyphRun(run)
+                        if !run.text.is_empty() && LINE.contains(&run.text) =>
+                    {
                         Some(run)
                     }
                     _ => None,
