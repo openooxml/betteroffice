@@ -3507,8 +3507,8 @@ mod tests {
             width: 200.0,
             height: 60.0,
         };
-        let dl = build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, old, new)])
-            .unwrap();
+        let dl =
+            build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, old, new)]).unwrap();
         text_cmds(&dl)
             .into_iter()
             .map(|(text, ..)| text.to_string())
