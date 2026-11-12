@@ -203,12 +203,22 @@ fn a_stale_open_recalculates_a_file_with_an_uncached_formula_or_a_full_calculati
         "</row>",
         r#"<c r="D1" t="str"><f t="array" ref="D1:E1">"a"&amp;"b"</f><v>ab</v></c><c r="E1" t="str"/></row>"#,
     );
+    let alternate_branch = CACHED.replace(
+        "</row>",
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="x14"><c r="D1"><f>1+1</f><v/></c></mc:Choice><mc:Fallback><c r="D1"><v>2</v></c></mc:Fallback></mc:AlternateContent></row>"#,
+    );
+    let dropped_array_range = CACHED.replace(
+        "</row>",
+        r#"<c r="D1"><f t="array" ref="D1:D300000">A1</f><v>5</v></c></row>"#,
+    );
     for (sheet_data, calc_pr) in [
         (uncached.as_str(), ""),
         (empty_cached.as_str(), ""),
         (array_follower.as_str(), ""),
         (typed_bool_array_follower.as_str(), ""),
         (typed_str_array_follower.as_str(), ""),
+        (alternate_branch.as_str(), ""),
+        (dropped_array_range.as_str(), ""),
         (CACHED, r#"<calcPr fullCalcOnLoad="1"/>"#),
         (CACHED, r#"<calcPr forceFullCalc="1"/>"#),
     ] {

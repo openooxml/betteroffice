@@ -646,6 +646,8 @@ pub struct SourceCellFacts {
     pub uncached_formulas: BTreeSet<(u32, u32)>,
     /// Cells with a formula or a `t` type written without a cached result.
     pub blank_results: BTreeSet<(u32, u32)>,
+    /// Whether an array formula's range was too large or malformed to keep.
+    pub dropped_array_ranges: bool,
     /// Inline strings authored with formatted runs, with the text the model keeps.
     pub rich_inline: BTreeMap<(u32, u32), String>,
     /// Whether a formula cell sits inside `mc:AlternateContent`, where another
@@ -761,6 +763,8 @@ fn parse_worksheet(
                             shared_formulas.record(&e, origin, &text)?;
                             if let Some(range) = array_ref.filter(|range| range.contains(origin)) {
                                 sheet.set_array_formula(origin, range);
+                            } else if attr(&e, b"t")?.as_deref() == Some("array") {
+                                facts.dropped_array_ranges = true;
                             }
                         }
                         c.formula = Some(text);

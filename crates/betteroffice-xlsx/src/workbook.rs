@@ -1796,13 +1796,21 @@ impl Workbook {
                 let Some(facts) = package.source_cell_facts(index) else {
                     return false;
                 };
-                facts.blank_results.iter().any(|&(row, col)| {
-                    let at = CellRef::new(row, col);
-                    sheet.cell(at).is_some_and(|cell| cell.formula.is_some())
-                        || sheet.array_formulas().any(|(anchor, range)| {
-                            at != anchor && range.contains(at)
+                facts.alternate_formulas
+                    || facts.dropped_array_ranges
+                    || facts.blank_results.iter().any(|&(row, col)| {
+                        sheet
+                            .cell(CellRef::new(row, col))
+                            .is_some_and(|cell| cell.formula.is_some())
+                    })
+                    || sheet.array_formulas().any(|(anchor, range)| {
+                        (range.start.row..=range.end.row).any(|row| {
+                            facts
+                                .blank_results
+                                .range((row, range.start.col)..=(row, range.end.col))
+                                .any(|&(row, col)| CellRef::new(row, col) != anchor)
                         })
-                })
+                    })
             }))
     }
 
