@@ -3451,6 +3451,10 @@ impl EditingDoc {
                     }
                 }
             }
+            let mut by_id: HashMap<u32, Vec<&str>> = HashMap::new();
+            for (holder, now) in &current {
+                by_id.entry(*now).or_default().push(holder.as_str());
+            }
             let captured: HashSet<(&str, u32)> = saved
                 .iter()
                 .filter_map(|(owner, id)| Some((owner.as_str(), parse_paragraph_id(id)?)))
@@ -3469,10 +3473,11 @@ impl EditingDoc {
                 };
                 let moved = current.get(owner).is_some_and(|now| *now != id);
                 let viewed = occurrence(owner);
-                let taken = current.iter().any(|(holder, now)| {
-                    *now == id
-                        && !captured.contains(&(holder.as_str(), id))
-                        && (viewed.is_none() || occurrence(holder) != viewed)
+                let taken = by_id.get(&id).is_some_and(|holders| {
+                    holders.iter().any(|&holder| {
+                        !captured.contains(&(holder, id))
+                            && (viewed.is_none() || occurrence(holder) != viewed)
+                    })
                 });
                 if moved || taken {
                     stale.push((owner.clone(), text.clone()));
@@ -6999,6 +7004,149 @@ mod tests {
         );
         let txn = left.yrs_doc().transact();
         assert!(claim(&claims(&txn), &current, &a).unwrap().published);
+    }
+
+    #[test]
+    fn recording_saved_ids_reports_moved_and_taken_pairs_and_publishes_the_rest() {
+        let base = EditingDoc::new(1);
+        for story in ["edited", "moved", "taken", "taker", "first", "second"] {
+            base.create_story(story, "one", "Normal", "left").unwrap();
+        }
+        base.create_story("body", "abc", "Normal", "left").unwrap();
+        let update = base.encode_state_as_update_v1();
+        let (left, right) = (EditingDoc::new(2), EditingDoc::new(3));
+        left.apply_update_v1(&update).unwrap();
+        right.apply_update_v1(&update).unwrap();
+        let key = |story: &str| base.paragraphs(story).unwrap()[0].para_id.clone();
+        let (edited, moved, taken, taker, first, second) = (
+            key("edited"),
+            key("moved"),
+            key("taken"),
+            key("taker"),
+            key("first"),
+            key("second"),
+        );
+
+        claim_id(&left, &edited, "0000E001", false);
+        left.insert_text(
+            &ctx(),
+            Position::new("edited", 0),
+            "typed",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        left.split_paragraph(&ctx(), Position::new("body", 1), None)
+            .unwrap();
+        let deleted = left
+            .split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap()
+            .first_para_id;
+        let deleted_id = doc_identity(&left, &deleted).ooxml_para_id.unwrap();
+        left.delete_range(&ctx(), StoryRange::new("body", 1, 3))
+            .unwrap();
+        claim_id(&left, &moved, "0000B001", false);
+        claim_id(&left, &moved, "0000B002", false);
+        claim_id(&left, &taken, "0000C001", false);
+        claim_id(&right, &taker, "0000C001", true);
+        claim_id(&right, &first, "0000D001", true);
+        claim_id(&left, &second, "0000D001", true);
+        left.apply_update_v1(&right.encode_state_as_update_v1())
+            .unwrap();
+        assert_ne!(
+            doc_identity(&left, &taken).ooxml_para_id.as_deref(),
+            Some("0000C001")
+        );
+        assert_eq!(
+            doc_identity(&left, &first).ooxml_para_id.as_deref(),
+            Some("0000D001")
+        );
+        assert_eq!(
+            doc_identity(&left, &second).ooxml_para_id.as_deref(),
+            Some("0000D001")
+        );
+
+        let saved = vec![
+            (edited.clone(), "0000E001".to_owned()),
+            (deleted.clone(), deleted_id.clone()),
+            (moved.clone(), "0000B001".to_owned()),
+            (taken.clone(), "0000C001".to_owned()),
+            (first.clone(), "0000D001".to_owned()),
+            (second.clone(), "0000D001".to_owned()),
+            (first.clone(), "0000D001".to_owned()),
+        ];
+        let expected = vec![
+            (moved.clone(), "0000B001".to_owned()),
+            (taken.clone(), "0000C001".to_owned()),
+        ];
+        assert_eq!(left.record_saved_paragraph_ids(&saved), expected);
+
+        let published = |id: &str, owner: &str| {
+            let txn = left.yrs_doc().transact();
+            claim(&claims(&txn), id, owner).unwrap().published
+        };
+        assert!(published("0000E001", &edited));
+        assert!(published(&deleted_id, &deleted));
+        assert!(!published("0000B001", &moved));
+        assert!(!published("0000B002", &moved));
+        assert!(!published("0000C001", &taken));
+        assert!(published("0000C001", &taker));
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+
+        let before = left.encode_state_vector_v1();
+        assert_eq!(left.record_saved_paragraph_ids(&saved), expected);
+        assert_eq!(left.encode_state_vector_v1(), before);
+    }
+
+    #[test]
+    fn a_saved_id_another_uncaptured_holder_shares_is_taken_without_moving() {
+        let base = EditingDoc::new(1);
+        for story in ["first", "second", "other"] {
+            base.create_story(story, "one", "Normal", "left").unwrap();
+        }
+        let update = base.encode_state_as_update_v1();
+        let (left, right) = (EditingDoc::new(2), EditingDoc::new(3));
+        left.apply_update_v1(&update).unwrap();
+        right.apply_update_v1(&update).unwrap();
+        let key = |story: &str| base.paragraphs(story).unwrap()[0].para_id.clone();
+        let (first, second, other) = (key("first"), key("second"), key("other"));
+        claim_id(&right, &first, "0000D001", true);
+        claim_id(&left, &second, "0000D001", true);
+        claim_id(&left, &other, "0000E001", false);
+        left.apply_update_v1(&right.encode_state_as_update_v1())
+            .unwrap();
+        for holder in [&first, &second] {
+            assert_eq!(
+                doc_identity(&left, holder).ooxml_para_id.as_deref(),
+                Some("0000D001")
+            );
+        }
+        let published = |id: &str, owner: &str| {
+            let txn = left.yrs_doc().transact();
+            claim(&claims(&txn), id, owner).unwrap().published
+        };
+
+        let taken_only = vec![
+            (first.clone(), "0000D001".to_owned()),
+            (other.clone(), "0000E001".to_owned()),
+        ];
+        assert_eq!(
+            left.record_saved_paragraph_ids(&taken_only),
+            [(first.clone(), "0000D001".to_owned())]
+        );
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+        assert!(published("0000E001", &other));
+
+        let before = left.encode_state_vector_v1();
+        let both = vec![
+            (first.clone(), "0000D001".to_owned()),
+            (second.clone(), "0000D001".to_owned()),
+        ];
+        assert!(left.record_saved_paragraph_ids(&both).is_empty());
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+        assert_eq!(left.encode_state_vector_v1(), before);
     }
 
     #[test]

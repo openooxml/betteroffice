@@ -5741,11 +5741,17 @@ impl EngineSession {
             let blocks = Rc::get_mut(&mut lowered.blocks)?;
             let map = Rc::get_mut(&mut lowered.map)?;
             let revealable = Rc::get_mut(&mut lowered.revealable_blocks)?;
-            lowered
-                .local
-                .patch(blocks.shared_mut(), map, revealable, &txn, env, &edit)
+            let shift =
+                lowered
+                    .local
+                    .patch(blocks.shared_mut(), map, revealable, &txn, env, &edit)?;
+            let renumbered = docx_layout::footnotes::number_note_references(
+                blocks.shared_mut().as_mut_slice(),
+                &env.note_numbering,
+            );
+            Some((shift, renumbered))
         })();
-        let Some(shift) = shift else {
+        let Some((shift, renumbered)) = shift else {
             if let Some((_, revision)) = previous_version
                 && let Some(blocks) = Rc::get_mut(&mut lowered.blocks)
             {
@@ -5776,7 +5782,9 @@ impl EngineSession {
                 *certificate = None;
             }
         }
-        let measurement_patch = if origin_matches {
+        let measurement_patch = if renumbered {
+            None
+        } else if origin_matches {
             Some(MeasurementPatch {
                 base_generation: lowered.generation,
                 current_generation: generation,
@@ -5884,6 +5892,7 @@ impl EngineSession {
                     Rc::make_mut(&mut lowered.revealable_blocks),
                     &mut units,
                     &mut lowered.local,
+                    &env.note_numbering,
                 );
                 lowered.preview = Some(Rc::new(units));
                 lowered.serialized_blocks = None;
@@ -6289,7 +6298,7 @@ impl EngineSession {
         let mut measured_spacing = None;
         let worker_owned = request.worker_owned.is_some();
         if let Some(worker) = request.worker_owned {
-            let env = if worker.render_env.is_null() {
+            let mut env: RenderEnv = if worker.render_env.is_null() {
                 RenderEnv::default()
             } else {
                 serde_json::from_value(worker.render_env.clone())
@@ -6298,6 +6307,8 @@ impl EngineSession {
             let story = worker.body_story.as_deref().unwrap_or("body");
             let mut regions = request.regions;
             regions.normalize_authored();
+            env.note_numbering =
+                docx_layout::footnotes::SectionNoteNumbering::for_regions(&regions);
             if let Some(payload) = request.worker_headers_footers {
                 let value = serde_json::json!({ "headersFooters": payload });
                 for variant in value["headersFooters"]["variants"]
@@ -6774,6 +6785,8 @@ impl EngineSession {
             if cache_key.is_some() {
                 render_env.revision_preview.clear();
             }
+            render_env.note_numbering =
+                docx_layout::footnotes::SectionNoteNumbering::for_regions(&regions);
             let mut stories = BTreeSet::from([body_story]);
             for section_index in 0..regions.sections.len() {
                 let Some(refs) = effective_header_footer_refs(&regions, section_index) else {
@@ -7440,6 +7453,10 @@ impl EngineSession {
             let line_px = regions.paragraph_spacing_line_px(0);
             env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
             env.doc_grid_pitch_px = regions.doc_grid_snap_pitch_px(0);
+        }
+        if let Some(env) = &mut parsed_render_env {
+            env.note_numbering =
+                docx_layout::footnotes::SectionNoteNumbering::for_regions(&regions);
         }
         let prefix = match prefix {
             Some(PagePrefix { exact: true, .. })
@@ -21755,6 +21772,230 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_ne!(engine.lower_story_json("body", &env).unwrap(), before);
     }
 
+    fn footnote_marks(blocks: serde_json::Value) -> Vec<(i64, String)> {
+        blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|block| block["runs"].as_array().cloned().unwrap_or_default())
+            .filter_map(|run| {
+                Some((
+                    run.get("footnoteRefId")?.as_f64()? as i64,
+                    run["text"].as_str()?.to_owned(),
+                ))
+            })
+            .collect()
+    }
+
+    fn resident_footnote_marks(engine: &EngineSession) -> Vec<(i64, String)> {
+        footnote_marks(
+            serde_json::to_value(engine.render.borrow().stories["body"].blocks.as_ref()).unwrap(),
+        )
+    }
+
+    fn fresh_footnote_marks(engine: &EngineSession, env: &RenderEnv) -> Vec<(i64, String)> {
+        footnote_marks(
+            serde_json::to_value(
+                crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", env).unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn revision_preview_note_engine(
+        client_id: u64,
+        body: &str,
+        note_ids: &[u32],
+        font: u32,
+    ) -> EngineSession {
+        use super::lowering_fixture::Package;
+
+        let mut notes = format!("<w:footnotes {}>", lowering_fixture::NS);
+        for id in note_ids {
+            notes.push_str(&format!(
+                r#"<w:footnote w:id="{id}"><w:p><w:r><w:t>Note {id}</w:t></w:r></w:p></w:footnote>"#
+            ));
+        }
+        notes.push_str("</w:footnotes>");
+        let bytes = Package::new(body)
+            .part(
+                "footnotes.xml",
+                "rIdNotes",
+                "footnotes",
+                "footnotes",
+                &notes,
+            )
+            .bytes();
+        let engine = EngineSession::new(client_id);
+        crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+        engine.set_local_lowering(true);
+        engine
+            .layout_regions_for_trigger(&small_page_request(font), None, RelayoutTrigger::Bulk)
+            .unwrap();
+        assert!(engine.render.borrow().stories["body"].preview.is_some());
+        engine
+    }
+
+    fn patch_revision_preview(engine: &EngineSession, decision: RevisionPreview) -> RenderEnv {
+        let epoch = engine.doc_epoch();
+        let id = preview_fixture::ids(engine).remove(0);
+        let env = engine.render.borrow().stories["body"]
+            .env
+            .clone()
+            .with_revision_preview(&id, decision);
+        let before = engine.stats();
+        assert!(engine.patch_preview_body(epoch, &env).is_some());
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + 1,
+        );
+        env
+    }
+
+    #[test]
+    fn revision_preview_replay_marks_note_references_with_their_ordinals() {
+        use super::lowering_fixture::{para, run};
+
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let body = para(
+            "10000001",
+            &format!(
+                r#"{}<w:ins w:id="1" w:author="A"><w:r><w:t>x</w:t></w:r></w:ins><w:r><w:footnoteReference w:id="2"/></w:r>"#,
+                run("Before"),
+            ),
+        );
+        let engine = revision_preview_note_engine(9677, &body, &[2], font);
+        assert_eq!(resident_footnote_marks(&engine), vec![(2, "1".to_owned())]);
+        let env = patch_revision_preview(&engine, RevisionPreview::Rejected);
+        assert_eq!(resident_footnote_marks(&engine), vec![(2, "1".to_owned())]);
+        assert_eq!(
+            resident_footnote_marks(&engine),
+            fresh_footnote_marks(&engine, &env)
+        );
+    }
+
+    #[test]
+    fn a_reference_hidden_by_a_revision_preview_shifts_the_later_ordinals() {
+        use super::lowering_fixture::{para, run};
+
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let body = format!(
+            "{}{}",
+            para(
+                "10000001",
+                &format!(
+                    r#"{}<w:ins w:id="1" w:author="A"><w:r><w:footnoteReference w:id="2"/></w:r></w:ins>{}<w:r><w:footnoteReference w:id="3"/></w:r>"#,
+                    run("Before"),
+                    run("Mid"),
+                ),
+            ),
+            para(
+                "10000002",
+                &format!(
+                    r#"{}<w:r><w:footnoteReference w:id="4"/></w:r>"#,
+                    run("Later")
+                ),
+            ),
+        );
+        let engine = revision_preview_note_engine(9678, &body, &[2, 3, 4], font);
+        let shown = vec![
+            (2, "1".to_owned()),
+            (3, "2".to_owned()),
+            (4, "3".to_owned()),
+        ];
+        let hidden = vec![(3, "1".to_owned()), (4, "2".to_owned())];
+        assert_eq!(resident_footnote_marks(&engine), shown);
+        for (decision, expected) in [
+            (RevisionPreview::Rejected, &hidden),
+            (RevisionPreview::Accepted, &shown),
+            (RevisionPreview::Rejected, &hidden),
+        ] {
+            let env = patch_revision_preview(&engine, decision);
+            assert_eq!(&resident_footnote_marks(&engine), expected, "{decision:?}");
+            assert_eq!(
+                resident_footnote_marks(&engine),
+                fresh_footnote_marks(&engine, &env),
+                "{decision:?}",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf probe; run explicitly with --ignored --nocapture"]
+    fn renumber_cost_on_a_note_heavy_story() {
+        use super::lowering_fixture::{Package, para, run};
+
+        const PARAGRAPHS: usize = 2000;
+        const NOTE_EVERY: usize = 4;
+        const EDITS: u32 = 50;
+        let mut body = String::new();
+        let mut notes = format!("<w:footnotes {}>", lowering_fixture::NS);
+        for index in 0..PARAGRAPHS {
+            let mut content = run("Paragraph text");
+            if index % NOTE_EVERY == NOTE_EVERY - 1 {
+                let id = index / NOTE_EVERY + 1;
+                content.push_str(&format!(r#"<w:r><w:footnoteReference w:id="{id}"/></w:r>"#));
+                notes.push_str(&format!(
+                    r#"<w:footnote w:id="{id}"><w:p><w:r><w:t>Note {id}</w:t></w:r></w:p></w:footnote>"#
+                ));
+            }
+            body.push_str(&para(&format!("{:08X}", 0x10000001 + index), &content));
+        }
+        notes.push_str("</w:footnotes>");
+        let bytes = Package::new(&body)
+            .part(
+                "footnotes.xml",
+                "rIdNotes",
+                "footnotes",
+                "footnotes",
+                &notes,
+            )
+            .bytes();
+        let (engine, _) = local_patch_laid_out(&bytes, 9679, true);
+        let env = engine.render.borrow().stories["body"].env.clone();
+        let refs = docx_layout::footnotes::collect_note_refs(
+            &engine.render.borrow().stories["body"].blocks.to_vec(),
+        )
+        .len();
+        let offset = measurement_patch_offset(&engine, 0);
+        let mut partial = std::time::Duration::ZERO;
+        let mut renumber = std::time::Duration::ZERO;
+        for _ in 0..EDITS {
+            engine
+                .edit_resident_text(
+                    crate::StoryRange::new("body", offset, offset),
+                    Some("x"),
+                    true,
+                )
+                .unwrap();
+            let started = std::time::Instant::now();
+            assert!(
+                engine
+                    .patch_lowered_body(engine.doc_epoch(), &env)
+                    .is_some()
+            );
+            partial += started.elapsed();
+            let mut blocks = engine.render.borrow().stories["body"]
+                .blocks
+                .shared()
+                .to_vec();
+            let started = std::time::Instant::now();
+            let renumbered =
+                docx_layout::footnotes::number_note_references(&mut blocks, &env.note_numbering);
+            renumber += started.elapsed();
+            assert!(!renumbered);
+        }
+        println!(
+            "RENUMBER_COST partial_ms_avg={:.3} renumber_us_avg={:.1} refs={refs}",
+            partial.as_secs_f64() * 1e3 / f64::from(EDITS),
+            renumber.as_secs_f64() * 1e6 / f64::from(EDITS),
+        );
+    }
+
     #[test]
     fn resident_float_local_lowering_failures_preserve_measurement_origin() {
         let fonts = docx_layout::MeasureFonts::default();
@@ -26602,6 +26843,309 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 .unwrap()
                 > separator_height
         );
+    }
+
+    type NoteKey = (String, i64);
+
+    /// Lays out one paragraph per entry of `paragraphs`, each holding its note references, with a
+    /// next-page section break after each paragraph in `section_breaks`. Returns the body's note
+    /// marks in document order and the label each note area gives each note.
+    fn note_ordinal_layout(
+        client_id: u64,
+        paragraphs: &[&[(&str, f64)]],
+        section_breaks: &[usize],
+        regions: serde_json::Value,
+    ) -> (Vec<(NoteKey, String)>, BTreeMap<NoteKey, String>) {
+        note_ordinal_layout_with_tables(client_id, paragraphs, section_breaks, &[], regions)
+    }
+
+    /// [`note_ordinal_layout`], with each paragraph in `table_paragraphs` placed alone in a
+    /// one-cell table.
+    fn note_ordinal_layout_with_tables(
+        client_id: u64,
+        paragraphs: &[&[(&str, f64)]],
+        section_breaks: &[usize],
+        table_paragraphs: &[usize],
+        regions: serde_json::Value,
+    ) -> (Vec<(NoteKey, String)>, BTreeMap<NoteKey, String>) {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(client_id);
+        engine
+            .doc()
+            .create_story("body", "", "Normal", "left")
+            .unwrap();
+        let mut ops = vec![crate::RawOp::Delete { index: 0, len: 1 }];
+        let mut contents = Vec::new();
+        let mut cursor = 0;
+        for (paragraph, refs) in paragraphs.iter().enumerate() {
+            let in_table = table_paragraphs.contains(&paragraph);
+            let cell_story = format!("body:t{paragraph}:r0c0");
+            let mut cell_ops = vec![crate::RawOp::Delete { index: 0, len: 1 }];
+            let (target, mut at) = if in_table {
+                (&mut cell_ops, 0)
+            } else {
+                (&mut ops, cursor)
+            };
+            for &(kind, id) in refs.iter() {
+                let (key, prefix) = if kind == "endnote" {
+                    ("endnoteRefId", "en")
+                } else {
+                    ("footnoteRefId", "fn")
+                };
+                target.push(crate::RawOp::Insert {
+                    index: at,
+                    text: "ab".to_owned(),
+                    attrs: Attrs::new(),
+                });
+                target.push(crate::RawOp::InsertEmbed {
+                    index: at + 2,
+                    kind: "noteRef".to_owned(),
+                    payload: vec![(key.to_owned(), Any::Number(id))],
+                    attrs: Attrs::new(),
+                });
+                at += 3;
+                engine
+                    .doc()
+                    .create_story(format!("{prefix}:{id}").as_str(), "Note", "Normal", "left")
+                    .unwrap();
+                contents.push(json!({"id": id as i64, "noteKind": kind, "height": 0}));
+            }
+            target.push(crate::RawOp::InsertEmbed {
+                index: at,
+                kind: "pilcrow".to_owned(),
+                payload: vec![("paraId".to_owned(), Any::from(format!("note-p{paragraph}")))],
+                attrs: Attrs::new(),
+            });
+            at += 1;
+            if !in_table {
+                cursor = at;
+                continue;
+            }
+            engine
+                .doc()
+                .create_story(cell_story.as_str(), "", "Normal", "left")
+                .unwrap();
+            engine
+                .doc()
+                .apply_raw_ops(
+                    &cell_story,
+                    cell_ops,
+                    &crate::EditCtx::local("", "2026-07-18T00:00:00Z"),
+                )
+                .unwrap();
+            let rows = json!([{
+                "trPr": {"isHeader": false},
+                "cells": [{"tcPr": {"colspan": 1, "rowspan": 1}, "story": cell_story}]
+            }]);
+            ops.push(crate::RawOp::InsertEmbed {
+                index: cursor,
+                kind: "table".to_owned(),
+                payload: vec![
+                    ("tblPr".to_owned(), Any::from_json("{}").unwrap()),
+                    ("grid".to_owned(), Any::from_json("[]").unwrap()),
+                    (
+                        "rows".to_owned(),
+                        Any::from_json(&rows.to_string()).unwrap(),
+                    ),
+                ],
+                attrs: Attrs::new(),
+            });
+            cursor += 1;
+        }
+        engine
+            .doc()
+            .apply_raw_ops(
+                "body",
+                ops,
+                &crate::EditCtx::local("", "2026-07-18T00:00:00Z"),
+            )
+            .unwrap();
+        let body = engine.doc().paragraphs("body").unwrap();
+        for &index in section_breaks {
+            engine
+                .doc()
+                .set_paragraph_attr(
+                    &body[index].para_id,
+                    "sectionBreakType",
+                    Any::from("nextPage"),
+                )
+                .unwrap();
+        }
+        let request = json!({
+            "bodyStory": "body",
+            "regions": regions,
+            "notes": {"contents": contents},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let mut labels = BTreeMap::new();
+        for page in output["layout"]["pages"].as_array().unwrap() {
+            for area in page["noteAreas"].as_array().into_iter().flatten() {
+                for note in area["notes"].as_array().into_iter().flatten() {
+                    labels.insert(
+                        (
+                            note["kind"].as_str().unwrap().to_owned(),
+                            note["id"].as_i64().unwrap(),
+                        ),
+                        note["displayLabel"].as_str().unwrap().to_owned(),
+                    );
+                }
+            }
+        }
+        let pagination = engine.pagination.borrow();
+        let mut marks = Vec::new();
+        for measured in pagination.input.as_ref().unwrap().measured.iter() {
+            push_note_marks(&measured.block, &mut marks);
+        }
+        (marks, labels)
+    }
+
+    fn push_note_marks(block: &LayoutBlock, marks: &mut Vec<(NoteKey, String)>) {
+        match block {
+            LayoutBlock::Paragraph(paragraph) => {
+                for run in &paragraph.runs {
+                    let Run::Text(text) = run else {
+                        continue;
+                    };
+                    let key = match (text.fmt.footnote_ref_id, text.fmt.endnote_ref_id) {
+                        (Some(id), _) => ("footnote".to_owned(), id as i64),
+                        (None, Some(id)) => ("endnote".to_owned(), id as i64),
+                        (None, None) => continue,
+                    };
+                    marks.push((key, text.text.clone()));
+                }
+            }
+            LayoutBlock::Table(table) => {
+                for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                    for block in &cell.blocks {
+                        push_note_marks(block, marks);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn assert_marks_follow_notes(
+        (marks, labels): (Vec<(NoteKey, String)>, BTreeMap<NoteKey, String>),
+        expected: &[&str],
+    ) {
+        let texts: Vec<&str> = marks.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(texts, expected);
+        for (key, text) in &marks {
+            assert_eq!(labels.get(key), Some(text), "{key:?}");
+        }
+    }
+
+    fn note_ordinal_regions(note_settings: serde_json::Value) -> serde_json::Value {
+        json!({
+            "noteSettings": note_settings,
+            "sections": [{
+                "sectionId": "main",
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20}
+            }]
+        })
+    }
+
+    #[test]
+    fn a_lone_note_marks_the_body_with_its_ordinal() {
+        for (client_id, kind) in [(7311, "footnote"), (7312, "endnote")] {
+            assert_marks_follow_notes(
+                note_ordinal_layout(
+                    client_id,
+                    &[&[(kind, 2.0)]],
+                    &[],
+                    note_ordinal_regions(json!({})),
+                ),
+                &["1"],
+            );
+        }
+    }
+
+    #[test]
+    fn notes_out_of_id_order_mark_the_body_in_document_order() {
+        for (client_id, kind) in [(7313, "footnote"), (7314, "endnote")] {
+            assert_marks_follow_notes(
+                note_ordinal_layout(
+                    client_id,
+                    &[&[(kind, 7.0), (kind, 3.0)], &[(kind, 5.0)]],
+                    &[],
+                    note_ordinal_regions(json!({})),
+                ),
+                &["1", "2", "3"],
+            );
+        }
+    }
+
+    #[test]
+    fn note_number_format_and_start_reach_the_body_mark() {
+        for (client_id, kind) in [(7315, "footnote"), (7316, "endnote")] {
+            assert_marks_follow_notes(
+                note_ordinal_layout(
+                    client_id,
+                    &[&[(kind, 4.0), (kind, 2.0)]],
+                    &[],
+                    note_ordinal_regions(json!({kind: {"numFmt": "lowerRoman", "numStart": 3}})),
+                ),
+                &["iii", "iv"],
+            );
+        }
+    }
+
+    #[test]
+    fn footnotes_restarting_each_section_mark_the_body_per_section() {
+        let section = |id: &str| {
+            json!({
+                "sectionId": id,
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20}
+            })
+        };
+        assert_marks_follow_notes(
+            note_ordinal_layout(
+                7317,
+                &[
+                    &[("footnote", 2.0), ("footnote", 3.0)],
+                    &[("footnote", 4.0)],
+                ],
+                &[0],
+                json!({
+                    "noteSettings": {"footnote": {"numRestart": "eachSect"}},
+                    "sections": [section("first"), section("second")]
+                }),
+            ),
+            &["1", "2", "1"],
+        );
+    }
+
+    #[test]
+    fn a_note_reference_in_a_table_cell_marks_its_ordinal_in_document_order() {
+        for (client_id, kind) in [(7318, "footnote"), (7319, "endnote")] {
+            assert_marks_follow_notes(
+                note_ordinal_layout_with_tables(
+                    client_id,
+                    &[&[(kind, 7.0)], &[(kind, 3.0), (kind, 8.0)], &[(kind, 5.0)]],
+                    &[],
+                    &[1],
+                    note_ordinal_regions(json!({})),
+                ),
+                &["1", "2", "3", "4"],
+            );
+        }
     }
 
     fn paragraph_pagination_input(first_text: &str, shifted_suffix: bool) -> String {
