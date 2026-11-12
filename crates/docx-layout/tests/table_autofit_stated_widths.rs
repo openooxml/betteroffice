@@ -110,3 +110,15 @@ fn content_minimums_past_the_budget_do_not_widen_stated_cells_that_fit() {
     let table = measure_table(&config, [96.0, 96.0], [wide("a"), wide("b")], 192.0);
     assert_widths(&table.column_widths, &[96.0, 96.0]);
 }
+
+#[test]
+fn stated_widths_past_a_grid_that_fills_the_text_width_stay_inside_it() {
+    let config = config();
+    let table = measure_table(
+        &config,
+        [100.0, 100.0],
+        [cell("a", 1800.0, "x"), cell("b", 1800.0, "x")],
+        200.0,
+    );
+    assert_widths(&table.column_widths, &[100.0, 100.0]);
+}

@@ -12,8 +12,8 @@
 //!   preferred cell widths before fitting any explicit table width.
 //! - **autofit** — accumulate per-column minimum and maximum content widths
 //!   from every cell, bounded by preferred cell widths and the content budget.
-//!   In a table that states no width, cell widths that alone exceed the
-//!   budget widen it, as in Word.
+//!   In a table that states no width, cell widths and a grid that both exceed
+//!   the budget widen it, as in Word.
 //!   Distribute room above minimums in proportion to column flex (`max - min`),
 //!   or shrink minimums proportionally when they exceed the budget.
 //! - otherwise — normalize the declared grid and uniformly scale it to an
@@ -820,10 +820,15 @@ fn autofit_column_widths(
     );
     let min_total: f64 = minimums.iter().sum();
     let max_total: f64 = maximums.iter().sum();
+    let grid_total: f64 = table_block
+        .grid_widths
+        .as_deref()
+        .or(table_block.column_widths.as_deref())
+        .map_or(0.0, |grid| grid.iter().sum());
     let limit = if explicit_width_px.is_some() {
         budget
     } else {
-        budget.max(stated)
+        budget.max(stated.min(grid_total))
     };
     let target = limit.min(
         min_total.max(explicit_width_px.unwrap_or(if max_total > 0.0 {
