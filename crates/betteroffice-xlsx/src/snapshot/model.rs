@@ -56,6 +56,9 @@ const CONDITIONAL_FORMATS_V2: u8 = 33;
 /// A chart record that also carries the edited part XML it saves; a chart
 /// without any keeps the `CHART` layout.
 const CHART_XML: u8 = 34;
+/// A sheet record laid out as `HIDDEN_SHEET` whose format also carries the
+/// default column widths; a sheet without any keeps its other layouts.
+const SIZED_SHEET: u8 = 35;
 
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
@@ -64,7 +67,7 @@ const BORDER_V2: u8 = 23;
 fn run_tag(tag: u8) -> u8 {
     match tag {
         CONDITIONAL_HEADER | AUTO_FILTER_HEADER => HEADER,
-        STYLED_SHEET | HIDDEN_SHEET => SHEET,
+        STYLED_SHEET | HIDDEN_SHEET | SIZED_SHEET => SHEET,
         CHART_XML => CHART,
         XF_V2 => XF,
         CONDITIONAL_FORMATS_V2 => CONDITIONAL_FORMATS,
@@ -459,6 +462,8 @@ impl MetadataCursor {
                 CHART_REF
             } else if self.sheet_phase == CHART && sheet.charts[self.index].raw_xml.is_some() {
                 CHART_XML
+            } else if self.sheet_phase == SHEET && sized(&sheet.format) {
+                SIZED_SHEET
             } else if self.sheet_phase == SHEET
                 && (!sheet.hidden_col_widths.is_empty() || !sheet.hidden_row_heights.is_empty())
             {
@@ -473,8 +478,14 @@ impl MetadataCursor {
                     w.str(&sheet.name);
                     w.option(sheet.freeze_pane.as_ref(), write_pane);
                     write_format(w, &sheet.format);
+                    let sized = sized(&sheet.format);
+                    if sized {
+                        w.option(sheet.format.default_col_width, Writer::f64);
+                        w.option(sheet.format.base_col_width, Writer::var_u32);
+                    }
                     let counts = sheet_counts(sheet)?;
-                    let count = if !sheet.hidden_col_widths.is_empty()
+                    let count = if sized
+                        || !sheet.hidden_col_widths.is_empty()
                         || !sheet.hidden_row_heights.is_empty()
                     {
                         11
@@ -1018,7 +1029,9 @@ impl ModelSnapshotBuilder {
             INDEXED => g.ensure(m, |m| Ok(&mut m.styles.indexed_colors), budget),
             TABLE => g.ensure(m, |m| Ok(&mut m.tables), budget),
             TABLE_COLUMN => g.ensure(m, |m| Ok(&mut m.tables.last_mut().unwrap().columns), budget),
-            SHEET | STYLED_SHEET | HIDDEN_SHEET => g.ensure(m, |m| Ok(&mut m.sheets), budget),
+            SHEET | STYLED_SHEET | HIDDEN_SHEET | SIZED_SHEET => {
+                g.ensure(m, |m| Ok(&mut m.sheets), budget)
+            }
             HYPERLINK => g.ensure(
                 m,
                 |m| Ok(&mut m.sheets.last_mut().unwrap().hyperlinks),
@@ -1244,7 +1257,7 @@ impl ModelSnapshotBuilder {
                 .ok_or_else(|| SnapshotError::new("snapshot table column has no table"))?
                 .columns
                 .push(r.str()?.to_owned()),
-            SHEET | STYLED_SHEET | HIDDEN_SHEET => self.read_sheet(r, raw)?,
+            SHEET | STYLED_SHEET | HIDDEN_SHEET | SIZED_SHEET => self.read_sheet(r, raw)?,
             CHART_XML => self.read_sheet_record(raw, r)?,
             _ => self.read_sheet_record(tag, r)?,
         }
@@ -1270,9 +1283,13 @@ impl ModelSnapshotBuilder {
         sheet.auto_filter = self.auto_filters.next().unwrap_or_default();
         sheet.freeze_pane = r.option(read_pane)?;
         sheet.format = read_format(r)?;
+        if tag == SIZED_SHEET {
+            sheet.format.default_col_width = r.option(Reader::f64)?;
+            sheet.format.base_col_width = r.option(Reader::var_u32)?;
+        }
         let mut counts = [0; 11];
         let count = match tag {
-            HIDDEN_SHEET => 11,
+            HIDDEN_SHEET | SIZED_SHEET => 11,
             STYLED_SHEET => 9,
             _ => 8,
         };
@@ -1671,6 +1688,8 @@ fn write_format(w: &mut Writer, value: &SheetFormat) {
         default_row_height_pt,
         custom_height,
         zero_height,
+        default_col_width: _,
+        base_col_width: _,
     } = value;
     w.option(*default_row_height_pt, Writer::f64);
     w.bool(*custom_height);
@@ -1682,7 +1701,12 @@ fn read_format(r: &mut Reader<'_>) -> SnapshotResult<SheetFormat> {
         default_row_height_pt: r.option(Reader::f64)?,
         custom_height: r.bool()?,
         zero_height: r.bool()?,
+        ..SheetFormat::default()
     })
+}
+
+fn sized(format: &SheetFormat) -> bool {
+    format.default_col_width.is_some() || format.base_col_width.is_some()
 }
 
 fn write_hyperlink(w: &mut Writer, value: &Hyperlink) {
@@ -3309,6 +3333,7 @@ mod tests {
             default_row_height_pt: Some(-0.0),
             custom_height: true,
             zero_height: true,
+            ..SheetFormat::default()
         };
         sheet.col_styles = vec![
             ColStyle {
@@ -3846,6 +3871,28 @@ mod tests {
         let decoded = decode(&chunks);
         assert_eq!(&decoded, opened.model());
         assert_eq!(encode(&decoded, budget), chunks);
+    }
+
+    #[test]
+    fn column_defaults_use_their_own_sheet_record_only_when_declared() {
+        let mut model = sample_model();
+        let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+        let sheet_tags = |model: &Workbook| {
+            encode(model, budget)
+                .iter()
+                .filter_map(|chunk| {
+                    let (kind, _, payload) = unframe(chunk).unwrap();
+                    (kind == ChunkKind::Model && run_tag(payload[0]) == SHEET).then_some(payload[0])
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(!sheet_tags(&model).contains(&SIZED_SHEET));
+        model.sheets[0].format.default_col_width = Some(22.86);
+        model.sheets[0].format.base_col_width = Some(10);
+        assert_eq!(sheet_tags(&model)[0], SIZED_SHEET);
+        let chunks = encode(&model, budget);
+        assert_eq!(decode(&chunks), model);
+        assert_eq!(advance_all(&chunks, budget).unwrap(), model);
     }
 
     #[test]
