@@ -341,9 +341,15 @@ export interface PngPictureReport {
   unit?: string
 }
 
+export interface PngSkippedEffectReport {
+  key: string
+  count: number
+}
+
 export interface PngTargetReport {
   png: Uint8Array
   pictures: Array<PngPictureReport>
+  skippedEffects: Array<PngSkippedEffectReport>
 }
 
 export declare function range_rects_by_handle(handle: number, from: number, to: number): string

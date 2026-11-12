@@ -87,6 +87,14 @@ pub fn decode_font_face(
     Ok(object.into())
 }
 
+/// Every kind of effect a PNG export can report as skipped, in reporting order.
+#[wasm_bindgen(js_name = skippedEffectKinds)]
+pub fn skipped_effect_kinds() -> Vec<String> {
+    docx_layout::skipped_effects::SkippedEffect::ALL
+        .map(|effect| effect.name().to_owned())
+        .to_vec()
+}
+
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
@@ -697,6 +705,22 @@ impl EditSession {
     pub fn display_range_rects_json(&self, from: f64, to: f64) -> Result<String, JsValue> {
         self.core
             .display_range_rects_json(from, to)
+            .map_err(JsValue::from)
+    }
+
+    /// The kinds of effect the web canvas backend leaves off resident display
+    /// page `page_index`, as bits in `skippedEffectKinds()` order, the first
+    /// kind the lowest bit. `unavailable` holds `(region, area, index)` triples
+    /// for the pictures it could not draw: region 0 body, 1 header, 2 footer,
+    /// 3 note separator, 4 note, with `area` the note area's index.
+    #[wasm_bindgen(js_name = canvasSkippedEffects)]
+    pub fn canvas_skipped_effects(
+        &self,
+        page_index: u32,
+        unavailable: &[u32],
+    ) -> Result<u32, JsValue> {
+        self.core
+            .display_canvas_skipped_effects(page_index, unavailable)
             .map_err(JsValue::from)
     }
 

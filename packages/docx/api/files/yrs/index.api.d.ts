@@ -39,7 +39,7 @@ import type { DocxLayoutMap, DocxPageExportOptions, DocxPagedStructuredContent, 
 export { decodeDocxHostJson } from './yrsSessionFacade';
 import type { DocxPngOptions, DocxPngTarget } from '../layout/render/png';
 import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
-export { PngExportError, type PngExportCode, type PngDiagnostic, type PngPictureUnavailableReason, type PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
+export { PngExportError, PNG_SKIPPED_EFFECT_KINDS, type PngExportCode, type PngDiagnostic, type PngPictureUnavailableDiagnostic, type PngEffectsSkippedDiagnostic, type PngSkippedEffect, type PngSkippedEffectKind, type PngPictureUnavailableReason, type PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 export type { DocxPngFontFace, DocxPngOptions, DocxPngTarget } from '../layout/render/png';
 /** @internal */
 export type { DocxCommandEchoContext, DocxCommandKind, DocxCommandFrame, DocxFrameReservations, DocxCommandPageIdentity, DocxCommandPayloads, DocxCommandSelection, DocxEditState, DocxEchoGlyphLine, DocxEchoGlyphSet, DocxEchoRect, DocxEchoTransform, DocxNavigationIntent, DocxSelectionPointIntent, DocxWorkerEditSession, DocxCommandConnection, DocxCommandInitReply, } from './residentCommandProtocol';
@@ -1474,10 +1474,14 @@ export interface YrsSession extends CollaborationReplica {
     renderPng(target: DocxPngTarget, options?: DocxPngOptions): Promise<Uint8Array>;
     /** The native engine's rasterizer; the wasm engine has none. @internal */
     renderPngTarget?(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array;
-    /** {@link renderPngTarget}, with the pictures it drew as placeholders. @internal */
+    /** {@link renderPngTarget}, with the pictures it drew as placeholders and the effects it skipped, by rasterizer key. @internal */
     renderPngTargetReport?(displayListJson: string, targetJson: string, optionsJson: string): {
         png: Uint8Array;
         pictures: PngUnavailablePicture[];
+        skippedEffects: {
+            key: string;
+            count: number;
+        }[];
     };
     /** Drops the observer and frees the wasm-side replica. Idempotent. */
     destroy(): void;

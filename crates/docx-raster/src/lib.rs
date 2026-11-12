@@ -21,6 +21,7 @@ use docx_layout::display_list::{
     LinePrimitive, PageBorderPrimitive, PageBorderSide, PageBorderZOrder, Primitive, RectPrimitive,
     RevisionKind, ShapePathCommand, ShapePrimitive,
 };
+use docx_layout::skipped_effects::{PrimitiveAt, Region};
 use ooxml_raster::svg;
 use ooxml_raster::{encode_png, parse_css_color};
 use ooxml_text::{FontId, FontStore};
@@ -180,6 +181,8 @@ pub struct SkippedPicture {
     pub limit: Option<u64>,
     pub actual: Option<u64>,
     pub unit: Option<&'static str>,
+    /// The primitive that drew the placeholder.
+    pub at: PrimitiveAt,
 }
 
 #[derive(Clone, Copy)]
@@ -534,24 +537,48 @@ impl<'k> Renderer<'k> {
                 .unwrap_or(0)
                 .min(page.primitives.len()),
         );
-        for primitive in watermark {
+        for (index, primitive) in watermark.iter().enumerate() {
+            self.scratch.images.at = PrimitiveAt {
+                region: Region::Body,
+                index,
+            };
             self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
         }
-        for region in [&page.header, &page.footer].into_iter().flatten() {
+        let header = (Region::Header, &page.header);
+        for (place, region) in [header, (Region::Footer, &page.footer)] {
+            let Some(region) = region else {
+                continue;
+            };
             let scope = ImageScope::HeaderFooter(&region.r_id);
-            for primitive in &region.primitives {
+            for (index, primitive) in region.primitives.iter().enumerate() {
+                self.scratch.images.at = PrimitiveAt {
+                    region: place,
+                    index,
+                };
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
         }
-        for primitive in body {
+        for (index, primitive) in body.iter().enumerate() {
+            self.scratch.images.at = PrimitiveAt {
+                region: Region::Body,
+                index: watermark.len() + index,
+            };
             self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
         }
-        for area in &page.note_areas {
+        for (area_index, area) in page.note_areas.iter().enumerate() {
             let scope = ImageScope::Notes(NoteKind::from_region(area.kind.as_deref()));
-            for primitive in &area.separator_primitives {
+            for (index, primitive) in area.separator_primitives.iter().enumerate() {
+                self.scratch.images.at = PrimitiveAt {
+                    region: Region::NoteSeparator(area_index),
+                    index,
+                };
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
-            for primitive in &area.primitives {
+            for (index, primitive) in area.primitives.iter().enumerate() {
+                self.scratch.images.at = PrimitiveAt {
+                    region: Region::Note(area_index),
+                    index,
+                };
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
         }
@@ -2117,6 +2144,7 @@ struct PageImages<'c> {
     skipped: usize,
     pictures: Vec<SkippedPicture>,
     refusal: Option<PictureFailure>,
+    at: PrimitiveAt,
 }
 
 impl<'c> PageImages<'c> {
@@ -2133,6 +2161,10 @@ impl<'c> PageImages<'c> {
             skipped: 0,
             pictures: Vec::new(),
             refusal: None,
+            at: PrimitiveAt {
+                region: Region::Body,
+                index: 0,
+            },
         }
     }
 
@@ -2148,6 +2180,7 @@ impl<'c> PageImages<'c> {
             limit: failure.limit,
             actual: failure.actual,
             unit: failure.unit,
+            at: self.at,
         });
         self.skipped += 1;
     }
@@ -4033,6 +4066,24 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_picture_is_reported_at_its_position_beside_one_with_the_same_id() {
+        let drawn = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==";
+        let failed = "data:image/png;base64,bm90IGFuIGltYWdl";
+        let scene = picture_scene(&[drawn, failed]);
+        let rendered = render_pictures(&scene, &ImageMap::new(), &mut ImageCache::default(), 1.0);
+        let reported: Vec<(&str, PrimitiveAt)> = rendered
+            .skipped_pictures
+            .iter()
+            .map(|picture| (picture.id.as_str(), picture.at))
+            .collect();
+        let at = PrimitiveAt {
+            region: Region::Body,
+            index: 1,
+        };
+        assert_eq!(reported, [("data:image/png;base64", at)]);
+    }
+
+    #[test]
     fn missing_and_unknown_pictures_paint_scaled_placeholders_and_report_reasons() {
         let scene = picture_scene(&["rIdMissing", "rIdGarbage"]);
         let images = ImageMap::from([("rIdGarbage".to_owned(), b"not an image".to_vec())]);
@@ -4050,6 +4101,10 @@ mod tests {
                         limit: None,
                         actual: None,
                         unit: None,
+                        at: PrimitiveAt {
+                            region: Region::Body,
+                            index: 0,
+                        },
                     },
                     SkippedPicture {
                         id: "rIdGarbage".to_owned(),
@@ -4057,6 +4112,10 @@ mod tests {
                         limit: None,
                         actual: None,
                         unit: None,
+                        at: PrimitiveAt {
+                            region: Region::Body,
+                            index: 1,
+                        },
                     },
                 ],
             );
