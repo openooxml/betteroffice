@@ -1732,8 +1732,16 @@ fn story_fingerprint_for_save(
     budget: &mut Option<usize>,
     seeded: Option<SaveSeeds<'_>>,
 ) -> Option<([u8; 32], Vec<UnitState>, bool)> {
-    let mut fingerprint = StoryFingerprint::start(doc, txn, story, comments, budget, seeded)?;
-    fingerprint.advance(budget, usize::MAX)?;
+    let mut fingerprint = StoryFingerprint::start(
+        doc,
+        txn,
+        story,
+        comments,
+        *budget,
+        seeded,
+        PRIME_SLICE_SEGMENTS,
+    )?;
+    fingerprint.advance(txn, budget, usize::MAX)?;
     fingerprint.finish()
 }
 
@@ -1746,29 +1754,45 @@ pub enum PrimeSlice {
     Declined,
 }
 
-/// Stories of more segments than this are read in a slice of their own before any is digested.
+/// Story segments read per slice.
 const PRIME_SLICE_SEGMENTS: usize = 512;
 /// What reading and closing a story, and taking each segment apart, count against a slice's
 /// `max_bytes`, beside the canonical bytes digested.
 const PRIME_STORY_COST: usize = 1024;
 const PRIME_SEGMENT_COST: usize = 64;
 
-/// A save seed state prime between slices: the stories still to digest, the one under way and
-/// the states of those done, as of the commit epoch it started at.
+/// A save seed state prime in progress between slices.
 pub(crate) struct PrimeProgress {
     epoch: u64,
+    max_paragraphs: u32,
+    phase: PrimePhase,
     budget: Option<usize>,
     stories: std::collections::VecDeque<String>,
     roots: HashMap<String, String>,
+    anchors: HashMap<String, crate::canonical::CommentAnchors>,
     comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>>,
     states: HashMap<String, Arc<StoryState>>,
     current: Option<(String, StoryFingerprint<'static>)>,
+}
+
+/// The setup step a prime takes next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimePhase {
+    Scan,
+    Anchors,
+    Stories,
 }
 
 /// A story's [`story_fingerprint_for_save`], taken a few segments at a time.
 struct StoryFingerprint<'a> {
     story: String,
     seeded: Option<SaveSeeds<'a>>,
+    cursor: crate::StorySegmentCursor,
+    vanished: bool,
+    chunk: usize,
+    media: Option<Arc<docx_parse::media::MediaTable>>,
+    urls: crate::media::SegmentDataUrls,
+    text: usize,
     segments: std::vec::IntoIter<crate::StorySegment>,
     boundaries: std::iter::Peekable<std::vec::IntoIter<(u32, String, bool)>>,
     units: Vec<UnitState>,
@@ -1793,27 +1817,14 @@ impl<'a> StoryFingerprint<'a> {
         txn: &Transaction<'_>,
         story: &str,
         comments: &BTreeMap<String, Vec<(u32, u32)>>,
-        budget: &mut Option<usize>,
+        budget: Option<usize>,
         seeded: Option<SaveSeeds<'a>>,
+        chunk: usize,
     ) -> Option<Self> {
         use sha2::Digest;
         #[cfg(test)]
         STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
-        let mut segments = doc.story_segments_in(txn, story).ok()?;
-        strip_display_only_keys(&mut segments);
-        if let Some(media) = doc.media_table() {
-            match budget.as_mut() {
-                None => crate::media::write_segment_data_urls(&mut segments, &media).ok()?,
-                Some(budget) => {
-                    let written =
-                        crate::media::write_segment_data_urls_within(&mut segments, &media, budget);
-                    if !written.ok()? {
-                        *budget = 0;
-                        return None;
-                    }
-                }
-            }
-        }
+        let cursor = doc.story_segment_cursor_in(txn, story).ok()?;
         let mut boundaries: Vec<(u32, String, bool)> = comments
             .iter()
             .flat_map(|(key, anchors)| {
@@ -1826,7 +1837,13 @@ impl<'a> StoryFingerprint<'a> {
         Some(Self {
             story: story.to_owned(),
             seeded,
-            segments: segments.into_iter(),
+            cursor,
+            vanished: false,
+            chunk: chunk.max(1),
+            media: doc.media_table(),
+            urls: crate::media::SegmentDataUrls::new(budget),
+            text: 0,
+            segments: Vec::new().into_iter(),
             boundaries: boundaries.into_iter().peekable(),
             units: Vec::new(),
             unit: UnitDigest::default(),
@@ -1848,21 +1865,19 @@ impl<'a> StoryFingerprint<'a> {
     /// Digests segments until about `max_bytes` canonical bytes went in, answering whether every
     /// segment did and how many bytes this call digested; `None` where the whole story yields
     /// none.
-    fn advance(&mut self, budget: &mut Option<usize>, max_bytes: usize) -> Option<(bool, usize)> {
+    fn advance(
+        &mut self,
+        txn: &Transaction<'_>,
+        budget: &mut Option<usize>,
+        max_bytes: usize,
+    ) -> Option<(bool, usize)> {
         use sha2::Digest;
         let seeded_units = self
             .seeded
             .map(|seeded| seeded.units)
             .filter(|units| units.unique);
         let mut digested = 0usize;
-        for segment in self.segments.by_ref() {
-            if let Some(budget) = budget.as_mut() {
-                let Some(rest) = budget.checked_sub(segment_text_len(&segment)) else {
-                    *budget = 0;
-                    return None;
-                };
-                *budget = rest;
-            }
+        while let Some(segment) = self.next_segment(txn, budget)? {
             segment_canonical(&segment, &mut self.bytes, &mut self.section_bytes);
             digested = digested.saturating_add(self.bytes.len() + PRIME_SEGMENT_COST);
             self.unit.segment(&self.bytes);
@@ -1930,10 +1945,77 @@ impl<'a> StoryFingerprint<'a> {
                 _ => self.inline = true,
             }
             if digested >= max_bytes {
-                return Some((self.segments.as_slice().is_empty(), digested));
+                let done = self.segments.as_slice().is_empty() && self.cursor.is_empty();
+                return Some((done, digested));
             }
         }
         Some((true, digested))
+    }
+
+    /// The story's next segment, ready to digest.
+    fn next_segment(
+        &mut self,
+        txn: &Transaction<'_>,
+        budget: &mut Option<usize>,
+    ) -> Option<Option<crate::StorySegment>> {
+        if self.segments.as_slice().is_empty() {
+            let Some(mut chunk) = self.cursor.next_chunk(txn, self.chunk) else {
+                self.vanished = true;
+                return None;
+            };
+            if chunk.is_empty() {
+                return Some(None);
+            }
+            strip_display_only_keys(&mut chunk);
+            if let Some(media) = self.media.clone() {
+                self.urls.write(&mut chunk, &media);
+                if self.urls.failed() || self.urls.spent() {
+                    return self.decline(txn, budget);
+                }
+            }
+            self.segments = chunk.into_iter();
+        }
+        let Some(segment) = self.segments.next() else {
+            return Some(None);
+        };
+        if let Some(left) = self.urls.budget() {
+            let text = self.text.saturating_add(segment_text_len(&segment));
+            let Some(rest) = left.checked_sub(text) else {
+                return self.decline(txn, budget);
+            };
+            self.text = text;
+            *budget = Some(rest);
+        }
+        Some(Some(segment))
+    }
+
+    /// Ends a story that yields nothing.
+    fn decline(
+        &mut self,
+        txn: &Transaction<'_>,
+        budget: &mut Option<usize>,
+    ) -> Option<Option<crate::StorySegment>> {
+        if budget.is_none() {
+            return None;
+        }
+        if let Some(media) = self.media.clone() {
+            while !self.urls.spent() {
+                let Some(mut chunk) = self.cursor.next_chunk(txn, self.chunk) else {
+                    self.vanished = true;
+                    return None;
+                };
+                if chunk.is_empty() {
+                    break;
+                }
+                strip_display_only_keys(&mut chunk);
+                self.urls.write(&mut chunk, &media);
+            }
+        }
+        *budget = Some(match self.urls.budget() {
+            Some(left) if self.urls.failed() => left,
+            _ => 0,
+        });
+        None
     }
 
     fn finish(mut self) -> Option<([u8; 32], Vec<UnitState>, bool)> {
@@ -3718,6 +3800,23 @@ impl EditingDoc {
         max_inflated_bytes: u32,
         max_bytes: u32,
     ) -> PrimeSlice {
+        self.prime_save_seed_states_slice_with(
+            max_paragraphs,
+            max_inflated_bytes,
+            max_bytes,
+            PRIME_SLICE_SEGMENTS,
+        )
+    }
+
+    /// [`Self::prime_save_seed_states_slice`] with a given segments-per-slice count.
+    pub(crate) fn prime_save_seed_states_slice_with(
+        &self,
+        max_paragraphs: u32,
+        max_inflated_bytes: u32,
+        max_bytes: u32,
+        segments_per_slice: usize,
+    ) -> PrimeSlice {
+        let sliced = max_bytes != u32::MAX;
         let mut progress = self.prime_progress.lock().unwrap();
         let bytes = match self.source.lock().unwrap().as_ref() {
             Some(SourcePackage::Ready(index)) if index.seed_states_initialized() => {
@@ -3731,6 +3830,7 @@ impl EditingDoc {
                 return PrimeSlice::Declined;
             }
         };
+        let txn = self.yrs_doc().transact();
         let epoch = self.epoch.load(Ordering::Relaxed);
         if progress
             .as_ref()
@@ -3739,7 +3839,6 @@ impl EditingDoc {
             *progress = None;
             return PrimeSlice::Declined;
         }
-        let txn = self.yrs_doc().transact();
         if progress.is_none() {
             if !self.unchanged_since_seeded() || self.media.lock().unwrap().is_none() {
                 return PrimeSlice::Declined;
@@ -3754,45 +3853,61 @@ impl EditingDoc {
             if inflated.fold(0u64, u64::saturating_add) > u64::from(max_inflated_bytes) {
                 return PrimeSlice::Declined;
             }
-            let scan = self.committed_scan(&txn);
-            if scan.pilcrows.len() > max_paragraphs as usize {
-                return PrimeSlice::Declined;
-            }
-            let Some(source) = self.source_index() else {
-                return PrimeSlice::Declined;
-            };
-            if source.seed_states_initialized() {
-                return PrimeSlice::Known;
-            }
-            if !source.opened_under_own_digest() {
-                return PrimeSlice::Declined;
-            }
             *progress = Some(PrimeProgress {
                 epoch,
+                max_paragraphs,
+                phase: PrimePhase::Scan,
                 budget: Some((max_inflated_bytes as usize).max(1)),
-                stories: scan.stories.iter().cloned().collect(),
-                roots: scan
-                    .stories
-                    .iter()
-                    .map(|story| (story.clone(), scan.root(story).to_owned()))
-                    .collect(),
-                comments: scan
-                    .stories
-                    .iter()
-                    .map(|story| {
-                        (
-                            story.clone(),
-                            crate::canonical::story_comment_anchors(&txn, story),
-                        )
-                    })
-                    .collect(),
+                stories: std::collections::VecDeque::new(),
+                roots: HashMap::new(),
+                anchors: HashMap::new(),
+                comments: HashMap::new(),
                 states: HashMap::new(),
                 current: None,
             });
+            if sliced {
+                return PrimeSlice::Pending;
+            }
         }
         let Some(state) = progress.as_mut() else {
             return PrimeSlice::Declined;
         };
+        if state.phase == PrimePhase::Scan {
+            let scan = self.committed_scan(&txn);
+            if scan.pilcrows.len() > state.max_paragraphs as usize {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
+            let Some(source) = self.source_index() else {
+                *progress = None;
+                return PrimeSlice::Declined;
+            };
+            if source.seed_states_initialized() {
+                *progress = None;
+                return PrimeSlice::Known;
+            }
+            if !source.opened_under_own_digest() {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
+            state.stories = scan.stories.iter().cloned().collect();
+            state.roots = scan
+                .stories
+                .iter()
+                .map(|story| (story.clone(), scan.root(story).to_owned()))
+                .collect();
+            state.phase = PrimePhase::Anchors;
+            if sliced {
+                return PrimeSlice::Pending;
+            }
+        }
+        if state.phase == PrimePhase::Anchors {
+            state.anchors = crate::canonical::comment_anchors_by_story(&txn);
+            state.phase = PrimePhase::Stories;
+            if sliced {
+                return PrimeSlice::Pending;
+            }
+        }
         let mut left = max_bytes as usize;
         loop {
             if state.current.is_none() {
@@ -3805,25 +3920,27 @@ impl EditingDoc {
                     source.seed_states_or(|| self.live_save_seed_states(stories));
                     return PrimeSlice::Known;
                 };
-                let comments = state.comments.get(&story).cloned().unwrap_or_default();
+                let anchors = state.anchors.remove(&story).unwrap_or_default();
+                let comments = crate::canonical::resolve_comment_anchors(&txn, &anchors);
                 left = left.saturating_sub(PRIME_STORY_COST);
                 match StoryFingerprint::start(
                     self,
                     &txn,
                     &story,
                     &comments,
-                    &mut state.budget,
+                    state.budget,
                     None,
+                    segments_per_slice,
                 ) {
                     Some(fingerprint) => {
-                        let large = fingerprint.segments.len() > PRIME_SLICE_SEGMENTS;
+                        let large = fingerprint.cursor.len() > segments_per_slice;
+                        state.comments.insert(story.clone(), comments);
                         state.current = Some((story, fingerprint));
-                        if large && max_bytes != u32::MAX {
+                        if large && sliced {
                             return PrimeSlice::Pending;
                         }
                     }
                     None => {
-                        state.comments.remove(&story);
                         if state.budget == Some(0) {
                             *progress = None;
                             return PrimeSlice::Declined;
@@ -3838,7 +3955,11 @@ impl EditingDoc {
             let Some((_, fingerprint)) = state.current.as_mut() else {
                 continue;
             };
-            let advanced = fingerprint.advance(&mut state.budget, left.max(1));
+            let advanced = fingerprint.advance(&txn, &mut state.budget, left.max(1));
+            if fingerprint.vanished {
+                *progress = None;
+                return PrimeSlice::Declined;
+            }
             if let Some((false, _)) = advanced {
                 return PrimeSlice::Pending;
             }
@@ -6007,6 +6128,331 @@ mod tests {
             session.paragraph_save_plan().unwrap(),
             expected.paragraph_save_plan().unwrap()
         );
+    }
+
+    fn bytes_session(bytes: &[u8]) -> crate::session::EditSessionCore {
+        let session =
+            crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
+        session.open_docx(bytes, true, None, None).unwrap();
+        session
+    }
+
+    fn commented(id: u32, text: &str) -> String {
+        format!(
+            r#"<w:commentRangeStart w:id="{id}"/>{}<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r>"#,
+            crate::seed::fixture::run(text)
+        )
+    }
+
+    fn commented_docx(body: &str, comments: u32) -> Vec<u8> {
+        use crate::seed::fixture;
+        let remarks: String = (1..=comments)
+            .map(|id| {
+                format!(
+                    r#"<w:comment w:id="{id}" w:author="Ann" w:date="2026-01-04T00:00:00Z">{}</w:comment>"#,
+                    fixture::para(&format!("{:08X}", 0x3000_0000 + id), &fixture::run("Remark"))
+                )
+            })
+            .collect();
+        fixture::Package::new(body)
+            .rel("rIdImage", "image", "media/image1.png")
+            .part(
+                "comments.xml",
+                "rIdComments",
+                "comments",
+                "comments",
+                &format!(
+                    r#"<w:comments {}>{remarks}</w:comments>"#,
+                    fixture::namespaces()
+                ),
+            )
+            .bytes()
+    }
+
+    fn multi_chunk_docx() -> Vec<u8> {
+        use crate::seed::fixture;
+        let control = |id: i32, content: &str| {
+            format!(
+                r#"<w:sdt><w:sdtPr><w:id w:val="{id}"/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#
+            )
+        };
+        let table = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{}</w:tc><w:tc><w:tcPr/>{}{}</w:tc></w:tr></w:tbl>"#,
+            fixture::para("20000001", &commented(2, "Commented cell")),
+            control(
+                -601,
+                &format!(
+                    "{}{}",
+                    control(
+                        -602,
+                        &fixture::para("20000002", &commented(3, "Nested control"))
+                    ),
+                    fixture::para("20000004", &fixture::run("Outer control"))
+                )
+            ),
+            fixture::para("20000003", &fixture::run("After the controls")),
+        );
+        let mut body = format!(
+            "{}{table}",
+            fixture::para("10000001", &commented(1, "Commented body"))
+        );
+        for index in 0..1500u32 {
+            body.push_str(&fixture::para(
+                &format!("{:08X}", 0x0100_0000 + index),
+                &fixture::run(&format!("Paragraph {index} of the long body")),
+            ));
+        }
+        body.push_str(&fixture::para(
+            "10000002",
+            &format!(
+                "{}{}",
+                fixture::run("Picture: "),
+                fixture::image("rIdImage", "Picture")
+            ),
+        ));
+        commented_docx(&body, 3)
+    }
+
+    fn prime_in_slices(
+        doc: &EditingDoc,
+        max_inflated_bytes: u32,
+        max_bytes: u32,
+        segments_per_slice: usize,
+    ) -> (PrimeSlice, usize) {
+        let mut slices = 0;
+        loop {
+            match doc.prime_save_seed_states_slice_with(
+                u32::MAX,
+                max_inflated_bytes,
+                max_bytes,
+                segments_per_slice,
+            ) {
+                PrimeSlice::Pending => slices += 1,
+                outcome => return (outcome, slices),
+            }
+        }
+    }
+
+    #[test]
+    fn sliced_priming_matches_one_shot_on_a_multi_chunk_body_with_media_and_comments() {
+        let bytes = multi_chunk_docx();
+        let whole = bytes_session(&bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let whole_source = whole.engine.doc().source_index().unwrap();
+        assert!(whole_source.seed_states().len() >= 4);
+        for max_bytes in [1, 64, 4096, 65536] {
+            let sliced = bytes_session(&bytes);
+            let doc = sliced.engine.doc();
+            let mut slices = 0;
+            loop {
+                match doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes) {
+                    PrimeSlice::Pending => slices += 1,
+                    PrimeSlice::Known => break,
+                    PrimeSlice::Declined => panic!("declined at {max_bytes}"),
+                }
+            }
+            assert!(slices > 1, "{max_bytes}");
+            assert!(doc.prime_progress.lock().unwrap().is_none());
+            let source = doc.source_index().unwrap();
+            assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+            assert_same_seed_states(&source, &whole_source);
+            assert_eq!(
+                sliced.paragraph_save_plan().unwrap(),
+                whole.paragraph_save_plan().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn priming_any_number_of_segments_at_a_time_matches_one_shot() {
+        let bytes = multi_chunk_docx();
+        let whole = bytes_session(&bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let whole_source = whole.engine.doc().source_index().unwrap();
+        let whole_plan = whole.paragraph_save_plan().unwrap();
+        for segments_per_slice in [1, 2, 3, 5, 7, 512] {
+            for max_bytes in [1, 4096, u32::MAX] {
+                let label = format!("{segments_per_slice} segments, {max_bytes} bytes");
+                let sliced = bytes_session(&bytes);
+                let doc = sliced.engine.doc();
+                let (outcome, slices) =
+                    prime_in_slices(doc, u32::MAX, max_bytes, segments_per_slice);
+                assert_eq!(outcome, PrimeSlice::Known, "{label}");
+                assert_eq!(slices == 0, max_bytes == u32::MAX, "{label}");
+                assert!(doc.prime_progress.lock().unwrap().is_none(), "{label}");
+                let source = doc.source_index().unwrap();
+                assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0, "{label}");
+                assert_same_seed_states(&source, &whole_source);
+                assert_eq!(sliced.paragraph_save_plan().unwrap(), whole_plan, "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn comment_anchors_decoded_once_resolve_as_each_story_does() {
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        let txn = doc.yrs_doc().transact();
+        let grouped = crate::canonical::comment_anchors_by_story(&txn);
+        let scan = doc.committed_scan(&txn);
+        let mut anchored = 0;
+        for story in &scan.stories {
+            let resolved = grouped
+                .get(story)
+                .map(|anchors| crate::canonical::resolve_comment_anchors(&txn, anchors))
+                .unwrap_or_default();
+            let expected = crate::canonical::story_comment_anchors(&txn, story);
+            assert_eq!(resolved, expected, "{story}");
+            anchored += usize::from(!resolved.is_empty());
+        }
+        assert!(anchored >= 2, "{anchored}");
+    }
+
+    #[test]
+    fn sliced_priming_declines_past_the_inflated_budget_a_segment_at_a_time() {
+        let session = save_seed_session();
+        let doc = session.engine.doc();
+        let source = doc.source_index().unwrap();
+        let packed = source.bytes().as_ref().len() as u32;
+        let package = ooxml_opc::RetainedPackage::from_bytes(source.bytes()).unwrap();
+        let inflated = package.parts().map(|(_, size)| size).sum::<u64>() as u32;
+        let size = packed.max(inflated);
+        assert!(size > 0);
+        assert_eq!(prime_in_slices(doc, size - 1, 1, 1).0, PrimeSlice::Declined);
+        assert!(doc.prime_progress.lock().unwrap().is_none());
+        assert!(!source.seed_states_initialized());
+        let (outcome, slices) = prime_in_slices(doc, size, 1, 1);
+        assert_eq!(outcome, PrimeSlice::Known);
+        assert!(slices > 3, "{slices}");
+        assert!(source.seed_states_initialized());
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_commit_at_any_prime_slice_position_declines() {
+        use crate::seed::fixture;
+        let table = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{}</w:tc></w:tr></w:tbl>"#,
+            fixture::para("20000001", &commented(2, "Cell")),
+        );
+        let bytes = commented_docx(
+            &format!(
+                "{}{table}{}",
+                fixture::para("10000001", &commented(1, "Body")),
+                fixture::para("10000002", &fixture::run("After"))
+            ),
+            2,
+        );
+        for segments_per_slice in [1, 512] {
+            let undisturbed = bytes_session(&bytes);
+            let (outcome, slices) =
+                prime_in_slices(undisturbed.engine.doc(), u32::MAX, 1, segments_per_slice);
+            assert_eq!(outcome, PrimeSlice::Known);
+            assert!(slices > 3, "{slices}");
+            let mut phases = Vec::new();
+            for committed_after in 1..=slices {
+                let session = bytes_session(&bytes);
+                let expected = bytes_session(&bytes);
+                let doc = session.engine.doc();
+                for _ in 0..committed_after {
+                    assert_eq!(
+                        doc.prime_save_seed_states_slice_with(
+                            u32::MAX,
+                            u32::MAX,
+                            1,
+                            segments_per_slice,
+                        ),
+                        PrimeSlice::Pending
+                    );
+                }
+                phases.push(
+                    doc.prime_progress
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|progress| progress.phase),
+                );
+                for session in [&session, &expected] {
+                    session
+                        .engine
+                        .doc()
+                        .insert_text(
+                            &ctx(),
+                            Position::new("body", 0),
+                            "New ",
+                            FormatPolicy::Plain,
+                        )
+                        .unwrap();
+                }
+                assert_eq!(
+                    doc.prime_save_seed_states_slice_with(
+                        u32::MAX,
+                        u32::MAX,
+                        1,
+                        segments_per_slice,
+                    ),
+                    PrimeSlice::Declined,
+                    "{segments_per_slice}: {committed_after}"
+                );
+                assert!(doc.prime_progress.lock().unwrap().is_none());
+                let source = doc.source_index().unwrap();
+                assert!(!source.seed_states_initialized());
+                assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+                assert_eq!(
+                    session.paragraph_save_plan().unwrap(),
+                    expected.paragraph_save_plan().unwrap()
+                );
+                assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 1);
+            }
+            assert_eq!(
+                phases[..3],
+                [
+                    Some(PrimePhase::Scan),
+                    Some(PrimePhase::Anchors),
+                    Some(PrimePhase::Stories)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_map_collected_behind_the_observer_declines_the_prime() {
+        let session = bytes_session(&multi_chunk_docx());
+        let doc = session.engine.doc();
+        let mut held = false;
+        for _ in 0..10_000 {
+            assert_eq!(
+                doc.prime_save_seed_states_slice_with(u32::MAX, u32::MAX, 1, 1),
+                PrimeSlice::Pending
+            );
+            held = doc
+                .prime_progress
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|progress| progress.current.as_ref())
+                .is_some_and(|(story, fingerprint)| {
+                    story == "body" && fingerprint.cursor.len() > 100
+                });
+            if held {
+                break;
+            }
+        }
+        assert!(held);
+        let epoch = doc.committed_epoch();
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.commit();
+            let body = crate::story_text(&txn, "body").unwrap();
+            let len = body.len(&txn);
+            body.remove_range(&mut txn, len - 5, 5);
+            txn.gc(None);
+        }
+        assert_eq!(doc.committed_epoch(), epoch);
+        assert_eq!(prime_in_slices(doc, u32::MAX, 1, 1).0, PrimeSlice::Declined);
+        assert!(doc.prime_progress.lock().unwrap().is_none());
+        let source = doc.source_index().unwrap();
+        assert!(!source.seed_states_initialized());
     }
 
     #[test]
