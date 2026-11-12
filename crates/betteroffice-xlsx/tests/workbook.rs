@@ -4840,15 +4840,47 @@ fn fill_range_refuses_a_validation_once_rows_moved_since_opening() {
     assert_eq!(workbook.model(), &before);
 }
 
-#[test]
-fn fill_range_ignores_extension_formats_once_rows_moved_since_opening() {
+fn fill_extension_rule_bytes(sqref: &str) -> Vec<u8> {
     let mut parts = sample_parts();
     set_test_part(
         &mut parts,
         "xl/worksheets/sheet1.xml",
-        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><extLst><ext uri="{78C0D931-6437-407d-A8EE-F0AAD7539E65}"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="dataBar" id="{00000000-0000-0000-0000-000000000001}"><x14:dataBar><x14:cfvo type="autoMin"/><x14:cfvo type="autoMax"/></x14:dataBar></x14:cfRule><xm:sqref>Z1:Z9</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst></worksheet>"#.to_vec(),
+        format!(r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><extLst><ext uri="{{78C0D931-6437-407d-A8EE-F0AAD7539E65}}"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="dataBar" id="{{00000000-0000-0000-0000-000000000001}}"><x14:dataBar><x14:cfvo type="autoMin"/><x14:cfvo type="autoMax"/></x14:dataBar></x14:cfRule><xm:sqref>{sqref}</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst></worksheet>"#).into_bytes(),
     );
-    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn fill_range_refuses_an_extension_rule_covering_only_the_source() {
+    let mut workbook = Workbook::open(&fill_extension_rule_bytes("A1")).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A2")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+
+    let mut elsewhere = Workbook::open(&fill_extension_rule_bytes("Z1:Z9")).unwrap();
+    elsewhere
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            CellRange::new(cell("A1"), cell("A2")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(elsewhere.cell(SheetId(0), cell("A2")).unwrap().input, "10");
+}
+
+#[test]
+fn fill_range_refuses_any_extension_rule_once_rows_moved_since_opening() {
+    let mut workbook = Workbook::open(&fill_extension_rule_bytes("Z1:Z9")).unwrap();
     workbook
         .apply_ops(
             vec![Op::InsertRows {
@@ -4859,15 +4891,18 @@ fn fill_range_ignores_extension_formats_once_rows_moved_since_opening() {
             CalculationOptions::default(),
         )
         .unwrap();
-    workbook
-        .fill_range(
-            SheetId(0),
-            CellRange::new(cell("A2"), cell("A2")),
-            CellRange::new(cell("A2"), cell("A3")),
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    assert_eq!(workbook.cell(SheetId(0), cell("A3")).unwrap().input, "10");
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A2"), cell("A2")),
+        CellRange::new(cell("A2"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
 }
 
 fn fill_comment_bytes(anchor: &str) -> Vec<u8> {
@@ -4926,6 +4961,33 @@ fn fill_range_finds_comments_where_inserted_rows_moved_them() {
         )
         .unwrap();
     assert_eq!(moved_out.cell(SheetId(0), cell("A3")).unwrap().input, "10");
+}
+
+#[test]
+fn fill_range_refuses_a_comment_whose_row_was_deleted() {
+    let mut workbook = Workbook::open(&fill_comment_bytes("A2")).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A2")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("comments")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
 }
 
 #[test]

@@ -431,8 +431,9 @@ impl PreservedPackage {
         None
     }
 
-    /// What of source sheet `index` a fill cannot keep: a data validation for
-    /// which `partial` holds, or a comment on a cell `comment_affected` names.
+    /// What of source sheet `index` a fill cannot keep: a data validation or
+    /// extension rule for which `partial` holds, or a comment on a cell
+    /// `comment_affected` names.
     #[doc(hidden)]
     pub fn fill_unsupported_feature(
         &self,
@@ -441,7 +442,7 @@ impl PreservedPackage {
         comment_affected: impl Fn(CellRef) -> bool,
     ) -> Option<&'static str> {
         let sheet = self.sheets.get(index)?;
-        let validations = find_part(&self.parts, &sheet.path).and_then(validation_ranges);
+        let validations = find_part(&self.parts, &sheet.path).and_then(source_rule_ranges);
         if validations.is_none_or(|rules| rules.iter().any(|ranges| partial(ranges))) {
             return Some("data validations");
         }
@@ -682,10 +683,10 @@ fn comment_move_unsupported(
     }
 }
 
-/// Each data validation's ranges in a worksheet part, read from the `sqref`
-/// attribute or, for extension validations, their `sqref` element. `None` when
-/// a range cannot be read.
-fn validation_ranges(bytes: &[u8]) -> Option<Vec<Vec<CellRange>>> {
+/// The ranges of each rule a worksheet part keeps outside the model: data
+/// validations, and every extension rule that names its cells in an `sqref`
+/// element. `None` when a range cannot be read.
+fn source_rule_ranges(bytes: &[u8]) -> Option<Vec<Vec<CellRange>>> {
     let parse = |sqref: &str| {
         let ranges = sqref
             .split_whitespace()
@@ -698,21 +699,16 @@ fn validation_ranges(bytes: &[u8]) -> Option<Vec<Vec<CellRange>>> {
     let mut buffer = Vec::new();
     let mut depth = 0;
     let mut rules = Vec::new();
-    let mut in_validation = false;
     loop {
         match next_event(&mut xml, &mut buffer, &mut depth).ok()? {
             Event::Start(start) | Event::Empty(start)
                 if local_name(&start).as_slice() == b"dataValidation" =>
             {
-                in_validation = true;
                 if let Some(sqref) = attr(&start, b"sqref").ok()? {
                     rules.push(parse(&sqref)?);
                 }
             }
-            Event::End(end) if local_name_from_end(&end).as_slice() == b"dataValidation" => {
-                in_validation = false;
-            }
-            Event::Start(start) if in_validation && local_name(&start).as_slice() == b"sqref" => {
+            Event::Start(start) if local_name(&start).as_slice() == b"sqref" => {
                 let sqref = collect_text(&mut xml, &mut buffer, &mut depth).ok()?;
                 rules.push(parse(&sqref)?);
             }

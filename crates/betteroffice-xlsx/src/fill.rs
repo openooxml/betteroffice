@@ -58,8 +58,9 @@ fn tiled_source(source: CellRange, row: u32, col: u32) -> CellRef {
     )
 }
 
-/// Refuses a fill over the data validations and comments a source sheet part
-/// keeps. Once rows or columns moved since opening, any validation refuses.
+/// Refuses a fill over the data validations, extension rules and comments a
+/// source sheet part keeps. Once rows or columns moved since opening, any such
+/// rule refuses, and so does a comment whose cell was deleted.
 pub(crate) fn preserved_fill_refusal(
     package: &xlsx_parse::PreservedPackage,
     preserved: &PreservedSheetState,
@@ -75,13 +76,9 @@ pub(crate) fn preserved_fill_refusal(
     let feature = package.fill_unsupported_feature(
         origin,
         |ranges| !exact || covers_partially(ranges, destination),
-        |at| match axes {
-            Some(axes) => axes
-                .rows
-                .current(at.row)
-                .zip(axes.cols.current(at.col))
-                .is_some_and(|(row, col)| destination.contains(CellRef::new(row, col))),
-            None => true,
+        |at| {
+            axes.and_then(|axes| axes.rows.current(at.row).zip(axes.cols.current(at.col)))
+                .is_none_or(|(row, col)| destination.contains(CellRef::new(row, col)))
         },
     )?;
     Some(refuses(feature))
