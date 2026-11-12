@@ -12,6 +12,7 @@ import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
 import {
   coverageProblems,
   defineRow,
+  rowName,
   runRow,
   surfaceMethods,
   type EngineHandle,
@@ -196,6 +197,24 @@ function tableFragment(session: Session) {
   return JSON.stringify(readTableFragment(reader, { story: 'body', tableIndex: 0 }));
 }
 
+// The facade's ensureUndo: track, scope history to the story, then edit.
+function undoableEdit(session: Session): void {
+  session.track_undo();
+  session.select_story('body');
+  session.insert_text('body', paraId(session, 'Second body'), 0, 'Undone ');
+}
+
+function addedComment(session: Session): string {
+  const id = paraId(session, 'Second body');
+  const ranges = [{ story: 'body', startPara: id, startOffset: 0, endPara: id, endOffset: 6 }];
+  return (JSON.parse(session.add_comment(JSON.stringify(ranges), 'Parity', DATE, '"Anchored"')) as { commentId: string }).commentId;
+}
+
+const TABLE_LOC = JSON.stringify({ story: 'body', tableIndex: 0 });
+const cellAt = (row: number, column: number) => ({ story: 'body', tableIndex: 0, row, column });
+const cellLoc = (row: number, column: number) => JSON.stringify(cellAt(row, column));
+const cellRange = (anchor: [number, number], head: [number, number]) => JSON.stringify({ anchor: cellAt(...anchor), head: cellAt(...head) });
+
 function seededImage(session: Session): string {
   const image = (JSON.parse(session.story_segments('body')) as YrsStorySegment[])
     .find((segment) => segment.kind === 'embed' && segment.embedKind === 'image');
@@ -294,11 +313,7 @@ const rows: Row<Docx>[] = [
   },
   defineRow({
     method: 'EditSession.resolve_comment',
-    setup: ({ session: s }: Docx) => {
-      const id = paraId(s, 'Second body');
-      const ranges = [{ story: 'body', startPara: id, startOffset: 0, endPara: id, endOffset: 6 }];
-      return (JSON.parse(s.add_comment(JSON.stringify(ranges), 'Parity', DATE, '"Anchored"')) as { commentId: string }).commentId;
-    },
+    setup: ({ session: s }: Docx) => addedComment(s),
     call: ({ session: s }, commentId) => s.resolve_comment(commentId),
   }),
   { method: 'EditSession.list_comments', call: ({ session: s }) => s.list_comments() },
@@ -396,9 +411,135 @@ const rows: Row<Docx>[] = [
   { method: 'EditSession.table_payload', call: ({ session: s }) => s.table_payload('body', 0) },
   defineRow({
     method: 'EditSession.validate_table_fragment',
+    voidReason: 'a valid fragment passes by not throwing',
     setup: ({ session: s }: Docx) => tableFragment(s),
     call: ({ session: s }, fragment) => s.validate_table_fragment(fragment),
   }),
+  defineRow({
+    method: 'EditSession.validate_table_fragment',
+    name: 'EditSession.validate_table_fragment (invalid)',
+    throws: { name: 'string', reason: 'a fragment whose grid is not an array is refused with a message' },
+    setup: ({ session: s }: Docx) => JSON.stringify({ ...JSON.parse(tableFragment(s)) as Record<string, unknown>, grid: 'none' }),
+    call: ({ session: s }, fragment) => s.validate_table_fragment(fragment),
+  }),
+  defineRow({
+    method: 'EditSession.undo',
+    mutates: true,
+    setup: ({ session: s }: Docx) => undoableEdit(s),
+    call: ({ session: s }) => s.undo(),
+  }),
+  defineRow({
+    method: 'EditSession.redo',
+    mutates: true,
+    setup: ({ session: s }: Docx) => {
+      undoableEdit(s);
+      s.undo();
+    },
+    call: ({ session: s }) => s.redo(),
+  }),
+  defineRow({
+    method: 'EditSession.can_undo',
+    setup: ({ session: s }: Docx) => undoableEdit(s),
+    call: ({ session: s }) => s.can_undo(),
+  }),
+  defineRow({
+    method: 'EditSession.can_redo',
+    setup: ({ session: s }: Docx) => {
+      undoableEdit(s);
+      s.undo();
+    },
+    call: ({ session: s }) => s.can_redo(),
+  }),
+  defineRow({
+    method: 'EditSession.history_stories',
+    setup: ({ session: s }: Docx) => {
+      undoableEdit(s);
+      s.undo();
+    },
+    call: ({ session: s }) => s.history_stories(),
+  }),
+  {
+    method: 'EditSession.track_undo',
+    mutates: true,
+    call: ({ session: s }) => {
+      undoableEdit(s);
+      return s.can_undo();
+    },
+  },
+  {
+    method: 'EditSession.add_undo_boundary',
+    mutates: true,
+    call: ({ session: s }) => {
+      undoableEdit(s);
+      s.add_undo_boundary();
+      s.insert_text('body', paraId(s, 'Final'), 0, 'Later ');
+      return s.undo();
+    },
+  },
+  { method: 'EditSession.undo_capture_mode', call: ({ session: s }) => s.undo_capture_mode() },
+  {
+    method: 'EditSession.set_undo_capture_mode',
+    call: ({ session: s }) => {
+      s.set_undo_capture_mode('manual');
+      return s.undo_capture_mode();
+    },
+  },
+  {
+    method: 'EditSession.toggle_mark',
+    mutates: true,
+    call: ({ session: s }) => s.toggle_mark(...span(s, 'First body', 0, 5), JSON.stringify({ type: 'bold' })),
+  },
+  { method: 'EditSession.insert_row', mutates: true, call: ({ session: s }) => s.insert_row(cellLoc(0, 0), true) },
+  { method: 'EditSession.insert_column', mutates: true, call: ({ session: s }) => s.insert_column(cellLoc(0, 0), true) },
+  { method: 'EditSession.delete_row', mutates: true, call: ({ session: s }) => s.delete_row(cellRange([0, 0], [0, 1])) },
+  { method: 'EditSession.delete_column', mutates: true, call: ({ session: s }) => s.delete_column(cellRange([0, 0], [1, 0])) },
+  { method: 'EditSession.delete_table', mutates: true, call: ({ session: s }) => s.delete_table(TABLE_LOC) },
+  { method: 'EditSession.merge_cells', mutates: true, call: ({ session: s }) => s.merge_cells(cellRange([0, 0], [0, 1])) },
+  defineRow({
+    method: 'EditSession.split_cell',
+    mutates: true,
+    setup: ({ session: s }: Docx) => s.merge_cells(cellRange([0, 0], [0, 1])),
+    call: ({ session: s }) => s.split_cell(cellLoc(0, 0)),
+  }),
+  { method: 'EditSession.set_cell_shading', mutates: true, call: ({ session: s }) => s.set_cell_shading(cellRange([0, 0], [0, 0]), 'FF0000') },
+  {
+    method: 'EditSession.set_cell_text_format',
+    mutates: true,
+    call: ({ session: s }) => s.set_cell_text_format(cellRange([0, 0], [1, 1]), JSON.stringify({ margins: { left: 240, right: 108 } })),
+  },
+  {
+    method: 'EditSession.set_cell_borders',
+    mutates: true,
+    call: ({ session: s }) => s.set_cell_borders(cellRange([0, 0], [0, 1]), JSON.stringify({ top: { style: 'single', size: 4, color: { rgb: '000000' } } })),
+  },
+  { method: 'EditSession.set_column_width', mutates: true, call: ({ session: s }) => s.set_column_width(cellLoc(0, 1), 3000) },
+  { method: 'EditSession.set_row_height', mutates: true, call: ({ session: s }) => s.set_row_height(cellLoc(1, 0), 400, 'atLeast') },
+  { method: 'EditSession.set_table_width', mutates: true, call: ({ session: s }) => s.set_table_width(TABLE_LOC, 5000) },
+  {
+    method: 'EditSession.set_table_properties',
+    mutates: true,
+    call: ({ session: s }) => s.set_table_properties(TABLE_LOC, JSON.stringify({ justification: 'center' })),
+  },
+  { method: 'EditSession.insert_section_break', mutates: true, call: ({ session: s }) => s.insert_section_break('body', paraId(s, 'Final'), 0, 'nextPage') },
+  { method: 'EditSession.set_section_margins', mutates: true, call: ({ session: s }) => s.set_section_margins('final', JSON.stringify({ marginLeft: 1800 })) },
+  defineRow({
+    method: 'EditSession.set_comment_ranges',
+    mutates: true,
+    setup: ({ session: s }: Docx) => addedComment(s),
+    call: ({ session: s }, commentId) => {
+      const id = paraId(s, 'Final');
+      s.set_comment_ranges(commentId, JSON.stringify([{ story: 'body', startPara: id, startOffset: 0, endPara: id, endOffset: 5 }]));
+    },
+  }),
+  defineRow({
+    method: 'EditSession.update_comment_metadata_json',
+    mutates: true,
+    setup: ({ session: s }: Docx) => addedComment(s),
+    call: ({ session: s }, commentId) => s.update_comment_metadata_json(commentId, JSON.stringify({ done: true })),
+  }),
+  { method: 'EditSession.locate_paragraph', call: ({ session: s }) => s.locate_paragraph('body', paraId(s, 'Second body')) },
+  { method: 'EditSession.story_checksum', call: ({ session: s }) => s.story_checksum('body') },
+  { method: 'EditSession.story_paragraph_ids', call: ({ session: s }) => s.story_paragraph_ids('body') },
   { method: 'write_docx_s13_wasm', call: ({ engine }) => packageParts(engine.write_docx_s13_wasm(saveRequest(engine), fixture)) },
   { method: 'write_docx_s13_wasm_with_warnings', call: ({ engine }) => framedParts(engine.write_docx_s13_wasm_with_warnings(saveRequest(engine), fixture)) },
   { method: 'parse_docx_s9', call: ({ engine }) => engine.parse_docx_s9(fixture, '') },
@@ -437,50 +578,50 @@ const exclusions: Exclusion[] = [
 const knownDifferences: KnownDifference[] = [];
 
 const notYetCovered: string[] = [
-  'EditSession.add_undo_boundary', 'EditSession.apply_delete', 'EditSession.apply_host_update', 'EditSession.apply_input',
+  'EditSession.apply_delete', 'EditSession.apply_host_update', 'EditSession.apply_input',
   'EditSession.apply_local_update', 'EditSession.apply_raw_ops', 'EditSession.apply_seed_raw_ops', 'EditSession.apply_update_chunks',
   'EditSession.apply_update', 'EditSession.apply_update_with_inference', 'EditSession.begin_region_layout', 'EditSession.begin_shared_reads',
-  'EditSession.bootstrap_peer', 'EditSession.build_display_list_frame', 'EditSession.build_display_pages_frame', 'EditSession.can_redo',
-  'EditSession.can_undo', 'EditSession.canvasSkippedEffects', 'EditSession.cell_selection', 'EditSession.clear_cell_selection',
+  'EditSession.bootstrap_peer', 'EditSession.build_display_list_frame', 'EditSession.build_display_pages_frame',
+  'EditSession.canvasSkippedEffects', 'EditSession.cell_selection', 'EditSession.clear_cell_selection',
   'EditSession.clear_measure_fonts', 'EditSession.clear_undo_input_time', 'EditSession.clear_update_event_observation', 'EditSession.clear_update_observer',
   'EditSession.comment_text_target_json', 'EditSession.compare_docx_json', 'EditSession.create_story', 'EditSession.decode_font',
-  'EditSession.delete_column', 'EditSession.delete_row', 'EditSession.delete_story', 'EditSession.delete_table',
+  'EditSession.delete_story',
   'EditSession.direct_batches_applied', 'EditSession.display_hit_test_regions_json', 'EditSession.display_range_rects_batch', 'EditSession.display_range_rects_json',
   'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json', 'EditSession.display_vertical_move_json', 'EditSession.drain_update_event',
   'EditSession.echo_glyph_set_json', 'EditSession.edit_text_resident', 'EditSession.encode_diff_chunks', 'EditSession.encode_diff',
   'EditSession.encode_peer_metadata', 'EditSession.encode_state', 'EditSession.encode_state_vector', 'EditSession.encode_sticky_position',
   'EditSession.encoded_selection', 'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json', 'EditSession.export_structured_with_pages_json',
   'EditSession.fail_compared_docx_json', 'EditSession.finish_compared_docx_json', 'EditSession.format_text_target_json', 'EditSession.geometry_position_outline_json',
-  'EditSession.has_pending_update', 'EditSession.header_footer_aliases_json', 'EditSession.history_stories', 'EditSession.insert_column',
-  'EditSession.insert_row', 'EditSession.insert_section_break', 'EditSession.insert_watermark', 'EditSession.layout_document_json',
+  'EditSession.has_pending_update', 'EditSession.header_footer_aliases_json',
+  'EditSession.insert_watermark', 'EditSession.layout_document_json',
   'EditSession.layout_document_with_regions_after_edit', 'EditSession.layout_document_with_regions_exact_prefix_retained',
   'EditSession.layout_document_with_regions_prefix_retained_json', 'EditSession.layout_document_with_regions_retained',
   'EditSession.layout_document_with_regions_retained_json', 'EditSession.layout_document_with_regions_retained_meta',
   'EditSession.load', 'EditSession.load_json', 'EditSession.load_media_sources', 'EditSession.load_note_separators',
-  'EditSession.locate_paragraph', 'EditSession.measure_paragraph_json', 'EditSession.media_bytes', 'EditSession.media_data_url',
-  'EditSession.media_sources_json', 'EditSession.media_type', 'EditSession.merge_cells', 'EditSession.move_embed',
+  'EditSession.measure_paragraph_json', 'EditSession.media_bytes', 'EditSession.media_data_url',
+  'EditSession.media_sources_json', 'EditSession.media_type', 'EditSession.move_embed',
   'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.open_docx', 'EditSession.outline_glyph_json',
   'EditSession.page_texts_json', 'EditSession.paragraph_id_count', 'EditSession.paragraph_save_plan', 'EditSession.paragraph_unit',
   'EditSession.patch_style_languages_xml', 'EditSession.persist_paragraph_ids', 'EditSession.prime_save_seed_states', 'EditSession.prime_save_seed_states_slice',
-  'EditSession.proposal_revision_ranges_json', 'EditSession.rebuild_media_sources', 'EditSession.record_saved_paragraph_ids', 'EditSession.redo',
+  'EditSession.proposal_revision_ranges_json', 'EditSession.rebuild_media_sources', 'EditSession.record_saved_paragraph_ids',
   'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.repeat_content_control_at', 'EditSession.reset_frame_base',
   'EditSession.resident_caret_snapshot_json', 'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
   'EditSession.resolve_encoded_selection', 'EditSession.resolve_paragraph_anchor', 'EditSession.resolve_sticky_position', 'EditSession.resume_region_layout',
   'EditSession.retained_headers_footers_json', 'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json', 'EditSession.revision_ids_at',
   'EditSession.revision_stamps_json', 'EditSession.run_inheritance', 'EditSession.seed_comment_metadata_json', 'EditSession.seed_from_docx',
   'EditSession.seed_opaque_sequences', 'EditSession.select_story', 'EditSession.selection_context', 'EditSession.selection',
-  'EditSession.set_cell_borders', 'EditSession.set_cell_selection', 'EditSession.set_cell_shading', 'EditSession.set_cell_text_format',
-  'EditSession.set_column_width', 'EditSession.set_comment_ranges', 'EditSession.set_content_control_value_at', 'EditSession.set_content_control_value_index',
+  'EditSession.set_cell_selection',
+  'EditSession.set_content_control_value_at', 'EditSession.set_content_control_value_index',
   'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages', 'EditSession.set_display_window', 'EditSession.set_document_property',
   'EditSession.set_header_footer_aliases', 'EditSession.set_hyperlink', 'EditSession.set_image_geometry_at', 'EditSession.set_image_geometry',
   'EditSession.set_local_lowering', 'EditSession.set_media_tokens', 'EditSession.set_part_metadata', 'EditSession.set_partial_document',
-  'EditSession.set_row_height', 'EditSession.set_section_margins', 'EditSession.set_selection', 'EditSession.set_style_language',
-  'EditSession.set_table_properties', 'EditSession.set_table_width', 'EditSession.set_undo_capture_mode', 'EditSession.set_undo_input_time',
-  'EditSession.set_update_observer', 'EditSession.set_windowed_incremental_builds', 'EditSession.settle_revisions_json', 'EditSession.split_cell',
-  'EditSession.start_update_event_observation', 'EditSession.stories_changed_since', 'EditSession.story_checksum', 'EditSession.story_paragraph_ids',
+  'EditSession.set_selection', 'EditSession.set_style_language',
+  'EditSession.set_undo_input_time',
+  'EditSession.set_update_observer', 'EditSession.set_windowed_incremental_builds', 'EditSession.settle_revisions_json',
+  'EditSession.start_update_event_observation', 'EditSession.stories_changed_since',
   'EditSession.story_segment_unit_digests', 'EditSession.story_segment_units', 'EditSession.style_languages_json', 'EditSession.take_base_latin_miss',
-  'EditSession.toggle_mark', 'EditSession.track_undo', 'EditSession.unavailable_tables_from', 'EditSession.undo_capture_mode', 'EditSession.undo',
-  'EditSession.update_comment_metadata_json', 'EditSession.update_measure_font_outlines', 'EditSession.written_paragraph_ids', 'EditSession.yrs_blocks_for_story',
+  'EditSession.unavailable_tables_from',
+  'EditSession.update_measure_font_outlines', 'EditSession.written_paragraph_ids', 'EditSession.yrs_blocks_for_story',
   'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.page_sizes', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.page_count',
   'RetainedLayoutMeta.partial', 'RetainedLayoutMeta.provisional',
   'RunInheritance.attributes', 'RunInheritance.paragraph_formatting', 'RunInheritance.table_attributes',
@@ -504,12 +645,12 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(207);
+    expect(notYetCovered.length).toBe(176);
   });
 
   for (const row of rows) {
     const known = knownDifferences.find((entry) => entry.method === row.method);
-    test(known ? `${row.method} still differs: ${known.reason}` : `${row.method} matches`, async () => {
+    test(known ? `${rowName(row)} still differs: ${known.reason}` : `${rowName(row)} matches`, async () => {
       const run = runRow(row, makeWasm, makeNative);
       if (known) await expect(run).rejects.toThrow();
       else await run;

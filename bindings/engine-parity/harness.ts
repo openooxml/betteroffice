@@ -12,11 +12,22 @@ export interface EngineHandle<T> {
 
 export type MakeEngine<T> = () => Promise<EngineHandle<T>>;
 
-export interface Row<T> {
+export interface RowExpectation {
   method: string;
+  /** Distinguishes a second row of the same method in test names. */
+  name?: string;
   mutates?: boolean;
+  throws?: { name: string; reason: string };
+  voidReason?: string;
+}
+
+export interface Row<T> extends RowExpectation {
   setup?: (target: T) => unknown;
   call: (target: T, context: never) => unknown;
+}
+
+export function rowName(row: RowExpectation): string {
+  return row.name ?? row.method;
 }
 
 export interface Exclusion {
@@ -46,9 +57,7 @@ export function generatedTokens(value: unknown, generated: readonly string[]): u
 
 export const normalize: readonly Normalization[] = [byteContainer, generatedTokens];
 
-export function defineRow<T, C>(row: {
-  method: string;
-  mutates?: boolean;
+export function defineRow<T, C>(row: RowExpectation & {
   setup: (target: T) => C | Promise<C>;
   call: (target: T, context: Awaited<C>) => unknown;
 }): Row<T> {
@@ -96,13 +105,30 @@ async function observe<T>(row: Row<T>, engine: EngineHandle<T>): Promise<{ outco
 export async function runRow<T>(row: Row<T>, makeWasm: MakeEngine<T>, makeNative: MakeEngine<T>): Promise<void> {
   const wasm = await observe(row, await makeWasm());
   const native = await observe(row, await makeNative());
-  expect(native.outcome, row.method).toStrictEqual(wasm.outcome);
+  const name = rowName(row);
+  expect(native.outcome, name).toStrictEqual(wasm.outcome);
+  expectDeclaredOutcome(row, wasm.outcome as Outcome);
   if (!row.mutates) return;
   const [left, right] = [native.saved!, wasm.saved!];
   if ('value' in left && 'value' in right) {
     await expectSavedPartsEqual(left.value as Uint8Array, right.value as Uint8Array);
   } else {
-    expect(left, `${row.method} save`).toStrictEqual(right);
+    expect(left, `${name} save`).toStrictEqual(right);
+  }
+}
+
+/** An agreed outcome still has to be the declared one: an error needs `throws`, `undefined` needs `mutates` or `voidReason`. */
+export function expectDeclaredOutcome(row: RowExpectation, outcome: Outcome): void {
+  const name = rowName(row);
+  if ('error' in outcome) {
+    const { error } = outcome;
+    if (!row.throws) throw new Error(`${name}: both engines threw ${error.name}: ${error.message}`);
+    expect(error.name, `${name} error`).toBe(row.throws.name);
+    return;
+  }
+  if (row.throws) throw new Error(`${name}: declares throws ${row.throws.name} but both engines returned a value`);
+  if (outcome.value === undefined && !row.mutates && !row.voidReason) {
+    throw new Error(`${name}: both engines returned undefined; mark the row mutates or give a voidReason`);
   }
 }
 
@@ -120,7 +146,7 @@ export function surfaceMethods(wasm: readonly Surface[], native: Surface): strin
 export function coverageProblems(
   surface: readonly string[],
   plan: {
-    rows: readonly { method: string }[];
+    rows: readonly RowExpectation[];
     exclusions: readonly Exclusion[];
     notYetCovered: readonly string[];
     knownDifferences: readonly KnownDifference[];
@@ -150,6 +176,14 @@ export function coverageProblems(
   }
   for (const entry of plan.knownDifferences) {
     if (!rowMethods.includes(entry.method)) problems.push(`${entry.method}: a known difference without a row`);
+  }
+  const names = new Set<string>();
+  for (const row of plan.rows) {
+    const name = rowName(row);
+    if (names.has(name)) problems.push(`${name}: two rows share this name; give a variant its own name`);
+    names.add(name);
+    if (row.throws && row.throws.reason.trim() === '') problems.push(`${name}: throws needs a reason`);
+    if (row.voidReason !== undefined && row.voidReason.trim() === '') problems.push(`${name}: voidReason is empty`);
   }
   return problems;
 }
