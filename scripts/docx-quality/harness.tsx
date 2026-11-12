@@ -11,6 +11,8 @@ import {
   resolveLastResortChoice,
   resolveMetricCompatFace,
   resolveScriptFallbackFace,
+  type BundledFontScript,
+  type LastResortOffice,
 } from 'virtual:docx-quality-fonts';
 import { measuredFontProvider, type FontLoad } from './measured-fonts';
 import { MAX_LOCAL_REFERENCE_PAGES } from '../office-quality/reference.mjs';
@@ -52,9 +54,9 @@ const faceOf = (kind: string, args: unknown[]) => {
   const [name, bold, italic, extra] = args as [string, boolean, boolean, string | undefined];
   const face =
     kind === 'family' ? resolveMetricCompatFace(name, bold, italic)
-    : kind === 'script' ? resolveScriptFallbackFace(name, bold, italic, extra)
-    : kind === 'glyph' ? resolveGlyphFallbackFace(name, bold, italic, extra ?? 'powerpoint')
-    : resolveLastResortChoice(name, bold, italic, extra)?.face;
+    : kind === 'script' ? resolveScriptFallbackFace(name as BundledFontScript, bold, italic, extra)
+    : kind === 'glyph' ? resolveGlyphFallbackFace(name, bold, italic, (extra as LastResortOffice | undefined) ?? 'powerpoint')
+    : resolveLastResortChoice(name, bold, italic, extra as LastResortOffice | undefined)?.face;
   return face?.file as string | undefined;
 };
 const measuredFonts = measuredFontProvider(provider, fontLoads, faceOf);
