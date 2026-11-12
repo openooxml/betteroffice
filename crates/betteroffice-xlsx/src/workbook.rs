@@ -2417,7 +2417,6 @@ impl Workbook {
                 package.materialize()?,
                 &self.preserved,
                 sheet,
-                destination,
             )
         {
             return Err(error);

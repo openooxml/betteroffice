@@ -4774,20 +4774,9 @@ fn fill_range_refuses_a_validation_covering_only_the_source() {
 }
 
 #[test]
-fn fill_range_allows_a_validation_covering_source_and_target() {
+fn fill_range_refuses_any_sheet_with_validations() {
     let mut workbook = Workbook::open(&fill_validation_bytes("A1:A3")).unwrap();
-    workbook
-        .fill_range(
-            SheetId(0),
-            CellRange::new(cell("A1"), cell("A1")),
-            CellRange::new(cell("A1"), cell("A3")),
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    assert_eq!(workbook.cell(SheetId(0), cell("A3")).unwrap().input, "10");
-    let saved = workbook.save().unwrap();
-    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
-    assert!(test_part_text(&parts, "xl/worksheets/sheet1.xml").contains(r#"sqref="A1:A3""#));
+    assert_preserved_fill_refused(&mut workbook, "A1", "A1:A3", "data validations");
 }
 
 #[test]
@@ -4851,31 +4840,11 @@ fn fill_extension_rule_bytes(sqref: &str) -> Vec<u8> {
 }
 
 #[test]
-fn fill_range_refuses_an_extension_rule_covering_only_the_source() {
-    let mut workbook = Workbook::open(&fill_extension_rule_bytes("A1")).unwrap();
-    let before = workbook.model().clone();
-    let result = workbook.fill_range(
-        SheetId(0),
-        CellRange::new(cell("A1"), cell("A1")),
-        CellRange::new(cell("A1"), cell("A2")),
-        CalculationOptions::default(),
-    );
-    assert!(
-        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve")),
-        "{result:?}"
-    );
-    assert_eq!(workbook.model(), &before);
-
-    let mut elsewhere = Workbook::open(&fill_extension_rule_bytes("Z1:Z9")).unwrap();
-    elsewhere
-        .fill_range(
-            SheetId(0),
-            CellRange::new(cell("A1"), cell("A1")),
-            CellRange::new(cell("A1"), cell("A2")),
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    assert_eq!(elsewhere.cell(SheetId(0), cell("A2")).unwrap().input, "10");
+fn fill_range_refuses_any_sheet_with_extension_rules() {
+    for sqref in ["A1", "Z1:Z9"] {
+        let mut workbook = Workbook::open(&fill_extension_rule_bytes(sqref)).unwrap();
+        assert_preserved_fill_refused(&mut workbook, "A1", "A1:A2", "conditional formats");
+    }
 }
 
 #[test]
@@ -4924,43 +4893,65 @@ fn fill_comment_bytes(anchor: &str) -> Vec<u8> {
 }
 
 #[test]
-fn fill_range_finds_comments_where_inserted_rows_moved_them() {
-    let insert = |workbook: &mut Workbook| {
-        workbook
-            .apply_ops(
-                vec![Op::InsertRows {
-                    sheet: SheetId(0),
-                    at: 0,
-                    count: 1,
-                }],
-                CalculationOptions::default(),
-            )
-            .unwrap();
-    };
-    let mut moved_in = Workbook::open(&fill_comment_bytes("A2")).unwrap();
-    insert(&mut moved_in);
-    let result = moved_in.fill_range(
-        SheetId(0),
-        CellRange::new(cell("A2"), cell("A2")),
-        CellRange::new(cell("A2"), cell("A3")),
-        CalculationOptions::default(),
-    );
-    assert!(
-        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("comments")),
-        "{result:?}"
-    );
+fn fill_range_refuses_any_sheet_with_comments() {
+    for anchor in ["A2", "Z99"] {
+        let mut workbook = Workbook::open(&fill_comment_bytes(anchor)).unwrap();
+        assert_preserved_fill_refused(&mut workbook, "A1", "A1:A2", "comments");
+    }
+}
 
-    let mut moved_out = Workbook::open(&fill_comment_bytes("A3")).unwrap();
-    insert(&mut moved_out);
-    moved_out
-        .fill_range(
-            SheetId(0),
-            CellRange::new(cell("A2"), cell("A2")),
-            CellRange::new(cell("A2"), cell("A3")),
+#[test]
+fn fill_range_refuses_conditional_formats_in_alternate_content() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" mc:Ignorable="x14"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><mc:AlternateContent><mc:Choice Requires="x14"><conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>A1&gt;0</formula></cfRule></conditionalFormatting></mc:Choice></mc:AlternateContent></worksheet>"#.to_vec(),
+    );
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    assert_preserved_fill_refused(&mut workbook, "A1", "A1:A2", "conditional formats");
+}
+
+#[test]
+fn fill_range_refuses_source_conditional_formats_once_rows_moved_since_opening() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>A1&gt;0</formula></cfRule></conditionalFormatting></worksheet>"#.to_vec(),
+    );
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
             CalculationOptions::default(),
         )
         .unwrap();
-    assert_eq!(moved_out.cell(SheetId(0), cell("A3")).unwrap().input, "10");
+    assert_preserved_fill_refused(&mut workbook, "A2", "A2:A3", "conditional formats");
+}
+
+fn assert_preserved_fill_refused(
+    workbook: &mut Workbook,
+    source: &str,
+    destination: &str,
+    expected: &str,
+) {
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::parse_a1(source).unwrap(),
+        CellRange::parse_a1(destination).unwrap(),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains(expected)),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
 }
 
 #[test]

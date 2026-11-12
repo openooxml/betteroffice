@@ -58,30 +58,23 @@ fn tiled_source(source: CellRange, row: u32, col: u32) -> CellRef {
     )
 }
 
-/// Refuses a fill over the data validations, extension rules and comments a
-/// source sheet part keeps. Once rows or columns moved since opening, any such
-/// rule refuses, and so does a comment whose cell was deleted.
+/// Refuses a fill on a sheet whose source part keeps data validations,
+/// extension rules or comments, or whose own conditional formats rows or
+/// columns may have moved away from since opening.
 pub(crate) fn preserved_fill_refusal(
     package: &xlsx_parse::PreservedPackage,
     preserved: &PreservedSheetState,
     sheet: SheetId,
-    destination: CellRange,
 ) -> Option<Error> {
     let origin = preserved.origins.get(sheet.0 as usize).copied().flatten()?;
-    let axes = preserved
+    let exact = preserved
         .axes
         .get(sheet.0 as usize)
-        .and_then(Option::as_ref);
-    let exact = axes.is_some_and(xlsx_parse::SheetAxes::is_identity);
-    let feature = package.fill_unsupported_feature(
-        origin,
-        |ranges| !exact || covers_partially(ranges, destination),
-        |at| {
-            axes.and_then(|axes| axes.rows.current(at.row).zip(axes.cols.current(at.col)))
-                .is_none_or(|(row, col)| destination.contains(CellRef::new(row, col)))
-        },
-    )?;
-    Some(refuses(feature))
+        .and_then(Option::as_ref)
+        .is_some_and(xlsx_parse::SheetAxes::is_identity);
+    package
+        .fill_unsupported_feature(origin, exact)
+        .map(refuses)
 }
 
 /// Builds the `SetCell` ops that tile `source` over `destination`.
