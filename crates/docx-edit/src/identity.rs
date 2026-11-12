@@ -1732,8 +1732,15 @@ fn story_fingerprint_for_save(
     budget: &mut Option<usize>,
     seeded: Option<SaveSeeds<'_>>,
 ) -> Option<([u8; 32], Vec<UnitState>, bool)> {
-    let mut fingerprint =
-        StoryFingerprint::start(doc, txn, story, comments, *budget, seeded, PRIME_SLICE_SEGMENTS)?;
+    let mut fingerprint = StoryFingerprint::start(
+        doc,
+        txn,
+        story,
+        comments,
+        *budget,
+        seeded,
+        PRIME_SLICE_SEGMENTS,
+    )?;
     fingerprint.advance(txn, budget, usize::MAX)?;
     fingerprint.finish()
 }
@@ -6169,7 +6176,10 @@ mod tests {
                 -601,
                 &format!(
                     "{}{}",
-                    control(-602, &fixture::para("20000002", &commented(3, "Nested control"))),
+                    control(
+                        -602,
+                        &fixture::para("20000002", &commented(3, "Nested control"))
+                    ),
                     fixture::para("20000004", &fixture::run("Outer control"))
                 )
             ),
