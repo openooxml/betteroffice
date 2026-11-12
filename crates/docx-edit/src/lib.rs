@@ -786,6 +786,9 @@ pub struct EditingDoc {
     /// A save seed state prime in progress; see [`EditingDoc::prime_save_seed_states_slice`].
     prime_progress: Mutex<Option<identity::PrimeProgress>>,
     prime_last_slice_cost: AtomicU64,
+    /// The `max_bytes` the last prime slice left unspent.
+    #[cfg(test)]
+    prime_last_slice_left: AtomicU64,
     #[cfg(test)]
     save_story_cache_disabled: AtomicBool,
     sticky_positions: Mutex<sticky_positions::StickyPositions>,
@@ -898,6 +901,8 @@ impl EditingDoc {
             save_story_states,
             prime_progress: Mutex::new(None),
             prime_last_slice_cost: AtomicU64::new(0),
+            #[cfg(test)]
+            prime_last_slice_left: AtomicU64::new(0),
             #[cfg(test)]
             save_story_cache_disabled: AtomicBool::new(false),
             sticky_positions: Mutex::default(),

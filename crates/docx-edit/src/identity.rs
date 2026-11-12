@@ -4000,14 +4000,19 @@ impl EditingDoc {
     ) -> PrimeSlice {
         self.prime_last_slice_cost.store(0, Ordering::Relaxed);
         let mut cost = 0u64;
+        let mut left = max_bytes as usize;
         let outcome = self.prime_slice_step(
             max_paragraphs,
             max_inflated_bytes,
             max_bytes,
             segments_per_slice,
             &mut cost,
+            &mut left,
         );
         self.prime_last_slice_cost.store(cost, Ordering::Relaxed);
+        #[cfg(test)]
+        self.prime_last_slice_left
+            .store(left as u64, Ordering::Relaxed);
         outcome
     }
 
@@ -4025,6 +4030,7 @@ impl EditingDoc {
         max_bytes: u32,
         segments_per_slice: usize,
         cost: &mut u64,
+        left: &mut usize,
     ) -> PrimeSlice {
         let sliced = max_bytes != u32::MAX;
         let mut progress = self.prime_progress.lock().unwrap();
@@ -4158,7 +4164,6 @@ impl EditingDoc {
                 return PrimeSlice::Pending;
             }
         }
-        let mut left = max_bytes as usize;
         loop {
             if state.current.is_none() {
                 let Some(story) = state.stories.pop_front() else {
@@ -4172,7 +4177,7 @@ impl EditingDoc {
                 };
                 let anchors = state.anchors.remove(&story).unwrap_or_default();
                 let comments = crate::canonical::resolve_comment_anchors(&txn, &anchors);
-                left = left.saturating_sub(PRIME_STORY_COST);
+                *left = left.saturating_sub(PRIME_STORY_COST);
                 *cost = cost.saturating_add(PRIME_STORY_COST as u64);
                 let kept = state.kept.remove(&story);
                 let cursor = || match kept {
@@ -4201,7 +4206,7 @@ impl EditingDoc {
                             *progress = None;
                             return PrimeSlice::Declined;
                         }
-                        if left == 0 {
+                        if *left == 0 {
                             return PrimeSlice::Pending;
                         }
                         continue;
@@ -4212,8 +4217,10 @@ impl EditingDoc {
                 continue;
             };
             let before = fingerprint.charged;
-            let advanced = fingerprint.advance(&txn, &mut state.budget, left.max(1));
-            *cost = cost.saturating_add(fingerprint.charged - before);
+            let advanced = fingerprint.advance(&txn, &mut state.budget, (*left).max(1));
+            let charged = fingerprint.charged - before;
+            *cost = cost.saturating_add(charged);
+            *left = left.saturating_sub(usize::try_from(charged).unwrap_or(usize::MAX));
             if fingerprint.vanished {
                 *progress = None;
                 return PrimeSlice::Declined;
@@ -4225,8 +4232,7 @@ impl EditingDoc {
                 continue;
             };
             let comments = state.comments.remove(&story).unwrap_or_default();
-            if let Some((true, used)) = advanced {
-                left = left.saturating_sub(used);
+            if let Some((true, _)) = advanced {
                 if let Some((fingerprint, units, _)) = fingerprint.finish() {
                     let root = state.roots.get(&story).cloned().unwrap_or_default();
                     let story_state = Arc::new(StoryState {
@@ -4242,7 +4248,7 @@ impl EditingDoc {
                 *progress = None;
                 return PrimeSlice::Declined;
             }
-            if left == 0 {
+            if *left == 0 {
                 return PrimeSlice::Pending;
             }
         }
