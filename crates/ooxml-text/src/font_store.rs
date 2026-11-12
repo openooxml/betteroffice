@@ -489,7 +489,14 @@ impl FontStore {
             indices.retain(|&index| index < count);
             !indices.is_empty()
         });
-        self.face_count = self.fonts.iter().filter(|entry| entry.entry.bytes_of.is_none()).count();
+        self.face_count = self
+            .fonts
+            .iter()
+            .filter(|entry| entry.entry.bytes_of.is_none())
+            .count();
+        // Removed ids may be reused by a later registration; raster caches
+        // keyed by FontId must not serve the removed face's outlines.
+        self.outline_revision += 1;
         self.shape_cache.borrow_mut().hot.entries.clear();
         self.shape_cache.borrow_mut().cold.entries.clear();
         self.missing_base_latin.borrow_mut().clear();
@@ -1259,6 +1266,17 @@ mod tests {
             store.cached_shape(&key("filler 0 0".to_owned())).is_none(),
             "entries untouched for a full generation age out"
         );
+    }
+
+    #[test]
+    fn truncating_fonts_invalidates_cached_outlines() {
+        let mut store = FontStore::new();
+        store.register(LIBERATION_SANS.to_vec()).unwrap();
+        let revision = store.outline_revision();
+        assert!(store.truncate_fonts(0));
+        assert_eq!(store.font_count(), 0);
+        assert_eq!(store.outline_revision(), revision + 1);
+        assert!(!store.truncate_fonts(0));
     }
 
     #[test]
