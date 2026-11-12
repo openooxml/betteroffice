@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import JSZip from 'jszip';
-import { layOutFonts, loadProduct, writeDocumentChains, type Product } from './native-chains';
+import { describeAddons, layOutFonts, loadProduct, missingAddons, serializeChains, writeDocumentChains, type FontPackages, type Product } from './native-chains';
 
 type Faces = Record<string, string[]>;
 
@@ -38,15 +38,16 @@ async function fontDocx(): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-async function productFaces(product: Product, bytes: Uint8Array): Promise<Faces> {
+async function productFaces(product: Product, bytes: Uint8Array): Promise<{ faces: Faces; measurement: Record<string, unknown> }> {
   const laid = await layOutFonts(product, bytes);
   try {
+    const { fontChains: _, ...measurement } = laid.measurement;
     product.editor.computeLayout({ document: laid.document, pageGap: 0, session: laid.session, renderEnv: laid.renderEnv, measurement: laid.measurement });
     const fonts = laid.session.residentWorkerSnapshot()?.fonts as Array<Uint8Array | { substituteOf: number; family: string }> | undefined;
     if (!fonts) throw new Error('the session handed no resident fonts to wasm');
     const names: string[] = [];
     for (const font of fonts) names.push(ArrayBuffer.isView(font) ? hash(font) : `${names[font.substituteOf]}~${font.family}`);
-    return Object.fromEntries(Object.entries(laid.measurement.fontChains).map(([key, chain]) => [key, chain.map((id) => names[id])]));
+    return { faces: Object.fromEntries(Object.entries(laid.measurement.fontChains).map(([key, chain]) => [key, chain.map((id) => names[id])])), measurement };
   } finally {
     laid.session.destroy();
   }
@@ -76,9 +77,9 @@ const prepared = built ? (async () => {
   const bytes = await fontDocx();
   const docx = join(directory, 'fonts.docx');
   await writeFile(docx, bytes);
-  const expected = await productFaces(product, bytes);
+  const { faces: expected, measurement } = await productFaces(product, bytes);
   const chainsPath = await writeDocumentChains(product, bytes, join(directory, 'chains'), 'fonts');
-  return { directory, docx, chainsPath, expected };
+  return { directory, docx, chainsPath, expected, measurement, product };
 })() : undefined;
 prepared?.catch(() => {});
 
@@ -91,7 +92,9 @@ test('the recorded chains file replays the product registry face for face', asyn
     console.log(`native-chains: ${productRoot} has no dist build, skipping the product chain checks`);
     return;
   }
-  const { chainsPath, expected } = await prepared;
+  const { chainsPath, expected, measurement, product } = await prepared;
+  expect(describeAddons(product.fonts)).not.toContain('absent');
+  expect(JSON.parse(await readFile(chainsPath, 'utf8')).measurement).toEqual(measurement);
   const keys = Object.keys(expected);
   for (const family of ['consolas', 'rockwell', 'microsoft sans serif', 'verdana', 'arial black', 'noto serif jp', 'times new roman', 'calibri'])
     expect({ family, present: keys.some((key) => key.toLowerCase().startsWith(`${family}|`)) }).toEqual({ family, present: true });
@@ -128,3 +131,31 @@ test('the native binary measures with the product chains it is handed', async ()
     .map((key) => `${key.split('|')[0]} | ${label(old.font_faces[key])} | ${label(expected[key])}`)].join('\n'));
   if (process.env.NATIVE_CHAINS_RED === '1') expect(old.font_faces).toEqual(expected);
 }, 300_000);
+
+test('the chains file keeps the measurement and the substitute arguments the product passed', () => {
+  const measurement = { defaults: { fontSize: 11, fontFamily: 'Calibri' }, compat: { noLeading: false }, authoritativeShaping: true };
+  const faces = [{ bytes: new Uint8Array([1]) }, { substituteOf: 0, family: 'Calibri' }, { substituteOf: 0, family: 'Arial', bold: true, italic: false }];
+  const { chains } = serializeChains(faces, { fontChains: { 'calibri|0|0': [1, 0] }, ...measurement });
+  expect(chains.measurement).toEqual(measurement);
+  expect(chains.faces.slice(1)).toEqual([{ substituteOf: 0, family: 'Calibri' }, { substituteOf: 0, family: 'Arial', bold: true, italic: false }]);
+  expect(() => serializeChains(faces, { fontChains: {}, ...measurement, fallbackIds: [0] })).toThrow('fallbackIds');
+});
+
+test('a document fails only when it needs an add-on its channel lacks', () => {
+  const packages: FontPackages = {
+    version: '0.0.0',
+    fonts: {
+      resolveBundledFamilyFace: (family: string) => (family === 'Noto Serif JP' ? { file: 'jp.ttf' } : { file: 'latin.ttf' }),
+      resolveScriptFallbackFace: (script: string) => ({ file: script === 'cjk-sc' ? 'sc.ttf' : 'arabic.ttf' }),
+    },
+    addons: {
+      'fonts-intl': { version: '1.0.0', files: new Set(['thai.ttf']), manifest: 'intl' },
+      'fonts-cjk': { files: new Set(['jp.ttf', 'sc.ttf']), manifest: 'cjk' },
+    },
+  };
+  const requirement = (family: string, scripts: string[] = []) => ({ key: family, family, bold: false, italic: false, scripts });
+  expect(missingAddons(packages, [requirement('Calibri', ['arabic'])])).toEqual([]);
+  expect(missingAddons(packages, [requirement('Calibri', ['cjk-sc'])])).toEqual(['Calibri (cjk-sc script, sc.ttf) needs @betteroffice/fonts-cjk, which is absent']);
+  expect(missingAddons(packages, [requirement('Noto Serif JP')])[0]).toContain('Noto Serif JP (family face');
+  expect(describeAddons(packages)).toBe('fonts-intl 1.0.0, fonts-cjk absent');
+});

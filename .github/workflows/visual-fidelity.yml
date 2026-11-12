@@ -710,9 +710,40 @@ jobs:
           packages=("@betteroffice/docx@$(jq -r '.versions.docx' "$QUALITY_PLAN")")
           fonts=$(jq -r '.published_fonts.docx // empty' "$QUALITY_PLAN")
           cjk=$(jq -r '.published_fonts_cjk.docx // empty' "$QUALITY_PLAN")
-          if [ -n "$fonts" ]; then packages+=("@betteroffice/fonts@$fonts"); fi
-          if [ -n "$cjk" ]; then packages+=("@betteroffice/fonts-cjk@$cjk"); fi
+          if [ -z "$fonts" ] || [ -z "$cjk" ]; then
+            echo "::error::The plan pins no @betteroffice/fonts or @betteroffice/fonts-cjk release for published docx"
+            exit 1
+          fi
+          intl=$(FONTS_VERSION="$fonts" node --input-type=module -e '
+          import { download } from "./scripts/office-quality/download.mjs";
+          import { registryLoaders, releasedFonts } from "./scripts/office-quality/plan.mjs";
+          const { packument } = registryLoaders(download);
+          const fonts = await packument("@betteroffice/fonts");
+          const version = process.env.FONTS_VERSION;
+          const release = { version, gitHead: fonts.versions?.[version]?.gitHead, time: fonts.time?.[version] };
+          const { published_fonts } = releasedFonts(await packument("@betteroffice/fonts-intl"), { docx: release },
+            { packageName: "@betteroffice/fonts-intl", releaseName: () => "@betteroffice/fonts" });
+          console.log(published_fonts.docx);
+          ')
+          packages+=("@betteroffice/fonts@$fonts" "@betteroffice/fonts-intl@$intl" "@betteroffice/fonts-cjk@$cjk")
           npm install --prefix "$RUNNER_TEMP/docx-published" --no-save --no-package-lock --ignore-scripts --no-audit --no-fund "${packages[@]}"
+          report() {
+            node --input-type=module -e '
+            import { createRequire } from "node:module";
+            import { readFileSync } from "node:fs";
+            const version = (from, name) => {
+              try { return JSON.parse(readFileSync(createRequire(from).resolve(`${name}/package.json`), "utf8")).version; } catch { return "absent"; }
+            };
+            const fonts = createRequire(process.argv[1] + "/package.json").resolve("@betteroffice/fonts/package.json");
+            console.log(`- ${process.argv[2]}: @betteroffice/fonts@${version(process.argv[1] + "/package.json", "@betteroffice/fonts")}, fonts-intl ${version(fonts, "@betteroffice/fonts-intl")}, fonts-cjk ${version(fonts, "@betteroffice/fonts-cjk")}`);
+            ' "$1" "$2"
+          }
+          {
+            echo "### DOCX font add-ons"
+            echo
+            report "$RUNNER_TEMP/docx-published/node_modules/@betteroffice/docx" "published (plan: fonts $fonts, fonts-intl $intl, fonts-cjk $cjk)"
+            report "$GITHUB_WORKSPACE/packages/docx" "commit (workspace)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Record the font chains the product's registry builds per document
         env:

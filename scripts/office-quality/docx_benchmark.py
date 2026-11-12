@@ -224,6 +224,12 @@ def main():
     native = Path(os.environ['QUALITY_NATIVE']).resolve()
     manifest = Path(os.environ['QUALITY_FONTS']).resolve()
     chains_root = Path(os.environ['QUALITY_CHAINS']).resolve() if os.environ.get('QUALITY_CHAINS') else None
+    if chains_root is None:
+        if os.environ.get('QUALITY_NATIVE_FONT_MAP') != 'bench-manifest':
+            raise ValueError('QUALITY_CHAINS is unset; set QUALITY_NATIVE_FONT_MAP=bench-manifest to measure with the bench font manifest')
+        print('DOCX native font path: bench-manifest (QUALITY_CHAINS unset, QUALITY_NATIVE_FONT_MAP=bench-manifest)', flush=True)
+    else:
+        print(f'DOCX native font path: product registry chains from {chains_root}', flush=True)
     font_paths = json.loads((chains_root / 'paths.json').read_text()) if chains_root else None
     soffice = os.environ.get('SOFFICE', 'libreoffice')
     os.environ['SAL_USE_VCLPLUGIN'] = 'svp'
@@ -258,7 +264,7 @@ def main():
             if sha256(directory / 'reference' / f'page_{page:04d}.png') != asset['sha256']:
                 raise ValueError('Reference hash mismatch')
         print(f"DOCX shard {job['shard']}: {index + 1}/{len(job['samples'])} {sample['id']}", flush=True)
-        chains = product_chains(chains_root, sample) if chains_root else None
+        chains = product_chains(chains_root, sample) if chains_root else {}
         timings = measure_sample(sample, directory, binaries, manifest, soffice, job['trials'], index, chains=chains)
         print(f"{sample['id']}: LibreOffice fidelity", flush=True)
         fidelity = libreoffice_fidelity(sample, directory, soffice, version)

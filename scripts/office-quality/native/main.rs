@@ -41,15 +41,21 @@ fn run() -> Result<()> {
         Some(chains) => Fonts::replay(Path::new(chains), &requirements)?,
         None => Fonts::load(Path::new(&args[2]), &requirements)?,
     };
-    request["measurement"] = json!({
-        "fontChains": fonts.ids,
-        "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
-        "compat": {
-            "noLeading": package["settings"]["compatibilityFlags"]["noLeading"].as_bool().unwrap_or(false),
-            "doNotExpandShiftReturn": package["settings"]["compatibilityFlags"]["doNotExpandShiftReturn"].as_bool().unwrap_or(false)
-        },
-        "authoritativeShaping": true
-    });
+    request["measurement"] = if fonts.measurement.is_object() {
+        let mut measurement = fonts.measurement.clone();
+        measurement["fontChains"] = json!(fonts.ids);
+        measurement
+    } else {
+        json!({
+            "fontChains": fonts.ids,
+            "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+            "compat": {
+                "noLeading": package["settings"]["compatibilityFlags"]["noLeading"].as_bool().unwrap_or(false),
+                "doNotExpandShiftReturn": package["settings"]["compatibilityFlags"]["doNotExpandShiftReturn"].as_bool().unwrap_or(false)
+            },
+            "authoritativeShaping": true
+        })
+    };
     let layout: Value = serde_json::from_str(
         &engine.layout_document_with_regions_retained_json(&request.to_string())?,
     )?;
@@ -218,6 +224,7 @@ struct Fonts {
     chains: FontChains,
     ids: BTreeMap<String, Vec<u32>>,
     faces: Vec<String>,
+    measurement: Value,
 }
 
 impl Fonts {
@@ -232,6 +239,7 @@ impl Fonts {
             chains: FontChains::new(),
             ids: BTreeMap::new(),
             faces: Vec::new(),
+            measurement: Value::Null,
         };
         docx_layout::clear_measure_fonts();
         let mut loaded = BTreeMap::<String, u32>::new();
@@ -342,8 +350,13 @@ impl Fonts {
             chains: FontChains::new(),
             ids: BTreeMap::new(),
             faces: Vec::new(),
+            measurement: Value::Null,
         };
         docx_layout::clear_measure_fonts();
+        if !recorded["measurement"].is_object() {
+            return Err("font chains file has no measurement".into());
+        }
+        registry.measurement = recorded["measurement"].clone();
         let faces = recorded["faces"]
             .as_array()
             .ok_or("font chains file has no faces")?;
