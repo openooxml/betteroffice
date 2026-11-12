@@ -36,6 +36,10 @@ export function deriveLimits(
   return { rows: 1_048_576, cols: 16_384, rowsPerPage };
 }
 
+export function coversWholeTrack(range: CellRange, limits: Pick<SelectionLimits, 'rows' | 'cols'>): boolean {
+  return (range.top <= 0 && range.bottom >= limits.rows - 1) || (range.left <= 0 && range.right >= limits.cols - 1);
+}
+
 export function extendScrollExtent<T extends Pick<SheetInfo, 'contentWidth' | 'contentHeight'>>(
   scroll: HTMLElement, info: T, rect: Rect, zoom: number
 ): T {

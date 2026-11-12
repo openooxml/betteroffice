@@ -440,6 +440,76 @@ pub struct SeedParagraph {
     pub alignment: String,
 }
 
+/// A story's segments still to read.
+pub(crate) enum StorySegmentCursor {
+    Diffs(std::vec::IntoIter<PendingSegment>),
+    Segments(std::vec::IntoIter<StorySegment>),
+}
+
+/// One owned diff entry of a [`StorySegmentCursor`].
+pub(crate) struct PendingSegment {
+    insert: PendingInsert,
+    attributes: Option<Box<Attrs>>,
+}
+
+enum PendingInsert {
+    Value(Any),
+    Map(yrs::Hook<MapRef>),
+}
+
+impl PendingSegment {
+    fn new(diff: yrs::types::text::Diff<YChange>) -> Self {
+        let insert = match diff.insert {
+            Out::Any(value) => PendingInsert::Value(value),
+            Out::YMap(map) => PendingInsert::Map(yrs::SharedRef::hook(&map)),
+            _ => PendingInsert::Value(Any::Null),
+        };
+        Self {
+            insert,
+            attributes: diff.attributes,
+        }
+    }
+}
+
+impl StorySegmentCursor {
+    /// The story's next `limit` segments.
+    pub(crate) fn next_chunk<T: ReadTxn>(
+        &mut self,
+        txn: &T,
+        limit: usize,
+    ) -> Option<Vec<StorySegment>> {
+        match self {
+            Self::Diffs(diffs) => diffs
+                .by_ref()
+                .take(limit)
+                .map(|pending| {
+                    ooxml_opc::progress::tick();
+                    let insert = match pending.insert {
+                        PendingInsert::Value(value) => Out::Any(value),
+                        PendingInsert::Map(hook) => Out::YMap(hook.get(txn)?),
+                    };
+                    Some(StorySegment {
+                        content: segment_content(insert, txn),
+                        attributes: ordered_attrs(pending.attributes.as_deref()),
+                    })
+                })
+                .collect(),
+            Self::Segments(segments) => Some(segments.by_ref().take(limit).collect()),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Diffs(diffs) => diffs.len(),
+            Self::Segments(segments) => segments.len(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommentAnchor {
     pub story: StoryId,
@@ -1861,26 +1931,35 @@ impl EditingDoc {
         txn: &T,
         story_id: &str,
     ) -> EditResult<Vec<StorySegment>> {
+        self.story_segment_cursor_in(txn, story_id)?
+            .next_chunk(txn, usize::MAX)
+            .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))
+    }
+
+    /// [`Self::story_segments_in`], read a chunk at a time from the story's diff.
+    pub(crate) fn story_segment_cursor_in<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story_id: &str,
+    ) -> EditResult<StorySegmentCursor> {
         let story = match story_ref(txn, story_id) {
             Ok(story) => story,
             Err(EditError::CellHasNoStory(_)) => {
                 return empty_cells::EmptyCell::new(story_id)
                     .doc()
-                    .story_segments(story_id);
+                    .story_segments(story_id)
+                    .map(|segments| StorySegmentCursor::Segments(segments.into_iter()));
             }
             Err(error) => return Err(error),
         };
-        Ok(story
-            .diff(txn, YChange::identity)
-            .into_iter()
-            .map(|diff| {
-                ooxml_opc::progress::tick();
-                StorySegment {
-                    content: segment_content(diff.insert, txn),
-                    attributes: ordered_attrs(diff.attributes.as_deref()),
-                }
-            })
-            .collect())
+        Ok(StorySegmentCursor::Diffs(
+            story
+                .diff(txn, YChange::identity)
+                .into_iter()
+                .map(PendingSegment::new)
+                .collect::<Vec<_>>()
+                .into_iter(),
+        ))
     }
 
     pub fn paragraphs(&self, story_id: &str) -> EditResult<Vec<ParagraphSnapshot>> {
