@@ -469,6 +469,14 @@ impl PendingSegment {
             attributes: diff.attributes,
         }
     }
+
+    /// The embedded map this entry holds, if it holds one.
+    pub(crate) fn map_hook(&self) -> Option<&yrs::Hook<MapRef>> {
+        match &self.insert {
+            PendingInsert::Map(hook) => Some(hook),
+            PendingInsert::Value(_) => None,
+        }
+    }
 }
 
 impl StorySegmentCursor {

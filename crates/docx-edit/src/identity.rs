@@ -1773,6 +1773,8 @@ pub(crate) struct PrimeProgress {
     comments: HashMap<String, BTreeMap<String, Vec<(u32, u32)>>>,
     states: HashMap<String, Arc<StoryState>>,
     current: Option<(String, StoryFingerprint<'static>)>,
+    scan: Option<ScanBuilder>,
+    kept: HashMap<String, Vec<crate::PendingSegment>>,
 }
 
 /// The setup step a prime takes next.
@@ -1821,10 +1823,24 @@ impl<'a> StoryFingerprint<'a> {
         seeded: Option<SaveSeeds<'a>>,
         chunk: usize,
     ) -> Option<Self> {
+        let cursor = || doc.story_segment_cursor_in(txn, story).ok();
+        Self::start_from(doc, story, comments, budget, seeded, chunk, cursor)
+    }
+
+    /// [`Self::start`] over the segments `cursor` gives.
+    fn start_from(
+        doc: &EditingDoc,
+        story: &str,
+        comments: &BTreeMap<String, Vec<(u32, u32)>>,
+        budget: Option<usize>,
+        seeded: Option<SaveSeeds<'a>>,
+        chunk: usize,
+        cursor: impl FnOnce() -> Option<crate::StorySegmentCursor>,
+    ) -> Option<Self> {
         use sha2::Digest;
         #[cfg(test)]
         STORY_FINGERPRINTS.with(|count| count.set(count.get() + 1));
-        let cursor = doc.story_segment_cursor_in(txn, story).ok()?;
+        let cursor = cursor()?;
         let mut boundaries: Vec<(u32, String, bool)> = comments
             .iter()
             .flat_map(|(key, anchors)| {
@@ -2232,6 +2248,167 @@ impl Scan {
             }
         }
         story
+    }
+}
+
+/// A [`Pilcrow`] read in an earlier slice, its map held as a hook.
+struct HookedPilcrow {
+    story: String,
+    key: String,
+    hook: yrs::Hook<MapRef>,
+    allocated: Option<String>,
+    source: Option<String>,
+    synthetic: bool,
+    content: bool,
+}
+
+impl HookedPilcrow {
+    fn new(pilcrow: Pilcrow) -> Self {
+        Self {
+            hook: yrs::SharedRef::hook(&pilcrow.map),
+            story: pilcrow.story,
+            key: pilcrow.key,
+            allocated: pilcrow.allocated,
+            source: pilcrow.source,
+            synthetic: pilcrow.synthetic,
+            content: pilcrow.content,
+        }
+    }
+
+    fn resolve<T: ReadTxn>(self, txn: &T) -> Option<Pilcrow> {
+        Some(Pilcrow {
+            map: self.hook.get(txn)?,
+            story: self.story,
+            key: self.key,
+            allocated: self.allocated,
+            source: self.source,
+            synthetic: self.synthetic,
+            content: self.content,
+        })
+    }
+}
+
+/// [`Scan::new`] taken a few segments at a time, holding no yrs reference between calls.
+struct ScanBuilder {
+    stories: Vec<String>,
+    next: usize,
+    current: Option<Vec<crate::PendingSegment>>,
+    position: usize,
+    content: bool,
+    pilcrows: Vec<HookedPilcrow>,
+    parents: HashMap<String, String>,
+    kept: HashMap<String, Vec<crate::PendingSegment>>,
+}
+
+impl ScanBuilder {
+    fn new<T: ReadTxn>(txn: &T) -> Self {
+        let mut stories: Vec<String> = match txn.get_map(STORIES) {
+            Some(stories) => crate::live_stories(&stories, txn)
+                .filter(|(_, value)| matches!(value, Out::YText(_)))
+                .map(|(id, _)| id.to_string())
+                .collect(),
+            None => Vec::new(),
+        };
+        crate::sort::sort_by(&mut stories, &|left, right| left.cmp(right));
+        Self {
+            stories,
+            next: 0,
+            current: None,
+            position: 0,
+            content: false,
+            pilcrows: Vec::new(),
+            parents: HashMap::new(),
+            kept: HashMap::new(),
+        }
+    }
+
+    /// Scans up to `limit` segments, answering whether all are; `None` once one fails to resolve.
+    fn advance<T: ReadTxn>(&mut self, txn: &T, limit: usize) -> Option<bool> {
+        let mut left = limit;
+        while let Some(story) = self.stories.get(self.next) {
+            if left == 0 {
+                return Some(false);
+            }
+            if self.current.is_none() {
+                let Out::YText(text) = txn.get_map(STORIES)?.get(txn, story)? else {
+                    return None;
+                };
+                let diff = text.diff(txn, YChange::identity);
+                self.current = Some(diff.into_iter().map(crate::PendingSegment::new).collect());
+                self.position = 0;
+                self.content = false;
+            }
+            let segments = self.current.as_deref().unwrap_or_default();
+            while left > 0 {
+                let Some(segment) = segments.get(self.position) else {
+                    break;
+                };
+                ooxml_opc::progress::tick();
+                self.position += 1;
+                left -= 1;
+                let Some(hook) = segment.map_hook() else {
+                    self.content = true;
+                    continue;
+                };
+                let map = hook.get(txn)?;
+                match map_string(&map, txn, KIND_KEY).as_deref() {
+                    Some(crate::PILCROW_KIND) => {
+                        let mut pilcrow = Pilcrow::read(story, map, txn);
+                        pilcrow.content = std::mem::take(&mut self.content);
+                        self.pilcrows.push(HookedPilcrow::new(pilcrow));
+                    }
+                    Some("table") => {
+                        let Some(Out::Any(Any::Array(rows))) = map.get(txn, "rows") else {
+                            continue;
+                        };
+                        for row in rows.iter() {
+                            let Any::Map(row) = row else { continue };
+                            let Some(Any::Array(cells)) = row.get("cells") else {
+                                continue;
+                            };
+                            for cell in cells.iter() {
+                                if let Any::Map(cell) = cell
+                                    && let Some(Any::String(child)) = cell.get("story")
+                                {
+                                    self.parents.insert(child.to_string(), story.clone());
+                                }
+                            }
+                        }
+                    }
+                    Some("blockSdt") => {
+                        if let Some(child) = map_string(&map, txn, "story") {
+                            self.parents.insert(child, story.clone());
+                        }
+                    }
+                    _ => self.content = true,
+                }
+            }
+            if self.position < segments.len() {
+                return Some(false);
+            }
+            let segments = self.current.take().unwrap_or_default();
+            self.kept.insert(story.clone(), segments);
+            self.next += 1;
+        }
+        Some(true)
+    }
+
+    /// The scan and each story's segments; `None` when a pilcrow's map no longer resolves.
+    fn finish<T: ReadTxn>(
+        self,
+        txn: &T,
+    ) -> Option<(Scan, HashMap<String, Vec<crate::PendingSegment>>)> {
+        let pilcrows = self
+            .pilcrows
+            .into_iter()
+            .map(|pilcrow| pilcrow.resolve(txn))
+            .collect::<Option<Vec<_>>>()?;
+        let scan = Scan {
+            stories: self.stories,
+            pilcrows,
+            parents: self.parents,
+        };
+        Some((scan, self.kept))
     }
 }
 
@@ -3864,6 +4041,8 @@ impl EditingDoc {
                 comments: HashMap::new(),
                 states: HashMap::new(),
                 current: None,
+                scan: None,
+                kept: HashMap::new(),
             });
             if sliced {
                 return PrimeSlice::Pending;
@@ -3873,7 +4052,30 @@ impl EditingDoc {
             return PrimeSlice::Declined;
         };
         if state.phase == PrimePhase::Scan {
-            let scan = self.committed_scan(&txn);
+            let limit = if sliced {
+                segments_per_slice.max(1)
+            } else {
+                usize::MAX
+            };
+            let builder = state.scan.get_or_insert_with(|| ScanBuilder::new(&txn));
+            match builder.advance(&txn, limit) {
+                Some(true) => {}
+                Some(false) => return PrimeSlice::Pending,
+                None => {
+                    *progress = None;
+                    return PrimeSlice::Declined;
+                }
+            }
+            let finished = state.scan.take().and_then(|builder| builder.finish(&txn));
+            let Some((scan, kept)) = finished else {
+                *progress = None;
+                return PrimeSlice::Declined;
+            };
+            let scan = Arc::new(scan);
+            if epoch == state.epoch {
+                *self.scan_cache.0.lock().unwrap() = Some((state.epoch, Arc::clone(&scan)));
+            }
+            state.kept = kept;
             if scan.pilcrows.len() > state.max_paragraphs as usize {
                 *progress = None;
                 return PrimeSlice::Declined;
@@ -3923,14 +4125,19 @@ impl EditingDoc {
                 let anchors = state.anchors.remove(&story).unwrap_or_default();
                 let comments = crate::canonical::resolve_comment_anchors(&txn, &anchors);
                 left = left.saturating_sub(PRIME_STORY_COST);
-                match StoryFingerprint::start(
+                let kept = state.kept.remove(&story);
+                let cursor = || match kept {
+                    Some(segments) => Some(crate::StorySegmentCursor::Diffs(segments.into_iter())),
+                    None => self.story_segment_cursor_in(&txn, &story).ok(),
+                };
+                match StoryFingerprint::start_from(
                     self,
-                    &txn,
                     &story,
                     &comments,
                     state.budget,
                     None,
                     segments_per_slice,
+                    cursor,
                 ) {
                     Some(fingerprint) => {
                         let large = fingerprint.cursor.len() > segments_per_slice;
@@ -6421,7 +6628,7 @@ mod tests {
         let session = bytes_session(&multi_chunk_docx());
         let doc = session.engine.doc();
         let mut held = false;
-        for _ in 0..10_000 {
+        for _ in 0..100_000 {
             assert_eq!(
                 doc.prime_save_seed_states_slice_with(u32::MAX, u32::MAX, 1, 1),
                 PrimeSlice::Pending
