@@ -1105,11 +1105,39 @@ pub fn install_panic_hook() {
     INSTALLED.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            use std::io::Write;
-            let _ = writeln!(std::io::stderr(), "[xlsx-native] panic: {info}");
+            let mut line = format!("[xlsx-native] panic: {info}")
+                .replace('\r', "\\r")
+                .replace('\n', "\\n");
+            line.push('\n');
+            write_panic_line(&line);
             prev(info);
         }));
     });
+}
+
+fn write_panic_line(line: &str) {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        let fd = std::io::stderr().as_raw_fd();
+        let mut stderr = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+        let _ = stderr.write_all(line.as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        let handle = std::io::stderr().as_raw_handle();
+        let mut stderr =
+            std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(handle) });
+        let _ = stderr.write_all(line.as_bytes());
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        use std::io::Write;
+        let _ = write!(std::io::stderr(), "{line}");
+    }
 }
 
 /// @internal Test hook: the calling thread's live engine bytes.
