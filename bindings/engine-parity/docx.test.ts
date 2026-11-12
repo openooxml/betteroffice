@@ -12,9 +12,13 @@ import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
 import {
   coverageProblems,
   defineRow,
+  FramedZipReturn,
   rowName,
+  runKnownDifference,
   runRow,
   surfaceMethods,
+  zipEntries,
+  ZipReturn,
   type EngineHandle,
   type Exclusion,
   type KnownDifference,
@@ -95,18 +99,6 @@ async function buildFixture(): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
-async function packageParts(bytes: Uint8Array): Promise<[string, Uint8Array][]> {
-  const zip = await JSZip.loadAsync(bytes, { checkCRC32: true });
-  const names = Object.keys(zip.files).filter((name) => !zip.files[name]!.dir).sort();
-  return Promise.all(names.map(async (name): Promise<[string, Uint8Array]> => [name, await zip.files[name]!.async('uint8array')]));
-}
-
-async function framedParts(framed: Uint8Array) {
-  const length = Number(new DataView(framed.buffer, framed.byteOffset, framed.byteLength).getBigUint64(0, true));
-  const warnings: unknown = JSON.parse(new TextDecoder().decode(framed.subarray(8, 8 + length)));
-  return { warnings, parts: await packageParts(framed.subarray(8 + length)) };
-}
-
 const fontBytes = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
 const wasmEngine: DocxEngine = { ...wasmEdit, font_preflight: wasmFontPreflight };
 const nativeEngine = createRequire(import.meta.url)('../docx-native/index.js') as DocxEngine;
@@ -117,7 +109,7 @@ beforeAll(async () => {
   await initWasm({ module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)) });
   await initPreflight({ module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/preflight/docx_preflight_bg.wasm', import.meta.url)) });
   fixture = await buildFixture();
-  fixtureEntries = Object.fromEntries(await packageParts(fixture));
+  fixtureEntries = Object.fromEntries((await zipEntries(fixture)).parts);
 });
 
 // version() is "{nonce:016x}-{epoch}"; mint_nonce in crates/docx-edit/src/batch.rs mixes host entropy and the clock.
@@ -273,9 +265,10 @@ const rows: Row<Docx>[] = [
   { method: 'EditSession.open_docx_preview_with_budget', call: ({ fresh }) => fresh().open_docx_preview_with_budget(fixture, 4, 2) },
   {
     method: 'EditSession.begin_opening',
+    mutates: true,
     call: ({ session: s }) => {
-      s.begin_opening('engine-parity-reopened');
-      return s.paragraph_identities();
+      const result = s.begin_opening('engine-parity-reopened');
+      return { result, after: s.paragraph_identities() };
     },
   },
   { method: 'EditSession.replace_range', mutates: true, call: ({ session: s }) => s.replace_range(...span(s, 'First body', 0, 5), 'Parity') },
@@ -313,6 +306,7 @@ const rows: Row<Docx>[] = [
   },
   defineRow({
     method: 'EditSession.resolve_comment',
+    mutates: true,
     setup: ({ session: s }: Docx) => addedComment(s),
     call: ({ session: s }, commentId) => s.resolve_comment(commentId),
   }),
@@ -462,8 +456,10 @@ const rows: Row<Docx>[] = [
     method: 'EditSession.track_undo',
     mutates: true,
     call: ({ session: s }) => {
-      undoableEdit(s);
-      return s.can_undo();
+      const result = s.track_undo();
+      s.select_story('body');
+      s.insert_text('body', paraId(s, 'Second body'), 0, 'Undone ');
+      return { result, after: s.can_undo() };
     },
   },
   {
@@ -471,17 +467,17 @@ const rows: Row<Docx>[] = [
     mutates: true,
     call: ({ session: s }) => {
       undoableEdit(s);
-      s.add_undo_boundary();
+      const result = s.add_undo_boundary();
       s.insert_text('body', paraId(s, 'Final'), 0, 'Later ');
-      return s.undo();
+      return { result, after: s.undo() };
     },
   },
   { method: 'EditSession.undo_capture_mode', call: ({ session: s }) => s.undo_capture_mode() },
   {
     method: 'EditSession.set_undo_capture_mode',
     call: ({ session: s }) => {
-      s.set_undo_capture_mode('manual');
-      return s.undo_capture_mode();
+      const result = s.set_undo_capture_mode('manual');
+      return { result, after: s.undo_capture_mode() };
     },
   },
   {
@@ -528,7 +524,8 @@ const rows: Row<Docx>[] = [
     setup: ({ session: s }: Docx) => addedComment(s),
     call: ({ session: s }, commentId) => {
       const id = paraId(s, 'Final');
-      s.set_comment_ranges(commentId, JSON.stringify([{ story: 'body', startPara: id, startOffset: 0, endPara: id, endOffset: 5 }]));
+      const result = s.set_comment_ranges(commentId, JSON.stringify([{ story: 'body', startPara: id, startOffset: 0, endPara: id, endOffset: 5 }]));
+      return { result, after: s.list_comments() };
     },
   }),
   defineRow({
@@ -540,8 +537,8 @@ const rows: Row<Docx>[] = [
   { method: 'EditSession.locate_paragraph', call: ({ session: s }) => s.locate_paragraph('body', paraId(s, 'Second body')) },
   { method: 'EditSession.story_checksum', call: ({ session: s }) => s.story_checksum('body') },
   { method: 'EditSession.story_paragraph_ids', call: ({ session: s }) => s.story_paragraph_ids('body') },
-  { method: 'write_docx_s13_wasm', call: ({ engine }) => packageParts(engine.write_docx_s13_wasm(saveRequest(engine), fixture)) },
-  { method: 'write_docx_s13_wasm_with_warnings', call: ({ engine }) => framedParts(engine.write_docx_s13_wasm_with_warnings(saveRequest(engine), fixture)) },
+  { method: 'write_docx_s13_wasm', call: ({ engine }) => new ZipReturn(engine.write_docx_s13_wasm(saveRequest(engine), fixture)) },
+  { method: 'write_docx_s13_wasm_with_warnings', call: ({ engine }) => new FramedZipReturn(engine.write_docx_s13_wasm_with_warnings(saveRequest(engine), fixture)) },
   { method: 'parse_docx_s9', call: ({ engine }) => engine.parse_docx_s9(fixture, '') },
   { method: 'parse_docx_relationships', call: ({ engine }) => engine.parse_docx_relationships(fixture) },
   ...PARSES.map((method): Row<Docx> => ({ method, call: ({ engine }) => engine[method](fixture) })),
@@ -551,8 +548,8 @@ const rows: Row<Docx>[] = [
   { method: 'find_docx_content_controls_json', call: ({ engine }) => engine.find_docx_content_controls_json(fixture, TAG_QUERY, '{}') },
   { method: 'font_preflight', call: ({ engine }) => engine.font_preflight(fixture) },
   { method: 'unzip_docx', call: ({ engine }) => engine.unzip_docx(fixture) },
-  { method: 'rezip_docx', call: ({ engine }) => packageParts(engine.rezip_docx(fixtureEntries)) },
-  { method: 'sanitizeOoxml', call: ({ engine }) => packageParts(engine.sanitizeOoxml(fixture, 'docx')) },
+  { method: 'rezip_docx', call: ({ engine }) => new ZipReturn(engine.rezip_docx(fixtureEntries)) },
+  { method: 'sanitizeOoxml', call: ({ engine }) => new ZipReturn(engine.sanitizeOoxml(fixture, 'docx')) },
   { method: 'paragraphPatchWriterVersion', call: ({ engine }) => engine.paragraphPatchWriterVersion() },
   { method: 'skippedEffectKinds', call: ({ engine }) => engine.skippedEffectKinds() },
 ];
@@ -651,9 +648,7 @@ describe('docx native and wasm parity table', () => {
   for (const row of rows) {
     const known = knownDifferences.find((entry) => entry.method === row.method);
     test(known ? `${rowName(row)} still differs: ${known.reason}` : `${rowName(row)} matches`, async () => {
-      const run = runRow(row, makeWasm, makeNative);
-      if (known) await expect(run).rejects.toThrow();
-      else await run;
+      await (known ? runKnownDifference : runRow)(row, makeWasm, makeNative);
     }, 30_000);
   }
 });

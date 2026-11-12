@@ -1,4 +1,5 @@
 import { expect } from 'bun:test';
+import JSZip from 'jszip';
 import type { Surface } from '../../scripts/check-engine-surface';
 import { expectSavedPartsEqual } from '../native-parity';
 
@@ -44,6 +45,33 @@ export type Outcome = { value: unknown } | { error: { name: string; code: unknow
 
 export type Normalization = (value: unknown, generated: readonly string[]) => unknown;
 
+/** A row return that is a zip package. */
+export class ZipReturn {
+  constructor(readonly bytes: Uint8Array) {}
+}
+
+/** A row return framed as a u64 little-endian warnings JSON length, that JSON, then a zip package. */
+export class FramedZipReturn {
+  constructor(readonly bytes: Uint8Array) {}
+}
+
+export async function zipEntries(bytes: Uint8Array): Promise<{ entryNames: string[]; parts: [string, Uint8Array][] }> {
+  const zip = await JSZip.loadAsync(bytes, { checkCRC32: true });
+  const entryNames = Object.keys(zip.files);
+  const files = entryNames.filter((name) => !zip.files[name]!.dir).sort();
+  const parts = await Promise.all(files.map(async (name): Promise<[string, Uint8Array]> => [name, await zip.files[name]!.async('uint8array')]));
+  return { entryNames, parts };
+}
+
+export async function zipParts(value: unknown): Promise<unknown> {
+  if (value instanceof ZipReturn) return zipEntries(value.bytes);
+  if (!(value instanceof FramedZipReturn)) return value;
+  const { bytes } = value;
+  const length = Number(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, true));
+  const warningsJson = new TextDecoder().decode(bytes.subarray(8, 8 + length));
+  return { warningsJson, warnings: JSON.parse(warningsJson) as unknown, ...await zipEntries(bytes.subarray(8 + length)) };
+}
+
 export function byteContainer(value: unknown): unknown {
   return Buffer.isBuffer(value) ? Uint8Array.from(value) : value;
 }
@@ -55,7 +83,7 @@ export function generatedTokens(value: unknown, generated: readonly string[]): u
     .reduce((text, token, index) => text.replaceAll(token, `<generated ${index}>`), value);
 }
 
-export const normalize: readonly Normalization[] = [byteContainer, generatedTokens];
+export const normalize: readonly Normalization[] = [zipParts, byteContainer, generatedTokens];
 
 export function defineRow<T, C>(row: RowExpectation & {
   setup: (target: T) => C | Promise<C>;
@@ -64,16 +92,18 @@ export function defineRow<T, C>(row: RowExpectation & {
   return row;
 }
 
-function mapDeep(value: unknown, leaf: (value: unknown) => unknown): unknown {
-  if (Array.isArray(value)) return value.map((item) => mapDeep(item, leaf));
+async function mapDeep(value: unknown, leaf: (value: unknown) => unknown): Promise<unknown> {
+  if (Array.isArray(value)) return Promise.all(value.map((item) => mapDeep(item, leaf)));
   if (value !== null && typeof value === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapDeep(item, leaf)]));
+    return Object.fromEntries(await Promise.all(Object.entries(value).map(async ([key, item]) => [key, await mapDeep(item, leaf)])));
   }
   return leaf(value);
 }
 
-function normalized(value: unknown, generated: readonly string[]): unknown {
-  return normalize.reduce((current, step) => mapDeep(current, (leaf) => step(leaf, generated)), value);
+async function normalized(value: unknown, generated: readonly string[]): Promise<unknown> {
+  let current = value;
+  for (const step of normalize) current = await mapDeep(current, (leaf) => step(leaf, generated));
+  return current;
 }
 
 async function capture(run: () => unknown): Promise<Outcome> {
@@ -87,34 +117,80 @@ async function capture(run: () => unknown): Promise<Outcome> {
   }
 }
 
-async function observe<T>(row: Row<T>, engine: EngineHandle<T>): Promise<{ outcome: unknown; saved?: Outcome }> {
+interface Observation {
+  outcome: unknown;
+  saved?: Outcome;
+}
+
+async function observe<T>(row: Row<T>, engine: EngineHandle<T>, side: string): Promise<Observation> {
   try {
-    const context = await row.setup?.(engine.target);
+    const setup = await capture(() => row.setup?.(engine.target));
+    if ('error' in setup) throw new Error(`${rowName(row)}: ${side} setup threw ${setup.error.name}: ${setup.error.message}`);
     const before = engine.generated();
-    const outcome = await capture(() => row.call(engine.target, context as never));
+    const outcome = await capture(() => row.call(engine.target, setup.value as never));
     const generated = [...before, ...engine.generated()];
-    if (!row.mutates) return { outcome: normalized(outcome, generated) };
+    if (!row.mutates) return { outcome: await normalized(outcome, generated) };
     const saved = await capture(() => engine.save());
-    return { outcome: normalized(outcome, generated), saved: normalized(saved, generated) as Outcome };
+    return { outcome: await normalized(outcome, generated), saved: await normalized(saved, generated) as Outcome };
   } finally {
     engine.free();
   }
 }
 
+async function observeBoth<T>(row: Row<T>, makeWasm: MakeEngine<T>, makeNative: MakeEngine<T>) {
+  const wasm = await observe(row, await makeWasm(), 'wasm');
+  const native = await observe(row, await makeNative(), 'native');
+  return { wasm, native };
+}
+
+async function expectDocxPackage(name: string, side: string, saved: Outcome): Promise<Uint8Array> {
+  if ('error' in saved) throw new Error(`${name}: ${side} save threw ${saved.error.name}: ${saved.error.message}`);
+  const bytes = saved.value;
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) throw new Error(`${name}: ${side} save returned no bytes`);
+  const zip = await JSZip.loadAsync(bytes, { checkCRC32: true }).catch((error: unknown) => {
+    throw new Error(`${name}: ${side} save is not a valid zip: ${String(error)}`);
+  });
+  if (!zip.file('word/document.xml')) throw new Error(`${name}: ${side} save has no word/document.xml`);
+  return bytes;
+}
+
 /** Runs one row on a fresh wasm and a fresh native session and requires equal outcomes and saves. */
 export async function runRow<T>(row: Row<T>, makeWasm: MakeEngine<T>, makeNative: MakeEngine<T>): Promise<void> {
-  const wasm = await observe(row, await makeWasm());
-  const native = await observe(row, await makeNative());
+  const { wasm, native } = await observeBoth(row, makeWasm, makeNative);
   const name = rowName(row);
   expect(native.outcome, name).toStrictEqual(wasm.outcome);
   expectDeclaredOutcome(row, wasm.outcome as Outcome);
   if (!row.mutates) return;
-  const [left, right] = [native.saved!, wasm.saved!];
-  if ('value' in left && 'value' in right) {
-    await expectSavedPartsEqual(left.value as Uint8Array, right.value as Uint8Array);
-  } else {
-    expect(left, `${name} save`).toStrictEqual(right);
+  const nativeBytes = await expectDocxPackage(name, 'native', native.saved!);
+  const wasmBytes = await expectDocxPackage(name, 'wasm', wasm.saved!);
+  await expectSavedPartsEqual(nativeBytes, wasmBytes);
+}
+
+async function differs(check: () => unknown): Promise<boolean> {
+  try {
+    await check();
+    return false;
+  } catch {
+    return true;
   }
+}
+
+/** A known difference holds only while both engines run the row and their outcomes or saves still differ. */
+export async function runKnownDifference<T>(row: Row<T>, makeWasm: MakeEngine<T>, makeNative: MakeEngine<T>): Promise<void> {
+  const name = rowName(row);
+  const observed = await observeBoth(row, makeWasm, makeNative).catch((error: unknown) => {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; a known difference needs both engines to run the row, so fix the setup or remove the knownDifferences entry`);
+  });
+  const { wasm, native } = observed;
+  if (await differs(() => expect(native.outcome).toStrictEqual(wasm.outcome))) return;
+  if (row.mutates) {
+    const [left, right] = [native.saved!, wasm.saved!];
+    const savedDiffer = 'value' in left && 'value' in right
+      ? await differs(() => expectSavedPartsEqual(left.value as Uint8Array, right.value as Uint8Array))
+      : await differs(() => expect(left).toStrictEqual(right));
+    if (savedDiffer) return;
+  }
+  throw new Error(`${name}: both engines now agree; remove the knownDifferences entry`);
 }
 
 /** An agreed outcome still has to be the declared one: an error needs `throws`, `undefined` needs `mutates` or `voidReason`. */
