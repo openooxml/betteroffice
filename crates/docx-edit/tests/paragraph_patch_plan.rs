@@ -1884,6 +1884,16 @@ fn typing_at_either_edge_of_a_complex_field_is_legacy() {
 }
 
 #[test]
+fn typing_at_a_bookmark_beside_a_complex_field_is_legacy_as_a_field() {
+    let doc = open(&format!(
+        r#"<w:bookmarkStart w:id="1" w:name="mark"/><w:r><w:t>abc</w:t></w:r><w:bookmarkEnd w:id="1"/><w:r><w:t>de</w:t></w:r>{PAGE_REFERENCE}"#
+    ));
+    doc.insert_text(&ctx(), Position::new("body", 3), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
 fn an_edit_across_a_complex_field_boundary_is_legacy() {
     let doc = open(&text_around_page_reference());
     replace(&doc, 2, 5, "X");
