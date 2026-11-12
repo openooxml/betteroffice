@@ -40,7 +40,9 @@ defaults to 1.30.4). The manifest must declare the archival export in its
 header as `"conformance": "pdfa-2u"`; `export_pdf_batch --pdfa-2u` writes that
 field. The gate parses veraPDF's JSON report (compliant flag and failed rules)
 rather than trusting only its exit status. `--verapdf-report-dir` keeps the raw
-reports for inspection.
+reports for inspection. With `--allow-unsupported`, manifest entries that
+`export_pdf_batch --allow-unsupported` marked `"status": "unsupported"` are
+reported separately instead of failing; no PDF is expected for them.
 """
 
 from __future__ import annotations
@@ -824,6 +826,8 @@ def main(argv: list[str] | None = None) -> int:
                         help='fail unless every pdffonts row is embedded, subset and Unicode-mapped')
     parser.add_argument('--require-pdfa-2u', action='store_true',
                         help='require PDF/A-2u: run veraPDF on every PDF and fail on any non-compliance')
+    parser.add_argument('--allow-unsupported', action='store_true',
+                        help='skip manifest entries marked "status": "unsupported" instead of failing')
     parser.add_argument('--verapdf', type=Path,
                         help='veraPDF executable (default: $VERAPDF, then PATH)')
     parser.add_argument('--verapdf-version',
@@ -930,6 +934,7 @@ def main(argv: list[str] | None = None) -> int:
         'groups': {group: {'fixtures': 0, 'failed': 0, 'pages': 0, 'pdf_bytes': 0,
                            'text_chars': 0, 'extractable_chars': 0} for group in GROUPS},
         'fixtures': [],
+        'unsupported': [],
         'failures': [],
         'warnings': [],
     }
@@ -957,6 +962,12 @@ def main(argv: list[str] | None = None) -> int:
         pdf_root = args.pdf_dir or manifest_path.parent
         for entry in entries:
             relative = Path(entry['path'])
+            if args.allow_unsupported and entry.get('status') == 'unsupported':
+                report['unsupported'].append({
+                    'path': str(relative),
+                    'error': entry.get('error'),
+                })
+                continue
             key = f"{pdf_root}\0{relative}"
             if key in seen:
                 report['warnings'].append(
@@ -1023,6 +1034,7 @@ def main(argv: list[str] | None = None) -> int:
         'extractable_chars': sum(fixture['extractable_chars'] or 0 for fixture in fixtures),
         'pdfa_checked': len(verapdf_checked),
         'pdfa_compliant': len(verapdf_compliant),
+        'unsupported': len(report['unsupported']),
     }
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1031,6 +1043,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"PDF matrix: {report['summary']['fixtures']} fixture(s), "
         f"{report['summary']['passed']} passed, {report['summary']['failed']} failed, "
+        f"{report['summary']['unsupported']} unsupported, "
         f"{report['summary']['pages']} page(s)"
     )
     if pdfa_gate.required:

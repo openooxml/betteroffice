@@ -2,14 +2,17 @@
 //!
 //! ```text
 //! cargo run -p betteroffice-docx --example export_pdf_batch -- <input_dir> <output_dir>
-//!     [--pdfa-2u] [--title TEXT] [--author TEXT] [--subject TEXT]
-//!     [--keywords TEXT] [--creator TEXT] [--creation-date PDF_DATE]
-//!     [--modification-date PDF_DATE]
+//!     [--pdfa-2u] [--allow-unsupported] [--title TEXT] [--author TEXT]
+//!     [--subject TEXT] [--keywords TEXT] [--creator TEXT]
+//!     [--creation-date PDF_DATE] [--modification-date PDF_DATE]
 //! ```
 //!
 //! Without flags every fixture is exported as plain PDF 1.7. `--pdfa-2u`
 //! targets PDF/A-2u (ISO 19005-2) for every fixture; a document that would
-//! need the Base-14 fallback fails instead of silently downgrading. The
+//! need the Base-14 fallback fails instead of silently downgrading.
+//! `--allow-unsupported` records PDF/A-2u content the writer cannot represent
+//! (for example an uncovered emoji scalar) as `"status": "unsupported"` and
+//! keeps the command successful, so a matrix can report it separately. The
 //! metadata flags populate `/Info` and XMP for every fixture; dates are PDF
 //! date strings such as `D:20260101120000Z` and are written verbatim.
 //!
@@ -71,6 +74,7 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut positional = Vec::new();
     let mut options = PdfExportOptions::default();
+    let mut allow_unsupported = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let (flag, inline) = match arg.split_once('=') {
@@ -86,6 +90,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     return Err("--pdfa-2u takes no value".into());
                 }
                 options.conformance = PdfConformance::PdfA2u;
+            }
+            "--allow-unsupported" => {
+                if inline.is_some() {
+                    return Err("--allow-unsupported takes no value".into());
+                }
+                allow_unsupported = true;
             }
             "--title" => options.metadata.title = Some(value("--title", inline, &mut args)?),
             "--author" => options.metadata.author = Some(value("--author", inline, &mut args)?),
@@ -106,6 +116,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if allow_unsupported && options.conformance != PdfConformance::PdfA2u {
+        return Err("--allow-unsupported requires --pdfa-2u".into());
+    }
     let [input_dir, output_dir]: [String; 2] = positional.try_into().map_err(|_| USAGE)?;
     let input_dir = PathBuf::from(input_dir);
     let output_dir = PathBuf::from(output_dir);
@@ -134,6 +147,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let total = fixtures.len();
     let mut records = Vec::with_capacity(total);
     let mut failures = 0;
+    let mut unsupported = 0;
     for (index, (relative, source)) in fixtures.into_iter().enumerate() {
         let mut record = Map::new();
         record.insert("path".into(), json!(portable(&relative)));
@@ -161,6 +175,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 record.insert("text_chars".into(), json!(text_chars));
                 record.insert("error".into(), Value::Null);
             }
+            Err(error) if allow_unsupported && error.contains("PDF/A-2u") => {
+                unsupported += 1;
+                eprintln!(
+                    "[{}/{total}] SKIP {}: {error}",
+                    index + 1,
+                    portable(&relative)
+                );
+                record.insert("status".into(), json!("unsupported"));
+                record.insert("pages".into(), Value::Null);
+                record.insert("pdf_bytes".into(), Value::Null);
+                record.insert("fonts_embedded".into(), Value::Null);
+                record.insert("text_chars".into(), Value::Null);
+                record.insert("error".into(), json!(error));
+            }
             Err(error) => {
                 failures += 1;
                 eprintln!(
@@ -184,16 +212,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "input_dir": absolute(&input_dir),
         "output_dir": absolute(&output_dir),
         "conformance": conformance_name(options.conformance),
+        "allow_unsupported": allow_unsupported,
         "metadata": metadata_json(&options.metadata),
         "fixtures": records,
     });
     let manifest_path = output_dir.join("manifest.json");
     fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
     println!(
-        "exported {} fixture(s) to {}: {} ok, {} failed; manifest {}",
+        "exported {} fixture(s) to {}: {} ok, {} unsupported, {} failed; manifest {}",
         total,
         output_dir.display(),
-        total - failures,
+        total - failures - unsupported,
+        unsupported,
         failures,
         manifest_path.display()
     );

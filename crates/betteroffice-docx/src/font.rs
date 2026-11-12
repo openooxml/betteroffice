@@ -25,20 +25,9 @@ pub(crate) struct FontRegistry {
     resolved: HashSet<(String, Vec<String>)>,
     #[cfg(feature = "fonts")]
     pub(crate) cjk_fallbacks: bool,
-    #[cfg(feature = "fonts")]
-    pub(crate) pdfa_fallbacks: bool,
     views: HashMap<(ooxml_text::FontId, String), ooxml_text::FontId>,
     registrations: usize,
 }
-
-/// Bundled monochrome Noto Emoji (OFL-1.1) for PDF/A painter fallback.
-///
-/// A variable font at its default `wght` instance. The PDF writer subsets it
-/// through `subsetter`'s default-location TrueType path, which keeps the
-/// default outlines and drops `fvar`/`gvar`/`HVAR`, so the embedded program is
-/// a static TrueType face.
-#[cfg(feature = "fonts")]
-const PDFA_EMOJI_FALLBACK: &[u8] = include_bytes!("../assets/NotoEmoji.ttf");
 
 impl FontRegistry {
     /// Ordered face chains keyed `family|bold|italic`, exactly as layout
@@ -85,38 +74,6 @@ impl FontRegistry {
             .map_err(|error| Error::Font(error.to_string()))?;
         self.registrations += 1;
         Ok(())
-    }
-
-    /// Registers the bundled Noto Emoji face as a PDF/A painter fallback.
-    ///
-    /// The face stays out of [`Self::chains`]: the painter resolves unmatched
-    /// scalars against the store in registration order, so calling this after
-    /// document and CJK registration leaves their priority unchanged. The
-    /// helper is idempotent per registry and goes through
-    /// [`Self::register_export_fallback`], so its resource limits apply.
-    #[cfg(feature = "fonts")]
-    pub(crate) fn register_pdfa_fallbacks(&mut self) -> Result<()> {
-        if self.pdfa_fallbacks {
-            return Ok(());
-        }
-        self.register_export_fallback(PDFA_EMOJI_FALLBACK)?;
-        self.pdfa_fallbacks = true;
-        Ok(())
-    }
-
-    /// Drops the export-local PDF/A face and its registration budget.
-    ///
-    /// `font_count` is the count captured before
-    /// [`Self::register_pdfa_fallbacks`]. Removing the face without returning
-    /// its one registration would make repeated PDF/A exports of the same
-    /// document consume the 4096-registration budget.
-    #[cfg(feature = "fonts")]
-    pub(crate) fn release_pdfa_fallbacks(&mut self, font_count: usize) {
-        if self.pdfa_fallbacks {
-            self.store.truncate_fonts(font_count);
-            self.registrations = self.registrations.saturating_sub(1);
-            self.pdfa_fallbacks = false;
-        }
     }
 
     /// Registers `bytes` into the chain under `key`, ahead of bundled faces for
@@ -445,25 +402,6 @@ mod tests {
             chain.len(),
             calibri.chains[&chain_key("Calibri", false, false)].len()
         );
-    }
-
-    #[test]
-    fn pdfa_fallbacks_register_the_bundled_emoji_face_once() {
-        use super::FontRegistry;
-        let mut fonts = FontRegistry::default();
-        let before = fonts.store.face_count();
-        let font_count = fonts.store.font_count();
-        fonts.register_pdfa_fallbacks().unwrap();
-        assert_eq!(fonts.store.face_count(), before + 1);
-        assert!(fonts.pdfa_fallbacks);
-        assert!(fonts.chains.is_empty());
-        fonts.register_pdfa_fallbacks().unwrap();
-        assert_eq!(fonts.store.face_count(), before + 1);
-        let registrations = fonts.registrations;
-        fonts.release_pdfa_fallbacks(font_count);
-        assert!(!fonts.pdfa_fallbacks);
-        assert_eq!(fonts.store.face_count(), before);
-        assert_eq!(fonts.registrations, registrations.saturating_sub(1));
     }
 
     fn run(text: &str, scripts: &[&str]) -> TextRunPrimitive {

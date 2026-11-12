@@ -122,9 +122,8 @@ is refused rather than exported partially. The default output is a plain,
 untagged PDF and makes no PDF/A claim.
 
 `export_pdf_with_options` opts into PDF/A-2u (ISO 19005-2 level U). It adds
-XMP identification, `/Info`, an sRGB output intent, deterministic trailer IDs,
-CIDSet and a monochrome emoji fallback; it refuses Base-14 or uncovered text
-instead of downgrading. Tagged PDF and PDF/UA are not supported.
+XMP identification, `/Info`, an sRGB output intent and deterministic trailer
+IDs; it refuses Base-14 or uncovered text instead of downgrading. Tagged PDF and PDF/UA are not supported.
 
 ```rust
 use betteroffice_docx::Document;

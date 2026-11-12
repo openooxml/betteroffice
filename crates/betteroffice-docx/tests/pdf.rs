@@ -75,29 +75,31 @@ fn pdfa2u_export_embeds_metadata_and_an_output_intent() {
     );
 }
 
-/// A character outside every document and bundled Latin/CJK face must export
-/// under PDF/A-2u through the bundled monochrome emoji fallback instead of
-/// being rejected as an uncovered scalar.
+/// PDF/A-2u must reject a scalar no registered face covers instead of
+/// emitting `.notdef`; Standard keeps painting it through the historical
+/// fallback path.
 #[test]
-fn pdfa2u_export_covers_an_emoji_scalar() {
+fn pdfa2u_rejects_an_uncovered_emoji_scalar() {
     let document =
         Document::open(&minimal_docx(&[run("Calibri", false, false, "Hello 😀")])).expect("open");
 
     document.export_pdf().expect("standard export");
-    let pdf = document
+    let error = document
         .export_pdf_with_options(&PdfExportOptions {
             conformance: PdfConformance::PdfA2u,
             ..PdfExportOptions::default()
         })
-        .expect("export PDF/A-2u with an emoji");
-    assert!(pdf.starts_with(b"%PDF-1.7"));
-    assert!(String::from_utf8_lossy(&pdf).contains("/Metadata"));
+        .expect_err("PDF/A-2u must not emit .notdef");
+    assert!(
+        error.to_string().contains("needs a glyph"),
+        "unexpected PDF/A-2u error: {error}"
+    );
 }
 
-/// A PDF/A fallback face is export-local: a later Standard export of the same
-/// cached document must see the pre-PDF/A font store.
+/// A rejected PDF/A export must not mutate the cached registry used by later
+/// Standard exports.
 #[test]
-fn pdfa_emoji_fallback_does_not_leak_into_standard_exports() {
+fn pdfa_rejection_does_not_leak_into_standard_exports() {
     let document =
         Document::open(&minimal_docx(&[run("Calibri", false, false, "Hello 😀")])).expect("open");
     let before = document.export_pdf().expect("standard export before PDF/A");
@@ -106,7 +108,7 @@ fn pdfa_emoji_fallback_does_not_leak_into_standard_exports() {
             conformance: PdfConformance::PdfA2u,
             ..PdfExportOptions::default()
         })
-        .expect("PDF/A export");
+        .expect_err("PDF/A export must reject emoji");
     let after = document.export_pdf().expect("standard export after PDF/A");
     assert_eq!(
         before, after,

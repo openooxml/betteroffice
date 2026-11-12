@@ -4,10 +4,13 @@
 #   * curated: `pdf_matrix.py --prepare` (24 fixtures)
 #   * full:    every checked-in DOCX under crates/docx-edit/tests/fixtures
 #
-# Both exports pass `--pdfa-2u` to `export_pdf_batch` and both checks pass
-# `--require-pdfa-2u` to `pdf_matrix.py`, so every PDF must validate with the
-# pinned veraPDF release. The export step is skipped with a warning when the
-# batch example does not expose `--pdfa-2u` yet.
+# Both exports pass `--pdfa-2u` to `export_pdf_batch`; documents the writer
+# cannot represent conformantly (for example an uncovered emoji scalar) are
+# recorded as `unsupported` and reported separately instead of failing the
+# matrix. Both checks pass `--require-pdfa-2u` to `pdf_matrix.py`, so every
+# produced PDF must validate with the pinned veraPDF release. The export step
+# is skipped with a warning when the batch example does not expose
+# `--pdfa-2u` yet.
 #
 # Usage:
 #   bash scripts/office-quality/pdfa_matrix.sh
@@ -91,13 +94,14 @@ run_matrix() {
     echo "  veraPDF: $verapdf_reports"
 
     if ! "$cargo" run --quiet -p betteroffice-docx --example export_pdf_batch -- \
-        --pdfa-2u "$input" "$output"; then
+        --pdfa-2u --allow-unsupported "$input" "$output"; then
         echo "pdfa_matrix: $name export failed; checking the manifest it wrote" >&2
         status=1
     fi
     if ! "$python" scripts/office-quality/pdf_matrix.py \
         "$output/manifest.json" \
         --require-pdfa-2u \
+        --allow-unsupported \
         --strict-fonts \
         --verapdf "$verapdf" \
         --verapdf-version "$version" \

@@ -495,7 +495,7 @@ fn export_pdf_inner(
     }
 
     for (font_id, refs) in &font_objects {
-        write_font(&mut pdf, &font_map[font_id], *refs, options.conformance);
+        write_font(&mut pdf, &font_map[font_id], *refs);
     }
 
     let mut image_map: BTreeMap<String, ImageRefs> = BTreeMap::new();
@@ -696,7 +696,7 @@ fn deflate(data: &[u8]) -> Vec<u8> {
     encoder.finish().expect("in-memory deflate")
 }
 
-fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs, conformance: PdfConformance) {
+fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
     let base = Name(font.base_name.as_bytes());
     pdf.type0_font(refs.type0)
         .base_font(base)

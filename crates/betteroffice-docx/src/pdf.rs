@@ -3,8 +3,6 @@
 use crate::{Document, Error, PdfExportOptions, Result};
 
 #[cfg(feature = "fonts")]
-use crate::PdfConformance;
-#[cfg(feature = "fonts")]
 use betteroffice_fonts::LastResortOffice;
 
 impl Document {
@@ -45,34 +43,15 @@ impl Document {
                 page.page_index
             )));
         }
-        // A PDF/A painter may not emit `.notdef`, so characters outside every
-        // document, CJK and bundled face need the monochrome emoji fallback.
-        // Standard keeps its historical face priority and never registers it.
-        // The face is export-local: remove it from the cached registry after
-        // both successful and rejected exports so a later Standard export sees
-        // exactly the same store as before.
-        #[cfg(feature = "fonts")]
-        let pdfa_store_len = if options.conformance == PdfConformance::PdfA2u {
-            let len = fonts.store.font_count();
-            fonts.register_pdfa_fallbacks()?;
-            Some(len)
-        } else {
-            None
-        };
         let images = self.scoped_image_bytes();
-        let result = docx_pdf::export_pdf_with_options(
+        docx_pdf::export_pdf_with_options(
             &display_list,
             Some(&fonts.store),
             &images,
             Some(fonts.chains()),
             options,
         )
-        .map_err(|error| Error::Render(error.to_string()));
-        #[cfg(feature = "fonts")]
-        if let Some(len) = pdfa_store_len {
-            fonts.release_pdfa_fallbacks(len);
-        }
-        result
+        .map_err(|error| Error::Render(error.to_string()))
     }
 
     /// Registers script fallback faces for Han/Kana/Hangul after layout.

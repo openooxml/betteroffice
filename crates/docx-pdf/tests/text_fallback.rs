@@ -606,17 +606,16 @@ fn pdfa_collects_real_glyphs_and_maps_every_painted_code() {
 
 #[test]
 fn pdfa_tounicode_encodes_non_bmp_scalars_as_surrogate_pairs() {
-    let emoji_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../betteroffice-docx/assets/NotoEmoji.ttf");
-    let Ok(emoji_bytes) = std::fs::read(&emoji_path) else {
-        eprintln!("skipping: {} is unavailable", emoji_path.display());
+    let fallback_path = Path::new("/usr/share/fonts/TTF/DejaVuSans.ttf");
+    let Ok(fallback_bytes) = std::fs::read(fallback_path) else {
+        eprintln!("skipping: {} is unavailable", fallback_path.display());
         return;
     };
     let mut store = FontStore::default();
     store
         .register(font_bytes("Roboto-Regular.ttf"))
         .expect("roboto");
-    let emoji = store.register(emoji_bytes).expect("emoji");
+    let fallback = store.register(fallback_bytes).expect("fallback");
 
     let run = text_run("😀");
     let page = page(vec![Primitive::Text(run.clone())]);
@@ -625,15 +624,15 @@ fn pdfa_tounicode_encodes_non_bmp_scalars_as_surrogate_pairs() {
         pages: vec![page.clone()],
     };
     let uses = font::collect_with_text_policy(&display_list, &store, PdfConformance::PdfA2u)
-        .expect("emoji face covers U+1F600");
+        .expect("fallback face covers U+1F600");
     assert!(
-        uses[&emoji.to_u32()]
+        uses[&fallback.to_u32()]
             .values()
             .all(|texts| texts.contains("😀")),
-        "emoji source text missing: {uses:?}"
+        "fallback source text missing: {uses:?}"
     );
     let fonts = embed_policy(&store, &uses, PdfConformance::PdfA2u).expect("embed");
-    let cmap = String::from_utf8_lossy(&fonts[&emoji.to_u32()].tounicode);
+    let cmap = String::from_utf8_lossy(&fonts[&fallback.to_u32()].tounicode);
     assert!(
         cmap.contains("D83DDE00"),
         "non-BMP destination must be a UTF-16BE surrogate pair: {cmap}"
@@ -999,16 +998,15 @@ fn pdfa_paints_fully_covered_glyph_runs() {
 
 #[test]
 fn pdfa_glyph_runs_re_resolve_notdef_clusters_through_fallbacks() {
-    let emoji_path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../betteroffice-docx/assets/NotoEmoji.ttf");
-    let Ok(emoji_bytes) = std::fs::read(&emoji_path) else {
-        eprintln!("skipping: {} is unavailable", emoji_path.display());
+    let fallback_path = Path::new("/usr/share/fonts/TTF/DejaVuSans.ttf");
+    let Ok(fallback_bytes) = std::fs::read(fallback_path) else {
+        eprintln!("skipping: {} is unavailable", fallback_path.display());
         return;
     };
     let mut store = FontStore::default();
     let bytes = font_bytes("Roboto-Regular.ttf");
     let roboto = store.register(bytes.clone()).expect("roboto");
-    let emoji = store.register(emoji_bytes).expect("emoji");
+    let fallback = store.register(fallback_bytes).expect("fallback");
     let face = Face::parse(&bytes, 0).expect("face");
 
     let mut run = glyph_run(roboto.to_u32(), "Hi", &bytes);
@@ -1047,10 +1045,10 @@ fn pdfa_glyph_runs_re_resolve_notdef_clusters_through_fallbacks() {
         "PDF/A-2u collected .notdef: {uses:?}"
     );
     assert!(
-        uses[&emoji.to_u32()]
+        uses[&fallback.to_u32()]
             .values()
             .any(|texts| texts.contains("😀")),
-        "emoji fallback glyph missing: {uses:?}"
+        "fallback glyph missing: {uses:?}"
     );
 
     let fonts = embed_policy(&store, &uses, PdfConformance::PdfA2u).expect("embed");

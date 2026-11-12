@@ -36,13 +36,12 @@ Supported today:
   `pdfaid` identification, matching document information, deterministic trailer
   IDs, nonzero glyph codes and Unicode mappings for every painted
   scalar. Standard exports remain plain PDF 1.7 and make no PDF/A claim.
-- PDF/A-2u registers a bundled monochrome Noto Emoji fallback so emoji scalars
-  are painted from a real outline instead of `.notdef`
 
 Not yet covered: tagged PDF/PDF-UA, PDF/A-1, PDF/A-3, gradients, JPEG XL
 images, named destinations for internal anchors (internal `#anchor` links are
 skipped, not emitted as unresolved `/GoTo` actions), and color emoji
-rendering.
+rendering. PDF/A-2u rejects scalars that no registered outline face covers,
+including emoji; Standard remains available for those documents.
 
 ```rust
 use betteroffice_docx_pdf::export_pdf_with_fonts;
