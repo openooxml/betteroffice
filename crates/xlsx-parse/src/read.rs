@@ -644,8 +644,7 @@ fn push_item_text(text: &mut Option<(usize, String)>, out: &mut String, value: &
 pub struct SourceCellFacts {
     /// Formula cells written without a cached `<v>` result.
     pub uncached_formulas: BTreeSet<(u32, u32)>,
-    /// Cells with a formula or a `t` type and no cached result: neither a `<v>` with text
-    /// nor, for `t="inlineStr"`, an `<is>` with text.
+    /// Cells with a formula or `t` type but no `<v>` text and no `t="inlineStr"` `<is>` text.
     pub blank_results: BTreeSet<(u32, u32)>,
     /// Whether an array formula's range was too large or malformed to keep.
     pub dropped_array_ranges: bool,
