@@ -123,14 +123,14 @@ export const EFFECT_FIXTURES: EffectFixture[] = [
     skipped: { wasm: [], native: ['text.modernEffects'] },
   },
   {
-    name: 'a run with a classic shadow, which the parser also reads as a modern shadow',
+    name: 'a run with a classic shadow, which both engines draw',
     parts: effectDocx({ body: styledRun('<w:shadow/>') }),
-    skipped: { wasm: ['text.shadow'], native: ['text.modernEffects'] },
+    skipped: { wasm: [], native: [] },
   },
   {
-    name: 'a shadowed glowing run, whose glow costs both shadows on the canvas',
+    name: 'a shadowed glowing run, whose glow costs the classic shadow on the canvas',
     parts: effectDocx({ body: styledRun(`<w:shadow/>${GLOW}`) }),
-    skipped: { wasm: ['text.modernEffects', 'text.shadow'], native: ['text.modernEffects'] },
+    skipped: { wasm: ['text.shadow'], native: ['text.modernEffects'] },
   },
   {
     name: 'a dotted tab leader, which layout draws as a dotted decoration',
