@@ -33,6 +33,14 @@ Examples:
 
 Only pypdfium2 is required. Missing `qpdf`, `pdffonts`, or `pdftotext` are
 recorded as unavailable rather than treated as failures.
+
+With `--require-pdfa-2u`, every PDF must also validate as PDF/A-2u. veraPDF is
+then mandatory and pinned (`VERAPDF` names its executable, `VERAPDF_VERSION`
+defaults to 1.30.4). The manifest must declare the archival export in its
+header as `"conformance": "pdfa-2u"`; `export_pdf_batch --pdfa-2u` writes that
+field. The gate parses veraPDF's JSON report (compliant flag and failed rules)
+rather than trusting only its exit status. `--verapdf-report-dir` keeps the raw
+reports for inspection.
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -151,9 +160,29 @@ LARGE_REPEATS = 30
 W_NS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 TOLERANCE_PT = 0.01
 
+# Pinned archival validator. `pdfa_matrix.sh` and CI install exactly this
+# release; `--verapdf-version` rejects a different local installation.
+VERAPDF_DEFAULT_VERSION = '1.30.4'
+VERAPDF_FLAVOUR = '2u'
+VERAPDF_TIMEOUT = 300
+# A huge failing document can produce hundreds of rule summaries. The fixture
+# record keeps the first slice and counts the rest.
+VERAPDF_MAX_FAILED_CHECKS = 20
+
 
 class MissingDependency(RuntimeError):
     pass
+
+
+@dataclass
+class PdfaGate:
+    """PDF/A-2u validation settings shared by every fixture."""
+
+    executable: str | None
+    required: bool
+    version: str | None
+    expected_version: str
+    report_dir: Path | None
 
 
 @dataclass
@@ -328,17 +357,267 @@ def tool_path(name: str) -> str | None:
     return shutil.which(name)
 
 
-def run_tool(command: list[str]) -> subprocess.CompletedProcess[str] | None:
+def run_tool(
+    command: list[str], timeout: int = 120
+) -> subprocess.CompletedProcess[str] | None:
     try:
         return subprocess.run(
             command,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def find_verapdf(explicit: str | Path | None = None) -> str | None:
+    """Resolve the veraPDF executable from an option, `VERAPDF`, or `PATH`."""
+    candidate = str(explicit) if explicit else os.environ.get('VERAPDF')
+    if candidate:
+        return candidate if Path(candidate).is_file() else None
+    return shutil.which('verapdf')
+
+
+def verapdf_version(executable: str) -> str | None:
+    """Read the semantic version from `verapdf --version`."""
+    result = run_tool([executable, '--version'], timeout=120)
+    if result is None or result.returncode != 0:
+        return None
+    match = re.search(r'veraPDF\s+v?(\d+\.\d+\.\d+)', result.stdout + result.stderr)
+    return match.group(1) if match else None
+
+
+def _verapdf_result(
+    compliant: bool | None,
+    statement: str = '',
+    failed_checks: list[dict[str, Any]] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    failed = failed_checks or []
+    return {
+        'compliant': compliant,
+        'statement': statement,
+        'failed_checks': failed[:VERAPDF_MAX_FAILED_CHECKS],
+        'failed_check_count': len(failed),
+        'error': error,
+    }
+
+
+def _verapdf_failure(summary: dict[str, Any]) -> dict[str, Any]:
+    checks = [
+        check for check in summary.get('checks') or [] if isinstance(check, dict)
+    ]
+    messages = [
+        check.get('errorMessage') or check.get('context')
+        for check in checks
+        if check.get('errorMessage') or check.get('context')
+    ]
+    return {
+        'specification': summary.get('specification'),
+        'clause': summary.get('clause'),
+        'test_number': summary.get('testNumber'),
+        'description': summary.get('description') or summary.get('test'),
+        'error': '; '.join(messages),
+        'failed_checks': summary.get('failedChecks'),
+    }
+
+
+def parse_verapdf_json(payload: str) -> dict[str, Any]:
+    """Parse the `--format json` report into a compliance verdict.
+
+    A report without a `validationResult` (or with a non-normal job end) is an
+    invalid report, not an implicit pass.
+    """
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as error:
+        return _verapdf_result(None, error=f'invalid JSON report: {error}')
+    if not isinstance(data, dict):
+        return _verapdf_result(None, error='JSON report is not an object')
+    report = data.get('report')
+    jobs = report.get('jobs') if isinstance(report, dict) else None
+    if isinstance(jobs, dict):
+        jobs = [jobs]
+    if not isinstance(jobs, list) or not jobs:
+        return _verapdf_result(None, error='JSON report has no jobs')
+    job = jobs[0]
+    if not isinstance(job, dict):
+        return _verapdf_result(None, error='JSON report job is not an object')
+    validation = job.get('validationResult')
+    if isinstance(validation, list):
+        if not validation:
+            return _verapdf_result(None, error='JSON report has no validationResult')
+        validation = validation[0]
+    if not isinstance(validation, dict):
+        return _verapdf_result(
+            None,
+            error=(
+                'JSON report has no validationResult '
+                f"(jobEndStatus={job.get('jobEndStatus')!r})"
+            ),
+        )
+    compliant = validation.get('compliant', validation.get('isCompliant'))
+    if not isinstance(compliant, bool):
+        return _verapdf_result(
+            None,
+            error=(
+                'JSON report validationResult has no boolean compliant flag '
+                f"(jobEndStatus={validation.get('jobEndStatus')!r})"
+            ),
+        )
+    details = validation.get('details')
+    summaries = details.get('ruleSummaries') if isinstance(details, dict) else None
+    failed_checks = []
+    for summary in summaries or []:
+        if not isinstance(summary, dict):
+            continue
+        if summary.get('ruleStatus') == 'FAILED' or summary.get('status') == 'failed':
+            failed_checks.append(_verapdf_failure(summary))
+    return _verapdf_result(
+        compliant,
+        str(validation.get('statement') or ''),
+        failed_checks,
+    )
+
+
+def parse_verapdf_raw(payload: str) -> dict[str, Any]:
+    """Parse the XML `--format raw` report (`isCompliant` + assertions)."""
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as error:
+        return _verapdf_result(None, error=f'invalid raw report: {error}')
+    validation = None
+    for element in root.iter():
+        if element.tag.rsplit('}', 1)[-1] == 'validationResult':
+            validation = element
+            break
+    if validation is None:
+        return _verapdf_result(None, error='raw report has no validationResult')
+    compliant_attr = validation.get('isCompliant')
+    if compliant_attr not in {'true', 'false'}:
+        return _verapdf_result(
+            None,
+            error=(
+                'raw report validationResult has no isCompliant flag '
+                f"(jobEndStatus={validation.get('jobEndStatus')!r})"
+            ),
+        )
+    failed_checks = []
+    for assertion in validation.iter():
+        if assertion.tag.rsplit('}', 1)[-1] != 'assertion':
+            continue
+        if assertion.get('status') != 'FAILED':
+            continue
+        rule = None
+        for child in assertion:
+            if child.tag.rsplit('}', 1)[-1] == 'ruleId':
+                rule = child
+                break
+        message = ''
+        error_message = ''
+        for child in assertion:
+            name = child.tag.rsplit('}', 1)[-1]
+            if name == 'message':
+                message = (child.text or '').strip()
+            elif name == 'errorMessage':
+                error_message = (child.text or '').strip()
+        failed_checks.append(
+            {
+                'specification': rule.get('specification') if rule is not None else None,
+                'clause': rule.get('clause') if rule is not None else None,
+                'test_number': rule.get('testNumber') if rule is not None else None,
+                'description': message,
+                'error': error_message,
+                'failed_checks': 1,
+            }
+        )
+    return _verapdf_result(
+        compliant_attr == 'true',
+        str(validation.get('flavour') or ''),
+        failed_checks,
+    )
+
+
+def parse_verapdf_report(payload: str) -> dict[str, Any]:
+    """Parse either report format; auto-detect JSON vs XML."""
+    stripped = payload.lstrip('\ufeff \t\r\n')
+    if stripped.startswith(('{', '[')):
+        return parse_verapdf_json(payload)
+    return parse_verapdf_raw(payload)
+
+
+def run_verapdf(pdf_path: Path, executable: str) -> dict[str, Any]:
+    """Validate one PDF with veraPDF and return the parsed verdict.
+
+    The process exit status is recorded but never decides the verdict: a
+    compliant report with a non-zero exit is accepted and a non-compliant
+    report with a zero exit is still a failure.
+    """
+    command = [
+        executable,
+        '--format',
+        'json',
+        '--flavour',
+        VERAPDF_FLAVOUR,
+        str(pdf_path),
+    ]
+    result = run_tool(command, timeout=VERAPDF_TIMEOUT)
+    if result is None:
+        return _verapdf_result(None, error=f'veraPDF could not run ({executable})')
+    parsed = parse_verapdf_report(result.stdout)
+    parsed['raw'] = result.stdout
+    parsed['exit_code'] = result.returncode
+    parsed['stderr'] = result.stderr.strip()[-2000:]
+    if parsed['error'] is None and result.returncode not in (0, 1):
+        parsed['error'] = (
+            f'veraPDF exited {result.returncode} without a usable report'
+            + (f": {parsed['stderr']}" if parsed['stderr'] else '')
+        )
+    return parsed
+
+
+def _declares_pdfa_2u(value: Any) -> bool:
+    if value is True:
+        return True
+    if not isinstance(value, str):
+        return False
+    normalized = re.sub(r'[^a-z0-9]', '', value.lower())
+    return normalized in {'pdfa2u', 'pdfa2', '2u'}
+
+
+def manifest_declares_pdfa_2u(
+    header: dict[str, Any], entry: dict[str, Any]
+) -> bool:
+    """Whether a manifest says its PDFs were exported for PDF/A-2u.
+
+    `export_pdf_batch --pdfa-2u` writes `"conformance": "pdfa-2u"` in the
+    manifest header. A per-entry `conformance`/`pdfa_2u` claim is accepted as
+    well so hand-written manifests can exercise the gate.
+    """
+    return (
+        _declares_pdfa_2u(header.get('conformance'))
+        or _declares_pdfa_2u(entry.get('conformance'))
+        or entry.get('pdfa_2u') is True
+        or header.get('pdfa_2u') is True
+    )
+
+
+def describe_verapdf_failure(result: dict[str, Any]) -> str:
+    """One-line reason for a non-compliant or invalid veraPDF report."""
+    if result.get('error'):
+        return str(result['error'])
+    failed = result.get('failed_checks') or []
+    if not failed:
+        return 'veraPDF reported non-compliance without a failed rule'
+    first = failed[0]
+    detail = first.get('error') or first.get('description') or 'rule failed'
+    clause = first.get('clause')
+    prefix = f"clause {clause}: " if clause else ''
+    remaining = int(result.get('failed_check_count') or 0) - len(failed)
+    suffix = f' (+{remaining} more)' if remaining > 0 else ''
+    return f'{prefix}{detail}{suffix}'
 
 
 def parse_pdffonts(output: str) -> list[dict[str, str]]:
@@ -543,6 +822,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--large-bytes', type=int, default=512 * 1024, help='size threshold for the large group')
     parser.add_argument('--strict-fonts', action='store_true',
                         help='fail unless every pdffonts row is embedded, subset and Unicode-mapped')
+    parser.add_argument('--require-pdfa-2u', action='store_true',
+                        help='require PDF/A-2u: run veraPDF on every PDF and fail on any non-compliance')
+    parser.add_argument('--verapdf', type=Path,
+                        help='veraPDF executable (default: $VERAPDF, then PATH)')
+    parser.add_argument('--verapdf-version',
+                        default=os.environ.get('VERAPDF_VERSION', VERAPDF_DEFAULT_VERSION),
+                        help='required veraPDF release (default: $VERAPDF_VERSION or 1.30.4)')
+    parser.add_argument('--verapdf-report-dir', type=Path,
+                        help='keep the raw veraPDF JSON report for every PDF here')
+    parser.add_argument('--no-verapdf-version-check', action='store_true',
+                        help='accept any veraPDF release instead of the pinned one')
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--prepare', type=Path, metavar='DIR', help='stage the curated fixture set and exit')
     args = parser.parse_args(argv)
@@ -580,7 +870,48 @@ def main(argv: list[str] | None = None) -> int:
         'qpdf': tool_path('qpdf'),
         'pdffonts': tool_path('pdffonts'),
         'pdftotext': tool_path('pdftotext'),
+        'verapdf': find_verapdf(args.verapdf),
     }
+
+    detected_verapdf_version = None
+    if args.require_pdfa_2u:
+        if not tools['verapdf']:
+            print(
+                'pdf_matrix: --require-pdfa-2u needs veraPDF.\n'
+                'Install the pinned release:\n'
+                '  bash scripts/office-quality/install-verapdf.sh .source/pdf-matrix/verapdf\n'
+                'then set VERAPDF=.source/pdf-matrix/verapdf/bin/verapdf '
+                f'(required version: {args.verapdf_version})',
+                file=sys.stderr,
+            )
+            return 2
+        detected_verapdf_version = verapdf_version(tools['verapdf'])
+        if detected_verapdf_version is None:
+            print(
+                f"pdf_matrix: cannot read the version of {tools['verapdf']}",
+                file=sys.stderr,
+            )
+            return 2
+        if (
+            not args.no_verapdf_version_check
+            and detected_verapdf_version != args.verapdf_version
+        ):
+            print(
+                'pdf_matrix: veraPDF version mismatch: '
+                f"found {detected_verapdf_version}, require {args.verapdf_version}.\n"
+                'Install the pinned release with scripts/office-quality/install-verapdf.sh '
+                'or pass --no-verapdf-version-check.',
+                file=sys.stderr,
+            )
+            return 2
+
+    pdfa_gate = PdfaGate(
+        executable=tools['verapdf'],
+        required=args.require_pdfa_2u,
+        version=detected_verapdf_version,
+        expected_version=args.verapdf_version,
+        report_dir=args.verapdf_report_dir,
+    )
 
     report_path = args.json or args.out or (manifests[0].parent / 'pdf_matrix.json')
     report: dict[str, Any] = {
@@ -588,6 +919,13 @@ def main(argv: list[str] | None = None) -> int:
         'manifests': [str(path) for path in manifests],
         'pdf_dir': str(args.pdf_dir.resolve()) if args.pdf_dir else None,
         'tools': tools,
+        'pdfa': {
+            'required': pdfa_gate.required,
+            'verapdf': pdfa_gate.executable,
+            'version': pdfa_gate.version,
+            'expected_version': pdfa_gate.expected_version,
+            'report_dir': str(pdfa_gate.report_dir.resolve()) if pdfa_gate.report_dir else None,
+        },
         'summary': {},
         'groups': {group: {'fixtures': 0, 'failed': 0, 'pages': 0, 'pdf_bytes': 0,
                            'text_chars': 0, 'extractable_chars': 0} for group in GROUPS},
@@ -637,6 +975,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.large_bytes,
                 expectations.get(str(relative).replace('\\', '/')),
                 args.strict_fonts,
+                pdfa_gate,
+                manifest_declares_pdfa_2u(header, entry),
                 report['warnings'],
             )
             group = fixture['group']
@@ -666,6 +1006,13 @@ def main(argv: list[str] | None = None) -> int:
         print('pdf_matrix: the manifests contain no fixtures', file=sys.stderr)
         return 2
     pages = sum(fixture['pages'] or 0 for fixture in fixtures)
+    verapdf_checked = [
+        fixture for fixture in fixtures if fixture.get('verapdf') is not None
+    ]
+    verapdf_compliant = [
+        fixture for fixture in verapdf_checked
+        if fixture['verapdf'].get('compliant') is True
+    ]
     report['summary'] = {
         'fixtures': len(fixtures),
         'passed': sum(1 for fixture in fixtures if not fixture['checks']),
@@ -674,6 +1021,8 @@ def main(argv: list[str] | None = None) -> int:
         'pdf_bytes': sum(fixture['pdf_bytes'] or 0 for fixture in fixtures),
         'text_chars': sum(fixture['text_chars'] or 0 for fixture in fixtures),
         'extractable_chars': sum(fixture['extractable_chars'] or 0 for fixture in fixtures),
+        'pdfa_checked': len(verapdf_checked),
+        'pdfa_compliant': len(verapdf_compliant),
     }
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -684,6 +1033,12 @@ def main(argv: list[str] | None = None) -> int:
         f"{report['summary']['passed']} passed, {report['summary']['failed']} failed, "
         f"{report['summary']['pages']} page(s)"
     )
+    if pdfa_gate.required:
+        print(
+            f"PDF/A-2u: {report['summary']['pdfa_compliant']}/"
+            f"{report['summary']['pdfa_checked']} fixture(s) compliant "
+            f"(veraPDF {pdfa_gate.version})"
+        )
     print('Groups:')
     for group in GROUPS:
         bucket = report['groups'][group]
@@ -718,6 +1073,8 @@ def check_fixture(
     large_bytes: int,
     expectation: dict[str, Any] | None,
     strict_fonts: bool,
+    pdfa_gate: PdfaGate,
+    declared_pdfa: bool,
     warnings: list[str],
 ) -> dict[str, Any]:
     checks: list[tuple[str, str]] = []
@@ -747,6 +1104,7 @@ def check_fixture(
         'fonts': [],
         'unembedded_fonts': [],
         'emoji_glyph_coverage': None,
+        'verapdf': None,
         'checks': checks,
     }
 
@@ -765,6 +1123,31 @@ def check_fixture(
         checks.append(
             ('pdf_bytes', f"manifest says {entry['pdf_bytes']} bytes, file has {len(raw)}")
         )
+
+    if pdfa_gate.required:
+        if not declared_pdfa:
+            checks.append(
+                (
+                    'pdfa',
+                    'manifest does not declare "conformance": "pdfa-2u"; '
+                    'export with export_pdf_batch --pdfa-2u',
+                )
+            )
+        result = run_verapdf(pdf_path, pdfa_gate.executable)
+        raw_report = result.pop('raw', None)
+        if pdfa_gate.report_dir is not None:
+            target = pdfa_gate.report_dir / Path(str(relative) + '.verapdf.json')
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(raw_report or '')
+                result['report'] = str(target)
+            except OSError as error:
+                warnings.append(f'{relative}: cannot write veraPDF report: {error}')
+        fixture['verapdf'] = result
+        if result['error']:
+            checks.append(('verapdf', str(result['error'])))
+        elif result['compliant'] is not True:
+            checks.append(('pdfa', describe_verapdf_failure(result)))
 
     try:
         document = pdfium.PdfDocument(str(pdf_path))

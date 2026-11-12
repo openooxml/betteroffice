@@ -307,3 +307,68 @@ cargo +1.99.1 test -p betteroffice-docx --test pdf_matrix -- --ignored --nocaptu
 
 The report is compact JSON (`groups`, per-fixture results, failures and
 warnings) and the terminal summary lists passed/failed counts per group.
+
+## PDF/A-2u acceptance
+
+`Document::export_pdf_with_options` (and `docx-pdf`'s
+`export_pdf_with_options`) select the archival profile with
+`PdfExportOptions { conformance: PdfConformance::PdfA2u, .. }`. The batch
+example exposes the same switch:
+
+```sh
+cargo run -p betteroffice-docx --example export_pdf_batch -- \
+  --pdfa-2u <input_dir> <output_dir>
+```
+
+A PDF/A-2u manifest must declare the profile in its header:
+
+```json
+{ "conformance": "pdfa-2u", "fixtures": [ ... ] }
+```
+
+`--require-pdfa-2u` makes that declaration mandatory, runs the pinned veraPDF
+on every PDF, and fails the fixture when the parsed report is non-compliant or
+unreadable. The verdict comes from the report's `compliant`/`isCompliant` flag
+and failed rules, not from the process exit status. Structural checks
+(`pdffonts`, `qpdf --check`, extraction) still run and `--strict-fonts` is
+recommended for archival sweeps.
+
+Install the pinned release and stage the matrices:
+
+```sh
+bash scripts/office-quality/install-verapdf.sh .source/pdf-matrix/verapdf
+source .source/office-quality/venv/bin/activate   # pypdfium2
+bash scripts/office-quality/pdfa_matrix.sh
+```
+
+`pdfa_matrix.sh` prepares the curated 24-fixture set and sweeps all 103
+checked-in DOCX fixtures under `crates/docx-edit/tests/fixtures`, exporting and
+validating each set separately.
+
+Environment variables:
+
+- `VERAPDF`: veraPDF executable path. `pdf_matrix.py` also reads it when
+  `--verapdf` is omitted; otherwise it searches `PATH`.
+- `VERAPDF_VERSION`: required release, default `1.30.4`. A mismatch exits 2
+  unless `--no-verapdf-version-check` is passed.
+- `PDFA_MATRIX_DIR`: work directory, default `.source/pdf-matrix`.
+- `PYTHON` / `CARGO`: interpreters/commands used by `pdfa_matrix.sh`.
+
+Reports (also uploaded by the `pdfa` CI job):
+
+- `.source/pdf-matrix/report-curated.json` and `report-full.json`:
+  `pdf_matrix.py` reports, including `pdfa` counts and each fixture's
+  `verapdf` verdict.
+- `.source/pdf-matrix/verapdf/{curated,full}/<fixture>.verapdf.json`: the raw
+  veraPDF report for every PDF.
+- `.source/pdf-matrix/skipped.txt`: written only when the batch example does
+  not expose `--pdfa-2u`; both matrices are then skipped with an explicit
+  warning rather than silently validating standard PDFs.
+
+The low-level acceptance test is `crates/docx-pdf/tests/pdfa.rs`. Its
+structural assertions always run; set `VERAPDF` to exercise veraPDF:
+
+```sh
+VERAPDF=.source/pdf-matrix/verapdf/bin/verapdf \
+  cargo test -p betteroffice-docx-pdf --test pdfa
+```

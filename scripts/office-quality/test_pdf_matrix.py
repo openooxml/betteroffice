@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import types
@@ -12,15 +13,21 @@ from unittest import mock
 from pdf_matrix import (
     GENERATED_TEXT_FIXTURES,
     DocxInfo,
+    describe_verapdf_failure,
+    find_verapdf,
     group_for,
     load_manifest,
     main,
     make_large_docx,
+    manifest_declares_pdfa_2u,
     is_emoji_char,
     make_text_docx,
     normalize_text,
     parse_page_size,
     parse_pdffonts,
+    parse_verapdf_json,
+    parse_verapdf_raw,
+    parse_verapdf_report,
     read_docx_info,
     scripts_in,
 )
@@ -62,9 +69,14 @@ def write_pdf(path: Path) -> int:
     return len(data)
 
 
-def write_manifest(path: Path, entries: list[dict[str, object]]) -> None:
+def write_manifest(
+    path: Path,
+    entries: list[dict[str, object]],
+    header: dict[str, object] | None = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({'fixtures': entries}))
+    payload: dict[str, object] = {**(header or {}), 'fixtures': entries}
+    path.write_text(json.dumps(payload))
 
 
 def ok_entry(relative: str, pdf_bytes: int) -> dict[str, object]:
@@ -419,6 +431,330 @@ class MainTests(unittest.TestCase):
             self.assertTrue(
                 any('duplicate fixture path' in warning for warning in report['warnings'])
             )
+
+
+def verapdf_rule(clause: str, message: str) -> dict[str, object]:
+    return {
+        'ruleStatus': 'FAILED',
+        'specification': 'ISO 19005-2:2011',
+        'clause': clause,
+        'testNumber': 1,
+        'status': 'failed',
+        'failedChecks': 1,
+        'description': 'archival rule',
+        'checks': [
+            {
+                'status': 'failed',
+                'context': 'root',
+                'errorMessage': message,
+                'errorArguments': [],
+            }
+        ],
+    }
+
+
+def verapdf_json(compliant: bool, rules: list[dict[str, object]] | None = None) -> str:
+    return json.dumps(
+        {
+            'report': {
+                'buildInformation': {},
+                'jobs': [
+                    {
+                        'itemDetails': {'name': 'report.pdf', 'size': 1},
+                        'validationResult': [
+                            {
+                                'compliant': compliant,
+                                'jobEndStatus': 'normal',
+                                'statement': (
+                                    'PDF file is compliant with Validation Profile requirements.'
+                                    if compliant
+                                    else 'PDF file is not compliant with Validation Profile requirements.'
+                                ),
+                                'details': {
+                                    'passedRules': 1,
+                                    'failedRules': len(rules or []),
+                                    'passedChecks': 1,
+                                    'failedChecks': len(rules or []),
+                                    'ruleSummaries': rules or [],
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+
+def verapdf_raw(compliant: bool, failures: list[tuple[str, str, str]] | None = None) -> str:
+    assertions = ''.join(
+        '<assertion ordinal="1" status="FAILED">'
+        f'<ruleId specification="ISO_19005_2" clause="{clause}" testNumber="1"/>'
+        f'<message>{description}</message><errorMessage>{message}</errorMessage>'
+        '</assertion>'
+        for clause, description, message in failures or []
+    )
+    value = 'true' if compliant else 'false'
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<rawResults><validationResult flavour="PDFA_2_U" '
+        f'isCompliant="{value}" jobEndStatus="NORMAL"><assertions>'
+        f'{assertions}</assertions></validationResult></rawResults>'
+    )
+
+
+def write_fake_verapdf(
+    root: Path,
+    *,
+    payload: str,
+    exit_code: int,
+    version: str = '1.30.4',
+) -> Path:
+    path = root / 'verapdf'
+    path.write_text(
+        f'#!{sys.executable}\n'
+        'import sys\n'
+        "if '--version' in sys.argv:\n"
+        f"    print('veraPDF {version}')\n"
+        '    sys.exit(0)\n'
+        f'sys.stdout.write({payload!r})\n'
+        f'sys.exit({exit_code})\n'
+    )
+    path.chmod(0o755)
+    return path
+
+
+class VerapdfParsingTests(unittest.TestCase):
+    def test_json_report_exposes_compliance_and_failed_checks(self):
+        report = parse_verapdf_json(
+            verapdf_json(
+                False,
+                [
+                    verapdf_rule('6.1.3', 'Missing or empty ID in the document trailer'),
+                    verapdf_rule('6.6.2.1', 'The catalog has no metadata stream'),
+                ],
+            )
+        )
+        self.assertIs(report['compliant'], False)
+        self.assertEqual(report['failed_check_count'], 2)
+        self.assertEqual(len(report['failed_checks']), 2)
+        self.assertEqual(report['failed_checks'][0]['clause'], '6.1.3')
+        self.assertIn('Missing or empty ID', report['failed_checks'][0]['error'])
+        message = describe_verapdf_failure(report)
+        self.assertIn('clause 6.1.3', message)
+        self.assertIn('Missing or empty ID', message)
+
+    def test_compliant_json_report_has_no_failed_checks(self):
+        report = parse_verapdf_json(verapdf_json(True))
+        self.assertIs(report['compliant'], True)
+        self.assertEqual(report['failed_checks'], [])
+        self.assertIsNone(report['error'])
+
+    def test_invalid_or_incomplete_json_reports_are_errors(self):
+        for payload in (
+            'not json',
+            '[]',
+            '{"report":{}}',
+            '{"report":{"jobs":[{"jobEndStatus":"ERROR"}]}}',
+            json.dumps(
+                {
+                    'report': {
+                        'jobs': [
+                            {
+                                'validationResult': [
+                                    {'jobEndStatus': 'ERROR', 'statement': 'failed to parse PDF'}
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ),
+        ):
+            with self.subTest(payload=payload):
+                report = parse_verapdf_json(payload)
+                self.assertIsNone(report['compliant'])
+                self.assertIsNotNone(report['error'])
+                self.assertIn('report', report['error'])
+
+    def test_raw_report_parses_is_compliant_and_failed_assertions(self):
+        failing = parse_verapdf_raw(
+            verapdf_raw(False, [('6.1.3', 'trailer rule', 'Missing or empty ID')])
+        )
+        self.assertIs(failing['compliant'], False)
+        self.assertEqual(failing['failed_check_count'], 1)
+        self.assertEqual(failing['failed_checks'][0]['clause'], '6.1.3')
+        self.assertIn('Missing or empty ID', failing['failed_checks'][0]['error'])
+
+        passing = parse_verapdf_raw(verapdf_raw(True))
+        self.assertIs(passing['compliant'], True)
+        self.assertIsNone(passing['error'])
+
+    def test_malformed_raw_report_is_an_error(self):
+        report = parse_verapdf_raw('<rawResults><validationResult isCompliant="')
+        self.assertIsNone(report['compliant'])
+        self.assertIn('invalid raw report', report['error'])
+        missing = parse_verapdf_raw('<rawResults/>')
+        self.assertIsNone(missing['compliant'])
+        self.assertIn('no validationResult', missing['error'])
+
+    def test_report_format_is_auto_detected(self):
+        self.assertIs(parse_verapdf_report(verapdf_json(True))['compliant'], True)
+        self.assertIs(parse_verapdf_report(verapdf_raw(True))['compliant'], True)
+
+    def test_failure_description_covers_invalid_reports(self):
+        message = describe_verapdf_failure(
+            {'error': 'veraPDF could not run', 'failed_checks': []}
+        )
+        self.assertEqual(message, 'veraPDF could not run')
+
+    def test_manifest_pdfa_declaration_contract(self):
+        self.assertTrue(manifest_declares_pdfa_2u({'conformance': 'pdfa-2u'}, {}))
+        self.assertTrue(manifest_declares_pdfa_2u({}, {'conformance': 'PDF/A-2u'}))
+        self.assertTrue(manifest_declares_pdfa_2u({}, {'pdfa_2u': True}))
+        self.assertFalse(manifest_declares_pdfa_2u({'conformance': 'standard'}, {}))
+        self.assertFalse(manifest_declares_pdfa_2u({}, {}))
+
+    def test_find_verapdf_accepts_option_env_and_rejects_missing_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = write_fake_verapdf(root, payload='', exit_code=0)
+            self.assertEqual(find_verapdf(executable), str(executable))
+            with mock.patch.dict(os.environ, {'VERAPDF': str(executable)}):
+                self.assertEqual(find_verapdf(), str(executable))
+            self.assertIsNone(find_verapdf(root / 'missing'))
+            with mock.patch.dict(os.environ, {'VERAPDF': str(root / 'missing')}):
+                self.assertIsNone(find_verapdf())
+
+
+class PdfaGateTests(unittest.TestCase):
+    def run_case(
+        self,
+        *,
+        payload: str,
+        exit_code: int,
+        declared: bool = True,
+        version: str = '1.30.4',
+        require: bool = True,
+        extra_args: list[str] | None = None,
+    ) -> tuple[int, dict[str, object], str, str, list[str]]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            size = write_pdf(root / 'pdfs' / 'report.pdf')
+            header = {'conformance': 'pdfa-2u'} if declared else None
+            write_manifest(
+                root / 'pdfs' / 'manifest.json',
+                [ok_entry('report.docx', size)],
+                header,
+            )
+            executable = write_fake_verapdf(
+                root, payload=payload, exit_code=exit_code, version=version
+            )
+            report_path = root / 'report.json'
+            report_dir = root / 'verapdf-reports'
+            arguments = [
+                str(root / 'pdfs' / 'manifest.json'),
+                '--verapdf', str(executable),
+                '--verapdf-version', '1.30.4',
+                '--verapdf-report-dir', str(report_dir),
+                '--json', str(report_path),
+                *(extra_args or []),
+            ]
+            if require:
+                arguments.append('--require-pdfa-2u')
+            with mock.patch.dict(sys.modules, {'pypdfium2': fake_pdfium('hello')}):
+                code, stdout, stderr = run_main(arguments)
+            report = (
+                json.loads(report_path.read_text())
+                if report_path.is_file()
+                else {}
+            )
+            reports = sorted(
+                str(path.relative_to(root))
+                for path in report_dir.rglob('*')
+                if path.is_file()
+            )
+            return code, report, stdout, stderr, reports
+
+    def test_non_compliant_report_fails_even_when_the_exit_status_is_zero(self):
+        code, report, _stdout, _stderr, reports = self.run_case(
+            payload=verapdf_json(
+                False, [verapdf_rule('6.1.3', 'Missing or empty ID')]
+            ),
+            exit_code=0,
+        )
+        self.assertEqual(code, 1, report['failures'])
+        checks = report['failures'][0]['checks']
+        pdfa_checks = [message for check, message in checks if check == 'pdfa']
+        self.assertEqual(len(pdfa_checks), 1, checks)
+        self.assertIn('clause 6.1.3', pdfa_checks[0])
+        self.assertEqual(report['fixtures'][0]['verapdf']['compliant'], False)
+        self.assertEqual(report['summary']['pdfa_checked'], 1)
+        self.assertEqual(report['summary']['pdfa_compliant'], 0)
+        self.assertEqual(reports, ['verapdf-reports/report.docx.verapdf.json'])
+
+    def test_compliant_report_passes_even_when_the_exit_status_is_nonzero(self):
+        code, report, _stdout, _stderr, _reports = self.run_case(
+            payload=verapdf_json(True), exit_code=1
+        )
+        self.assertEqual(code, 0, report['failures'])
+        self.assertEqual(report['fixtures'][0]['verapdf']['compliant'], True)
+        self.assertEqual(report['summary']['pdfa_compliant'], 1)
+
+    def test_invalid_report_is_a_verapdf_failure(self):
+        code, report, _stdout, _stderr, _reports = self.run_case(
+            payload='{"report":{"jobs":[{"jobEndStatus":"ERROR"}]}}',
+            exit_code=0,
+        )
+        self.assertEqual(code, 1)
+        checks = report['failures'][0]['checks']
+        self.assertIn('verapdf', [check for check, _ in checks])
+        message = next(message for check, message in checks if check == 'verapdf')
+        self.assertIn('validationResult', message)
+
+    def test_manifest_must_declare_pdfa_2u(self):
+        code, report, _stdout, _stderr, _reports = self.run_case(
+            payload=verapdf_json(True), exit_code=0, declared=False
+        )
+        self.assertEqual(code, 1)
+        checks = report['failures'][0]['checks']
+        message = next(message for check, message in checks if check == 'pdfa')
+        self.assertIn('does not declare', message)
+
+    def test_version_mismatch_is_rejected_before_validation(self):
+        code, _report, _stdout, stderr, _reports = self.run_case(
+            payload=verapdf_json(True), exit_code=0, version='1.29.1'
+        )
+        self.assertEqual(code, 2)
+        self.assertIn('version mismatch', stderr)
+        self.assertIn('1.30.4', stderr)
+
+    def test_missing_verapdf_is_a_missing_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            size = write_pdf(root / 'pdfs' / 'report.pdf')
+            write_manifest(
+                root / 'pdfs' / 'manifest.json',
+                [ok_entry('report.docx', size)],
+                {'conformance': 'pdfa-2u'},
+            )
+            with mock.patch.dict(sys.modules, {'pypdfium2': fake_pdfium('hello')}):
+                code, _stdout, stderr = run_main([
+                    str(root / 'pdfs' / 'manifest.json'),
+                    '--require-pdfa-2u',
+                    '--verapdf', str(root / 'missing-verapdf'),
+                ])
+            self.assertEqual(code, 2)
+            self.assertIn('needs veraPDF', stderr)
+
+    def test_without_the_flag_validation_is_skipped(self):
+        code, report, _stdout, _stderr, reports = self.run_case(
+            payload=verapdf_json(False), exit_code=1, require=False
+        )
+        self.assertEqual(code, 0, report['failures'])
+        self.assertEqual(reports, [])
+        self.assertIsNone(report['fixtures'][0]['verapdf'])
+        self.assertFalse(report['pdfa']['required'])
+        self.assertEqual(report['summary']['pdfa_checked'], 0)
 
 
 if __name__ == '__main__':
