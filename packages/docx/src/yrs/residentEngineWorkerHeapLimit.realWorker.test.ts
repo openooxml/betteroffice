@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { exportDocxMarkdown } from '../core';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
 import { engineKind } from '../wasm/engineEdit';
@@ -61,20 +62,28 @@ test(`a heap limit on one ${engineKind} worker thread fails only that thread's o
   const unlimited = client();
   const roomy = client();
 
-  const [failure, opened, roomyOpened] = await Promise.all([
-    limited.openSource({ bytes, heapLimitBytes: HEAP_LIMIT_BYTES }).then(() => undefined, (error: unknown) => error),
+  const [opened, roomyOpened] = await Promise.all([
     unlimited.openSource({ bytes }),
     roomy.openSource({ bytes, heapLimitBytes: ROOMY_HEAP_LIMIT_BYTES }),
   ]);
-
-  expect(failure).toBeInstanceOf(Error);
-  expect((failure as Error).message).toMatch(OUT_OF_MEMORY);
-  await expect(limited.openSource({ bytes })).rejects.toThrow(OUT_OF_MEMORY);
   for (const result of [opened, roomyOpened]) {
     expect(result.document.package.document).toBeDefined();
     expect(result.stateVector).toBeInstanceOf(Uint8Array);
     expect(result.stateVector.byteLength).toBeGreaterThan(0);
   }
+
+  const failure = await limited.openSource({ bytes, heapLimitBytes: HEAP_LIMIT_BYTES })
+    .then(() => undefined, (error: unknown) => error);
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toMatch(OUT_OF_MEMORY);
+
+  const [state, roomyState] = await Promise.all([unlimited.encodeState(), roomy.encodeState()]);
+  for (const encoded of [state, roomyState]) expect(encoded.byteLength).toBeGreaterThan(0);
+
+  const exported = await exportDocxMarkdown(bytes, { revisionView: 'accepted' });
+  expect(exported.markdown).toContain(LAST_PARAGRAPH);
+
+  await expect(limited.openSource({ bytes })).rejects.toThrow(OUT_OF_MEMORY);
 
   const session = await createResidentEngineSession();
   cleanups.push(() => session.destroy());
