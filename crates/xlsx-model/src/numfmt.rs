@@ -1005,6 +1005,12 @@ fn best_fraction(value: f64, limit: u64) -> Option<(u64, u64)> {
 /// (whole, numerator, denominator) for `mag`, or `None` when one does not
 /// fit a u64 and the section shows general text instead.
 fn fraction_parts(mag: f64, pattern: FractionPattern) -> Option<(u64, u64, u64)> {
+    let mag = if mag > 0.0 && mag.is_finite() {
+        let (m, e) = fifteen_digits(mag);
+        format!("{m}e{e}").parse().unwrap_or(mag)
+    } else {
+        mag
+    };
     if !mag.is_finite() || mag >= u64::MAX as f64 {
         return None;
     }
