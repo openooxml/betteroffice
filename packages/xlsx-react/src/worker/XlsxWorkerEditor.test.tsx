@@ -6314,18 +6314,11 @@ describe('workbook worker editor', () => {
     fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
     const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
       .find((handle) => handle.getAttribute('data-handle') === 'se')!;
-    const original = globalThis.setTimeout;
-    let nudge: (() => void) | undefined;
-    const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((handler: () => void, delay?: number) => {
-      if (delay === 250) { nudge = handler; return original(() => {}, 0); }
-      return original(handler, delay);
-    }) as typeof setTimeout);
-    restorers.push(() => timer.mockRestore());
-    act(() => {
-      fireEvent.keyDown(scroll, { key: 'ArrowRight' });
-      fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
-    });
-    expect(nudge).toBeDefined();
+    const clock = selectionWindow();
+    act(() => { fireEvent.keyDown(scroll, { key: 'ArrowRight' }); });
+    expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(1px, 0px)');
+    expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+    act(() => { fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 300, clientY: 200, button: 0 }); });
     await act(async () => {});
     expect(host.editMethods.moveChart.mock.calls).toEqual([[0, 'chart:1', 1, 0]]);
     fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
@@ -6336,7 +6329,7 @@ describe('workbook worker editor', () => {
       [0, 'chart:1', { left: 0, top: 0, right: 30, bottom: 20 }],
     ]);
     expect(host.editMethods.moveChart).toHaveBeenCalledTimes(1);
-    await act(async () => { nudge!(); });
+    await act(async () => { await clock.tick(300); });
     expect(host.editMethods.moveChart).toHaveBeenCalledTimes(1);
   });
 
