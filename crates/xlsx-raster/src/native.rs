@@ -344,6 +344,10 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
                 stacked,
                 wrap,
             } => {
+                let accounting = *underline
+                    && !*stacked
+                    && rotation_deg.is_none()
+                    && accounting_underline(*underline_style);
                 let run = font::TextRun {
                     x: *x,
                     y: *y,
@@ -354,7 +358,7 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
                     clip,
                     bold: *bold,
                     italic: *italic,
-                    underline: *underline,
+                    underline: *underline && !accounting,
                     double_underline: double_underline(*underline_style),
                     strike: *strike,
                     highlight: highlight.as_deref().map(parse_color).transpose()?,
@@ -400,22 +404,33 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
                             )
                         },
                     );
+                    if accounting {
+                        font::paint_accounting_underline(
+                            &mut pixmap,
+                            &run,
+                            (layout.left, layout.width),
+                        );
+                    }
                 } else if let Some(wrap) = wrap {
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text_with_fonts(run.faces, run.stack, line, *font_size)
                     });
                     for (index, line) in lines.iter().enumerate() {
-                        font::paint_text(
-                            &mut pixmap,
-                            &font::TextRun {
-                                y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
-                                text: line,
-                                ..run
-                            },
-                        );
+                        let run = font::TextRun {
+                            y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
+                            text: line,
+                            ..run
+                        };
+                        font::paint_text(&mut pixmap, &run);
+                        if accounting {
+                            font::paint_accounting_underline(&mut pixmap, &run, (clip.x, clip.w));
+                        }
                     }
                 } else {
                     font::paint_text(&mut pixmap, &run);
+                    if accounting {
+                        font::paint_accounting_underline(&mut pixmap, &run, (clip.x, clip.w));
+                    }
                 }
             }
         }

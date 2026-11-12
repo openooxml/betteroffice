@@ -10,7 +10,8 @@ use vello::peniko::{
 };
 use vello::{Glyph, Scene};
 use xlsx_render::{
-    Align, DisplayList, DrawCmd, GeometryPathCommand, PatternType, Rect as DisplayRect, border_dash,
+    Align, DisplayList, DrawCmd, GeometryPathCommand, PatternType, Rect as DisplayRect,
+    RunUnderline, border_dash,
 };
 
 use crate::scene_shared::{
@@ -63,6 +64,7 @@ pub fn paint_cell_editor(scene: &mut Scene, rect: DisplayRect, value: &str) -> R
         11.0,
         "#000000",
         Align::Left,
+        false,
         false,
         false,
         false,
@@ -218,7 +220,7 @@ fn translate_command(
             bold,
             italic,
             underline,
-            underline_style: _,
+            underline_style,
             strike,
             highlight,
             dashed_underline,
@@ -238,6 +240,10 @@ fn translate_command(
             if let Some(degrees) = rotation_deg {
                 return Err(format!("text rotated {degrees} degrees is not translated"));
             }
+            let accounting = *underline && accounting_underline(*underline_style);
+            let span = number_format
+                .as_ref()
+                .map_or((clip.x, clip.w), |layout| (layout.left, layout.width));
             let prepare = |x: f32, y: f32, text: &str, align: Align| {
                 PreparedText::new(
                     x,
@@ -248,7 +254,8 @@ fn translate_command(
                     align,
                     *bold,
                     *italic,
-                    *underline,
+                    *underline && !accounting,
+                    double_underline(*underline_style),
                     *strike,
                     highlight.as_deref(),
                     *dashed_underline,
@@ -283,9 +290,24 @@ fn translate_command(
                 for run in &runs {
                     run.paint(scene, font);
                 }
+                if accounting {
+                    let mut lines: Vec<&PreparedText> = runs.iter().collect();
+                    lines.dedup_by_key(|run| run.baseline);
+                    for run in lines {
+                        run.paint_accounting_underline(scene, span);
+                    }
+                }
             })
         }
     }
+}
+
+fn double_underline(style: Option<RunUnderline>) -> bool {
+    matches!(style, Some(RunUnderline::Double | RunUnderline::DoubleAccounting))
+}
+
+fn accounting_underline(style: Option<RunUnderline>) -> bool {
+    matches!(style, Some(RunUnderline::SingleAccounting | RunUnderline::DoubleAccounting))
 }
 
 fn paint_clipped(
@@ -450,6 +472,7 @@ struct PreparedText {
     bold: bool,
     italic: bool,
     underline: bool,
+    double_underline: bool,
     strike: bool,
     dashed_underline: bool,
 }
@@ -466,6 +489,7 @@ impl PreparedText {
         bold: bool,
         italic: bool,
         underline: bool,
+        double_underline: bool,
         strike: bool,
         highlight: Option<&str>,
         dashed_underline: bool,
@@ -514,6 +538,7 @@ impl PreparedText {
             bold,
             italic,
             underline,
+            double_underline,
             strike,
             dashed_underline,
         })
@@ -571,6 +596,11 @@ impl PreparedText {
                 .map(|metrics| metrics.thickness as f32)
                 .unwrap_or(0.05 * em);
             self.paint_bar(scene, position, thickness);
+            if self.double_underline {
+                let line = (thickness * self.scale).max(0.5);
+                let second = position - (line + line.max(1.0)) / self.scale;
+                self.paint_bar(scene, second, thickness);
+            }
         }
         if self.strike {
             let metrics = FACE.strikeout_metrics();
@@ -620,6 +650,26 @@ impl PreparedText {
             f64::from(center + height / 2.0),
         );
         scene.fill(Fill::NonZero, Affine::IDENTITY, self.color, None, &rect);
+    }
+
+    /// An accounting underline across `left..left + width`, its top on the descender line.
+    fn paint_accounting_underline(&self, scene: &mut Scene, (left, width): (f32, f32)) {
+        let thickness = FACE
+            .underline_metrics()
+            .map(|metrics| metrics.thickness as f32)
+            .unwrap_or(0.05 * FACE.units_per_em() as f32);
+        let height = (thickness * self.scale).max(0.5);
+        let mut top = self.baseline - FACE.descender() as f32 * self.scale;
+        for _ in 0..1 + usize::from(self.double_underline) {
+            let rect = Rect::new(
+                f64::from(left),
+                f64::from(top),
+                f64::from(left + width),
+                f64::from(top + height),
+            );
+            scene.fill(Fill::NonZero, Affine::IDENTITY, self.color, None, &rect);
+            top += height + height.max(1.0);
+        }
     }
 }
 

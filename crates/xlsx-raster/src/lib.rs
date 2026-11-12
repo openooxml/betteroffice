@@ -227,6 +227,10 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 stacked,
                 wrap,
             } => {
+                let accounting = *underline
+                    && !*stacked
+                    && rotation_deg.is_none()
+                    && accounting_underline(*underline_style);
                 let run = font::TextRun {
                     x: *x,
                     y: *y,
@@ -237,7 +241,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     clip,
                     bold: *bold,
                     italic: *italic,
-                    underline: *underline,
+                    underline: *underline && !accounting,
                     double_underline: double_underline(*underline_style),
                     strike: *strike,
                     highlight: highlight.as_deref().map(parse_color).transpose()?,
@@ -279,22 +283,33 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                             )
                         },
                     );
+                    if accounting {
+                        font::paint_accounting_underline(
+                            &mut pixmap,
+                            &run,
+                            (layout.left, layout.width),
+                        );
+                    }
                 } else if let Some(wrap) = wrap {
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text(line, *font_size)
                     });
                     for (index, line) in lines.iter().enumerate() {
-                        font::paint_text(
-                            &mut pixmap,
-                            &font::TextRun {
-                                y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
-                                text: line,
-                                ..run
-                            },
-                        );
+                        let run = font::TextRun {
+                            y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
+                            text: line,
+                            ..run
+                        };
+                        font::paint_text(&mut pixmap, &run);
+                        if accounting {
+                            font::paint_accounting_underline(&mut pixmap, &run, (clip.x, clip.w));
+                        }
                     }
                 } else {
                     font::paint_text(&mut pixmap, &run);
+                    if accounting {
+                        font::paint_accounting_underline(&mut pixmap, &run, (clip.x, clip.w));
+                    }
                 }
             }
         }
@@ -639,6 +654,11 @@ fn path_coord(value: f64) -> Result<f32, String> {
 fn double_underline(style: Option<xlsx_render::RunUnderline>) -> bool {
     use xlsx_render::RunUnderline::{Double, DoubleAccounting};
     matches!(style, Some(Double | DoubleAccounting))
+}
+
+fn accounting_underline(style: Option<xlsx_render::RunUnderline>) -> bool {
+    use xlsx_render::RunUnderline::{DoubleAccounting, SingleAccounting};
+    matches!(style, Some(SingleAccounting | DoubleAccounting))
 }
 
 /// parse a `#rrggbb` string into a tiny-skia color.

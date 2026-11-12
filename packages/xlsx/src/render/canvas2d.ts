@@ -259,7 +259,10 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   } else if (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null) {
     paintRotatedText(ctx, cmd, cmd.rotationDeg);
   } else if (cmd.numberFormat) {
-    paintNumberFormat(ctx, cmd, cmd.numberFormat, paintRun);
+    const layout = cmd.numberFormat;
+    const accounting = cmd.underline && isAccounting(cmd);
+    paintNumberFormat(ctx, accounting ? { ...cmd, underline: false } : cmd, layout, paintRun);
+    if (accounting) fillAccountingUnderline(ctx, cmd, layout.left, layout.width);
   } else if (cmd.wrap) {
     const wrap = cmd.wrap;
     const align = cmd.align ?? 'left';
@@ -440,7 +443,9 @@ function paintDecorations(
   const fontSize = fontSizePx(cmd);
   const thickness = Math.max(fontSize * 0.05, 0.5);
   ctx.fillStyle = cmd.color;
-  if (cmd.underline) fillUnderline(ctx, cmd, x0, cmd.y + fontSize * 0.1, width, thickness);
+  const cell = cmd.clip ?? { x: x0, w: width };
+  if (cmd.underline && isAccounting(cmd)) fillAccountingUnderline(ctx, cmd, cell.x, cell.w);
+  else if (cmd.underline) fillUnderline(ctx, cmd, x0, cmd.y + fontSize * 0.1, width, thickness);
   if (cmd.strike) ctx.fillRect(x0, cmd.y - fontSize * 0.26, width, thickness);
   if (cmd.dashedUnderline) {
     ctx.save();
@@ -450,6 +455,18 @@ function paintDecorations(
     strokeSegment(ctx, x0, cmd.y + fontSize * 0.1, x0 + width, cmd.y + fontSize * 0.1);
     ctx.restore();
   }
+}
+
+function isAccounting(cmd: TextCmd): boolean {
+  return cmd.underlineStyle === 'singleAccounting' || cmd.underlineStyle === 'doubleAccounting';
+}
+
+/** An accounting underline spans `x..x + width` with its top on the descender line. */
+function fillAccountingUnderline(ctx: CanvasRenderingContext2D, cmd: TextCmd, x: number, width: number): void {
+  const fontSize = fontSizePx(cmd);
+  const descent = ctx.measureText(cmd.text).fontBoundingBoxDescent || fontSize * 0.2;
+  ctx.fillStyle = cmd.color;
+  fillUnderline(ctx, cmd, x, cmd.y + descent, width, Math.max(fontSize * 0.05, 0.5));
 }
 
 /** A double kind adds a second line one line width and at least a pixel below the first. */
