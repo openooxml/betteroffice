@@ -6404,6 +6404,7 @@ mod tests {
                 );
                 assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 1);
             }
+            phases.dedup();
             assert_eq!(
                 phases[..3],
                 [
@@ -6453,6 +6454,230 @@ mod tests {
         assert!(doc.prime_progress.lock().unwrap().is_none());
         let source = doc.source_index().unwrap();
         assert!(!source.seed_states_initialized());
+    }
+
+    fn prime_phase(doc: &EditingDoc) -> Option<PrimePhase> {
+        doc.prime_progress
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|progress| progress.phase)
+    }
+
+    fn cached_scan(doc: &EditingDoc) -> Option<(u64, Arc<Scan>)> {
+        doc.scan_cache.0.lock().unwrap().clone()
+    }
+
+    fn same_cache(left: &Option<(u64, Arc<Scan>)>, right: &Option<(u64, Arc<Scan>)>) -> bool {
+        match (left, right) {
+            (None, None) => true,
+            (Some((left_epoch, left)), Some((right_epoch, right))) => {
+                left_epoch == right_epoch && Arc::ptr_eq(left, right)
+            }
+            _ => false,
+        }
+    }
+
+    fn prime_slice(doc: &EditingDoc, segments_per_slice: usize) -> PrimeSlice {
+        doc.prime_save_seed_states_slice_with(u32::MAX, u32::MAX, 1, segments_per_slice)
+    }
+
+    fn edit_body(session: &crate::session::EditSessionCore) {
+        session
+            .engine
+            .doc()
+            .insert_text(
+                &ctx(),
+                Position::new("body", 0),
+                "New ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+    }
+
+    /// Each pending slice's phase in an undisturbed prime, and how many end in the scan.
+    fn prime_phases(bytes: &[u8], segments_per_slice: usize) -> (Vec<Option<PrimePhase>>, usize) {
+        let session = bytes_session(bytes);
+        let doc = session.engine.doc();
+        let mut phases = Vec::new();
+        loop {
+            match prime_slice(doc, segments_per_slice) {
+                PrimeSlice::Pending => phases.push(prime_phase(doc)),
+                outcome => {
+                    assert_eq!(outcome, PrimeSlice::Known, "{segments_per_slice}");
+                    break;
+                }
+            }
+        }
+        let scanning = phases
+            .iter()
+            .take_while(|phase| **phase == Some(PrimePhase::Scan))
+            .count();
+        (phases, scanning)
+    }
+
+    #[test]
+    fn a_scan_primed_in_slices_equals_a_whole_scan() {
+        let bytes = multi_chunk_docx();
+        for segments_per_slice in [1, 2, 7, 1 << 20] {
+            let session = bytes_session(&bytes);
+            let doc = session.engine.doc();
+            *doc.scan_cache.0.lock().unwrap() = None;
+            let epoch = doc.committed_epoch();
+            assert_eq!(prime_slice(doc, segments_per_slice), PrimeSlice::Pending);
+            let mut scan_slices = 0;
+            while prime_phase(doc) == Some(PrimePhase::Scan) {
+                assert!(cached_scan(doc).is_none(), "{segments_per_slice}");
+                assert_eq!(prime_slice(doc, segments_per_slice), PrimeSlice::Pending);
+                scan_slices += 1;
+            }
+            assert_eq!(prime_phase(doc), Some(PrimePhase::Anchors));
+            assert_eq!(
+                scan_slices > 1,
+                segments_per_slice < 1 << 20,
+                "{segments_per_slice}"
+            );
+            let (cached_epoch, cached) = cached_scan(doc).unwrap();
+            assert_eq!(cached_epoch, epoch);
+            let txn = doc.yrs_doc().transact();
+            let whole = Scan::new(&txn);
+            assert_eq!(
+                scan_view(&cached),
+                scan_view(&whole),
+                "{segments_per_slice}"
+            );
+            assert!(whole.pilcrows.len() > 1500 && !whole.parents.is_empty());
+            drop(txn);
+            assert_eq!(
+                prime_in_slices(doc, u32::MAX, 1, segments_per_slice).0,
+                PrimeSlice::Known
+            );
+        }
+    }
+
+    #[test]
+    fn an_edit_after_any_prime_slice_leaves_no_partial_scan() {
+        let bytes = multi_chunk_docx();
+        for segments_per_slice in [1, 7, 512] {
+            let (phases, scanning) = prime_phases(&bytes, segments_per_slice);
+            let positions: BTreeSet<usize> = [
+                1,
+                2,
+                scanning / 2,
+                scanning,
+                scanning + 1,
+                scanning + 2,
+                phases.len() / 2,
+                phases.len(),
+            ]
+            .into_iter()
+            .filter(|after| (1..=phases.len()).contains(after))
+            .collect();
+            for committed_after in positions {
+                let label = format!("{segments_per_slice}: {committed_after}");
+                let session = bytes_session(&bytes);
+                let doc = session.engine.doc();
+                *doc.scan_cache.0.lock().unwrap() = None;
+                for _ in 0..committed_after {
+                    assert_eq!(
+                        prime_slice(doc, segments_per_slice),
+                        PrimeSlice::Pending,
+                        "{label}"
+                    );
+                }
+                let phase = prime_phase(doc);
+                assert_eq!(phase, phases[committed_after - 1], "{label}");
+                if phase == Some(PrimePhase::Scan) {
+                    assert!(cached_scan(doc).is_none(), "{label}");
+                }
+                edit_body(&session);
+                let before = cached_scan(doc);
+                assert_eq!(
+                    prime_slice(doc, segments_per_slice),
+                    PrimeSlice::Declined,
+                    "{label}"
+                );
+                assert!(doc.prime_progress.lock().unwrap().is_none(), "{label}");
+                assert!(same_cache(&cached_scan(doc), &before), "{label}");
+                let source = doc.source_index().unwrap();
+                assert!(!source.seed_states_initialized(), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_declined_sliced_scan_leaves_the_save_scan_of_an_unprimed_session() {
+        let bytes = multi_chunk_docx();
+        for segments_per_slice in [1, 7] {
+            let (_, scanning) = prime_phases(&bytes, segments_per_slice);
+            let positions: BTreeSet<usize> = [1, 2, scanning / 2, scanning, scanning + 1]
+                .into_iter()
+                .filter(|after| *after >= 1)
+                .collect();
+            for committed_after in positions {
+                let label = format!("{segments_per_slice}: {committed_after}");
+                let primed = bytes_session(&bytes);
+                let unprimed = bytes_session(&bytes);
+                let doc = primed.engine.doc();
+                for _ in 0..committed_after {
+                    assert_eq!(
+                        prime_slice(doc, segments_per_slice),
+                        PrimeSlice::Pending,
+                        "{label}"
+                    );
+                }
+                edit_body(&primed);
+                edit_body(&unprimed);
+                assert_eq!(
+                    prime_slice(doc, segments_per_slice),
+                    PrimeSlice::Declined,
+                    "{label}"
+                );
+                assert_eq!(
+                    scan_view(&checked_scan(doc)),
+                    scan_view(&checked_scan(unprimed.engine.doc())),
+                    "{label}"
+                );
+                assert_eq!(
+                    primed.paragraph_save_plan().unwrap(),
+                    unprimed.paragraph_save_plan().unwrap(),
+                    "{label}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn priming_with_a_sliced_scan_records_the_one_shot_seed_states() {
+        let opens: [fn() -> crate::session::EditSessionCore; 2] =
+            [principal_session, || bytes_session(&multi_chunk_docx())];
+        for open in opens {
+            let whole = open();
+            assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+            let whole_source = whole.engine.doc().source_index().unwrap();
+            let whole_plan = whole.paragraph_save_plan().unwrap();
+            for segments_per_slice in [1, 2, 7, 1 << 20] {
+                for max_bytes in [1, u32::MAX] {
+                    let label = format!("{segments_per_slice} segments, {max_bytes} bytes");
+                    let sliced = open();
+                    let doc = sliced.engine.doc();
+                    *doc.scan_cache.0.lock().unwrap() = None;
+                    let (outcome, _) =
+                        prime_in_slices(doc, u32::MAX, max_bytes, segments_per_slice);
+                    assert_eq!(outcome, PrimeSlice::Known, "{label}");
+                    assert!(doc.prime_progress.lock().unwrap().is_none(), "{label}");
+                    let source = doc.source_index().unwrap();
+                    assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0, "{label}");
+                    assert_same_seed_states(&source, &whole_source);
+                    let (epoch, cached) = cached_scan(doc).unwrap();
+                    assert_eq!(epoch, doc.committed_epoch(), "{label}");
+                    let txn = doc.yrs_doc().transact();
+                    assert_eq!(scan_view(&cached), scan_view(&Scan::new(&txn)), "{label}");
+                    drop(txn);
+                    assert_eq!(sliced.paragraph_save_plan().unwrap(), whole_plan, "{label}");
+                }
+            }
+        }
     }
 
     #[test]
