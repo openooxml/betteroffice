@@ -16,21 +16,30 @@ use docx_edit::structured::{
     DocxStructuredContent, ExportOptions, MarkdownContent, MarkdownOptions,
     export_package_structured,
 };
-use docx_edit::{EditCtx, EditingDoc, Receipt, StoryRange};
+use docx_edit::{
+    EditCtx, EditingDoc, ParagraphIdentities, ParagraphRef, ParagraphSavePlan, Receipt,
+    SegmentContent, SpliceAnchor, StoryRange, is_opaque_seed_budget_error,
+    seed_from_docx_with_generation,
+};
 use docx_layout::types::Input as LayoutInput;
 use docx_parse::block::BlockContent;
 use docx_parse::document::{DocumentBody, Section, get_paragraph_text};
 use docx_parse::inline::{InlineNode, Run, RunContent, RunType};
+use docx_parse::notes::Note;
+use docx_parse::numbering::NumberingDefinitions;
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
 use docx_parse::paragraph_identity::{
     allocate_paragraph_id, format_paragraph_id, package_paragraph_ids,
 };
+use docx_parse::relationships::Relationship;
 use docx_parse::s9::{
     S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions, S9SectionWire,
     S9WireEnvelope,
 };
+use docx_parse::serializer::paragraph_ids::{S13TouchedPart, S13WholePart};
 use docx_parse::serializer::{
-    S13SaveOptions, S13SaveRequest, SerializerDeterminism, write_docx_s13_parts,
+    S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SaveOptions, S13SaveRequest,
+    S13SpliceAnchor, S13SplicedPart, SerializerDeterminism, write_docx_s13_parts,
 };
 use docx_parse::table::Table;
 use docx_parse::xml::ParseLimits;
@@ -44,12 +53,17 @@ use crate::{
 pub struct Document {
     /// Inflated package parts retained from open for `save` to reuse.
     pub(crate) original_parts: Vec<(String, Vec<u8>)>,
+    source: Vec<u8>,
     seed: String,
     model: DocumentModel,
     /// By body paragraph ordinal, the fresh ID handed to a paragraph that
     /// repeats an earlier paragraph's ID and the authored ID it saves with
     /// until it is edited or the model is changed.
     authored_ids: BTreeMap<usize, (String, String)>,
+    opened_ids: BTreeMap<usize, (String, String)>,
+    /// What a save writes when the model holds only the session edits; `None` once it cannot.
+    session_baseline: Option<SavedFields>,
+    session_edits: Vec<SessionEdit>,
     #[cfg(any(feature = "fonts", feature = "raster"))]
     pub(crate) fonts: Mutex<crate::font::FontRegistry>,
     #[cfg(feature = "fonts")]
@@ -85,7 +99,10 @@ impl Document {
         let font_manager = FontManager::new(&options.font_source, options.font_loading)?;
         let (parsed, original_parts) = docx_parse::parse_docx_s9_wire_parts_with_limits(
             bytes,
-            S9ParseOptions::default(),
+            S9ParseOptions {
+                source_ordinals: true,
+                ..S9ParseOptions::default()
+            },
             limits,
         )?;
         let mut document = parsed.document;
@@ -98,8 +115,12 @@ impl Document {
         );
         let document = Self {
             original_parts,
+            source: bytes.to_vec(),
             seed: format!("{:x}", Sha256::digest(bytes)),
+            session_baseline: Some(SavedFields::of(&model)),
+            session_edits: Vec::new(),
             model,
+            opened_ids: authored_ids.clone(),
             authored_ids,
             #[cfg(any(feature = "fonts", feature = "raster"))]
             fonts: Mutex::new(crate::font::FontRegistry::default()),
@@ -237,16 +258,26 @@ impl Document {
             .next()
             .map(|paragraph| paragraph.text)
             .unwrap_or_default();
-        replace_plain_run(paragraph, edited, template);
+        replace_plain_run(paragraph, edited.clone(), template);
         let replacement = paragraph.clone();
-        if let Some(sections) = &mut self.model.body.sections {
-            for section in sections {
-                if let Some(section_paragraph) = find_paragraph_mut(&mut section.content, para_id) {
-                    *section_paragraph = replacement.clone();
-                }
-            }
-        }
+        replace_section_paragraphs(&mut self.model.body, para_id, &replacement);
         self.authored_ids.retain(|_, (fresh, _)| fresh != para_id);
+        let mirrored = match (&mut self.session_baseline, replacement.source_ordinal) {
+            (Some(baseline), Some(ordinal)) if context.suggesting.is_none() => {
+                baseline.replace_paragraph(para_id, &replacement).then(|| SessionEdit {
+                    para_id: para_id.to_owned(),
+                    ordinal,
+                    text: text.to_owned(),
+                    expected: edited,
+                    context: context.clone(),
+                })
+            }
+            _ => None,
+        };
+        match mirrored {
+            Some(edit) => self.session_edits.push(edit),
+            None => self.session_baseline = None,
+        }
         Ok(receipt)
     }
 
@@ -462,9 +493,67 @@ impl Document {
                 modified_by: options.modified_by,
             },
             selective: None,
-            paragraph_ids: None,
+            paragraph_ids: self.session_save_plan()?,
         };
         write_docx_s13_parts(request, &self.original_parts, None).map_err(Error::from)
+    }
+
+    /// The editing session's paragraph save plan for the current model, as the
+    /// product's session save writes it; `None` saves the whole model.
+    fn session_save_plan(&self) -> Result<Option<S13ParagraphIds>> {
+        let Some(baseline) = &self.session_baseline else {
+            return Ok(None);
+        };
+        if !baseline.saves_as(&self.model) {
+            return Ok(None);
+        }
+        let Some(reassigned) = self.reassigned_ids() else {
+            return Ok(None);
+        };
+        let session = EditingDoc::new(1);
+        let seeded = seed_from_docx_with_generation(&session, &self.source, &self.seed[..32]);
+        if let Err(message) = seeded {
+            if is_opaque_seed_budget_error(&message) {
+                return Ok(None);
+            }
+            return Err(Error::Parse(docx_parse::ParseError::Canonical(message)));
+        }
+        let identities = session.paragraph_identities();
+        let body_part = body_part(&identities);
+        for edit in &self.session_edits {
+            edit.replay(&session, &identities, &body_part)?;
+        }
+        let mut plan = session_paragraph_ids(session.paragraph_save_plan());
+        if !reassigned.is_empty() {
+            let Some(patched) = plan
+                .patched_parts
+                .iter_mut()
+                .find(|patched| patched.part == body_part)
+            else {
+                return Ok(None);
+            };
+            patched
+                .para_ids
+                .retain(|(ordinal, _)| !reassigned.iter().any(|(source, _)| source == ordinal));
+            patched.para_ids.extend(reassigned);
+            patched.para_ids.sort_by_key(|(ordinal, _)| *ordinal);
+        }
+        Ok(Some(plan))
+    }
+
+    /// `(source ordinal, ID)` of each body paragraph that saves with the fresh
+    /// ID it was given on open; `None` when one has no source ordinal.
+    fn reassigned_ids(&self) -> Option<Vec<(u32, String)>> {
+        let paragraphs = self.paragraphs();
+        self.opened_ids
+            .iter()
+            .filter(|(ordinal, _)| !self.authored_ids.contains_key(*ordinal))
+            .filter_map(|(ordinal, (fresh, _))| {
+                let paragraph = paragraphs.get(*ordinal)?;
+                (paragraph.para_id.as_ref() == Some(fresh))
+                    .then(|| paragraph.source_ordinal.map(|source| (source, fresh.clone())))
+            })
+            .collect()
     }
 
     /// `body` as it saves: a paragraph still at its ordinal with its fresh ID
@@ -485,6 +574,212 @@ impl Document {
             });
         }
         body
+    }
+}
+
+/// The model fields a save writes.
+struct SavedFields {
+    body: DocumentBody,
+    headers: Vec<(String, docx_parse::HeaderFooter)>,
+    footers: Vec<(String, docx_parse::HeaderFooter)>,
+    footnotes: Vec<Note>,
+    endnotes: Vec<Note>,
+    footnote_separators: Vec<Note>,
+    endnote_separators: Vec<Note>,
+    relationships: Vec<(String, Relationship)>,
+    numbering: NumberingDefinitions,
+}
+
+impl SavedFields {
+    fn of(model: &DocumentModel) -> Self {
+        Self {
+            body: model.body.clone(),
+            headers: model.headers.clone(),
+            footers: model.footers.clone(),
+            footnotes: model.footnotes.clone(),
+            endnotes: model.endnotes.clone(),
+            footnote_separators: model.footnote_separators.clone(),
+            endnote_separators: model.endnote_separators.clone(),
+            relationships: model.relationships.clone(),
+            numbering: model.numbering.clone(),
+        }
+    }
+
+    fn saves_as(&self, model: &DocumentModel) -> bool {
+        self.body == model.body
+            && self.headers == model.headers
+            && self.footers == model.footers
+            && self.footnotes == model.footnotes
+            && self.endnotes == model.endnotes
+            && self.footnote_separators == model.footnote_separators
+            && self.endnote_separators == model.endnote_separators
+            && self.relationships == model.relationships
+            && self.numbering == model.numbering
+    }
+
+    fn replace_paragraph(&mut self, para_id: &str, replacement: &Paragraph) -> bool {
+        let Some(paragraph) = find_paragraph_mut(&mut self.body.content, para_id) else {
+            return false;
+        };
+        *paragraph = replacement.clone();
+        replace_section_paragraphs(&mut self.body, para_id, replacement);
+        true
+    }
+}
+
+/// A text replacement the save replays into the editing session.
+struct SessionEdit {
+    para_id: String,
+    /// The paragraph's `w:p` occurrence in the body part.
+    ordinal: u32,
+    text: String,
+    expected: String,
+    context: EditCtx,
+}
+
+impl SessionEdit {
+    fn replay(
+        &self,
+        session: &EditingDoc,
+        identities: &ParagraphIdentities,
+        body_part: &str,
+    ) -> Result<()> {
+        let (story, key) = identities
+            .paragraphs
+            .iter()
+            .find_map(|identity| match (&identity.paragraph, &identity.source) {
+                (ParagraphRef::Session { story, para_id }, Some(source))
+                    if source.paragraph_ordinal == self.ordinal
+                        && part_path(&source.part_uri) == body_part =>
+                {
+                    Some((story, para_id))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| Error::ParagraphNotFound(self.para_id.clone()))?;
+        let range = story_paragraph_range(session, story, key)?
+            .ok_or_else(|| Error::ParagraphNotFound(self.para_id.clone()))?;
+        session.replace_range(&self.context, range, &self.text)?;
+        let replayed = session
+            .paragraphs(story)?
+            .into_iter()
+            .find(|paragraph| paragraph.para_id == *key)
+            .map(|paragraph| paragraph.text);
+        if replayed.as_deref() != Some(self.expected.as_str()) {
+            return Err(Error::UnsupportedParagraphEdit(self.para_id.clone()));
+        }
+        Ok(())
+    }
+}
+
+/// The content of the paragraph closed by the pilcrow `key` in `story`.
+fn story_paragraph_range(
+    session: &EditingDoc,
+    story: &str,
+    key: &str,
+) -> Result<Option<StoryRange>> {
+    let (mut start, mut offset) = (0, 0);
+    for segment in session.story_segments(story)? {
+        match segment.content {
+            SegmentContent::Text(text) => offset += utf16_len(&text),
+            SegmentContent::Pilcrow(properties) if properties.para_id == key => {
+                return Ok(Some(StoryRange::new(story, start, offset)));
+            }
+            SegmentContent::Pilcrow(_) => {
+                offset += 1;
+                start = offset;
+            }
+            SegmentContent::OtherEmbed { .. } => offset += 1,
+        }
+    }
+    Ok(None)
+}
+
+fn part_path(uri: &str) -> &str {
+    uri.strip_prefix('/').unwrap_or(uri)
+}
+
+fn body_part(identities: &ParagraphIdentities) -> String {
+    identities
+        .paragraphs
+        .iter()
+        .find_map(|identity| match (&identity.paragraph, &identity.source) {
+            (ParagraphRef::Session { story, .. }, Some(source)) if story == "body" => {
+                Some(part_path(&source.part_uri).to_owned())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| "word/document.xml".to_owned())
+}
+
+/// `plan` as the package writer's request field, every planned part kept.
+fn session_paragraph_ids(plan: ParagraphSavePlan) -> S13ParagraphIds {
+    S13ParagraphIds {
+        removed_comment_ids: Vec::new(),
+        section_edits: None,
+        assignments: plan
+            .assignments
+            .into_iter()
+            .map(|(part, ordinal, para_id)| S13ParagraphId {
+                part,
+                ordinal,
+                para_id,
+            })
+            .collect(),
+        patched_parts: plan
+            .patched_parts
+            .into_iter()
+            .map(|(part, para_ids)| S13PatchedPart { part, para_ids })
+            .collect(),
+        spliced_parts: plan
+            .spliced_parts
+            .into_iter()
+            .map(|part| S13SplicedPart {
+                part: part.part,
+                sha256: part.sha256,
+                paragraphs: part
+                    .paragraphs
+                    .into_iter()
+                    .map(|(ordinal, _)| ordinal)
+                    .collect(),
+                changed: part.changed,
+                inserted: part
+                    .inserted
+                    .into_iter()
+                    .map(|anchor| match anchor {
+                        SpliceAnchor::Before(ordinal) => S13SpliceAnchor::Before(ordinal),
+                        SpliceAnchor::After(ordinal) => S13SpliceAnchor::After(ordinal),
+                    })
+                    .collect(),
+                removed: part.removed,
+                paragraph_patches: part.paragraph_patches,
+                legacy_paragraphs: part.legacy_paragraphs,
+                table_patches: part.table_patches,
+                format_only: part.format_only,
+            })
+            .collect(),
+        whole_parts: plan
+            .whole_parts
+            .into_iter()
+            .map(|part| S13WholePart {
+                part: part.part,
+                sha256: part.sha256,
+                changed: part.changed,
+            })
+            .collect(),
+        touched_parts: plan
+            .touched_parts
+            .into_iter()
+            .map(|(part, touched)| S13TouchedPart { part, touched })
+            .collect(),
+    }
+}
+
+fn replace_section_paragraphs(body: &mut DocumentBody, para_id: &str, replacement: &Paragraph) {
+    for section in body.sections.iter_mut().flatten() {
+        if let Some(paragraph) = find_paragraph_mut(&mut section.content, para_id) {
+            *paragraph = replacement.clone();
+        }
     }
 }
 
