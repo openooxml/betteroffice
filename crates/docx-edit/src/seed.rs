@@ -4987,9 +4987,15 @@ fn structural_attrs(mut attrs: JsonObject, skipped: &[&str]) -> JsonObject {
 
 fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<'a> {
     let formatting = field(Some(cell), "formatting");
+    let shading = field(formatting, "shading")
+        .filter(|value| !value.is_null())
+        .or_else(|| field(options.style_cell, "shading"));
     let background = resolve_color_to_hex(
-        field(field(formatting, "shading"), "fill")
-            .or_else(|| field(field(options.style_cell, "shading"), "fill")),
+        if string(field(shading, "pattern")) == Some("solid") {
+            field(shading, "color")
+        } else {
+            field(shading, "fill")
+        },
         options.theme,
     );
     let width = field(field(formatting, "width"), "value")

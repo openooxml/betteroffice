@@ -1516,8 +1516,9 @@ function projectCell(
   }
 ): ProjectedCell {
   const formatting = cell.formatting;
+  const shading = formatting?.shading ?? options.styleCell?.shading;
   const backgroundColor = resolveColorToHex(
-    formatting?.shading?.fill ?? options.styleCell?.shading?.fill,
+    shading?.pattern === 'solid' ? shading.color : shading?.fill,
     options.theme
   );
   const width = formatting?.width?.value ?? options.gridWidth;
