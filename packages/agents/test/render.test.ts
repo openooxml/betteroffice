@@ -213,6 +213,35 @@ test('engine diagnostics become one warning line', async () => {
   } finally { render.mockRestore(); doc.close(); }
 });
 
+test('a skipped-effects diagnostic previews without counting as a placeholder picture', async () => {
+  const doc = await openDocx(await fixture());
+  const png = new Uint8Array(await createCanvas(12, 7).encode('png'));
+  const render = spyOn(doc.session, 'renderPng').mockImplementation(async (_target, options) => {
+    options?.onDiagnostic?.({ code: 'effects-skipped', page: 0, effects: ['text.effect', 'shape.effects'] });
+    options?.onDiagnostic?.({ code: 'picture-unavailable', pictures: [{ id: 'media:0', reason: 'metafile' }] });
+    return png;
+  });
+  try {
+    const preview = await renderDocxPage(doc.session, 1);
+    expect(preview.png).toBe(png);
+    expect(preview.warnings).toContain('1 picture could not be drawn; the preview shows a placeholder in its place.');
+    expect(preview.warnings.filter((warning) => warning.includes('could not be drawn; the preview shows a placeholder'))).toHaveLength(1);
+  } finally { render.mockRestore(); doc.close(); }
+});
+
+test('a page whose only diagnostic is skipped effects shows no placeholder warning', async () => {
+  const doc = await openDocx(await fixture());
+  const png = new Uint8Array(await createCanvas(12, 7).encode('png'));
+  const render = spyOn(doc.session, 'renderPng').mockImplementation(async (_target, options) => {
+    options?.onDiagnostic?.({ code: 'effects-skipped', page: 0, effects: ['shape.effects'] });
+    return png;
+  });
+  try {
+    const preview = await renderDocxPage(doc.session, 1);
+    expect(preview.warnings.some((warning) => warning.includes('placeholder'))).toBe(false);
+  } finally { render.mockRestore(); doc.close(); }
+});
+
 test('DOCX previews use the engine PNG where it can draw', async () => {
   const zip = await JSZip.loadAsync(await fixture());
   zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace('<w:br w:type="page"/>', ''));
