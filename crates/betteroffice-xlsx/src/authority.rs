@@ -8341,7 +8341,12 @@ mod tests {
             let mut released = Writer::new();
             base.row_styles.write(&mut released);
             let filtered = base.auto_filters.iter().any(Option::is_some);
-            if filtered || base.conditional_formats.iter().any(|formats| !formats.is_empty()) {
+            if filtered
+                || base
+                    .conditional_formats
+                    .iter()
+                    .any(|formats| !formats.is_empty())
+            {
                 released.bytes(&serde_json::to_vec(&base.conditional_formats).unwrap());
                 if filtered {
                     released.bytes(&serde_json::to_vec(&base.auto_filters).unwrap());

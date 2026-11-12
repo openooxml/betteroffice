@@ -141,7 +141,13 @@ fn explicit_true_show_gridlines_keeps_screen_gridlines() {
     ]))
     .unwrap();
     for sheet in [0, 1] {
-        assert!(!workbook.sheet(SheetId(sheet)).unwrap().format.hide_gridlines);
+        assert!(
+            !workbook
+                .sheet(SheetId(sheet))
+                .unwrap()
+                .format
+                .hide_gridlines
+        );
         assert!(screen_lines(&workbook, sheet) > 0);
     }
 }
