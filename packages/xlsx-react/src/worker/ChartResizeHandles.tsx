@@ -1,4 +1,6 @@
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import type { TranslationKey } from '@betteroffice/xlsx-i18n';
+import { useTranslation } from '../i18n';
 import { CHART_RESIZE_HANDLES, type ChartResizeHandle } from './chartResize';
 
 /** A chart frame already scaled into the overlay's CSS-pixel space. */
@@ -11,15 +13,15 @@ export interface ScaledChartRect {
 
 const HANDLE_SIZE = 8;
 
-const HANDLE_LABELS: Record<ChartResizeHandle, string> = {
-  nw: 'Resize chart from the top-left corner',
-  n: 'Resize chart from the top edge',
-  ne: 'Resize chart from the top-right corner',
-  e: 'Resize chart from the right edge',
-  se: 'Resize chart from the bottom-right corner',
-  s: 'Resize chart from the bottom edge',
-  sw: 'Resize chart from the bottom-left corner',
-  w: 'Resize chart from the left edge',
+const HANDLE_LABELS: Record<ChartResizeHandle, TranslationKey> = {
+  nw: 'a11y.chartResizeNw',
+  n: 'a11y.chartResizeN',
+  ne: 'a11y.chartResizeNe',
+  e: 'a11y.chartResizeE',
+  se: 'a11y.chartResizeSe',
+  s: 'a11y.chartResizeS',
+  sw: 'a11y.chartResizeSw',
+  w: 'a11y.chartResizeW',
 };
 
 /** Which arrow keys move an edge handle; corners accept both axes. */
@@ -58,18 +60,20 @@ export function ChartResizeHandles({ rect, onStart, onNudge }: {
   onStart: (handle: ChartResizeHandle, event: ReactPointerEvent<HTMLElement>) => void;
   onNudge: (handle: ChartResizeHandle, dx: number, dy: number) => void;
 }) {
+  const { t } = useTranslation();
   return <>
     {CHART_RESIZE_HANDLES.map((spec) => {
       const axes = handleAxes(spec.handle);
       const shortcuts = [axes.horizontal ? 'ArrowLeft ArrowRight' : null,
         axes.vertical ? 'ArrowUp ArrowDown' : null].filter(Boolean).join(' ');
-      const directions = axes.horizontal && axes.vertical ? 'arrow keys'
-        : axes.horizontal ? 'left and right arrows' : 'up and down arrows';
+      const hint: TranslationKey = axes.horizontal && axes.vertical ? 'a11y.chartResizeHintBoth'
+        : axes.horizontal ? 'a11y.chartResizeHintHorizontal' : 'a11y.chartResizeHintVertical';
+      const label = t(HANDLE_LABELS[spec.handle]);
       return (
         <button key={spec.handle} type="button"
           data-testid="xlsx-chart-resize-handle" data-handle={spec.handle}
-          aria-label={HANDLE_LABELS[spec.handle]} aria-keyshortcuts={shortcuts}
-          title={`${HANDLE_LABELS[spec.handle]} (${directions}; hold Shift for 10px)`}
+          aria-label={label} aria-keyshortcuts={shortcuts}
+          title={t(hint, { label })}
           onPointerDown={(event) => onStart(spec.handle, event)}
           onMouseDown={(event) => event.stopPropagation()}
           onKeyDown={(event) => {
