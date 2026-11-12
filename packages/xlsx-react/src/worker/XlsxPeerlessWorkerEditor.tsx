@@ -576,7 +576,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     isReady: () => run?.ready ?? false, readOnly: () => propsRef.current.readOnly ?? false,
     allowHostProposals: () => propsRef.current.allowHostProposals ?? false,
     seal: (): InputSeal => {
-      if (chartDrag.current) return { refused: 'gesture-active' };
+      if (chartDrag.current || chartResizeActive()) return { refused: 'gesture-active' };
       flushNudgeRef.current();
       return draftController.seal();
     },

@@ -935,7 +935,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     }
   };
   const seal = (): InputSeal => {
-    if (chartDrag.current) return { refused: 'gesture-active' };
+    if (chartDrag.current || chartResizeActive()) return { refused: 'gesture-active' };
     flushNudgeRef.current();
     const pending = composition.current;
     if (!pending) return {};
@@ -1250,7 +1250,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const options = { kind: 'chart' as const, target: { sheet, target: id }, input: edges };
     void coordinator.runAfterPendingInput(operation, options).catch(reportInputError);
   };
-  const { start: startChartResize, cancel: cancelChartResize, nudge: nudgeChartResize } = useChartResizeGesture({
+  const { start: startChartResize, cancel: cancelChartResize, nudge: nudgeChartResize,
+    active: chartResizeActive } = useChartResizeGesture({
     zoom: () => sourceRef.current?.painted?.request.zoom ?? zoomRef.current,
     preview: setChartPreview,
     commit: (_handle, edges) => {
