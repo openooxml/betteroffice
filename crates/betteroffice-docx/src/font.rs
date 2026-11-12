@@ -463,7 +463,7 @@ mod tests {
     #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
     #[test]
     fn an_unbundled_family_with_hebrew_text_chains_the_last_resort_then_the_glyph_fallback_then_hebrew()
-    {
+     {
         assert_eq!(
             chain_families("Segoe UI Black", &["hebrew"]),
             ["Selawik", "Liberation Sans", "Noto Sans Hebrew"]
