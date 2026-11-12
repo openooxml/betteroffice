@@ -109,10 +109,11 @@ export function createRustMeasureSource(options: {
   runtime?: { decoder?: FontDecoder };
   /** Register sliced script-fallback faces from their skeleton and core. */
   progressive?: boolean;
-  /** With the default provider, give families it doesn't carry the last-resort face. */
+  /** With the default provider, give families it doesn't carry the last-resort face. On unless `false`. */
   standIns?: boolean;
 }): RustMeasureSource {
   const engine = options.engine;
+  const standIns = options.standIns !== false;
   const hosted = hostedFontFamilies(options.bundled);
   let implicit = false;
   let generation = 0;
@@ -129,10 +130,10 @@ export function createRustMeasureSource(options: {
     },
     { baseLatin: () => import('./baseLatinFaces').then(tier => tier.resolveBaseLatinProvider(baseLatinFontState(), options.runtime)), bundled: (hosted ? undefined : options.bundled) ?? (async () => {
       const current = generation;
-      const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime, options.standIns), hosted);
+      const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime, standIns), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
-    }), progressive: options.progressive
+    }), standInTail: options.standIns === true, progressive: options.progressive
       ? async (slices) => import('@betteroffice/fonts/progressive').then(async ({ openSlicedFace, sliceSourceOf }) => {
         const face = await openSlicedFace(slices as Parameters<typeof openSlicedFace>[0]);
         if (!sliceSourceOf(face)) throw new Error('A sliced face opened without file URLs cannot load its outlines in the worker');
@@ -275,7 +276,7 @@ export function createRustMeasureSource(options: {
       if (implicit) {
         const ids = [...new Set(Object.values(fontChains).flat())];
         if (ids.length > 0) fontChains[IMPLICIT_FONT_COVERAGE] = ids;
-        if (ids.length > 0 && options.standIns) fontChains[IMPLICIT_SYMBOL_SHAPING] = ids;
+        if (ids.length > 0 && options.standIns === true) fontChains[IMPLICIT_SYMBOL_SHAPING] = ids;
       }
       return {
         fontChains,
