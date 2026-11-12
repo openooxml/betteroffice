@@ -21771,9 +21771,83 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert_ne!(engine.lower_story_json("body", &env).unwrap(), before);
     }
 
+    fn footnote_marks(blocks: serde_json::Value) -> Vec<(i64, String)> {
+        blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|block| block["runs"].as_array().cloned().unwrap_or_default())
+            .filter_map(|run| {
+                Some((
+                    run.get("footnoteRefId")?.as_f64()? as i64,
+                    run["text"].as_str()?.to_owned(),
+                ))
+            })
+            .collect()
+    }
+
+    fn resident_footnote_marks(engine: &EngineSession) -> Vec<(i64, String)> {
+        footnote_marks(
+            serde_json::to_value(engine.render.borrow().stories["body"].blocks.as_ref()).unwrap(),
+        )
+    }
+
+    fn fresh_footnote_marks(engine: &EngineSession, env: &RenderEnv) -> Vec<(i64, String)> {
+        footnote_marks(
+            serde_json::to_value(
+                crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", env).unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn revision_preview_note_engine(
+        client_id: u64,
+        body: &str,
+        note_ids: &[u32],
+        font: u32,
+    ) -> EngineSession {
+        use super::lowering_fixture::Package;
+
+        let mut notes = format!("<w:footnotes {}>", lowering_fixture::NS);
+        for id in note_ids {
+            notes.push_str(&format!(
+                r#"<w:footnote w:id="{id}"><w:p><w:r><w:t>Note {id}</w:t></w:r></w:p></w:footnote>"#
+            ));
+        }
+        notes.push_str("</w:footnotes>");
+        let bytes = Package::new(body)
+            .part("footnotes.xml", "rIdNotes", "footnotes", "footnotes", &notes)
+            .bytes();
+        let engine = EngineSession::new(client_id);
+        crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+        engine.set_local_lowering(true);
+        engine
+            .layout_regions_for_trigger(&small_page_request(font), None, RelayoutTrigger::Bulk)
+            .unwrap();
+        assert!(engine.render.borrow().stories["body"].preview.is_some());
+        engine
+    }
+
+    fn patch_revision_preview(engine: &EngineSession, decision: RevisionPreview) -> RenderEnv {
+        let epoch = engine.doc_epoch();
+        let id = preview_fixture::ids(engine).remove(0);
+        let env = engine.render.borrow().stories["body"]
+            .env
+            .clone()
+            .with_revision_preview(&id, decision);
+        let before = engine.stats();
+        assert!(engine.patch_preview_body(epoch, &env).is_some());
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + 1,
+        );
+        env
+    }
+
     #[test]
-    fn known_limit_revision_preview_replay_shows_the_raw_note_id() {
-        use super::lowering_fixture::{Package, para, run};
+    fn revision_preview_replay_marks_note_references_with_their_ordinals() {
+        use super::lowering_fixture::{para, run};
 
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
@@ -21785,52 +21859,121 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 run("Before"),
             ),
         );
-        let notes = format!(
-            r#"<w:footnotes {}><w:footnote w:id="2"><w:p><w:r><w:t>Two</w:t></w:r></w:p></w:footnote></w:footnotes>"#,
-            lowering_fixture::NS
+        let engine = revision_preview_note_engine(9677, &body, &[2], font);
+        assert_eq!(resident_footnote_marks(&engine), vec![(2, "1".to_owned())]);
+        let env = patch_revision_preview(&engine, RevisionPreview::Rejected);
+        assert_eq!(resident_footnote_marks(&engine), vec![(2, "1".to_owned())]);
+        assert_eq!(
+            resident_footnote_marks(&engine),
+            fresh_footnote_marks(&engine, &env)
         );
+    }
+
+    #[test]
+    fn a_reference_hidden_by_a_revision_preview_shifts_the_later_ordinals() {
+        use super::lowering_fixture::{para, run};
+
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let body = format!(
+            "{}{}",
+            para(
+                "10000001",
+                &format!(
+                    r#"{}<w:ins w:id="1" w:author="A"><w:r><w:footnoteReference w:id="2"/></w:r></w:ins>{}<w:r><w:footnoteReference w:id="3"/></w:r>"#,
+                    run("Before"),
+                    run("Mid"),
+                ),
+            ),
+            para(
+                "10000002",
+                &format!(r#"{}<w:r><w:footnoteReference w:id="4"/></w:r>"#, run("Later")),
+            ),
+        );
+        let engine = revision_preview_note_engine(9678, &body, &[2, 3, 4], font);
+        let shown = vec![(2, "1".to_owned()), (3, "2".to_owned()), (4, "3".to_owned())];
+        let hidden = vec![(3, "1".to_owned()), (4, "2".to_owned())];
+        assert_eq!(resident_footnote_marks(&engine), shown);
+        for (decision, expected) in [
+            (RevisionPreview::Rejected, &hidden),
+            (RevisionPreview::Accepted, &shown),
+            (RevisionPreview::Rejected, &hidden),
+        ] {
+            let env = patch_revision_preview(&engine, decision);
+            assert_eq!(&resident_footnote_marks(&engine), expected, "{decision:?}");
+            assert_eq!(
+                resident_footnote_marks(&engine),
+                fresh_footnote_marks(&engine, &env),
+                "{decision:?}",
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf probe; run explicitly with --ignored --nocapture"]
+    fn renumber_cost_on_a_note_heavy_story() {
+        use super::lowering_fixture::{Package, para, run};
+
+        const PARAGRAPHS: usize = 2000;
+        const NOTE_EVERY: usize = 4;
+        const EDITS: u32 = 50;
+        let mut body = String::new();
+        let mut notes = format!("<w:footnotes {}>", lowering_fixture::NS);
+        for index in 0..PARAGRAPHS {
+            let mut content = run("Paragraph text");
+            if index % NOTE_EVERY == NOTE_EVERY - 1 {
+                let id = index / NOTE_EVERY + 1;
+                content.push_str(&format!(r#"<w:r><w:footnoteReference w:id="{id}"/></w:r>"#));
+                notes.push_str(&format!(
+                    r#"<w:footnote w:id="{id}"><w:p><w:r><w:t>Note {id}</w:t></w:r></w:p></w:footnote>"#
+                ));
+            }
+            body.push_str(&para(&format!("{:08X}", 0x10000001 + index), &content));
+        }
+        notes.push_str("</w:footnotes>");
         let bytes = Package::new(&body)
             .part("footnotes.xml", "rIdNotes", "footnotes", "footnotes", &notes)
             .bytes();
-        let marks = |engine: &EngineSession| {
-            let blocks =
-                serde_json::to_value(engine.render.borrow().stories["body"].blocks.as_ref())
-                    .unwrap();
-            blocks
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|block| block["runs"].as_array().cloned().unwrap_or_default())
-                .filter_map(|run| {
-                    Some((
-                        run.get("footnoteRefId")?.as_f64()? as i64,
-                        run["text"].as_str()?.to_owned(),
-                    ))
-                })
-                .collect::<Vec<_>>()
-        };
-        let engine = EngineSession::new(9677);
-        crate::seed_from_docx(engine.doc(), &bytes).unwrap();
-        engine.set_local_lowering(true);
-        let request = small_page_request(font);
-        engine
-            .layout_regions_for_trigger(&request, None, RelayoutTrigger::Bulk)
-            .unwrap();
-        assert!(engine.render.borrow().stories["body"].preview.is_some());
-        assert_eq!(marks(&engine), vec![(2, "1".to_owned())]);
-        let epoch = engine.doc_epoch();
-        let id = preview_fixture::ids(&engine).remove(0);
-        let env = engine.render.borrow().stories["body"]
-            .env
-            .clone()
-            .with_revision_preview(&id, RevisionPreview::Rejected);
-        let before = engine.stats();
-        assert!(engine.patch_preview_body(epoch, &env).is_some());
-        assert_eq!(
-            engine.stats().lower_preview_patches,
-            before.lower_preview_patches + 1,
+        let (engine, _) = local_patch_laid_out(&bytes, 9679, true);
+        let env = engine.render.borrow().stories["body"].env.clone();
+        let refs = docx_layout::footnotes::collect_note_refs(
+            &engine.render.borrow().stories["body"].blocks.to_vec(),
+        )
+        .len();
+        let offset = measurement_patch_offset(&engine, 0);
+        let mut partial = std::time::Duration::ZERO;
+        let mut renumber = std::time::Duration::ZERO;
+        for _ in 0..EDITS {
+            engine
+                .edit_resident_text(
+                    crate::StoryRange::new("body", offset, offset),
+                    Some("x"),
+                    true,
+                )
+                .unwrap();
+            let started = std::time::Instant::now();
+            assert!(
+                engine
+                    .patch_lowered_body(engine.doc_epoch(), &env)
+                    .is_some()
+            );
+            partial += started.elapsed();
+            let mut blocks = engine.render.borrow().stories["body"]
+                .blocks
+                .shared()
+                .to_vec();
+            let started = std::time::Instant::now();
+            let renumbered =
+                docx_layout::footnotes::number_note_references(&mut blocks, &env.note_numbering);
+            renumber += started.elapsed();
+            assert!(!renumbered);
+        }
+        println!(
+            "RENUMBER_COST partial_ms_avg={:.3} renumber_us_avg={:.1} refs={refs}",
+            partial.as_secs_f64() * 1e3 / f64::from(EDITS),
+            renumber.as_secs_f64() * 1e6 / f64::from(EDITS),
         );
-        assert_eq!(marks(&engine), vec![(2, "2".to_owned())]);
     }
 
     #[test]

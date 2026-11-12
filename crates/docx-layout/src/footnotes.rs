@@ -1684,6 +1684,57 @@ mod tests {
     }
 
     #[test]
+    fn default_note_numbering_equals_no_numbering_and_any_setting_differs() {
+        let numbering = |value: serde_json::Value| {
+            SectionNoteNumbering::for_regions(&serde_json::from_value(value).unwrap())
+        };
+        assert!(SectionNoteNumbering::for_regions(&DocumentRegions::default()).is_empty());
+        assert!(numbering(json!({"sections": [{"sectionId": "main"}]})).is_empty());
+        assert!(
+            numbering(json!({
+                "noteSettings": {
+                    "footnote": {"numFmt": "decimal", "numStart": 1, "numRestart": "continuous"},
+                    "endnote": {"position": "docEnd"}
+                },
+                "sections": [{"sectionId": "first"}, {"sectionId": "second"}]
+            }))
+            .is_empty()
+        );
+
+        let settings = [
+            json!({"footnote": {"numRestart": "eachSect"}}),
+            json!({"footnote": {"numRestart": "eachPage"}}),
+            json!({"footnote": {"numFmt": "lowerRoman"}}),
+            json!({"footnote": {"numStart": 3}}),
+            json!({"endnote": {"numFmt": "lowerRoman"}}),
+        ];
+        let numberings: Vec<_> = settings
+            .iter()
+            .map(|settings| {
+                numbering(json!({
+                    "noteSettings": settings,
+                    "sections": [{"sectionId": "main"}]
+                }))
+            })
+            .collect();
+        for (index, numbering) in numberings.iter().enumerate() {
+            assert!(!numbering.is_empty(), "{}", settings[index]);
+            for other in &numberings[index + 1..] {
+                assert_ne!(numbering, other, "{}", settings[index]);
+            }
+        }
+        let per_section = numbering(json!({
+            "sections": [
+                {"sectionId": "first"},
+                {"sectionId": "second", "noteSettings": {"footnote": {"numStart": 5}}}
+            ]
+        }));
+        assert_eq!(per_section.len(), 2);
+        assert_eq!(per_section[0], SectionNoteNumbering::default());
+        assert_eq!(per_section[1].footnote.num_start, Some(5));
+    }
+
+    #[test]
     fn separator_widths_follow_page_geometry_while_columns_follow_the_caller() {
         let mut narrow = page(1, 0, Vec::new());
         narrow.size.w = 288.0;
