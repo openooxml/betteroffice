@@ -536,18 +536,34 @@ impl Document {
         }
         let mut plan = session_paragraph_ids(session.paragraph_save_plan());
         if !reassigned.is_empty() {
-            let Some(patched) = plan
+            if let Some(patched) = plan
                 .patched_parts
                 .iter_mut()
                 .find(|patched| patched.part == body_part)
-            else {
+            {
+                patched
+                    .para_ids
+                    .retain(|(ordinal, _)| !reassigned.iter().any(|(source, _)| source == ordinal));
+                patched.para_ids.extend(reassigned);
+                patched.para_ids.sort_by_key(|(ordinal, _)| *ordinal);
+            } else if plan
+                .spliced_parts
+                .iter()
+                .any(|spliced| spliced.part == body_part)
+            {
+                let moved: BTreeSet<u32> = reassigned.iter().map(|(ordinal, _)| *ordinal).collect();
+                plan.assignments
+                    .retain(|id| id.part != body_part || !moved.contains(&id.ordinal));
+                for (ordinal, para_id) in reassigned {
+                    plan.assignments.push(S13ParagraphId {
+                        part: body_part.clone(),
+                        ordinal,
+                        para_id,
+                    });
+                }
+            } else {
                 return Ok(None);
-            };
-            patched
-                .para_ids
-                .retain(|(ordinal, _)| !reassigned.iter().any(|(source, _)| source == ordinal));
-            patched.para_ids.extend(reassigned);
-            patched.para_ids.sort_by_key(|(ordinal, _)| *ordinal);
+            }
         }
         Ok(Some(plan))
     }
