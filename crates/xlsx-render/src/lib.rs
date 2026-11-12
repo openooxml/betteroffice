@@ -3494,6 +3494,40 @@ mod tests {
         assert!(lines[0].1 >= FONT_SIZE_PT * GHOST_MIN_SCALE);
     }
 
+    fn default_cell_ghost_texts(old: &str, new: &str) -> Vec<String> {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell(old));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl = build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, old, new)])
+            .unwrap();
+        text_cmds(&dl)
+            .into_iter()
+            .map(|(text, ..)| text.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn stacked_ghost_exactly_filling_a_default_column_stays_whole() {
+        let texts = default_cell_ghost_texts("$1,000.00", "$2,000.00");
+        assert_eq!(texts, vec!["$2,000.00", "$1,000.00"]);
+    }
+
+    #[test]
+    fn stacked_ghost_one_char_past_a_default_column_is_shortened() {
+        let texts = default_cell_ghost_texts("$1,000.00", "$20,000.00");
+        assert_eq!(texts.len(), 2);
+        assert!(texts[0].ends_with('…'));
+        assert_eq!(texts[1], "$1,000.00");
+    }
+
     #[test]
     fn short_rows_shrink_stacked_ghosts_without_overlap() {
         let mut sheet = Sheet::new("Sheet1");
