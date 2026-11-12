@@ -35,3 +35,11 @@ ooxml-fidelity = { package = "betteroffice-ooxml-fidelity", path = "../ooxml-fid
 ooxml-opc.workspace = true
 png = "0.18"
 serde_json = "1"
+
+[[example]]
+name = "export_pdf"
+required-features = ["raster"]
+
+[[example]]
+name = "export_pdf_batch"
+required-features = ["raster"]

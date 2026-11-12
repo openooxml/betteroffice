@@ -32,6 +32,7 @@
 //! page tree. The command exits 1 when any fixture fails and still writes the
 //! manifest for the fixtures that succeeded.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -75,6 +76,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     fixtures.sort_by(|left, right| left.0.cmp(&right.0));
     if fixtures.is_empty() {
         return Err(format!("no .docx fixtures under {}", input_dir.display()).into());
+    }
+    let mut destinations = HashSet::with_capacity(fixtures.len());
+    for (relative, _) in &fixtures {
+        let destination = relative.with_extension("pdf");
+        if !destinations.insert(destination.clone()) {
+            return Err(format!("output path collision: {}", destination.display()).into());
+        }
     }
 
     let total = fixtures.len();

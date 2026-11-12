@@ -1,3 +1,5 @@
+#![cfg(all(feature = "raster", feature = "fonts"))]
+
 //! End-to-end smoke test for the batch PDF exporter.
 //!
 //! This runs the compiled example over a small representative fixture set, so

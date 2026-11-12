@@ -1,3 +1,5 @@
+#![cfg(all(feature = "raster", feature = "fonts"))]
+
 use betteroffice_docx::Document;
 
 #[test]

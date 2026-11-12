@@ -43,6 +43,31 @@ impl FontRegistry {
         self.register_keyed(chain_key(family, bold, italic), bytes, priority)
     }
 
+    /// Registers a provider fallback face for export without adding a chain.
+    ///
+    /// Applies the same per-font, registration-count, and distinct-face limits
+    /// as [`Self::register_keyed`], so a provider cannot bypass the facade's
+    /// resource contract through PDF export.
+    #[cfg(feature = "fonts")]
+    pub(crate) fn register_export_fallback(&mut self, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err(Error::ResourceLimit("font exceeds 33554432 bytes".into()));
+        }
+        if self.registrations >= 4_096 {
+            return Err(Error::ResourceLimit(
+                "more than 4096 font registrations".into(),
+            ));
+        }
+        if self.store.face_count() >= 256 && self.store.find_face(bytes).is_none() {
+            return Err(Error::ResourceLimit("more than 256 font faces".into()));
+        }
+        self.store
+            .register_slice(bytes)
+            .map_err(|error| Error::Font(error.to_string()))?;
+        self.registrations += 1;
+        Ok(())
+    }
+
     /// Registers `bytes` into the chain under `key`, ahead of bundled faces for
     /// embedded (`0`) and application (`1`) priorities.
     fn register_keyed(&mut self, key: String, bytes: &[u8], priority: u8) -> Result<u32> {
