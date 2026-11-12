@@ -287,7 +287,8 @@ fn a_stale_open_keeps_a_result_only_on_a_value_or_an_inline_string_with_text() {
                 ),
             ] {
                 let source = package(&CACHED.replace("</row>", &format!("{cells}</row>")), "");
-                let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+                let workbook =
+                    Workbook::open_recalculating_stale(&source, options(), None).unwrap();
                 let expected_values = if kept {
                     [5.0, 999.0, 7.0]
                 } else {

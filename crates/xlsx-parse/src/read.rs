@@ -1198,7 +1198,9 @@ fn finalize_cell(
         .as_deref()
         .is_some_and(|value| !value.trim().is_empty())
         || (c.ty.as_deref() == Some("inlineStr")
-            && c.inline_text.as_deref().is_some_and(|text| !text.is_empty()));
+            && c.inline_text
+                .as_deref()
+                .is_some_and(|text| !text.is_empty()));
     if (c.formula.is_some() || c.ty.is_some()) && !cached {
         facts.blank_results.insert((addr.row, addr.col));
     }
