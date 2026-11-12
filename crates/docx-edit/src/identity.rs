@@ -6009,6 +6009,185 @@ mod tests {
         );
     }
 
+    fn bytes_session(bytes: &[u8]) -> crate::session::EditSessionCore {
+        let session =
+            crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
+        session.open_docx(bytes, true, None, None).unwrap();
+        session
+    }
+
+    fn commented(id: u32, text: &str) -> String {
+        format!(
+            r#"<w:commentRangeStart w:id="{id}"/>{}<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r>"#,
+            crate::seed::fixture::run(text)
+        )
+    }
+
+    fn commented_docx(body: &str, comments: u32) -> Vec<u8> {
+        use crate::seed::fixture;
+        let remarks: String = (1..=comments)
+            .map(|id| {
+                format!(
+                    r#"<w:comment w:id="{id}" w:author="Ann" w:date="2026-01-04T00:00:00Z">{}</w:comment>"#,
+                    fixture::para(&format!("{:08X}", 0x3000_0000 + id), &fixture::run("Remark"))
+                )
+            })
+            .collect();
+        fixture::Package::new(body)
+            .rel("rIdImage", "image", "media/image1.png")
+            .part(
+                "comments.xml",
+                "rIdComments",
+                "comments",
+                "comments",
+                &format!(
+                    r#"<w:comments {}>{remarks}</w:comments>"#,
+                    fixture::namespaces()
+                ),
+            )
+            .bytes()
+    }
+
+    #[test]
+    fn sliced_priming_matches_one_shot_on_a_multi_chunk_body_with_media_and_comments() {
+        use crate::seed::fixture;
+        let control = |id: i32, content: &str| {
+            format!(
+                r#"<w:sdt><w:sdtPr><w:id w:val="{id}"/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#
+            )
+        };
+        let table = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{}</w:tc><w:tc><w:tcPr/>{}{}</w:tc></w:tr></w:tbl>"#,
+            fixture::para("20000001", &commented(2, "Commented cell")),
+            control(
+                -601,
+                &format!(
+                    "{}{}",
+                    control(-602, &fixture::para("20000002", &commented(3, "Nested control"))),
+                    fixture::para("20000004", &fixture::run("Outer control"))
+                )
+            ),
+            fixture::para("20000003", &fixture::run("After the controls")),
+        );
+        let mut body = format!(
+            "{}{table}",
+            fixture::para("10000001", &commented(1, "Commented body"))
+        );
+        for index in 0..1500u32 {
+            body.push_str(&fixture::para(
+                &format!("{:08X}", 0x0100_0000 + index),
+                &fixture::run(&format!("Paragraph {index} of the long body")),
+            ));
+        }
+        body.push_str(&fixture::para(
+            "10000002",
+            &format!(
+                "{}{}",
+                fixture::run("Picture: "),
+                fixture::image("rIdImage", "Picture")
+            ),
+        ));
+        let bytes = commented_docx(&body, 3);
+        let whole = bytes_session(&bytes);
+        assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
+        let whole_source = whole.engine.doc().source_index().unwrap();
+        assert!(whole_source.seed_states().len() >= 4);
+        for max_bytes in [1, 64, 4096, 65536] {
+            let sliced = bytes_session(&bytes);
+            let doc = sliced.engine.doc();
+            let mut slices = 0;
+            loop {
+                match doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes) {
+                    PrimeSlice::Pending => slices += 1,
+                    PrimeSlice::Known => break,
+                    PrimeSlice::Declined => panic!("declined at {max_bytes}"),
+                }
+            }
+            assert!(slices > 1, "{max_bytes}");
+            assert!(doc.prime_progress.lock().unwrap().is_none());
+            let source = doc.source_index().unwrap();
+            assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+            assert_same_seed_states(&source, &whole_source);
+            assert_eq!(
+                sliced.paragraph_save_plan().unwrap(),
+                whole.paragraph_save_plan().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn a_commit_at_any_prime_slice_position_declines() {
+        use crate::seed::fixture;
+        let table = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{}</w:tc></w:tr></w:tbl>"#,
+            fixture::para("20000001", &commented(2, "Cell")),
+        );
+        let bytes = commented_docx(
+            &format!(
+                "{}{table}{}",
+                fixture::para("10000001", &commented(1, "Body")),
+                fixture::para("10000002", &fixture::run("After"))
+            ),
+            2,
+        );
+        let undisturbed = bytes_session(&bytes);
+        let mut slices = 1;
+        while undisturbed
+            .engine
+            .doc()
+            .prime_save_seed_states_slice(u32::MAX, u32::MAX, 1)
+            == PrimeSlice::Pending
+        {
+            slices += 1;
+        }
+        assert!(
+            undisturbed
+                .engine
+                .doc()
+                .source_index()
+                .unwrap()
+                .seed_states_initialized()
+        );
+        assert!(slices >= 4, "{slices}");
+        for committed_after in 1..slices {
+            let session = bytes_session(&bytes);
+            let expected = bytes_session(&bytes);
+            let doc = session.engine.doc();
+            for _ in 0..committed_after {
+                assert_eq!(
+                    doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, 1),
+                    PrimeSlice::Pending
+                );
+            }
+            for session in [&session, &expected] {
+                session
+                    .engine
+                    .doc()
+                    .insert_text(
+                        &ctx(),
+                        Position::new("body", 0),
+                        "New ",
+                        FormatPolicy::Plain,
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, 1),
+                PrimeSlice::Declined,
+                "{committed_after}"
+            );
+            assert!(doc.prime_progress.lock().unwrap().is_none());
+            let source = doc.source_index().unwrap();
+            assert!(!source.seed_states_initialized());
+            assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                session.paragraph_save_plan().unwrap(),
+                expected.paragraph_save_plan().unwrap()
+            );
+            assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 1);
+        }
+    }
+
     #[test]
     fn promoted_block_paragraphs_after_plain_and_offset_tables_splice_at_the_block_edge() {
         let xml = concat!(
