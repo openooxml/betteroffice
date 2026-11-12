@@ -1754,15 +1754,14 @@ pub enum PrimeSlice {
     Declined,
 }
 
-/// Segments are read this many at a time; a longer story's diff takes a slice of its own.
+/// Story segments read per slice.
 const PRIME_SLICE_SEGMENTS: usize = 512;
 /// What reading and closing a story, and taking each segment apart, count against a slice's
 /// `max_bytes`, beside the canonical bytes digested.
 const PRIME_STORY_COST: usize = 1024;
 const PRIME_SEGMENT_COST: usize = 64;
 
-/// A save seed state prime between slices: the setup step it is at, the stories still to
-/// digest, the one under way and the states of those done, as of the commit epoch it started at.
+/// A save seed state prime in progress between slices.
 pub(crate) struct PrimeProgress {
     epoch: u64,
     max_paragraphs: u32,
@@ -1776,7 +1775,7 @@ pub(crate) struct PrimeProgress {
     current: Option<(String, StoryFingerprint<'static>)>,
 }
 
-/// The slice a prime takes next after the one that parsed the package.
+/// The setup step a prime takes next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrimePhase {
     Scan,
@@ -1953,9 +1952,7 @@ impl<'a> StoryFingerprint<'a> {
         Some((true, digested))
     }
 
-    /// The next segment, its display-only keys stripped and its media written a chunk at a
-    /// time, and its text taken off `budget` when there is one; `None` where the story yields
-    /// none.
+    /// The story's next segment, ready to digest.
     fn next_segment(
         &mut self,
         txn: &Transaction<'_>,
@@ -1992,8 +1989,7 @@ impl<'a> StoryFingerprint<'a> {
         Some(Some(segment))
     }
 
-    /// Ends a story that yields nothing, leaving `budget` where writing all its media first
-    /// would: what that left when a part's URL cannot be read, else spent.
+    /// Ends a story that yields nothing.
     fn decline(
         &mut self,
         txn: &Transaction<'_>,
@@ -3812,8 +3808,7 @@ impl EditingDoc {
         )
     }
 
-    /// [`Self::prime_save_seed_states_slice`], reading story segments `segments_per_slice` at a
-    /// time.
+    /// [`Self::prime_save_seed_states_slice`] with a given segments-per-slice count.
     pub(crate) fn prime_save_seed_states_slice_with(
         &self,
         max_paragraphs: u32,

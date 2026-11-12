@@ -328,9 +328,7 @@ pub(crate) fn write_segment_data_urls(
     }
 }
 
-/// Writes the `data:` URLs of a story's segments a chunk at a time, as one pass over all of
-/// them would: within `budget`, when given one, of URLs, each counted at every value it is
-/// written into, and of rewritten payloads, writing nothing more once it runs out.
+/// Writes the `data:` URLs of a story's segments a chunk at a time.
 pub(crate) struct SegmentDataUrls {
     urls: HashMap<usize, Option<Arc<str>>>,
     budget: Option<usize>,

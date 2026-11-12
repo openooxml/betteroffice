@@ -440,14 +440,13 @@ pub struct SeedParagraph {
     pub alignment: String,
 }
 
-/// A story's segments still to read, from the diff taken when it was opened, which no commit
-/// since has changed. It holds no shared type, only hooks resolved in the reading transaction.
+/// A story's segments still to read.
 pub(crate) enum StorySegmentCursor {
     Diffs(std::vec::IntoIter<PendingSegment>),
     Segments(std::vec::IntoIter<StorySegment>),
 }
 
-/// One diff entry of a [`StorySegmentCursor`], owned apart from the transaction that read it.
+/// One owned diff entry of a [`StorySegmentCursor`].
 pub(crate) struct PendingSegment {
     insert: PendingInsert,
     attributes: Option<Box<Attrs>>,
@@ -463,7 +462,6 @@ impl PendingSegment {
         let insert = match diff.insert {
             Out::Any(value) => PendingInsert::Value(value),
             Out::YMap(map) => PendingInsert::Map(yrs::SharedRef::hook(&map)),
-            // Every other shared type reads as the empty embed `segment_content` gives it.
             _ => PendingInsert::Value(Any::Null),
         };
         Self {
@@ -474,8 +472,7 @@ impl PendingSegment {
 }
 
 impl StorySegmentCursor {
-    /// The next `limit` segments, fewer at the end of the story; `None` where a map it holds is
-    /// gone from `txn`.
+    /// The story's next `limit` segments.
     pub(crate) fn next_chunk<T: ReadTxn>(
         &mut self,
         txn: &T,

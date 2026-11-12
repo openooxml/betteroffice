@@ -333,10 +333,10 @@ pub(crate) fn story_comment_anchors<T: ReadTxn>(
         .unwrap_or_default()
 }
 
-/// The anchors of each comment in one story, by comment key, as decoded and not yet resolved.
+/// The decoded anchors of each comment in one story, by comment key.
 pub(crate) type CommentAnchors = BTreeMap<String, Vec<crate::CommentAnchor>>;
 
-/// Every comment anchor that decodes, decoded once, by story.
+/// Every decodable comment anchor, by story.
 pub(crate) fn comment_anchors_by_story<T: ReadTxn>(txn: &T) -> HashMap<String, CommentAnchors> {
     decoded_comment_anchors(txn, None)
 }
