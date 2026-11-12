@@ -135,8 +135,8 @@ def test_apply_ops_refuses_track_moves_before_the_batch_applies(sample_bytes):
     before = workbook.save()
     version = workbook.version()
     for move in (
-        {"type": "moveCols", "sheet": 0, "col": 0, "count": 1, "before": 2},
-        {"type": "moveRows", "sheet": 0, "row": 0, "count": 1, "before": 2},
+        {"type": "moveCols", "sheet": 0, "col": 6, "count": 1, "before": 9},
+        {"type": "moveRows", "sheet": 0, "row": 5, "count": 1, "before": 8},
     ):
         with pytest.raises(
             bo.OperationError,
