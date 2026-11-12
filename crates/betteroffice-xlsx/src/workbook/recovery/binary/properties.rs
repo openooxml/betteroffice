@@ -757,6 +757,10 @@ proptest! {
             let bytes = encoded(&op);
             prop_assert_eq!(bytes[0], tag as u8);
             let mut reader = Reader::new(&bytes);
+            if cfg!(not(feature = "unstable-track-visibility")) && matches!(tag, 40 | 41) {
+                prop_assert!(Op::read(&mut reader).is_err());
+                continue;
+            }
             prop_assert_eq!(Op::read(&mut reader).unwrap(), op);
             prop_assert!(reader.finish().is_ok());
         }

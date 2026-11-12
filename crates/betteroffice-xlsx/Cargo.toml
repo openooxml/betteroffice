@@ -20,6 +20,7 @@ fonts-cjk = ["fonts", "betteroffice-fonts/fonts-cjk"]
 raster = ["dep:xlsx-raster"]
 fuzzing = []
 unstable-track-moves = ["xlsx-ops/unstable-track-moves"]
+unstable-track-visibility = ["xlsx-ops/unstable-track-visibility"]
 
 [dependencies]
 betteroffice-fonts = { workspace = true }

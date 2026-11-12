@@ -894,18 +894,18 @@ impl Codec for Op {
                 count: Codec::read(r)?,
                 before: Codec::read(r)?,
             },
-            40 => Self::SetColsVisibility {
+            40 => available(Self::SetColsVisibility {
                 sheet: Codec::read(r)?,
                 col: Codec::read(r)?,
                 count: Codec::read(r)?,
                 hidden: Codec::read(r)?,
-            },
-            41 => Self::SetRowsVisibility {
+            })?,
+            41 => available(Self::SetRowsVisibility {
                 sheet: Codec::read(r)?,
                 row: Codec::read(r)?,
                 count: Codec::read(r)?,
                 hidden: Codec::read(r)?,
-            },
+            })?,
             42 => Self::RestoreArrayFormula {
                 sheet: Codec::read(r)?,
                 anchor: Codec::read(r)?,
@@ -919,4 +919,9 @@ impl Codec for Op {
             _ => return Err(SnapshotError::new("invalid recovery Op")),
         })
     }
+}
+
+fn available(op: Op) -> SnapshotResult<Op> {
+    xlsx_ops::ensure_op_available(&op).map_err(|error| SnapshotError::new(error.to_string()))?;
+    Ok(op)
 }

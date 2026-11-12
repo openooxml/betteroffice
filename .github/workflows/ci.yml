@@ -328,6 +328,8 @@ jobs:
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-xlsx-ops --all-targets --features unstable-track-moves -- -D warnings
           cargo clippy -p betteroffice-xlsx --all-targets --features unstable-track-moves -- -D warnings
+          cargo clippy -p betteroffice-xlsx-ops --all-targets --features unstable-track-visibility -- -D warnings
+          cargo clippy -p betteroffice-xlsx --all-targets --features unstable-track-visibility -- -D warnings
           cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-fonts --all-targets --features build -- -D warnings
           cargo clippy -p betteroffice-fonts --all-targets --features manager -- -D warnings
@@ -387,6 +389,8 @@ jobs:
           cargo test -p betteroffice-pptx --all-features
           cargo test -p betteroffice-xlsx-ops --features unstable-track-moves
           cargo test -p betteroffice-xlsx --features unstable-track-moves
+          cargo test -p betteroffice-xlsx-ops --features unstable-track-visibility
+          cargo test -p betteroffice-xlsx --features unstable-track-visibility
           cargo test -p betteroffice-pptx-edit --features test-counters --test attach_scaling
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm

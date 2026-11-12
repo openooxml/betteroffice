@@ -18,6 +18,8 @@ ACCEPTED_UNTYPED_TAGS = {
     "restoreArrayFormula",
     "restoreColDimension",
     "restoreRowDimension",
+    "setColsVisibility",
+    "setRowsVisibility",
 }
 INTERNAL_TAGS = {
     "setCharts",
@@ -116,7 +118,7 @@ def test_typed_ops_cover_every_public_tag_the_engine_decodes(sample_bytes):
         typing.get_args(typing.get_type_hints(op)["type"])[0]
         for op in typing.get_args(op_types.XlsxOp)
     }
-    assert len(typed) == 30
+    assert len(typed) == 28
     assert typed.isdisjoint(ACCEPTED_UNTYPED_TAGS | INTERNAL_TAGS)
     assert typed | ACCEPTED_UNTYPED_TAGS | INTERNAL_TAGS == accepted
 
@@ -143,6 +145,24 @@ def test_apply_ops_refuses_track_moves_before_the_batch_applies(sample_bytes):
             match="^cannot move sheet 0 tracks: moving rows or columns is not supported yet$",
         ):
             workbook.apply_ops([{"type": "setCell", "sheet": 0, "at": {"row": 0, "col": 9}, "cell": {}}, move])
+    assert workbook.version() == version
+    assert workbook.can_undo is False
+    assert workbook.save() == before
+
+
+def test_apply_ops_refuses_track_visibility_ranges_before_the_batch_applies(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    before = workbook.save()
+    version = workbook.version()
+    for visibility in (
+        {"type": "setColsVisibility", "sheet": 0, "col": 6, "count": 2, "hidden": True},
+        {"type": "setRowsVisibility", "sheet": 0, "row": 5, "count": 2, "hidden": True},
+    ):
+        with pytest.raises(
+            bo.OperationError,
+            match="^cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet$",
+        ):
+            workbook.apply_ops([{"type": "setCell", "sheet": 0, "at": {"row": 0, "col": 9}, "cell": {}}, visibility])
     assert workbook.version() == version
     assert workbook.can_undo is False
     assert workbook.save() == before

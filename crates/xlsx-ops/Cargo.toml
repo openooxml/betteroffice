@@ -17,6 +17,7 @@ name = "xlsx_ops"
 [features]
 fuzzing = []
 unstable-track-moves = []
+unstable-track-visibility = []
 
 [dependencies]
 quick-xml = "0.41"

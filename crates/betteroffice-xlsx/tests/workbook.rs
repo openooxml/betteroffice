@@ -1,3 +1,5 @@
+#[cfg(feature = "unstable-track-visibility")]
+use betteroffice_xlsx::MAX_COLS;
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
@@ -5,9 +7,9 @@ use betteroffice_xlsx::{
     CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
     DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, ErrorValue, FreezePane,
     GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
-    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_COLS, MAX_ROWS, NumberFormatKind,
-    NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId,
-    StylePatch, Stylesheet, UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
+    ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, Stylesheet,
+    UpdateOrigin, Viewport, Workbook, WorkbookModel,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12752,6 +12754,7 @@ fn hidden_custom_sizes_survive_bounded_workbook_snapshots() {
     assert_eq!(restored.model().sheets[0].row_heights.get(&0), Some(&30.0));
 }
 
+#[cfg(feature = "unstable-track-visibility")]
 #[test]
 fn a_visibility_range_hides_its_span_and_refuses_a_span_past_the_sheet() {
     let mut sheet = Sheet::new("Sized");
@@ -12826,6 +12829,7 @@ fn a_visibility_range_hides_its_span_and_refuses_a_span_past_the_sheet() {
     assert!(!workbook.can_undo());
 }
 
+#[cfg(feature = "unstable-track-visibility")]
 #[test]
 fn a_visibility_range_syncs_its_whole_span_to_a_peer() {
     let mut sheet = Sheet::new("Sized");
@@ -13969,6 +13973,62 @@ fn a_batch_holding_a_track_move_is_refused_whole() {
             assert_eq!(
                 error.to_string(),
                 "cannot move sheet 0 tracks: moving rows or columns is not supported yet"
+            );
+        }
+        assert_eq!(workbook.model(), &base);
+        assert!(!workbook.undo(options).unwrap().applied);
+    }
+}
+
+#[cfg(not(feature = "unstable-track-visibility"))]
+#[test]
+fn a_batch_holding_a_visibility_range_is_refused_whole() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+    let probe = Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("C1"),
+        cell: CellState {
+            value: CellValue::Number { value: 7.0 },
+            ..CellState::default()
+        },
+    };
+    for range in [
+        Op::SetColsVisibility {
+            sheet: SheetId(0),
+            col: 0,
+            count: 2,
+            hidden: true,
+        },
+        Op::SetRowsVisibility {
+            sheet: SheetId(0),
+            row: 0,
+            count: 2,
+            hidden: true,
+        },
+    ] {
+        let ops = vec![probe.clone(), range];
+        for error in [
+            workbook.apply_ops(ops.clone(), options).unwrap_err(),
+            workbook
+                .apply_ops_profiled(ops, options, &mut || 0.0)
+                .unwrap_err(),
+        ] {
+            assert!(matches!(error, Error::Operation(_)));
+            assert_eq!(
+                error.to_string(),
+                "cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet"
             );
         }
         assert_eq!(workbook.model(), &base);

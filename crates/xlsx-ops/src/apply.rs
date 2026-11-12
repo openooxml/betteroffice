@@ -61,6 +61,10 @@ pub enum OpError {
     TrackMovesUnavailable {
         sheet: SheetId,
     },
+    /// A track visibility range in a build without the `unstable-track-visibility` feature.
+    TrackVisibilityUnavailable {
+        sheet: SheetId,
+    },
     NumFmtTableFull,
     InvalidStyle(String),
     InvalidConditionalFormat(String),
@@ -111,6 +115,11 @@ impl fmt::Display for OpError {
                 "cannot move sheet {} tracks: moving rows or columns is not supported yet",
                 sheet.0
             ),
+            OpError::TrackVisibilityUnavailable { sheet } => write!(
+                f,
+                "cannot hide or unhide sheet {} tracks: hiding or unhiding rows or columns is not supported yet",
+                sheet.0
+            ),
             OpError::InvalidStyle(message) | OpError::InvalidDefinedName(message) => {
                 f.write_str(message)
             }
@@ -141,20 +150,21 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
     }
 }
 
-/// Refuses a track move unless built with `unstable-track-moves`.
-#[cfg(not(feature = "unstable-track-moves"))]
+/// Refuses a track move unless built with `unstable-track-moves`, and a track
+/// visibility range unless built with `unstable-track-visibility`.
+#[cfg_attr(
+    all(feature = "unstable-track-moves", feature = "unstable-track-visibility"),
+    allow(unused_variables)
+)]
 pub fn ensure_op_available(op: &Op) -> Result<(), OpError> {
-    match op {
-        Op::MoveRows { sheet, .. } | Op::MoveCols { sheet, .. } => {
-            Err(OpError::TrackMovesUnavailable { sheet: *sheet })
-        }
-        _ => Ok(()),
+    #[cfg(not(feature = "unstable-track-moves"))]
+    if let Op::MoveRows { sheet, .. } | Op::MoveCols { sheet, .. } = op {
+        return Err(OpError::TrackMovesUnavailable { sheet: *sheet });
     }
-}
-
-/// Every op is available with `unstable-track-moves`.
-#[cfg(feature = "unstable-track-moves")]
-pub fn ensure_op_available(_op: &Op) -> Result<(), OpError> {
+    #[cfg(not(feature = "unstable-track-visibility"))]
+    if let Op::SetColsVisibility { sheet, .. } | Op::SetRowsVisibility { sheet, .. } = op {
+        return Err(OpError::TrackVisibilityUnavailable { sheet: *sheet });
+    }
     Ok(())
 }
 
@@ -6193,7 +6203,86 @@ mod track_moves_unavailable_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "unstable-track-visibility")))]
+mod track_visibility_unavailable_tests {
+    use super::*;
+    use crate::UndoStack;
+
+    const REFUSAL: &str =
+        "cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet";
+
+    fn ranges() -> [Op; 2] {
+        [
+            Op::SetColsVisibility {
+                sheet: SheetId(0),
+                col: 0,
+                count: 2,
+                hidden: true,
+            },
+            Op::SetRowsVisibility {
+                sheet: SheetId(0),
+                row: 0,
+                count: 2,
+                hidden: true,
+            },
+        ]
+    }
+
+    fn filled() -> Workbook {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Sheet1"));
+        wb.sheets[0].set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        wb
+    }
+
+    fn probe() -> Op {
+        Op::SetCell {
+            sheet: SheetId(0),
+            at: CellRef::new(0, 2),
+            cell: CellState {
+                value: CellValue::Number { value: 7.0 },
+                ..CellState::default()
+            },
+        }
+    }
+
+    #[test]
+    fn every_entry_refuses_a_visibility_range_and_leaves_the_workbook_unchanged() {
+        for op in ranges() {
+            let base = filled();
+            let mut wb = base.clone();
+            let refused = OpError::TrackVisibilityUnavailable { sheet: SheetId(0) };
+            assert_eq!(refused.to_string(), REFUSAL);
+            assert_eq!(ensure_op_available(&op), Err(refused.clone()));
+            assert_eq!(apply(&mut wb, &op), Err(refused.clone()));
+            assert_eq!(apply_in_place(&mut wb, &op), Err(refused.clone()));
+            assert_eq!(apply_ops(&mut wb, &[probe(), op]), Err(refused));
+            assert_eq!(wb, base);
+        }
+    }
+
+    #[test]
+    fn a_recovered_history_step_holding_a_visibility_range_is_refused() {
+        let base = filled();
+        let mut wb = base.clone();
+        let [cols, rows] = ranges();
+        let mut stack = UndoStack::from_recovery_stacks(vec![vec![probe(), cols]], Vec::new());
+        assert_eq!(stack.undo(&mut wb).unwrap_err().to_string(), REFUSAL);
+        assert_eq!((stack.undo_depth(), stack.redo_depth()), (1, 0));
+        let mut stack = UndoStack::from_recovery_stacks(Vec::new(), vec![vec![probe(), rows]]);
+        assert_eq!(stack.redo(&mut wb).unwrap_err().to_string(), REFUSAL);
+        assert_eq!((stack.undo_depth(), stack.redo_depth()), (0, 1));
+        assert_eq!(wb, base);
+    }
+}
+
+#[cfg(all(test, feature = "unstable-track-visibility"))]
 mod visibility_range_tests {
     use super::*;
 
