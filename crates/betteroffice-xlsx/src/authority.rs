@@ -8323,6 +8323,90 @@ mod tests {
         assert_eq!(restored.materialize().unwrap(), model);
     }
 
+    const MAIN_CHECKPOINT: &[u8] = &[];
+
+    fn recovery_checkpoint_model() -> WorkbookModel {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.sheets.push(Sheet::new("Notes"));
+        model.sheets[0].format.default_row_height_pt = Some(16.0);
+        model.sheets[0].format.custom_height = true;
+        model
+    }
+
+    fn recovery_checkpoint_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_recovery_checkpoint_hex() {
+        let model = recovery_checkpoint_model();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 109).unwrap();
+        let bytes = authority.encode_recovery_state().unwrap();
+        println!("hex: {}", recovery_checkpoint_hex(&bytes));
+        println!("bytes: {bytes:?}");
+    }
+
+    #[test]
+    #[ignore]
+    fn restore_recovery_checkpoint_hex() {
+        let hex = std::env::var("BO_CHECKPOINT_HEX").unwrap();
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        match WorkbookAuthority::restore_recovery_state(&bytes, 105, 0, true, false) {
+            Ok(_) => println!("Ok"),
+            Err(error) => println!("Err: {error}"),
+        }
+    }
+
+    #[test]
+    fn recovery_state_without_column_defaults_keeps_main_bytes() {
+        let model = recovery_checkpoint_model();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 109).unwrap();
+        assert_eq!(authority.encode_recovery_state().unwrap(), MAIN_CHECKPOINT);
+    }
+
+    #[test]
+    fn recovery_state_round_trips_column_defaults() {
+        let mut model = recovery_checkpoint_model();
+        model.sheets[1].format.default_col_width = Some(22.86);
+        model.sheets[1].format.base_col_width = Some(10);
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 109).unwrap();
+        let recovered = WorkbookAuthority::restore_recovery_state(
+            &authority.encode_recovery_state().unwrap(),
+            105,
+            0,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(recovered.base.formats, authority.base.formats);
+        assert_eq!(recovered.materialize().unwrap(), model);
+    }
+
+    #[test]
+    fn recovery_state_with_column_defaults_is_refused_by_main_tail_reader() {
+        use crate::snapshot::wire::Reader;
+        use snapshot::Codec;
+        let mut model = recovery_checkpoint_model();
+        model.sheets[1].format.default_col_width = Some(22.86);
+        model.sheets[1].format.base_col_width = Some(10);
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 109).unwrap();
+        let [_, _, tail] = authority.recovery_state_parts().unwrap();
+        let mut reader = Reader::new(&tail);
+        Vec::<BTreeMap<u32, u32>>::read(&mut reader).unwrap();
+        if !reader.is_empty() {
+            reader.str().unwrap();
+        }
+        if !reader.is_empty() {
+            reader.str().unwrap();
+        }
+        assert!(reader.finish().is_err());
+    }
+
     #[test]
     fn remote_conditional_format_removal_is_refused_for_updates_and_snapshots() {
         use crate::{CalculationOptions, Workbook};
