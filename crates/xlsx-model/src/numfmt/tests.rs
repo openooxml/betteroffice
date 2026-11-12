@@ -338,6 +338,18 @@ fn rounding_is_half_away_from_zero() {
 }
 
 #[test]
+fn every_section_rounds_at_fifteen_significant_digits() {
+    assert_eq!(fv(9007199254740993.0, "0"), "9007199254740990");
+    assert_eq!(fv(1.005, "0.00E+00"), "1.01E+00");
+    assert_eq!(fv(9.995, "0.00"), "10.00");
+    assert_eq!(fv(1e-20, "0.00"), "0.00");
+    assert_eq!(fv(1.005, "#.##"), "1.01");
+    let half = fv(1000000000000009.5, "0 ?/2");
+    assert_eq!(half, fv(1000000000000010.0, "0 ?/2"));
+    assert!(!half.contains("1/2"));
+}
+
+#[test]
 fn date_anchors_and_phantom_day() {
     // the deliberate 1900 leap-year bug: serial 60 is the phantom 1900-02-29.
     assert_eq!(fv(60.0, "m/d/yyyy"), "2/29/1900");
