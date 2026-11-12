@@ -504,7 +504,7 @@ impl Document {
         let Some(baseline) = &self.session_baseline else {
             return Ok(None);
         };
-        if !baseline.saves_as(&self.model) {
+        if !baseline.saves_as(&self.model) || self.needs_full_write() {
             return Ok(None);
         }
         let Some(reassigned) = self.reassigned_ids() else {
@@ -550,6 +550,29 @@ impl Document {
             patched.para_ids.sort_by_key(|(ordinal, _)| *ordinal);
         }
         Ok(Some(plan))
+    }
+
+    /// Whether the source has a shape the plan writes differently from the full
+    /// write: note markup bound on the root, an escaped paragraph ID, or a
+    /// fallback text box.
+    fn needs_full_write(&self) -> bool {
+        let notes = [
+            &self.model.footnotes,
+            &self.model.endnotes,
+            &self.model.footnote_separators,
+            &self.model.endnote_separators,
+        ];
+        notes
+            .into_iter()
+            .flatten()
+            .any(|note| !note.custom_root_bindings.is_empty())
+            || self.original_parts.iter().any(|(name, xml)| {
+                if !name.starts_with("word/") || !name.ends_with(".xml") {
+                    return false;
+                }
+                let xml = String::from_utf8_lossy(xml);
+                escapes_a_paragraph_id(&xml) || has_fallback_text_box(&xml)
+            })
     }
 
     /// Whether each changed body paragraph saves from the session as the model holds it.
@@ -621,6 +644,36 @@ impl Document {
         }
         body
     }
+}
+
+/// Whether a `paraId` attribute value in `xml` holds a character or entity reference.
+fn escapes_a_paragraph_id(xml: &str) -> bool {
+    ['"', '\''].into_iter().any(|quote| {
+        let attribute = format!(":paraId={quote}");
+        xml.match_indices(&attribute).any(|(at, _)| {
+            xml[at + attribute.len()..]
+                .split(quote)
+                .next()
+                .is_some_and(|value| value.contains('&'))
+        })
+    })
+}
+
+/// Whether an `mc:Fallback` in `xml` holds a `w:txbxContent`.
+fn has_fallback_text_box(xml: &str) -> bool {
+    xml.match_indices(":Fallback").any(|(at, name)| {
+        let end = at + name.len();
+        let opens = matches!(
+            xml.as_bytes().get(end),
+            Some(b'>' | b' ' | b'\t' | b'\r' | b'\n')
+        ) && xml[..at]
+            .rfind('<')
+            .is_some_and(|tag| !xml[tag + 1..].starts_with('/'));
+        opens
+            && xml[end..]
+                .find(":Fallback>")
+                .is_some_and(|close| xml[end..end + close].contains(":txbxContent"))
+    })
 }
 
 /// The model fields a save writes.
@@ -1228,6 +1281,10 @@ mod session_save_tests {
     }
 
     fn open() -> Document {
+        open_source(source())
+    }
+
+    fn open_source(source: String) -> Document {
         let parts = vec![
             (
                 "[Content_Types].xml".to_owned(),
@@ -1237,7 +1294,7 @@ mod session_save_tests {
                 "_rels/.rels".to_owned(),
                 br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
             ),
-            ("word/document.xml".to_owned(), source().into_bytes()),
+            ("word/document.xml".to_owned(), source.into_bytes()),
         ];
         Document::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
     }
@@ -1312,6 +1369,37 @@ mod session_save_tests {
         let unchanged = [first_paragraph(), paragraph("0000000B", &run("Charlie"))];
         let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
         assert_plan_keeps(&document, &unchanged, "Delta edited twice");
+    }
+
+    #[test]
+    fn shapes_the_plan_writes_differently_take_the_full_write() {
+        let fallback = format!(
+            r#"<w:r><mc:AlternateContent><mc:Choice Requires="w14"><w:t>Delta</w:t></mc:Choice><mc:Fallback><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape><v:textbox><w:txbxContent>{}</w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r>"#,
+            r#"<w:p><w:r><w:t>Fallback</w:t></w:r></w:p>"#
+        );
+        let variants = [
+            source().replacen(
+                r#"w14:paraId="0000000C""#,
+                r#"w14:paraId="0000000&#x43;""#,
+                1,
+            ),
+            source().replacen(&run("Delta"), &fallback, 1),
+        ];
+        for variant in variants {
+            assert_ne!(variant, source());
+            let edited = || {
+                let mut document = open_source(variant.clone());
+                document
+                    .replace_paragraph_text("0000000B", "Charlie edited")
+                    .unwrap();
+                document
+            };
+            let document = edited();
+            assert!(document.session_save_plan().unwrap().is_none());
+            let saved = main_part(&document);
+            assert!(saved.contains("Charlie edited"), "{saved}");
+            assert_eq!(saved, full_write(edited()));
+        }
     }
 
     #[test]
