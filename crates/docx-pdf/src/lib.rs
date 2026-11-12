@@ -6,8 +6,13 @@
 //! positioned glyph runs, fallback text, rectangles, lines, decorations,
 //! images (RGB plus soft masks), shape paths, headers/footers, note areas and
 //! page borders. Links and tagged PDF are follow-up work.
+//!
+//! Plain PDF 1.7 is the default. [`PdfConformance::PdfA2u`] opts into archival
+//! output through [`export_pdf_with_options`]; it requires embedded fonts and
+//! rejects input the writer cannot represent conformantly instead of silently
+//! emitting a non-conforming file.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
 use docx_layout::display_list::{
@@ -27,8 +32,16 @@ use crate::font::{EmbeddedFont, FontError};
 mod font;
 mod image;
 mod link;
+// PDF/A-2u seam: `/Info` + XMP generation is owned by the metadata slice.
+mod metadata;
+pub(crate) mod options;
+// PDF/A-2u seam: sRGB ICC profile + `/OutputIntents` is owned by the color
+// slice.
+mod pdfa_color;
 mod text;
 mod units;
+
+pub use options::{PdfConformance, PdfExportOptions, PdfMetadata};
 
 /// PDF export failed.
 #[derive(Debug)]
@@ -116,6 +129,112 @@ struct FontRefs {
     file: Ref,
     to_unicode: Ref,
     cid_to_gid: Ref,
+    /// PDF/A-2u `/CIDSet` stream; `None` for Standard output.
+    cid_set: Option<Ref>,
+}
+
+/// Object ids reserved for the PDF/A structures the catalog and trailer must
+/// reference while they are written.
+///
+/// The output intent itself is a direct dictionary in the catalog's
+/// `/OutputIntents` array, so only its `/DestOutputProfile` stream needs an
+/// id. All three ids come from the single object counter that also allocates
+/// fonts, images, opacity states, pages and link annotations.
+struct PdfAObjects {
+    /// Trailer `/Info` dictionary.
+    info: Ref,
+    /// Catalog `/Metadata` XMP stream.
+    xmp: Ref,
+    /// `/OutputIntents[0] /DestOutputProfile` ICC stream.
+    profile: Ref,
+}
+
+impl PdfAObjects {
+    /// Reserve the ids in a fixed order and advance the caller's counter past
+    /// them.
+    fn reserve(next_id: &mut i32) -> Self {
+        let info = Ref::new(*next_id);
+        let xmp = Ref::new(*next_id + 1);
+        let profile = Ref::new(*next_id + 2);
+        *next_id += 3;
+        Self { info, xmp, profile }
+    }
+}
+
+/// Deterministic 128-bit file identifier accumulated from emitted content.
+///
+/// PDF/A requires `/ID` in the trailer. Deriving it from the document content
+/// makes repeated exports of the same input reproduce the same identifier and
+/// different input produce a different one. FNV-1a is used because its output
+/// is stable across Rust releases and it needs no additional dependency.
+struct DocumentId {
+    low: u64,
+    high: u64,
+}
+
+impl DocumentId {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn new() -> Self {
+        Self {
+            low: Self::FNV_OFFSET,
+            high: Self::FNV_OFFSET.rotate_left(32) ^ 0xa5a5_5a5a_1234_5678,
+        }
+    }
+
+    /// Hash one chunk with a length prefix so concatenations stay unambiguous.
+    fn update(&mut self, bytes: &[u8]) {
+        self.mix(b'\x1e');
+        for byte in (bytes.len() as u64).to_le_bytes() {
+            self.mix(byte);
+        }
+        for &byte in bytes {
+            self.mix(byte);
+        }
+    }
+
+    /// Hash a field discriminator.
+    fn update_tag(&mut self, tag: u8) {
+        self.mix(tag);
+    }
+
+    fn mix(&mut self, byte: u8) {
+        let byte = u64::from(byte);
+        self.low = (self.low ^ byte).wrapping_mul(Self::FNV_PRIME);
+        self.high = (self.high ^ byte)
+            .wrapping_mul(Self::FNV_PRIME)
+            .rotate_left(13);
+    }
+
+    /// Hash every metadata field, distinguishing absent from empty values.
+    fn update_metadata(&mut self, metadata: &PdfMetadata) {
+        for (tag, value) in [
+            (1, &metadata.title),
+            (2, &metadata.author),
+            (3, &metadata.subject),
+            (4, &metadata.keywords),
+            (5, &metadata.creator),
+            (6, &metadata.creation_date),
+            (7, &metadata.modification_date),
+        ] {
+            self.update_tag(tag);
+            match value {
+                Some(value) => {
+                    self.update_tag(1);
+                    self.update(value.as_bytes());
+                }
+                None => self.update_tag(0),
+            }
+        }
+    }
+
+    fn finish(&self) -> Vec<u8> {
+        let mut id = Vec::with_capacity(16);
+        id.extend_from_slice(&self.low.to_be_bytes());
+        id.extend_from_slice(&self.high.to_be_bytes());
+        id
+    }
 }
 
 /// Export a display list as a plain, untagged PDF.
@@ -123,7 +242,13 @@ struct FontRefs {
 /// Text primitives use a Base-14 font. Glyph runs require
 /// [`export_pdf_with_fonts`].
 pub fn export_pdf(display_list: &DisplayList) -> Result<Vec<u8>, PdfError> {
-    export_pdf_inner(display_list, None, &BTreeMap::new(), None)
+    export_pdf_with_options(
+        display_list,
+        None,
+        &BTreeMap::new(),
+        None,
+        &PdfExportOptions::default(),
+    )
 }
 
 /// Export a display list with embedded, subset TrueType fonts.
@@ -134,7 +259,13 @@ pub fn export_pdf_with_fonts(
     display_list: &DisplayList,
     store: &FontStore,
 ) -> Result<Vec<u8>, PdfError> {
-    export_pdf_inner(display_list, Some(store), &BTreeMap::new(), None)
+    export_pdf_with_options(
+        display_list,
+        Some(store),
+        &BTreeMap::new(),
+        None,
+        &PdfExportOptions::default(),
+    )
 }
 
 /// Export with embedded fonts and registered image bytes.
@@ -148,7 +279,13 @@ pub fn export_pdf_with_fonts_and_images(
     store: &FontStore,
     images: &BTreeMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>, PdfError> {
-    export_pdf_inner(display_list, Some(store), images, None)
+    export_pdf_with_options(
+        display_list,
+        Some(store),
+        images,
+        None,
+        &PdfExportOptions::default(),
+    )
 }
 
 /// Export with embedded fonts, registered image bytes, and the facade's
@@ -165,7 +302,34 @@ pub fn export_pdf_with_fonts_images_and_chains(
     images: &BTreeMap<String, Vec<u8>>,
     chains: &HashMap<String, Vec<FontId>>,
 ) -> Result<Vec<u8>, PdfError> {
-    export_pdf_inner(display_list, Some(store), images, Some(chains))
+    export_pdf_with_options(
+        display_list,
+        Some(store),
+        images,
+        Some(chains),
+        &PdfExportOptions::default(),
+    )
+}
+
+/// Export with explicit conformance and document metadata.
+///
+/// `store` must be the same font registry that produced the display list's
+/// `font_id`s. [`PdfConformance::Standard`] keeps the historical behavior and
+/// accepts `None` (Base-14 fallback text). [`PdfConformance::PdfA2u`] requires
+/// a store and rejects the Base-14 fallback whenever the document contains
+/// text, returning [`PdfError::Unsupported`] for input it cannot represent
+/// conformantly; it never silently downgrades.
+///
+/// `images` and `chains` have the same meaning as in
+/// [`export_pdf_with_fonts_images_and_chains`].
+pub fn export_pdf_with_options(
+    display_list: &DisplayList,
+    store: Option<&FontStore>,
+    images: &BTreeMap<String, Vec<u8>>,
+    chains: Option<&HashMap<String, Vec<FontId>>>,
+    options: &PdfExportOptions,
+) -> Result<Vec<u8>, PdfError> {
+    export_pdf_inner(display_list, store, images, chains, options)
 }
 
 fn export_pdf_inner(
@@ -173,12 +337,19 @@ fn export_pdf_inner(
     store: Option<&FontStore>,
     images: &BTreeMap<String, Vec<u8>>,
     chains: Option<&HashMap<String, Vec<FontId>>>,
+    options: &PdfExportOptions,
 ) -> Result<Vec<u8>, PdfError> {
     if display_list.pages.is_empty() {
         return Err(PdfError::NoPages);
     }
 
     let mut pdf = Pdf::new();
+    // PDF/A-2 is based on PDF 1.7. pdf-writer defaults to a 1.7 header, but
+    // archival output states it explicitly instead of depending on that
+    // default; Standard output keeps the default bytes.
+    if options.conformance.is_pdfa() {
+        pdf.set_version(1, 7);
+    }
     let catalog_id = Ref::new(1);
     let page_tree_id = Ref::new(2);
     let text_font_id = Ref::new(3);
@@ -209,16 +380,76 @@ fn export_pdf_inner(
                 )
                 .any(|primitive| matches!(primitive, Primitive::Text(_)))
         });
-    pdf.catalog(catalog_id).pages(page_tree_id);
+    // PDF/A-2u seam: enforce archival preconditions before any object is
+    // written. A `PdfA2u` request must not fall back to Base-14 and must not
+    // be downgraded to `Standard`; unsupported input is reported instead.
+    // Empty metadata is accepted: ISO 19005-2 does not require a title (that
+    // is a PDF/UA requirement), and the metadata writer omits absent fields.
+    if options.conformance.is_pdfa() {
+        if store.is_none() {
+            return Err(PdfError::Unsupported(
+                "PDF/A-2u requires embedded fonts (a FontStore)",
+            ));
+        }
+        if has_text {
+            return Err(PdfError::Unsupported(
+                "PDF/A-2u forbids the Base-14 text fallback",
+            ));
+        }
+    }
+
+    // PDF/A-2u seam: the precondition above guarantees `has_text` is false for
+    // `PdfA2u`, so no Base-14 object or `/F0` resource can appear in archival
+    // output. The explicit gate keeps that invariant if the precondition moves.
+    let has_text = has_text && !options.conformance.is_pdfa();
+
+    let mut next_id = if has_text { 4 } else { 3 };
+    // PDF/A-2u seam: reserved ids draw from the same counter as fonts,
+    // images, opacity states, pages and link annotations, so they stay
+    // deterministic and collision-free.
+    let pdfa = options
+        .conformance
+        .is_pdfa()
+        .then(|| PdfAObjects::reserve(&mut next_id));
+    // PDF/A-2u seam: `/ID` is a deterministic content hash set on the trailer
+    // before `finish`. Standard exports keep pdf-writer's default trailer
+    // without `/ID`, so their bytes do not change.
+    let mut file_id = pdfa.is_some().then(DocumentId::new);
+
+    {
+        let mut catalog = pdf.catalog(catalog_id);
+        catalog.pages(page_tree_id);
+        if let Some(pdfa) = &pdfa {
+            catalog.metadata(pdfa.xmp);
+            // PDF/A-2u seam: the output intent is a direct dictionary in the
+            // catalog's `/OutputIntents` array; `profile` is the reserved ICC
+            // stream referenced by `/DestOutputProfile`.
+            pdfa_color::attach_output_intent(&mut catalog, pdfa.profile)?;
+        }
+    }
     if has_text {
         pdf.type1_font(text_font_id).base_font(Name(b"Helvetica"));
+    }
+    if let Some(pdfa) = &pdfa {
+        if let Some(file_id) = file_id.as_mut() {
+            file_id.update(b"PDF/A-2u");
+            file_id.update_metadata(&options.metadata);
+        }
+        // PDF/A-2u seam: `/Info` and the XMP stream are owned by the metadata
+        // slice; this slice reserves their ids and registers them with the
+        // trailer and catalog above.
+        metadata::write_document_info(&mut pdf, pdfa.info, &options.metadata)?;
+        metadata::write_xmp_metadata(&mut pdf, pdfa.xmp, options.conformance, &options.metadata)?;
+        pdfa_color::write_output_profile(&mut pdf, pdfa.profile)?;
     }
 
     let font_uses = match (store, chains) {
         (Some(store), Some(chains)) if !chains.is_empty() => {
-            collect_with_chains(display_list, store, chains)
+            font::collect_with_chains_policy(display_list, store, chains, options.conformance)?
         }
-        (Some(store), _) => font::collect_with_text(display_list, store),
+        (Some(store), _) => {
+            font::collect_with_text_policy(display_list, store, options.conformance)?
+        }
         (None, _) => font::collect(display_list),
     };
     if store.is_none() && !font_uses.is_empty() {
@@ -227,14 +458,29 @@ fn export_pdf_inner(
 
     let mut font_map = BTreeMap::new();
     let mut font_objects = Vec::new();
-    let mut next_id = if has_text { 4 } else { 3 };
     if let Some(store) = store {
         for (index, (font_id, glyphs)) in font_uses.iter().enumerate() {
             if glyphs.is_empty() {
                 continue;
             }
             let resource = format!("F{}", index + 1);
-            let embedded = EmbeddedFont::new(resource, store, *font_id, glyphs)?;
+            let embedded = EmbeddedFont::new_with_conformance(
+                resource,
+                store,
+                *font_id,
+                glyphs,
+                options.conformance,
+            )?;
+            if let Some(file_id) = file_id.as_mut() {
+                file_id.update(embedded.base_name.as_bytes());
+                file_id.update(&embedded.subset);
+                file_id.update(&embedded.tounicode);
+                if let Some(map) = &embedded.cid_to_gid {
+                    for gid in map {
+                        file_id.update(&gid.to_be_bytes());
+                    }
+                }
+            }
             let refs = FontRefs {
                 type0: Ref::new(next_id),
                 cid: Ref::new(next_id + 1),
@@ -242,15 +488,19 @@ fn export_pdf_inner(
                 file: Ref::new(next_id + 3),
                 to_unicode: Ref::new(next_id + 4),
                 cid_to_gid: Ref::new(next_id + 5),
+                // PDF/A-2u seam: `/CIDSet` needs its own stream. Reserve it
+                // only for archival output so Standard ref numbering (and
+                // therefore bytes) stay unchanged.
+                cid_set: options.conformance.is_pdfa().then(|| Ref::new(next_id + 6)),
             };
-            next_id += 6;
+            next_id += if options.conformance.is_pdfa() { 7 } else { 6 };
             font_objects.push((*font_id, refs));
             font_map.insert(*font_id, embedded);
         }
     }
 
     for (font_id, refs) in &font_objects {
-        write_font(&mut pdf, &font_map[font_id], *refs);
+        write_font(&mut pdf, &font_map[font_id], *refs, options.conformance);
     }
 
     let mut image_map: BTreeMap<String, ImageRefs> = BTreeMap::new();
@@ -315,6 +565,14 @@ fn export_pdf_inner(
     }
 
     for (refs, decoded) in &image_objects {
+        if let Some(file_id) = file_id.as_mut() {
+            file_id.update(&(decoded.width as u32).to_be_bytes());
+            file_id.update(&(decoded.height as u32).to_be_bytes());
+            file_id.update(&decoded.rgb);
+            if let Some(alpha) = &decoded.alpha {
+                file_id.update(alpha);
+            }
+        }
         write_image(&mut pdf, refs, decoded);
     }
 
@@ -352,7 +610,7 @@ fn export_pdf_inner(
 
         let width = points(&page.width, "page width")?;
         let height = points(&page.height, "page height")?;
-        let content = deflate(&page_content(
+        let content = page_content(
             page,
             width,
             height,
@@ -361,7 +619,27 @@ fn export_pdf_inner(
             store,
             chains,
             &opacity_map,
-        )?);
+            options.conformance,
+        )?;
+        if let Some(file_id) = file_id.as_mut() {
+            file_id.update(&width.to_le_bytes());
+            file_id.update(&height.to_le_bytes());
+            // Hash the uncompressed content so `/ID` does not depend on the
+            // deflate implementation.
+            file_id.update(&content);
+            for link in &links {
+                for value in link.rect {
+                    file_id.update(&value.to_le_bytes());
+                }
+                if let link::LinkAction::Uri(uri) = &link.action {
+                    file_id.update(uri.as_bytes());
+                }
+                if let Some(title) = &link.title {
+                    file_id.update(title.as_bytes());
+                }
+            }
+        }
+        let content = deflate(&content);
         pdf.stream(content_id, &content).filter(Filter::FlateDecode);
         let mut writer = pdf.page(page_id);
         writer
@@ -398,7 +676,9 @@ fn export_pdf_inner(
         resources.finish();
         writer.finish();
         for (id, annotation) in annotation_ids.iter().zip(&links) {
-            link::write_annotation(&mut pdf, *id, page_id, annotation);
+            // PDF/A-2u seam: the link slice adds `/F 4` (print flag) for
+            // archival annotations; Standard output stays byte-identical.
+            link::write_annotation(&mut pdf, *id, page_id, annotation, options.conformance)?;
         }
         page_ids.push(page_id);
     }
@@ -406,49 +686,13 @@ fn export_pdf_inner(
     pdf.pages(page_tree_id)
         .kids(page_ids.iter().copied())
         .count(page_ids.len() as i32);
+    if let Some(file_id) = file_id {
+        // PDF/A-2u seam: both `/ID` strings are identical for the first
+        // revision; a later incremental update would change the second only.
+        let id = DocumentId::finish(&file_id);
+        pdf.set_file_id((id.clone(), id));
+    }
     Ok(pdf.finish())
-}
-
-/// Collect every glyph a chain-exported document paints.
-///
-/// Shaped glyph runs keep their run font and `.notdef` fallbacks. Fallback
-/// text resolves through the facade's layout chains, matching the painter's
-/// alias order; glyph runs hidden from painting are left out.
-fn collect_with_chains(
-    display_list: &DisplayList,
-    store: &FontStore,
-    chains: &HashMap<String, Vec<FontId>>,
-) -> BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> {
-    let mut fonts = font::collect(display_list);
-    let mut visible_glyph_fonts = BTreeSet::new();
-    let mut resolved_fonts = BTreeMap::new();
-    for page in &display_list.pages {
-        for primitive in all_primitives(page) {
-            match primitive {
-                Primitive::Text(text) if !text.hidden && !text.text.is_empty() => {
-                    text::collect_text_glyphs_with_chains(
-                        store,
-                        text,
-                        Some(chains),
-                        &mut resolved_fonts,
-                    );
-                }
-                Primitive::GlyphRun(run) if !run.hidden => {
-                    visible_glyph_fonts.insert(run.font_id);
-                    text::collect_glyph_run_fallbacks(store, run, &mut resolved_fonts);
-                }
-                _ => {}
-            }
-        }
-    }
-    fonts.retain(|font_id, _| visible_glyph_fonts.contains(font_id));
-    for (font_id, glyphs) in resolved_fonts {
-        let collected = fonts.entry(font_id).or_default();
-        for (glyph, sources) in glyphs {
-            collected.entry(glyph).or_default().extend(sources);
-        }
-    }
-    fonts
 }
 
 fn deflate(data: &[u8]) -> Vec<u8> {
@@ -457,7 +701,7 @@ fn deflate(data: &[u8]) -> Vec<u8> {
     encoder.finish().expect("in-memory deflate")
 }
 
-fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
+fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs, conformance: PdfConformance) {
     let base = Name(font.base_name.as_bytes());
     pdf.type0_font(refs.type0)
         .base_font(base)
@@ -486,6 +730,9 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
         } else if !font.is_cff {
             cid.cid_to_gid_map_predefined(Name(b"Identity"));
         }
+        // PDF/A-2u seam: `/CIDSet` is allocated with the font refs and
+        // written below from the final subset plan; Standard has no ref and
+        // writes no descriptor entry.
         cid.widths().consecutive(0, font.widths.iter().copied());
     }
 
@@ -505,6 +752,11 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
             .descent(font.descent)
             .cap_height(font.cap_height)
             .stem_v(80.0);
+        if conformance.is_pdfa()
+            && let Some(cid_set) = refs.cid_set
+        {
+            descriptor.cid_set(cid_set);
+        }
         if font.is_cff {
             descriptor.font_file3(refs.file);
         } else {
@@ -531,6 +783,13 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
         stream.filter(Filter::FlateDecode);
     }
     pdf.cmap(refs.to_unicode, &font.tounicode);
+    if conformance.is_pdfa()
+        && let Some(cid_set) = refs.cid_set
+    {
+        // PDF/A-2u seam: deterministic one-bit-per-CID payload computed from
+        // the final subset, including duplicate CIDs for distinct sources.
+        pdf.stream(cid_set, &font.cid_set());
+    }
 }
 
 fn page_content(
@@ -542,6 +801,7 @@ fn page_content(
     store: Option<&FontStore>,
     chains: Option<&HashMap<String, Vec<FontId>>>,
     opacities: &BTreeMap<u32, (String, Ref)>,
+    conformance: PdfConformance,
 ) -> Result<Vec<u8>, PdfError> {
     let mut content = Content::new();
     if let Some(rgb) = page.background.as_deref().and_then(parse_color) {
@@ -572,6 +832,7 @@ fn page_content(
         store,
         chains,
         opacities,
+        conformance,
         ImagePart::Body,
     )?;
     if let Some(header) = &page.header {
@@ -584,6 +845,7 @@ fn page_content(
             store,
             chains,
             opacities,
+            conformance,
             ImagePart::HeaderFooter(&header.r_id),
         )?;
     }
@@ -597,6 +859,7 @@ fn page_content(
             store,
             chains,
             opacities,
+            conformance,
             ImagePart::HeaderFooter(&footer.r_id),
         )?;
     }
@@ -609,6 +872,7 @@ fn page_content(
         store,
         chains,
         opacities,
+        conformance,
         ImagePart::Body,
     )?;
     for note in &page.note_areas {
@@ -621,6 +885,7 @@ fn page_content(
             store,
             chains,
             opacities,
+            conformance,
             ImagePart::Notes(note.kind.as_deref()),
         )?;
         paint_primitives(
@@ -632,6 +897,7 @@ fn page_content(
             store,
             chains,
             opacities,
+            conformance,
             ImagePart::Notes(note.kind.as_deref()),
         )?;
     }
@@ -701,6 +967,7 @@ fn paint_primitives(
     store: Option<&FontStore>,
     chains: Option<&HashMap<String, Vec<FontId>>>,
     opacities: &BTreeMap<u32, (String, Ref)>,
+    conformance: PdfConformance,
     part: ImagePart<'_>,
 ) -> Result<(), PdfError> {
     for primitive in primitives {
@@ -713,6 +980,18 @@ fn paint_primitives(
         match primitive {
             Primitive::Text(text) => match store {
                 Some(store) => match chains {
+                    // PDF/A-2u seam: policy painters reject `.notdef`, missing
+                    // coverage and unmappable source text. Standard keeps the
+                    // historical painters untouched.
+                    Some(chains) if conformance.is_pdfa() => text::paint_text_with_chains_policy(
+                        content,
+                        page,
+                        text,
+                        fonts,
+                        store,
+                        Some(chains),
+                        conformance,
+                    )?,
                     Some(chains) => text::paint_text_with_chains(
                         content,
                         page,
@@ -721,13 +1000,26 @@ fn paint_primitives(
                         store,
                         Some(chains),
                     )?,
+                    None if conformance.is_pdfa() => {
+                        text::paint_text_policy(content, page, text, fonts, store, conformance)?
+                    }
                     None => text::paint_text(content, page, text, fonts, store)?,
                 },
-                None => paint_text(content, page, text)?,
+                None => paint_text(content, page, text, conformance)?,
             },
             Primitive::Rect(rect) => paint_rect(content, page, rect)?,
             Primitive::Line(line) => paint_line(content, page, line)?,
+            // PDF/A-2u seam: policy painting rejects a cluster that would
+            // still paint `.notdef` after fallback resolution.
             Primitive::GlyphRun(run) => match store {
+                Some(store) if conformance.is_pdfa() => text::paint_glyph_run_with_store_policy(
+                    content,
+                    page,
+                    run,
+                    fonts,
+                    store,
+                    conformance,
+                )?,
                 Some(store) => text::paint_glyph_run_with_store(content, page, run, fonts, store)?,
                 None => text::paint_glyph_run(content, page, run, fonts)?,
             },
@@ -837,7 +1129,16 @@ fn paint_text(
     content: &mut Content,
     page: &DisplayPage,
     text: &TextRunPrimitive,
+    conformance: PdfConformance,
 ) -> Result<(), PdfError> {
+    // PDF/A-2u seam: defense in depth behind the top-level precondition.
+    // Base-14 fonts are not embedded, so archival output must never reach
+    // this painter.
+    if conformance.is_pdfa() {
+        return Err(PdfError::Unsupported(
+            "PDF/A-2u forbids the Base-14 text fallback",
+        ));
+    }
     if text.hidden || text.text.is_empty() {
         return Ok(());
     }

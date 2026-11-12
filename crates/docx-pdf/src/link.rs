@@ -4,14 +4,20 @@
 //! hyperlink into a clickable rectangle in PDF points, and [`write_annotation`]
 //! serializes one as a `/Link` annotation with a `/URI` action. Internal
 //! anchors are skipped: this writer has no named destination table.
+//!
+//! PDF/A-2u additionally requires the annotation's `/F` Print flag
+//! (ISO 19005-2, 6.3.2) but exempts `/Link` annotations from the `/AP`
+//! appearance-stream requirement (6.3.3), so archival output sets `/F 4` and
+//! writes no appearance dictionary.
 
 use docx_layout::display_list::{
     DisplayPage, DocAttrs, GlyphRunPrimitive, ImagePrimitive, Primitive, TextRunPrimitive,
 };
-use pdf_writer::types::{ActionType, AnnotationType};
+use pdf_writer::types::{ActionType, AnnotationFlags, AnnotationType};
 use pdf_writer::{Name, Pdf, Rect, Ref, Str, TextStr};
 
 use crate::units::{PX_TO_PT, font_size_px};
+use crate::{PdfConformance, PdfError};
 
 /// One clickable rectangle on a PDF page.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +35,12 @@ pub(crate) struct LinkAnnotation {
 pub(crate) enum LinkAction {
     /// Open an external URI.
     Uri(String),
+    /// An action this writer cannot serialize, named by its PDF action type
+    /// (for example `"JavaScript"`). [`collect_links`] emits only URIs; the
+    /// variant exists so [`write_annotation`] can reject such input instead of
+    /// emitting a link with no action or silently dropping the click target.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Unsupported(&'static str),
 }
 
 /// Collect the clickable regions of one page.
@@ -149,7 +161,28 @@ fn rects_touch(left: [f32; 4], right: [f32; 4]) -> bool {
 }
 
 /// Write one `/Link` annotation object for `page`.
-pub(crate) fn write_annotation(pdf: &mut Pdf, id: Ref, page: Ref, annotation: &LinkAnnotation) {
+///
+/// The rectangle, title and URI action are written exactly as collected.
+/// [`PdfConformance::PdfA2u`] adds `/F 4`: ISO 19005-2, 6.3.2 requires the
+/// Print flag and forbids Hidden, Invisible, NoView and ToggleNoView, which a
+/// zero `Print`-only value satisfies. Link annotations are exempt from the
+/// appearance-stream requirement (6.3.3), so no `/AP` dictionary is written.
+/// `Standard` keeps the historical dictionary without `/F`.
+///
+/// An action this writer cannot serialize is rejected with
+/// [`PdfError::Unsupported`]; it is never dropped or downgraded to a dead
+/// click target.
+pub(crate) fn write_annotation(
+    pdf: &mut Pdf,
+    id: Ref,
+    page: Ref,
+    annotation: &LinkAnnotation,
+    conformance: PdfConformance,
+) -> Result<(), PdfError> {
+    let uri = match &annotation.action {
+        LinkAction::Uri(uri) => uri,
+        LinkAction::Unsupported(kind) => return Err(PdfError::Unsupported(*kind)),
+    };
     let mut writer = pdf.annotation(id);
     writer
         .subtype(AnnotationType::Link)
@@ -160,16 +193,16 @@ pub(crate) fn write_annotation(pdf: &mut Pdf, id: Ref, page: Ref, annotation: &L
             annotation.rect[3],
         ))
         .page(page);
+    if conformance.is_pdfa() {
+        writer.flags(AnnotationFlags::PRINT);
+    }
     if let Some(title) = annotation.title.as_deref() {
         writer.pair(Name(b"T"), TextStr(title));
     }
     let mut action = writer.action();
-    match &annotation.action {
-        LinkAction::Uri(uri) => {
-            action.action_type(ActionType::Uri);
-            action.uri(Str(uri.as_bytes()));
-        }
-    }
+    action.action_type(ActionType::Uri);
+    action.uri(Str(uri.as_bytes()));
+    Ok(())
 }
 
 /// The link metadata of one primitive and its clickable box in CSS pixels,
@@ -797,5 +830,25 @@ mod tests {
         ]);
         assert_eq!(merged.len(), 1, "{merged:?}");
         assert_eq!(merged[0].rect, [0.0, 0.0, 110.0, 10.0]);
+    }
+
+    #[test]
+    fn unsupported_action_is_rejected_in_pdfa_mode() {
+        let mut pdf = Pdf::new();
+        let result = write_annotation(
+            &mut pdf,
+            Ref::new(1),
+            Ref::new(2),
+            &LinkAnnotation {
+                rect: [10.0, 20.0, 30.0, 40.0],
+                action: LinkAction::Unsupported("JavaScript"),
+                title: None,
+            },
+            crate::PdfConformance::PdfA2u,
+        );
+        assert!(
+            matches!(result, Err(PdfError::Unsupported("JavaScript"))),
+            "{result:?}"
+        );
     }
 }

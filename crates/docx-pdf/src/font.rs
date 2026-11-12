@@ -1,6 +1,6 @@
 //! Font planning and subsetting for PDF export.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use docx_layout::display_list::{GlyphRunPrimitive, Primitive};
 use ooxml_text::{FontId, FontStore};
@@ -8,6 +8,55 @@ use pdf_writer::types::{FontFlags, SystemInfo, UnicodeCmap};
 use pdf_writer::{Name, Str};
 use subsetter::GlyphRemapper;
 use ttf_parser::{Face, GlyphId};
+
+use crate::PdfError;
+use crate::options::PdfConformance;
+
+/// PDF/A-2u rejects any text code that addresses `.notdef` (glyph/CID 0).
+pub(crate) const PDFA_MULTI_SCALAR_CLUSTER: &str =
+    "PDF/A-2u cannot fall back for a multi-scalar glyph cluster";
+pub(crate) const PDFA_NOTDEF: &str = "PDF/A-2u text cannot address .notdef";
+/// No registered, usable face maps the painted scalar to a real glyph.
+pub(crate) const PDFA_MISSING_GLYPH: &str =
+    "PDF/A-2u text needs a glyph the registered fonts do not cover";
+/// PDF/A-2u cannot embed a bitmap-only face as a valid CID font program.
+pub(crate) const PDFA_NO_OUTLINES: &str = "PDF/A-2u text font has no embeddable outlines";
+/// The collection and the painter disagree about the embedded font set.
+pub(crate) const PDFA_EMBEDDED_FONT: &str = "PDF/A-2u text needs an embedded font";
+/// A glyph is painted from a cluster with no Unicode source text.
+pub(crate) const PDFA_NO_SOURCE_TEXT: &str = "PDF/A-2u glyph has no Unicode source text";
+/// A painted code has no `ToUnicode` entry to extract it back to Unicode.
+pub(crate) const PDFA_UNMAPPED_CODE: &str = "PDF/A-2u painted code has no ToUnicode mapping";
+/// One CFF glyph would carry several distinct Unicode source strings.
+pub(crate) const PDFA_CFF_AMBIGUOUS: &str =
+    "PDF/A-2u cannot map one CFF glyph to several source strings";
+/// A source string has no character a `ToUnicode` map may legally carry.
+pub(crate) const PDFA_UNMAPPABLE_TEXT: &str = "PDF/A-2u source text has no valid Unicode mapping";
+
+/// The part of a source string a PDF/A `ToUnicode` destination may carry.
+///
+/// U+0000, U+FEFF and U+FFFE carry no extractable text for PDF/A and must not
+/// appear in a destination string. An empty result means the code cannot be
+/// mapped conformantly; callers reject it instead of inventing U+FFFD.
+fn pdfa_unicode_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !matches!(ch, '\u{0000}' | '\u{FEFF}' | '\u{FFFE}'))
+        .collect()
+}
+
+/// A font could not be embedded, separating policy rejections from load and
+/// subset failures so [`EmbeddedFont::new`] keeps its historical error type.
+#[derive(Debug)]
+enum EmbedFailure {
+    Font(FontError),
+    Policy(&'static str),
+}
+
+impl From<FontError> for EmbedFailure {
+    fn from(error: FontError) -> Self {
+        Self::Font(error)
+    }
+}
 
 #[derive(Debug)]
 pub enum FontError {
@@ -61,8 +110,12 @@ fn subset_tag(mut id: u32) -> String {
     tag
 }
 
-fn has_outlines(face: &Face) -> bool {
+pub(crate) fn face_has_outlines(face: &Face) -> bool {
     face.tables().glyf.is_some() || face.tables().cff.is_some() || face.tables().cff2.is_some()
+}
+
+fn has_outlines(face: &Face) -> bool {
+    face_has_outlines(face)
 }
 
 fn push_u16(out: &mut Vec<u8>, value: u16) {
@@ -282,13 +335,81 @@ fn synth_outline_less_font(
     Ok((font, remap, widths))
 }
 
+/// Reject uses that can never produce conforming PDF/A-2u text.
+///
+/// Runs in `BTreeMap`/`BTreeSet` order, so the first rejection is deterministic.
+fn validate_pdfa_uses(
+    uses: &BTreeMap<u16, BTreeSet<String>>,
+    is_cff: bool,
+) -> Result<(), EmbedFailure> {
+    for (old, texts) in uses {
+        if *old == 0 {
+            return Err(EmbedFailure::Policy(PDFA_NOTDEF));
+        }
+        if texts.is_empty() {
+            return Err(EmbedFailure::Policy(PDFA_NO_SOURCE_TEXT));
+        }
+        // A CFF CID *is* its charstring index, and `/CIDToGIDMap` is only
+        // legal for CIDFontType2, so one CFF glyph cannot back several codes.
+        if is_cff && texts.len() > 1 {
+            return Err(EmbedFailure::Policy(PDFA_CFF_AMBIGUOUS));
+        }
+        for text in texts {
+            if text.is_empty() {
+                return Err(EmbedFailure::Policy(PDFA_NO_SOURCE_TEXT));
+            }
+            if pdfa_unicode_text(text).is_empty() {
+                return Err(EmbedFailure::Policy(PDFA_UNMAPPABLE_TEXT));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl EmbeddedFont {
+    #[allow(dead_code)] // Standard-path constructor used by the text fallback tests.
     pub fn new(
         resource: String,
         store: &FontStore,
         id: u32,
         uses: &BTreeMap<u16, BTreeSet<String>>,
     ) -> Result<Self, FontError> {
+        Self::build(resource, store, id, uses, PdfConformance::Standard).map_err(|failure| {
+            match failure {
+                EmbedFailure::Font(error) => error,
+                // Standard applies no PDF/A policy; keep the conversion total.
+                EmbedFailure::Policy(message) => FontError::Subset(message.to_owned()),
+            }
+        })
+    }
+
+    /// Embed a subset under `conformance`.
+    ///
+    /// [`PdfConformance::Standard`] is [`EmbeddedFont::new`] with the error
+    /// mapped onto [`PdfError`]. [`PdfConformance::PdfA2u`] also rejects
+    /// `.notdef`, glyphs without Unicode source text, ambiguous CFF glyphs and
+    /// unmappable source text, and never builds a `ToUnicode` destination from
+    /// U+0000, U+FEFF or U+FFFE.
+    pub(crate) fn new_with_conformance(
+        resource: String,
+        store: &FontStore,
+        id: u32,
+        uses: &BTreeMap<u16, BTreeSet<String>>,
+        conformance: PdfConformance,
+    ) -> Result<Self, PdfError> {
+        Self::build(resource, store, id, uses, conformance).map_err(|failure| match failure {
+            EmbedFailure::Font(error) => PdfError::Font(error),
+            EmbedFailure::Policy(message) => PdfError::Unsupported(message),
+        })
+    }
+
+    fn build(
+        resource: String,
+        store: &FontStore,
+        id: u32,
+        uses: &BTreeMap<u16, BTreeSet<String>>,
+        conformance: PdfConformance,
+    ) -> Result<Self, EmbedFailure> {
         let font_id = FontId::from_u32(id);
         let bytes = store
             .font_bytes(font_id)
@@ -296,9 +417,16 @@ impl EmbeddedFont {
         let original = Face::parse(bytes, 0).map_err(|error| FontError::Font(error.to_string()))?;
         let upem = f32::from(original.units_per_em().max(1));
         let scale = 1000.0 / upem;
+        let is_cff = original.tables().cff.is_some();
 
         if uses.len() > usize::from(u16::MAX) {
-            return Err(FontError::Subset("too many glyphs".into()));
+            return Err(FontError::Subset("too many glyphs".into()).into());
+        }
+        if conformance.is_pdfa() {
+            validate_pdfa_uses(uses, is_cff)?;
+            if !has_outlines(&original) {
+                return Err(EmbedFailure::Policy(PDFA_NO_OUTLINES));
+            }
         }
         let mut remapper = GlyphRemapper::new();
         for old in uses.keys().copied() {
@@ -338,10 +466,9 @@ impl EmbeddedFont {
                 // extraction stays correct and export never fails.
                 synth_outline_less_font(&original, uses)?
             }
-            Err(error) => return Err(FontError::Subset(error.to_string())),
+            Err(error) => return Err(EmbedFailure::Font(FontError::Subset(error.to_string()))),
         };
 
-        let is_cff = original.tables().cff.is_some();
         let mut widths = widths;
         let max_glyph = remap.values().copied().max().unwrap_or(0);
         let mut next_cid = max_glyph
@@ -354,8 +481,16 @@ impl EmbeddedFont {
         let mut cid_to_gid: Vec<u16> = (0..=max_glyph).collect();
         for (old, texts) in uses {
             let Some(glyph) = remap.get(old).copied() else {
+                if conformance.is_pdfa() {
+                    return Err(EmbedFailure::Font(FontError::Subset(
+                        "subset lost a requested glyph".into(),
+                    )));
+                }
                 continue;
             };
+            if conformance.is_pdfa() && glyph == 0 {
+                return Err(EmbedFailure::Policy(PDFA_NOTDEF));
+            }
             for (index, text) in texts.iter().enumerate() {
                 if text.is_empty() || (is_cff && index > 0) {
                     continue;
@@ -369,6 +504,10 @@ impl EmbeddedFont {
                         .ok_or_else(|| FontError::Subset("too many CIDs".into()))?;
                     cid
                 };
+                // CID 0 is `.notdef`: a PDF/A-2u code must never address it.
+                if conformance.is_pdfa() && cid == 0 {
+                    return Err(EmbedFailure::Policy(PDFA_NOTDEF));
+                }
                 cid_map.insert((*old, text.clone()), cid);
                 if usize::from(cid) >= widths.len() {
                     widths.resize(usize::from(cid) + 1, widths[usize::from(glyph)]);
@@ -395,8 +534,32 @@ impl EmbeddedFont {
                 supplement: 0,
             },
         );
-        for ((_, text), cid) in &cid_map {
-            cmap.pair_with_multiple(*cid, text.chars());
+        if conformance.is_pdfa() {
+            // One destination per painted code. Pre-validation already
+            // rejected empty or unmappable sources; re-check here because the
+            // mapping must be total for every collected code.
+            let mut destinations: BTreeMap<u16, String> = BTreeMap::new();
+            for ((_, text), cid) in &cid_map {
+                let destination = pdfa_unicode_text(text);
+                if destination.is_empty() {
+                    return Err(EmbedFailure::Policy(PDFA_UNMAPPABLE_TEXT));
+                }
+                match destinations.get(cid) {
+                    Some(existing) if existing != &destination => {
+                        return Err(EmbedFailure::Policy(PDFA_CFF_AMBIGUOUS));
+                    }
+                    _ => {
+                        destinations.insert(*cid, destination);
+                    }
+                }
+            }
+            for (cid, destination) in &destinations {
+                cmap.pair_with_multiple(*cid, destination.chars());
+            }
+        } else {
+            for ((_, text), cid) in &cid_map {
+                cmap.pair_with_multiple(*cid, text.chars());
+            }
         }
         let tounicode = cmap.finish().into_vec();
 
@@ -454,13 +617,59 @@ impl EmbeddedFont {
             .copied()
             .or_else(|| self.remap.get(&old).copied())
     }
+
+    /// Exact CID for the collected `(glyph id, source text)` pair.
+    ///
+    /// Unlike [`EmbeddedFont::cid`], this never falls back to the glyph's
+    /// first CID: PDF/A-2u needs the code whose `ToUnicode` entry is the
+    /// painted source string. Returns `None` for `.notdef` and for pairs the
+    /// subset does not address.
+    pub(crate) fn cid_exact(&self, old: u32, text: &str) -> Option<u16> {
+        let old = u16::try_from(old).ok()?;
+        let cid = self.cid_map.get(&(old, text.to_owned())).copied()?;
+        if cid == 0 {
+            return None;
+        }
+        if let Some(map) = &self.cid_to_gid
+            && map.get(usize::from(cid)).copied().unwrap_or(0) == 0
+        {
+            return None;
+        }
+        Some(cid)
+    }
+
+    /// PDF `/CIDSet` payload: one bit per addressable CID, most significant bit
+    /// first, covering the identity range (including `.notdef` at CID 0),
+    /// every duplicate CID allocated for a distinct source string, and every
+    /// extra glyph a `CIDToGIDMap` identity relation exposes.
+    ///
+    /// Computed from the final subset data, so the writer can emit it for
+    /// PDF/A-2u without a second planning pass; the bytes are deterministic.
+    pub(crate) fn cid_set(&self) -> Vec<u8> {
+        // With an explicit map the legal CIDs are exactly its indices; with
+        // Identity every glyph in the subset is addressable, including
+        // component glyphs no run paints.
+        let max_cid = match &self.cid_to_gid {
+            Some(map) => map.len().saturating_sub(1),
+            None => self.widths.len().saturating_sub(1),
+        }
+        .max(usize::from(
+            self.cid_map.values().copied().max().unwrap_or(0),
+        ));
+        let mut bits = vec![0u8; max_cid / 8 + 1];
+        for cid in 0..=max_cid {
+            bits[cid / 8] |= 0x80u8 >> (cid % 8);
+        }
+        bits
+    }
 }
 
-/// Visit every primitive a page paints, in paint order.
-fn each_primitive(
+/// Visit every primitive a page paints, in paint order, stopping at the first
+/// policy error.
+fn try_each_primitive(
     display_list: &docx_layout::display_list::DisplayList,
-    mut visit: impl FnMut(&Primitive),
-) {
+    mut visit: impl FnMut(&Primitive) -> Result<(), PdfError>,
+) -> Result<(), PdfError> {
     for page in &display_list.pages {
         for primitive in page.primitives.iter().chain(
             page.header
@@ -482,9 +691,22 @@ fn each_primitive(
                         ),
                 ),
         ) {
-            visit(primitive);
+            visit(primitive)?;
         }
     }
+    Ok(())
+}
+
+/// Visit every primitive a page paints, in paint order.
+fn each_primitive(
+    display_list: &docx_layout::display_list::DisplayList,
+    mut visit: impl FnMut(&Primitive),
+) {
+    try_each_primitive(display_list, |primitive| {
+        visit(primitive);
+        Ok(())
+    })
+    .expect("an infallible primitive visitor cannot fail");
 }
 
 /// Collect every glyph a document paints, keyed by font id and original glyph id.
@@ -521,6 +743,111 @@ pub fn collect_with_text(
         }
         _ => {}
     });
+    fonts
+}
+
+/// Collect every glyph under `conformance`, resolving fallback text exactly
+/// like [`collect_with_text`].
+///
+/// [`PdfConformance::Standard`] is [`collect_with_text`] unchanged.
+/// [`PdfConformance::PdfA2u`] never records glyph 0: a run whose scalars no
+/// registered face covers fails with [`PdfError::Unsupported`] instead of
+/// embedding `.notdef`, and hidden content stays uncollected.
+pub(crate) fn collect_with_text_policy(
+    display_list: &docx_layout::display_list::DisplayList,
+    store: &FontStore,
+    conformance: PdfConformance,
+) -> Result<BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>>, PdfError> {
+    if !conformance.is_pdfa() {
+        return Ok(collect_with_text(display_list, store));
+    }
+    let mut fonts: BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> = BTreeMap::new();
+    try_each_primitive(display_list, |primitive| match primitive {
+        Primitive::Text(text) if !text.hidden && !text.text.is_empty() => {
+            crate::text::collect_text_glyphs_with_chains_policy(
+                store,
+                text,
+                None,
+                conformance,
+                &mut fonts,
+            )
+        }
+        Primitive::GlyphRun(run) if !run.hidden => {
+            collect_run_policy(&mut fonts, run)?;
+            crate::text::collect_glyph_run_fallbacks_policy(store, run, conformance, &mut fonts)
+        }
+        _ => Ok(()),
+    })?;
+    Ok(fonts)
+}
+
+/// Collect every glyph for a chain-resolved document under `conformance`.
+///
+/// [`PdfConformance::Standard`] reproduces the writer's historical chain
+/// collector exactly. [`PdfConformance::PdfA2u`] collects only nonzero glyphs,
+/// so a run font whose every cluster is re-resolved to a fallback font is not
+/// embedded at all; the painter must likewise never reference it.
+pub(crate) fn collect_with_chains_policy(
+    display_list: &docx_layout::display_list::DisplayList,
+    store: &FontStore,
+    chains: &HashMap<String, Vec<FontId>>,
+    conformance: PdfConformance,
+) -> Result<BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>>, PdfError> {
+    if !conformance.is_pdfa() {
+        return Ok(collect_with_chains_standard(display_list, store, chains));
+    }
+    let mut fonts: BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> = BTreeMap::new();
+    try_each_primitive(display_list, |primitive| match primitive {
+        Primitive::Text(text) if !text.hidden && !text.text.is_empty() => {
+            crate::text::collect_text_glyphs_with_chains_policy(
+                store,
+                text,
+                Some(chains),
+                conformance,
+                &mut fonts,
+            )
+        }
+        Primitive::GlyphRun(run) if !run.hidden => {
+            collect_run_policy(&mut fonts, run)?;
+            crate::text::collect_glyph_run_fallbacks_policy(store, run, conformance, &mut fonts)
+        }
+        _ => Ok(()),
+    })?;
+    Ok(fonts)
+}
+
+/// The historical chain collection, kept byte-identical for
+/// [`PdfConformance::Standard`].
+fn collect_with_chains_standard(
+    display_list: &docx_layout::display_list::DisplayList,
+    store: &FontStore,
+    chains: &HashMap<String, Vec<FontId>>,
+) -> BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>> {
+    let mut fonts = collect(display_list);
+    let mut visible_glyph_fonts = BTreeSet::new();
+    let mut resolved_fonts = BTreeMap::new();
+    each_primitive(display_list, |primitive| match primitive {
+        Primitive::Text(text) if !text.hidden && !text.text.is_empty() => {
+            crate::text::collect_text_glyphs_with_chains(
+                store,
+                text,
+                Some(chains),
+                &mut resolved_fonts,
+            );
+        }
+        Primitive::GlyphRun(run) if !run.hidden => {
+            visible_glyph_fonts.insert(run.font_id);
+            crate::text::collect_glyph_run_fallbacks(store, run, &mut resolved_fonts);
+        }
+        _ => {}
+    });
+    fonts.retain(|font_id, _| visible_glyph_fonts.contains(font_id));
+    for (font_id, glyphs) in resolved_fonts {
+        let collected = fonts.entry(font_id).or_default();
+        for (glyph, sources) in glyphs {
+            collected.entry(glyph).or_default().extend(sources);
+        }
+    }
     fonts
 }
 
@@ -597,4 +924,51 @@ fn collect_run(
             entry.entry(glyph.id as u16).or_default().insert(text);
         }
     }
+}
+
+/// Collect a glyph run's real glyphs for PDF/A-2u.
+///
+/// `.notdef` is never recorded: a base gid-0 cluster is left for
+/// [`crate::text::collect_glyph_run_fallbacks_policy`] to re-resolve, and a
+/// missing cluster fails there. A non-base gid-0 component cannot be
+/// re-resolved (it carries no source scalar of its own), so it rejects here.
+fn collect_run_policy(
+    fonts: &mut BTreeMap<u32, BTreeMap<u16, BTreeSet<String>>>,
+    run: &GlyphRunPrimitive,
+) -> Result<(), PdfError> {
+    let entry = fonts.entry(run.font_id).or_default();
+    let starts = cluster_starts(run);
+    let mut bases: BTreeMap<u32, (f64, usize)> = BTreeMap::new();
+    for (index, glyph) in run.glyphs.iter().enumerate() {
+        if bases
+            .get(&glyph.cluster)
+            .is_none_or(|(advance, _)| glyph.advance > *advance)
+        {
+            bases.insert(glyph.cluster, (glyph.advance, index));
+        }
+    }
+    for (index, glyph) in run.glyphs.iter().enumerate() {
+        let is_base = bases
+            .get(&glyph.cluster)
+            .is_some_and(|(_, base)| *base == index);
+        if !is_base {
+            if glyph.id == 0 {
+                return Err(PdfError::Unsupported(PDFA_NOTDEF));
+            }
+            entry
+                .entry(glyph.id as u16)
+                .or_default()
+                .insert("\u{200B}".to_owned());
+            continue;
+        }
+        if glyph.id == 0 {
+            continue;
+        }
+        let text = cluster_source_text(run, &starts, glyph.cluster);
+        if text.is_empty() {
+            return Err(PdfError::Unsupported(PDFA_NO_SOURCE_TEXT));
+        }
+        entry.entry(glyph.id as u16).or_default().insert(text);
+    }
+    Ok(())
 }

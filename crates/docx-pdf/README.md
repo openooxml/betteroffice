@@ -32,13 +32,17 @@ Supported today:
 - Flate-compressed page, image and font streams
 - external link annotations from primitive `href`s, including rotated text,
   glyph runs, images and shapes; merged per target
+- opt-in PDF/A-2u (ISO 19005-2 level U): embedded sRGB output intent, XMP
+  `pdfaid` identification, matching document information, deterministic trailer
+  IDs, CIDSet, nonzero glyph codes and Unicode mappings for every painted
+  scalar. Standard exports remain plain PDF 1.7 and make no PDF/A claim.
+- PDF/A-2u registers a bundled monochrome Noto Emoji fallback so emoji scalars
+  are painted from a real outline instead of `.notdef`
 
-Not yet covered: PDF/A, tagged PDF/PDF-UA, gradients, JPEG XL images,
-named destinations for internal anchors (internal `#anchor` links are
+Not yet covered: tagged PDF/PDF-UA, PDF/A-1, PDF/A-3, gradients, JPEG XL
+images, named destinations for internal anchors (internal `#anchor` links are
 skipped, not emitted as unresolved `/GoTo` actions), and color emoji
 rendering.
-Missing emoji still paint `.notdef` (or nothing when no face covers them), but
-the text layer recovers the source scalar through `/ActualText`/`ToUnicode`.
 
 ```rust
 use betteroffice_docx_pdf::export_pdf_with_fonts;
@@ -47,6 +51,27 @@ use ooxml_text::FontStore;
 
 let bytes = export_pdf_with_fonts(&display_list, &font_store)?;
 ```
+
+For archival output, use the facade's options API:
+
+```rust
+use betteroffice_docx::{Document, PdfConformance, PdfExportOptions, PdfMetadata};
+
+let document = Document::open(&docx_bytes)?;
+let pdf = document.export_pdf_with_options(&PdfExportOptions {
+    conformance: PdfConformance::PdfA2u,
+    metadata: PdfMetadata {
+        title: Some("Contract".into()),
+        ..PdfMetadata::default()
+    },
+})?;
+```
+
+PDF/A-2u requires a usable font store and refuses Base-14 or uncovered text
+instead of writing a non-conforming file. A bitmap-only face is rejected rather
+than synthesized into blank outlines, and bitmap faces are skipped when an
+outline face can cover the same scalar. Invalid metadata dates are rejected;
+absent fields are omitted from both `/Info` and XMP.
 
 `export_pdf` is the no-font entry point for text/rect/line-only display lists.
 `export_pdf_with_fonts_and_images` adds image bytes keyed by the scoped

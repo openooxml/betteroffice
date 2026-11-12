@@ -14,7 +14,11 @@ use serde_json::Number;
 use ttf_parser::{Face, GlyphId};
 
 use crate::PdfError;
-use crate::font::EmbeddedFont;
+use crate::font::{
+    EmbeddedFont, PDFA_EMBEDDED_FONT, PDFA_MISSING_GLYPH, PDFA_MULTI_SCALAR_CLUSTER,
+    PDFA_NO_SOURCE_TEXT, PDFA_NOTDEF, PDFA_UNMAPPED_CODE,
+};
+use crate::options::PdfConformance;
 use crate::units::{PX_TO_PT, f64_to_points, font_size_px, parse_color, points};
 
 /// Base-14 resource registered by the writer for text without embedded fonts.
@@ -163,10 +167,7 @@ impl<'a> FontFaces<'a> {
 
     /// First font whose cmap maps `ch` to a real glyph, preferring a face that
     /// declares the run's requested family.
-    ///
-    /// Uncovered scalars fall back to the first parseable face's `.notdef`
-    /// (glyph 0), which every subset keeps.
-    fn resolve(&self, ch: char) -> Option<(u32, u16)> {
+    fn covering_face(&self, ch: char) -> Option<(u32, u16)> {
         for &index in &self.preferred {
             if let Some(glyph) = self.covering(index as usize, ch) {
                 return Some((index, glyph));
@@ -177,7 +178,47 @@ impl<'a> FontFaces<'a> {
                 return Some((index as u32, glyph));
             }
         }
-        self.first_face().map(|index| (index, 0))
+        None
+    }
+
+    /// [`FontFaces::covering_face`] with the historical `.notdef` fallback.
+    ///
+    /// Uncovered scalars fall back to the first parseable face's `.notdef`
+    /// (glyph 0), which every Standard subset keeps.
+    fn resolve(&self, ch: char) -> Option<(u32, u16)> {
+        self.covering_face(ch)
+            .or_else(|| self.first_face().map(|index| (index, 0)))
+    }
+
+    /// [`FontFaces::resolve`] under a conformance profile.
+    ///
+    /// PDF/A-2u never returns glyph 0: a scalar no face covers is `None` so
+    /// the caller can reject the run instead of painting `.notdef`.
+    fn resolve_policy(&self, ch: char, conformance: PdfConformance) -> Option<(u32, u16)> {
+        if !conformance.is_pdfa() {
+            return self.resolve(ch);
+        }
+        // A bitmap face can cover a scalar while having no PDF-embeddable
+        // outline program. Skip it so a later outline face can paint it; if
+        // none does, the caller rejects instead of synthesizing blank text.
+        let outline_covering = |index: usize| {
+            self.faces
+                .get(index)?
+                .as_ref()
+                .filter(|face| crate::font::face_has_outlines(face))
+                .and_then(|_| self.covering(index, ch))
+        };
+        for &index in &self.preferred {
+            if let Some(glyph) = outline_covering(index as usize) {
+                return Some((index, glyph));
+            }
+        }
+        for index in 0..self.faces.len() {
+            if let Some(glyph) = outline_covering(index) {
+                return Some((index as u32, glyph));
+            }
+        }
+        None
     }
 
     fn covering(&self, index: usize, ch: char) -> Option<u16> {
@@ -345,21 +386,43 @@ pub(crate) fn collect_text_glyphs_with_chains(
     chains: Option<&HashMap<String, Vec<FontId>>>,
     out: &mut BTreeMap<u32, BTreeMap<u16, std::collections::BTreeSet<String>>>,
 ) {
+    collect_text_glyphs_with_chains_policy(store, run, chains, PdfConformance::Standard, out)
+        .expect("standard text collection never rejects");
+}
+
+/// [`collect_text_glyphs_with_chains`] under a conformance profile.
+///
+/// Casing (all caps and synthesized small caps) matches
+/// [`paint_text_with_chains_policy`] exactly, including the uppercased glyphs
+/// small caps draw. PDF/A-2u never records glyph 0: a scalar no usable face
+/// maps to a real glyph fails with [`PdfError::Unsupported`], and hidden or
+/// empty runs record nothing.
+pub(crate) fn collect_text_glyphs_with_chains_policy(
+    store: &FontStore,
+    run: &TextRunPrimitive,
+    chains: Option<&HashMap<String, Vec<FontId>>>,
+    conformance: PdfConformance,
+    out: &mut BTreeMap<u32, BTreeMap<u16, std::collections::BTreeSet<String>>>,
+) -> Result<(), PdfError> {
     if run.hidden || run.text.is_empty() {
-        return;
+        return Ok(());
     }
     let faces = FontFaces::for_run(store, &run.font, chains);
     for painted in painted_chars(run) {
         for ch in painted.chars {
-            let Some((font_id, glyph)) = faces.resolve(ch) else {
+            let Some((font_id, glyph)) = faces.resolve_policy(ch, conformance) else {
+                if conformance.is_pdfa() {
+                    return Err(PdfError::Unsupported(PDFA_MISSING_GLYPH));
+                }
                 continue;
             };
             let entry = out.entry(font_id).or_default();
-            // Even `.notdef` keeps the source scalar: the text layer must stay
-            // searchable when no registered face covers the glyph.
+            // Standard keeps the source scalar even for `.notdef`: the text
+            // layer stays searchable when no registered face covers a glyph.
             entry.entry(glyph).or_default().insert(ch.to_string());
         }
     }
+    Ok(())
 }
 
 /// Collect fallback glyphs for `.notdef` clusters in a glyph run.
@@ -374,12 +437,32 @@ pub(crate) fn collect_glyph_run_fallbacks(
     run: &GlyphRunPrimitive,
     out: &mut BTreeMap<u32, BTreeMap<u16, std::collections::BTreeSet<String>>>,
 ) {
+    collect_glyph_run_fallbacks_policy(store, run, PdfConformance::Standard, out)
+        .expect("standard glyph-run fallback collection never rejects");
+}
+
+/// [`collect_glyph_run_fallbacks`] under a conformance profile.
+///
+/// PDF/A-2u rejects a gid-0 cluster that no registered face re-resolves to a
+/// real glyph, or whose cluster has no Unicode source text, instead of
+/// embedding `.notdef`. Non-base gid-0 components are rejected by the glyph-run
+/// collector before this runs.
+pub(crate) fn collect_glyph_run_fallbacks_policy(
+    store: &FontStore,
+    run: &GlyphRunPrimitive,
+    conformance: PdfConformance,
+    out: &mut BTreeMap<u32, BTreeMap<u16, std::collections::BTreeSet<String>>>,
+) -> Result<(), PdfError> {
     if !run.glyphs.iter().any(|glyph| glyph.id == 0) {
-        return;
+        return Ok(());
     }
     let faces = FontFaces::new(store);
     if faces.is_empty() {
-        return;
+        return if conformance.is_pdfa() {
+            Err(PdfError::Unsupported(PDFA_MISSING_GLYPH))
+        } else {
+            Ok(())
+        };
     }
     let starts = crate::font::cluster_starts(run);
     for glyph in &run.glyphs {
@@ -387,17 +470,28 @@ pub(crate) fn collect_glyph_run_fallbacks(
             continue;
         }
         let text = crate::font::cluster_source_text(run, &starts, glyph.cluster);
-        let Some(ch) = text.chars().next() else {
+        let mut chars = text.chars();
+        let Some(ch) = chars.next() else {
+            if conformance.is_pdfa() {
+                return Err(PdfError::Unsupported(PDFA_NO_SOURCE_TEXT));
+            }
             continue;
         };
-        let Some((font_id, glyph_id)) = faces.resolve(ch) else {
+        if conformance.is_pdfa() && chars.next().is_some() {
+            return Err(PdfError::Unsupported(PDFA_MULTI_SCALAR_CLUSTER));
+        }
+        let Some((font_id, glyph_id)) = faces.resolve_policy(ch, conformance) else {
+            if conformance.is_pdfa() {
+                return Err(PdfError::Unsupported(PDFA_MISSING_GLYPH));
+            }
             continue;
         };
         let entry = out.entry(font_id).or_default();
-        // `.notdef` still carries its whole source cluster so extraction can
-        // recover characters no registered face covers.
+        // The whole cluster rides the resolved glyph so extraction keeps its
+        // full source text in both profiles.
         entry.entry(glyph_id).or_default().insert(text);
     }
+    Ok(())
 }
 
 /// A maximal run of consecutive scalars painted with the same font and size.
@@ -409,11 +503,24 @@ struct Segment {
     glyphs: Vec<(u16, f64, String)>,
 }
 
-fn shape_text(faces: &FontFaces<'_>, run: &TextRunPrimitive, size_px: f64) -> Vec<Segment> {
+/// Shape a fallback text run under `conformance`.
+///
+/// Standard skips scalars no face covers; PDF/A-2u rejects them so the painter
+/// never emits `.notdef`. Casing matches
+/// [`collect_text_glyphs_with_chains_policy`] exactly.
+fn shape_text_with(
+    faces: &FontFaces<'_>,
+    run: &TextRunPrimitive,
+    size_px: f64,
+    conformance: PdfConformance,
+) -> Result<Vec<Segment>, PdfError> {
     let mut segments: Vec<Segment> = Vec::new();
     for painted in painted_chars(run) {
         for ch in painted.chars {
-            let Some((font_id, glyph)) = faces.resolve(ch) else {
+            let Some((font_id, glyph)) = faces.resolve_policy(ch, conformance) else {
+                if conformance.is_pdfa() {
+                    return Err(PdfError::Unsupported(PDFA_MISSING_GLYPH));
+                }
                 continue;
             };
             let advance =
@@ -430,7 +537,7 @@ fn shape_text(faces: &FontFaces<'_>, run: &TextRunPrimitive, size_px: f64) -> Ve
             }
         }
     }
-    segments
+    Ok(segments)
 }
 
 /// Build a text matrix for a baseline origin plus an offset along the
@@ -494,6 +601,63 @@ fn cid(font: &EmbeddedFont, glyph: u32, text: &str) -> Option<u16> {
     font.cid(glyph, text).or_else(|| font.glyph(0))
 }
 
+/// CID for a painted code under `conformance`.
+///
+/// Standard keeps [`cid`]'s `.notdef` fallback. PDF/A-2u requires the exact
+/// `(glyph, source text)` pair collected for the subset and rejects glyph 0 or
+/// an unmapped code instead of painting something `ToUnicode` cannot describe.
+fn painted_cid(
+    font: &EmbeddedFont,
+    glyph: u32,
+    text: &str,
+    conformance: PdfConformance,
+) -> Result<Option<u16>, PdfError> {
+    if !conformance.is_pdfa() {
+        return Ok(cid(font, glyph, text));
+    }
+    if glyph == 0 {
+        return Err(PdfError::Unsupported(PDFA_NOTDEF));
+    }
+    if text.is_empty() {
+        return Err(PdfError::Unsupported(PDFA_NO_SOURCE_TEXT));
+    }
+    font.cid_exact(glyph, text)
+        .map(Some)
+        .ok_or(PdfError::Unsupported(PDFA_UNMAPPED_CODE))
+}
+
+/// Embedded `(font, CID)` target for one shaped glyph under `conformance`.
+///
+/// Standard may skip a glyph whose font or CID is absent; PDF/A-2u rejects it
+/// because an unembedded or unmapped code would break the archival text layer.
+fn resolve_glyph_target(
+    fonts: &BTreeMap<u32, EmbeddedFont>,
+    font_id: u32,
+    glyph_id: u32,
+    text: &str,
+    conformance: PdfConformance,
+) -> Result<Option<(u32, u16)>, PdfError> {
+    let Some(font) = fonts.get(&font_id) else {
+        return if conformance.is_pdfa() {
+            Err(PdfError::Unsupported(PDFA_EMBEDDED_FONT))
+        } else {
+            Ok(None)
+        };
+    };
+    if !conformance.is_pdfa() {
+        return Ok(cid(font, glyph_id, text).map(|cid| (font_id, cid)));
+    }
+    if glyph_id == 0 {
+        return Err(PdfError::Unsupported(PDFA_NOTDEF));
+    }
+    if text.is_empty() {
+        return Err(PdfError::Unsupported(PDFA_NO_SOURCE_TEXT));
+    }
+    font.cid_exact(glyph_id, text)
+        .map(|cid| Some((font_id, cid)))
+        .ok_or(PdfError::Unsupported(PDFA_UNMAPPED_CODE))
+}
+
 /// Paint a fallback text run. Never rejects its text; only a malformed
 /// coordinate or a non-positive horizontal scale is a PDF number error.
 pub(crate) fn paint_text(
@@ -506,6 +670,18 @@ pub(crate) fn paint_text(
     paint_text_with_chains(content, page, text, fonts, store, None)
 }
 
+/// [`paint_text`] under a conformance profile, without chains.
+pub(crate) fn paint_text_policy(
+    content: &mut Content,
+    page: &DisplayPage,
+    text: &TextRunPrimitive,
+    fonts: &BTreeMap<u32, EmbeddedFont>,
+    store: &FontStore,
+    conformance: PdfConformance,
+) -> Result<(), PdfError> {
+    paint_text_with_chains_policy(content, page, text, fonts, store, None, conformance)
+}
+
 /// Paint a fallback text run, resolving scalars through the facade's ordered
 /// font chains when supplied.
 pub(crate) fn paint_text_with_chains(
@@ -515,6 +691,30 @@ pub(crate) fn paint_text_with_chains(
     fonts: &BTreeMap<u32, EmbeddedFont>,
     store: &FontStore,
     chains: Option<&HashMap<String, Vec<FontId>>>,
+) -> Result<(), PdfError> {
+    paint_text_with_chains_policy(
+        content,
+        page,
+        text,
+        fonts,
+        store,
+        chains,
+        PdfConformance::Standard,
+    )
+}
+
+/// Paint a fallback text run under `conformance`.
+///
+/// PDF/A-2u never paints `.notdef` or the Base-14 fallback: a run the
+/// collection could not cover fails with [`PdfError::Unsupported`].
+pub(crate) fn paint_text_with_chains_policy(
+    content: &mut Content,
+    page: &DisplayPage,
+    text: &TextRunPrimitive,
+    fonts: &BTreeMap<u32, EmbeddedFont>,
+    store: &FontStore,
+    chains: Option<&HashMap<String, Vec<FontId>>>,
+    conformance: PdfConformance,
 ) -> Result<(), PdfError> {
     if text.hidden || text.text.is_empty() {
         return Ok(());
@@ -543,12 +743,15 @@ pub(crate) fn paint_text_with_chains(
     }
 
     let faces = FontFaces::for_run(store, &text.font, chains);
-    let segments = shape_text(&faces, text, size_px);
+    let segments = shape_text_with(&faces, text, size_px, conformance)?;
     let usable = !fonts.is_empty()
         && segments
             .iter()
             .any(|segment| fonts.contains_key(&segment.font_id));
     if faces.is_empty() || !usable {
+        if conformance.is_pdfa() {
+            return Err(PdfError::Unsupported(PDFA_EMBEDDED_FONT));
+        }
         paint_builtin_text(
             content,
             &display_text(text),
@@ -586,13 +789,16 @@ pub(crate) fn paint_text_with_chains(
 
     for segment in &segments {
         let Some(font) = fonts.get(&segment.font_id) else {
+            if conformance.is_pdfa() {
+                return Err(PdfError::Unsupported(PDFA_EMBEDDED_FONT));
+            }
             continue;
         };
         content.set_font(Name(font.resource.as_bytes()), size * segment.scale as f32);
         if rtl {
             for (glyph, advance, text) in &segment.glyphs {
                 cursor -= advance * scale;
-                let Some(glyph) = cid(font, u32::from(*glyph), text) else {
+                let Some(glyph) = painted_cid(font, u32::from(*glyph), text, conformance)? else {
                     continue;
                 };
                 content.set_text_matrix(text_matrix(
@@ -610,7 +816,7 @@ pub(crate) fn paint_text_with_chains(
             let start = cursor;
             let mut bytes = Vec::with_capacity(segment.glyphs.len() * 2);
             for (glyph, _, text) in &segment.glyphs {
-                let Some(glyph) = cid(font, u32::from(*glyph), text) else {
+                let Some(glyph) = painted_cid(font, u32::from(*glyph), text, conformance)? else {
                     continue;
                 };
                 bytes.extend_from_slice(&glyph.to_be_bytes());
@@ -638,6 +844,9 @@ pub(crate) fn paint_text_with_chains(
     content.end_text();
 
     if painted == 0 {
+        if conformance.is_pdfa() {
+            return Err(PdfError::Unsupported(PDFA_EMBEDDED_FONT));
+        }
         paint_builtin_text(
             content,
             &display_text(text),
@@ -723,7 +932,7 @@ pub(crate) fn paint_glyph_run(
     run: &GlyphRunPrimitive,
     fonts: &BTreeMap<u32, EmbeddedFont>,
 ) -> Result<(), PdfError> {
-    paint_glyph_run_impl(content, page, run, fonts, None)
+    paint_glyph_run_impl(content, page, run, fonts, None, PdfConformance::Standard)
 }
 
 /// Paint a positioned glyph run, resolving gid-0 clusters against `store`.
@@ -739,7 +948,30 @@ pub(crate) fn paint_glyph_run_with_store(
     fonts: &BTreeMap<u32, EmbeddedFont>,
     store: &FontStore,
 ) -> Result<(), PdfError> {
-    paint_glyph_run_impl(content, page, run, fonts, Some(store))
+    paint_glyph_run_impl(
+        content,
+        page,
+        run,
+        fonts,
+        Some(store),
+        PdfConformance::Standard,
+    )
+}
+
+/// [`paint_glyph_run_with_store`] under `conformance`.
+///
+/// PDF/A-2u rejects any cluster that would still paint `.notdef` after
+/// fallback resolution, and tolerates a run font that was not embedded because
+/// every cluster was re-resolved to a fallback font.
+pub(crate) fn paint_glyph_run_with_store_policy(
+    content: &mut Content,
+    page: &DisplayPage,
+    run: &GlyphRunPrimitive,
+    fonts: &BTreeMap<u32, EmbeddedFont>,
+    store: &FontStore,
+    conformance: PdfConformance,
+) -> Result<(), PdfError> {
+    paint_glyph_run_impl(content, page, run, fonts, Some(store), conformance)
 }
 
 fn paint_glyph_run_impl(
@@ -748,11 +980,12 @@ fn paint_glyph_run_impl(
     run: &GlyphRunPrimitive,
     fonts: &BTreeMap<u32, EmbeddedFont>,
     store: Option<&FontStore>,
+    conformance: PdfConformance,
 ) -> Result<(), PdfError> {
     if run.hidden || run.glyphs.is_empty() {
         return Ok(());
     }
-    if !fonts.contains_key(&run.font_id) {
+    if !conformance.is_pdfa() && !fonts.contains_key(&run.font_id) {
         return Err(PdfError::Unsupported("glyph run font was not embedded"));
     }
 
@@ -770,6 +1003,17 @@ fn paint_glyph_run_impl(
     let has_missing_glyph = run.glyphs.iter().any(|glyph| glyph.id == 0);
     let faces = store.filter(|_| has_missing_glyph).map(FontFaces::new);
     let starts = crate::font::cluster_starts(run);
+    if conformance.is_pdfa() && has_missing_glyph {
+        // A single missing glyph cannot represent a multi-scalar cluster: the
+        // fallback would paint one glyph while claiming both scalars. Reject
+        // rather than silently dropping part of the text.
+        for glyph in run.glyphs.iter().filter(|glyph| glyph.id == 0) {
+            let text = crate::font::cluster_source_text(run, &starts, glyph.cluster);
+            if text.chars().nth(1).is_some() {
+                return Err(PdfError::Unsupported(PDFA_MULTI_SCALAR_CLUSTER));
+            }
+        }
+    }
     let mut bases: BTreeMap<u32, (f64, usize)> = BTreeMap::new();
     for (index, glyph) in run.glyphs.iter().enumerate() {
         if bases
@@ -797,25 +1041,24 @@ fn paint_glyph_run_impl(
         if glyph.id == 0
             && let Some(faces) = faces.as_ref()
             && let Some(ch) = text.chars().next()
-            && let Some((font_id, glyph_id)) = faces.resolve(ch)
+            && let Some((font_id, glyph_id)) = faces.resolve_policy(ch, conformance)
             && fonts.contains_key(&font_id)
         {
             return (font_id, u32::from(glyph_id), text);
         }
         (run.font_id, glyph.id, text)
     };
-    let targets: Vec<Option<(u32, u16)>> = run
-        .glyphs
-        .iter()
-        .enumerate()
-        .map(|(index, glyph)| {
-            let (font_id, glyph_id, text) = target_for(index, glyph);
-            let glyph_id = fonts
-                .get(&font_id)
-                .and_then(|font| cid(font, glyph_id, &text))?;
-            Some((font_id, glyph_id))
-        })
-        .collect();
+    let mut targets: Vec<Option<(u32, u16)>> = Vec::with_capacity(run.glyphs.len());
+    for (index, glyph) in run.glyphs.iter().enumerate() {
+        let (font_id, glyph_id, text) = target_for(index, glyph);
+        targets.push(resolve_glyph_target(
+            fonts,
+            font_id,
+            glyph_id,
+            &text,
+            conformance,
+        )?);
+    }
 
     // Match the raster oracle: rotate around the run box's centre, not the
     // first glyph. `glyph_rect` there spans every advance and a 1.2em line box.

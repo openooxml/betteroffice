@@ -18,11 +18,27 @@ use ttf_parser::Face;
 #[path = "../src/units.rs"]
 mod units;
 
-/// The only error the coordinate helpers construct; the test crate has no PDF
-/// export error type of its own.
+/// Mirror of the crate's export error; the test crate has no PDF export error
+/// type of its own. `InvalidNumber` backs the coordinate helpers, `Unsupported`
+/// backs link-action rejection.
 #[derive(Debug)]
 pub enum PdfError {
     InvalidNumber(&'static str),
+    Unsupported(&'static str),
+}
+
+/// Mirror of the crate's conformance profile; the test crate links `link.rs`
+/// against this stub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfConformance {
+    Standard,
+    PdfA2u,
+}
+
+impl PdfConformance {
+    fn is_pdfa(self) -> bool {
+        matches!(self, Self::PdfA2u)
+    }
 }
 
 #[path = "../src/link.rs"]
@@ -244,7 +260,9 @@ fn writes_link_annotations() {
             action: LinkAction::Uri("https://example.com/a(b".into()),
             title: Some("Example".into()),
         },
-    );
+        PdfConformance::Standard,
+    )
+    .expect("a URI link is always representable");
 
     let bytes = pdf.finish();
     let text = String::from_utf8_lossy(&bytes);
@@ -256,6 +274,65 @@ fn writes_link_annotations() {
     assert!(text.contains("/S /URI"), "{text}");
     assert!(text.contains("/URI (https://example.com/a\\(b)"), "{text}");
     assert!(!text.contains("/S /GoTo"), "{text}");
+    // Standard keeps the historical dictionary: no annotation flags, no
+    // appearance stream.
+    assert!(!text.contains("/F 4"), "{text}");
+    assert!(!text.contains("/AP"), "{text}");
+}
+
+#[test]
+fn writes_pdfa_link_annotations_with_print_flag_and_no_appearance() {
+    let mut pdf = Pdf::new();
+    let page = Ref::new(2);
+
+    link::write_annotation(
+        &mut pdf,
+        Ref::new(1),
+        page,
+        &LinkAnnotation {
+            rect: [10.0, 20.0, 30.0, 40.0],
+            action: LinkAction::Uri("https://example.com/a(b".into()),
+            title: Some("Example".into()),
+        },
+        PdfConformance::PdfA2u,
+    )
+    .expect("PDF/A-2u represents URI links without an appearance stream");
+
+    let bytes = pdf.finish();
+    let text = String::from_utf8_lossy(&bytes);
+    // ISO 19005-2 6.3.2: Print set, Hidden/Invisible/NoView/ToggleNoView clear.
+    assert!(text.contains("/F 4"), "{text}");
+    // ISO 19005-2 6.3.3 exempts Link annotations from /AP.
+    assert!(!text.contains("/AP"), "{text}");
+    // Geometry, page link and the URI action are unchanged from Standard.
+    assert!(text.contains("/Rect [10 20 30 40]"), "{text}");
+    assert!(text.contains("/P 2 0 R"), "{text}");
+    assert!(text.contains("/T (Example)"), "{text}");
+    assert!(text.contains("/S /URI"), "{text}");
+    assert!(text.contains("/URI (https://example.com/a\\(b)"), "{text}");
+}
+
+#[test]
+fn rejects_unsupported_link_actions() {
+    let mut pdf = Pdf::new();
+
+    let error = link::write_annotation(
+        &mut pdf,
+        Ref::new(1),
+        Ref::new(2),
+        &LinkAnnotation {
+            rect: [10.0, 20.0, 30.0, 40.0],
+            action: LinkAction::Unsupported("JavaScript"),
+            title: None,
+        },
+        PdfConformance::PdfA2u,
+    )
+    .expect_err("PDF/A-2u must not emit an unsupported action");
+
+    assert!(
+        matches!(error, PdfError::Unsupported("JavaScript")),
+        "unexpected error: {error:?}"
+    );
 }
 
 fn number(value: f64) -> Number {
