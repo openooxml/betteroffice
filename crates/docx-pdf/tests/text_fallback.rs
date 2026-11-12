@@ -682,7 +682,23 @@ fn pdfa_rejects_a_bitmap_only_face_instead_of_synthesizing_blank_outlines() {
         error.to_string().contains("glyph"),
         "unexpected bitmap refusal: {error}"
     );
-    let _ = emoji;
+
+    // Direct embedding must also refuse the bitmap program; the resolver
+    // normally hides this path by skipping bitmap faces for PDF/A.
+    let emoji_face = Face::parse(store.font_bytes(emoji).expect("emoji bytes"), 0).expect("face");
+    let glyph = emoji_face.glyph_index('😀').expect("emoji glyph").0;
+    let uses = BTreeMap::from([(u16::from(glyph), BTreeSet::from(["😀".to_owned()]))]);
+    match font::EmbeddedFont::new_with_conformance(
+        "F1".to_owned(),
+        &store,
+        emoji.to_u32(),
+        &uses,
+        PdfConformance::PdfA2u,
+    ) {
+        Err(PdfError::Unsupported(message)) if message.contains("outlines") => {}
+        Err(other) => panic!("unexpected bitmap embed error: {other:?}"),
+        Ok(_) => panic!("PDF/A-2u embedded a bitmap-only face as outlines"),
+    }
 }
 
 #[test]
