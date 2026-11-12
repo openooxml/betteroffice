@@ -4035,6 +4035,26 @@ describe('peerless workbook worker editor', () => {
     expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
   });
 
+  it('refuses save during an active chart resize as it does during a chart drag', async () => {
+    const host = peerlessHarness();
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
+    const view = await host.mount();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+    await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+    const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!;
+    fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+    expect(await host.commands().execute('save', null))
+      .toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+    expect(host.session.save).not.toHaveBeenCalled();
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 404, clientY: 202, button: 0 });
+    await act(async () => {});
+    expect(host.sent.filter((command) => command.kind === 'resizeChart')).toHaveLength(1);
+  });
+
   it('Escape cancels pending offscreen keyboard input before its frame arrives', async () => {
     const host = peerlessHarness();
     const view = await host.mount();
@@ -6971,6 +6991,31 @@ it('renders target-changed and gesture-active command refusals', async () => {
   reviewEdit(view, 'after refusal');
   await advance();
   expect(host.cells.get('0:0:0')).toBe('after refusal');
+});
+
+it('refuses Ctrl+S during an active chart resize as it does during a chart drag', async () => {
+  const host = harness();
+  host.charts.push({ id: 'chart', label: 'Chart', rect: { x: 192, y: 96, w: 192, h: 96 },
+    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true, resizable: true });
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+  await opened();
+  fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+  fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+  const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
+    .find((handle) => handle.getAttribute('data-handle') === 'se')!;
+  fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+  fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's', ctrlKey: true });
+  await advance();
+  expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('Finish moving the chart first.');
+  expect(host.editMethods.save).not.toHaveBeenCalled();
+  expect(api.failure).toBeNull();
+  fireEvent.pointerUp(window, { pointerId: 1, clientX: 404, clientY: 202, button: 0 });
+  await advance();
+  expect(host.editMethods.resizeChart.mock.calls).toEqual([
+    [0, 'chart', { left: 0, top: 0, right: 20, bottom: 10 }],
+  ]);
 });
 
 for (const route of ['cut', 'bold'] as const) {
