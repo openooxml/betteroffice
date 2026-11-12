@@ -7002,6 +7002,98 @@ mod tests {
     }
 
     #[test]
+    fn recording_saved_ids_reports_moved_and_taken_pairs_and_publishes_the_rest() {
+        let base = EditingDoc::new(1);
+        for story in ["edited", "moved", "taken", "taker", "first", "second"] {
+            base.create_story(story, "one", "Normal", "left").unwrap();
+        }
+        base.create_story("body", "abc", "Normal", "left").unwrap();
+        let update = base.encode_state_as_update_v1();
+        let (left, right) = (EditingDoc::new(2), EditingDoc::new(3));
+        left.apply_update_v1(&update).unwrap();
+        right.apply_update_v1(&update).unwrap();
+        let key = |story: &str| base.paragraphs(story).unwrap()[0].para_id.clone();
+        let (edited, moved, taken, taker, first, second) = (
+            key("edited"),
+            key("moved"),
+            key("taken"),
+            key("taker"),
+            key("first"),
+            key("second"),
+        );
+
+        claim_id(&left, &edited, "0000E001", false);
+        left.insert_text(
+            &ctx(),
+            Position::new("edited", 0),
+            "typed",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        left.split_paragraph(&ctx(), Position::new("body", 1), None)
+            .unwrap();
+        let deleted = left
+            .split_paragraph(&ctx(), Position::new("body", 3), None)
+            .unwrap()
+            .first_para_id;
+        let deleted_id = doc_identity(&left, &deleted).ooxml_para_id.unwrap();
+        left.delete_range(&ctx(), StoryRange::new("body", 1, 3))
+            .unwrap();
+        claim_id(&left, &moved, "0000B001", false);
+        claim_id(&left, &moved, "0000B002", false);
+        claim_id(&left, &taken, "0000C001", false);
+        claim_id(&right, &taker, "0000C001", true);
+        claim_id(&right, &first, "0000D001", true);
+        claim_id(&left, &second, "0000D001", true);
+        left.apply_update_v1(&right.encode_state_as_update_v1())
+            .unwrap();
+        assert_ne!(
+            doc_identity(&left, &taken).ooxml_para_id.as_deref(),
+            Some("0000C001")
+        );
+        assert_eq!(
+            doc_identity(&left, &first).ooxml_para_id.as_deref(),
+            Some("0000D001")
+        );
+        assert_eq!(
+            doc_identity(&left, &second).ooxml_para_id.as_deref(),
+            Some("0000D001")
+        );
+
+        let saved = vec![
+            (edited.clone(), "0000E001".to_owned()),
+            (deleted.clone(), deleted_id.clone()),
+            (moved.clone(), "0000B001".to_owned()),
+            (taken.clone(), "0000C001".to_owned()),
+            (first.clone(), "0000D001".to_owned()),
+            (second.clone(), "0000D001".to_owned()),
+            (first.clone(), "0000D001".to_owned()),
+        ];
+        let expected = vec![
+            (moved.clone(), "0000B001".to_owned()),
+            (taken.clone(), "0000C001".to_owned()),
+        ];
+        assert_eq!(left.record_saved_paragraph_ids(&saved), expected);
+
+        let published = |id: &str, owner: &str| {
+            let txn = left.yrs_doc().transact();
+            claim(&claims(&txn), id, owner).unwrap().published
+        };
+        assert!(published("0000E001", &edited));
+        assert!(published(&deleted_id, &deleted));
+        assert!(!published("0000B001", &moved));
+        assert!(!published("0000B002", &moved));
+        assert!(!published("0000C001", &taken));
+        assert!(published("0000C001", &taker));
+        assert!(published("0000D001", &first));
+        assert!(published("0000D001", &second));
+
+        let before = left.encode_state_vector_v1();
+        assert_eq!(left.record_saved_paragraph_ids(&saved), expected);
+        assert_eq!(left.encode_state_vector_v1(), before);
+    }
+
+    #[test]
     fn a_synthetic_paragraph_is_promoted_by_authoring_into_it() {
         let doc = EditingDoc::new(7);
         doc.create_story("body", "", "Normal", "left").unwrap();
