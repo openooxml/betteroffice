@@ -247,12 +247,14 @@ jobs:
 
           packs=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-"))')
           formats=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-") | not)')
+          # shellcheck disable=SC2086 # binding names contain no spaces
           publish $packs
           if [ $status -ne 0 ] && [ -n "$formats" ]; then
             echo "::error::A font pack did not publish, so no format binding was dispatched: every betteroffice-<format> wheel requires betteroffice-fonts-latin, -intl and -cjk at the versions this commit pins."
             echo "::error::A missing PyPI project needs its pending publisher (environment pypi-fonts-<pack>): RELEASING.md, \"Font pack wheels\". Rerun the release once it exists."
             exit 1
           fi
+          # shellcheck disable=SC2086 # binding names contain no spaces
           publish $formats
           exit $status
 
