@@ -224,11 +224,66 @@ export function surfaceMethods(wasm: readonly Surface[], native: Surface): strin
   return [...new Set(wasm.flatMap(names))].filter((name) => nativeNames.has(name)).sort();
 }
 
+export type EngineSide = 'native' | 'wasm';
+
+export interface OneEngineExport {
+  name: string;
+  side: EngineSide;
+}
+
+export interface OneEngineOnly extends OneEngineExport {
+  reason: 'BY_DESIGN' | 'PARKED' | 'GAP' | 'BUILD_METADATA';
+  note: string;
+}
+
+function exportNames(surfaces: readonly Surface[]) {
+  const classes = new Map<string, Set<string>>();
+  for (const surface of surfaces) {
+    for (const [owner, members] of surface.classes) {
+      const names = classes.get(owner) ?? new Set<string>();
+      for (const member of members.keys()) names.add(member);
+      classes.set(owner, names);
+    }
+  }
+  return { classes, bare: new Set(surfaces.flatMap((surface) => [...surface.functions.keys(), ...surface.consts])) };
+}
+
+/** Exports declared on one engine only: a whole class by its name, otherwise `Class.member`, functions and consts. */
+export function oneEngineExports(wasm: readonly Surface[], native: Surface): OneEngineExport[] {
+  const sides = { wasm: exportNames(wasm), native: exportNames([native]) };
+  const only = (side: EngineSide, other: EngineSide): OneEngineExport[] => [
+    ...[...sides[side].classes].flatMap(([owner, members]) => {
+      const shared = sides[other].classes.get(owner);
+      return shared ? [...members].filter((member) => !shared.has(member)).map((member) => `${owner}.${member}`) : [owner];
+    }),
+    ...[...sides[side].bare].filter((name) => !sides[other].bare.has(name)),
+  ].map((name) => ({ name, side }));
+  return [...only('wasm', 'native'), ...only('native', 'wasm')].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function oneEngineProblems(actual: readonly OneEngineExport[], listed: readonly OneEngineOnly[]): string[] {
+  const problems: string[] = [];
+  const key = (entry: OneEngineExport) => `${entry.side}:${entry.name}`;
+  const actualKeys = new Set(actual.map(key));
+  const listedKeys = new Set<string>();
+  for (const entry of listed) {
+    if (listedKeys.has(key(entry))) problems.push(`${entry.name}: listed twice in oneEngineOnly`);
+    listedKeys.add(key(entry));
+    if (!actualKeys.has(key(entry))) problems.push(`${entry.name}: listed as ${entry.side} only but is not one-engine-only`);
+    if (entry.note.trim() === '') problems.push(`${entry.name}: oneEngineOnly needs a note`);
+  }
+  for (const entry of actual) {
+    if (!listedKeys.has(key(entry))) problems.push(`${entry.name}: only on ${entry.side} but not in oneEngineOnly`);
+  }
+  return problems;
+}
+
 export interface CoveragePlan {
   rows: readonly RowExpectation[];
   exclusions: readonly Exclusion[];
   notYetCovered: readonly string[];
   knownDifferences: readonly KnownDifference[];
+  oneEngineOnly: readonly OneEngineOnly[];
 }
 
 export function printParityCounts(format: string, surface: readonly string[], plan: CoveragePlan): void {
@@ -241,6 +296,7 @@ export function printParityCounts(format: string, surface: readonly string[], pl
     `notYetCovered=${plan.notYetCovered.length}`,
     `errorRows=${plan.rows.filter((row) => row.throws).length}`,
     `knownDifferences=${plan.knownDifferences.length}`,
+    `oneEngineOnly=${plan.oneEngineOnly.length}`,
   ].join(' '));
 }
 

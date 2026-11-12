@@ -8,6 +8,8 @@ import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
 import {
   coverageProblems,
   defineRow,
+  oneEngineExports,
+  oneEngineProblems,
   printParityCounts,
   rowName,
   runKnownDifference,
@@ -17,6 +19,7 @@ import {
   type EngineHandle,
   type Exclusion,
   type KnownDifference,
+  type OneEngineOnly,
   type Row,
 } from './harness';
 
@@ -339,18 +342,32 @@ const notYetCovered: string[] = [
   'decodeFontFace',
 ];
 
-function xlsxSurface(): string[] {
+const NO_RASTERIZER = 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/xlsx/src/wasm/enginePng.ts';
+const FONT_PACKS = 'native reads installed font pack directories; wasm has no filesystem and loads @betteroffice/fonts bytes in JS (packages/xlsx/src/wasm/enginePngFonts.ts:11)';
+const oneEngineOnly: OneEngineOnly[] = [
+  { name: 'XlsxDocument.renderPngTarget', side: 'native', reason: 'BY_DESIGN', note: NO_RASTERIZER },
+  { name: 'configureFontPacks', side: 'native', reason: 'BY_DESIGN', note: FONT_PACKS },
+  { name: 'fontPackDiagnosticsJson', side: 'native', reason: 'BY_DESIGN', note: FONT_PACKS },
+  { name: 'engineHeapLiveBytes', side: 'native', reason: 'PARKED', note: 'heap accounting of the native allocator; no wasm counterpart yet' },
+  { name: 'setHeapLimit', side: 'native', reason: 'PARKED', note: 'native heap cap; no wasm counterpart yet' },
+  { name: 'engineVersion', side: 'native', reason: 'PARKED', note: 'engine build version; not exported by the wasm build yet' },
+  { name: '__napiBindingTarget', side: 'native', reason: 'BUILD_METADATA', note: 'napi-rs build target marker' },
+];
+
+function xlsxSurfaces() {
   const read = (path: string) => parseSurface(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8'));
   const wasm = Object.entries(FORMATS).filter(([name]) => name === 'xlsx' || name.startsWith('xlsx-')).map(([, format]) => read(format.wasm));
-  return surfaceMethods(wasm, read(FORMATS.xlsx!.native));
+  const native = read(FORMATS.xlsx!.native);
+  return { surface: surfaceMethods(wasm, native), oneEngine: oneEngineExports(wasm, native) };
 }
 
 describe('xlsx native and wasm parity table', () => {
   test('every method on both engines is a row, an exclusion or not yet covered', () => {
-    const surface = xlsxSurface();
-    const plan = { rows, exclusions, notYetCovered, knownDifferences };
+    const { surface, oneEngine } = xlsxSurfaces();
+    const plan = { rows, exclusions, notYetCovered, knownDifferences, oneEngineOnly };
     printParityCounts('xlsx', surface, plan);
     expect(coverageProblems(surface, plan)).toEqual([]);
+    expect(oneEngineProblems(oneEngine, oneEngineOnly)).toEqual([]);
   });
 
   test('the not yet covered list only shrinks', () => {

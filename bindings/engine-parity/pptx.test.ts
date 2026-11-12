@@ -8,6 +8,8 @@ import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
 import {
   coverageProblems,
   defineRow,
+  oneEngineExports,
+  oneEngineProblems,
   printParityCounts,
   rowName,
   runKnownDifference,
@@ -17,6 +19,7 @@ import {
   type EngineHandle,
   type Exclusion,
   type KnownDifference,
+  type OneEngineOnly,
   type Row,
 } from './harness';
 
@@ -509,18 +512,40 @@ const notYetCovered: string[] = [
   'compileSlideJson', 'decodeFontFace', 'decodeTiffPng',
 ];
 
-function pptxSurface(): string[] {
+const FONT_PACKS = 'native reads installed font pack directories; wasm has no filesystem and loads @betteroffice/fonts bytes in JS';
+const oneEngineOnly: OneEngineOnly[] = [
+  {
+    name: 'PptxRenderer.renderPngTarget', side: 'native', reason: 'BY_DESIGN',
+    note: 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/pptx/src/wasm/enginePng.ts',
+  },
+  {
+    name: 'PptxRenderer.registerDefaultFonts', side: 'native', reason: 'BY_DESIGN',
+    note: `${FONT_PACKS}: registerDefaults (packages/pptx/src/wasm/enginePngFonts.ts:139) feeds requestedFontFacesJson faces to registerFont/registerFallbackFont`,
+  },
+  { name: 'configureFontPacks', side: 'native', reason: 'BY_DESIGN', note: `${FONT_PACKS} (packages/pptx/src/wasm/enginePngFonts.ts:139)` },
+  { name: 'fontPackDiagnosticsJson', side: 'native', reason: 'BY_DESIGN', note: `${FONT_PACKS} (packages/pptx/src/wasm/enginePngFonts.ts:139)` },
+  { name: 'engineVersion', side: 'native', reason: 'PARKED', note: 'engine build version; not exported by the wasm build yet' },
+  { name: '__napiBindingTarget', side: 'native', reason: 'BUILD_METADATA', note: 'napi-rs build target marker' },
+  {
+    name: 'MetafileConverter', side: 'wasm', reason: 'GAP',
+    note: 'separate metafile_svg wasm module for the command host; native converts in the engine through PptxDocument.metafileSvg',
+  },
+];
+
+function pptxSurfaces() {
   const read = (path: string) => parseSurface(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8'));
   const wasm = Object.entries(FORMATS).filter(([name]) => name === 'pptx' || name.startsWith('pptx-')).map(([, format]) => read(format.wasm));
-  return surfaceMethods(wasm, read(FORMATS.pptx!.native));
+  const native = read(FORMATS.pptx!.native);
+  return { surface: surfaceMethods(wasm, native), oneEngine: oneEngineExports(wasm, native) };
 }
 
 describe('pptx native and wasm parity table', () => {
   test('every method on both engines is a row, an exclusion or not yet covered', () => {
-    const surface = pptxSurface();
-    const plan = { rows, exclusions, notYetCovered, knownDifferences };
+    const { surface, oneEngine } = pptxSurfaces();
+    const plan = { rows, exclusions, notYetCovered, knownDifferences, oneEngineOnly };
     printParityCounts('pptx', surface, plan);
     expect(coverageProblems(surface, plan)).toEqual([]);
+    expect(oneEngineProblems(oneEngine, oneEngineOnly)).toEqual([]);
   });
 
   test('the not yet covered list only shrinks', () => {
