@@ -8,7 +8,7 @@ sha=${2:-$LO_SHA256}
 if (($# > 2)); then mirrors=("${@:3}"); else mirrors=("${LO_MIRRORS[@]}"); fi
 floor=${LO_FETCH_FLOOR:-524288}
 floor_seconds=${LO_FETCH_FLOOR_SECONDS:-30}
-budget=${LO_FETCH_BUDGET:-3600}
+budget=${LO_FETCH_BUDGET:-7200}
 attempts=${LO_FETCH_ATTEMPTS:-3}
 partial="$dest.part"
 slow=''

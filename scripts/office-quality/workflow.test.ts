@@ -531,7 +531,7 @@ test('one job fetches the LibreOffice archive into a cache every LibreOffice job
   expect(archive.needs).toBeUndefined();
   expect(archive.if).toBe("github.ref == 'refs/heads/main'");
   expect(archive['runs-on']).toBe('ubuntu-24.04');
-  expect(archive['timeout-minutes']).toBe(70);
+  expect(archive['timeout-minutes']).toBe(130);
   expect(archive.outputs.key).toBe('${{ steps.pin.outputs.key }}');
   const names = archive.steps.map((step: any) => step.name ?? step.uses);
   const restore = archive.steps.find((step: any) => step.id === 'restore');
