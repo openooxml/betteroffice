@@ -221,6 +221,11 @@ pub struct SheetFormat {
     pub custom_height: bool,
     /// `zeroHeight`: rows without height, cells or row style are hidden.
     pub zero_height: bool,
+    /// `defaultColWidth`: the stored width of a column no `<col>` sizes.
+    pub default_col_width: Option<f64>,
+    /// `baseColWidth`: digits a default column holds before padding, when
+    /// `defaultColWidth` is absent.
+    pub base_col_width: Option<u32>,
     /// `showGridLines="0"` on the first `sheetView`: the screen draws no gridlines.
     pub hide_gridlines: bool,
 }
