@@ -7,12 +7,15 @@ use std::collections::{BTreeSet, HashMap};
 use betteroffice_docx::fonts::{FontLoading, FontManager, FontSource, LastResortOffice};
 use betteroffice_docx::{Document, LayoutInput, LayoutResult, Primitive};
 use docx_layout::types::{Fragment, Layout};
+use ooxml_text::auto_space::AUTO_SPACE_EM;
 use ooxml_text::family_metrics::family_metrics;
 use ooxml_text::word_fonts::requested_line_metrics;
 use serde_json::{Value, json};
 
 const LATIN: &str = "Hamburgevons0123456789";
 const KANA: &str = "ひらがなとカタカナ";
+const FONT_SIZE_PT: f64 = 11.0;
+const FONT_SIZE_PX: f64 = FONT_SIZE_PT * 96.0 / 72.0;
 const JAPANESE: &str = "日本語の文章です。";
 /// Word's `ＭＳ 明朝` line box at 14px: 14.126px ascent over 4.074px descent.
 const MINCHO_PITCH_AT_14PX: f64 = 14.126 + 4.074;
@@ -112,13 +115,13 @@ fn a_family_without_a_bundled_face_keeps_its_own_line_box_and_latin_face_next_to
         let latin = Document::open(&package)
             .unwrap()
             .layout(input(
-                json!({"text": LATIN, "fontFamily": family.as_str(), "fontSize": 11}),
+                json!({"text": LATIN, "fontFamily": family.as_str(), "fontSize": FONT_SIZE_PT}),
             ))
             .unwrap();
         let mixed = Document::open(&package)
             .unwrap()
             .layout(input(json!({"text": format!("{LATIN}{KANA}"),
-                                 "fontFamily": family.as_str(), "fontSize": 11})))
+                                 "fontFamily": family.as_str(), "fontSize": FONT_SIZE_PT})))
             .unwrap();
 
         match (pitch(&latin.layout), pitch(&mixed.layout)) {
@@ -148,13 +151,16 @@ fn a_family_without_a_bundled_face_keeps_its_own_line_box_and_latin_face_next_to
                 continue;
             };
             latin_fonts.insert(font);
-            // The last Latin letter carries the Latin to East Asian spacing.
-            let spaced = LATIN.ends_with(character);
-            let advance_differs = !spaced && (advance - own_advance).abs() > 0.02;
-            if wrong.is_none() && (id != own_id || advance_differs) {
+            let spacing = if LATIN.ends_with(character) {
+                f64::from(AUTO_SPACE_EM) * FONT_SIZE_PX
+            } else {
+                0.0
+            };
+            let wanted = own_advance + spacing;
+            if wrong.is_none() && (id != own_id || (advance - wanted).abs() > 0.02) {
                 wrong = Some(format!(
                     "{family}: {character:?} draws glyph {id} advancing {advance:.3}px, \
-                     the family's own face draws glyph {own_id} advancing {own_advance:.3}px"
+                     the family's own face draws glyph {own_id} and the spacing rules give {wanted:.3}px"
                 ));
             }
         }
