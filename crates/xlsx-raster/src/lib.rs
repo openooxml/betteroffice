@@ -1132,6 +1132,7 @@ mod tests {
 
     #[test]
     fn vertical_header_defaults_to_the_padded_right_edge() {
+        const COL_WIDTH: f64 = 3.54296875;
         let mut bounds = Vec::new();
         for horizontal in [
             None,
@@ -1149,7 +1150,7 @@ mod tests {
                 ..Default::default()
             });
             let mut sheet = xlsx_model::Sheet::new("Sheet1");
-            sheet.col_widths.insert(0, 3.54296875);
+            sheet.col_widths.insert(0, COL_WIDTH);
             sheet.row_heights.insert(0, 213.5);
             sheet.set_cell(
                 xlsx_model::CellRef::new(0, 0),
@@ -1180,8 +1181,12 @@ mod tests {
             bounds[1].0 < bounds[2].0 && bounds[2].0 < bounds[3].0,
             "{bounds:?}"
         );
+        let col_px = xlsx_render::geometry::col_chars_to_px(COL_WIDTH) as u32;
+        let padded_right = col_px - 2;
         assert!(
-            bounds[0].0 + bounds[0].2 > 30 && bounds[0].2 < 28,
+            bounds[0].0 + bounds[0].2 > col_px
+                && bounds[0].2 < padded_right
+                && bounds[0].2 + 4 >= padded_right,
             "{bounds:?}"
         );
         assert!(bounds.iter().all(|b| b.3 < 283), "{bounds:?}");
