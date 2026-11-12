@@ -1932,6 +1932,104 @@ fn typing_beside_a_simple_field_is_legacy() {
     assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
 }
 
+fn assert_field_result_kept(saved: &str, result: &str, fields: usize) {
+    assert!(saved.contains(&format!(">{result}</w:t>")), "{saved}");
+    for kind in ["begin", "separate", "end"] {
+        let char_type = format!(r#"w:fldCharType="{kind}""#);
+        assert_eq!(saved.matches(&char_type).count(), fields, "{saved}");
+    }
+}
+
+fn assert_typing_in_a_field_run_keeps_the_result(content: &str, at: u32, result: &str) {
+    let doc = open(content);
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", at),
+        "X",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    assert_insertion_patch(&doc, at);
+    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    assert!(
+        warnings.contains(&"DOCX_MINIMAL_PATCH replace counts {\"field\":1}".to_owned()),
+        "{warnings:?}"
+    );
+    assert_field_result_kept(&saved, result, 1);
+}
+
+#[test]
+fn typing_after_a_field_end_in_the_result_run_keeps_the_result_text() {
+    assert_typing_in_a_field_run_keeps_the_result(
+        concat!(
+            r#"<w:r><w:t>abc</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+            r#"<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+            r#"<w:r><w:t>2</w:t><w:fldChar w:fldCharType="end"/><w:t>def</w:t></w:r>"#,
+        ),
+        5,
+        "2",
+    );
+}
+
+#[test]
+fn typing_before_a_field_begin_in_the_result_run_keeps_the_result_text() {
+    assert_typing_in_a_field_run_keeps_the_result(
+        concat!(
+            r#"<w:r><w:t>abc</w:t><w:fldChar w:fldCharType="begin"/>"#,
+            r#"<w:instrText xml:space="preserve"> PAGE </w:instrText>"#,
+            r#"<w:fldChar w:fldCharType="separate"/><w:t>1</w:t>"#,
+            r#"<w:fldChar w:fldCharType="end"/></w:r>"#,
+        ),
+        1,
+        "1",
+    );
+}
+
+#[test]
+fn typing_outside_a_nested_field_keeps_both_fields() {
+    let content = concat!(
+        r#"<w:r><w:t>abc</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> QUOTE </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>def</w:t></w:r>"#,
+    );
+    let doc = open(content);
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", 1),
+        "X",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    let planned = !part.paragraph_patches.is_empty();
+    if !planned {
+        assert!(part.legacy_paragraphs[0].detail.starts_with("field:"));
+    }
+    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    if warnings.is_empty() {
+        assert!(planned);
+        let expected = content.replacen("<w:t>abc</w:t>", "<w:t>aXbc</w:t>", 1);
+        assert!(saved.contains(&format!("{expected}</w:p>")), "{saved}");
+    } else {
+        assert!(
+            warnings.iter().any(|warning| warning.contains("\"field\":1")),
+            "{warnings:?}"
+        );
+    }
+    assert_field_result_kept(&saved, "7", 2);
+}
+
 #[test]
 fn repeated_text_alignment_is_legacy() {
     let doc = open(&text("aaaa"));
