@@ -138,6 +138,7 @@ impl FontRegistry {
                     LastResortOffice::Word,
                 )
             });
+            let mut scripts = Vec::new();
             for face in faces {
                 let base = self.register_bytes(&face.load()?)?;
                 let script = own.as_ref().is_some_and(|own| {
@@ -147,11 +148,14 @@ impl FontRegistry {
                             && known.italic == face.italic
                     })
                 });
-                let id = if script {
-                    base
+                if script {
+                    scripts.push(base);
                 } else {
-                    self.measured_as(base, face.measure_as.as_deref().unwrap_or(family))
-                };
+                    let id = self.measured_as(base, face.measure_as.as_deref().unwrap_or(family));
+                    self.insert(key.clone(), id, 2);
+                }
+            }
+            for id in scripts {
                 self.insert(key.clone(), id, 2);
             }
             self.resolved.insert(resolved_key);
