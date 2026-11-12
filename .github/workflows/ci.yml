@@ -384,6 +384,8 @@ jobs:
       - name: Remove the workspace test binaries
         if: steps.ws.outputs.present == 'true'
         run: |
+          if ! command -v jq >/dev/null; then
+            echo "::error::jq is required to list the test binaries and is not on this runner"; exit 1; fi
           set -euo pipefail
           json="${RUNNER_TEMP:-/tmp}/test-artifacts.jsonl"
           cargo test --no-run --message-format=json > "$json"
