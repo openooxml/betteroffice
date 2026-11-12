@@ -316,6 +316,17 @@ fn commas_after_fraction_digits_scale() {
 }
 
 #[test]
+fn commas_after_a_literal_do_not_scale() {
+    assert_eq!(fv(1234.0, "0.0\" kg\","), "1234.0 kg");
+    assert_eq!(fv(1234.0, "0\" kg\","), "1234 kg");
+    assert_eq!(fv(1234567.0, "0,\" kg\","), "1235 kg");
+    assert_eq!(fv(1234567.0, "0.0,\" kg\","), "1234.6 kg");
+    assert_eq!(fv(12.345, "0.0%,"), "1234.5%");
+    assert_eq!(fv(1234567.0, "0.0,%"), "123456.7%");
+    assert_eq!(fv(1234567.0, "#,##0,,\"M\""), "1M");
+}
+
+#[test]
 fn percent_and_scientific() {
     assert_eq!(fv(0.5, "0%"), "50%");
     assert_eq!(fv(0.1234, "0.0%"), "12.3%");
