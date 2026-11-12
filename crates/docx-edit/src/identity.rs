@@ -3827,6 +3827,7 @@ impl EditingDoc {
                 return PrimeSlice::Declined;
             }
         };
+        let txn = self.yrs_doc().transact();
         let epoch = self.epoch.load(Ordering::Relaxed);
         if progress
             .as_ref()
@@ -3835,7 +3836,6 @@ impl EditingDoc {
             *progress = None;
             return PrimeSlice::Declined;
         }
-        let txn = self.yrs_doc().transact();
         if progress.is_none() {
             if !self.unchanged_since_seeded() || self.media.lock().unwrap().is_none() {
                 return PrimeSlice::Declined;
