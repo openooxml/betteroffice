@@ -239,7 +239,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     canvas.height = Math.round(request.height * request.dpr);
     canvas.style.width = `${request.width}px`;
     canvas.style.height = `${request.height}px`;
-    const settled = paintWithDefaultFonts(displayList, () => paintDisplayList(context, displayList, request.dpr * request.zoom, { x: 0, y: 0 }, request.zoom));
+    const settled = paintWithDefaultFonts(displayList, () => paintDisplayList(context, displayList, request.dpr * request.zoom));
     heldPreview.current = settled ? null : { canvas, displayList, request };
     canvas.dataset.previewReady = settled ? 'true' : 'pending';
   };
@@ -778,7 +778,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         canvas.style.width = `${request.width}px`;
         canvas.style.height = `${request.height}px`;
         canvas.dataset.defaultFonts = paintWithDefaultFonts(painted.displayList,
-          () => paintDisplayList(context, painted.displayList, request.dpr * request.zoom, { x: 0, y: 0 }, request.zoom)) ? 'settled' : 'pending';
+          () => paintDisplayList(context, painted.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
         canvas.dataset.workerSequence = String(painted.sequence);
         canvas.dataset.paintSource = painted.source;
         canvas.dataset.workerZoom = String(request.zoom);
@@ -1995,9 +1995,15 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     },
   });
 
-  // The chart box keeps the outline: it is a movable frame rather than a cell
-  // edge and has no snapped interior to straddle.
-  const outline = (rect: NonNullable<typeof selectionRect>, color: string, width: 1 | 2 = 2): CSSProperties => {
+  const headers = Boolean(props.showSheetHeaders);
+  const outline = (rect: NonNullable<typeof selectionRect>, border: string, background?: string): CSSProperties => {
+    const scaled = scaledRect(rect, paintedZoom);
+    return { position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
+      boxSizing: 'border-box', border, background };
+  };
+  // With headers the chart box keeps an outline: it is a movable frame rather
+  // than a cell edge and has no snapped interior to straddle.
+  const edgeOutline = (rect: NonNullable<typeof selectionRect>, color: string, width: 1 | 2 = 2): CSSProperties => {
     const scaled = scaledRect(rect, paintedZoom);
     return { position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
       outline: `${width}px solid ${color}`, outlineOffset: -width / 2 };
@@ -2011,7 +2017,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     return { position: 'absolute', left: box.left, top: box.top, width: box.width, height: box.height,
       boxShadow: `inset 0 0 0 ${width}px ${MARQUEE_COLOR}` };
   };
-  const fills = selectionRect && !selectedChart
+  const fills = headers && selectionRect && !selectedChart
     ? marqueeFills(scaledRect(selectionRect, paintedZoom), focusRect ? scaledRect(focusRect, paintedZoom) : null) : [];
   const defaultToolbar = <EditorToolbar mode="commands">
     <EditorToolbar.Toolbar />
@@ -2040,7 +2046,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                 style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
               {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
                 painted={pluginHost.painted} zoom={zoom} top={props.showSheetHeaders ? COLUMN_HEADER_HEIGHT : 0} />}
-              <SheetGrid frame={frame} zoom={paintedZoom} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0} showSheetHeaders={Boolean(props.showSheetHeaders)} headerHandlers={headerHandlers} selection={selection}
+              <SheetGrid frame={frame} zoom={paintedZoom} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0} showSheetHeaders={headers} headerHandlers={headerHandlers} selection={selection}
                 sheet={painted?.request.sheet}
                 selectAllLabel={t('commands.selectAll')}
                 unhideLabels={{ col: t('commands.unhideColumns'), row: t('commands.unhideRows') }}>
@@ -2060,9 +2066,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                 <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>
                   <canvas ref={canvasRef} style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} />
                   {previewDraft && (run?.ready ? <div data-testid="xlsx-commit-preview" aria-hidden
-                    style={{ position: 'absolute', left: (previewRect?.x ?? 0) * paintedZoom,
-                      top: (previewRect?.y ?? 0) * paintedZoom, width: (previewRect?.w ?? 96) * paintedZoom,
-                      height: (previewRect?.h ?? 24) * paintedZoom, background: '#fff',
+                    style={{ ...outline(previewRect ?? { x: 0, y: 0, w: 96, h: 24 }, 'none', '#fff'),
                       color: '#000', padding: `0 ${8 * paintedZoom}px`, overflow: 'hidden', whiteSpace: 'pre',
                       display: previewDraft.sheet === active && (!grid || previewRect) ? 'block' : 'none',
                       font: `${13 * paintedZoom}px system-ui, sans-serif`,
@@ -2076,11 +2080,11 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                       style={{ position: 'absolute', left: fill.x, top: fill.y, width: fill.w, height: fill.h,
                         background: SELECTION_FILL }} />)}
                     {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
-                      style={marquee(selectionRect)} />}
+                      style={headers ? marquee(selectionRect) : outline(selectionRect, `1px solid ${BRAND}`, 'rgba(33, 115, 70, 0.12)')} />}
                     {focusRect && !selectedChart && !editing && <div data-testid="xlsx-active-cell"
-                      style={marquee(focusRect, ACTIVE_CELL_WIDTH)} />}
+                      style={headers ? marquee(focusRect, ACTIVE_CELL_WIDTH) : outline(focusRect, `2px solid ${BRAND}`)} />}
                     {chartRect && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart?.id} aria-hidden
-                      style={{ ...outline(chartRect, BRAND),
+                      style={{ ...(headers ? edgeOutline(chartRect, BRAND) : outline(chartRect, `2px solid ${BRAND}`)),
                         transform: `translate(${chartOffset?.x ?? 0}px, ${chartOffset?.y ?? 0}px)`, boxShadow: '0 1px 6px rgba(0, 0, 0, 0.25)' }} />}
                     {editing && editRect && <input ref={attachCellInput} data-testid="xlsx-cell-editor"
                       value={(composition.current?.source === 'cell' ? editorInputRef.current?.value : undefined) ?? editing.value}
@@ -2103,11 +2107,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                         if (suppressBlur.current) { suppressBlur.current = false; return; }
                         commitDraft('cell');
                       }}
-                      style={{ position: 'absolute', left: editRect.x * paintedZoom, top: editRect.y * paintedZoom,
-                        width: editRect.w * paintedZoom, height: editRect.h * paintedZoom, boxSizing: 'border-box',
-                        border: `2px solid ${BRAND}`, background: editColors?.background, color: editColors?.color,
-                        padding: '0 3px', font: `${13 * paintedZoom}px system-ui, sans-serif`, pointerEvents: 'auto',
-                        outline: 'none' }} />}
+                      style={{ ...outline(editRect, `2px solid ${BRAND}`, editColors?.background), color: editColors?.color, padding: '0 3px',
+                        font: `${13 * paintedZoom}px system-ui, sans-serif`, pointerEvents: 'auto', outline: 'none' }} />}
                   </div>
                 </div>
               </div>

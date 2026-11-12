@@ -1,7 +1,7 @@
 /**
- * Geometry for the cell-selection marquee.
+ * Geometry for the cell-selection marquee drawn alongside the sheet headers.
  *
- * The canvas snaps its unstyled grid strokes to the CSS pixel grid: a one-pixel
+ * The header bands lay their boundaries out on whole CSS pixels: a one-pixel
  * line on a boundary at `b` covers `[b - 1, b]`. The selection border has to sit
  * on that same grid, or it reads as inside the cell on one edge and outside on
  * the other whenever the zoom makes the boundary fractional.

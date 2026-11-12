@@ -58,7 +58,7 @@ export const PeerlessWorkerExtent = memo(function PeerlessWorkerExtent({ store, 
 });
 
 export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store, active, zoom, selectedChart,
-  chartOffset, controller, disabled, run }: {
+  chartOffset, controller, disabled, run, showSheetHeaders = false }: {
   store: WorkerPresentationStore;
   active: number;
   zoom: number;
@@ -67,6 +67,7 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
   controller: WorkerDraftController;
   disabled: boolean;
   run: PeerlessWorkbookSession | null;
+  showSheetHeaders?: boolean;
 }) {
   const unavailable = usePeerlessReadOnly(run, disabled);
   const painted = useWorkerPresentation(store, selectPainted);
@@ -84,9 +85,14 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
     painted?.geometry && painted.request.sheet === sheet ? cellRect(painted.geometry, row, col) : null, [painted]);
   const colors = useCallback((sheet: number, bounds: { x: number; y: number; w: number; h: number }) =>
     cellEditorColors(painted?.request.sheet === sheet ? painted.displayList : null, bounds), [painted]);
-  // The chart box keeps the outline: it is a movable frame rather than a cell
-  // edge and has no snapped interior to straddle.
-  const outline = (bounds: NonNullable<typeof selectionRect>, color: string, width: 1 | 2 = 2): CSSProperties => {
+  const outline = (bounds: NonNullable<typeof selectionRect>, border: string, background?: string): CSSProperties => {
+    const scaled = scaledRect(bounds, scale);
+    return { position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
+      boxSizing: 'border-box', border, background };
+  };
+  // With headers the chart box keeps an outline: it is a movable frame rather
+  // than a cell edge and has no snapped interior to straddle.
+  const edgeOutline = (bounds: NonNullable<typeof selectionRect>, color: string, width: 1 | 2 = 2): CSSProperties => {
     const scaled = scaledRect(bounds, scale);
     return { position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
       outline: `${width}px solid ${color}`, outlineOffset: -width / 2 };
@@ -100,7 +106,7 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
     return { position: 'absolute', left: box.left, top: box.top, width: box.width, height: box.height,
       boxShadow: `inset 0 0 0 ${width}px ${MARQUEE_COLOR}` };
   };
-  const fills = selectionRect && !selectedChart
+  const fills = showSheetHeaders && selectionRect && !selectedChart
     ? marqueeFills(scaledRect(selectionRect, scale), focusRect ? scaledRect(focusRect, scale) : null) : [];
   return <div data-testid="xlsx-overlay-host"
     style={{ position: 'absolute', top: 0, left: 0, width: 0, height: 0, pointerEvents: 'none' }}>
@@ -108,11 +114,11 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
       style={{ position: 'absolute', left: fill.x, top: fill.y, width: fill.w, height: fill.h,
         background: SELECTION_FILL }} />)}
     {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
-      style={marquee(selectionRect)} />}
+      style={showSheetHeaders ? marquee(selectionRect) : outline(selectionRect, '1px solid #217346', 'rgba(33, 115, 70, 0.12)')} />}
     {focusRect && !selectedChart && <div data-testid="xlsx-active-cell"
-      style={marquee(focusRect, ACTIVE_CELL_WIDTH)} />}
+      style={showSheetHeaders ? marquee(focusRect, ACTIVE_CELL_WIDTH) : outline(focusRect, '2px solid #217346')} />}
     {chartRect && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart?.id} aria-hidden
-      style={{ ...outline(chartRect, '#217346'), transform: `translate(${chartOffset?.x ?? 0}px, ${chartOffset?.y ?? 0}px)` }} />}
+      style={{ ...(showSheetHeaders ? edgeOutline(chartRect, '#217346') : outline(chartRect, '2px solid #217346')), transform: `translate(${chartOffset?.x ?? 0}px, ${chartOffset?.y ?? 0}px)` }} />}
     <PeerlessWorkerCellInput controller={controller} zoom={scale} disabled={unavailable} rect={rect} colors={colors} />
   </div>;
 });

@@ -1,4 +1,4 @@
-import { paintDisplayList, type DisplayList, type DrawCmd, type TextCmd } from '@betteroffice/xlsx';
+import type { DisplayList, TextCmd } from '@betteroffice/xlsx';
 import type { WorkbookCommandFrame } from '@betteroffice/xlsx/worker';
 import { describe, expect, test } from 'bun:test';
 import { WorkerCellEcho } from './WorkerCellEcho';
@@ -11,21 +11,11 @@ function harness(maxPatches = 8) {
   };
   const text: string[] = [];
   const clips: number[][] = [];
-  const strokes: number[][] = [];
-  const pen = { lineWidth: 1 };
-  let from: [number, number] | null = null;
-  let to: [number, number] | null = null;
   const context = {
     save() {}, restore() {}, setTransform() {}, beginPath() {}, clip() {}, clearRect() {},
-    setLineDash() {},
     rect(...rect: number[]) { clips.push(rect); },
     fillText(value: string) { text.push(value); },
     fillRect() {},
-    moveTo(x: number, y: number) { from = [x, y]; },
-    lineTo(x: number, y: number) { to = [x, y]; },
-    stroke() { if (from && to) strokes.push([...from, ...to, pen.lineWidth]); },
-    get lineWidth() { return pen.lineWidth; },
-    set lineWidth(value: number) { pen.lineWidth = value; },
   } as unknown as CanvasRenderingContext2D;
   const errors: unknown[] = [];
   const source = new WorkerPaintSource({
@@ -36,29 +26,26 @@ function harness(maxPatches = 8) {
     onError: (error) => { errors.push(error); },
   });
   const echo = new WorkerCellEcho({ source, context: () => context, maxPatches });
-  const last = { displayList: null as DisplayList | null };
-  const install = (coversThroughSeq: number, value = 'final', startRow = 0, cell: Partial<TextCmd> = {},
-    extra: DrawCmd[] = []) => {
+  const install = (coversThroughSeq: number, value = 'final', startRow = 0, cell: Partial<TextCmd> = {}) => {
     const captured = source.captureCommandFrame()!;
     const displayList: DisplayList = {
       width: 192, height: 48,
-      commands: [{ op: 'fillRect', x: 0, y: 0, w: 192, h: 48, color: '#ffffff' }, ...extra,
+      commands: [{ op: 'fillRect', x: 0, y: 0, w: 192, h: 48, color: '#ffffff' },
         { op: 'text', text: value, x: 8, y: 18, fontSize: 11, color: '#123456', bold: true,
           clip: { x: 0, y: 0, w: 96, h: 24 }, ...cell }],
       grid: { startRow, startCol: 0, rowOffsets: [0, 24, 48], colOffsets: [0, 96, 192, 288] },
     };
-    last.displayList = displayList;
     const frame: WorkbookCommandFrame = {
       session: 'book', incarnation: 'worker', coversThroughSeq, sequence: 90, epoch: 1,
       sheet: request.sheet, viewport: request.viewport, displayList, version: value,
-      requestGeneration: captured.requestGeneration!, zoom: request.zoom, dpr: request.dpr,
+      requestGeneration: captured.requestGeneration!, zoom: 1, dpr: 1,
     };
     return source.install(frame, captured);
   };
   expect(install(0, 'initial')).toBe(true);
   text.length = 0;
   clips.length = 0;
-  return { source, echo, text, clips, strokes, errors, context, install, request, last };
+  return { source, echo, text, clips, errors, context, install, request };
 }
 
 describe('WorkerCellEcho', () => {
@@ -227,20 +214,6 @@ describe('WorkerCellEcho', () => {
     expect(source.painted).toBe(authoritative);
     expect(source.coversThroughSeq).toBe(0);
     expect(errors).toEqual([failure]);
-  });
-
-  test('echo snaps gridlines at the frame zoom, not at zoom 1', () => {
-    const { context, echo, install, last, request, strokes } = harness();
-    request.zoom = 1.5;
-    const gridline: DrawCmd = { op: 'line', x1: 96, y1: 0, x2: 96, y2: 24, width: 1, color: '#d0d0d0' };
-    expect(install(0, 'initial', 0, {}, [gridline])).toBe(true);
-    strokes.length = 0;
-    paintDisplayList(context, last.displayList!, request.dpr * request.zoom, { x: 0, y: 0 }, request.zoom);
-    const authoritative = [...strokes];
-    expect(authoritative).toHaveLength(1);
-    strokes.length = 0;
-    echo.patch(1, [{ sheet: 0, row: 0, col: 0, text: 'typed' }]);
-    expect(strokes).toEqual(authoritative);
   });
 
   test('dispose restores authoritative pixels and removes the transaction', () => {

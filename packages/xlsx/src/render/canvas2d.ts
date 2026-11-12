@@ -53,8 +53,7 @@ export function paintDisplayList(
   ctx: CanvasRenderingContext2D,
   dl: DisplayList,
   dpr: number,
-  origin: { x: number; y: number } = { x: 0, y: 0 },
-  zoom = 1
+  origin: { x: number; y: number } = { x: 0, y: 0 }
 ): void {
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, origin.x, origin.y);
@@ -62,11 +61,11 @@ export function paintDisplayList(
   ctx.rect(0, 0, dl.width, dl.height);
   ctx.clip();
   ctx.clearRect(0, 0, dl.width, dl.height);
-  for (const cmd of dl.commands) paintCommand(ctx, cmd, dpr, origin, zoom);
+  for (const cmd of dl.commands) paintCommand(ctx, cmd, dpr, origin);
   ctx.restore();
 }
 
-function paintCommand(ctx: CanvasRenderingContext2D, cmd: DrawCmd, dpr: number, origin: { x: number; y: number }, zoom: number): void {
+function paintCommand(ctx: CanvasRenderingContext2D, cmd: DrawCmd, dpr: number, origin: { x: number; y: number }): void {
   switch (cmd.op) {
     case 'fillRect':
       paintClipped(ctx, cmd.clip, () => {
@@ -78,7 +77,7 @@ function paintCommand(ctx: CanvasRenderingContext2D, cmd: DrawCmd, dpr: number, 
       paintClipped(ctx, cmd.clip, () => paintPattern(ctx, cmd, dpr, origin));
       return;
     case 'line':
-      paintClipped(ctx, cmd.clip, () => paintLine(ctx, cmd, dpr, origin, zoom));
+      paintClipped(ctx, cmd.clip, () => paintLine(ctx, cmd, dpr, origin));
       return;
     case 'path':
       paintClipped(ctx, cmd.clip, () => paintPath(ctx, cmd));
@@ -190,44 +189,11 @@ function paintPath(ctx: CanvasRenderingContext2D, cmd: PathCmd): void {
   }
 }
 
-function paintLine(ctx: CanvasRenderingContext2D, cmd: LineCmd, dpr: number, origin: { x: number; y: number }, zoom: number): void {
+function paintLine(ctx: CanvasRenderingContext2D, cmd: LineCmd, dpr: number, origin: { x: number; y: number }): void {
   ctx.strokeStyle = cmd.color;
   ctx.save();
   ctx.lineCap = 'butt';
   let { x1, y1, x2, y2 } = cmd;
-  // Gridlines and the pane divider are marked `hairline` by the renderer. They
-  // are hairlines in sheet space, so they keep a whole number of CSS pixels at
-  // any zoom, and they snap to the same CSS pixel columns the DOM header band is
-  // laid out on: a boundary stroke sits inside its track, an even-width split
-  // straddles it. A solid cell border is not a hairline and keeps the normal
-  // scaled path.
-  //
-  // The context is already translated by `origin` (device pixels), so snapping
-  // happens on the absolute CSS grid the canvas is placed on: the offset is added
-  // before rounding and removed again to express the result in list space.
-  if (cmd.hairline === true && zoom > 0 && (x1 === x2 || y1 === y2)) {
-    const realDpr = dpr / zoom;
-    const thickCss = Math.max(1, Math.round(cmd.width));
-    const half = thickCss % 2 === 1 ? 0.5 : 0;
-    const originCssX = origin.x / realDpr;
-    const originCssY = origin.y / realDpr;
-    if (x1 === x2) {
-      const centre = (Math.round(x1 * zoom + originCssX) - half) * realDpr - origin.x;
-      x1 = x2 = centre / dpr;
-      y1 = (Math.round(y1 * zoom + originCssY) * realDpr - origin.y) / dpr;
-      y2 = (Math.round(y2 * zoom + originCssY) * realDpr - origin.y) / dpr;
-    } else {
-      const centre = (Math.round(y1 * zoom + originCssY) - half) * realDpr - origin.y;
-      y1 = y2 = centre / dpr;
-      x1 = (Math.round(x1 * zoom + originCssX) * realDpr - origin.x) / dpr;
-      x2 = (Math.round(x2 * zoom + originCssX) * realDpr - origin.x) / dpr;
-    }
-    ctx.lineWidth = thickCss / zoom;
-    ctx.setLineDash([]);
-    strokeSegment(ctx, x1, y1, x2, y2);
-    ctx.restore();
-    return;
-  }
   const width = Math.max(1, Math.round(cmd.width * dpr));
   // a double without a rail width keeps the legacy passes around the unsnapped line
   const legacyDouble = cmd.style === 'double' && cmd.rail === undefined;

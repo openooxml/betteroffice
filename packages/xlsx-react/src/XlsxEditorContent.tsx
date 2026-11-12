@@ -1253,7 +1253,7 @@ export function XlsxEditorContent({
       } catch {}
     }
     try {
-      canvas.dataset.defaultFonts = paintWithDefaultFonts(dl, () => paintDisplayList(ctx, dl, dpr * zoom, { x: 0, y: 0 }, zoom))
+      canvas.dataset.defaultFonts = paintWithDefaultFonts(dl, () => paintDisplayList(ctx, dl, dpr * zoom))
         ? 'settled' : 'pending';
     } catch (paintError) {
       failPaint(paintError);
@@ -2539,7 +2539,7 @@ export function XlsxEditorContent({
   const scaledFocusRect = focusRect ? scaledRect(focusRect, zoom) : null;
   const selectionMarquee = scaledSelectionRect ? marqueeBox(scaledSelectionRect) : null;
   const focusMarquee = scaledFocusRect ? marqueeBox(scaledFocusRect, ACTIVE_CELL_WIDTH) : null;
-  const selectionFills = scaledSelectionRect
+  const selectionFills = showSheetHeaders && scaledSelectionRect
     ? marqueeFills(scaledSelectionRect, scaledFocusRect)
     : [];
   const scaledEditRect = editRect ? scaledRect(editRect, zoom) : null;
@@ -2893,11 +2893,11 @@ export function XlsxEditorContent({
                   pointerEvents: 'none',
                 }}
               >
-                {/* the marquee's edges snap to the same pixel grid as the canvas
-                    gridlines: the range ring is one pixel inside each boundary,
-                    the active-cell ring two pixels across it, and the wash
-                    stops at the active cell. */}
-                {selectionMarquee && !selectedChart && (
+                {/* with headers, the marquee's edges snap to the same pixel grid
+                    as the header bands: the range ring is one pixel inside each
+                    boundary, the active-cell ring two pixels across it, and the
+                    wash stops at the active cell. */}
+                {scaledSelectionRect && selectionMarquee && !selectedChart && (
                   <>
                     {selectionFills.map((fill, index) => (
                       <div
@@ -2916,7 +2916,7 @@ export function XlsxEditorContent({
                     ))}
                     <div
                       data-testid="xlsx-selection"
-                      style={{
+                      style={showSheetHeaders ? {
                         position: 'absolute',
                         left: selectionMarquee.left,
                         top: selectionMarquee.top,
@@ -2924,6 +2924,15 @@ export function XlsxEditorContent({
                         height: selectionMarquee.height,
                         boxShadow: `inset 0 0 0 ${MARQUEE_WIDTH}px ${MARQUEE_COLOR}`,
                         pointerEvents: 'none',
+                      } : {
+                        position: 'absolute',
+                        left: scaledSelectionRect.x,
+                        top: scaledSelectionRect.y,
+                        width: scaledSelectionRect.w,
+                        height: scaledSelectionRect.h,
+                        boxSizing: 'border-box',
+                        border: `1px solid ${BRAND}`,
+                        background: 'rgba(33, 115, 70, 0.12)',
                       }}
                     />
                   </>
@@ -2952,10 +2961,10 @@ export function XlsxEditorContent({
                     }}
                   />
                 )}
-                {focusMarquee && !selectedChart && !editing && (
+                {scaledFocusRect && focusMarquee && !selectedChart && !editing && (
                   <div
                     data-testid="xlsx-active-cell"
-                    style={{
+                    style={showSheetHeaders ? {
                       position: 'absolute',
                       left: focusMarquee.left,
                       top: focusMarquee.top,
@@ -2963,6 +2972,14 @@ export function XlsxEditorContent({
                       height: focusMarquee.height,
                       boxShadow: `inset 0 0 0 ${ACTIVE_CELL_WIDTH}px ${MARQUEE_COLOR}`,
                       pointerEvents: 'none',
+                    } : {
+                      position: 'absolute',
+                      left: scaledFocusRect.x,
+                      top: scaledFocusRect.y,
+                      width: scaledFocusRect.w,
+                      height: scaledFocusRect.h,
+                      boxSizing: 'border-box',
+                      border: `2px solid ${BRAND}`,
                     }}
                   />
                 )}

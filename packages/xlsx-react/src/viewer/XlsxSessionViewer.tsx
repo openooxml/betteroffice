@@ -120,7 +120,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
       canvas.style.width = `${request.width}px`;
       canvas.style.height = `${request.height}px`;
       canvas.dataset.defaultFonts = paintWithDefaultFonts(frame.displayList,
-        () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom, { x: 0, y: 0 }, request.zoom)) ? 'settled' : 'pending';
+        () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
     },
   }), []);
 
@@ -502,9 +502,17 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
     setSelectedChart(null);
   };
 
-  // drawn on the cell edges, not inside them: an outline with a negative offset
-  // straddles the gridline and leaves the box sized like the range itself.
-  const outline = (rect: NonNullable<typeof selectionRect>, color: string, width: 1 | 2 = 2): CSSProperties => {
+  const headers = Boolean(props.showSheetHeaders);
+  const outline = (rect: NonNullable<typeof selectionRect>, border: string, background?: string): CSSProperties => {
+    const scaled = scaledRect(rect, paintedZoom);
+    return {
+      position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
+      boxSizing: 'border-box', border, background,
+    };
+  };
+  // with headers, drawn on the cell edges, not inside them: an outline with a
+  // negative offset straddles the gridline and leaves the box sized like the range.
+  const edgeOutline = (rect: NonNullable<typeof selectionRect>, color: string, width: 1 | 2 = 2): CSSProperties => {
     const scaled = scaledRect(rect, paintedZoom);
     return {
       position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
@@ -525,7 +533,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
     };
   };
   // the wash stops at the active cell: only the first box of the selection stays clear.
-  const fills = selectionRect && !selectedChart
+  const fills = headers && selectionRect && !selectedChart
     ? marqueeFills(scaledRect(selectionRect, paintedZoom), focusRect ? scaledRect(focusRect, paintedZoom) : null) : [];
 
   return (
@@ -539,7 +547,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
             {toolbarContent != null && <div data-testid="xlsx-toolbar" style={{ flex: '0 0 auto' }}>{toolbarContent}</div>}
             <div data-testid="xlsx-workspace" style={{ position: 'relative', display: 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
               <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
-                <SheetGrid frame={frame} zoom={paintedZoom} showSheetHeaders={Boolean(props.showSheetHeaders)} headerHandlers={{ onHeaderMouseDown, onHeaderDragSelect, onSelectAll }} selection={selection}
+                <SheetGrid frame={frame} zoom={paintedZoom} showSheetHeaders={headers} headerHandlers={{ onHeaderMouseDown, onHeaderDragSelect, onSelectAll }} selection={selection}
                   selectAllLabel={t('commands.selectAll')}
                   sheet={painted?.frame.sheet}>
                 <div ref={scrollRef} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
@@ -557,11 +565,14 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
                         style={{ position: 'absolute', left: fill.x, top: fill.y,
                           width: fill.w, height: fill.h, background: SELECTION_FILL }} />)}
                       {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
-                        style={ring(scaledRect(selectionRect, paintedZoom))} />}
+                        style={headers ? ring(scaledRect(selectionRect, paintedZoom))
+                          : outline(selectionRect, `1px solid ${BRAND}`, 'rgba(33, 115, 70, 0.12)')} />}
                       {focusRect && !selectedChart && <div data-testid="xlsx-active-cell"
-                        style={ring(scaledRect(focusRect, paintedZoom), ACTIVE_CELL_WIDTH)} />}
+                        style={headers ? ring(scaledRect(focusRect, paintedZoom), ACTIVE_CELL_WIDTH)
+                          : outline(focusRect, `2px solid ${BRAND}`)} />}
                       {chartRect && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart} aria-hidden
-                        style={{ ...outline(chartRect, BRAND), boxShadow: '0 1px 6px rgba(0, 0, 0, 0.25)' }} />}
+                        style={{ ...(headers ? edgeOutline(chartRect, BRAND) : outline(chartRect, `2px solid ${BRAND}`, 'transparent')),
+                          boxShadow: '0 1px 6px rgba(0, 0, 0, 0.25)' }} />}
                     </div>
                   </div>
                 </div>

@@ -272,7 +272,7 @@ describe('workbook session viewer', () => {
   it('draws the viewer selection as an edge marquee, not a fill', async () => {
     const { viewer } = session();
     open(viewer);
-    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen showSheetHeaders />);
     await opened();
     const marquee = await waitFor(() => view.getByTestId('xlsx-selection') as HTMLElement);
     // a one-pixel inset ring on the cell's snapped rect.
@@ -290,11 +290,27 @@ describe('workbook session viewer', () => {
       .toEqual(['-1px', '-1px', '98px', '26px']);
   });
 
+  it('keeps the bordered viewer selection without headers', async () => {
+    const { viewer } = session();
+    open(viewer);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    await opened();
+    const marquee = await waitFor(() => view.getByTestId('xlsx-selection') as HTMLElement);
+    expect([marquee.style.border, marquee.style.background, marquee.style.boxShadow])
+      .toEqual(['1px solid #217346', 'rgba(33, 115, 70, 0.12)', '']);
+    expect([marquee.style.left, marquee.style.top, marquee.style.width, marquee.style.height])
+      .toEqual(['0px', '0px', '96px', '24px']);
+    const active = view.getByTestId('xlsx-active-cell') as HTMLElement;
+    expect([active.style.border, active.style.boxShadow, active.style.left, active.style.width, active.style.height])
+      .toEqual(['2px solid #217346', '', '0px', '96px', '24px']);
+    expect(view.queryAllByTestId('xlsx-selection-fill')).toHaveLength(0);
+  });
+
   it('washes a range except the active cell and leaves a single cell clear', async () => {
     const { viewer, call } = session();
     call.selectionData.mockResolvedValue({ region: { top: 0, left: 0, bottom: 2, right: 2 } });
     open(viewer);
-    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen showSheetHeaders />);
     await opened();
     const scroll = view.getByTestId('xlsx-scroll');
     expect(view.queryAllByTestId('xlsx-selection-fill')).toHaveLength(0);
@@ -827,9 +843,7 @@ describe('workbook session viewer', () => {
     expect(scroll.scrollLeft).toBe(125);
     await tick();
     expect(await selected).toBe(true);
-    // the ring starts on the boundary snapped to a whole CSS pixel.
-    const left = parseFloat((view.getByTestId('xlsx-selection') as HTMLElement).style.left);
-    expect(left).toBe(Math.round(96 * 1.3));
+    expect(parseFloat((view.getByTestId('xlsx-selection') as HTMLElement).style.left)).toBeCloseTo(96 * 1.3);
   });
 
   it('accepts a painted target with a positive partial viewport intersection', async () => {

@@ -1186,7 +1186,7 @@ import type { DisplayList } from '../display-list/types';
 export declare function paintDisplayList(ctx: CanvasRenderingContext2D, dl: DisplayList, dpr: number, origin?: {
     x: number;
     y: number;
-}, zoom?: number): void;
+}): void;
 
 // ---- saveWarnings.d.ts ----
 export type { SaveResult, SaveWarning, SaveWarningCode } from '../../../shared/office-session/saveWarnings';

@@ -204,10 +204,10 @@ function pointAt(fixture: Fixture, addr: CellAddr): { clientX: number; clientY: 
   return { clientX: rect.x + rect.w / 2, clientY: rect.y + rect.h / 2 };
 }
 
-async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array) => void) {
+async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array) => void, showSheetHeaders = false) {
   const ready: { handle: WorkbookHandle | null } = { handle: null };
   const view = render(
-    <XlsxEditor legacySyncApi experimentalWorkerOpen={false} showSheetHeaders
+    <XlsxEditor legacySyncApi experimentalWorkerOpen={false} showSheetHeaders={showSheetHeaders}
       file={fixture.bytes.slice()}
       onSave={onSave}
       onReady={(api) => {
@@ -233,7 +233,7 @@ async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array
     reopenWith: (next: Fixture) =>
       act(async () => {
         view.rerender(
-          <XlsxEditor legacySyncApi experimentalWorkerOpen={false} showSheetHeaders
+          <XlsxEditor legacySyncApi experimentalWorkerOpen={false} showSheetHeaders={showSheetHeaders}
             file={next.bytes.slice()}
             onSave={onSave}
             onReady={(api) => {
@@ -273,6 +273,10 @@ async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array
       };
     },
   };
+}
+
+function mountWithHeaders(fixture: Fixture = plain) {
+  return mountEditor(fixture, undefined, true);
 }
 
 // the centre of a chart's visible region, which is where the editor paints it.
@@ -328,7 +332,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('shows the column letters and row numbers for the painted frame', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const grid = view.surface.closest('[data-testid="xlsx-grid"]')!;
     expect(grid.querySelector('[data-testid="xlsx-column-headers"] > div')?.textContent).toBe('A');
     expect(grid.querySelector('[data-testid="xlsx-row-headers"] > div')?.textContent).toBe('1');
@@ -343,7 +347,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('sends no ops when a whole-sheet row boundary is dragged', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const grid = view.surface.closest('[data-testid="xlsx-grid"]')!;
     fireEvent.click(grid.querySelector('[data-testid="xlsx-grid-corner"]')!);
     await waitFor(() => expect(selectedAddresses(view))
@@ -376,7 +380,7 @@ describe('XlsxEditor grid pointer handling', () => {
     (plain.grid.colOffsets[col]! + plain.grid.colOffsets[col + 1]!) / 2;
 
   it('selects the whole column from the column header', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const grid = view.surface.closest('[data-testid="xlsx-grid"]')!;
 
     fireEvent.mouseDown(grid.querySelector('[data-testid="xlsx-column-headers"] [data-col="0"]')!);
@@ -400,7 +404,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('draws the cell selection as a snapped edge ring, not a fill', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     view.click({ row: 1, col: 1 });
     const marquee = await waitFor(() => view.selectionBox()!);
     // a one-pixel inset ring, so the element keeps a zero border. happy-dom keeps the hex as
@@ -427,8 +431,26 @@ describe('XlsxEditor grid pointer handling', () => {
     expect(view.view.queryAllByTestId('xlsx-selection-fill')).toEqual([]);
   });
 
-  it('washes a range but leaves the active cell clear', async () => {
+  it('keeps the bordered selection and active-cell boxes without headers', async () => {
     const view = await mountEditor();
+    view.click({ row: 1, col: 1 });
+    const marquee = await waitFor(() => view.selectionBox()!);
+    const cell = cellRect(plain.grid, 1, 1)!;
+    expect(marquee.style.border).toBe('1px solid #217346');
+    expect(marquee.style.background).toBe('rgba(33, 115, 70, 0.12)');
+    expect(marquee.style.boxShadow).toBe('');
+    expect(parseFloat(marquee.style.left)).toBeCloseTo(cell.x);
+    expect(parseFloat(marquee.style.width)).toBeCloseTo(cell.w);
+    const active = view.view.getByTestId('xlsx-active-cell');
+    expect(active.style.border).toBe('2px solid #217346');
+    expect(active.style.boxShadow).toBe('');
+    expect(parseFloat(active.style.left)).toBeCloseTo(cell.x);
+    expect(parseFloat(active.style.height)).toBeCloseTo(cell.h);
+    expect(view.view.queryAllByTestId('xlsx-selection-fill')).toEqual([]);
+  });
+
+  it('washes a range but leaves the active cell clear', async () => {
+    const view = await mountWithHeaders();
     // anchor at D4 and drag back to B2, so the active cell is the range's
     // top-left corner: the wash then splits into the band under the active row
     // and the band beside the active column.
@@ -494,7 +516,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('selects the whole row from the row header', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const grid = view.surface.closest('[data-testid="xlsx-grid"]')!;
 
     fireEvent.mouseDown(grid.querySelector('[data-testid="xlsx-row-headers"] [data-row="0"]')!);
@@ -508,7 +530,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('selects the whole sheet from the corner above the row numbers', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const grid = view.surface.closest('[data-testid="xlsx-grid"]')!;
     const applyOps = spyOn(view.workbook(), 'applyOps');
     const a11y = spyOn(xlsx, 'buildA11yGrid');
@@ -533,7 +555,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('extends the whole-column selection from the anchor on shift', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const columns = view.surface.closest('[data-testid="xlsx-grid"]')!
       .querySelector('[data-testid="xlsx-column-headers"]')!;
 
@@ -548,7 +570,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('dragging a selected column header sends no move op', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const band = view.surface.closest('[data-testid="xlsx-grid"]')!
       .querySelector('[data-testid="xlsx-column-headers"]')!;
     const applyOps = spyOn(view.workbook(), 'applyOps');
@@ -566,7 +588,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('extends the whole-column selection track by track when a label is dragged', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const band = columnBand(view);
     fireEvent.mouseDown(band.querySelector('[data-col="0"]')!);
     fireEvent.mouseDown(band.querySelector('[data-col="2"]')!, { shiftKey: true });
@@ -594,7 +616,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('dragging a header inside a selected run sends no move op', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const band = columnBand(view);
     fireEvent.mouseDown(band.querySelector('[data-col="0"]')!);
     fireEvent.mouseDown(band.querySelector('[data-col="2"]')!, { shiftKey: true });
@@ -611,7 +633,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('resizes a whole selected column run as one batch of width ops', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const band = columnBand(view);
     fireEvent.mouseDown(band.querySelector('[data-col="1"]')!);
     fireEvent.mouseDown(band.querySelector('[data-col="3"]')!, { shiftKey: true });
@@ -640,7 +662,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('resizes a lone column from its boundary with one op', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const band = columnBand(view);
     const applyOps = spyOn(view.workbook(), 'applyOps');
 
@@ -659,7 +681,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('resizes a whole selected row run as one batch of height ops', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const band = view.surface.closest('[data-testid="xlsx-grid"]')!
       .querySelector('[data-testid="xlsx-row-headers"]')!;
     fireEvent.mouseDown(band.querySelector('[data-row="1"]')!);
@@ -686,7 +708,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('extends from the anchor when a shift-pressed header is dragged', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const band = columnBand(view);
     fireEvent.mouseDown(band.querySelector('[data-col="0"]')!);
     await waitFor(() => expect(selectedAddresses(view)).toHaveLength(VIEWPORT_ROWS), MOUNTED);
@@ -712,7 +734,7 @@ describe('XlsxEditor grid pointer handling', () => {
   // the keyboard listener lives on the scroller, so focus has to be there for a
   // key the user sends after a header press to reach the grid at all.
   it('takes focus from a column header press, so the next key moves the selection', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const band = columnBand(view);
     // a cell press is what normally focuses the scroller; blur puts focus back
     // on the body, the state a press on a toolbar or sheet control leaves.
@@ -733,7 +755,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('freezes the columns left of the header the menu opened on', async () => {
-    const view = await mountEditor();
+    const view = await mountWithHeaders();
     const band = view.surface.closest('[data-testid="xlsx-grid"]')!
       .querySelector('[data-testid="xlsx-column-headers"]')!;
     const applyOps = spyOn(view.workbook(), 'applyOps');
@@ -747,7 +769,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('unhides the hidden column from its band handle', async () => {
-    const view = await mountEditor(fixtureFrom(withHiddenTracks(plain.bytes, { columns: [4] })));
+    const view = await mountWithHeaders(fixtureFrom(withHiddenTracks(plain.bytes, { columns: [4] })));
     const handle = view.view.container.querySelector<HTMLElement>(
       '[data-testid="xlsx-hidden-handle"][data-axis="col"]')!;
     expect(handle).not.toBeNull();
@@ -761,7 +783,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('unhides a hidden run from its band handle as one range op', async () => {
-    const view = await mountEditor(fixtureFrom(withHiddenTracks(plain.bytes, { columns: [4, 5] })));
+    const view = await mountWithHeaders(fixtureFrom(withHiddenTracks(plain.bytes, { columns: [4, 5] })));
     const handle = view.view.container.querySelector<HTMLElement>(
       '[data-testid="xlsx-hidden-handle"][data-axis="col"]')!;
     expect(handle.dataset.start).toBe('4');
@@ -775,7 +797,7 @@ describe('XlsxEditor grid pointer handling', () => {
   });
 
   it('unhides the hidden row from its band handle', async () => {
-    const view = await mountEditor(fixtureFrom(withHiddenTracks(plain.bytes, { rows: [6] })));
+    const view = await mountWithHeaders(fixtureFrom(withHiddenTracks(plain.bytes, { rows: [6] })));
     const handle = view.view.container.querySelector<HTMLElement>(
       '[data-testid="xlsx-hidden-handle"][data-axis="row"]')!;
     expect(handle).not.toBeNull();
@@ -1629,7 +1651,7 @@ describe('XlsxEditor host integration', () => {
       value: { readText: () => clipboardText },
     });
     try {
-      const view = await mountEditor({ bytes: file, grid: plain.grid, charts: plain.charts });
+      const view = await mountWithHeaders({ bytes: file, grid: plain.grid, charts: plain.charts });
       const handle = view.workbook();
       const row = () => [0, 1, 2, 3, 4].map((col) => handle.cell(0, 0, col).input);
       const applyOps = spyOn(handle, 'applyOps');

@@ -1204,7 +1204,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         canvas.height = Math.round(request.height * request.dpr);
         canvas.style.width = `${request.width}px`; canvas.style.height = `${request.height}px`;
         canvas.dataset.defaultFonts = paintWithDefaultFonts(frame.displayList,
-          () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom, { x: 0, y: 0 }, request.zoom)) ? 'settled' : 'pending';
+          () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
         canvas.dataset.workerSequence = String(frame.sequence);
         canvas.dataset.commandCoverage = String(frame.coversThroughSeq ?? 0);
         canvas.dataset.paintSource = frame.source; canvas.dataset.workerZoom = String(request.zoom);
@@ -2139,7 +2139,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
             <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>
               <canvas ref={canvasRef} style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} />
               <PeerlessWorkerOverlay store={presentation} active={active} zoom={zoom} selectedChart={selectedChart}
-                chartOffset={chartOffset} controller={draftController} run={run} disabled={Boolean(error) || Boolean(props.readOnly)} />
+                chartOffset={chartOffset} controller={draftController} run={run} disabled={Boolean(error) || Boolean(props.readOnly)}
+                showSheetHeaders={Boolean(props.showSheetHeaders)} />
               <PeerlessWorkerPresence store={presentation} run={run} provider={props.collaboration?.provider}
                 active={active} sheets={sheets} />
               {pluginHost.managed && <PluginOverlays host={pluginHost.host} activations={pluginHost.activations}

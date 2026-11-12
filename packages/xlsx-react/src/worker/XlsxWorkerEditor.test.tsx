@@ -523,7 +523,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   const mount = async (onSave?: (bytes: Uint8Array) => void, readOnly = false, hostProps: Partial<Omit<XlsxAsyncEditorProps, 'file'>> = {}) => {
     editState = { ...editState, readOnly };
     const view = render(<Profiler id="peerless" onRender={renderCount}>
-      <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} showSheetHeaders toolbar={defaultToolbar ? undefined : <Chrome />} onReady={ready} onSave={onSave} {...hostProps} />
+      <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} toolbar={defaultToolbar ? undefined : <Chrome />} onReady={ready} onSave={onSave} {...hostProps} />
     </Profiler>);
     await opened();
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
@@ -8594,9 +8594,9 @@ describe('peerless keyboard navigation and proposal freshness', () => {
         expect(host.cellInputs).toHaveBeenLastCalledWith(0, reverse ? 'C4' : 'B2');
         expect(view.getByTestId('xlsx-selection').style.width).toBe('192px');
         expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
-        const focusBox = view.getByTestId('xlsx-active-cell') as HTMLElement;
-        expect(focusBox.style.left).toBe(`${anchor.col * 96 - 1}px`);
-        expect(focusBox.style.top).toBe(`${anchor.row * 24 - 1}px`);
+        const outline = view.getByTestId('xlsx-overlay-host').children[1] as HTMLElement;
+        expect(outline.style.left).toBe(`${anchor.col * 96}px`);
+        expect(outline.style.top).toBe(`${anchor.row * 24}px`);
         fireEvent.keyDown(scroll, { key: reverse ? 'ArrowDown' : 'ArrowUp', shiftKey: true });
         expect(name.value).toBe(reverse ? 'C4' : 'B2');
         expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'select', payload: { selection: {
@@ -8675,12 +8675,12 @@ describe('peerless keyboard navigation and proposal freshness', () => {
     host.frame.mockImplementation(async (...args) => ({ ...await frame(...args),
       mergedRanges: [{ start: { row: 0, col: 0 }, end: { row: 1, col: 1 } }] }));
     const view = await host.mount();
-    const outline = view.getByTestId('xlsx-active-cell') as HTMLElement;
-    expect(outline.style.width).toBe('194px');
-    expect(outline.style.height).toBe('50px');
+    const outline = view.getByTestId('xlsx-overlay-host').children[1] as HTMLElement;
+    expect(outline.style.width).toBe('192px');
+    expect(outline.style.height).toBe('48px');
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
-    expect((view.getByTestId('xlsx-active-cell') as HTMLElement).style.width).toBe('98px');
-    expect((view.getByTestId('xlsx-active-cell') as HTMLElement).style.height).toBe('26px');
+    expect(outline.style.width).toBe('96px');
+    expect(outline.style.height).toBe('24px');
     expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('C1');
   });
 
@@ -9377,7 +9377,7 @@ describe('workbook worker editor header interactions', () => {
 
   it('sends no ops when a whole-sheet row boundary is dragged in the peerless editor', async () => {
     const host = peerlessHarness();
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
     await act(async () => { fireEvent.click(view.getByTestId('xlsx-grid-corner')); });
     await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
     const band = view.getByTestId('xlsx-row-headers');
@@ -9509,7 +9509,7 @@ describe('workbook worker editor header interactions', () => {
 
   it('freezes from the header menu through the peerless applyOps command', async () => {
     const host = peerlessHarness();
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
     const header = view.getByTestId('xlsx-column-headers').querySelector('[data-col="1"]')!;
     fireEvent.contextMenu(header, { button: 2, clientX: 120, clientY: 8 });
     const menu = await waitFor(() => view.getByTestId('xlsx-column-header-menu'));
@@ -9562,7 +9562,7 @@ describe('workbook worker editor header interactions', () => {
     const host = peerlessHarness();
     host.hidden.cols.push([4, 4]);
     paintWideTracks(host.frame);
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
     fireEvent.click(hiddenHandle(view, 'col'));
     await waitFor(() => expect(host.sent.some((command) => command.kind === 'applyOps')).toBe(true));
     expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([
@@ -9627,7 +9627,7 @@ describe('workbook worker editor header interactions', () => {
   it('resizes the whole selected peerless column run in one transaction', async () => {
     const host = peerlessHarness();
     widen(host.frame);
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
     fireEvent.mouseDown(columnLabel(view, 1));
     fireEvent.mouseDown(columnLabel(view, 3), { shiftKey: true });
     await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
@@ -9661,7 +9661,7 @@ describe('workbook worker editor header interactions', () => {
 
   it('resizes a lone peerless column from its boundary with one transaction', async () => {
     const host = peerlessHarness();
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
     const band = view.getByTestId('xlsx-column-headers');
     fireEvent.pointerDown(band, { button: 0, clientX: 192, clientY: 0, pointerId: 4 });
     fireEvent.pointerMove(band, { clientX: 227, clientY: 0, pointerId: 4 });
@@ -9700,7 +9700,7 @@ describe('workbook worker editor header interactions', () => {
   it('resizes the whole selected peerless row run in one transaction', async () => {
     const host = peerlessHarness();
     paintWideTracks(host.frame);
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
     fireEvent.mouseDown(rowLabel(view, 1));
     fireEvent.mouseDown(rowLabel(view, 3), { shiftKey: true });
     await waitFor(() => expect(selectedAddresses(view)).toHaveLength(27));
@@ -9839,7 +9839,7 @@ describe('workbook worker editor header interactions', () => {
   it('dragging a header inside a selected run sends no move op in the peerless editor', async () => {
     const host = peerlessHarness();
     widen(host.frame);
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
     const band = view.getByTestId('xlsx-column-headers');
     fireEvent.mouseDown(columnLabel(view, 0));
     fireEvent.mouseDown(columnLabel(view, 2), { shiftKey: true });
@@ -9854,7 +9854,7 @@ describe('workbook worker editor header interactions', () => {
 
   it('selects the whole sheet from the corner above the row numbers', async () => {
     const host = peerlessHarness();
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
     await act(async () => { fireEvent.click(view.getByTestId('xlsx-grid-corner')); });
     // the host hears the selection as one `select` whose range is the sheet's
     // own extent, not the painted window's.
@@ -9917,10 +9917,54 @@ describe('workbook worker editor header interactions', () => {
 
   it('draws the peerless marquee on the cell edge without a fill', async () => {
     const host = peerlessHarness();
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
     expectEdgeMarquee(await waitFor(() => view.getByTestId('xlsx-selection') as HTMLElement));
     expect(view.queryAllByTestId('xlsx-selection-fill')).toHaveLength(0);
   });
+
+  // Without headers the marquee keeps its bordered, washed box on the cell rect.
+  const expectBorderedMarquee = (view: ReturnType<typeof render>) => {
+    const marquee = view.getByTestId('xlsx-selection') as HTMLElement;
+    expect([marquee.style.border, marquee.style.background, marquee.style.boxShadow])
+      .toEqual(['1px solid #217346', 'rgba(33, 115, 70, 0.12)', '']);
+    expect([marquee.style.left, marquee.style.top, marquee.style.width, marquee.style.height])
+      .toEqual(['0px', '0px', '96px', '24px']);
+    const active = view.getByTestId('xlsx-active-cell') as HTMLElement;
+    expect([active.style.border, active.style.boxShadow, active.style.left, active.style.width, active.style.height])
+      .toEqual(['2px solid #217346', '', '0px', '96px', '24px']);
+    expect(view.queryAllByTestId('xlsx-selection-fill')).toHaveLength(0);
+  };
+
+  it('keeps the bordered legacy marquee without headers', async () => {
+    harness();
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    await waitFor(() => view.getByTestId('xlsx-selection'));
+    expectBorderedMarquee(view);
+  });
+
+  it('keeps the bordered peerless marquee without headers', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount();
+    await waitFor(() => view.getByTestId('xlsx-selection'));
+    expectBorderedMarquee(view);
+  });
+
+  for (const showSheetHeaders of [false, true]) {
+    it(`frames a selected legacy chart with ${showSheetHeaders ? 'an edge outline' : 'a border'}`, async () => {
+      const host = harness();
+      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+        rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+      const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+        showSheetHeaders={showSheetHeaders} />);
+      await opened();
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+      const box = view.getByTestId('xlsx-chart-selection');
+      expect([box.style.border, box.style.outlineOffset])
+        .toEqual(showSheetHeaders ? ['', '-1px'] : ['2px solid #217346', '']);
+      fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    });
+  }
 
   it('washes the legacy range except its active cell', async () => {
     harness();
@@ -9941,7 +9985,7 @@ describe('workbook worker editor header interactions', () => {
 
   it('washes the peerless range except its active cell', async () => {
     const host = peerlessHarness();
-    const view = await host.mount();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
     const scroll = view.getByTestId('xlsx-scroll');
     await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', shiftKey: true }); });
     await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', shiftKey: true }); });
