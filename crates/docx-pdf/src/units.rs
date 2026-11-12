@@ -39,19 +39,19 @@ pub(crate) fn parse_color(value: &str) -> Option<[f32; 3]> {
     if let Some(hex) = value.strip_prefix('#') {
         return match hex.len() {
             3 => Some([
-                hex_channel(&hex[0..1])?,
-                hex_channel(&hex[1..2])?,
-                hex_channel(&hex[2..3])?,
+                hex_channel(hex.get(0..1)?)?,
+                hex_channel(hex.get(1..2)?)?,
+                hex_channel(hex.get(2..3)?)?,
             ]),
             6 => Some([
-                hex_channel(&hex[0..2])?,
-                hex_channel(&hex[2..4])?,
-                hex_channel(&hex[4..6])?,
+                hex_channel(hex.get(0..2)?)?,
+                hex_channel(hex.get(2..4)?)?,
+                hex_channel(hex.get(4..6)?)?,
             ]),
             8 => Some([
-                hex_channel(&hex[0..2])?,
-                hex_channel(&hex[2..4])?,
-                hex_channel(&hex[4..6])?,
+                hex_channel(hex.get(0..2)?)?,
+                hex_channel(hex.get(2..4)?)?,
+                hex_channel(hex.get(4..6)?)?,
             ]),
             _ => None,
         };
@@ -74,5 +74,20 @@ fn hex_channel(value: &str) -> Option<f32> {
 
 fn channel(value: &str) -> Option<f32> {
     let value = value.parse::<f32>().ok()?;
-    Some((value / 255.0).clamp(0.0, 1.0))
+    value.is_finite().then(|| (value / 255.0).clamp(0.0, 1.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_ascii_hex_colors() {
+        assert_eq!(parse_color("#中"), None);
+        assert_eq!(parse_color("#éa"), None);
+        assert_eq!(parse_color("#12"), None);
+        assert_eq!(parse_color("rgb(NaN, 0, 0)"), None);
+        assert_eq!(parse_color("rgba(0, inf, 0, 1)"), None);
+        assert!(parse_color("#112233").is_some());
+    }
 }

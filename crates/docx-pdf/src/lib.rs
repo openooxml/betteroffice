@@ -163,7 +163,8 @@ fn export_pdf_inner(
     let catalog_id = Ref::new(1);
     let page_tree_id = Ref::new(2);
     let text_font_id = Ref::new(3);
-    let has_text = store.map_or(true, |store| store.font_count() == 0)
+    let has_builtin_text = store.is_none_or(|store| !text::store_has_usable_face(store));
+    let has_text = has_builtin_text
         && display_list.pages.iter().any(|page| {
             page.primitives
                 .iter()
@@ -411,7 +412,7 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
             })
             .font_descriptor(refs.descriptor)
             .default_width(1000.0);
-        if let Some(_) = &font.cid_to_gid {
+        if font.cid_to_gid.is_some() {
             cid.cid_to_gid_map_stream(refs.cid_to_gid);
         } else if !font.is_cff {
             cid.cid_to_gid_map_predefined(Name(b"Identity"));
@@ -447,6 +448,8 @@ fn write_font(pdf: &mut Pdf, font: &EmbeddedFont, refs: FontRefs) {
     stream.filter(Filter::FlateDecode);
     if font.is_cff {
         stream.pair(Name(b"Subtype"), Name(b"OpenType"));
+    } else {
+        stream.pair(Name(b"Length1"), font.subset.len() as i32);
     }
     drop(stream);
     if let Some(map) = &font.cid_to_gid {
@@ -471,12 +474,10 @@ fn page_content(
     opacities: &BTreeMap<u32, (String, Ref)>,
 ) -> Result<Vec<u8>, PdfError> {
     let mut content = Content::new();
-    if let Some(background) = page.background.as_deref() {
-        if let Some(rgb) = parse_color(background) {
-            content.set_fill_rgb(rgb[0], rgb[1], rgb[2]);
-            content.rect(0.0, 0.0, width, height);
-            content.fill_nonzero();
-        }
+    if let Some(rgb) = page.background.as_deref().and_then(parse_color) {
+        content.set_fill_rgb(rgb[0], rgb[1], rgb[2]);
+        content.rect(0.0, 0.0, width, height);
+        content.fill_nonzero();
     }
 
     for border in page
@@ -487,10 +488,15 @@ fn page_content(
         paint_page_border(&mut content, page, border)?;
     }
 
+    let watermark_count = page
+        .watermark_primitive_count
+        .unwrap_or(0)
+        .min(page.primitives.len());
+    let (watermark, body) = page.primitives.split_at(watermark_count);
     paint_primitives(
         &mut content,
         page,
-        &page.primitives,
+        watermark,
         fonts,
         images,
         store,
@@ -521,6 +527,16 @@ fn page_content(
             ImagePart::HeaderFooter(&footer.r_id),
         )?;
     }
+    paint_primitives(
+        &mut content,
+        page,
+        body,
+        fonts,
+        images,
+        store,
+        opacities,
+        ImagePart::Body,
+    )?;
     for note in &page.note_areas {
         paint_primitives(
             &mut content,
@@ -584,12 +600,16 @@ fn primitive_opacity(primitive: &Primitive) -> Option<u32> {
         Primitive::Image(image) => {
             return image::opacity_alpha(image)
                 .map(|alpha| (alpha * 1000.0).round() as u32)
-                .filter(|key| *key > 0 && *key < 1000);
+                .filter(|key| *key < 1000);
         }
         _ => None,
     }?;
     let alpha = value.as_f64()?;
-    if !alpha.is_finite() || alpha >= 1.0 || alpha <= 0.0 {
+    if !alpha.is_finite() {
+        return None;
+    }
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha >= 1.0 {
         return None;
     }
     Some((alpha * 1000.0).round() as u32)
@@ -825,10 +845,12 @@ fn paint_decoration(
         } else {
             thickness * 2.0
         };
+        content.save_state();
         content.set_dash_pattern([unit, unit], 0.0);
         content.move_to(x, page_height - (y + h / 2.0));
         content.line_to(x + w, page_height - (y + h / 2.0));
         content.stroke();
+        content.restore_state();
     } else {
         content.set_fill_rgb(color[0], color[1], color[2]);
         content.rect(x, page_height - y - h, w, h);
@@ -852,7 +874,11 @@ fn paint_shape(
             .rotation
             .as_ref()
             .and_then(Number::as_f64)
-            .unwrap_or(0.0) as f32;
+            .unwrap_or(0.0);
+        if !rotation.is_finite() {
+            return Err(PdfError::InvalidNumber("shape rotation"));
+        }
+        let rotation = rotation as f32;
         if rotation.abs() > f32::EPSILON || transform.flip_h || transform.flip_v {
             let cx = points(&shape.x, "shape x")? + points(&shape.w, "shape width")? / 2.0;
             let cy = page_height
@@ -950,7 +976,9 @@ fn paint_shape(
         (false, true) => {
             content.stroke();
         }
-        (false, false) => {}
+        (false, false) => {
+            content.end_path();
+        }
     }
     content.restore_state();
     Ok(())
@@ -1027,19 +1055,19 @@ fn parse_color(value: &str) -> Option<[f32; 3]> {
     if let Some(hex) = value.strip_prefix('#') {
         return match hex.len() {
             3 => Some([
-                hex_channel(&hex[0..1])?,
-                hex_channel(&hex[1..2])?,
-                hex_channel(&hex[2..3])?,
+                hex_channel(hex.get(0..1)?)?,
+                hex_channel(hex.get(1..2)?)?,
+                hex_channel(hex.get(2..3)?)?,
             ]),
             6 => Some([
-                hex_channel(&hex[0..2])?,
-                hex_channel(&hex[2..4])?,
-                hex_channel(&hex[4..6])?,
+                hex_channel(hex.get(0..2)?)?,
+                hex_channel(hex.get(2..4)?)?,
+                hex_channel(hex.get(4..6)?)?,
             ]),
             8 => Some([
-                hex_channel(&hex[0..2])?,
-                hex_channel(&hex[2..4])?,
-                hex_channel(&hex[4..6])?,
+                hex_channel(hex.get(0..2)?)?,
+                hex_channel(hex.get(2..4)?)?,
+                hex_channel(hex.get(4..6)?)?,
             ]),
             _ => None,
         };
@@ -1062,13 +1090,114 @@ fn hex_channel(value: &str) -> Option<f32> {
 
 fn channel(value: &str) -> Option<f32> {
     let value = value.parse::<f32>().ok()?;
-    Some((value / 255.0).clamp(0.0, 1.0))
+    value.is_finite().then(|| (value / 255.0).clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use docx_layout::display_list::{DocAttrs, GlyphRunPrimitive, ImagePrimitive, PlacedGlyph};
+    use docx_layout::display_list::{
+        DecoKind, DocAttrs, GlyphRunPrimitive, HfKind, HfRegion, ImagePrimitive, PlacedGlyph,
+    };
+
+    fn number(value: f64) -> Number {
+        Number::from_f64(value).unwrap()
+    }
+
+    /// One page carrying `primitives`, with `watermark_primitive_count` and a
+    /// single header (footer stays empty).
+    fn one_page(
+        primitives: Vec<Primitive>,
+        watermark_primitive_count: Option<usize>,
+        header: Option<HfRegion>,
+    ) -> DisplayList {
+        DisplayList {
+            contract_version: None,
+            pages: vec![DisplayPage {
+                page_index: 0,
+                width: Number::from(816),
+                height: Number::from(1056),
+                content_bounds: None,
+                column_bounds: Vec::new(),
+                section_id: None,
+                section_index: None,
+                section_page_index: None,
+                section_page_number: None,
+                page_label: None,
+                primitives,
+                watermark_primitive_count,
+                background: None,
+                page_borders: Vec::new(),
+                header,
+                footer: None,
+                note_areas: Vec::new(),
+                reservations: Vec::new(),
+                table_gridlines: Vec::new(),
+                unbuilt: false,
+                position_span: None,
+                hf_parts: None,
+            }],
+        }
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64, fill: &str) -> Primitive {
+        Primitive::Rect(RectPrimitive {
+            x: number(x),
+            y: number(y),
+            w: number(w),
+            h: number(h),
+            fill: fill.to_owned(),
+            attrs: DocAttrs::default(),
+        })
+    }
+
+    fn line(x1: f64, y1: f64, x2: f64, y2: f64, width: f64, color: &str) -> Primitive {
+        Primitive::Line(LinePrimitive {
+            x1: number(x1),
+            y1: number(y1),
+            x2: number(x2),
+            y2: number(y2),
+            stroke_width: number(width),
+            color: color.to_owned(),
+            dash: None,
+            role: None,
+            border_style: None,
+            secondary_color: None,
+            opacity: None,
+            border_owner: None,
+            attrs: DocAttrs::default(),
+        })
+    }
+
+    /// A shape with nonempty geometry and neither fill nor stroke.
+    fn paintless_shape(x: f64, y: f64) -> Primitive {
+        Primitive::Shape(ShapePrimitive {
+            x: number(x),
+            y: number(y),
+            w: number(100.0),
+            h: number(50.0),
+            geometry_path: vec![
+                ShapePathCommand::Move {
+                    x: number(10.0),
+                    y: number(10.0),
+                },
+                ShapePathCommand::Line {
+                    x: number(90.0),
+                    y: number(10.0),
+                },
+                ShapePathCommand::Line {
+                    x: number(90.0),
+                    y: number(40.0),
+                },
+                ShapePathCommand::Close,
+            ],
+            fill: None,
+            stroke: None,
+            transform: None,
+            decorative: false,
+            attrs: DocAttrs::default(),
+        })
+    }
 
     fn text(x: f64, y: f64, value: &str) -> Primitive {
         Primitive::Text(TextRunPrimitive {
@@ -1161,6 +1290,46 @@ mod tests {
         assert!(pdf.contains("/DeviceGray"));
         assert!(pdf.contains("/ExtGState"));
         assert!(pdf.contains("/ca 0.5"));
+    }
+
+    #[test]
+    fn zero_opacity_emits_a_transparent_graphics_state() {
+        let mut page = text(72.0, 96.0, "transparent");
+        if let Primitive::Text(run) = &mut page {
+            run.opacity = Some(Number::from_f64(0.0).unwrap());
+        }
+        let display_list = DisplayList {
+            contract_version: None,
+            pages: vec![DisplayPage {
+                page_index: 0,
+                width: Number::from(816),
+                height: Number::from(1056),
+                content_bounds: None,
+                column_bounds: Vec::new(),
+                section_id: None,
+                section_index: None,
+                section_page_index: None,
+                section_page_number: None,
+                page_label: None,
+                primitives: vec![page],
+                watermark_primitive_count: None,
+                background: None,
+                page_borders: Vec::new(),
+                header: None,
+                footer: None,
+                note_areas: Vec::new(),
+                reservations: Vec::new(),
+                table_gridlines: Vec::new(),
+                unbuilt: false,
+                position_span: None,
+                hf_parts: None,
+            }],
+        };
+        let mut store = FontStore::default();
+        let bytes = export_pdf_with_fonts_and_images(&display_list, &mut store, &BTreeMap::new())
+            .expect("export");
+        let pdf = String::from_utf8_lossy(&bytes);
+        assert!(pdf.contains("/ca 0"));
     }
 
     #[test]
@@ -1269,6 +1438,341 @@ mod tests {
             .read_to_string(&mut decoded)
             .expect("inflate content");
         decoded
+    }
+
+    fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    /// Decompress the content stream the page dictionary's `/Contents` names.
+    ///
+    /// Unlike [`inflate_first_stream`], this finds the page stream even when an
+    /// image or font stream precedes it.
+    fn inflate_page_content(pdf: &[u8]) -> String {
+        use std::io::Read;
+        let contents = find_bytes(pdf, b"/Contents ").expect("/Contents");
+        let id_start = contents + b"/Contents ".len();
+        let id_len = pdf[id_start..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        assert!(id_len > 0, "content stream reference");
+        let id = std::str::from_utf8(&pdf[id_start..id_start + id_len]).expect("content id");
+        let object = format!("\n{id} 0 obj");
+        let object_start = find_bytes(pdf, object.as_bytes()).expect("content object");
+        let stream_start = object_start
+            + find_bytes(&pdf[object_start..], b"stream\n").expect("content stream")
+            + b"stream\n".len();
+        let stream_end = stream_start
+            + find_bytes(&pdf[stream_start..], b"endstream").expect("content stream end");
+        let mut decoded = String::new();
+        flate2::read::ZlibDecoder::new(&pdf[stream_start..stream_end])
+            .read_to_string(&mut decoded)
+            .expect("inflate content");
+        decoded
+    }
+
+    /// Value of one `/ca` or `/CA` entry in the ExtGState dictionaries.
+    fn ext_g_state_alpha(pdf: &str, key: &str) -> Option<f32> {
+        let start = pdf.find(key)? + key.len();
+        let rest = pdf[start..].trim_start();
+        let end = rest
+            .find(|character: char| {
+                !(character.is_ascii_digit() || character == '.' || character == '-')
+            })
+            .unwrap_or(rest.len());
+        rest[..end].parse().ok()
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct GState {
+        fill: Option<[f32; 3]>,
+        stroke: Option<[f32; 3]>,
+        dashed: bool,
+    }
+
+    enum Operand {
+        Num(f32),
+        Array(Vec<f32>),
+    }
+
+    /// One path-painting operation together with the graphics state and the
+    /// path it actually painted.
+    #[derive(Debug, Clone, PartialEq)]
+    struct PaintOp {
+        /// `n`, `S`/`s`, `f`/`F`/`f*`, `B`/`B*`/`b`/`b*`.
+        op: String,
+        fill: Option<[f32; 3]>,
+        stroke: Option<[f32; 3]>,
+        dashed: bool,
+        /// Subpaths started since the previous paint; a leaked shape path
+        /// shows up as an extra subpath on the next fill.
+        subpaths: usize,
+    }
+
+    fn operands_rgb(operands: &[Operand]) -> Option<[f32; 3]> {
+        match operands {
+            [Operand::Num(r), Operand::Num(g), Operand::Num(b)] => Some([*r, *g, *b]),
+            _ => None,
+        }
+    }
+
+    /// Interpret the path, color, dash and `q`/`Q` operators of a page content
+    /// stream and return its painting operations in order.
+    ///
+    /// Text and image operators are ignored: their operands never change the
+    /// state this tracks (colors are RGB, dash arrays are the only arrays).
+    fn paint_ops(content: &str) -> Vec<PaintOp> {
+        let normalized = content.replace('[', " [ ").replace(']', " ] ");
+        let mut tokens = normalized.split_whitespace();
+        let mut operands: Vec<Operand> = Vec::new();
+        let mut state = GState::default();
+        let mut stack: Vec<GState> = Vec::new();
+        let mut subpaths = 0usize;
+        let mut ops = Vec::new();
+        while let Some(token) = tokens.next() {
+            if token == "[" {
+                let mut values = Vec::new();
+                for item in tokens.by_ref() {
+                    if item == "]" {
+                        break;
+                    }
+                    if let Ok(value) = item.parse::<f32>() {
+                        values.push(value);
+                    }
+                }
+                operands.push(Operand::Array(values));
+                continue;
+            }
+            if let Ok(value) = token.parse::<f32>() {
+                operands.push(Operand::Num(value));
+                continue;
+            }
+            match token {
+                "q" => stack.push(state),
+                "Q" => state = stack.pop().unwrap_or_default(),
+                "rg" => state.fill = operands_rgb(&operands),
+                "RG" => state.stroke = operands_rgb(&operands),
+                "d" => {
+                    state.dashed = matches!(
+                        operands.first(),
+                        Some(Operand::Array(values)) if values.iter().any(|value| *value > 0.0)
+                    );
+                }
+                "m" | "l" | "re" => subpaths += 1,
+                "n" | "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
+                    ops.push(PaintOp {
+                        op: token.to_owned(),
+                        fill: state.fill,
+                        stroke: state.stroke,
+                        dashed: state.dashed,
+                        subpaths,
+                    });
+                    subpaths = 0;
+                }
+                _ => {}
+            }
+            operands.clear();
+        }
+        ops
+    }
+
+    #[test]
+    fn paintless_shape_ends_its_path_before_the_next_fill() {
+        let display_list = one_page(
+            vec![
+                paintless_shape(72.0, 120.0),
+                rect(100.0, 120.0, 40.0, 30.0, "#ff0000"),
+            ],
+            None,
+            None,
+        );
+        let bytes = export_pdf(&display_list).expect("export");
+        let ops = paint_ops(&inflate_page_content(&bytes));
+        let first = ops.first().expect("a painting operation");
+        assert_eq!(
+            first.op, "n",
+            "a paint-less shape must end its path before the next primitive"
+        );
+        let fill = ops
+            .iter()
+            .find(|op| op.op == "f")
+            .expect("rect fill operation");
+        assert_eq!(fill.fill, Some([1.0, 0.0, 0.0]));
+        assert_eq!(
+            fill.subpaths, 1,
+            "the rect fill must paint only the rect, not the leaked shape path"
+        );
+    }
+
+    #[test]
+    fn watermark_paints_below_header_and_body_paints_above() {
+        let header = HfRegion {
+            r_id: "rIdHeader".to_owned(),
+            kind: HfKind::Header,
+            y: Number::from(0),
+            height: Number::from(72),
+            primitives: vec![rect(72.0, 36.0, 100.0, 10.0, "#00ff00")],
+        };
+        let display_list = one_page(
+            vec![
+                rect(0.0, 200.0, 300.0, 300.0, "#ff0000"),
+                rect(72.0, 400.0, 100.0, 10.0, "#0000ff"),
+            ],
+            Some(1),
+            Some(header),
+        );
+        let bytes = export_pdf(&display_list).expect("export");
+        let ops = paint_ops(&inflate_page_content(&bytes));
+        let fills: Vec<Option<[f32; 3]>> = ops
+            .iter()
+            .filter(|op| op.op == "f")
+            .map(|op| op.fill)
+            .collect();
+        assert_eq!(
+            fills,
+            vec![
+                Some([1.0, 0.0, 0.0]),
+                Some([0.0, 1.0, 0.0]),
+                Some([0.0, 0.0, 1.0]),
+            ],
+            "watermark, header, then body must paint in that order"
+        );
+    }
+
+    #[test]
+    fn dashed_rule_does_not_leak_its_dash_into_a_solid_line() {
+        let decoration = Primitive::Decoration(DecorationPrimitive {
+            deco: DecoKind::Underline,
+            x: Number::from(72),
+            y: Number::from(200),
+            w: Number::from(100),
+            h: Number::from(2),
+            color: "#000000".to_owned(),
+            dashed: true,
+            dotted: false,
+            attrs: DocAttrs::default(),
+        });
+        let display_list = one_page(
+            vec![decoration, line(72.0, 240.0, 172.0, 240.0, 1.0, "#ff0000")],
+            None,
+            None,
+        );
+        let bytes = export_pdf(&display_list).expect("export");
+        let ops = paint_ops(&inflate_page_content(&bytes));
+        let strokes: Vec<&PaintOp> = ops
+            .iter()
+            .filter(|op| op.op == "S" || op.op == "s")
+            .collect();
+        assert_eq!(strokes.len(), 2, "one dashed rule and one solid line");
+        assert!(
+            strokes[0].dashed,
+            "the dashed decoration must set a dash pattern"
+        );
+        assert!(
+            !strokes[1].dashed,
+            "the solid line must not inherit the decoration dash pattern"
+        );
+        assert_eq!(strokes[1].stroke, Some([1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn zero_opacity_image_emits_ca_zero() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        let source = ::image::RgbaImage::from_pixel(2, 2, ::image::Rgba([10, 20, 30, 255]));
+        ::image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut png, ::image::ImageFormat::Png)
+            .expect("encode png");
+        let mut images = BTreeMap::new();
+        images.insert("rId9".to_owned(), png.into_inner());
+
+        let display_list = one_page(
+            vec![Primitive::Image(ImagePrimitive {
+                rel_id: "rId9".to_owned(),
+                x: Number::from(72),
+                y: Number::from(72),
+                w: Number::from(48),
+                h: Number::from(48),
+                rotation_deg: None,
+                opacity: Some(number(0.0)),
+                filter: None,
+                decorative: false,
+                crop: None,
+                alt_text: None,
+                relationship_id: None,
+                attrs: DocAttrs::default(),
+            })],
+            None,
+            None,
+        );
+        let mut store = FontStore::default();
+        let bytes =
+            export_pdf_with_fonts_and_images(&display_list, &mut store, &images).expect("export");
+        let pdf = String::from_utf8_lossy(&bytes);
+        assert_eq!(ext_g_state_alpha(&pdf, "/ca "), Some(0.0));
+        assert_eq!(ext_g_state_alpha(&pdf, "/CA "), Some(0.0));
+        let content = inflate_page_content(&bytes);
+        let state = content.find("/GS1 gs").expect("zero-alpha graphics state");
+        let paint = content.find("/Im1 Do").expect("image paint");
+        assert!(
+            state < paint,
+            "the image must paint inside the zero-alpha graphics state"
+        );
+    }
+
+    #[test]
+    fn rotated_image_link_annotation_covers_the_painted_frame() {
+        let image = ImagePrimitive {
+            rel_id: "rId7".to_owned(),
+            x: Number::from(100),
+            y: Number::from(100),
+            w: Number::from(200),
+            h: Number::from(20),
+            rotation_deg: Some(Number::from(90)),
+            opacity: None,
+            filter: None,
+            decorative: false,
+            crop: None,
+            alt_text: None,
+            relationship_id: None,
+            attrs: DocAttrs {
+                href: Some("https://example.com/logo".to_owned()),
+                ..DocAttrs::default()
+            },
+        };
+        let display_list = one_page(vec![Primitive::Image(image.clone())], None, None);
+        let page = &display_list.pages[0];
+        let links = crate::link::collect_links(page);
+        assert_eq!(links.len(), 1, "the rotated image must stay clickable");
+        let rect = links[0].rect;
+        // Hand-computed: a 150x15pt frame at (75, 702) rotated 90° about its
+        // centre paints over [142.5, 634.5, 157.5, 784.5]; an unrotated link
+        // box would be [75, 702, 225, 717] and miss the painted frame.
+        for (actual, expected) in rect.iter().zip([142.5_f32, 634.5, 157.5, 784.5]) {
+            assert!(
+                (actual - expected).abs() < 0.01,
+                "annotation rect {rect:?} should cover the rotated frame"
+            );
+        }
+        // Cross-check against the painter: every corner of the image unit
+        // square, mapped through the placement the exporter uses, must lie
+        // inside the clickable rectangle.
+        let page_height = points(&page.height, "page height").expect("page height");
+        let transform = crate::image::image_transform(&image, page_height).expect("transform");
+        let [a, b, c, d, e, f] = transform.matrix;
+        for (u, v) in [(0.0_f32, 0.0_f32), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+            let x = a * u + c * v + e;
+            let y = b * u + d * v + f;
+            assert!(
+                x >= rect[0] - 0.01
+                    && x <= rect[2] + 0.01
+                    && y >= rect[1] - 0.01
+                    && y <= rect[3] + 0.01,
+                "painted corner ({x}, {y}) must lie inside link rect {rect:?}"
+            );
+        }
     }
 
     #[test]

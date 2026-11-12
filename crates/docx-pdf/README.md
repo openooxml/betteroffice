@@ -11,13 +11,14 @@ Supported today:
 - positioned `GlyphRun` text with subset TrueType/CFF fonts, `ToUnicode`,
   widths and per-glyph placement
 - per-character fallback across every registered face; Base-14 Helvetica only
-  when the store has no fonts at all
+  when the store has no usable outline face
 - one CID per `(glyph, source text)` for TrueType fonts, with a generated
   `/CIDToGIDMap`, so an Arabic tooth/dot glyph shared by several letters still
   maps to the right character; non-base dot glyphs are marked with empty
   `/ActualText` and stay out of the text layer
 - CFF fonts cannot duplicate CIDs: a glyph shared by several source characters
   keeps its first ToUnicode mapping (CJK subsets normally hit no duplicate)
+- CFF2 faces are instanced and converted to TrueType outlines before embedding
 - `TextRun` primitives carry `/ActualText`, so a scalar its chosen face lacks
   (for example Simplified Chinese in a Japanese chain) is still searchable when
   no covering face was registered
@@ -25,11 +26,13 @@ Supported today:
 - filled/stroked rectangles, lines, decorations and shape paths
 - images as RGB XObjects with optional alpha soft masks, crop, rotation and data URLs
 - Flate-compressed page, image and font streams
-- external link annotations from primitive `href`s, merged per target
+- external link annotations from primitive `href`s, including rotated text,
+  glyph runs, images and shapes; merged per target
 
 Not yet covered: tagged PDF/PDF-UA, gradients, SVG/EMF/JPEG XL images,
 named destinations for internal anchors (internal `#anchor` links are
-skipped, not emitted as unresolved `/GoTo` actions), and color emoji rendering.
+skipped, not emitted as unresolved `/GoTo` actions), and color emoji
+rendering.
 Missing emoji still paint `.notdef` (or nothing when no face covers them), but
 the text layer recovers the source scalar through `/ActualText`/`ToUnicode`.
 
