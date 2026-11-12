@@ -6121,8 +6121,7 @@ mod track_moves_unavailable_tests {
     use super::*;
     use crate::UndoStack;
 
-    const REFUSAL: &str =
-        "cannot move sheet 0 tracks: moving rows or columns is not supported yet";
+    const REFUSAL: &str = "cannot move sheet 0 tracks: moving rows or columns is not supported yet";
 
     fn moves() -> [Op; 2] {
         [
