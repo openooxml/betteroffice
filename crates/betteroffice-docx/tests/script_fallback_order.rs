@@ -148,7 +148,10 @@ fn a_family_without_a_bundled_face_keeps_its_own_line_box_and_latin_face_next_to
                 continue;
             };
             latin_fonts.insert(font);
-            if wrong.is_none() && (id != own_id || (advance - own_advance).abs() > 0.02) {
+            // The last Latin letter carries the Latin to East Asian spacing.
+            let spaced = LATIN.ends_with(character);
+            let advance_differs = !spaced && (advance - own_advance).abs() > 0.02;
+            if wrong.is_none() && (id != own_id || advance_differs) {
                 wrong = Some(format!(
                     "{family}: {character:?} draws glyph {id} advancing {advance:.3}px, \
                      the family's own face draws glyph {own_id} advancing {own_advance:.3}px"
