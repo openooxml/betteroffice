@@ -128,6 +128,11 @@ const CASES: Case[] = [
     ].join('')),
     edit: { paragraph: 1, paraId: '0F000002' },
   },
+  {
+    name: 'repeated-paragraph-id',
+    parts: bodyOnly([p('1A000001', 'First paragraph.'), p('1A000001', 'Second paragraph, same id.'), p('1A000003', 'Third paragraph.')].join('')),
+    edit: { paragraph: 2, paraId: '1A000003' },
+  },
 ];
 
 async function pack(parts: Parts): Promise<Uint8Array> {
