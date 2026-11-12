@@ -883,7 +883,7 @@ impl Workbook {
         };
         if full_calculation
             || workbook.has_uncached_source_formulas()
-            || workbook.has_blank_formula_results()
+            || workbook.has_blank_formula_results()?
         {
             workbook.recalculate(options);
         } else {
@@ -1764,8 +1764,8 @@ impl Workbook {
             .is_some_and(|package| package.facts().has_uncached_source_formulas())
     }
 
-    fn has_blank_formula_results(&self) -> bool {
-        self.model().sheets.iter().any(|sheet| {
+    fn has_blank_formula_results(&self) -> Result<bool> {
+        if self.model().sheets.iter().any(|sheet| {
             sheet
                 .iter_cells()
                 .any(|(_, cell)| cell.formula.is_some() && cell.value == CellValue::Empty)
@@ -1780,7 +1780,30 @@ impl Workbook {
                         })
                     })
                 })
-        })
+        }) {
+            return Ok(true);
+        }
+        let Some(package) = self.source_package.as_ref() else {
+            return Ok(false);
+        };
+        let package = package.materialize()?;
+        Ok(self
+            .model()
+            .sheets
+            .iter()
+            .enumerate()
+            .any(|(index, sheet)| {
+                let Some(facts) = package.source_cell_facts(index) else {
+                    return false;
+                };
+                facts.blank_results.iter().any(|&(row, col)| {
+                    let at = CellRef::new(row, col);
+                    sheet.cell(at).is_some_and(|cell| cell.formula.is_some())
+                        || sheet.array_formulas().any(|(anchor, range)| {
+                            at != anchor && range.contains(at)
+                        })
+                })
+            }))
     }
 
     /// The committed state a structured export reads.

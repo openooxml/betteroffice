@@ -195,10 +195,20 @@ fn a_stale_open_recalculates_a_file_with_an_uncached_formula_or_a_full_calculati
         "</row>",
         r#"<c r="D1"><f t="array" ref="D1:E1">A1:B1</f><v>5</v></c></row>"#,
     );
+    let typed_bool_array_follower = CACHED.replace(
+        "</row>",
+        r#"<c r="D1" t="b"><f t="array" ref="D1:E1">TRUE()</f><v>1</v></c><c r="E1" t="b"/></row>"#,
+    );
+    let typed_str_array_follower = CACHED.replace(
+        "</row>",
+        r#"<c r="D1" t="str"><f t="array" ref="D1:E1">"a"&amp;"b"</f><v>ab</v></c><c r="E1" t="str"/></row>"#,
+    );
     for (sheet_data, calc_pr) in [
         (uncached.as_str(), ""),
         (empty_cached.as_str(), ""),
         (array_follower.as_str(), ""),
+        (typed_bool_array_follower.as_str(), ""),
+        (typed_str_array_follower.as_str(), ""),
         (CACHED, r#"<calcPr fullCalcOnLoad="1"/>"#),
         (CACHED, r#"<calcPr forceFullCalc="1"/>"#),
     ] {
@@ -210,6 +220,35 @@ fn a_stale_open_recalculates_a_file_with_an_uncached_formula_or_a_full_calculati
             "{sheet_data} {calc_pr}"
         );
     }
+}
+
+#[test]
+fn a_stale_open_recalculates_an_array_follower_written_without_a_value() {
+    let source = package(
+        &CACHED.replace(
+            "</row>",
+            r#"<c r="D1"><f t="array" ref="D1:E1">A1:B1</f><v>5</v></c></row>"#,
+        ),
+        "",
+    );
+    let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+    assert_eq!(
+        workbook.model().value(SheetId(0), CellRef::new(0, 4)),
+        CellValue::Number { value: 10.0 }
+    );
+}
+
+#[test]
+fn a_stale_open_keeps_an_empty_string_array_follower_cached() {
+    let source = package(
+        &CACHED.replace(
+            "</row>",
+            r#"<c r="D1" t="str"><f t="array" ref="D1:E1">""&amp;""</f><v></v></c><c r="E1" t="str"><v></v></c></row>"#,
+        ),
+        "",
+    );
+    let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+    assert_eq!(values(&workbook), numbers(&[5.0, 999.0, 7.0]));
 }
 
 #[test]
@@ -240,14 +279,19 @@ fn a_stale_open_with_an_empty_cached_result_saves_dependents_from_the_calculated
         ),
         "",
     );
-    let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+    let mut workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+    workbook
+        .edit_cell(SheetId(0), CellRef::new(0, 0), "6", options())
+        .unwrap();
     assert_eq!(
-        workbook.model().value(SheetId(0), CellRef::new(0, 3)),
-        CellValue::Number { value: 2.0 }
-    );
-    assert_eq!(
-        workbook.model().value(SheetId(0), CellRef::new(0, 4)),
-        CellValue::Number { value: 3.0 }
+        saved_caches(&workbook.save().unwrap()),
+        vec![
+            Some("6".into()),
+            Some("12".into()),
+            Some("5".into()),
+            Some("2".into()),
+            Some("3".into())
+        ]
     );
 }
 

@@ -644,6 +644,8 @@ fn push_item_text(text: &mut Option<(usize, String)>, out: &mut String, value: &
 pub struct SourceCellFacts {
     /// Formula cells written without a cached `<v>` result.
     pub uncached_formulas: BTreeSet<(u32, u32)>,
+    /// Cells with a formula or a `t` type written without a cached result.
+    pub blank_results: BTreeSet<(u32, u32)>,
     /// Inline strings authored with formatted runs, with the text the model keeps.
     pub rich_inline: BTreeMap<(u32, u32), String>,
     /// Whether a formula cell sits inside `mc:AlternateContent`, where another
@@ -1185,6 +1187,16 @@ fn finalize_cell(
     };
     if c.formula.is_some() && c.value_text.is_none() && c.inline_text.is_none() {
         facts.uncached_formulas.insert((addr.row, addr.col));
+    }
+    if (c.formula.is_some() || c.ty.is_some())
+        && c.inline_text.is_none()
+        && (c.value_text.is_none()
+            || (c.ty.as_deref() != Some("str")
+                && c.value_text
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())))
+    {
+        facts.blank_results.insert((addr.row, addr.col));
     }
     if c.inline_runs
         && c.ty.as_deref() == Some("inlineStr")
