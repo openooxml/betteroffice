@@ -3071,6 +3071,22 @@ mod tests {
     }
 
     #[test]
+    fn classic_and_w14_shadows_stay_apart_in_a_strict_part_declaring_strict_drawingml() {
+        let run = root(concat!(
+            r#"<w:r xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" "#,
+            r#"xmlns:a="http://purl.oclc.org/ooxml/drawingml/main" "#,
+            r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">"#,
+            r#"<w:rPr><w14:shadow w14:blurRad="38100"/></w:rPr><w:t>A</w:t></w:r>"#
+        ));
+        let formatting = parse_run(&run, None, None, None).run.formatting.unwrap();
+        assert_eq!(formatting.shadow, None);
+        assert_eq!(
+            formatting.modern_effects.unwrap().shadow.unwrap().blur_radius,
+            Some(4.0)
+        );
+    }
+
+    #[test]
     fn word_data_binding_wins_over_the_word_2013_binding() {
         const WORD: &str = r#"<w:dataBinding w:xpath="/a" w:storeItemID="{1}"/>"#;
         const WORD_2013: &str = r#"<w15:dataBinding w15:xpath="/b" w15:storeItemID="{2}"/>"#;

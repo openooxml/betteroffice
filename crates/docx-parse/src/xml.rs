@@ -466,7 +466,7 @@ impl XmlElement {
                     prefix == namespace
                         || !STANDARD_NAMESPACES
                             .iter()
-                            .any(|(standard, _)| *standard == prefix)
+                            .any(|standard| standard.prefix == prefix)
                 }))
     }
 
@@ -784,47 +784,99 @@ pub fn reads_as_written(xml: &[u8]) -> bool {
     matches!(repaired(xml), std::borrow::Cow::Borrowed(_)) && PlainXml::new(xml).accepts()
 }
 
+/// A prefix the loader reads by name, with the transitional namespace it
+/// stands for and, where ISO/IEC 29500 Strict renames that namespace, the
+/// Strict one. VML, markup compatibility and the Microsoft extensions keep a
+/// single namespace in both conformance classes.
+struct StandardNamespace {
+    prefix: &'static str,
+    transitional: &'static str,
+    strict: Option<&'static str>,
+}
+
+const fn standard(
+    prefix: &'static str,
+    transitional: &'static str,
+    strict: Option<&'static str>,
+) -> StandardNamespace {
+    StandardNamespace {
+        prefix,
+        transitional,
+        strict,
+    }
+}
+
 /// Prefixes the loader reads by name, with the namespaces they stand for.
-const STANDARD_NAMESPACES: [(&str, &str); 22] = [
-    ("w", namespaces::W),
-    ("v", namespaces::V),
-    ("o", namespaces::O),
-    ("a", namespaces::A),
-    ("r", namespaces::R),
-    ("wp", namespaces::WP),
-    ("wp14", namespaces::WP14),
-    ("wps", namespaces::WPS),
-    ("wpc", namespaces::WPC),
-    ("wpg", namespaces::WPG),
-    ("pic", namespaces::PIC),
-    ("m", namespaces::M),
-    ("mc", namespaces::MC),
-    ("w14", namespaces::W14),
-    ("w15", namespaces::W15),
-    ("w10", "urn:schemas-microsoft-com:office:word"),
-    (
+const STANDARD_NAMESPACES: [StandardNamespace; 22] = [
+    standard(
+        "w",
+        namespaces::W,
+        Some("http://purl.oclc.org/ooxml/wordprocessingml/main"),
+    ),
+    standard("v", namespaces::V, None),
+    standard("o", namespaces::O, None),
+    standard(
+        "a",
+        namespaces::A,
+        Some("http://purl.oclc.org/ooxml/drawingml/main"),
+    ),
+    standard(
+        "r",
+        namespaces::R,
+        Some("http://purl.oclc.org/ooxml/officeDocument/relationships"),
+    ),
+    standard(
+        "wp",
+        namespaces::WP,
+        Some("http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing"),
+    ),
+    standard("wp14", namespaces::WP14, None),
+    standard("wps", namespaces::WPS, None),
+    standard("wpc", namespaces::WPC, None),
+    standard("wpg", namespaces::WPG, None),
+    standard(
+        "pic",
+        namespaces::PIC,
+        Some("http://purl.oclc.org/ooxml/drawingml/picture"),
+    ),
+    standard(
+        "m",
+        namespaces::M,
+        Some("http://purl.oclc.org/ooxml/officeDocument/math"),
+    ),
+    standard("mc", namespaces::MC, None),
+    standard("w14", namespaces::W14, None),
+    standard("w15", namespaces::W15, None),
+    standard("w10", "urn:schemas-microsoft-com:office:word", None),
+    standard(
         "w16se",
         "http://schemas.microsoft.com/office/word/2015/wordml/symex",
+        None,
     ),
-    (
+    standard(
         "w16cid",
         "http://schemas.microsoft.com/office/word/2016/wordml/cid",
+        None,
     ),
-    (
+    standard(
         "w16",
         "http://schemas.microsoft.com/office/word/2018/wordml",
+        None,
     ),
-    (
+    standard(
         "w16cex",
         "http://schemas.microsoft.com/office/word/2018/wordml/cex",
+        None,
     ),
-    (
+    standard(
         "w16sdtdh",
         "http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash",
+        None,
     ),
-    (
+    standard(
         "wne",
         "http://schemas.microsoft.com/office/word/2006/wordml",
+        None,
     ),
 ];
 
@@ -1035,10 +1087,11 @@ impl<'a> PlainXml<'a> {
                     || (parent.namespace == namespaces::W.as_bytes()
                         && !STANDARD_NAMESPACES
                             .iter()
-                            .any(|(_, uri)| uri.as_bytes() == namespace))
+                            .any(|standard| standard.transitional.as_bytes() == namespace))
             })
-            || (STANDARD_NAMESPACES.iter().any(|(standard, uri)| {
-                WORD_PREFIXES.contains(&standard.as_bytes()) && uri.as_bytes() == namespace
+            || (STANDARD_NAMESPACES.iter().any(|standard| {
+                WORD_PREFIXES.contains(&standard.prefix.as_bytes())
+                    && standard.transitional.as_bytes() == namespace
             }) && attributes
                 .iter()
                 .any(|&(key_prefix, key_local, _)| key_prefix.is_empty() && key_local != b"xmlns"))
@@ -1176,9 +1229,10 @@ impl<'a> PlainXml<'a> {
         {
             return true;
         }
-        STANDARD_NAMESPACES
-            .iter()
-            .all(|(standard, uri)| (standard.as_bytes() == prefix) == (uri.as_bytes() == namespace))
+        STANDARD_NAMESPACES.iter().all(|standard| {
+            (standard.prefix.as_bytes() == prefix)
+                == (standard.transitional.as_bytes() == namespace)
+        })
     }
 
     fn attribute_value(&mut self) -> Option<&'a [u8]> {
@@ -1465,11 +1519,10 @@ pub(crate) fn parse_xml_strict(
 
 /// The Strict conformance namespace that stands for the transitional `namespace`.
 pub(crate) fn strict_namespace(namespace: &str) -> Option<&'static str> {
-    match namespace {
-        namespaces::W => Some("http://purl.oclc.org/ooxml/wordprocessingml/main"),
-        namespaces::WP => Some("http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing"),
-        _ => None,
-    }
+    STANDARD_NAMESPACES
+        .iter()
+        .find(|standard| standard.transitional == namespace)
+        .and_then(|standard| standard.strict)
 }
 
 /// Whether `element` declares a standard prefix for a namespace other than the
@@ -1477,8 +1530,10 @@ pub(crate) fn strict_namespace(namespace: &str) -> Option<&'static str> {
 fn rebinds_a_standard_prefix(element: &XmlElement) -> bool {
     element.attributes.iter().any(|(key, uri)| {
         key.strip_prefix("xmlns:").is_some_and(|prefix| {
-            STANDARD_NAMESPACES.iter().any(|(standard, own)| {
-                *standard == prefix && uri != own && strict_namespace(own) != Some(uri.as_str())
+            STANDARD_NAMESPACES.iter().any(|standard| {
+                standard.prefix == prefix
+                    && uri != standard.transitional
+                    && standard.strict != Some(uri.as_str())
             })
         })
     })
@@ -1511,8 +1566,8 @@ pub(crate) fn canonical_namespace(prefix: &str) -> Option<&'static str> {
     }
     STANDARD_NAMESPACES
         .iter()
-        .find(|(standard, _)| *standard == prefix)
-        .map(|(_, namespace)| *namespace)
+        .find(|standard| standard.prefix == prefix)
+        .map(|standard| standard.transitional)
 }
 
 fn retain_replayed_namespace_aliases(
@@ -2188,7 +2243,7 @@ mod tests {
 
     #[test]
     fn reads_as_written_accepts_unused_namespace_aliases_and_mc_names_by_uri() {
-        for (_, namespace) in STANDARD_NAMESPACES {
+        for namespace in STANDARD_NAMESPACES.map(|standard| standard.transitional) {
             let xml = format!(
                 "<w:document xmlns:w=\"{}\" xmlns:alias=\"{namespace}\"><w:body><w:p/></w:body></w:document>",
                 namespaces::W
@@ -2444,6 +2499,49 @@ mod tests {
         assert_eq!(root.child("w14", "shadow").unwrap().name, "w14:shadow");
         assert_eq!(root.children_named("w", "shadow").count(), 1);
         assert_eq!(root.children_named("w14", "shadow").count(), 1);
+    }
+
+    #[test]
+    fn a_strict_part_declaring_strict_drawingml_keeps_prefixes_apart() {
+        let doc = parse(concat!(
+            r#"<w:rPr xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" "#,
+            r#"xmlns:a="http://purl.oclc.org/ooxml/drawingml/main" "#,
+            r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">"#,
+            r#"<w:shadow/><w14:shadow w14:blurRad="38100"/></w:rPr>"#
+        ))
+        .unwrap();
+        let root = doc.root().unwrap();
+        assert!(!root.matches_local_names);
+        assert!(root.child_elements().all(|child| !child.matches_local_names));
+        assert_eq!(root.child("w", "shadow").unwrap().name, "w:shadow");
+        assert_eq!(root.child("w14", "shadow").unwrap().name, "w14:shadow");
+        assert_eq!(root.children_named("w", "shadow").count(), 1);
+    }
+
+    #[test]
+    fn every_standard_prefix_decides_its_strict_namespace() {
+        for (index, standard) in STANDARD_NAMESPACES.iter().enumerate() {
+            assert!(
+                STANDARD_NAMESPACES[..index]
+                    .iter()
+                    .all(|earlier| earlier.prefix != standard.prefix),
+                "{} is listed twice",
+                standard.prefix
+            );
+            assert_eq!(strict_namespace(standard.transitional), standard.strict);
+            let Some(strict) = standard.strict else {
+                continue;
+            };
+            assert!(strict.starts_with("http://purl.oclc.org/ooxml/"), "{strict}");
+            assert_ne!(strict, standard.transitional);
+            let xml = format!(
+                r#"<x:rPr xmlns:x="{}" xmlns:{}="{strict}"><x:shadow/></x:rPr>"#,
+                namespaces::W,
+                standard.prefix
+            );
+            let doc = parse(&xml).unwrap();
+            assert!(!doc.root().unwrap().matches_local_names, "{xml}");
+        }
     }
 
     #[test]
