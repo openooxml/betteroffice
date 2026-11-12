@@ -639,17 +639,20 @@ jobs:
         with:
           path: ~/.cache/libreoffice-archive
           key: ${{ needs.libreoffice-archive.outputs.key }}
-          fail-on-cache-miss: true
 
-      - &check-libreoffice
-        name: Require the exact LibreOffice archive cache entry
+      - &fetch-libreoffice-on-miss
+        name: Fetch and verify the LibreOffice archive on a cache miss
+        timeout-minutes: 25
         env:
           CACHE_HIT: ${{ steps.restore-libreoffice.outputs.cache-hit }}
           CACHE_KEY: ${{ needs.libreoffice-archive.outputs.key }}
+          LO_FETCH_BUDGET: "1200"
         run: |
-          if [ "$CACHE_HIT" != "true" ]; then
-            echo "::error::the LibreOffice archive cache entry $CACHE_KEY was not restored exactly; rerun the whole workflow so libreoffice-archive fetches it"
-            exit 1
+          if [ "$CACHE_HIT" = "true" ]; then
+            echo "LibreOffice archive $CACHE_KEY restored from cache"
+          else
+            echo "::warning::cache miss for $CACHE_KEY: fetching and verifying the pinned archive"
+            bash scripts/office-quality/fetch-libreoffice.sh
           fi
 
       - name: Install LibreOffice and comparison tools
@@ -827,7 +830,7 @@ jobs:
         with:
           python-version: "3.13"
       - *restore-libreoffice
-      - *check-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -988,7 +991,7 @@ jobs:
         with:
           bun-version: "1.4.3"
       - *restore-libreoffice
-      - *check-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -1105,7 +1108,7 @@ jobs:
         with:
           bun-version: "1.4.3"
       - *restore-libreoffice
-      - *check-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -1261,7 +1264,7 @@ jobs:
         with:
           python-version: "3.13"
       - *restore-libreoffice
-      - *check-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install the pinned LibreOffice release
         timeout-minutes: 15
         run: bash scripts/office-quality/install-libreoffice.sh
@@ -1396,7 +1399,7 @@ jobs:
           bun-version: "1.4.3"
 
       - *restore-libreoffice
-      - *check-libreoffice
+      - *fetch-libreoffice-on-miss
 
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
