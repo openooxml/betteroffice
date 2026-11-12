@@ -77,7 +77,8 @@ const fontSourceLabel = (fonts) =>
 /**
  * One arm's font source and how the faces it requested from its provider loaded across the arm's captures.
  * `requested` counts the faces the documents requested that the provider offers (base Latin included when the
- * release ships it); `missing` counts captures that recorded no face loads at all.
+ * release ships it); `missing` counts completed captures that recorded no face loads at all. Only completed
+ * captures are measured: a capture that timed out or errored is never scored, so it is counted in `not_measured`.
  */
 export function fontSummary(samples, channel) {
   const sources = new Set();
@@ -88,10 +89,17 @@ export function fontSummary(samples, channel) {
   let captures = 0;
   let missing = 0;
   const unattributed = { loaded: 0, failed: 0 };
+  const notMeasured = { timed_out: 0, errored: 0 };
   for (const sample of samples) {
     const fonts = sample.comparisons?.find((result) => result.channel === channel)?.fonts;
     if (!fonts) continue;
     if (typeof fonts.package === 'string') sources.add(fontSourceLabel(fonts));
+    const capture = fonts.capture ?? 'ok';
+    if (capture !== 'ok') {
+      if (capture === 'timeout') notMeasured.timed_out++;
+      else notMeasured.errored++;
+      continue;
+    }
     if (!Number.isInteger(fonts.advertised)) {
       if (fonts.measured) missing++;
       continue;
@@ -119,7 +127,29 @@ export function fontSummary(samples, channel) {
     failed: failed.size,
     reasons,
     unattributed,
+    not_measured: notMeasured,
   };
+}
+
+const notMeasuredText = ({ not_measured: { timed_out, errored } }) =>
+  timed_out || errored ? `; captures not measured: ${timed_out} timed out, ${errored} errored` : '';
+
+/** Why a DOCX arm fails its font check, by name; its completed captures are always checked. */
+export function fontArmFailures(samples, channel) {
+  const summary = fontSummary(samples, channel);
+  const line = `DOCX ${fontArmLine(channel, summary)}`;
+  const failures = [];
+  if (!summary.captures && !summary.missing) failures.push(`DOCX ${channel} arm: nothing was measured${notMeasuredText(summary)}`);
+  if (summary.failed) failures.push(line);
+  const unrecorded = samples
+    .filter((sample) => {
+      const fonts = sample.comparisons.find((entry) => entry.channel === channel)?.fonts;
+      return (fonts?.capture ?? 'ok') === 'ok' && !Number.isInteger(fonts?.advertised);
+    })
+    .map((sample) => sample.id);
+  if (unrecorded.length)
+    failures.push(`DOCX ${channel} arm: ${unrecorded.length} completed captures recorded no font loads: ${unrecorded.slice(0, 10).join(', ')}${unrecorded.length > 10 ? ', …' : ''}`);
+  return { line, failures };
 }
 
 const reasonText = (reasons) =>
@@ -134,7 +164,7 @@ const unattributedText = ({ unattributed }) =>
     : '';
 
 export function fontArmLine(channel, summary) {
-  return `${channel} arm: ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)}), by reason: ${reasonText(summary.reasons)}${summary.missing ? `; ${summary.missing} captures recorded no font loads` : ''}${unattributedText(summary)}`;
+  return `${channel} arm: ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)}), by reason: ${reasonText(summary.reasons)}${summary.missing ? `; ${summary.missing} captures recorded no font loads` : ''}${unattributedText(summary)}${notMeasuredText(summary)}`;
 }
 
 function fontNote(samples, format) {
@@ -142,9 +172,9 @@ function fontNote(samples, format) {
   for (const [channel, label] of [['published', 'Published'], ['commit', 'Commit']]) {
     const summary = fontSummary(samples, channel);
     if (!summary.sources.length) continue;
-    const loads = summary.captures
-      ? `; ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)})${summary.failed ? `, by reason: ${reasonText(summary.reasons)}` : ''}${unattributedText(summary)}`
-      : format === 'docx' ? '' : '; face loads are counted for DOCX captures only';
+    const loads = summary.captures || summary.missing
+      ? `; ${summary.failed} of ${summary.requested} faces did not load (${requestedDefinition(summary)})${summary.failed ? `, by reason: ${reasonText(summary.reasons)}` : ''}${unattributedText(summary)}${notMeasuredText(summary)}`
+      : format === 'docx' ? `; nothing was measured${notMeasuredText(summary)}` : '; face loads are counted for DOCX captures only';
     lines.push(`- ${label} fonts: ${summary.sources.join('; ')}${loads}`);
   }
   return lines.length ? `\n\n${lines.join('\n')}` : '';
@@ -409,7 +439,7 @@ export function aggregateReport(report) {
     if (report.corpus?.[format]) entry.corpus = { ...report.corpus[format] };
     const fonts = Object.fromEntries(['published', 'commit']
       .map((channel) => [channel, fontSummary(samples, channel)])
-      .filter(([, summary]) => summary.sources.length || summary.captures));
+      .filter(([, summary]) => summary.sources.length || summary.captures || summary.not_measured.timed_out || summary.not_measured.errored));
     if (Object.keys(fonts).length) entry.fonts = fonts;
     if (format !== 'xlsx' && report[`${format}_benchmark`]) {
       const timing = timingSummary(report.samples, format);

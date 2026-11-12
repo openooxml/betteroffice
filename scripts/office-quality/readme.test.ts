@@ -428,6 +428,7 @@ test('the aggregate counts advertised, loaded and failed faces per arm by reason
       failed: 3,
       reasons: { 'http 404': 1, blocked: 1, error: 1 },
       unattributed: { loaded: 0, failed: 0 },
+      not_measured: { timed_out: 0, errored: 0 },
     },
     commit: {
       sources: ['@betteroffice/fonts@0.5.0 (workspace)'],
@@ -440,6 +441,7 @@ test('the aggregate counts advertised, loaded and failed faces per arm by reason
       failed: 0,
       reasons: {},
       unattributed: { loaded: 0, failed: 0 },
+      not_measured: { timed_out: 0, errored: 0 },
     },
   });
   const text = JSON.stringify(aggregateReport(fontsReport()));

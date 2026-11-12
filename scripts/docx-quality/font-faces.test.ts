@@ -3,7 +3,7 @@ import { BASE_LATIN_FONTS, BUNDLED_FONTS, resolveMetricCompatFace } from '../../
 import { fontProvider } from '../../packages/fonts/src/provider';
 import { fontFaceSummary } from './font-faces.mjs';
 import { measuredFontProvider, type FontLoad } from './measured-fonts';
-import { fontArmLine, fontSummary } from '../office-quality/readme.mjs';
+import { fontArmFailures, fontArmLine, fontSummary } from '../office-quality/readme.mjs';
 
 const advertised = [...new Set(BUNDLED_FONTS.map((face) => face.file))];
 const baseLatin = BASE_LATIN_FONTS.map((face) => face.file);
@@ -110,4 +110,38 @@ test('a capture that recorded no font loads is counted, never skipped', () => {
   );
   expect(summary).toMatchObject({ captures: 0, missing: 1 });
   expect(fontArmLine('commit', summary)).toContain('1 captures recorded no font loads');
+});
+
+const capture = (id: string, fonts: Record<string, unknown>) => ({
+  id,
+  comparisons: [{ channel: 'commit', fonts: { package: '@betteroffice/fonts@0.5.0', copy: 'workspace', measured: true, ...fonts } }],
+});
+const measuredOk = { capture: 'ok', advertised: 3, loaded_faces: ['Carlito-Regular.ttf'], failed_faces: {} };
+
+test('timed-out and errored captures do not fail the font check and are counted as not measured', () => {
+  const samples = [capture('done', measuredOk), capture('slow', { capture: 'timeout' }), capture('broken', { capture: 'error' })];
+  const summary = fontSummary(samples, 'commit');
+  expect(summary).toMatchObject({ captures: 1, missing: 0, failed: 0, not_measured: { timed_out: 1, errored: 1 } });
+  const { line, failures } = fontArmFailures(samples, 'commit');
+  expect(failures).toEqual([]);
+  expect(line).toEndWith('; captures not measured: 1 timed out, 1 errored');
+});
+
+test('a completed capture without a font record fails the arm by name', () => {
+  const { failures } = fontArmFailures([capture('done', measuredOk), capture('silent', { capture: 'ok' })], 'commit');
+  expect(failures).toEqual(['DOCX commit arm: 1 completed captures recorded no font loads: silent']);
+});
+
+test('a completed capture with a failed advertised face fails the arm', () => {
+  const { line, failures } = fontArmFailures(
+    [capture('done', { ...measuredOk, failed_faces: { 'Caladea-Regular.ttf': 'http 404' } })],
+    'commit',
+  );
+  expect(failures).toEqual([line]);
+  expect(line).toContain('1 of 2 faces did not load');
+});
+
+test('an arm with no completed capture fails as nothing was measured, never skipped', () => {
+  const { failures } = fontArmFailures([capture('slow', { capture: 'timeout' }), capture('broken', { capture: 'error' })], 'commit');
+  expect(failures).toEqual(['DOCX commit arm: nothing was measured; captures not measured: 1 timed out, 1 errored']);
 });

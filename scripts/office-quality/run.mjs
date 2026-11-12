@@ -4,7 +4,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { FORMATS, fontArmLine, fontSummary, renderSection } from './readme.mjs';
+import { FORMATS, fontArmFailures, renderSection } from './readme.mjs';
 import { measureSamples } from './results.mjs';
 import { validateReferenceMetadata } from './reference.mjs';
 import { download } from './download.mjs';
@@ -129,26 +129,21 @@ async function recordFonts(samples, format, channel) {
     );
     const comparison = sample.comparisons.find((entry) => entry.channel === channel);
     if (comparison)
-      comparison.fonts = { ...source, ...(format === 'docx' ? { measured: true } : {}), ...(capture?.font_faces ?? {}) };
+      comparison.fonts = {
+        ...source,
+        ...(format === 'docx' ? { measured: true, capture: capture?.status ?? 'error' } : {}),
+        ...(capture?.status === 'ok' ? capture.font_faces ?? {} : {}),
+      };
   }
 }
 
-/** DOCX arms whose advertised faces did not load, or whose captures recorded no font loads (named). */
+/** DOCX arms whose completed captures did not load an advertised face, recorded no font loads, or do not exist (named). */
 function fontFailures(samples) {
   const failures = [];
   for (const channel of ['published', 'commit']) {
-    const summary = fontSummary(samples, channel);
-    const line = `DOCX ${fontArmLine(channel, summary)}`;
-    console.log(line);
-    const unrecorded = samples
-      .filter((sample) => {
-        const fonts = sample.comparisons.find((entry) => entry.channel === channel)?.fonts;
-        return !Number.isInteger(fonts?.advertised);
-      })
-      .map((sample) => sample.id);
-    if (summary.failed) failures.push(line);
-    if (unrecorded.length)
-      failures.push(`DOCX ${channel} arm: ${unrecorded.length} captures recorded no font loads: ${unrecorded.slice(0, 10).join(', ')}${unrecorded.length > 10 ? ', …' : ''}`);
+    const arm = fontArmFailures(samples, channel);
+    console.log(arm.line);
+    failures.push(...arm.failures);
   }
   return failures;
 }

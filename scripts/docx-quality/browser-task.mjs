@@ -46,24 +46,21 @@ await writeFile(
 );
 const start = performance.now();
 let browser;
+let timedOut = false;
 const deadline = setTimeout(async () => {
+  timedOut = true;
   console.error('Browser capture exceeded its deadline');
-  const faces = await readFontFaces().catch(() => undefined);
-  await writeFile(
-    resolve(out, 'result.json'),
-    JSON.stringify({ ...metadata, status: 'timeout', ...(faces ? { font_faces: faces } : {}) })
-  );
-  await browser?.close();
+  await writeFile(resolve(out, 'result.json'), JSON.stringify({ ...metadata, status: 'timeout' }));
+  await Promise.race([browser?.close(), new Promise((done) => setTimeout(done, 10_000))]).catch(() => {});
   process.exit(1);
 }, timeout * 1000);
 const logs = [];
 const externalRequests = [];
 const networkViolations = [];
-let fontFaces;
 let page;
-// Read at the end of the capture, so faces first loaded while pages are drawn count, and after a failure.
+// Read at the end of the capture, so faces first loaded while pages are drawn count.
 const readFontFaces = async () => {
-  const report = await page?.evaluate(() => window.oracleFontReport?.() ?? null).catch(() => null);
+  const report = await page.evaluate(() => window.oracleFontReport?.() ?? null).catch(() => null);
   return report && Array.isArray(report.fontsAdvertised)
     ? fontFaceSummary(report.fontLoads, report.fontsAdvertised, networkViolations, report.baseLatinAdvertised ?? [])
     : undefined;
@@ -142,7 +139,7 @@ try {
     );
   }
   const captureMetadata = await page.evaluate(() => window.oracleCaptureMetadata?.() ?? {});
-  fontFaces = await readFontFaces();
+  const fontFaces = await readFontFaces();
   if (networkViolations.length)
     throw new Error(`Unexpected external requests: ${JSON.stringify(networkViolations)}`);
   const record = {
@@ -160,15 +157,11 @@ try {
   await writeFile(resolve(out, 'result.json'), JSON.stringify(record, null, 2));
   console.log(JSON.stringify(record));
 } catch (error) {
-  fontFaces = (await readFontFaces()) ?? fontFaces;
-  await writeFile(
-    resolve(out, 'result.json'),
-    JSON.stringify(
-      { ...metadata, status: 'error', error: String(error), networkViolations, ...(fontFaces ? { font_faces: fontFaces } : {}) },
-      null,
-      2
-    )
-  );
+  if (!timedOut)
+    await writeFile(
+      resolve(out, 'result.json'),
+      JSON.stringify({ ...metadata, status: 'error', error: String(error), networkViolations }, null, 2)
+    );
   console.log(
     JSON.stringify({
       status: 'error',
