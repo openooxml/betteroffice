@@ -4929,6 +4929,7 @@ pub(crate) fn border_side_sources(
 fn cell_borders(
     formatting: Option<&Value>,
     table_borders: Option<&Value>,
+    style_borders: Option<&Value>,
     first_row: bool,
     last_row: bool,
     first_column: bool,
@@ -4942,12 +4943,8 @@ fn cell_borders(
                 .collect(),
         )
     });
-    let direct = field(formatting, "borders");
-    if inherited.is_none() && direct.is_none() {
-        None
-    } else {
-        merge_plain(inherited.as_ref(), direct)
-    }
+    let inherited = merge_plain(inherited.as_ref(), style_borders);
+    merge_plain(inherited.as_ref(), field(formatting, "borders"))
 }
 
 pub(crate) fn synthesized_cell_width(
@@ -4976,6 +4973,7 @@ struct CellOptions<'a> {
     first_column: bool,
     last_column: bool,
     table_borders: Option<&'a Value>,
+    style_cell: Option<&'a Value>,
     default_margins: Option<&'a Value>,
     theme: Option<&'a Value>,
     table_bidi: bool,
@@ -4989,8 +4987,11 @@ fn structural_attrs(mut attrs: JsonObject, skipped: &[&str]) -> JsonObject {
 
 fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<'a> {
     let formatting = field(Some(cell), "formatting");
-    let background =
-        resolve_color_to_hex(field(field(formatting, "shading"), "fill"), options.theme);
+    let background = resolve_color_to_hex(
+        field(field(formatting, "shading"), "fill")
+            .or_else(|| field(field(options.style_cell, "shading"), "fill")),
+        options.theme,
+    );
     let width = field(field(formatting, "width"), "value")
         .cloned()
         .or_else(|| options.grid_width.map(|value| json!(value)));
@@ -5031,6 +5032,7 @@ fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<
         "borders": cell_borders(
             formatting,
             options.table_borders,
+            field(options.style_cell, "borders"),
             options.first_row,
             options.last_row,
             options.first_column,
@@ -5146,18 +5148,83 @@ fn table_cell_style_formatting(
     };
     let mut result = field(style, property).cloned();
     let parts = array(field(style, "tblStylePr"));
-    if property == "rPr" {
-        let whole = parts
-            .iter()
-            .find(|part| string(field(Some(part), "type")) == Some("wholeTable"));
-        result = merge(result.as_ref(), field(whole, property));
-    }
     if !parts
         .iter()
         .any(|part| field(Some(part), property).is_some())
     {
         return result;
     }
+    for (region, _) in
+        table_style_regions(table, style, row_index, start_column, end_column, columns)
+    {
+        if region == "wholeTable" && property != "rPr" {
+            continue;
+        }
+        let conditional = parts
+            .iter()
+            .find(|part| string(field(Some(part), "type")) == Some(region));
+        result = merge(result.as_ref(), field(conditional, property));
+    }
+    result
+}
+
+/// The shading and edge borders a cell takes from its table style's `tcPr` and active
+/// conditional parts.
+fn table_cell_style_properties(
+    table: &Value,
+    style: Option<&Value>,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    columns: usize,
+) -> Option<Value> {
+    let parts = array(field(style, "tblStylePr"));
+    if field(style, "tcPr").is_none()
+        && !parts.iter().any(|part| field(Some(part), "tcPr").is_some())
+    {
+        return None;
+    }
+    let regions = table_style_regions(table, style, row_index, start_column, end_column, columns);
+    let layers = std::iter::once((field(style, "tcPr"), [true; 4])).chain(regions.into_iter().map(
+        |(region, edges)| {
+            let conditional = parts
+                .iter()
+                .find(|part| string(field(Some(part), "type")) == Some(region));
+            (field(conditional, "tcPr"), edges)
+        },
+    ));
+    let mut shading = None;
+    let mut borders = Map::new();
+    for (properties, [top, bottom, left, right]) in layers {
+        if let Some(value) = field(properties, "shading") {
+            shading = Some(value);
+        }
+        if let Some(sides) = object(field(properties, "borders")) {
+            for (edge, side) in border_side_sources(top, bottom, left, right) {
+                if let Some(border) = sides.get(side) {
+                    borders.insert(edge.to_owned(), border.clone());
+                }
+            }
+        }
+    }
+    (shading.is_some() || !borders.is_empty()).then(|| {
+        json!({
+            "shading": nullish(shading),
+            "borders": (!borders.is_empty()).then_some(Value::Object(borders))
+        })
+    })
+}
+
+/// The table style regions active for a cell in precedence order, each with whether the cell
+/// sits on the region's top, bottom, left and right edge.
+fn table_style_regions(
+    table: &Value,
+    style: Option<&Value>,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    columns: usize,
+) -> Vec<(&'static str, [bool; 4])> {
     let formatting = field(Some(table), "formatting");
     let style_formatting = field(style, "tblPr");
     let look = field(formatting, "look").or_else(|| field(style_formatting, "look"));
@@ -5186,47 +5253,65 @@ fn table_cell_style_formatting(
     };
     let row_band_size = band_size("styleRowBandSize");
     let column_band_size = band_size("styleColBandSize");
-    let mut regions = Vec::new();
+    let top = row_index == 0;
+    let bottom = row_index + 1 == rows.len();
+    let left = start_column == 0;
+    let right = end_column == columns;
+    let band_of = |position: usize, size: f64| (position as f64 / size).floor();
+    let mut regions = vec![("wholeTable", [top, bottom, left, right])];
     if !flag("noHBand", 0x200) && !at_first_row && !at_last_row && row_band_size > 0.0 {
-        let band =
-            (row_index.saturating_sub(usize::from(first_row)) as f64 / row_band_size).floor();
-        regions.push(if band % 2.0 == 0.0 {
-            "band1Horz"
-        } else {
-            "band2Horz"
-        });
+        let position = row_index.saturating_sub(usize::from(first_row));
+        let band = band_of(position, row_band_size);
+        let body_end = rows.len().saturating_sub(usize::from(last_row));
+        regions.push((
+            if band % 2.0 == 0.0 {
+                "band1Horz"
+            } else {
+                "band2Horz"
+            },
+            [
+                position == 0 || band_of(position - 1, row_band_size) != band,
+                row_index + 1 >= body_end || band_of(position + 1, row_band_size) != band,
+                left,
+                right,
+            ],
+        ));
     }
     if !flag("noVBand", 0x400) && !at_first_column && !at_last_column && column_band_size > 0.0 {
-        let band = (start_column.saturating_sub(usize::from(first_column)) as f64
-            / column_band_size)
-            .floor();
-        regions.push(if band % 2.0 == 0.0 {
-            "band1Vert"
-        } else {
-            "band2Vert"
-        });
+        let position = start_column.saturating_sub(usize::from(first_column));
+        let band = band_of(position, column_band_size);
+        let last = end_column.saturating_sub(usize::from(first_column) + 1);
+        let body_end = columns.saturating_sub(usize::from(last_column));
+        regions.push((
+            if band % 2.0 == 0.0 {
+                "band1Vert"
+            } else {
+                "band2Vert"
+            },
+            [
+                top,
+                bottom,
+                position == 0 || band_of(position - 1, column_band_size) != band,
+                end_column >= body_end
+                    || band_of(last + 1, column_band_size) != band_of(last, column_band_size),
+            ],
+        ));
     }
-    for (region, active) in [
-        ("firstCol", at_first_column),
-        ("lastCol", at_last_column),
-        ("firstRow", at_first_row),
-        ("lastRow", at_last_row),
-        ("nwCell", at_first_row && at_first_column),
-        ("neCell", at_first_row && at_last_column),
-        ("swCell", at_last_row && at_first_column),
-        ("seCell", at_last_row && at_last_column),
+    for (region, active, edges) in [
+        ("firstCol", at_first_column, [top, bottom, true, true]),
+        ("lastCol", at_last_column, [top, bottom, true, true]),
+        ("firstRow", at_first_row, [true, true, left, right]),
+        ("lastRow", at_last_row, [true, true, left, right]),
+        ("nwCell", at_first_row && at_first_column, [true; 4]),
+        ("neCell", at_first_row && at_last_column, [true; 4]),
+        ("swCell", at_last_row && at_first_column, [true; 4]),
+        ("seCell", at_last_row && at_last_column, [true; 4]),
     ] {
         if active {
-            regions.push(region);
+            regions.push((region, edges));
         }
     }
-    for region in regions {
-        let conditional = parts
-            .iter()
-            .find(|part| string(field(Some(part), "type")) == Some(region));
-        result = merge(result.as_ref(), field(conditional, property));
-    }
-    result
+    regions
 }
 
 fn project_row<'a>(
@@ -5300,6 +5385,14 @@ fn project_row<'a>(
         if span.is_some_and(|(_, skip)| *skip) {
             continue;
         }
+        let style_cell = table_cell_style_properties(
+            table,
+            style_context.style,
+            row_index,
+            start_column,
+            column,
+            style_context.column_count,
+        );
         let mut projected = project_cell(
             cell,
             CellOptions {
@@ -5315,6 +5408,7 @@ fn project_row<'a>(
                 first_column: start_column == 0,
                 last_column: column == total_columns,
                 table_borders: style_context.borders,
+                style_cell: style_cell.as_ref(),
                 default_margins: style_context.margins,
                 theme: style_context.theme,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
@@ -5353,6 +5447,14 @@ fn project_row<'a>(
                 "content": [{ "type": "paragraph", "content": [] }]
             })
         };
+        let style_cell = table_cell_style_properties(
+            table,
+            style_context.style,
+            row_index,
+            0,
+            total_columns,
+            style_context.column_count,
+        );
         let projected = project_cell(
             &synthetic,
             CellOptions {
@@ -5368,6 +5470,7 @@ fn project_row<'a>(
                 first_column: true,
                 last_column: true,
                 table_borders: style_context.borders,
+                style_cell: style_cell.as_ref(),
                 default_margins: style_context.margins,
                 theme: style_context.theme,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
@@ -8769,6 +8872,107 @@ mod tests {
         assert_eq!(
             inheritance.run_attrs(None, None)["fontSize"]["size"],
             json!(22)
+        );
+    }
+
+    fn conditional_cells(look: Value) -> Vec<Vec<Value>> {
+        let line = |color: &str| json!({ "style": "single", "size": 8, "color": { "rgb": color } });
+        let fill = |color: &str| json!({ "fill": { "rgb": color } });
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Shaded",
+                "tblPr": { "borders": { "insideH": line("000000") } },
+                "tblStylePr": [
+                    { "type": "firstRow", "tcPr": {
+                        "shading": fill("FF0000"),
+                        "borders": { "bottom": line("FF0000"), "insideV": { "style": "nil" } }
+                    } },
+                    { "type": "firstCol", "tcPr": {
+                        "shading": fill("00FF00"), "borders": { "insideH": line("00FF00") }
+                    } },
+                    { "type": "band1Horz", "tcPr": { "shading": fill("0000FF") } },
+                    { "type": "band2Horz", "tcPr": { "borders": { "top": line("888888") } } }
+                ]
+            }]
+        });
+        let rows: Vec<Value> = (0..4)
+            .map(|row| {
+                let cells: Vec<Value> = (0..3)
+                    .map(|column| {
+                        let mut cell = json!({ "type": "tableCell", "content": [] });
+                        if (row, column) == (2, 1) {
+                            cell["formatting"] = json!({ "shading": fill("ABCDEF") });
+                        }
+                        cell
+                    })
+                    .collect();
+                json!({ "cells": cells })
+            })
+            .collect();
+        let mut table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Shaded" },
+            "rows": rows
+        });
+        if !look.is_null() {
+            table["formatting"]["look"] = look;
+        }
+        let baseline = RunInheritance::new(Some(&definitions)).table_attrs(&table);
+        baseline["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                row.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|cell| cell["attributes"].clone())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn table_style_conditional_parts_shade_and_border_their_regions() {
+        let cells = conditional_cells(Value::Null);
+        let fill = |row: usize, column: usize| cells[row][column]["backgroundColor"].clone();
+        let edge = |row: usize, column: usize, side: &str| {
+            cells[row][column]["borders"][side]["color"]["rgb"].clone()
+        };
+        assert_eq!(fill(0, 0), json!("FF0000"));
+        assert_eq!(fill(0, 1), json!("FF0000"));
+        assert_eq!(fill(1, 0), json!("00FF00"));
+        assert_eq!(fill(1, 1), json!("0000FF"));
+        assert_eq!(fill(2, 1), json!("ABCDEF"));
+        assert_eq!(cells[2][1]["_originalResolvedFill"], json!("ABCDEF"));
+        assert!(fill(2, 2).is_null());
+        assert_eq!(fill(3, 1), json!("0000FF"));
+        assert_eq!(cells[1][1]["_originalResolvedFill"], json!("0000FF"));
+
+        assert_eq!(edge(0, 0, "bottom"), json!("FF0000"));
+        assert_eq!(cells[0][1]["borders"]["right"]["style"], json!("nil"));
+        assert_eq!(edge(1, 0, "bottom"), json!("00FF00"));
+        assert_eq!(edge(2, 0, "top"), json!("00FF00"));
+        assert_eq!(edge(1, 1, "top"), json!("000000"));
+        assert_eq!(edge(2, 2, "top"), json!("888888"));
+        assert_eq!(edge(3, 0, "bottom"), Value::Null);
+        assert!(cells[2][1]["_originalFormatting"]["borders"].is_null());
+    }
+
+    #[test]
+    fn table_look_turns_conditional_cell_regions_off() {
+        let cells = conditional_cells(json!({ "firstRow": true, "noHBand": true }));
+        assert_eq!(cells[0][0]["backgroundColor"], json!("FF0000"));
+        for (row, column) in [(1, 0), (1, 1), (2, 2), (3, 1)] {
+            assert!(cells[row][column]["backgroundColor"].is_null());
+        }
+        assert_eq!(
+            cells[1][0]["borders"]["bottom"]["color"]["rgb"],
+            json!("000000")
+        );
+        assert_eq!(
+            cells[2][2]["borders"]["top"]["color"]["rgb"],
+            json!("000000")
         );
     }
 

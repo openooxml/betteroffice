@@ -37,7 +37,12 @@ import type {
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
 import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeStyleRunFormatting, mergeTextFormatting } from '../utils/textFormattingMerge';
-import { tableCellParagraphFormatting, tableCellRunFormatting, tableColumnCount } from './tableParagraphFormatting';
+import {
+  tableCellParagraphFormatting,
+  tableCellRunFormatting,
+  tableCellStyleProperties,
+  tableColumnCount,
+} from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
 import { noteYrsStoriesDirty } from './yrsToDocument';
@@ -1474,6 +1479,7 @@ function revisionAttrs(info: TrackedChangeInfo): Attrs {
 function cellBorders(
   formatting: TableCellFormatting | undefined,
   tableBorders: TableBorders | undefined,
+  styleBorders: TableBorders | undefined,
   firstRow: boolean,
   lastRow: boolean,
   firstColumn: boolean,
@@ -1487,8 +1493,8 @@ function cellBorders(
         right: lastColumn ? tableBorders.right : tableBorders.insideV,
       }
     : undefined;
-  return inherited || formatting?.borders
-    ? { ...(inherited ?? {}), ...(formatting?.borders ?? {}) }
+  return inherited || styleBorders || formatting?.borders
+    ? { ...(inherited ?? {}), ...(styleBorders ?? {}), ...(formatting?.borders ?? {}) }
     : undefined;
 }
 
@@ -1503,13 +1509,17 @@ function projectCell(
     firstColumn: boolean;
     lastColumn: boolean;
     tableBorders?: TableBorders;
+    styleCell?: Pick<TableCellFormatting, 'shading' | 'borders'>;
     defaultMargins?: { top?: number; bottom?: number; left?: number; right?: number };
     theme: Theme | null;
     tableBidi: boolean;
   }
 ): ProjectedCell {
   const formatting = cell.formatting;
-  const backgroundColor = resolveColorToHex(formatting?.shading?.fill, options.theme);
+  const backgroundColor = resolveColorToHex(
+    formatting?.shading?.fill ?? options.styleCell?.shading?.fill,
+    options.theme
+  );
   const width = formatting?.width?.value ?? options.gridWidth;
   const widthType = formatting?.width?.type ?? (options.gridWidth !== undefined ? 'pct' : null);
   const attrs: Attrs = {
@@ -1523,6 +1533,7 @@ function projectCell(
       cellBorders(
         formatting,
         options.tableBorders,
+        options.styleCell?.borders,
         options.firstRow,
         options.lastRow,
         options.firstColumn,
@@ -1645,6 +1656,7 @@ function projectRow(
         firstColumn: startColumn === 0,
         lastColumn: column === totalColumns,
         tableBorders,
+        styleCell: tableCellStyleProperties(table, tableStyle, rowIndex, startColumn, column, styleColumns),
         defaultMargins,
         theme,
         tableBidi: Boolean(table.formatting?.bidi),
@@ -1677,6 +1689,7 @@ function projectRow(
           firstColumn: true,
           lastColumn: true,
           tableBorders,
+          styleCell: tableCellStyleProperties(table, tableStyle, rowIndex, 0, totalColumns, styleColumns),
           defaultMargins,
           theme,
           tableBidi: Boolean(table.formatting?.bidi),

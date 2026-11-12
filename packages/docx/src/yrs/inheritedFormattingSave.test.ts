@@ -467,6 +467,42 @@ describe('cell and table formatting stays inherited on save', () => {
   });
 });
 
+function conditionalFixture(): Uint8Array {
+  const parts: PartsMap = new Map(Object.entries(unzipContainer(fixture('plain'))));
+  const border = (side: string) => `<w:${side} w:val="single" w:sz="12" w:space="0" w:color="FF0000"/>`;
+  const conditional =
+    `<w:tblStylePr w:type="firstRow"><w:tcPr><w:tcBorders>${border('bottom')}</w:tcBorders>` +
+    '<w:shd w:val="clear" w:color="auto" w:fill="4F81BD" w:themeFill="accent1"/></w:tcPr></w:tblStylePr>' +
+    `<w:tblStylePr w:type="band1Horz"><w:tcPr><w:tcBorders>${border('top')}${border('bottom')}</w:tcBorders>` +
+    '<w:shd w:val="clear" w:color="auto" w:fill="D3DFEE"/></w:tcPr></w:tblStylePr>';
+  parts.set('word/styles.xml', toBytes(STYLES.replace('</w:tblPr></w:style></w:styles>', `</w:tblPr>${conditional}</w:style></w:styles>`)));
+  const xml = new TextDecoder().decode(parts.get('word/document.xml'));
+  const direct = '<w:tcW w:w="4500" w:type="dxa"/></w:tcPr><w:p><w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">300';
+  parts.set('word/document.xml', toBytes(xml.replace(direct, direct.replace('</w:tcPr>', '<w:shd w:val="clear" w:color="auto" w:fill="ABCDEF"/></w:tcPr>'))));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+describe('table style conditional cell properties stay inherited on save', () => {
+  const source = conditionalFixture();
+  it.each(Object.keys(SAVES) as (keyof typeof SAVES)[])('%s', async (path) => {
+    const xml = await saveTableEdit(path, source, (engine) => {
+      const story = 'body:t0:r0c0';
+      const read = engine.readParagraphs({ story, view: 'accepted' });
+      if (!read.ok) throw new Error(`cell read refused: ${JSON.stringify(read)}`);
+      const paraId = read.paragraphs[0]!.paraId;
+      engine.replaceRange({ story, start: { paraId, offset: 0 }, end: { paraId, offset: 4 } }, 'Lease');
+      const receipt = engine.insertRow({ story: 'body', tableIndex: 0, row: 1, column: 0 }, 'below');
+      return ['body', story, ...receipt.createdStoryIds, ...receipt.changedStoryIds];
+    });
+    const table = savedTable(xml);
+    expect(text(table)).toContain('Lease');
+    expect(table).not.toContain('<w:tcBorders');
+    const shading = table.match(/<w:shd\b[^>]*>/g) ?? [];
+    expect(shading.length).toBeGreaterThan(0);
+    for (const element of shading) expect(element).toContain('w:fill="ABCDEF"');
+  }, TIMEOUT);
+});
+
 const TOGGLE_CASES = [
   { name: 'paragraph basedOn b+b', paragraph: true, character: false, table: false, chain: 'paragraph', bold: true },
   { name: 'character basedOn b+b', paragraph: false, character: true, table: false, chain: 'character', bold: true },
