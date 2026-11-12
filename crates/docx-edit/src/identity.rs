@@ -6356,20 +6356,39 @@ mod tests {
         let session = bytes_session(&bytes);
         let costs = story_slice_costs(session.engine.doc(), 1);
         assert!(costs.iter().all(|&cost| cost > 1 || cost == 0), "{costs:?}");
-        assert!(costs.iter().any(|&cost| cost > PRIME_STORY_COST as u64), "{costs:?}");
+        assert!(
+            costs.iter().any(|&cost| cost > PRIME_STORY_COST as u64),
+            "{costs:?}"
+        );
     }
 
     #[test]
     fn priming_many_tiny_stories_charges_story_cost_in_bounded_slices() {
         use crate::seed::fixture;
-        let comments = 120u32;
-        let runs: String = (1..=comments).map(|id| commented(id, "C")).collect();
-        let bytes = commented_docx(&fixture::para("10000001", &runs), comments);
+        let nested = 60u32;
+        let mut body = fixture::para("10000001", &commented(1, "Body"));
+        let mut rows = String::new();
+        for index in 0..nested {
+            body.push_str(&format!(
+                r#"<w:sdt><w:sdtPr><w:id w:val="{}"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+                -1000 - index as i32,
+                fixture::para(&format!("{:08X}", 0x0200_0000 + index), &fixture::run("C"))
+            ));
+            rows.push_str(&format!(
+                r#"<w:tr><w:tc><w:tcPr/>{}</w:tc></w:tr>"#,
+                fixture::para(&format!("{:08X}", 0x0300_0000 + index), &fixture::run("C"))
+            ));
+        }
+        body.push_str(&format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>{rows}</w:tbl>"#
+        ));
+        body.push_str(&fixture::para("10000002", &fixture::run("After")));
+        let bytes = commented_docx(&body, 1);
         let whole = bytes_session(&bytes);
         assert!(whole.prime_save_seed_states(u32::MAX, u32::MAX));
         let source = whole.engine.doc().source_index().unwrap();
         let stories = source.seed_states().len() as u64;
-        assert!(stories > u64::from(comments), "{stories}");
+        assert!(stories > u64::from(nested), "{stories}");
         let all = whole.engine.doc().prime_last_slice_cost();
         assert!(all >= stories * PRIME_STORY_COST as u64, "{all}");
         for max_bytes in [2048u32, 4096] {
