@@ -1,10 +1,13 @@
 import contextlib
 import io
 import json
+import sys
 import tempfile
+import types
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from pdf_matrix import (
     GENERATED_TEXT_FIXTURES,
@@ -80,6 +83,56 @@ def run_main(arguments: list[str]) -> tuple[int, str, str]:
     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
         code = main(arguments)
     return code, stdout.getvalue(), stderr.getvalue()
+
+
+class FakeTextPage:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def get_text_range(self) -> str:
+        return self.text
+
+    def close(self) -> None:
+        pass
+
+
+class FakePage:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def get_width(self) -> float:
+        return 612.0
+
+    def get_height(self) -> float:
+        return 792.0
+
+    def get_textpage(self) -> FakeTextPage:
+        return FakeTextPage(self.text)
+
+    def close(self) -> None:
+        pass
+
+
+class FakeDocument:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, index: int) -> FakePage:
+        return FakePage(self.text)
+
+    def close(self) -> None:
+        pass
+
+
+def fake_pdfium(text: str) -> types.ModuleType:
+    """A pypdfium2 stand-in whose one page extracts `text` verbatim."""
+    module = types.ModuleType('pypdfium2')
+    module.PdfDocument = lambda path: FakeDocument(text)
+    module.__version__ = 'test'
+    return module
 
 
 class ScriptTests(unittest.TestCase):
@@ -214,6 +267,77 @@ class PdffontsTests(unittest.TestCase):
         self.assertEqual(fonts[0]['emb'], 'yes')
         self.assertEqual(fonts[0]['uni'], 'yes')
         self.assertEqual(fonts[1]['emb'], 'no')
+
+
+class EmojiExpectationTests(unittest.TestCase):
+    def run_case(
+        self,
+        extracted: str,
+        expected: list[str] | None,
+        *,
+        source_text: str | None = None,
+    ) -> tuple[int, dict[str, object]]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'fixtures'
+            source.mkdir()
+            relative = 'emoji/report.docx'
+            if expected is not None:
+                (source / 'expected.json').write_text(
+                    json.dumps({relative: {'text': expected}})
+                )
+            if source_text is not None:
+                (source / relative).parent.mkdir(parents=True, exist_ok=True)
+                write_docx(
+                    source / relative,
+                    '<w:document xmlns:w="http://schemas.openxmlformats.org/'
+                    'wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>'
+                    f'{source_text}'
+                    '</w:t></w:r></w:p><w:sectPr>'
+                    '<w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>',
+                )
+            size = write_pdf(root / 'pdfs' / 'emoji' / 'report.pdf')
+            write_manifest(root / 'pdfs' / 'manifest.json', [ok_entry(relative, size)])
+            report_path = root / 'report.json'
+            with mock.patch.dict(sys.modules, {'pypdfium2': fake_pdfium(extracted)}):
+                code, stdout, stderr = run_main([
+                    str(root / 'pdfs' / 'manifest.json'),
+                    '--fixtures-dir', str(source),
+                    '--json', str(report_path),
+                ])
+            self.assertTrue(report_path.is_file(), (code, stdout, stderr))
+            return code, json.loads(report_path.read_text())
+
+    def test_missing_explicit_emoji_fails_the_fixture(self):
+        code, report = self.run_case('plain text', ['😀'])
+        self.assertEqual(code, 1, report)
+        self.assertEqual(len(report['failures']), 1, report['failures'])
+        checks = report['failures'][0]['checks']
+        self.assertIn('emoji', [check for check, _ in checks])
+        message = next(message for check, message in checks if check == 'emoji')
+        self.assertIn('😀', message)
+        coverage = report['fixtures'][0]['emoji_glyph_coverage']
+        self.assertEqual(coverage['missing'], ['😀'])
+
+    def test_recovered_explicit_emoji_passes_the_fixture(self):
+        code, report = self.run_case('recovered 😀', ['😀'])
+        self.assertEqual(code, 0, report['failures'])
+        self.assertEqual(
+            report['fixtures'][0]['emoji_glyph_coverage'],
+            {'expected': ['😀'], 'recovered': ['😀'], 'missing': []},
+        )
+
+    def test_emoji_without_an_expectation_stays_a_glyph_warning(self):
+        code, report = self.run_case('plain text', None, source_text='😀')
+        self.assertEqual(code, 0, report['failures'])
+        self.assertFalse(
+            any(check == 'emoji' for failure in report['failures']
+                for check, _ in failure['checks'])
+        )
+        self.assertTrue(
+            any('no extractor recovered one' in warning for warning in report['warnings']),
+            report['warnings'],
+        )
 
 
 class MainTests(unittest.TestCase):

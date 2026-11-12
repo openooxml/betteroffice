@@ -12,8 +12,10 @@ Fixtures are grouped by their first path segment when they came from
 and document content. `--prepare` also generates small CJK, RTL, and emoji
 DOCX files and an `expected.json`; the CJK and RTL fixtures must recover their
 exact text (whitespace and bidi layout artifacts ignored), and every
-`pdffonts` row must be embedded, subset, and Unicode-mapped. Missing emoji
-glyphs are reported as `emoji_glyph_coverage` warnings rather than failures.
+`pdffonts` row must be embedded, subset, and Unicode-mapped. An explicitly
+expected emoji glyph that no extractor recovers fails the fixture; an emoji
+document with no `expected.json` entry only warns through
+`emoji_glyph_coverage`.
 The script writes compact JSON and a human summary, and exits non-zero when
 any fixture fails.
 
@@ -985,9 +987,9 @@ def check_fixture(
                 'missing': missing,
             }
             if missing:
-                warnings.append(
-                    f'{relative}: emoji glyph coverage is incomplete; missing '
-                    + ', '.join(missing)
+                checks.append(
+                    ('emoji', 'no extractor recovered expected emoji: '
+                              + ', '.join(missing))
                 )
 
     embedded = entry.get('fonts_embedded')
