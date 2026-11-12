@@ -22,6 +22,7 @@ export interface ChainsFile {
   fontChains: Record<string, number[]>;
   measurement: Record<string, unknown>;
   rejectedEmbedded: RejectedEmbedded[];
+  absentAddons: AbsentAddon[];
 }
 
 export type Measurement = { fontChains: Record<string, number[]> } & Record<string, unknown>;
@@ -37,11 +38,21 @@ export interface Requirement {
 export const ADDONS = { 'fonts-latin': 'LATIN_FONT_ASSET_URLS', 'fonts-intl': 'INTL_FONT_ASSET_URLS', 'fonts-cjk': 'CJK_FONT_ASSET_URLS' } as const;
 export type AddonName = keyof typeof ADDONS;
 
+export type AbsentAddon = { addon: AddonName; families: string[]; scripts: string[] };
+
 export interface Addon {
   version?: string;
   error?: string;
+  absent?: boolean;
   files: Set<string>;
   manifest: string;
+}
+
+const ADDON_IN_ERROR = /@betteroffice\/(fonts-latin|fonts-intl|fonts-cjk)\b|\b(intl|CJK) add-on/i;
+
+export function addonOfError(text: string): AddonName | undefined {
+  const match = ADDON_IN_ERROR.exec(text);
+  return match ? ((match[1] ?? `fonts-${match[2].toLowerCase()}`) as AddonName) : undefined;
 }
 
 export interface FontPackages {
@@ -85,7 +96,7 @@ export async function packageVersion(root: string): Promise<string> {
   return version;
 }
 
-export async function loadProduct(root: string): Promise<Product> {
+export async function loadProduct(root: string, planAbsent: ReadonlySet<AddonName> = new Set()): Promise<Product> {
   root = resolve(root);
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   const label = `${manifest.name}@${manifest.version}`;
@@ -106,13 +117,13 @@ export async function loadProduct(root: string): Promise<Product> {
   } finally {
     probe.destroy?.();
   }
-  const fonts = await loadFontPackages(root);
+  const fonts = await loadFontPackages(root, planAbsent);
   return { root, version: manifest.version, yrs: modules.yrs, layout: modules.layout, utils: modules.utils, editor: modules.editor, fonts };
 }
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-export async function loadFontPackages(root: string): Promise<FontPackages> {
+export async function loadFontPackages(root: string, planAbsent: ReadonlySet<AddonName> = new Set()): Promise<FontPackages> {
   const fromProduct = createRequire(join(root, 'package.json'));
   const fontsManifest = fromProduct.resolve('@betteroffice/fonts/package.json');
   const fonts = await import(pathToFileURL(fromProduct.resolve('@betteroffice/fonts')).href);
@@ -129,10 +140,9 @@ export async function loadFontPackages(root: string): Promise<FontPackages> {
       addonRoot = dirname(fromFonts.resolve(`${id}/package.json`));
     } catch {}
     const addon: Addon = { files: new Set(), manifest: join(addonRoot ?? join(repo, 'packages', name), 'assets', 'manifest.json') };
-    if (!addonRoot && !['dependencies', 'peerDependencies', 'optionalDependencies'].some((field) => fontsPackage[field]?.[id])) {
-      addons[name] = addon;
-      continue;
-    }
+    const declared = ['dependencies', 'peerDependencies', 'optionalDependencies'].some((field) => fontsPackage[field]?.[id] !== undefined);
+    if (planAbsent.has(name) && declared) throw new Error(`the plan marks ${id} absent, but @betteroffice/fonts@${version} declares it`);
+    if (!addonRoot && !declared) addon.absent = true;
     if (addonRoot) {
       addon.version = await packageVersion(addonRoot);
       try {
@@ -152,7 +162,24 @@ export async function loadFontPackages(root: string): Promise<FontPackages> {
 
 export function describeAddons(packages: FontPackages) {
   return Object.entries(packages.addons).map(([name, addon]) =>
-    `${name} ${addon.version === undefined ? 'absent' : addon.error ? `${addon.version} (failed: ${addon.error})` : addon.version}`).join(', ');
+    `${name} ${addon.absent ? 'absent (not declared)' : addon.version === undefined ? 'missing' : addon.error ? `${addon.version} (failed: ${addon.error})` : addon.version}`).join(', ');
+}
+
+export function absentAddonUse(packages: FontPackages, requirements: Requirement[], loads: Iterable<[AddonName, string]> = []): AbsentAddon[] {
+  const absent = (Object.entries(packages.addons) as Array<[AddonName, Addon]>).filter(([, addon]) => addon.absent);
+  const owner = (face: { file: string } | undefined) => face && absent.find(([, addon]) => addon.files.has(face.file))?.[0];
+  const use = new Map<AddonName, { families: Set<string>; scripts: Set<string> }>();
+  const entry = (name: AddonName) => use.get(name) ?? use.set(name, { families: new Set(), scripts: new Set() }).get(name)!;
+  for (const requirement of requirements) {
+    const family = owner(packages.fonts.resolveBundledFamilyFace(requirement.family, requirement.bold, requirement.italic));
+    if (family) entry(family).families.add(requirement.family);
+    for (const script of requirement.scripts ?? []) {
+      const name = owner(packages.fonts.resolveScriptFallbackFace(script, false, false, requirement.family));
+      if (name) entry(name).scripts.add(script);
+    }
+  }
+  for (const [name, label] of loads) entry(name).families.add(label);
+  return [...use].map(([addon, { families, scripts }]) => ({ addon, families: [...families].sort(), scripts: [...scripts].sort() }));
 }
 
 export function missingAddons(packages: FontPackages, requirements: Requirement[]) {
@@ -166,8 +193,8 @@ export function missingAddons(packages: FontPackages, requirements: Requirement[
     ];
     for (const [use, face] of faces) {
       const hit = face && owner(face.file);
-      if (!hit || (hit[1].version !== undefined && !hit[1].error)) continue;
-      missing.add(`${requirement.family} (${use}, ${face!.file}) needs @betteroffice/${hit[0]}, which is ${hit[1].error ?? 'absent'}`);
+      if (!hit || hit[1].absent || (hit[1].version !== undefined && !hit[1].error)) continue;
+      missing.add(`${requirement.family} (${use}, ${face!.file}) needs @betteroffice/${hit[0]}, which is ${hit[1].error ?? 'missing'}`);
     }
   }
   return [...missing];
@@ -211,8 +238,9 @@ const RESOLVERS: Record<string, (args: any[]) => string> = {
   resolveBaseLatin: () => 'base Latin',
 };
 
-export function guardRegistrations(bundled: Module | undefined, engine: Engine, embedded: Array<{ family: string; data: ArrayBuffer }> = []) {
+export function guardRegistrations(bundled: Module | undefined, engine: Engine, embedded: Array<{ family: string; data: ArrayBuffer }> = [], absent: ReadonlySet<AddonName> = new Set()) {
   const failures = new Set<string>();
+  const absentLoads: Array<[AddonName, string]> = [];
   const embeddedFamilies = new Map<object, string>(embedded.map((face) => [face.data, face.family]));
   const rejected = new Map<object, RejectedEmbedded>();
   const sources = new WeakMap<object, string>();
@@ -223,7 +251,9 @@ export function guardRegistrations(bundled: Module | undefined, engine: Engine, 
       sources.set(bytes, label);
       return bytes;
     } catch (error) {
-      failures.add(`${label}: ${message(error)}`);
+      const addon = addonOfError(message(error));
+      if (addon && absent.has(addon)) absentLoads.push([addon, label]);
+      else failures.add(`${label}: ${message(error)}`);
       throw error;
     }
   };
@@ -242,6 +272,7 @@ export function guardRegistrations(bundled: Module | undefined, engine: Engine, 
   });
   return {
     failures,
+    absentLoads: () => [...absentLoads],
     rejectedEmbedded: () => [...rejected.values()],
     bundled: provider,
     engine: {
@@ -284,7 +315,8 @@ export async function layOutFonts(product: Product, bytes: Uint8Array, engineOf:
     const host = session.openDocx(bytes, true);
     const document = session.materializeDocx() ?? host.document;
     const embedded = await product.utils.extractEmbeddedFontFaces(document);
-    const registrations = guardRegistrations(await product.layout.resolveCompleteFontProvider(), engineOf(session), embedded);
+    const absent = new Set((Object.entries(product.fonts.addons) as Array<[AddonName, Addon]>).filter(([, addon]) => addon.absent).map(([name]) => name));
+    const registrations = guardRegistrations(await product.layout.resolveCompleteFontProvider(), engineOf(session), embedded, absent);
     const { bundled } = registrations;
     const measure = product.layout.createRustMeasureSource({ engine: registrations.engine, ...(bundled ? { bundled } : {}) });
     measure.setCompat(document.package?.settings?.compatibilityFlags);
@@ -299,7 +331,8 @@ export async function layOutFonts(product: Product, bytes: Uint8Array, engineOf:
       throw new FailedRegistration(`${product.version}: the product's registry dropped fonts it failed to register: ${[...registrations.failures].join('; ')}`);
     const measurement = measure.measurementConfigForRequirements(requirements);
     if (!measurement) throw new Error(`${product.version}: the product could not load the fonts this document lays out with`);
-    return { session, document, renderEnv, requirements, measurement: measurement as Measurement, rejectedEmbedded: registrations.rejectedEmbedded() };
+    const absentAddons = absentAddonUse(product.fonts, requirements, registrations.absentLoads());
+    return { session, document, renderEnv, requirements, measurement: measurement as Measurement, rejectedEmbedded: registrations.rejectedEmbedded(), absentAddons };
   } catch (error) {
     session.destroy();
     throw error;
@@ -310,10 +343,10 @@ export async function recordChains(product: Product, bytes: Uint8Array) {
   let recorder: ReturnType<typeof recordingEngine> | undefined;
   const laid = await layOutFonts(product, bytes, (session) => (recorder = recordingEngine(session)).engine);
   laid.session.destroy();
-  return { faces: recorder!.faces, measurement: laid.measurement, rejectedEmbedded: laid.rejectedEmbedded };
+  return { faces: recorder!.faces, measurement: laid.measurement, rejectedEmbedded: laid.rejectedEmbedded, absentAddons: laid.absentAddons };
 }
 
-export function serializeChains(faces: RecordedFace[], { fontChains, ...measurement }: Measurement, rejectedEmbedded: RejectedEmbedded[] = []) {
+export function serializeChains(faces: RecordedFace[], { fontChains, ...measurement }: Measurement, rejectedEmbedded: RejectedEmbedded[] = [], absentAddons: AbsentAddon[] = []) {
   const unmapped = Object.keys(measurement).filter((key) => !MEASUREMENT_KEYS.has(key));
   if (unmapped.length) throw new Error(`the product's measurement carries ${unmapped.join(', ')}, which the chains file does not map to recorded fonts`);
   const files = new Map<string, Uint8Array>();
@@ -331,6 +364,7 @@ export function serializeChains(faces: RecordedFace[], { fontChains, ...measurem
     fontChains: {},
     measurement: structuredClone(measurement),
     rejectedEmbedded: rejectedEmbedded.map((face) => ({ ...face })),
+    absentAddons: absentAddons.map((use) => ({ addon: use.addon, families: [...use.families], scripts: [...use.scripts] })),
   };
   for (const [key, chain] of Object.entries(fontChains)) {
     if (!chain.length || chain.some((id) => !Number.isInteger(id) || id < 0 || id >= faces.length))
@@ -341,13 +375,22 @@ export function serializeChains(faces: RecordedFace[], { fontChains, ...measurem
 }
 
 export async function writeDocumentChains(product: Product, bytes: Uint8Array, directory: string, name: string) {
-  const { faces, measurement, rejectedEmbedded } = await recordChains(product, bytes);
-  const { chains, files } = serializeChains(faces, measurement, rejectedEmbedded);
+  const { faces, measurement, rejectedEmbedded, absentAddons } = await recordChains(product, bytes);
+  const { chains, files } = serializeChains(faces, measurement, rejectedEmbedded, absentAddons);
   await mkdir(directory, { recursive: true });
   for (const [file, data] of files) await writeFile(join(directory, file), data);
   const path = join(directory, `${name}.chains.json`);
   await writeFile(path, JSON.stringify(chains));
-  return path;
+  return { path, absentAddons: chains.absentAddons };
+}
+
+export function planAbsentAddons(plan: Record<string, any>): Set<AddonName> {
+  return new Set((['fonts-cjk', 'fonts-intl'] as const).filter((name) => plan[`published_${name.replace('-', '_')}`]?.docx === 'absent'));
+}
+
+export function describeAbsentUse(uses: AbsentAddon[]) {
+  return uses.map(({ addon, families, scripts }) =>
+    `${addon} absent (${[families.length && `families ${families.join(', ')}`, scripts.length && `scripts ${scripts.join(', ')}`].filter(Boolean).join('; ')})`).join('; ');
 }
 
 export const LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS = '0.5.1';
@@ -414,6 +457,9 @@ async function main(env: NodeJS.ProcessEnv) {
   const output = required('QUALITY_OUTPUT');
   const chainsRoot = required('QUALITY_CHAINS');
   const job = JSON.parse(await readFile(join(output, 'job.json'), 'utf8'));
+  const planBytes = await readFile(required('QUALITY_PLAN'));
+  if (sha256(planBytes) !== job.plan_sha256) throw new Error('QUALITY_PLAN is not the plan this job was staged from');
+  const planAbsent = planAbsentAddons(JSON.parse(planBytes.toString('utf8')));
   const build = JSON.parse(await readFile(join(required('QUALITY_NATIVE'), 'published', 'build.json'), 'utf8'));
   const roots = { published: required('QUALITY_PRODUCT_PUBLISHED'), commit: required('QUALITY_PRODUCT_COMMIT') };
   const paths: Record<string, { path: string; version: string; last_release_without_registry_exports?: string }> = {};
@@ -430,22 +476,29 @@ async function main(env: NodeJS.ProcessEnv) {
     }
     let product: Product;
     try {
-      product = await loadProduct(root);
+      product = await loadProduct(root, channel === 'published' ? planAbsent : new Set());
     } catch (error) {
       if (!(error instanceof MissingExport)) throw error;
       throw new Error(missingExportsFailure(channel, version, error.message));
     }
     lines.push(`${channel}: @betteroffice/fonts@${product.fonts.version}, ${describeAddons(product.fonts)}`);
     console.log(lines.at(-1));
+    let absentDocuments = 0;
     for (const sample of job.samples) {
       try {
-        await writeDocumentChains(product, new Uint8Array(await readFile(join(output, sample.id, 'source.docx'))), join(chainsRoot, channel), sample.id);
+        const { absentAddons } = await writeDocumentChains(product, new Uint8Array(await readFile(join(output, sample.id, 'source.docx'))), join(chainsRoot, channel), sample.id);
+        if (absentAddons.length) {
+          absentDocuments++;
+          console.log(`${channel} ${sample.id}: fell back for ${describeAbsentUse(absentAddons)}`);
+        }
       } catch (error) {
         if (!(error instanceof MissingAddon)) throw error;
         failures.push(`${channel} ${sample.id}: ${error.message}`);
         console.log(failures.at(-1));
       }
     }
+    lines.push(`${channel}: ${absentDocuments} documents fell back for an absent font add-on`);
+    console.log(lines.at(-1));
     paths[channel] = { path: 'product-registry', version };
     lines.push(describeFontPath(channel, version));
     console.log(lines.at(-1));

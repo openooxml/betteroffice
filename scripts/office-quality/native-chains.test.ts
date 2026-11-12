@@ -2,13 +2,14 @@ import { afterAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import JSZip from 'jszip';
 import {
-  LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS, compareSemver, describeAddons, describeFontPath, fontPathFor, guardRegistrations, layOutFonts,
-  loadProduct, missingAddons, missingExportsFailure, serializeChains, writeDocumentChains, type FontPackages, type Product,
+  LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS, absentAddonUse, addonOfError, compareSemver, describeAbsentUse, describeAddons, describeFontPath, fontPathFor,
+  guardRegistrations, layOutFonts, loadFontPackages, loadProduct, missingAddons, missingExportsFailure, planAbsentAddons, serializeChains,
+  writeDocumentChains, type AddonName, type FontPackages, type Product,
 } from './native-chains';
 
 type Faces = Record<string, string[]>;
@@ -98,7 +99,7 @@ const prepared = built ? (async () => {
   const docx = join(directory, 'fonts.docx');
   await writeFile(docx, bytes);
   const { faces: expected, measurement } = await productFaces(product, bytes);
-  const chainsPath = await writeDocumentChains(product, bytes, join(directory, 'chains'), 'fonts');
+  const { path: chainsPath } = await writeDocumentChains(product, bytes, join(directory, 'chains'), 'fonts');
   return { directory, docx, chainsPath, expected, measurement, product };
 })() : undefined;
 prepared?.catch(() => {});
@@ -116,6 +117,7 @@ test('the recorded chains file replays the product registry face for face', asyn
   expect(describeAddons(product.fonts)).not.toContain('absent');
   expect(JSON.parse(await readFile(chainsPath, 'utf8')).measurement).toEqual(measurement);
   expect(JSON.parse(await readFile(chainsPath, 'utf8')).rejectedEmbedded).toEqual([]);
+  expect(JSON.parse(await readFile(chainsPath, 'utf8')).absentAddons).toEqual([]);
   const keys = Object.keys(expected);
   for (const family of ['consolas', 'rockwell', 'microsoft sans serif', 'verdana', 'arial black', 'noto serif jp', 'times new roman', 'calibri'])
     expect({ family, present: keys.some((key) => key.toLowerCase().startsWith(`${family}|`)) }).toEqual({ family, present: true });
@@ -177,11 +179,79 @@ test('a document fails only when it needs an add-on its channel lacks', () => {
   };
   const requirement = (family: string, scripts: string[] = []) => ({ key: family, family, bold: false, italic: false, scripts });
   expect(missingAddons(packages, [requirement('Calibri', ['arabic'])])).toEqual([]);
-  expect(missingAddons(packages, [requirement('Calibri', ['cjk-sc'])])).toEqual(['Calibri (cjk-sc script, sc.ttf) needs @betteroffice/fonts-cjk, which is absent']);
+  expect(missingAddons(packages, [requirement('Calibri', ['cjk-sc'])])).toEqual(['Calibri (cjk-sc script, sc.ttf) needs @betteroffice/fonts-cjk, which is missing']);
   expect(missingAddons(packages, [requirement('Noto Serif JP')])[0]).toContain('Noto Serif JP (family face');
-  expect(describeAddons(packages)).toBe('fonts-latin 1.0.0, fonts-intl 1.0.0, fonts-cjk absent');
+  expect(describeAddons(packages)).toBe('fonts-latin 1.0.0, fonts-intl 1.0.0, fonts-cjk missing');
   const withoutLatin = { ...packages, addons: { ...packages.addons, 'fonts-latin': { files: new Set(['latin.ttf']), manifest: 'latin', error: 'broken' } } };
   expect(missingAddons(withoutLatin, [requirement('Calibri')])).toEqual(['Calibri (family face, latin.ttf) needs @betteroffice/fonts-latin, which is broken']);
+});
+
+test('an add-on absent from its channel is counted per document, not failed', () => {
+  const packages: FontPackages = {
+    version: '0.4.2',
+    fonts: {
+      resolveBundledFamilyFace: (family: string) => ({ file: family === 'Leelawadee' ? 'thai.ttf' : 'latin.ttf' }),
+      resolveScriptFallbackFace: (script: string) => ({ file: script === 'thai' ? 'thai.ttf' : 'arabic.ttf' }),
+    },
+    addons: {
+      'fonts-latin': { version: '1.0.0', files: new Set(['latin.ttf']), manifest: 'latin' },
+      'fonts-intl': { absent: true, files: new Set(['thai.ttf']), manifest: 'intl' },
+      'fonts-cjk': { version: '1.0.0', files: new Set(['sc.ttf']), manifest: 'cjk' },
+    },
+  };
+  const requirement = (family: string, scripts: string[] = []) => ({ key: family, family, bold: false, italic: false, scripts });
+  const requirements = [requirement('Calibri', ['thai', 'arabic']), requirement('Leelawadee'), requirement('Cambria', ['thai'])];
+  expect(missingAddons(packages, requirements)).toEqual([]);
+  expect(absentAddonUse(packages, requirements)).toEqual([{ addon: 'fonts-intl', families: ['Leelawadee'], scripts: ['thai'] }]);
+  expect(absentAddonUse(packages, [requirement('Calibri')])).toEqual([]);
+  expect(describeAddons(packages)).toBe('fonts-latin 1.0.0, fonts-intl absent (not declared), fonts-cjk 1.0.0');
+  const { chains } = serializeChains([], { fontChains: {} }, [], absentAddonUse(packages, requirements));
+  expect(chains.absentAddons).toEqual([{ addon: 'fonts-intl', families: ['Leelawadee'], scripts: ['thai'] }]);
+  expect(describeAbsentUse(chains.absentAddons)).toBe('fonts-intl absent (families Leelawadee; scripts thai)');
+  expect(planAbsentAddons({ published_fonts_intl: { docx: 'absent' }, published_fonts_cjk: { docx: '0.4.2' } })).toEqual(new Set(['fonts-intl']));
+});
+
+test('a face load for an absent add-on is tolerated, a load for a declared add-on fails', async () => {
+  const engine = { registerFont: () => 0, clearFonts: () => {} };
+  const loader = async (): Promise<ArrayBuffer> => {
+    throw new Error('Bundled font NotoSansThai-Regular.ttf.zst needs the optional intl add-on - install @betteroffice/fonts-intl');
+  };
+  const provider = { resolveScriptFallback: () => loader };
+  const tolerant = guardRegistrations(provider, engine, [], new Set<AddonName>(['fonts-intl']));
+  await expect(tolerant.bundled!.resolveScriptFallback('thai', false, false, 'Calibri')()).rejects.toThrow('intl add-on');
+  expect(tolerant.failures.size).toBe(0);
+  expect(tolerant.absentLoads()).toEqual([['fonts-intl', 'Calibri (thai script)']]);
+  const strict = guardRegistrations(provider, engine);
+  await expect(strict.bundled!.resolveScriptFallback('thai', false, false, 'Calibri')()).rejects.toThrow('intl add-on');
+  expect([...strict.failures]).toEqual(['Calibri (thai script): Bundled font NotoSansThai-Regular.ttf.zst needs the optional intl add-on - install @betteroffice/fonts-intl']);
+  expect(addonOfError('Font slice x needs the optional CJK add-on — install @betteroffice/fonts-cjk')).toBe('fonts-cjk');
+  expect(addonOfError('Bundled font x needs @betteroffice/fonts-latin - install @betteroffice/fonts-latin')).toBe('fonts-latin');
+});
+
+test('a declared add-on that is not installed stays a failure, an undeclared one is absent, and the plan cannot mark a declared one absent', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'native-chains-addons-'));
+  try {
+    const fonts = join(root, 'node_modules', '@betteroffice', 'fonts');
+    await mkdir(fonts, { recursive: true });
+    await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'product', version: '0.6.0' }));
+    await writeFile(join(fonts, 'package.json'), JSON.stringify({
+      name: '@betteroffice/fonts', version: '0.4.2', main: 'index.mjs', peerDependencies: { '@betteroffice/fonts-cjk': '^0' },
+    }));
+    await writeFile(join(fonts, 'index.mjs'), 'export const resolveBundledFamilyFace = () => undefined;\nexport const resolveScriptFallbackFace = () => undefined;\n');
+    const packages = await loadFontPackages(root);
+    expect(packages.addons['fonts-cjk'].version).toBeUndefined();
+    expect(packages.addons['fonts-cjk'].absent).toBeUndefined();
+    expect(packages.addons['fonts-intl'].absent).toBe(true);
+    expect(packages.addons['fonts-intl'].files.size).toBeGreaterThan(0);
+    expect(describeAddons(packages)).toBe('fonts-latin absent (not declared), fonts-intl absent (not declared), fonts-cjk missing');
+    const cjkFace = [...packages.addons['fonts-cjk'].files][0];
+    packages.fonts = { resolveBundledFamilyFace: () => ({ file: cjkFace }), resolveScriptFallbackFace: () => undefined };
+    expect(missingAddons(packages, [{ key: 'x', family: 'Noto Sans SC', bold: false, italic: false }])[0]).toContain('needs @betteroffice/fonts-cjk, which is missing');
+    expect((await loadFontPackages(root, new Set<AddonName>(['fonts-intl']))).addons['fonts-intl'].absent).toBe(true);
+    await expect(loadFontPackages(root, new Set<AddonName>(['fonts-cjk']))).rejects.toThrow('the plan marks @betteroffice/fonts-cjk absent, but @betteroffice/fonts@0.4.2 declares it');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('the old font map is chosen only for a published release no newer than the last one without the registry exports', () => {

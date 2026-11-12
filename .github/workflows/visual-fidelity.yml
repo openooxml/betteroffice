@@ -199,6 +199,9 @@ jobs:
           const fontSources = [
             ...Object.entries(plan.published_fonts ?? {}).map(([format, version]) =>
               `${format.toUpperCase()} published channel: @betteroffice/fonts@${version}, ${plan.fonts_basis?.[format] === 'release-commit' ? 'the fonts release from the same release commit as' : 'the latest fonts release published before'} @betteroffice/${format}@${plan.versions[format]}`),
+            ...[['fonts-cjk', plan.published_fonts_cjk], ['fonts-intl', plan.published_fonts_intl]].flatMap(([name, pins]) =>
+              Object.entries(pins ?? {}).filter(([, pin]) => pin === 'absent').map(([format]) =>
+                `${format.toUpperCase()} published channel: @betteroffice/${name} absent, @betteroffice/fonts@${plan.published_fonts[format]} does not declare it`)),
             'commit channel: the font packages of this checkout',
           ];
           console.log(fontSources.join('\n'));
@@ -715,7 +718,14 @@ jobs:
             echo "::error::The plan pins no @betteroffice/fonts, @betteroffice/fonts-cjk or @betteroffice/fonts-intl release for published docx"
             exit 1
           fi
-          packages+=("@betteroffice/fonts@$fonts" "@betteroffice/fonts-intl@$intl" "@betteroffice/fonts-cjk@$cjk")
+          packages+=("@betteroffice/fonts@$fonts")
+          for pin in "fonts-intl=$intl" "fonts-cjk=$cjk"; do
+            if [ "${pin#*=}" = absent ]; then
+              echo "@betteroffice/${pin%%=*} absent: @betteroffice/fonts@$fonts does not declare it, so it is not installed"
+            else
+              packages+=("@betteroffice/${pin%%=*}@${pin#*=}")
+            fi
+          done
           npm install --prefix "$RUNNER_TEMP/docx-published" --no-save --no-package-lock --ignore-scripts --no-audit --no-fund "${packages[@]}"
           report() {
             node --input-type=module -e '
@@ -741,6 +751,7 @@ jobs:
           QUALITY_OUTPUT: ${{ runner.temp }}/docx-benchmark
           QUALITY_NATIVE: ${{ runner.temp }}/native
           QUALITY_CHAINS: ${{ runner.temp }}/native-chains
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_PRODUCT_PUBLISHED: ${{ runner.temp }}/docx-published/node_modules/@betteroffice/docx
           QUALITY_PRODUCT_COMMIT: ${{ github.workspace }}/packages/docx
         run: node scripts/office-quality/private-step.mjs docx-native-chains -- bun scripts/office-quality/native-chains.ts

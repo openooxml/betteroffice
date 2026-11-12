@@ -258,6 +258,10 @@ def summarize_font_paths(samples, method, paths=None):
     for channel in CHANNELS[:2]:
         rejected = [row['timings'][channel].get('rejected_embedded', []) for row in samples]
         lines.append(f'- {channel}: {sum(map(len, rejected))} rejected embedded font faces in {sum(map(bool, rejected))} documents')
+        absent = [row['timings'][channel].get('absent_addons', []) for row in samples]
+        addons = sorted({use['addon'] for uses in absent for use in uses})
+        by_addon = ', '.join(f"{addon} {sum(any(use['addon'] == addon for use in uses) for uses in absent)}" for addon in addons)
+        lines.append(f"- {channel}: {sum(map(bool, absent))} documents fell back for an absent font add-on{f' ({by_addon})' if by_addon else ''}")
     text = '### DOCX native font path\n\n' + '\n'.join(lines) + '\n'
     print(text, flush=True)
     if os.environ.get('GITHUB_STEP_SUMMARY'):
@@ -316,7 +320,9 @@ def main():
         chains = product_chains(chains_root, font_paths, sample) if chains_root else {}
         timings = measure_sample(sample, directory, binaries, manifest, soffice, job['trials'], index, chains=chains)
         for channel, path in chains.items():
-            timings[channel]['rejected_embedded'] = json.loads(path.read_text())['rejectedEmbedded']
+            recorded = json.loads(path.read_text())
+            timings[channel]['rejected_embedded'] = recorded['rejectedEmbedded']
+            timings[channel]['absent_addons'] = recorded['absentAddons']
         print(f"{sample['id']}: LibreOffice fidelity", flush=True)
         fidelity = libreoffice_fidelity(sample, directory, soffice, version)
         report['samples'].append(dict(id=sample['id'], source_sha256=sample['metadata']['source']['sha256'],
