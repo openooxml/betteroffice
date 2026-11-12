@@ -46,7 +46,7 @@ const mount = (handlers: SheetGridHeaderHandlers, zoom = 1,
   reorders.length = 0;
   selects.length = 0;
   unhides.length = 0;
-  return render(<SheetGrid frame={frame(grid)} zoom={zoom} headerHandlers={handlers}
+  return render(<SheetGrid frame={frame(grid)} zoom={zoom} showSheetHeaders headerHandlers={handlers}
     selection={selection} sheet={sheet} unhideLabels={unhideLabels}><div /></SheetGrid>);
 };
 // a whole-track selection on one axis: the only state a label press reorders from.
@@ -89,27 +89,27 @@ const stubRect = (element: Element, left = 0, top = 0) => {
 
 test('column labels use absolute sheet indices, not viewport positions', () => {
   const { container } = render(<SheetGrid frame={frame({ startRow: 0, startCol: 26,
-    colOffsets: [0, 80, 160], rowOffsets: [0, 20] })} zoom={1}><div /></SheetGrid>);
+    colOffsets: [0, 80, 160], rowOffsets: [0, 20] })} zoom={1} showSheetHeaders><div /></SheetGrid>);
   expect(labels(container, 'xlsx-column-headers')).toEqual(['AA', 'AB']);
 });
 
 test('row labels are one-based sheet rows', () => {
   const { container } = render(<SheetGrid frame={frame({ startRow: 9, startCol: 0,
-    colOffsets: [0, 80], rowOffsets: [0, 20, 40] })} zoom={1}><div /></SheetGrid>);
+    colOffsets: [0, 80], rowOffsets: [0, 20, 40] })} zoom={1} showSheetHeaders><div /></SheetGrid>);
   expect(labels(container, 'xlsx-row-headers')).toEqual(['10', '11']);
 });
 
 test('compact track indices keep their labels, and zero-sized tracks are skipped', () => {
   const { container } = render(<SheetGrid frame={frame({ startRow: 0, startCol: 0,
     colIndices: [0, 2, 5], rowIndices: [0, 3], colOffsets: [0, 80, 80, 160],
-    rowOffsets: [0, 20, 40] })} zoom={1}><div /></SheetGrid>);
+    rowOffsets: [0, 20, 40] })} zoom={1} showSheetHeaders><div /></SheetGrid>);
   expect(labels(container, 'xlsx-column-headers')).toEqual(['A', 'F']);
   expect(labels(container, 'xlsx-row-headers')).toEqual(['1', '4']);
 });
 
 test('header geometry follows zoom while the band height stays fixed', () => {
   const { container } = render(<SheetGrid frame={frame({ startRow: 0, startCol: 0,
-    colOffsets: [0, 80, 160], rowOffsets: [0, 20, 40] })} zoom={2}><div /></SheetGrid>);
+    colOffsets: [0, 80, 160], rowOffsets: [0, 20, 40] })} zoom={2} showSheetHeaders><div /></SheetGrid>);
   const [first, second] = Array.from(
     container.querySelectorAll('[data-testid="xlsx-column-headers"] > div'),
   ) as HTMLElement[];
@@ -119,7 +119,7 @@ test('header geometry follows zoom while the band height stays fixed', () => {
 
 test('a frozen column paints the split where the canvas draws it', () => {
   const { container } = render(<SheetGrid frame={frame({ startRow: 0, startCol: 0,
-    frozenCols: 1, dividerX: 80, colOffsets: [0, 80, 160], rowOffsets: [0, 20] })} zoom={1}><div /></SheetGrid>);
+    frozenCols: 1, dividerX: 80, colOffsets: [0, 80, 160], rowOffsets: [0, 20] })} zoom={1} showSheetHeaders><div /></SheetGrid>);
   const divider = container.querySelector<HTMLElement>(
     '[data-testid="xlsx-column-headers"] [data-testid="xlsx-freeze-divider"]')!;
   expect(divider.getAttribute('data-axis')).toBe('col');
@@ -132,7 +132,7 @@ test('a frozen column paints the split where the canvas draws it', () => {
 
 test('a frozen row paints the split across the row band', () => {
   const { container } = render(<SheetGrid frame={frame({ startRow: 0, startCol: 0,
-    frozenRows: 1, dividerY: 20, colOffsets: [0, 80], rowOffsets: [0, 20, 40] })} zoom={1}><div /></SheetGrid>);
+    frozenRows: 1, dividerY: 20, colOffsets: [0, 80], rowOffsets: [0, 20, 40] })} zoom={1} showSheetHeaders><div /></SheetGrid>);
   const divider = container.querySelector<HTMLElement>(
     '[data-testid="xlsx-row-headers"] [data-testid="xlsx-freeze-divider"]')!;
   expect(divider.getAttribute('data-axis')).toBe('row');
@@ -398,7 +398,7 @@ test('the select-all corner is live only with an onSelectAll handler', () => {
   fireEvent.click(corner);
   expect(calls).toBe(1);
 
-  const inert = render(<SheetGrid frame={frame(geometry)} zoom={1}
+  const inert = render(<SheetGrid frame={frame(geometry)} zoom={1} showSheetHeaders
     headerHandlers={{ onHeaderMouseDown: handlers.onHeaderMouseDown }}><div /></SheetGrid>);
   const dead = inert.container.querySelector('[data-testid="xlsx-grid-corner"]')!;
   expect(dead.getAttribute('aria-hidden')).toBe('true');
@@ -655,6 +655,22 @@ test('a dragged pixel size converts to the characters and points the engine stor
   expect(rowHeightFromPx(20)).toBe(15);
   expect(columnWidthFromPx(0)).toBe(0);
   expect(rowHeightFromPx(-4)).toBe(0);
+});
+
+test('header bands are absent by default', () => {
+  const { container } = render(<SheetGrid frame={frame(geometry)} zoom={1}><div data-testid="child" /></SheetGrid>);
+  expect(container.querySelector('[data-testid="xlsx-grid"]')).toBeNull();
+  expect(container.querySelector('[data-testid="xlsx-column-headers"]')).toBeNull();
+  expect(container.querySelector('[data-testid="xlsx-row-headers"]')).toBeNull();
+  expect(container.firstElementChild?.getAttribute('data-testid')).toBe('child');
+});
+
+test('the resize hit zone scales with zoom', () => {
+  const columns = headerTracks(geometry, 'col');
+  expect(resizeGestureAt(columns, 87, 0.5)).toEqual({ index: 0, offset: 0, size: 80 });
+  expect(resizeGestureAt(columns, 89, 0.5)).toBeNull();
+  expect(resizeGestureAt(columns, 82, 2)).toEqual({ index: 0, offset: 0, size: 80 });
+  expect(resizeGestureAt(columns, 83, 2)).toBeNull();
 });
 
 test('a drag previews the new size and shifts the tracks after it', () => {
@@ -1063,7 +1079,7 @@ test('a click held on one sheet does not collapse the selection after a sheet ch
   fireEvent.mouseDown(columnLabel(view.container, 1), {});
   // the sheet changes under the held press: the click belonged to the old one,
   // so the release must not select column B on the new sheet.
-  view.rerender(<SheetGrid frame={frame(fourTracks)} zoom={1} headerHandlers={handlers}
+  view.rerender(<SheetGrid frame={frame(fourTracks)} zoom={1} showSheetHeaders headerHandlers={handlers}
     selection={wholeColumns(0, 2)} sheet={1}><div /></SheetGrid>);
   stubRect(band);
   fireEvent.pointerUp(band, { clientX: 45, clientY: 0, pointerId: 1 });
@@ -1281,7 +1297,7 @@ test('a resize armed on one sheet does not commit after the sheet changes', () =
   stubRect(band);
   fireEvent.pointerDown(band, { button: 0, clientX: 80, clientY: 0, pointerId: 1 });
   fireEvent.pointerMove(band, { clientX: 120, clientY: 0, pointerId: 1 });
-  view.rerender(<SheetGrid frame={frame(geometry)} zoom={1} headerHandlers={handlers} sheet={1}>
+  view.rerender(<SheetGrid frame={frame(geometry)} zoom={1} showSheetHeaders headerHandlers={handlers} sheet={1}>
     <div /></SheetGrid>);
   stubRect(band);
   fireEvent.pointerUp(band, { clientX: 120, clientY: 0, pointerId: 1 });
@@ -1296,7 +1312,7 @@ test('a resize armed without a sheet identity does not commit against a new fram
   stubRect(band);
   fireEvent.pointerDown(band, { button: 0, clientX: 80, clientY: 0, pointerId: 1 });
   fireEvent.pointerMove(band, { clientX: 120, clientY: 0, pointerId: 1 });
-  view.rerender(<SheetGrid frame={frame(geometry)} zoom={1} headerHandlers={handlers}>
+  view.rerender(<SheetGrid frame={frame(geometry)} zoom={1} showSheetHeaders headerHandlers={handlers}>
     <div /></SheetGrid>);
   stubRect(band);
   fireEvent.pointerUp(band, { clientX: 120, clientY: 0, pointerId: 1 });
@@ -1313,7 +1329,7 @@ test('a reorder armed on one frame does not commit after the frame scrolls', () 
   fireEvent.pointerDown(columnLabel(view.container, 1), { button: 0, clientX: 45, clientY: 0, pointerId: 1 });
   fireEvent.pointerMove(band, { clientX: 85, clientY: 0, pointerId: 1 });
   view.rerender(<SheetGrid frame={frame({ startRow: 0, startCol: 1, colIndices: [1, 2, 3],
-    colOffsets: [0, 30, 60, 90], rowOffsets: [0, 20] })} zoom={1} headerHandlers={handlers} sheet={0}>
+    colOffsets: [0, 30, 60, 90], rowOffsets: [0, 20] })} zoom={1} showSheetHeaders headerHandlers={handlers} sheet={0}>
     <div /></SheetGrid>);
   stubRect(band);
   fireEvent.pointerUp(band, { clientX: 85, clientY: 0, pointerId: 1 });
@@ -1328,7 +1344,7 @@ test('a reorder armed on one sheet does not commit after the sheet changes', () 
   fireEvent.pointerDown(columnLabel(view.container, 1), { button: 0, clientX: 45, clientY: 0, pointerId: 1 });
   fireEvent.pointerMove(band, { clientX: 85, clientY: 0, pointerId: 1 });
   view.rerender(<SheetGrid frame={frame({ startRow: 0, startCol: 0,
-    colOffsets: [0, 30, 60, 90], rowOffsets: [0, 20] })} zoom={1} headerHandlers={handlers} sheet={1}>
+    colOffsets: [0, 30, 60, 90], rowOffsets: [0, 20] })} zoom={1} showSheetHeaders headerHandlers={handlers} sheet={1}>
     <div /></SheetGrid>);
   stubRect(band);
   fireEvent.pointerUp(band, { clientX: 85, clientY: 0, pointerId: 1 });
@@ -1346,7 +1362,7 @@ test('a reorder armed on one sheet survives an unrelated repaint', () => {
   stubRect(band);
   fireEvent.pointerDown(columnLabel(view.container, 0), { button: 0, clientX: 15, clientY: 0, pointerId: 1 });
   view.rerender(
-    <SheetGrid frame={frame({ ...grid })} zoom={1} headerHandlers={handlers}
+    <SheetGrid frame={frame({ ...grid })} zoom={1} showSheetHeaders headerHandlers={handlers}
       selection={wholeColumn(0)} sheet={0}>
       <div />
     </SheetGrid>
@@ -1368,7 +1384,7 @@ test('a reorder armed on one sheet is dropped once the band scrolls', () => {
   fireEvent.pointerDown(columnLabel(view.container, 1), { button: 0, clientX: 45, clientY: 0, pointerId: 1 });
   view.rerender(
     <SheetGrid frame={frame({ startRow: 0, startCol: 1, colIndices: [1, 2, 3],
-      colOffsets: [0, 30, 60, 90], rowOffsets: [0, 20] })} zoom={1} headerHandlers={handlers}
+      colOffsets: [0, 30, 60, 90], rowOffsets: [0, 20] })} zoom={1} showSheetHeaders headerHandlers={handlers}
       selection={wholeColumn(1)} sheet={0}>
       <div />
     </SheetGrid>
@@ -1391,7 +1407,7 @@ test('a resize armed on one sheet is dropped once the band scrolls', () => {
   fireEvent.pointerMove(band, { clientX: 120, clientY: 0, pointerId: 1 });
   view.rerender(
     <SheetGrid frame={frame({ startRow: 0, startCol: 1, colIndices: [1, 2, 3],
-      colOffsets: [0, 80, 160, 240], rowOffsets: [0, 20] })} zoom={1} headerHandlers={handlers} sheet={0}>
+      colOffsets: [0, 80, 160, 240], rowOffsets: [0, 20] })} zoom={1} showSheetHeaders headerHandlers={handlers} sheet={0}>
       <div />
     </SheetGrid>
   );
@@ -1410,7 +1426,7 @@ test('a selection drag is dropped once the band scrolls', () => {
   fireEvent.pointerDown(columnLabel(view.container, 0), { button: 0, clientX: 20, clientY: 0, pointerId: 1 });
   view.rerender(
     <SheetGrid frame={frame({ startRow: 0, startCol: 1, colIndices: [1, 2, 3],
-      colOffsets: [0, 80, 160, 240], rowOffsets: [0, 20] })} zoom={1} headerHandlers={handlers}>
+      colOffsets: [0, 80, 160, 240], rowOffsets: [0, 20] })} zoom={1} showSheetHeaders headerHandlers={handlers}>
       <div />
     </SheetGrid>
   );
@@ -1429,7 +1445,7 @@ test('a resize armed on one sheet commits after that sheet repaints', () => {
   stubRect(band);
   fireEvent.pointerDown(band, { button: 0, clientX: 80, clientY: 0, pointerId: 1 });
   fireEvent.pointerMove(band, { clientX: 120, clientY: 0, pointerId: 1 });
-  view.rerender(<SheetGrid frame={frame(geometry)} zoom={1} headerHandlers={handlers} sheet={0}>
+  view.rerender(<SheetGrid frame={frame(geometry)} zoom={1} showSheetHeaders headerHandlers={handlers} sheet={0}>
     <div /></SheetGrid>);
   stubRect(band);
   fireEvent.pointerUp(band, { clientX: 120, clientY: 0, pointerId: 1 });
@@ -1444,7 +1460,7 @@ test('a reorder armed on one sheet commits after a re-render of that sheet', () 
   const grid = { startRow: 0, startCol: 0, colOffsets: [0, 30, 60, 90], rowOffsets: [0, 20] };
   const painted = frame(grid);
   const tree = (
-    <SheetGrid frame={painted} zoom={1} headerHandlers={handlers} selection={wholeColumn(0)} sheet={0}>
+    <SheetGrid frame={painted} zoom={1} showSheetHeaders headerHandlers={handlers} selection={wholeColumn(0)} sheet={0}>
       <div />
     </SheetGrid>
   );

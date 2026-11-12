@@ -163,10 +163,12 @@ export function trackAtOffset(
 export function resizeGestureAt(
   tracks: HeaderTrack[],
   offset: number,
+  zoom = 1,
 ): HeaderTrack | null {
+  const zone = HEADER_RESIZE_ZONE_PX / (zoom || 1);
   for (let i = 0; i < tracks.length - 1; i += 1) {
     const boundary = tracks[i].offset + tracks[i].size;
-    if (Math.abs(offset - boundary) <= HEADER_RESIZE_ZONE_PX) return tracks[i];
+    if (Math.abs(offset - boundary) <= zone) return tracks[i];
   }
   return null;
 }
@@ -506,11 +508,13 @@ interface TrackDrag extends GestureOrigin {
  * it is what tells a fully selected track (a reorder) from a cell range that
  * merely reaches one (a selection drag).
  */
-export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selection, sheet, unhideLabels, selectAllLabel, children }: {
+export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selection, sheet, unhideLabels, selectAllLabel, showSheetHeaders = false, children }: {
   frame?: DisplayList | null;
   zoom: number;
   /** Space left of the row header for a plugin gutter. */
   leadingInset?: number;
+  /** Whether to paint the column and row header bands. */
+  showSheetHeaders?: boolean;
   /** Selection, header menu, resize, reorder and reveal callbacks; absent leaves the bands inert. */
   headerHandlers?: SheetGridHeaderHandlers;
   /** Current selection, used only to highlight fully selected tracks. */
@@ -682,7 +686,7 @@ export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selec
       // a boundary is only a resize when the surface can commit one: with no
       // resize handler a viewer press near the slop must fall through and
       // select the track instead of starting a gesture nothing can finish.
-      const boundary = headerHandlers?.onHeaderResize ? resizeGestureAt(tracks, along) : null;
+      const boundary = headerHandlers?.onHeaderResize ? resizeGestureAt(tracks, along, zoom) : null;
       if (boundary) {
         // a boundary press is a resize, not a track press: stop it here so the
         // label underneath never sees it, and capture the pointer so the drag
@@ -1056,6 +1060,8 @@ export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selec
   const rowResizeGuide = resizeGuideAt('row');
   const columnReorderGuide = reorderGuideAt('col');
   const rowReorderGuide = reorderGuideAt('row');
+
+  if (!showSheetHeaders) return <>{children}</>;
 
   return <div
     data-testid="xlsx-grid"

@@ -1783,6 +1783,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const onHeaderResize = (axis: 'col' | 'row', index: number, size: number,
     run?: { at: number; count: number }) => {
+    if (run && ((axis === 'row' && run.count >= XLSX_MAX_ROWS) || (axis === 'col' && run.count >= XLSX_MAX_COLUMNS))) return;
     if (!editable() || !Number.isFinite(size)) return;
     const sheet = activeRef.current;
     // the drag is measured in pixels; the engine stores characters and points.
@@ -1795,18 +1796,6 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         ? { type: 'setColWidth', sheet, col: index, width: columnWidthFromPx(size) }
         : { type: 'setRowHeight', sheet, row: index, height: rowHeightFromPx(size) }];
     command({ kind: 'applyOps', payload: { args: [ops] } });
-  };
-  const onHeaderReorder = (axis: 'col' | 'row', at: number, before: number, count: number) => {
-    if (!editable()) return;
-    const frame = sourceRef.current?.painted;
-    if (!frame || frame.request.sheet !== activeRef.current) return;
-    // the band reports sheet indices in pre-move coordinates, so the op takes
-    // them as-is; `count` is the selection's span, hidden tracks included.
-    const sheet = activeRef.current;
-    // one command keeps the move a single undo step.
-    command({ kind: 'applyOps', payload: { args: [[axis === 'col'
-      ? { type: 'moveCols', sheet, col: at, count, before }
-      : { type: 'moveRows', sheet, row: at, count, before }]] } });
   };
   const onHeaderUnhide = (axis: 'col' | 'row', spans: [number, number][]) => {
     if (!editable()) return;
@@ -1822,7 +1811,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   // keyed on the session: the first render has run === null, and a `[]` memo
   // would freeze that closure so the `!run?.ready` guard never passed again.
   const headerHandlers = useMemo<SheetGridHeaderHandlers>(
-    () => ({ onHeaderMouseDown, onHeaderResize, onHeaderReorder, onHeaderUnhide, onSelectAll,
+    () => ({ onHeaderMouseDown, onHeaderResize, onHeaderUnhide, onSelectAll,
       // a drag from an unselected header extends from the anchor the press set;
       // the press already committed the drafts and took focus.
       onHeaderDragSelect: (axis, index) => {
@@ -2127,8 +2116,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           {isProposalsAvailable() && proposalsPanelOpen && <ProposalsPanel proposals={proposals} staleFor={staleFor}
             style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
           {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
-            painted={pluginHost.painted} zoom={zoom} top={COLUMN_HEADER_HEIGHT} />}
-          <PeerlessSheetGrid store={presentation} active={active} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0} headerHandlers={headerHandlers}
+            painted={pluginHost.painted} zoom={zoom} top={props.showSheetHeaders ? COLUMN_HEADER_HEIGHT : 0} />}
+          <PeerlessSheetGrid store={presentation} active={active} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0} showSheetHeaders={Boolean(props.showSheetHeaders)} headerHandlers={headerHandlers}
             selectAllLabel={t('commands.selectAll')}
             unhideLabels={{ col: t('commands.unhideColumns'), row: t('commands.unhideRows') }}>
           <div ref={scrollRef} id={gridId} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
@@ -2144,7 +2133,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
               openCell();
             }}
             onMouseLeave={(event) => { event.currentTarget.style.cursor = 'default'; event.currentTarget.title = ''; }}
-            style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none' }}>
+            style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none',
+              ...(pluginHost.rowGutter && !props.showSheetHeaders ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}) }}>
             <PeerlessWorkerExtent store={presentation} zoom={zoom} />
             <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>
               <canvas ref={canvasRef} style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} />

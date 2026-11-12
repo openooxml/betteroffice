@@ -142,7 +142,6 @@ type Editor = 'in-thread' | 'peerless' | 'legacy-worker';
 interface Book {
   view: ReturnType<typeof render>;
   surface: HTMLElement;
-  grid: HTMLElement;
   errors: XlsxPluginError[];
   until(check: () => boolean): Promise<void>;
   sync(): Promise<void>;
@@ -176,14 +175,13 @@ async function mount(editor: Editor, records: readonly Decorator[],
   let pump = () => act(async () => {});
   const shared = (view: ReturnType<typeof render>, element: (next: readonly XlsxPlugin[]) => ReactElement) => {
     const surface = view.getByTestId('xlsx-scroll');
-    const grid = view.getByTestId('xlsx-grid');
     const gutter = () => view.queryByTestId('xlsx-row-gutter');
     const until = (check: () => boolean) => waitFor(async () => {
       await pump();
       expect(check()).toBe(true);
     }, MOUNTED);
     return {
-      view, surface, grid, errors, until, sync: () => pump(), gutter,
+      view, surface, errors, until, sync: () => pump(), gutter,
       row: (row: number) => gutter()?.querySelector<HTMLElement>(`[data-row="${row}"]`) ?? null,
       geometry: (record: Decorator) => last(record.contexts)?.geometry ?? null,
       replace: async (next: readonly Decorator[]) => {
@@ -399,7 +397,7 @@ for (const editor of ['in-thread', 'peerless', 'legacy-worker'] as const) {
       shown = 'items';
       await book.bump(toggled);
       await book.until(() => book.gutter() !== null);
-      expect(book.grid.style.marginLeft).toBe('24px');
+      expect(book.surface.style.marginLeft).toBe('24px');
       shown = 'null';
       await book.bump(toggled);
       await book.until(() => book.gutter() === null);
@@ -433,7 +431,7 @@ for (const editor of ['in-thread', 'peerless', 'legacy-worker'] as const) {
       await book.until(() => book.row(7) !== null);
       await book.zoom(2);
       await book.until(() => book.gutter()?.style.width === '48px' && book.row(7) !== null);
-      expect(book.grid.style.marginLeft).toBe('48px');
+      expect(book.surface.style.marginLeft).toBe('48px');
       await book.until(() => Math.abs(px(book.row(7)!.style.top) -
         (book.geometry(record)?.getCellRect({ sheetId: SHEET, row: 7, col: 0 })?.y ?? NaN)) < 0.01);
       for (const row of [0, 1, 4, 7]) await expectAligned(book, record, row);
@@ -471,7 +469,7 @@ for (const editor of ['in-thread', 'peerless', 'legacy-worker'] as const) {
       await book.edit(1, 1, 'changed');
       await book.until(() => record.rendered!.snapshot.version !== pinned);
       await book.until(() => book.gutter() === null);
-      expect(book.grid.style.marginLeft).toBe('');
+      expect(book.surface.style.marginLeft).toBe('');
       pinned = null;
       const stale = record.rendered!.snapshot.version;
       await book.edit(1, 1, 'again');
@@ -658,7 +656,7 @@ for (const editor of ['in-thread', 'peerless', 'legacy-worker'] as const) {
       expect(layer.parentElement).toBe(canvas.parentElement);
       expect(book.surface.contains(layer)).toBe(true);
       expect(book.gutter()!.contains(canvas)).toBe(false);
-      expect(book.grid.style.marginLeft).toBe('24px');
+      expect(book.surface.style.marginLeft).toBe('24px');
       await book.until(() => book.geometry(record)?.getCellRect(target) != null);
       expect(book.geometry(record)!.getCellRect(target)).toEqual(before);
       await book.until(() => at(left + edge, middle) !== null);

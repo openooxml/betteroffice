@@ -539,7 +539,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
             {toolbarContent != null && <div data-testid="xlsx-toolbar" style={{ flex: '0 0 auto' }}>{toolbarContent}</div>}
             <div data-testid="xlsx-workspace" style={{ position: 'relative', display: 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
               <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
-                <SheetGrid frame={frame} zoom={paintedZoom} headerHandlers={{ onHeaderMouseDown, onHeaderDragSelect, onSelectAll }} selection={selection}
+                <SheetGrid frame={frame} zoom={paintedZoom} showSheetHeaders={Boolean(props.showSheetHeaders)} headerHandlers={{ onHeaderMouseDown, onHeaderDragSelect, onSelectAll }} selection={selection}
                   selectAllLabel={t('commands.selectAll')}
                   sheet={painted?.frame.sheet}>
                 <div ref={scrollRef} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}

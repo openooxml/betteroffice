@@ -442,6 +442,7 @@ export function XlsxEditorContent({
   onReady,
   className,
   readOnly = false,
+  showSheetHeaders = false,
   allowHostProposals = false,
   defaultFonts,
   toolbar,
@@ -2184,6 +2185,7 @@ export function XlsxEditorContent({
   /** A committed boundary drag: resize the whole selected run, or one track. */
   const resizeHeaderTrack = useCallback(
     (axis: 'col' | 'row', index: number, size: number, run?: { at: number; count: number }) => {
+      if (run && ((axis === 'row' && run.count >= XLSX_MAX_ROWS) || (axis === 'col' && run.count >= XLSX_MAX_COLUMNS))) return;
       const sheet = activeSheetRef.current;
       // the drag is measured in pixels; the engine stores characters and points.
       if (run) {
@@ -2196,21 +2198,6 @@ export function XlsxEditorContent({
       applyHeaderOps(axis === 'col'
         ? [{ type: 'setColWidth', sheet, col: index, width: columnWidthFromPx(size) }]
         : [{ type: 'setRowHeight', sheet, row: index, height: rowHeightFromPx(size) }]);
-    },
-    [applyHeaderOps]
-  );
-
-  /** A committed label drag: move the selected run to the gap the band reported. */
-  const reorderHeaderTrack = useCallback(
-    (axis: 'col' | 'row', at: number, before: number, count: number) => {
-      const painted = paintedRef.current;
-      if (!painted || painted.sheet !== activeSheetRef.current) return;
-      // the band reports sheet indices in pre-move coordinates, so the op takes
-      // them as-is; `count` is the selection's span, hidden tracks included.
-      // One op keeps the move a single undo step.
-      applyHeaderOps([axis === 'col'
-        ? { type: 'moveCols', sheet: painted.sheet, col: at, count, before }
-        : { type: 'moveRows', sheet: painted.sheet, row: at, count, before }]);
     },
     [applyHeaderOps]
   );
@@ -2248,10 +2235,9 @@ export function XlsxEditorContent({
       selectHeaderTrack(axis, index, 'extend');
     },
     onHeaderResize: resizeHeaderTrack,
-    onHeaderReorder: reorderHeaderTrack,
     onHeaderUnhide: unhideHeaderTracks,
     onSelectAll: selectAll,
-  }), [selectHeaderTrack, resizeHeaderTrack, reorderHeaderTrack, unhideHeaderTracks, selectAll, focusContainer]);
+  }), [selectHeaderTrack, resizeHeaderTrack, unhideHeaderTracks, selectAll, focusContainer]);
 
   const headerMenu = useContextMenu({
     // the bands are siblings of the scroller, so their contextmenu never
@@ -2840,11 +2826,12 @@ export function XlsxEditorContent({
               index={pluginHost.rowGutter}
               painted={pluginHost.painted}
               zoom={zoom}
-              top={COLUMN_HEADER_HEIGHT}
+              top={showSheetHeaders ? COLUMN_HEADER_HEIGHT : 0}
             />
           )}
 
           <SheetGrid frame={frame} zoom={zoom} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0}
+            showSheetHeaders={showSheetHeaders}
             headerHandlers={headerHandlers} selection={selection} sheet={activeSheet}
             selectAllLabel={t('commands.selectAll')}
             unhideLabels={{ col: t('commands.unhideColumns'), row: t('commands.unhideRows') }}>
@@ -2864,6 +2851,7 @@ export function XlsxEditorContent({
               overflow: 'auto',
               minHeight: 0,
               outline: 'none',
+              ...(pluginHost.rowGutter && !showSheetHeaders ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}),
             }}
           >
             <div

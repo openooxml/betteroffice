@@ -258,16 +258,15 @@ describe('workbook session viewer', () => {
     await act(async () => { fireEvent.keyDown(scroll, { key: 'a', ctrlKey: true }); });
     expect(call.selectionData).toHaveBeenCalledWith(0, 1, 1, undefined);
     const outline = view.getByTestId('xlsx-selection') as HTMLElement;
-    // the one-pixel ring's box covers the boundary gridlines of the A1:C3 rect.
-    expect(outline.style.width).toBe('289px');
-    expect(outline.style.height).toBe('73px');
+    expect(outline.style.width).toBe('288px');
+    expect(outline.style.height).toBe('72px');
     expect(view.getAllByRole('gridcell').filter((cell) => cell.getAttribute('aria-selected') === 'true')).toHaveLength(9);
     await tick();
     fireEvent.keyDown(scroll, { key: 'ArrowRight' });
-    expect(outline.style.left).toBe('191px');
-    expect(outline.style.top).toBe('23px');
-    expect(outline.style.width).toBe('97px');
-    expect(outline.style.height).toBe('25px');
+    expect(outline.style.left).toBe('192px');
+    expect(outline.style.top).toBe('24px');
+    expect(outline.style.width).toBe('96px');
+    expect(outline.style.height).toBe('24px');
   });
 
   it('draws the viewer selection as an edge marquee, not a fill', async () => {
@@ -276,11 +275,11 @@ describe('workbook session viewer', () => {
     const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
     await opened();
     const marquee = await waitFor(() => view.getByTestId('xlsx-selection') as HTMLElement);
-    // a one-pixel inset ring covers the cell's boundary gridlines.
+    // a one-pixel inset ring on the cell's snapped rect.
     expect([marquee.style.outlineStyle, marquee.style.outlineWidth]).toEqual(['', '']);
     expect(marquee.style.boxShadow).toBe('inset 0 0 0 1px #217346');
-    expect([marquee.style.left, marquee.style.top]).toEqual(['-1px', '-1px']);
-    expect([marquee.style.width, marquee.style.height]).toEqual(['97px', '25px']);
+    expect([marquee.style.left, marquee.style.top]).toEqual(['0px', '0px']);
+    expect([marquee.style.width, marquee.style.height]).toEqual(['96px', '24px']);
     expect(marquee.style.background).toBe('');
     expect(marquee.style.backgroundColor).toBe('');
     // the active cell carries the two-pixel ring, one pixel across each of its
@@ -356,7 +355,7 @@ describe('workbook session viewer', () => {
     await tick();
     await tick();
     expect(call.selectionData.mock.calls[1]).toEqual([0, 0, 1, 'right']);
-    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.left).toBe('191px');
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.left).toBe('192px');
   });
 
   it('re-queries a data edge after the document version changes', async () => {
@@ -374,7 +373,7 @@ describe('workbook session viewer', () => {
     expect(call.cellGeometry).not.toHaveBeenCalled();
     await act(async () => fresh.resolve({ edge: { row: 0, col: 2 } }));
     expect(call.cellGeometry).toHaveBeenCalledWith(0, 0, 2);
-    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.left).toBe('191px');
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.left).toBe('192px');
   });
 
   it('uses the directional limit after a data query fails', async () => {
@@ -791,8 +790,8 @@ describe('workbook session viewer', () => {
     }));
     expect(await selected).toBe(true);
     const outline = view.getByTestId('xlsx-selection') as HTMLElement;
-    expect(outline.style.left).toBe('703px');
-    expect(outline.style.top).toBe('575px');
+    expect(outline.style.left).toBe('704px');
+    expect(outline.style.top).toBe('576px');
   });
 
   it('accepts painted frozen-pane geometry after fractional zoom rounds the reveal scroll', async () => {
@@ -828,10 +827,9 @@ describe('workbook session viewer', () => {
     expect(scroll.scrollLeft).toBe(125);
     await tick();
     expect(await selected).toBe(true);
-    // the ring's own edge is the boundary gridline: one pixel left of the
-    // boundary snapped to a whole CSS pixel.
+    // the ring starts on the boundary snapped to a whole CSS pixel.
     const left = parseFloat((view.getByTestId('xlsx-selection') as HTMLElement).style.left);
-    expect(left).toBe(Math.round(96 * 1.3) - 1);
+    expect(left).toBe(Math.round(96 * 1.3));
   });
 
   it('accepts a painted target with a positive partial viewport intersection', async () => {
@@ -876,8 +874,8 @@ describe('workbook session viewer', () => {
     await tick();
     expect(await selected).toBe(true);
     const outline = view.getByTestId('xlsx-selection') as HTMLElement;
-    expect(outline.style.left).toBe('-1px');
-    expect(outline.style.width).toBe('97px');
+    expect(outline.style.left).toBe('0px');
+    expect(outline.style.width).toBe('96px');
   });
 
   it('returns false when a matching paint does not visibly contain the target geometry', async () => {
@@ -978,13 +976,13 @@ describe('workbook session viewer', () => {
     let api!: XlsxWorkerViewerApi;
     const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
-    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.width).toBe('193px');
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.width).toBe('192px');
     const scroll = view.getByTestId('xlsx-scroll');
     fireEvent.mouseDown(scroll, { clientX: 200, clientY: 30 });
     fireEvent.mouseUp(window);
-    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.left).toBe('191px');
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.left).toBe('192px');
     fireEvent.keyDown(scroll, { key: 'ArrowDown', shiftKey: true });
-    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.height).toBe('49px');
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.height).toBe('48px');
     expect(view.getAllByRole('gridcell').filter((cell) => cell.getAttribute('aria-selected') === 'true')).toHaveLength(2);
     act(() => api.clearSelection());
     expect(view.queryByTestId('xlsx-selection')).toBeNull();
@@ -1005,7 +1003,7 @@ describe('workbook session viewer', () => {
     await tick();
     fireEvent.mouseDown(scroll, { clientX: 110, clientY: 30 });
     fireEvent.mouseUp(window);
-    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.left).toBe('95px');
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.left).toBe('96px');
     expect(view.getByRole('grid').textContent).toContain('Sheet 0');
     await act(async () => next.resolve(frame(0, { ...viewport, x: 200 })));
     expect(painted).toHaveLength(1);
@@ -1130,7 +1128,7 @@ describe('viewer header drag selection', () => {
       return next;
     });
     open(viewer);
-    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen showSheetHeaders />);
     await opened();
     return view;
   }
@@ -1170,6 +1168,16 @@ describe('viewer header drag selection', () => {
     fireEvent.pointerUp(leave?.target ?? band, { pointerId: 1 });
   };
 
+  it('hides the header bands by default', async () => {
+    const { viewer } = session();
+    open(viewer);
+    const view = render(<XlsxEditor legacySyncApi file={file} readOnly experimentalWorkerOpen />);
+    await opened();
+    expect(view.queryByTestId('xlsx-grid')).toBeNull();
+    expect(view.queryByTestId('xlsx-column-headers')).toBeNull();
+    expect(view.queryByTestId('xlsx-row-headers')).toBeNull();
+  });
+
   it('selects whole columns B:D from a drag across their headers', async () => {
     const view = await mount();
     const band = view.getByTestId('xlsx-column-headers');
@@ -1181,7 +1189,7 @@ describe('viewer header drag selection', () => {
     expect([...new Set(cells.map((cell) => cell.row))].sort((a, b) => a - b)).toEqual([1, 2, 3]);
     const marquee = view.getByTestId('xlsx-selection') as HTMLElement;
     expect([marquee.style.left, marquee.style.top, marquee.style.width, marquee.style.height])
-      .toEqual(['95px', '-1px', '289px', '73px']);
+      .toEqual(['96px', '0px', '288px', '72px']);
     // the band marks each of the three tracks as fully selected.
     expect(Array.from(band.querySelectorAll<HTMLElement>('[data-testid="xlsx-header-underline"]'),
       (mark) => mark.style.left)).toEqual(['96px', '192px', '288px']);
@@ -1213,7 +1221,7 @@ describe('viewer header drag selection', () => {
     expect([...new Set(cells.map((cell) => cell.col))].sort()).toEqual(['A', 'B', 'C', 'D']);
     const marquee = view.getByTestId('xlsx-selection') as HTMLElement;
     expect([marquee.style.left, marquee.style.top, marquee.style.width, marquee.style.height])
-      .toEqual(['-1px', '-1px', '385px', '73px']);
+      .toEqual(['0px', '0px', '384px', '72px']);
   });
 
   it('keeps the last crossed track when the drag leaves the band', async () => {
@@ -1227,6 +1235,6 @@ describe('viewer header drag selection', () => {
     fireEvent.pointerMove(band, { pointerId: 1, clientX: 3 * 96 + 48, clientY: 5 });
     expect([...new Set(selectedCells(view).map((cell) => cell.col))].sort()).toEqual(['B', 'C']);
     const marquee = view.getByTestId('xlsx-selection') as HTMLElement;
-    expect([marquee.style.left, marquee.style.width]).toEqual(['95px', '193px']);
+    expect([marquee.style.left, marquee.style.width]).toEqual(['96px', '192px']);
   });
 });

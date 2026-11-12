@@ -1888,6 +1888,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   };
   const onHeaderResize = (axis: 'col' | 'row', index: number, size: number,
     run?: { at: number; count: number }) => {
+    if (run && ((axis === 'row' && run.count >= XLSX_MAX_ROWS) || (axis === 'col' && run.count >= XLSX_MAX_COLUMNS))) return;
     if (!acceptInput()) return;
     const sheet = activeRef.current;
     // the band reports pixels; the engine stores characters and points.
@@ -1902,18 +1903,6 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       ? { type: 'setColWidth', sheet, col: index, width: columnWidthFromPx(size) }
       : { type: 'setRowHeight', sheet, row: index, height: rowHeightFromPx(size) });
   };
-  const onHeaderReorder = (axis: 'col' | 'row', at: number, before: number, count: number) => {
-    if (!acceptInput()) return;
-    const painted = sourceRef.current?.painted;
-    if (!painted || painted.request.sheet !== activeRef.current) return;
-    // the band reports sheet indices in pre-move coordinates, so the op takes
-    // them as-is; `count` is the selection's span, hidden tracks included.
-    const sheet = activeRef.current;
-    // one op keeps the move a single undo step.
-    applyStructuralOp(axis === 'col'
-      ? { type: 'moveCols', sheet, col: at, count, before }
-      : { type: 'moveRows', sheet, row: at, count, before });
-  };
   const onHeaderUnhide = (axis: 'col' | 'row', spans: [number, number][]) => {
     const painted = sourceRef.current?.painted;
     if (!painted || painted.request.sheet !== activeRef.current) return;
@@ -1927,7 +1916,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   // keyed on the session for the same reason the peerless editor is: the first
   // render has no session, and a `[]` memo would pin handlers bound to it.
   const headerHandlers = useMemo<SheetGridHeaderHandlers>(() => ({
-    onHeaderMouseDown, onHeaderResize, onHeaderReorder, onHeaderUnhide, onSelectAll,
+    onHeaderMouseDown, onHeaderResize, onHeaderUnhide, onSelectAll,
     // a drag from an unselected header extends from the anchor the press set;
     // the press already committed the draft and took focus.
     onHeaderDragSelect: (axis, index) => {
@@ -2050,8 +2039,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
               {isProposalsAvailable() && proposalsPanelOpen && <ProposalsPanel proposals={proposals} staleFor={staleFor}
                 style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
               {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
-                painted={pluginHost.painted} zoom={zoom} top={COLUMN_HEADER_HEIGHT} />}
-              <SheetGrid frame={frame} zoom={paintedZoom} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0} headerHandlers={headerHandlers} selection={selection}
+                painted={pluginHost.painted} zoom={zoom} top={props.showSheetHeaders ? COLUMN_HEADER_HEIGHT : 0} />}
+              <SheetGrid frame={frame} zoom={paintedZoom} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0} showSheetHeaders={Boolean(props.showSheetHeaders)} headerHandlers={headerHandlers} selection={selection}
                 sheet={painted?.request.sheet}
                 selectAllLabel={t('commands.selectAll')}
                 unhideLabels={{ col: t('commands.unhideColumns'), row: t('commands.unhideRows') }}>
@@ -2064,7 +2053,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                   openEditor();
                 }}
                 onMouseLeave={(event) => { event.currentTarget.style.cursor = 'default'; event.currentTarget.title = ''; }}
-                style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none' }}>
+                style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none',
+                  ...(pluginHost.rowGutter && !props.showSheetHeaders ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}) }}>
                 <div style={{ position: 'absolute', top: 0, left: 0, width: view ? view.contentWidth * zoom : '100%',
                   height: view ? view.contentHeight * zoom : '100%' }} />
                 <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>

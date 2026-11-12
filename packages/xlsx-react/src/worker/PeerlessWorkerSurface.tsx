@@ -30,8 +30,9 @@ const hidden: CSSProperties = {
  * state. Subscribe here so the header bands advance with the same painted
  * frame the canvas is showing instead of freezing at the first paint.
  */
-export const PeerlessSheetGrid = memo(function PeerlessSheetGrid({ store, active, leadingInset = 0, headerHandlers, selectAllLabel, unhideLabels, children }: {
+export const PeerlessSheetGrid = memo(function PeerlessSheetGrid({ store, active, leadingInset = 0, headerHandlers, selectAllLabel, unhideLabels, showSheetHeaders = false, children }: {
   store: WorkerPresentationStore; active: number; leadingInset?: number;
+  showSheetHeaders?: boolean;
   headerHandlers?: SheetGridHeaderHandlers;
   selectAllLabel?: string;
   unhideLabels?: { col: string; row: string }; children: ReactNode;
@@ -42,7 +43,7 @@ export const PeerlessSheetGrid = memo(function PeerlessSheetGrid({ store, active
   const selection = useWorkerPresentation(store, selectSelection);
   const paintedSheet = painted?.request.sheet === active ? active : null;
   return <SheetGrid frame={painted?.request.sheet === active ? painted.displayList : null}
-    zoom={painted?.request.zoom ?? 1} leadingInset={leadingInset} headerHandlers={headerHandlers}
+    zoom={painted?.request.zoom ?? 1} leadingInset={leadingInset} showSheetHeaders={showSheetHeaders} headerHandlers={headerHandlers}
     sheet={paintedSheet}
     selectAllLabel={selectAllLabel}
     unhideLabels={unhideLabels}

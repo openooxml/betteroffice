@@ -1,9 +1,9 @@
 ---
 '@betteroffice/xlsx': minor
 '@betteroffice/xlsx-react': minor
+'@betteroffice/rust-crates': minor
 ---
 
-Add column/row header bands: select, shift-extend, drag-reorder, boundary
-resize (a whole-track selection resizes together), corner select-all. Hidden
-tracks show doubled separators plus a reveal handle. The 1px marquee sits on
-the gridlines; a whole-cell selection is washed except the active cell.
+Add opt-in column and row header bands via `showSheetHeaders`: select,
+resize, and select-all. Headers are off by default. Moving rows or
+columns is refused for now.

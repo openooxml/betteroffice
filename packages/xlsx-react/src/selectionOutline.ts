@@ -8,9 +8,7 @@
  *
  * `marqueeBox` returns the element box for a ring drawn with
  * `box-shadow: inset 0 0 0 Npx …`. An even N grows the box by N/2 per side, so
- * the ring straddles each snapped boundary. A one-pixel ring covers the gridline
- * itself on every side: the canvas draws the boundary at `b` as `[b - 1, b]`, so
- * the box shifts one pixel left/up and the ring lands on those same pixels.
+ * the ring straddles each snapped boundary.
  */
 export interface PixelRect {
   x: number;
@@ -45,13 +43,11 @@ export function marqueeBox(rect: PixelRect, width = MARQUEE_WIDTH): MarqueeBox {
   const w = Math.max(0, x1 - x0);
   const h = Math.max(0, y1 - y0);
   if (width % 2 === 1) {
-    // a one-pixel ring is the gridline: boundary `b` is drawn `[b - 1, b]`, and
-    // a box from `x0 - 1` to `x1` puts its four ring pixels exactly there.
     return {
-      left: x0 - 1,
-      top: y0 - 1,
-      width: w + 1,
-      height: h + 1,
+      left: x0,
+      top: y0,
+      width: w,
+      height: h,
       inset: { x: x0, y: y0, w, h },
     };
   }

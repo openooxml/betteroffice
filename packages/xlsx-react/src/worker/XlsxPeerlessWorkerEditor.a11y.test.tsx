@@ -268,7 +268,7 @@ describe('peerless grid headers', () => {
 
   it('advances the labels when the presentation store installs a scrolled frame', async () => {
     const store = new WorkerPresentationStore();
-    const view = render(<PeerlessSheetGrid store={store} active={0}><div /></PeerlessSheetGrid>);
+    const view = render(<PeerlessSheetGrid store={store} active={0} showSheetHeaders><div /></PeerlessSheetGrid>);
     await act(async () => { store.setPainted(painted(0)); await Promise.resolve(); });
     expect(view.getByTestId('xlsx-column-headers').querySelector(':scope > div')?.textContent).toBe('A');
     await act(async () => { store.setPainted(painted(3)); await Promise.resolve(); });
@@ -278,7 +278,7 @@ describe('peerless grid headers', () => {
   it('forwards headerHandlers to the bands it renders', async () => {
     const store = new WorkerPresentationStore();
     const presses: { axis: string; index: number }[] = [];
-    const view = render(<PeerlessSheetGrid store={store} active={0}
+    const view = render(<PeerlessSheetGrid store={store} active={0} showSheetHeaders
       headerHandlers={{ onHeaderMouseDown: (axis, index) => presses.push({ axis, index }) }}>
       <div />
     </PeerlessSheetGrid>);

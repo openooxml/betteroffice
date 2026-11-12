@@ -523,7 +523,7 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
   const mount = async (onSave?: (bytes: Uint8Array) => void, readOnly = false, hostProps: Partial<Omit<XlsxAsyncEditorProps, 'file'>> = {}) => {
     editState = { ...editState, readOnly };
     const view = render(<Profiler id="peerless" onRender={renderCount}>
-      <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} toolbar={defaultToolbar ? undefined : <Chrome />} onReady={ready} onSave={onSave} {...hostProps} />
+      <XlsxWorkerEditor backend="peerless" file={file} readOnly={readOnly} showSheetHeaders toolbar={defaultToolbar ? undefined : <Chrome />} onReady={ready} onSave={onSave} {...hostProps} />
     </Profiler>);
     await opened();
     await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
@@ -704,8 +704,8 @@ for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
       activeCell: { row: 1, col: 1 },
     } }));
     expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B2');
-    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.width).toBe('289px');
-    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.height).toBe('73px');
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.width).toBe('288px');
+    expect((view.getByTestId('xlsx-selection') as HTMLElement).style.height).toBe('72px');
     await act(async () => { fireEvent.keyDown(scroll, { key: 'A', ...modifier }); });
     expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'select', payload: { selection: {
       range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 1_048_575, col: 16_383 } },
@@ -3904,7 +3904,7 @@ describe('peerless workbook worker editor', () => {
     } };
     await act(async () => host.ack(host.sent[3], { paint: true, selection }));
     expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A3');
-    expect(view.getByTestId('xlsx-selection').style.height).toBe('73px');
+    expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
     fireEvent.keyDown(scroll, { key: 'Delete' });
     await act(async () => {});
     expect(host.sent[4]).toMatchObject({ payload: { toolbar: { target: selection } } });
@@ -8592,8 +8592,8 @@ describe('peerless keyboard navigation and proposal freshness', () => {
         expect(name.value).toBe(reverse ? 'C4' : 'B2');
         await waitFor(() => expect(formula.value).toBe('anchor input'));
         expect(host.cellInputs).toHaveBeenLastCalledWith(0, reverse ? 'C4' : 'B2');
-        expect(view.getByTestId('xlsx-selection').style.width).toBe('193px');
-        expect(view.getByTestId('xlsx-selection').style.height).toBe('73px');
+        expect(view.getByTestId('xlsx-selection').style.width).toBe('192px');
+        expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
         const focusBox = view.getByTestId('xlsx-active-cell') as HTMLElement;
         expect(focusBox.style.left).toBe(`${anchor.col * 96 - 1}px`);
         expect(focusBox.style.top).toBe(`${anchor.row * 24 - 1}px`);
@@ -8622,8 +8622,8 @@ describe('peerless keyboard navigation and proposal freshness', () => {
       fireEvent.mouseUp(window);
       fireEvent.keyDown(scroll, { key, shiftKey });
       expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe(address);
-      expect(view.getByTestId('xlsx-selection').style.width).toBe('97px');
-      expect(view.getByTestId('xlsx-selection').style.height).toBe('25px');
+      expect(view.getByTestId('xlsx-selection').style.width).toBe('96px');
+      expect(view.getByTestId('xlsx-selection').style.height).toBe('24px');
     });
   }
 
@@ -8666,7 +8666,7 @@ describe('peerless keyboard navigation and proposal freshness', () => {
     await redoing;
     expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('C3');
     await waitFor(() => expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('4242'));
-    expect(view.getByTestId('xlsx-selection').style.height).toBe('25px');
+    expect(view.getByTestId('xlsx-selection').style.height).toBe('24px');
   });
 
   it('outlines the full merge containing the focused cell', async () => {
@@ -9348,7 +9348,7 @@ it('T20: XL chart selection settles with missing-target', async () => {
 
 describe('workbook worker editor header interactions', () => {
   const mountLegacy = async () => {
-    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} showSheetHeaders />);
     await opened();
     return view;
   };
@@ -9357,6 +9357,50 @@ describe('workbook worker editor header interactions', () => {
   const selectedAddresses = (view: ReturnType<typeof render>) =>
     Array.from(view.queryAllByRole('gridcell', { selected: true }) as Element[],
       (cell) => (cell.textContent ?? '').split(',')[0]!.trim());
+
+  it('hides the header bands by default in the legacy editor', async () => {
+    harness();
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    expect(view.queryByTestId('xlsx-grid')).toBeNull();
+    expect(view.queryByTestId('xlsx-column-headers')).toBeNull();
+    expect(view.queryByTestId('xlsx-row-headers')).toBeNull();
+  });
+
+  it('hides the header bands by default in the peerless editor', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: undefined });
+    expect(view.queryByTestId('xlsx-grid')).toBeNull();
+    expect(view.queryByTestId('xlsx-column-headers')).toBeNull();
+    expect(view.queryByTestId('xlsx-row-headers')).toBeNull();
+  });
+
+  it('sends no ops when a whole-sheet row boundary is dragged in the peerless editor', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount();
+    await act(async () => { fireEvent.click(view.getByTestId('xlsx-grid-corner')); });
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    const band = view.getByTestId('xlsx-row-headers');
+    fireEvent.pointerDown(band, { button: 0, clientX: 20, clientY: 24, pointerId: 8 });
+    fireEvent.pointerMove(band, { clientX: 20, clientY: 56, pointerId: 8 });
+    fireEvent.pointerUp(band, { button: 0, clientX: 20, clientY: 56, pointerId: 8 });
+    await act(async () => {});
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([]);
+  });
+
+  it('sends no ops when a whole-sheet row boundary is dragged in the legacy editor', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    const view = await mountLegacy();
+    fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    const band = view.getByTestId('xlsx-row-headers');
+    fireEvent.pointerDown(band, { button: 0, clientX: 20, clientY: 24, pointerId: 8 });
+    fireEvent.pointerMove(band, { clientX: 20, clientY: 56, pointerId: 8 });
+    fireEvent.pointerUp(band, { clientX: 20, clientY: 56, pointerId: 8 });
+    expect(applyOps).not.toHaveBeenCalled();
+  });
 
   it('selects the whole column from the column header', async () => {
     harness();
@@ -9674,27 +9718,22 @@ describe('workbook worker editor header interactions', () => {
     ]);
   });
 
-  it('reorders a dragged column through the structural op helper', async () => {
+  it('dragging a selected column header sends no move op in the legacy editor', async () => {
     const host = harness();
     const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
     Object.assign(host.editMethods, { applyOps });
     const view = await mountLegacy();
-    // the band only picks up a header the selection already covers in full, so
-    // the press on A first selects its whole column.
     fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
     await waitFor(() => expect(selectedAddresses(view)
       .filter((address) => address.startsWith('A'))).toHaveLength(4));
     // the harness paints 96px columns: A's label centre is at 48, and 150 is
-    // past B's midpoint (144), so A lands in the gap after B.
+    // past B's midpoint (144).
     const band = view.getByTestId('xlsx-column-headers');
     fireEvent.pointerDown(band.querySelector('[data-col="0"]')!, {
       button: 0, clientX: 48, clientY: 0, pointerId: 1 });
     fireEvent.pointerMove(band, { clientX: 150, clientY: 0, pointerId: 1 });
     fireEvent.pointerUp(band, { clientX: 150, clientY: 0, pointerId: 1 });
-    expect(applyOps).toHaveBeenCalledTimes(1);
-    expect(applyOps.mock.calls[0]![0]).toEqual([
-      { type: 'moveCols', sheet: 0, col: 0, count: 1, before: 2 },
-    ]);
+    expect(applyOps).not.toHaveBeenCalled();
   });
 
   // The harness paints A:C, but the drag in these tests runs across D:F and
@@ -9750,7 +9789,7 @@ describe('workbook worker editor header interactions', () => {
     expect(applyOps).not.toHaveBeenCalled();
   });
 
-  it('moves the whole selected legacy run from a track inside it', async () => {
+  it('dragging a header inside a selected run sends no move op in the legacy editor', async () => {
     const host = harness();
     const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
     Object.assign(host.editMethods, { applyOps });
@@ -9761,21 +9800,13 @@ describe('workbook worker editor header interactions', () => {
     fireEvent.mouseDown(columnLabel(view, 0));
     fireEvent.mouseDown(columnLabel(view, 2), { shiftKey: true });
     await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
-    const selected = selectedAddresses(view);
-    // B is inside the run, so the press picks A:C up; 337px is just past D's
-    // midpoint, so the run lands in the gap after D, before E.
     fireEvent.pointerDown(columnLabel(view, 1), { button: 0, clientX: 144, clientY: 12, pointerId: 2 });
     fireEvent.pointerMove(band, { clientX: 337, clientY: 12, pointerId: 2 });
     fireEvent.pointerUp(band, { clientX: 337, clientY: 12, pointerId: 2 });
-    expect(applyOps).toHaveBeenCalledTimes(1);
-    expect(applyOps.mock.calls[0]![0]).toEqual([
-      { type: 'moveCols', sheet: 0, col: 0, count: 3, before: 4 },
-    ]);
-    // the gesture moved the run; the selection's own range never moved.
-    expect(selectedAddresses(view)).toEqual(selected);
+    expect(applyOps).not.toHaveBeenCalled();
   });
 
-  it('reports an engine move refusal without failing the legacy workbook', async () => {
+  it('dragging a selected header past a merged range sends no move in the legacy editor', async () => {
     const host = harness();
     let api!: XlsxWorkerEditorApi;
     const applyOps = mock((_ops: unknown[]): EditResult => {
@@ -9785,22 +9816,18 @@ describe('workbook worker editor header interactions', () => {
     // B1:C1 is merged, so the engine refuses to tear it when B moves past D.
     Object.assign(host.peerMethods, { mergedRanges: () => [{ start: { row: 0, col: 1 }, end: { row: 0, col: 2 } }] });
     widen(host.sessionMethods.frame);
-    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} showSheetHeaders
       onReady={(value) => { api = value; }} />);
     await opened();
     const band = view.getByTestId('xlsx-column-headers');
     fireEvent.mouseDown(columnLabel(view, 1));
     await waitFor(() => expect(selectedAddresses(view)).toEqual(['B1', 'B2', 'B3', 'B4']));
-    // B is a whole-column selection; 337px is just past D's midpoint, so the drop
-    // lands in the gap after D, exactly where the merged range forbids the move.
+    // B is a whole-column selection; 337px is just past D's midpoint, across B1:C1.
     fireEvent.pointerDown(columnLabel(view, 1), { button: 0, clientX: 144, clientY: 12, pointerId: 7 });
     fireEvent.pointerMove(band, { clientX: 337, clientY: 12, pointerId: 7 });
     fireEvent.pointerUp(band, { clientX: 337, clientY: 12, pointerId: 7 });
-    expect(applyOps).toHaveBeenCalledTimes(1);
-    expect(applyOps.mock.calls[0]![0]).toEqual([{ type: 'moveCols', sheet: 0, col: 1, count: 1, before: 4 }]);
-    // the refusal names the declined edit and leaves the workbook open and editable.
-    await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
-      .toBe("This edit can't be applied here. The workbook is unchanged."));
+    expect(applyOps).not.toHaveBeenCalled();
+    expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
     expect(view.queryByTestId('xlsx-error')).toBeNull();
     expect(api.failure).toBeNull();
     const editing = api.editCellAsync(0, 0, 1, 'after refusal');
@@ -9809,7 +9836,7 @@ describe('workbook worker editor header interactions', () => {
     expect(host.cells.get('0:0:1')).toBe('after refusal');
   });
 
-  it('moves the whole selected peerless run as one applyOps command', async () => {
+  it('dragging a header inside a selected run sends no move op in the peerless editor', async () => {
     const host = peerlessHarness();
     widen(host.frame);
     const view = await host.mount();
@@ -9817,18 +9844,12 @@ describe('workbook worker editor header interactions', () => {
     fireEvent.mouseDown(columnLabel(view, 0));
     fireEvent.mouseDown(columnLabel(view, 2), { shiftKey: true });
     await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
-    const selected = selectedAddresses(view);
     expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([]);
-    // B is inside A:C, so the press moves the run; the drop after D puts it
-    // before E in one command with one op.
     fireEvent.pointerDown(columnLabel(view, 1), { button: 0, clientX: 144, clientY: 12, pointerId: 2 });
     fireEvent.pointerMove(band, { clientX: 337, clientY: 12, pointerId: 2 });
     fireEvent.pointerUp(band, { clientX: 337, clientY: 12, pointerId: 2 });
-    await waitFor(() => expect(host.sent.filter((command) => command.kind === 'applyOps').length).toBe(1));
-    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([
-      expect.objectContaining({ payload: { args: [[{ type: 'moveCols', sheet: 0, col: 0, count: 3, before: 4 }]] } }),
-    ]);
-    expect(selectedAddresses(view)).toEqual(selected);
+    await act(async () => {});
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([]);
   });
 
   it('selects the whole sheet from the corner above the row numbers', async () => {
@@ -9862,16 +9883,13 @@ describe('workbook worker editor header interactions', () => {
       [1, 2, 3].flatMap((row) => ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].map((column) => `${column}${row}`))));
   });
 
-  // The marquee is an inset ring rather than an outline: the element box
-  // starts one pixel left/up of the snapped cell rect and runs one pixel past
-  // it, so its one-pixel ring covers the boundary gridline on the same grid the
-  // canvas snaps its strokes to at any zoom.
+  // The marquee is an inset ring rather than an outline, on the snapped cell rect.
   const expectEdgeMarquee = (marquee: HTMLElement, snapped = { x: 0, y: 0, w: 96, h: 24 }) => {
     expect(marquee.style.boxShadow).toBe('inset 0 0 0 1px #217346');
-    expect(marquee.style.left).toBe(`${snapped.x - 1}px`);
-    expect(marquee.style.top).toBe(`${snapped.y - 1}px`);
-    expect(marquee.style.width).toBe(`${snapped.w + 1}px`);
-    expect(marquee.style.height).toBe(`${snapped.h + 1}px`);
+    expect(marquee.style.left).toBe(`${snapped.x}px`);
+    expect(marquee.style.top).toBe(`${snapped.y}px`);
+    expect(marquee.style.width).toBe(`${snapped.w}px`);
+    expect(marquee.style.height).toBe(`${snapped.h}px`);
     expect(marquee.style.outline).toBe('');
     expect(marquee.style.outlineOffset).toBe('');
     expect(marquee.style.background).toBe('');
@@ -9917,7 +9935,7 @@ describe('workbook worker editor header interactions', () => {
       .toEqual([['0px', '0px', '96px', '48px']]);
     expect(fills.every((fill) => fill.style.background === 'rgba(33, 115, 70, 0.12)')).toBe(true);
     expectClear(fills, a3);
-    expect(view.getByTestId('xlsx-selection').style.height).toBe('73px');
+    expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
     expect(view.getByTestId('xlsx-active-cell').style.height).toBe('26px');
   });
 
@@ -9932,7 +9950,7 @@ describe('workbook worker editor header interactions', () => {
       .toEqual([['0px', '24px', '96px', '48px']]);
     expect(fills.every((fill) => fill.style.background === 'rgba(33, 115, 70, 0.12)')).toBe(true);
     expectClear(fills, a1);
-    expect(view.getByTestId('xlsx-selection').style.height).toBe('73px');
+    expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
     expect(view.getByTestId('xlsx-active-cell').style.height).toBe('26px');
   });
 });

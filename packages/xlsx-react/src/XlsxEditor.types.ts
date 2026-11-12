@@ -155,6 +155,8 @@ export interface XlsxInThreadEditorProps extends XlsxEditorPluginProps, XlsxHost
   className?: string;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
+  /** Whether to show the column and row header bands. Defaults to false. */
+  showSheetHeaders?: boolean;
   allowHostProposals?: boolean;
   /**
    * Replaces the default toolbar: omitted keeps it (hidden when read-only),

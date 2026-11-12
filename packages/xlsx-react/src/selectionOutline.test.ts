@@ -2,19 +2,14 @@ import { describe, expect, test } from 'bun:test';
 import { ACTIVE_CELL_WIDTH, MARQUEE_WIDTH, marqueeBox, marqueeFills } from './selectionOutline';
 import type { MarqueeBox, PixelRect } from './selectionOutline';
 
-/**
- * The one-pixel ring covers the canvas gridline on every edge: boundary `b`
- * paints `[b - 1, b]`, so the box starts one pixel before the snapped rect and
- * ends on its far edge.
- */
 function expectAlignedRing(box: MarqueeBox) {
   const { inset } = box;
-  expect(box.left).toBe(inset.x - 1);
-  expect(box.top).toBe(inset.y - 1);
+  expect(box.left).toBe(inset.x);
+  expect(box.top).toBe(inset.y);
   expect(box.left + box.width).toBe(inset.x + inset.w);
   expect(box.top + box.height).toBe(inset.y + inset.h);
-  expect(box.width).toBe(inset.w + 1);
-  expect(box.height).toBe(inset.h + 1);
+  expect(box.width).toBe(inset.w);
+  expect(box.height).toBe(inset.h);
 }
 
 function expectNonNegativeBox(box: MarqueeBox) {
@@ -44,9 +39,7 @@ function intersect(a: PixelRect, b: PixelRect): PixelRect {
 describe('marqueeBox', () => {
   test('snaps an integer rect to itself and keeps the ring on its edges', () => {
     const box = marqueeBox({ x: 100, y: 50, w: 200, h: 40 });
-    // the ring covers the gridlines at [99, 100] and [299, 300]; a symmetric
-    // half-pixel offset would blur at most zooms.
-    expect(box).toEqual({ left: 99, top: 49, width: 201, height: 41, inset: { x: 100, y: 50, w: 200, h: 40 } });
+    expect(box).toEqual({ left: 100, top: 50, width: 200, height: 40, inset: { x: 100, y: 50, w: 200, h: 40 } });
     expectAlignedRing(box);
   });
 
@@ -65,22 +58,19 @@ describe('marqueeBox', () => {
 
     const box = marqueeBox(rect);
     expect(box.inset).toEqual({ x: 100, y: 51, w: 200, h: 39 });
-    expect(box.left).toBe(99);
-    expect(box.top).toBe(50);
-    expect(box.width).toBe(201);
-    expect(box.height).toBe(40);
+    expect(box.left).toBe(100);
+    expect(box.top).toBe(51);
+    expect(box.width).toBe(200);
+    expect(box.height).toBe(39);
     expectAlignedRing(box);
   });
 
-  test('covers the gridline pixel on every snapped edge', () => {
+  test('puts the one-pixel ring on the snapped edges', () => {
     const box = marqueeBox({ x: 100.4, y: 50.6, w: 199.3, h: 39.7 });
-    // boundary `b` is drawn `[b - 1, b]`; the ring's four pixels are exactly
-    // those four gridline pixels, so no edge reads as inset while another is
-    // on the line.
-    expect([box.left, box.left + 1]).toEqual([box.inset.x - 1, box.inset.x]);
+    expect([box.left, box.left + 1]).toEqual([box.inset.x, box.inset.x + 1]);
     expect([box.left + box.width - 1, box.left + box.width])
       .toEqual([box.inset.x + box.inset.w - 1, box.inset.x + box.inset.w]);
-    expect([box.top, box.top + 1]).toEqual([box.inset.y - 1, box.inset.y]);
+    expect([box.top, box.top + 1]).toEqual([box.inset.y, box.inset.y + 1]);
     expect([box.top + box.height - 1, box.top + box.height])
       .toEqual([box.inset.y + box.inset.h - 1, box.inset.y + box.inset.h]);
     expect(MARQUEE_WIDTH).toBe(1);
@@ -97,7 +87,7 @@ describe('marqueeBox', () => {
       expectAlignedRing(box);
     }
     expect(marqueeBox({ x: 100, y: 50, w: 0, h: 0 })).toEqual({
-      left: 99, top: 49, width: 1, height: 1, inset: { x: 100, y: 50, w: 0, h: 0 },
+      left: 100, top: 50, width: 0, height: 0, inset: { x: 100, y: 50, w: 0, h: 0 },
     });
   });
 
@@ -115,8 +105,8 @@ describe('marqueeBox', () => {
       { x: -5.5, y: -2.5, w: 10, h: 10 },
     ]) {
       const box = marqueeBox(rect);
-      expect(box.width).toBe(box.inset.w + 1);
-      expect(box.height).toBe(box.inset.h + 1);
+      expect(box.width).toBe(box.inset.w);
+      expect(box.height).toBe(box.inset.h);
       expectAlignedRing(box);
     }
   });
