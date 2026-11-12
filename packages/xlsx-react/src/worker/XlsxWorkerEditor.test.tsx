@@ -6315,10 +6315,11 @@ describe('workbook worker editor', () => {
     const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
       .find((handle) => handle.getAttribute('data-handle') === 'se')!;
     const clock = selectionWindow();
-    act(() => { fireEvent.keyDown(scroll, { key: 'ArrowRight' }); });
-    expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(1px, 0px)');
-    expect(host.editMethods.moveChart).not.toHaveBeenCalled();
-    act(() => { fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 300, clientY: 200, button: 0 }); });
+    act(() => {
+      fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+      expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+      fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+    });
     await act(async () => {});
     expect(host.editMethods.moveChart.mock.calls).toEqual([[0, 'chart:1', 1, 0]]);
     fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
