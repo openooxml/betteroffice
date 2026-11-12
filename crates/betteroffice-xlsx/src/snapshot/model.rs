@@ -2607,7 +2607,7 @@ mod tests {
                 .unwrap();
             let (kind, ordinal, payload) = unframe(chunk).unwrap();
             let mut payload = payload.to_vec();
-            payload[0] = 35;
+            payload[0] = GRIDLESS_SHEET + 1;
             *chunk = frame(kind, ordinal, &payload);
             let mut builder = ModelSnapshotBuilder::new();
             let refused = unknown

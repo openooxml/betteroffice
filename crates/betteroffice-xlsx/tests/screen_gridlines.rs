@@ -7,20 +7,21 @@ use betteroffice_xlsx::{
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
 fn source() -> Vec<u8> {
+    with_views([
+        r#"<sheetView showGridLines="0" workbookViewId="0"/><sheetView workbookViewId="1"/>"#,
+        r#"<sheetView workbookViewId="0"/><sheetView showGridLines="0" workbookViewId="1"/>"#,
+    ])
+}
+
+fn with_views(views: [&str; 2]) -> Vec<u8> {
     let mut model = WorkbookModel::default();
     model.sheets.push(Sheet::new("Dashboard"));
     model.sheets.push(Sheet::new("Data"));
     let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
-    for (path, views) in [
-        (
-            "xl/worksheets/sheet1.xml",
-            r#"<sheetView showGridLines="0" workbookViewId="0"/><sheetView workbookViewId="1"/>"#,
-        ),
-        (
-            "xl/worksheets/sheet2.xml",
-            r#"<sheetView workbookViewId="0"/><sheetView showGridLines="0" workbookViewId="1"/>"#,
-        ),
-    ] {
+    for (path, views) in ["xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml"]
+        .into_iter()
+        .zip(views)
+    {
         parts.iter_mut().find(|(part, _)| part == path).unwrap().1 = format!(
             r#"<worksheet xmlns="{MAIN}"><sheetViews>{views}</sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>text</t></is></c></row></sheetData></worksheet>"#
         )
@@ -130,4 +131,37 @@ fn hidden_gridlines_survive_save_snapshots_peers_and_recovery() {
     let reopened = Workbook::open(&saved).unwrap();
     assert!(reopened.sheet(SheetId(0)).unwrap().format.hide_gridlines);
     assert!(!reopened.sheet(SheetId(1)).unwrap().format.hide_gridlines);
+}
+
+#[test]
+fn explicit_true_show_gridlines_keeps_screen_gridlines() {
+    let workbook = Workbook::open(&with_views([
+        r#"<sheetView showGridLines="1" workbookViewId="0"/>"#,
+        r#"<sheetView showGridLines="true" workbookViewId="0"/>"#,
+    ]))
+    .unwrap();
+    for sheet in [0, 1] {
+        assert!(!workbook.sheet(SheetId(sheet)).unwrap().format.hide_gridlines);
+        assert!(screen_lines(&workbook, sheet) > 0);
+    }
+}
+
+#[test]
+fn model_written_hidden_gridlines_round_trip() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Dashboard");
+    sheet.format.hide_gridlines = true;
+    model.sheets.push(sheet);
+    model.sheets.push(Sheet::new("Data"));
+    let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let sheet1 = &parts
+        .iter()
+        .find(|(part, _)| part == "xl/worksheets/sheet1.xml")
+        .unwrap()
+        .1;
+    assert!(String::from_utf8_lossy(sheet1).contains(r#"showGridLines="0""#));
+    let reopened = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    assert!(reopened.sheet(SheetId(0)).unwrap().format.hide_gridlines);
+    assert!(!reopened.sheet(SheetId(1)).unwrap().format.hide_gridlines);
+    assert_eq!(screen_lines(&reopened, 0), 0);
 }
