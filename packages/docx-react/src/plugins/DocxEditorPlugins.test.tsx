@@ -567,6 +567,56 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     });
   }
 
+  const focusRecorder = () => {
+    const focus: boolean[] = [];
+    let loads = 0;
+    const plugin = defineDocxPlugin({ id: 'focus-surface', createState: () => null,
+      onEvent(context, event) {
+        if (event.type === 'load' && ++loads === 1) focus.push(context.snapshot.focused);
+        if (event.type === 'focus-change') focus.push(event.focused);
+      } });
+    return { focus, loaded: () => loads > 0, plugin };
+  };
+
+  if (experimentalWorkerOpen === undefined) test('turning read-only off in a viewer session replaces the focused input and blurs once', async () => {
+    const { focus, loaded, plugin } = focusRecorder();
+    const { ref, view, rerender } = await mount({ plugins: [plugin], readOnly: true });
+    const surface = view.container.querySelector('.paged-editor')!;
+    const input = document.getElementById(surface.getAttribute('data-docx-input')!)!;
+    await until(loaded);
+    await act(async () => { ref.current!.focus(); });
+    expect(document.activeElement).toBe(input);
+    await until(() => focus.includes(true));
+    focus.length = 0;
+    rerender({ plugins: [plugin], readOnly: false });
+    await until(() => focus.length > 0);
+    expect(input.isConnected).toBe(false);
+    expect(focus[0]).toBe(false);
+    await settle(400);
+    expect(focus.filter((focused) => !focused)).toEqual([false]);
+  });
+
+  test('a render error in the editor shell while the document has focus blurs once', async () => {
+    const { focus, loaded, plugin } = focusRecorder();
+    const Fails = ({ armed }: { armed: boolean }) => {
+      if (armed) throw new Error('shell render failed');
+      return null;
+    };
+    const { ref, view, rerender } = await mount({ plugins: [plugin], toolbar: <Fails armed={false} /> });
+    await until(loaded);
+    const surface = view.container.querySelector('.paged-editor')!;
+    const input = document.getElementById(surface.getAttribute('data-docx-input')!);
+    await act(async () => { ref.current!.focus(); });
+    await until(() => focus.includes(true));
+    expect(document.activeElement === input || surface.contains(document.activeElement)).toBe(true);
+    focus.length = 0;
+    rerender({ plugins: [plugin], toolbar: <Fails armed /> });
+    await until(() => focus.length > 0);
+    expect(view.container.querySelector('.paged-editor')).toBeNull();
+    await settle(400);
+    expect(focus).toEqual([false]);
+  });
+
   const selectFirstWord = async (ref: React.RefObject<DocxEditorRef | null>) => {
     if (experimentalWorkerOpen === false) return selectInThreadFirstWord(ref);
     const { paragraph } = await firstParagraph(ref);

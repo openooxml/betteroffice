@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Deze bewerking kan niet worden toegepast: een grafiek gebruikt cellen die erdoor zouden verschuiven. De werkmap is niet gewijzigd.",
       "editUnsupportedTable": "Deze bewerking kan niet worden toegepast: een tabel gebruikt cellen die erdoor zouden verschuiven. De werkmap is niet gewijzigd.",
       "editUnsupportedPivot": "Deze bewerking kan niet worden toegepast: een draaitabel gebruikt cellen die erdoor zouden verschuiven. De werkmap is niet gewijzigd.",
+      "editUnsupportedFill": "Deze doorvoering kan niet worden toegepast: ze zou cellen met koppelingen, notities of regels wijzigen. De werkmap is niet gewijzigd.",
       "sheetProtected": "Deze cel staat op een beveiligd werkblad.",
       "hostRefused": "Deze bewerking is niet toegestaan.",
       "tooManyToCheck": "Te veel cellen om door plug-ins te laten controleren (limiet {limit}).",
@@ -227,7 +228,8 @@
     "rangeSelected": "{start} tot {end} geselecteerd, {rows, plural, one {# rij} other {# rijen}} bij {columns, plural, one {# kolom} other {# kolommen}}",
     "sheetActivated": "{name}, werkblad {index} van {count}",
     "cellInputLabel": "Cel {address} bewerken",
-    "gridRoleDescription": "werkblad"
+    "gridRoleDescription": "werkblad",
+    "fillHandleLabel": "Vulgreep"
   },
   "plugins": {
     "toolbarGroup": "Plug-ins",

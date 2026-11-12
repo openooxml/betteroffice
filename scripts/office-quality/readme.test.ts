@@ -371,3 +371,99 @@ test('the timing note states how many timed documents had notes whose layout did
   expect(shown).toContain(`DOCX 2 of 2 sampled (timed per engine: BetterOffice 0.1.0 2, BetterOffice at ${commit.slice(0, 8)} 2, LibreOffice 2, 1 of them with notes whose layout did not converge, timed as the product renders them)`);
   expect(aggregateReport(input).formats.docx.timing.notes_not_converged).toBe(1);
 });
+
+function fontsReport() {
+  const input = report();
+  const published = { package: '@betteroffice/fonts@0.4.2', cjk: '@betteroffice/fonts-cjk@0.4.2', copy: 'local release copy' };
+  const workspace = { package: '@betteroffice/fonts@0.5.0', copy: 'workspace', base_latin: 4 };
+  const second = {
+    ...input.samples[0],
+    id: 'second',
+    metadata_url: 'https://corpus.betteroffice.dev/second/metadata.json',
+    comparisons: input.samples[0].comparisons.map((entry) => ({ ...entry })),
+  };
+  input.samples.push(second);
+  const [first] = input.samples;
+  Object.assign(first.comparisons[0], { fonts: { ...published, advertised: 90, loaded_faces: ['Carlito-Regular.ttf', 'Caladea-Bold.ttf'], failed_faces: { 'NotoSansJP-Regular.otf': 'http 404' } } });
+  Object.assign(second.comparisons[0], { fonts: { ...published, advertised: 90, loaded_faces: ['Carlito-Regular.ttf', 'NotoSansJP-Regular.otf'], failed_faces: { 'Gelasio-Bold.ttf': 'blocked', 'Inter-Regular.ttf': 'error' } } });
+  Object.assign(first.comparisons[1], { fonts: { ...workspace, advertised: 120, loaded_faces: ['Carlito-Regular.ttf.zst'], failed_faces: {} } });
+  Object.assign(second.comparisons[1], { fonts: { ...workspace, advertised: 120, loaded_faces: ['Carlito-Regular.ttf.zst', 'Caladea-Bold.ttf.zst'], failed_faces: {} } });
+  return input;
+}
+
+const noFontCounts = (section: string) => {
+  for (const text of ['did not load', 'M = ', 'by reason', 'not measured', 'nothing was measured', 'unattributed', 'face loads'])
+    expect(section.includes(text) && text).toBe(false);
+};
+
+test('the section names each arm font source only, without face counts', () => {
+  const section = renderSection(fontsReport());
+  expect(section).toContain('\n- Published fonts: @betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy)\n');
+  expect(section).toContain('\n- Commit fonts: @betteroffice/fonts@0.5.0 (workspace)\n');
+  noFontCounts(section);
+  expect(renderSection(report())).not.toContain('fonts:');
+});
+
+test('PPTX and XLSX arms name their font source only', () => {
+  const input = report();
+  input.samples.push({
+    ...input.samples[0],
+    id: 'deck',
+    format: 'pptx',
+    comparisons: [
+      { ...input.samples[0].comparisons[0], version: '0.0.4', fonts: { package: '@betteroffice/fonts@0.4.2', cjk: '@betteroffice/fonts-cjk@0.4.2', copy: 'local release copy' } },
+      { ...input.samples[0].comparisons[1], fonts: { package: '@betteroffice/fonts@0.5.0', copy: 'workspace' } },
+    ],
+  } as any);
+  const section = renderSection(input);
+  expect(section).toContain('\n- Published fonts: @betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy)\n');
+  expect(section).toContain('\n- Commit fonts: @betteroffice/fonts@0.5.0 (workspace)\n');
+  noFontCounts(section);
+});
+
+test('the aggregate counts advertised, loaded and failed faces per arm by reason, without names', () => {
+  const { fonts } = aggregateReport(fontsReport()).formats.docx;
+  expect(fonts).toEqual({
+    published: {
+      sources: ['@betteroffice/fonts@0.4.2 and @betteroffice/fonts-cjk@0.4.2 (local release copy)'],
+      captures: 2,
+      missing: 0,
+      advertised: 90,
+      base_latin: 0,
+      requested: 5,
+      loaded: 2,
+      failed: 3,
+      reasons: { 'http 404': 1, blocked: 1, error: 1 },
+      unattributed: { loaded: 0, failed: 0 },
+      not_measured: { timed_out: 0, errored: 0 },
+    },
+    commit: {
+      sources: ['@betteroffice/fonts@0.5.0 (workspace)'],
+      captures: 2,
+      missing: 0,
+      advertised: 120,
+      base_latin: 4,
+      requested: 2,
+      loaded: 2,
+      failed: 0,
+      reasons: {},
+      unattributed: { loaded: 0, failed: 0 },
+      not_measured: { timed_out: 0, errored: 0 },
+    },
+  });
+  const text = JSON.stringify(aggregateReport(fontsReport()));
+  for (const leak of ['Carlito', 'Gelasio', 'NotoSansJP', 'second', 'demo'])
+    expect(text.includes(leak) && leak).toBe(false);
+  expect(aggregateReport(report()).formats.docx.fonts).toBeUndefined();
+});
+
+test('the arm line states how many advertised faces did not load and why', async () => {
+  const { fontArmLine, fontSummary } = await import('./readme.mjs');
+  const { samples } = fontsReport();
+  expect(fontArmLine('published', fontSummary(samples, 'published'))).toBe(
+    "published arm: 3 of 5 faces did not load (M = faces the documents requested that the arm's provider offers, base latin: none in this release), by reason: blocked 1, error 1, http 404 1; sliced faces are observed only through their whole-face fallback at open; a chunk that fails or times out after open paints blank glyphs and is not observed"
+  );
+  expect(fontArmLine('commit', fontSummary(samples, 'commit'))).toBe(
+    "commit arm: 0 of 2 faces did not load (M = faces the documents requested that the arm's provider offers, base latin included), by reason: none; sliced faces are observed only through their whole-face fallback at open; a chunk that fails or times out after open paints blank glyphs and is not observed"
+  );
+});

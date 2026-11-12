@@ -23,7 +23,7 @@ test.skipIf(engineKind !== 'native')('native PNG export follows the picture outc
       session.openDocx(await pictureDocument(part), true);
       const png = await session.renderPng({ page: 0 }, {
         strictPictures,
-        onDiagnostic: ({ code, pictures }) => diagnostics.push({ code, pictures: pictures.map(({ id, reason }) => ({ id, reason })) }),
+        onDiagnostic: (diagnostic) => diagnostics.push({ code: diagnostic.code, pictures: diagnostic.code === 'picture-unavailable' ? diagnostic.pictures.map(({ id, reason }) => ({ id, reason })) : [] }),
       });
       results[name] = { png: createHash('sha256').update(png).digest('hex'), diagnostics };
     } catch (error) {

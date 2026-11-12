@@ -91,6 +91,9 @@ export interface DocxPluginHost {
   selectionUnsettled(generation?: string | null): void;
   selectionSettled(source: 'pointer' | 'touch' | 'keyboard', generation?: string | null): void;
   focusChanged(focused: boolean): void;
+  /** The focus tracker's re-check; opening, closing and mode changes run it, since each can replace the surface. */
+  setFocusCheck(check: (() => void) | null): void;
+  checkFocus(): void;
   localeChanged(locale: string): void;
   modeChanged(mode: EditorMode, readOnly: boolean): void;
   layoutChanged(layout: DocxPluginLayout | null): void;
@@ -169,6 +172,7 @@ function sameLayout(a: DocxPluginLayout | null, b: DocxPluginLayout | null): boo
 export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHost {
   let observeSelection = createDocxSelectionObserver();
   let reporter: ((error: DocxPluginError) => void) | undefined;
+  let focusCheck: (() => void) | null = null;
   let session: YrsSession | null = null;
   let workerProposalKey: string | null = null;
   let detachUpdates: (() => void) | null = null;
@@ -525,6 +529,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       viewport = null;
       generations += 1;
       runtime.open(`document-${generations}`);
+      focusCheck?.();
     },
 
     close(reason) {
@@ -534,6 +539,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
         detachGeometry = null;
       }
       runtime.close(reason);
+      focusCheck?.();
     },
 
     openWorker(version) {
@@ -556,6 +562,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       viewport = null;
       generations += 1;
       runtime.open(`document-${generations}`);
+      focusCheck?.();
     },
 
     workerChanged(version) {
@@ -688,6 +695,14 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (generation) notify({ type: 'focus-change', generation, focused });
     },
 
+    setFocusCheck(check) {
+      focusCheck = check;
+    },
+
+    checkFocus() {
+      focusCheck?.();
+    },
+
     localeChanged(locale) {
       if (locale === state.locale) return;
       state.locale = locale;
@@ -701,6 +716,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.readOnly = readOnly;
       const generation = runtime.generation();
       if (generation) notify({ type: 'mode-change', generation, mode, readOnly });
+      focusCheck?.();
     },
 
     layoutChanged(next) {

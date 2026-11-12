@@ -45,6 +45,7 @@ export declare class XlsxSnapshotBuilder {
 }
 export declare function displayListCellLimit(): number
 export declare function engineVersion(): string
+export declare function install_panic_hook(): void
 export interface BorderPatch {
   preset?: string
 }
@@ -99,6 +100,16 @@ describe("check-engine-surface parser", () => {
       "XlsxSnapshotBuilder",
     ]);
     expect(problems.some((problem) => problem.includes("free"))).toBe(true);
+  });
+
+  test("a missing install_panic_hook is reported", () => {
+    expect(parseSurface(wasm).functions.has("install_panic_hook")).toBe(true);
+    const broken = native.replace("export declare function install_panic_hook(): void\n", "");
+    const problems = compareSurfaces(parseSurface(wasm), parseSurface(broken), [
+      "XlsxDocument",
+      "XlsxSnapshotBuilder",
+    ]);
+    expect(problems).toEqual(["function install_panic_hook: missing natively (wasm: install_panic_hook(): void)"]);
   });
 
   test.each([

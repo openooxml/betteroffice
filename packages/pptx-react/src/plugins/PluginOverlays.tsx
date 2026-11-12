@@ -23,6 +23,7 @@ export function PluginOverlays({
       ref={layerRef}
       {...PLUGIN_CHROME}
       className="pptx-plugin-overlays"
+      data-plugin-overlays=""
       data-testid="plugin-overlays"
       style={{ position: 'absolute', inset: 0, pointerEvents: 'none', overflow: 'visible' }}
     >
