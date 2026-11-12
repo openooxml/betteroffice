@@ -23,17 +23,108 @@ pub struct DecodedImage {
 
 impl DecodedImage {
     /// Strictly decode an image, reporting why it failed.
+    ///
+    /// Raster formats go through the `image` crate. SVG and EMF/WMF metafile
+    /// pictures go through the shared sandboxed vector decoders, which bound
+    /// the document, the render work and the raster before allocating; a
+    /// metafile is replayed to SVG first. Both hand back straight RGBA.
+    ///
+    /// Metafile text needs the document's fonts; this entry point has none, so
+    /// it renders metafile text without glyphs. Use
+    /// [`Self::from_bytes_with_fonts`] when a `FontStore` is available.
+    ///
+    /// Kept as the entry point for callers that only have image bytes; the
+    /// export path uses [`Self::from_bytes_with_fonts`].
+    #[allow(dead_code)]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        Self::from_bytes_with_fonts(bytes, None)
+    }
+
+    /// [`Self::from_bytes`], laying metafile text out with the document's
+    /// fonts when `fonts` carries them. Plain SVG, raster and metafiles
+    /// without text decode exactly as before.
+    pub fn from_bytes_with_fonts(
+        bytes: &[u8],
+        fonts: Option<&ooxml_text::FontStore>,
+    ) -> Result<Self, String> {
+        if ooxml_metafile::is_metafile(bytes) {
+            return Self::from_metafile(bytes, fonts);
+        }
+        if ooxml_raster::svg::looks_like_svg(bytes) {
+            return Self::from_svg(bytes);
+        }
         let image = image::load_from_memory(bytes).map_err(|error| error.to_string())?;
         let image = image.to_rgba8();
         let (width, height) = image.dimensions();
-        let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
-        let mut alpha = Vec::with_capacity(width as usize * height as usize);
+        Self::from_rgba(width, height, image.into_raw())
+    }
+
+    /// Rasterize an SVG picture within [`ooxml_raster::svg::MAX_IMAGE_PIXELS`]
+    /// of raster and [`ooxml_raster::svg::MAX_SVG_RENDER_WORK`] of drawing
+    /// work, which caps the supersampling it can afford.
+    fn from_svg(bytes: &[u8]) -> Result<Self, String> {
+        let image = ooxml_raster::svg::parse(bytes)
+            .map_err(|refusal| format!("SVG picture refused: {refusal:?}"))?;
+        let (data, size) = image
+            .render()
+            .map_err(|refusal| format!("SVG picture could not render: {refusal:?}"))?;
+        Self::from_rgba(size.width(), size.height(), data)
+    }
+
+    /// Replay an EMF, EMF+ or WMF metafile into SVG and rasterize it with the
+    /// same bounded decoder as [`Self::from_svg`].
+    ///
+    /// Metafile text records name document fonts. When `fonts` is present and
+    /// the replay actually contains text, the parser gets
+    /// `ooxml_raster::svg::metafile_fontdb(fonts)` so those runs lay out with
+    /// real glyphs; otherwise it falls back to the default empty font
+    /// database, where geometry, fills and bitmaps still paint and text runs
+    /// render without glyphs.
+    fn from_metafile(bytes: &[u8], fonts: Option<&ooxml_text::FontStore>) -> Result<Self, String> {
+        let mut budget = ooxml_metafile::ReplayBudget::default();
+        let markup = ooxml_metafile::to_svg_with_budget(bytes, &mut budget)
+            .map_err(|refusal| format!("metafile picture refused: {refusal}"))?;
+        let fontdb = if ooxml_raster::svg::has_text_element(markup.markup.as_bytes()) {
+            fonts.map(ooxml_raster::svg::metafile_fontdb)
+        } else {
+            None
+        };
+        let image = ooxml_raster::svg::parse_metafile(
+            markup.markup.as_bytes(),
+            ooxml_raster::svg::MAX_IMAGE_PIXELS,
+            fontdb,
+        )
+        .map_err(|refusal| format!("metafile picture could not parse: {refusal:?}"))?;
+        let (data, size) = image
+            .render()
+            .map_err(|refusal| format!("metafile picture could not render: {refusal:?}"))?;
+        Self::from_rgba(size.width(), size.height(), data)
+    }
+
+    /// Split straight RGBA into interleaved RGB and an optional alpha plane,
+    /// the representation the PDF image writer consumes.
+    fn from_rgba(width: u32, height: u32, data: Vec<u8>) -> Result<Self, String> {
+        let width_usize = usize::try_from(width).map_err(|_| "image width is too large")?;
+        let height_usize = usize::try_from(height).map_err(|_| "image height is too large")?;
+        let pixels = width_usize
+            .checked_mul(height_usize)
+            .ok_or("image dimensions are too large")?;
+        let rgba_length = pixels
+            .checked_mul(4)
+            .ok_or("image dimensions are too large")?;
+        if data.len() != rgba_length {
+            return Err("image pixel buffer has the wrong length".to_owned());
+        }
+        let rgb_length = pixels
+            .checked_mul(3)
+            .ok_or("image dimensions are too large")?;
+        let mut rgb = Vec::with_capacity(rgb_length);
+        let mut alpha = Vec::with_capacity(pixels);
         let mut has_alpha = false;
-        for pixel in image.pixels() {
-            rgb.extend_from_slice(&pixel.0[..3]);
-            alpha.push(pixel.0[3]);
-            has_alpha |= pixel.0[3] != 255;
+        for pixel in data.chunks_exact(4) {
+            rgb.extend_from_slice(&pixel[..3]);
+            alpha.push(pixel[3]);
+            has_alpha |= pixel[3] != 255;
         }
         Ok(Self {
             width: i32::try_from(width).map_err(|_| "image width is too large")?,
@@ -46,8 +137,17 @@ impl DecodedImage {
 
 /// Decode an image, treating a truncated or corrupt source as a non-fatal
 /// missing picture: a bad logo cannot fail the whole document.
+#[allow(dead_code)]
 pub(crate) fn try_decode(bytes: &[u8]) -> Option<DecodedImage> {
     DecodedImage::from_bytes(bytes).ok()
+}
+
+/// [`try_decode`] with the document's fonts for metafile text.
+pub(crate) fn try_decode_with_fonts(
+    bytes: &[u8],
+    fonts: Option<&ooxml_text::FontStore>,
+) -> Option<DecodedImage> {
+    DecodedImage::from_bytes_with_fonts(bytes, fonts).ok()
 }
 
 /// Decode a `data:` URL into its payload.
@@ -67,21 +167,25 @@ const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// Where and how one image primitive paints onto a page.
 ///
 /// `matrix` is the complete image-unit-square-to-page transform, including the
-/// crop scale/translate and the display rotation. `crop` and `rotation` are the
-/// same pieces kept apart so the painter can clip in the frame's own,
-/// still-unrotated coordinate system.
+/// crop scale/translate, the mirror about the frame centre and the display
+/// rotation. `crop`, `flip` and `rotation` are the same pieces kept apart so
+/// the painter can clip in the frame's own, still-unrotated coordinate system.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ImageTransform {
-    /// Image unit square → page points, crop and rotation composed. The
-    /// painter draws the same matrix as `crop` inside `rotation`; it is kept
-    /// whole for callers that hit-test or test the resulting placement.
+    /// Image unit square → page points, crop, flip and rotation composed. The
+    /// painter draws the same matrix as `crop` inside `flip` inside
+    /// `rotation`; it is kept whole for callers that hit-test or test the
+    /// resulting placement.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) matrix: [f32; 6],
     /// Crop scale/translate in unrotated page points: `[sx, 0, 0, sy, e, f]`.
     pub(crate) crop: [f32; 6],
+    /// Mirror about the frame centre in unrotated page points, or
+    /// [`IDENTITY`] when the picture is not flipped: `[±1, 0, 0, ±1, tx, ty]`.
+    pub(crate) flip: [f32; 6],
     /// Rotation about the frame centre in page points.
     pub(crate) rotation: [f32; 6],
-    /// Frame rectangle `[x, y, w, h]` in page points, before rotation.
+    /// Frame rectangle `[x, y, w, h]` in page points, before flip or rotation.
     pub(crate) clip: [f32; 4],
 }
 
@@ -94,10 +198,15 @@ impl ImageTransform {
 
 /// Compute the placement of an image primitive on a page.
 ///
-/// `page_height` is in PDF points; the primitive's `x`, `y`, `w` and `h` are
-/// CSS pixels and are converted to points. The visible source rectangle is
-/// `[left, 1 - right] × [bottom, 1 - top]` in image unit coordinates (PDF's
-/// bottom-left origin), scaled so it exactly covers the frame.
+/// `page_height` is in PDF points; the primitive's frame fields are CSS pixels
+/// and are converted to points. A `contentFrame` overrides the primitive's own
+/// `x`, `y`, `w` and `h` field by field, exactly as `docx-raster`'s
+/// `image_frame` does; the primitive's fields remain the fallback. The visible
+/// source rectangle is `[left, 1 - right] × [bottom, 1 - top]` in image unit
+/// coordinates (PDF's bottom-left origin), scaled so it exactly covers the
+/// frame. A `flipH` or `flipV` attribute mirrors that placement about the
+/// frame centre before the rotation, matching the native raster, and leaves
+/// the frame itself in place.
 pub(crate) fn image_transform(
     image: &ImagePrimitive,
     page_height: f32,
@@ -105,10 +214,23 @@ pub(crate) fn image_transform(
     if !page_height.is_finite() {
         return Err(PdfError::InvalidNumber("page height"));
     }
-    let x = points(&image.x, "image x")?;
-    let y = points(&image.y, "image y")?;
-    let w = points(&image.w, "image width")?;
-    let h = points(&image.h, "image height")?;
+    let content_frame = image.attrs.content_frame.as_deref();
+    let frame_x = content_frame
+        .and_then(|frame| frame.x.as_ref())
+        .unwrap_or(&image.x);
+    let frame_y = content_frame
+        .and_then(|frame| frame.y.as_ref())
+        .unwrap_or(&image.y);
+    let frame_w = content_frame
+        .and_then(|frame| frame.w.as_ref())
+        .unwrap_or(&image.w);
+    let frame_h = content_frame
+        .and_then(|frame| frame.h.as_ref())
+        .unwrap_or(&image.h);
+    let x = points(frame_x, "image x")?;
+    let y = points(frame_y, "image y")?;
+    let w = points(frame_w, "image width")?;
+    let h = points(frame_h, "image height")?;
     let frame_y = page_height - y - h;
 
     let (left, bottom, visible_w, visible_h) = crop_bounds(image)?;
@@ -143,16 +265,26 @@ pub(crate) fn image_transform(
         cy - sin * cx - cos * cy,
     ];
 
-    // Crop first, then rotate about the frame centre (row-vector composition:
-    // crop × rotation).
-    let matrix = [
-        sx * cos,
-        sx * sin,
-        -sy * sin,
-        sy * cos,
-        e * cos - f * sin + rotation[4],
-        e * sin + f * cos + rotation[5],
-    ];
+    // The native raster mirrors the frame about its centre before rotating it
+    // (`docx-raster`'s `image_transform` composes `rotation.pre_concat(flip)`),
+    // so the frame stays where it was and its content is mirrored.
+    let (flip_x, flip_y) = (
+        if image.attrs.image_flip_h == Some(true) {
+            -1.0
+        } else {
+            1.0
+        },
+        if image.attrs.image_flip_v == Some(true) {
+            -1.0
+        } else {
+            1.0
+        },
+    );
+    let flip = [flip_x, 0.0, 0.0, flip_y, cx - flip_x * cx, cy - flip_y * cy];
+
+    // Crop first, then mirror, then rotate about the frame centre (row-vector
+    // composition: crop × flip × rotation).
+    let matrix = compose(compose(crop, flip), rotation);
     if !matrix.iter().all(|value| value.is_finite()) {
         return Err(PdfError::InvalidNumber("image transform"));
     }
@@ -160,9 +292,25 @@ pub(crate) fn image_transform(
     Ok(ImageTransform {
         matrix,
         crop,
+        flip,
         rotation,
         clip: [x, frame_y, w, h],
     })
+}
+
+/// Compose two row-vector PDF matrices: the result applies `inner` first and
+/// `outer` second, so `compose(crop, rotation)` is crop then rotate.
+fn compose(outer: [f32; 6], inner: [f32; 6]) -> [f32; 6] {
+    let [a, b, c, d, e, f] = outer;
+    let [g, h, i, j, k, l] = inner;
+    [
+        a * g + b * i,
+        a * h + b * j,
+        c * g + d * i,
+        c * h + d * j,
+        e * g + f * i + k,
+        e * h + f * j + l,
+    ]
 }
 
 /// Visible crop fractions as `(left, bottom, width, height)`, clamped to the
@@ -202,7 +350,7 @@ pub(crate) fn opacity_alpha(image: &ImagePrimitive) -> Option<f32> {
     (value < 1.0).then_some(value)
 }
 
-/// Paint the image XObject named by `refs`, applying its frame, crop and
+/// Paint the image XObject named by `refs`, applying its frame, crop, flip and
 /// rotation.
 ///
 /// `page_height` is in PDF points; opacity is ignored here by design — see
@@ -221,15 +369,20 @@ pub(crate) fn paint_image(
 
     content.save_state();
     // The clip is defined in the frame's own coordinates. Applying the
-    // rotation first clips the rotated frame, not its axis-aligned bound.
+    // rotation and mirror first clips the rotated frame, not its axis-aligned
+    // bound; the mirror maps the frame rectangle onto itself.
     if placement.rotation != IDENTITY {
         content.transform(placement.rotation);
+    }
+    if placement.flip != IDENTITY {
+        content.transform(placement.flip);
     }
     content.rect(clip_x, clip_y, clip_w, clip_h);
     content.clip_nonzero();
     content.end_path();
-    // Crop scaling is applied inside the clip; with the rotation already on
-    // the CTM this composes to `crop × rotation`, exactly `matrix`.
+    // Crop scaling is applied inside the clip; with the rotation and mirror
+    // already on the CTM this composes to `crop × flip × rotation`, exactly
+    // `matrix`.
     content.transform(placement.crop);
     content.x_object(Name(refs.resource.as_bytes()));
     content.restore_state();

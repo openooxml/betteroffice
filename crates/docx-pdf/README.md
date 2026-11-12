@@ -24,12 +24,16 @@ Supported today:
   no covering face was registered
 - headers, footers and note regions as separate paint layers
 - filled/stroked rectangles, lines, decorations and shape paths
-- images as RGB XObjects with optional alpha soft masks, crop, rotation and data URLs
+- images as RGB XObjects with optional alpha soft masks, crop, rotation,
+  `flipH`/`flipV` and data URLs
+- SVG pictures and EMF/EMF+/WMF metafiles rasterized through the shared
+  bounded vector decoders (raster size and render work are capped); metafile
+  text is laid out with the document's font store
 - Flate-compressed page, image and font streams
 - external link annotations from primitive `href`s, including rotated text,
   glyph runs, images and shapes; merged per target
 
-Not yet covered: tagged PDF/PDF-UA, gradients, SVG/EMF/JPEG XL images,
+Not yet covered: PDF/A, tagged PDF/PDF-UA, gradients, JPEG XL images,
 named destinations for internal anchors (internal `#anchor` links are
 skipped, not emitted as unresolved `/GoTo` actions), and color emoji
 rendering.

@@ -6,7 +6,7 @@
 //! anchors are skipped: this writer has no named destination table.
 
 use docx_layout::display_list::{
-    DisplayPage, DocAttrs, GlyphRunPrimitive, Primitive, TextRunPrimitive,
+    DisplayPage, DocAttrs, GlyphRunPrimitive, ImagePrimitive, Primitive, TextRunPrimitive,
 };
 use pdf_writer::types::{ActionType, AnnotationType};
 use pdf_writer::{Name, Pdf, Rect, Ref, Str, TextStr};
@@ -180,10 +180,7 @@ fn primitive_rect(primitive: &Primitive) -> Option<(&DocAttrs, [f64; 4])> {
             if text.hidden {
                 return None;
             }
-            Some((
-                &text.attrs,
-                rotated_box(text_rect(text)?, text.rotation_deg.as_ref()),
-            ))
+            Some((&text.attrs, text_link_rect(text)?))
         }
         Primitive::GlyphRun(run) => {
             if run.hidden {
@@ -193,15 +190,7 @@ fn primitive_rect(primitive: &Primitive) -> Option<(&DocAttrs, [f64; 4])> {
         }
         Primitive::Image(image) => Some((
             &image.attrs,
-            rotated_box(
-                frame(
-                    image.x.as_f64()?,
-                    image.y.as_f64()?,
-                    image.w.as_f64()?,
-                    image.h.as_f64()?,
-                )?,
-                image.rotation_deg.as_ref(),
-            ),
+            rotated_box(image_frame(image)?, image.rotation_deg.as_ref()),
         )),
         Primitive::Shape(shape) => {
             let rotation = shape
@@ -254,11 +243,31 @@ fn text_rect(text: &TextRunPrimitive) -> Option<[f64; 4]> {
     Some([x, baseline - size * 0.8, x + width, baseline + size * 0.25])
 }
 
+/// Bounds of a text run after the painter's rotation.
+///
+/// The painter rotates the run about `(x + width / 2, baseline - 0.2em)`,
+/// which is the baseline offset it uses for every text matrix, rather than
+/// about the visual box centre.
+fn text_link_rect(text: &TextRunPrimitive) -> Option<[f64; 4]> {
+    let rect = text_rect(text)?;
+    let Some(degrees) = rotation_degrees(text.rotation_deg.as_ref()) else {
+        return Some(rect);
+    };
+    let baseline = text.baseline_y.as_f64()?;
+    let size = f64::from(font_size_px(&text.font));
+    Some(rotate_box(
+        rect,
+        degrees,
+        ((rect[0] + rect[2]) / 2.0, baseline - size * 0.2),
+    ))
+}
+
 /// Bounds of one shaped run after the painter's placement transform.
 ///
-/// Non-rotated runs scale each glyph box about the run's left edge. Rotated
-/// runs use the accepted painter contract: anchor at the glyph-rect centre,
-/// with x offsets measured from the first glyph and scaled once.
+/// Both paths scale each glyph box about the run's left edge first, then a
+/// rotated run turns the scaled points about the glyph-rect centre
+/// `(mid-x, first baseline - 0.2em)`. That is the transform the raster and
+/// PDF painters apply to every glyph outline.
 fn glyph_run_rect(run: &GlyphRunPrimitive) -> Option<[f64; 4]> {
     let size = run.size;
     if !size.is_finite() || size <= 0.0 {
@@ -320,8 +329,9 @@ fn glyph_run_rect(run: &GlyphRunPrimitive) -> Option<[f64; 4]> {
             (glyph.x + glyph.advance, bottom),
         ] {
             let (x, y) = if rotated {
-                let dx = (x - first.x) * scale;
-                let dy = y - first.y;
+                let scaled_x = left + (x - left) * scale;
+                let dx = scaled_x - pivot_x;
+                let dy = y - pivot_y;
                 (pivot_x + dx * cos - dy * sin, pivot_y + dx * sin + dy * cos)
             } else {
                 (left + (x - left) * scale, y)
@@ -341,14 +351,25 @@ fn glyph_run_rect(run: &GlyphRunPrimitive) -> Option<[f64; 4]> {
         .then_some(bounds)
 }
 
+/// Clockwise rotation in degrees, or `None` when it is absent or a no-op.
+fn rotation_degrees(rotation: Option<&serde_json::Number>) -> Option<f64> {
+    let degrees = rotation.and_then(|value| value.as_f64())?;
+    (degrees.is_finite() && degrees.abs() > f64::EPSILON).then_some(degrees)
+}
+
 /// Axis-aligned bounds of a box rotated around its centre, in CSS pixels.
 fn rotated_box(rect: [f64; 4], rotation: Option<&serde_json::Number>) -> [f64; 4] {
-    let degrees = rotation.and_then(|value| value.as_f64()).unwrap_or(0.0);
-    if !degrees.is_finite() || degrees.abs() <= f64::EPSILON {
+    let Some(degrees) = rotation_degrees(rotation) else {
         return rect;
-    }
+    };
     let center_x = (rect[0] + rect[2]) / 2.0;
     let center_y = (rect[1] + rect[3]) / 2.0;
+    rotate_box(rect, degrees, (center_x, center_y))
+}
+
+/// Axis-aligned bounds of `rect` rotated clockwise about `center`.
+fn rotate_box(rect: [f64; 4], degrees: f64, center: (f64, f64)) -> [f64; 4] {
+    let (center_x, center_y) = center;
     let (sin, cos) = degrees.to_radians().sin_cos();
     let mut bounds = [
         f64::INFINITY,
@@ -378,6 +399,29 @@ fn rotated_box(rect: [f64; 4], rotation: Option<&serde_json::Number>) -> [f64; 4
 fn frame(x: f64, y: f64, w: f64, h: f64) -> Option<[f64; 4]> {
     let rect = [x, y, x + w, y + h];
     rect.iter().all(|value| value.is_finite()).then_some(rect)
+}
+
+/// The painted frame of an image in CSS pixels.
+///
+/// A `contentFrame` overrides the primitive's own `x`, `y`, `w` and `h` field
+/// by field, matching the native raster's `image_frame`; the primitive's
+/// fields remain the fallback for any axis the frame omits.
+fn image_frame(image: &ImagePrimitive) -> Option<[f64; 4]> {
+    let content_frame = image.attrs.content_frame.as_deref();
+    let field = |value: &Option<serde_json::Number>| -> Option<f64> { value.as_ref()?.as_f64() };
+    let x = content_frame
+        .and_then(|frame| field(&frame.x))
+        .or_else(|| image.x.as_f64())?;
+    let y = content_frame
+        .and_then(|frame| field(&frame.y))
+        .or_else(|| image.y.as_f64())?;
+    let w = content_frame
+        .and_then(|frame| field(&frame.w))
+        .or_else(|| image.w.as_f64())?;
+    let h = content_frame
+        .and_then(|frame| field(&frame.h))
+        .or_else(|| image.h.as_f64())?;
+    frame(x, y, w, h)
 }
 
 /// Resolve the external hyperlink destination of a primitive.
@@ -435,7 +479,8 @@ fn to_pdf_rect(rect_px: [f64; 4], page_height: f64) -> Option<[f32; 4]> {
 mod tests {
     use super::*;
     use docx_layout::display_list::{
-        ImagePrimitive, PlacedGlyph, ShapePathCommand, ShapePrimitive, ShapeTransformPrimitive,
+        ContentFrame, ImagePrimitive, PlacedGlyph, ShapePathCommand, ShapePrimitive,
+        ShapeTransformPrimitive,
     };
     use serde_json::Number;
 
@@ -520,6 +565,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn image_link_annotation_uses_the_content_frame_before_rotation() {
+        // The primitive's own fields describe the pre-layout box; the
+        // content frame is where the native raster actually paints. The link
+        // must cover that painted frame, and still follow it through rotation.
+        let mut image = ImagePrimitive {
+            rel_id: "rId7".to_owned(),
+            x: number(100.0),
+            y: number(100.0),
+            w: number(200.0),
+            h: number(20.0),
+            rotation_deg: Some(Number::from(90)),
+            opacity: None,
+            filter: None,
+            decorative: false,
+            crop: None,
+            alt_text: None,
+            relationship_id: None,
+            attrs: DocAttrs {
+                href: Some("https://example.com/frame".to_owned()),
+                ..DocAttrs::default()
+            },
+        };
+        image.attrs.content_frame = Some(Box::new(ContentFrame {
+            x: Some(number(40.0)),
+            y: Some(number(60.0)),
+            w: Some(number(100.0)),
+            h: Some(number(40.0)),
+        }));
+        let links = collect_links(&one_page(vec![Primitive::Image(image.clone())]));
+        assert_eq!(links.len(), 1);
+        // The 100x40 frame centred at (90, 80) rotates to [70, 30, 110, 130]
+        // CSS pixels, which is [52.5, 694.5, 82.5, 769.5] PDF points on the
+        // 1056 px page. The primitive's own box would give [67.5, 627, 82.5,
+        // 792], so a fallback to those fields cannot pass.
+        assert_rect(links[0].rect, [52.5, 694.5, 82.5, 769.5]);
+
+        // An axis the frame omits still falls back to the primitive, exactly
+        // as the raster's field-by-field frame does.
+        image.rotation_deg = None;
+        image.attrs.content_frame = Some(Box::new(ContentFrame {
+            x: Some(number(40.0)),
+            y: None,
+            w: None,
+            h: Some(number(60.0)),
+        }));
+        let links = collect_links(&one_page(vec![Primitive::Image(image)]));
+        assert_eq!(links.len(), 1);
+        // x = 40, y = 100 (fallback), w = 200 (fallback), h = 60.
+        assert_rect(links[0].rect, [30.0, 672.0, 180.0, 717.0]);
+    }
+
     fn glyph_run(href: &str) -> GlyphRunPrimitive {
         GlyphRunPrimitive {
             font_id: 0,
@@ -594,10 +691,11 @@ mod tests {
         run.rotation_deg = Some(Number::from(90));
         let links = collect_links(&one_page(vec![Primitive::GlyphRun(run)]));
         assert_eq!(links.len(), 1, "the rotated run must stay clickable");
-        // The painter anchors at the glyph-rect centre x=(72+95)/2, uses
-        // first-glyph-relative offsets, and rotates clockwise in display
-        // space. All four glyph-box corners must stay inside the link.
-        assert_rect(links[0].rect, [59.625, 705.15, 72.225, 722.4]);
+        // The painter scales about the run's left edge and rotates the
+        // scaled glyph boxes about the glyph-rect centre (x=(72+95)/2,
+        // first baseline - 0.2em) clockwise in display space. All four
+        // glyph-box corners must stay inside the link.
+        assert_rect(links[0].rect, [57.225, 713.775, 69.825, 731.025]);
     }
 
     #[test]
@@ -607,7 +705,7 @@ mod tests {
         run.horizontal_scale = Some(Number::from(200));
         let links = collect_links(&one_page(vec![Primitive::GlyphRun(run)]));
         assert_eq!(links.len(), 1);
-        assert_rect(links[0].rect, [59.625, 687.9, 72.225, 722.4]);
+        assert_rect(links[0].rect, [57.225, 696.525, 69.825, 731.025]);
     }
 
     #[test]
@@ -637,6 +735,44 @@ mod tests {
         let links = collect_links(&one_page(vec![Primitive::Shape(shape)]));
         assert_eq!(links.len(), 1);
         assert_rect(links[0].rect, [142.5, 634.5, 157.5, 784.5]);
+    }
+
+    #[test]
+    fn rotated_text_link_box_matches_the_painter_baseline_pivot() {
+        let text = TextRunPrimitive {
+            text: "Rotated".to_owned(),
+            paint_text: None,
+            x: Number::from(100),
+            baseline_y: Number::from(200),
+            width: Number::from(48),
+            paint_clip: None,
+            font: "16px Roboto".to_owned(),
+            scripts: None,
+            color: "#000000".to_owned(),
+            letter_spacing: None,
+            word_spacing: None,
+            rtl: None,
+            opacity: None,
+            rotation_deg: Some(Number::from(90)),
+            horizontal_scale: None,
+            substitute_scale: None,
+            all_caps: false,
+            small_caps: false,
+            hidden: false,
+            text_shadow: None,
+            text_outline: false,
+            emphasis_mark: None,
+            text_effect: None,
+            attrs: DocAttrs {
+                href: Some("https://example.com/rotated-text".to_owned()),
+                ..DocAttrs::default()
+            },
+        };
+        let links = collect_links(&one_page(vec![Primitive::Text(text)]));
+        assert_eq!(links.len(), 1);
+        // The painter rotates the 48x16.8px text box about
+        // (x + width / 2, baseline - 0.2em), not about the box centre.
+        assert_rect(links[0].rect, [87.6, 626.4, 100.2, 662.4]);
     }
 
     #[test]

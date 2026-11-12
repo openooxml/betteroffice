@@ -14,6 +14,8 @@ categories = ["rendering"]
 [dependencies]
 docx-layout.workspace = true
 ooxml-text.workspace = true
+ooxml-raster = { workspace = true, features = ["svg"] }
+ooxml-metafile = { workspace = true, features = ["svg"] }
 pdf-writer = "0.15"
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
