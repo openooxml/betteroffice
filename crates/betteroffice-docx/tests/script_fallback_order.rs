@@ -241,7 +241,9 @@ fn a_character_both_faces_cover_keeps_the_family_face_next_to_kana() {
             .collect();
         let mut occurrences = drawn.iter().filter(|&&(character, ..)| character == shared);
         let Some(&(_, own_font, own_id, own_advance)) = occurrences.next() else {
-            mismatches.push(format!("{family}: {shared:?} drew no glyph next to Latin text"));
+            mismatches.push(format!(
+                "{family}: {shared:?} drew no glyph next to Latin text"
+            ));
             continue;
         };
         match occurrences.next() {
