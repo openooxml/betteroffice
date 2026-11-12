@@ -529,6 +529,7 @@ test('one job fetches the LibreOffice archive into a cache every LibreOffice job
   const CACHE = 'actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
   const archive = workflow.jobs['libreoffice-archive'];
   expect(archive.needs).toBeUndefined();
+  expect(archive.if).toBe("github.ref == 'refs/heads/main'");
   expect(archive['runs-on']).toBe('ubuntu-24.04');
   expect(archive['timeout-minutes']).toBe(70);
   expect(archive.outputs.key).toBe('${{ steps.pin.outputs.key }}');
@@ -549,8 +550,15 @@ test('one job fetches the LibreOffice archive into a cache every LibreOffice job
     expect({ name, needs: job.needs }).toEqual({ name, needs: expect.arrayContaining(['prepare', 'libreoffice-archive']) });
     expect(job['runs-on']).toBe(archive['runs-on']);
     const install = job.steps.findIndex((step: any) => String(step.run ?? '').includes('install-libreoffice.sh'));
-    expect({ name, restore: job.steps[install - 1] }).toEqual({ name, restore: {
-      name: 'Restore the LibreOffice archive', uses: CACHE,
+    expect({ name, restore: job.steps[install - 2] }).toEqual({ name, restore: {
+      name: 'Restore the LibreOffice archive', id: 'restore-libreoffice', uses: CACHE,
       with: { path: '~/.cache/libreoffice-archive', key: '${{ needs.libreoffice-archive.outputs.key }}', 'fail-on-cache-miss': true } } });
+    const check = job.steps[install - 1];
+    expect({ name, check: check.name, env: check.env }).toEqual({ name, check: 'Require the exact LibreOffice archive cache entry', env: {
+      CACHE_HIT: '${{ steps.restore-libreoffice.outputs.cache-hit }}', CACHE_KEY: '${{ needs.libreoffice-archive.outputs.key }}' } });
+    expect(check.run).toContain('if [ "$CACHE_HIT" != "true" ]; then');
+    expect(check.run).toContain('::error::the LibreOffice archive cache entry $CACHE_KEY was not restored exactly; rerun the whole workflow so libreoffice-archive fetches it');
+    expect(check.run).toContain('exit 1');
+    expect(check.run).not.toMatch(/curl|wget|fetch-libreoffice/);
   }
 });

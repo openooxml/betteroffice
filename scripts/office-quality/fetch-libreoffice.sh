@@ -38,12 +38,22 @@ fetch() {
   limit=$(remaining)
   if ((limit < 1)); then limit=1; fi
   out=$(curl --location --fail --silent --show-error --connect-timeout 30 --max-time "$limit" \
-    --continue-at - --output "$partial" --write-out '%{http_code} %{speed_download}' "$@" "$url") || status=$?
-  code=${out%% *}
-  rate=${out##* }
+    --continue-at - --output "$partial" --write-out '%{http_code} %{speed_download} %{size_download} %{time_connect}' "$@" "$url") || status=$?
+  read -r code rate received connected <<< "$out" || true
   rate=${rate%.*}
   code=${code:-000}
   rate=${rate:-0}
+  received=${received%.*}
+  received=${received:-0}
+  connected=${connected:-0}
+}
+
+timed_out() {
+  if ((received == 0)) && [[ $connected =~ ^0(\.0*)?$ ]]; then
+    echo "no data (connect timeout)"
+  else
+    echo "$1 after $received bytes at an average $rate B/s"
+  fi
 }
 
 report() {
@@ -74,12 +84,12 @@ try_mirror() {
         return 1
         ;;
       28)
-        if (($(remaining) <= 0)); then outcome="budget of ${budget}s exhausted at $rate B/s after $(size) bytes"; return 1; fi
-        if [[ -n $floor_args ]]; then outcome="below the floor of $floor B/s for ${floor_seconds}s at $rate B/s"; return 2; fi
+        if (($(remaining) <= 0)); then outcome="budget of ${budget}s exhausted: $(timed_out "timed out"), $(size) bytes in total"; return 1; fi
+        if [[ -n $floor_args ]]; then outcome="$(timed_out "below the floor of $floor B/s for ${floor_seconds}s")"; return 2; fi
         ;;
       33) rm -f "$partial" ;;
     esac
-    outcome="curl exit $status (http $code) at $rate B/s"
+    outcome="curl exit $status (http $code) after $received bytes at an average $rate B/s"
     echo "retrying $url after curl exit $status at byte $(size)" >&2
     sleep "${LO_FETCH_PAUSE:-2}"
   done

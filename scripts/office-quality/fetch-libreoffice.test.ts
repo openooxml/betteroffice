@@ -125,7 +125,11 @@ test('the pin is one version, URL pair and hash shared by the fetch helper and t
   for (const path of [script, install]) expect(await readFile(path, 'utf8')).toContain('libreoffice-pin.sh');
   const installer = await readFile(install, 'utf8');
   expect(installer).not.toContain('curl');
-  expect(installer.indexOf('sha256sum --check')).toBeLessThan(installer.indexOf('tar -xzf'));
+  const check = installer.indexOf('sha256sum --check');
+  const extract = installer.indexOf('tar -xzf');
+  expect(check).toBeGreaterThanOrEqual(0);
+  expect(extract).toBeGreaterThanOrEqual(0);
+  expect(check).toBeLessThan(extract);
 });
 
 test('a good first mirror delivers the archive in one request', async () => {
@@ -171,6 +175,7 @@ test('a mirror under the speed floor is abandoned for the next, which resumes th
   const { status, log, dest } = await fetchArchive([url('/slow'), url('/good')], { LO_FETCH_FLOOR: '100000', LO_FETCH_FLOOR_SECONDS: '1' });
   expect(status).toBe(0);
   expect(log).toContain(`mirror ${url('/slow')}: below the floor of 100000 B/s`);
+  expect(log).toMatch(/: below the floor of 100000 B\/s for 1s after [1-9]\d* bytes at an average \d+ B\/s/);
   expect(log).toContain(`mirror ${url('/good')}: ok`);
   expect(hits.find(({ path }) => path === '/good')!.range).toBeGreaterThan(0);
   expect(await digestOf(dest)).toBe(sha);

@@ -634,11 +634,23 @@ jobs:
 
       - &restore-libreoffice
         name: Restore the LibreOffice archive
+        id: restore-libreoffice
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ~/.cache/libreoffice-archive
           key: ${{ needs.libreoffice-archive.outputs.key }}
           fail-on-cache-miss: true
+
+      - &check-libreoffice
+        name: Require the exact LibreOffice archive cache entry
+        env:
+          CACHE_HIT: ${{ steps.restore-libreoffice.outputs.cache-hit }}
+          CACHE_KEY: ${{ needs.libreoffice-archive.outputs.key }}
+        run: |
+          if [ "$CACHE_HIT" != "true" ]; then
+            echo "::error::the LibreOffice archive cache entry $CACHE_KEY was not restored exactly; rerun the whole workflow so libreoffice-archive fetches it"
+            exit 1
+          fi
 
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
@@ -815,6 +827,7 @@ jobs:
         with:
           python-version: "3.13"
       - *restore-libreoffice
+      - *check-libreoffice
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -975,6 +988,7 @@ jobs:
         with:
           bun-version: "1.4.3"
       - *restore-libreoffice
+      - *check-libreoffice
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -1091,6 +1105,7 @@ jobs:
         with:
           bun-version: "1.4.3"
       - *restore-libreoffice
+      - *check-libreoffice
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -1246,6 +1261,7 @@ jobs:
         with:
           python-version: "3.13"
       - *restore-libreoffice
+      - *check-libreoffice
       - name: Install the pinned LibreOffice release
         timeout-minutes: 15
         run: bash scripts/office-quality/install-libreoffice.sh
@@ -1380,6 +1396,7 @@ jobs:
           bun-version: "1.4.3"
 
       - *restore-libreoffice
+      - *check-libreoffice
 
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
