@@ -10187,6 +10187,93 @@ fn a_resized_chart_survives_a_save_and_undoes_in_one_step() {
     assert_eq!(workbook.model().sheets[0].charts[0].anchor, resized);
 }
 
+/// An east or south resize leaves the `from` marker exactly as read, even when
+/// it sits on a hidden column or carries an offset past its row's height.
+#[test]
+fn a_resize_keeps_the_marker_of_an_edge_that_did_not_move() {
+    let hidden_from_column = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let sheet = test_part_text(&parts, "xl/worksheets/sheet1.xml").replace(
+            "<sheetData>",
+            r#"<cols><col min="3" max="3" width="9" customWidth="1" hidden="1"/></cols><sheetData>"#,
+        );
+        set_test_part(&mut parts, "xl/worksheets/sheet1.xml", sheet.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let oversized_row_offset = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec()).unwrap().replace(
+            "<xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff>",
+            "<xdr:row>4</xdr:row><xdr:rowOff>762000</xdr:rowOff>",
+        );
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let from_of = |anchor: ChartAnchor| match anchor {
+        ChartAnchor::TwoCell { from, .. } => from,
+        other => panic!("expected a two-cell anchor, got {other:?}"),
+    };
+
+    for (bytes, edges, expected_from) in [
+        (
+            hidden_from_column,
+            ChartResize {
+                right: 40.0,
+                ..ChartResize::default()
+            },
+            AnchorCell {
+                col: 2,
+                col_off: 12700,
+                row: 4,
+                row_off: 0,
+            },
+        ),
+        (
+            oversized_row_offset,
+            ChartResize {
+                bottom: 30.0,
+                ..ChartResize::default()
+            },
+            AnchorCell {
+                col: 2,
+                col_off: 12700,
+                row: 4,
+                row_off: 762000,
+            },
+        ),
+    ] {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        let before = workbook.model().sheets[0].charts[0].anchor;
+        assert_eq!(from_of(before), expected_from);
+
+        assert!(
+            workbook
+                .resize_chart(
+                    SheetId(0),
+                    "xl/drawings/drawing1.xml#0",
+                    edges,
+                    CalculationOptions::default(),
+                )
+                .unwrap()
+                .applied
+        );
+        let resized = workbook.model().sheets[0].charts[0].anchor;
+        assert_ne!(resized, before, "{edges:?} must move an edge");
+        assert_eq!(
+            from_of(resized),
+            expected_from,
+            "{edges:?} must not renormalize the untouched corner"
+        );
+
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+        assert_eq!(
+            from_of(reopened.model().sheets[0].charts[0].anchor),
+            expected_from
+        );
+    }
+}
+
 /// A resize is clamped to a pixel and to the grid rather than collapsing into
 /// an inverted anchor no save could write.
 #[test]
