@@ -2678,6 +2678,15 @@ describe('document worker warmup', () => {
     expect(offered[2]).toBeLessThan(SAVE_SEED_MAX_SLICE_BYTES);
   });
 
+  test('a heavy slice after sub-millisecond slices that charge nothing is offered the initial budget', () => {
+    let budget = SAVE_SEED_SLICE_BYTES;
+    for (let slice = 0; slice < 3; slice += 1) budget = nextPrimeByteBudget(budget, 0, 0.1, 10, SAVE_SEED_MAX_GROWTH);
+    expect(budget).toBe(SAVE_SEED_SLICE_BYTES);
+    const next = nextPrimeByteBudget(budget, 16 * 1024, 0.1, 10, SAVE_SEED_MAX_GROWTH);
+    expect(next).toBeLessThanOrEqual(budget * SAVE_SEED_MAX_GROWTH);
+    expect(next).toBeLessThan(SAVE_SEED_MAX_SLICE_BYTES);
+  });
+
   test('the first charged slice after slices that charge nothing is offered the initial budget', () => {
     const offered: number[] = [];
     let budget = SAVE_SEED_SLICE_BYTES;
