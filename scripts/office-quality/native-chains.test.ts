@@ -115,6 +115,7 @@ test('the recorded chains file replays the product registry face for face', asyn
   const { chainsPath, expected, measurement, product } = await prepared;
   expect(describeAddons(product.fonts)).not.toContain('absent');
   expect(JSON.parse(await readFile(chainsPath, 'utf8')).measurement).toEqual(measurement);
+  expect(JSON.parse(await readFile(chainsPath, 'utf8')).rejectedEmbedded).toEqual([]);
   const keys = Object.keys(expected);
   for (const family of ['consolas', 'rockwell', 'microsoft sans serif', 'verdana', 'arial black', 'noto serif jp', 'times new roman', 'calibri'])
     expect({ family, present: keys.some((key) => key.toLowerCase().startsWith(`${family}|`)) }).toEqual({ family, present: true });
@@ -239,4 +240,40 @@ test('a registration the product registry drops fails the recording, naming the 
   await expect(register(guard.bundled!.resolveLastResort('Consolas'))).rejects.toThrow('rejected');
   expect(() => guard.engine.registerFont(new Uint8Array([0]))).toThrow('rejected');
   expect([...guard.failures]).toEqual(['Cambria: offline', 'Consolas (last resort): rejected']);
+});
+
+test('a substitute registration that fails is a hard failure naming the family', () => {
+  const engine = {
+    registerFont: () => 0,
+    registerSubstituteFont: (_id: number, family: string): number => {
+      if (family === 'Caladea') throw new Error('no metrics');
+      return (family === 'Carlito' ? null : 1) as number;
+    },
+    clearFonts: () => {},
+  };
+  const guard = guardRegistrations(undefined, engine);
+  expect(guard.engine.registerSubstituteFont!(0, 'Liberation Sans')).toBe(1);
+  expect(guard.failures.size).toBe(0);
+  expect(() => guard.engine.registerSubstituteFont!(0, 'Carlito')).toThrow('Carlito');
+  expect(() => guard.engine.registerSubstituteFont!(0, 'Caladea', true)).toThrow('no metrics');
+  expect([...guard.failures]).toEqual(['substitute for Carlito: the engine returned null', 'substitute for Caladea: no metrics']);
+});
+
+test('a rejected embedded font is counted and named per document, not failed', () => {
+  const engine = {
+    registerFont: (bytes: Uint8Array) => {
+      if (bytes[0] === 0) throw new Error('bad sfnt');
+      return 0;
+    },
+    clearFonts: () => {},
+  };
+  const corrupt = new Uint8Array([0]).buffer;
+  const guard = guardRegistrations(undefined, engine, [{ family: 'Brand Sans', data: corrupt }, { family: 'Brand Serif', data: new Uint8Array([1]).buffer }]);
+  expect(() => guard.engine.registerFont(new Uint8Array(corrupt))).toThrow('bad sfnt');
+  expect(() => guard.engine.registerFont(new Uint8Array(corrupt))).toThrow('bad sfnt');
+  expect(guard.failures.size).toBe(0);
+  expect(guard.rejectedEmbedded()).toEqual([{ family: 'Brand Sans', reason: 'bad sfnt' }]);
+  const { chains } = serializeChains([{ bytes: new Uint8Array([1]) }], { fontChains: { 'brand sans|0|0': [0] } }, guard.rejectedEmbedded());
+  expect(chains.rejectedEmbedded).toEqual([{ family: 'Brand Sans', reason: 'bad sfnt' }]);
+  expect(serializeChains([], { fontChains: {} }).chains.rejectedEmbedded).toEqual([]);
 });

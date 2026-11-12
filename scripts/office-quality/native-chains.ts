@@ -15,10 +15,13 @@ export interface Engine {
 export type Substitute = { substituteOf: number; family: string; bold?: boolean; italic?: boolean };
 export type RecordedFace = { bytes: Uint8Array } | Substitute;
 
+export type RejectedEmbedded = { family: string; reason: string };
+
 export interface ChainsFile {
   faces: Array<{ file: string; sha256: string } | Substitute>;
   fontChains: Record<string, number[]>;
   measurement: Record<string, unknown>;
+  rejectedEmbedded: RejectedEmbedded[];
 }
 
 export type Measurement = { fontChains: Record<string, number[]> } & Record<string, unknown>;
@@ -208,8 +211,10 @@ const RESOLVERS: Record<string, (args: any[]) => string> = {
   resolveBaseLatin: () => 'base Latin',
 };
 
-export function guardRegistrations(bundled: Module | undefined, engine: Engine) {
+export function guardRegistrations(bundled: Module | undefined, engine: Engine, embedded: Array<{ family: string; data: ArrayBuffer }> = []) {
   const failures = new Set<string>();
+  const embeddedFamilies = new Map<object, string>(embedded.map((face) => [face.data, face.family]));
+  const rejected = new Map<object, RejectedEmbedded>();
   const sources = new WeakMap<object, string>();
   const guarded = new WeakMap<Function, Function>();
   const read = (source: () => Promise<ArrayBuffer>, label: string) => async () => {
@@ -237,19 +242,36 @@ export function guardRegistrations(bundled: Module | undefined, engine: Engine) 
   });
   return {
     failures,
+    rejectedEmbedded: () => [...rejected.values()],
     bundled: provider,
     engine: {
       registerFont: (bytes, face) => {
         try {
           return face ? engine.registerFont(bytes, face) : engine.registerFont(bytes);
         } catch (error) {
+          const family = embeddedFamilies.get(bytes.buffer);
           const label = sources.get(bytes.buffer);
-          if (label) failures.add(`${label}: ${message(error)}`);
+          if (family !== undefined) {
+            if (!rejected.has(bytes.buffer)) rejected.set(bytes.buffer, { family, reason: message(error) });
+          } else if (label) failures.add(`${label}: ${message(error)}`);
           throw error;
         }
       },
       ...(engine.registerSubstituteFont && {
-        registerSubstituteFont: (id: number, family: string, ...style: [bold?: boolean, italic?: boolean]) => engine.registerSubstituteFont!(id, family, ...style),
+        registerSubstituteFont: (id: number, family: string, ...style: [bold?: boolean, italic?: boolean]) => {
+          let substitute: number;
+          try {
+            substitute = engine.registerSubstituteFont!(id, family, ...style);
+          } catch (error) {
+            failures.add(`substitute for ${family}: ${message(error)}`);
+            throw error;
+          }
+          if (!Number.isInteger(substitute)) {
+            failures.add(`substitute for ${family}: the engine returned ${substitute}`);
+            throw new Error(`the engine returned ${substitute} for the substitute for ${family}`);
+          }
+          return substitute;
+        },
       }),
       clearFonts: () => engine.clearFonts(),
     } satisfies Engine,
@@ -261,11 +283,12 @@ export async function layOutFonts(product: Product, bytes: Uint8Array, engineOf:
   try {
     const host = session.openDocx(bytes, true);
     const document = session.materializeDocx() ?? host.document;
-    const registrations = guardRegistrations(await product.layout.resolveCompleteFontProvider(), engineOf(session));
+    const embedded = await product.utils.extractEmbeddedFontFaces(document);
+    const registrations = guardRegistrations(await product.layout.resolveCompleteFontProvider(), engineOf(session), embedded);
     const { bundled } = registrations;
     const measure = product.layout.createRustMeasureSource({ engine: registrations.engine, ...(bundled ? { bundled } : {}) });
     measure.setCompat(document.package?.settings?.compatibilityFlags);
-    measure.setEmbeddedFaces(await product.utils.extractEmbeddedFontFaces(document), []);
+    measure.setEmbeddedFaces(embedded, []);
     const renderEnv = product.editor.documentRenderEnv(document);
     const request = product.editor.buildResidentRegionLayoutRequest(document, 0, renderEnv);
     const requirements: Requirement[] = JSON.parse(session.layoutFontRequirementsJson(JSON.stringify(request)));
@@ -276,7 +299,7 @@ export async function layOutFonts(product: Product, bytes: Uint8Array, engineOf:
       throw new FailedRegistration(`${product.version}: the product's registry dropped fonts it failed to register: ${[...registrations.failures].join('; ')}`);
     const measurement = measure.measurementConfigForRequirements(requirements);
     if (!measurement) throw new Error(`${product.version}: the product could not load the fonts this document lays out with`);
-    return { session, document, renderEnv, requirements, measurement: measurement as Measurement };
+    return { session, document, renderEnv, requirements, measurement: measurement as Measurement, rejectedEmbedded: registrations.rejectedEmbedded() };
   } catch (error) {
     session.destroy();
     throw error;
@@ -287,10 +310,10 @@ export async function recordChains(product: Product, bytes: Uint8Array) {
   let recorder: ReturnType<typeof recordingEngine> | undefined;
   const laid = await layOutFonts(product, bytes, (session) => (recorder = recordingEngine(session)).engine);
   laid.session.destroy();
-  return { faces: recorder!.faces, measurement: laid.measurement };
+  return { faces: recorder!.faces, measurement: laid.measurement, rejectedEmbedded: laid.rejectedEmbedded };
 }
 
-export function serializeChains(faces: RecordedFace[], { fontChains, ...measurement }: Measurement) {
+export function serializeChains(faces: RecordedFace[], { fontChains, ...measurement }: Measurement, rejectedEmbedded: RejectedEmbedded[] = []) {
   const unmapped = Object.keys(measurement).filter((key) => !MEASUREMENT_KEYS.has(key));
   if (unmapped.length) throw new Error(`the product's measurement carries ${unmapped.join(', ')}, which the chains file does not map to recorded fonts`);
   const files = new Map<string, Uint8Array>();
@@ -307,6 +330,7 @@ export function serializeChains(faces: RecordedFace[], { fontChains, ...measurem
     }),
     fontChains: {},
     measurement: structuredClone(measurement),
+    rejectedEmbedded: rejectedEmbedded.map((face) => ({ ...face })),
   };
   for (const [key, chain] of Object.entries(fontChains)) {
     if (!chain.length || chain.some((id) => !Number.isInteger(id) || id < 0 || id >= faces.length))
@@ -317,8 +341,8 @@ export function serializeChains(faces: RecordedFace[], { fontChains, ...measurem
 }
 
 export async function writeDocumentChains(product: Product, bytes: Uint8Array, directory: string, name: string) {
-  const { faces, measurement } = await recordChains(product, bytes);
-  const { chains, files } = serializeChains(faces, measurement);
+  const { faces, measurement, rejectedEmbedded } = await recordChains(product, bytes);
+  const { chains, files } = serializeChains(faces, measurement, rejectedEmbedded);
   await mkdir(directory, { recursive: true });
   for (const [file, data] of files) await writeFile(join(directory, file), data);
   const path = join(directory, `${name}.chains.json`);

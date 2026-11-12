@@ -75,6 +75,32 @@ class NativeBenchmarkTests(unittest.TestCase):
             self.assertEqual(result['commit']['status'], 'failed')
             self.assertIn('different font faces', result['commit']['error'])
 
+    def test_faces_are_required_for_docx_native_timings_only(self):
+        for format, status in [('pptx', 'ok'), ('docx', 'failed')]:
+            with self.subTest(format=format), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                sample = self.fixture(root)
+                (root / f'source.{format}').write_bytes(b'fixture')
+                sample = dict(sample, format=format, metadata=dict(source=dict(sha256=sha256(root / f'source.{format}'))))
+
+                def execute(command, **kwargs):
+                    channel = command[0]
+                    output = root / 'timing' / ('source.png' if channel == 'libreoffice' else f'{channel}.png')
+                    self.image(output)
+                    return 1, json.dumps(dict(status='ok', skipped_images=0, page=1, pages=1, dpi=96,
+                                              source_sha256=sample['metadata']['source']['sha256'], png_sha256=sha256(output)))
+
+                with patch('docx_benchmark.execute', execute), patch('builtins.print'):
+                    result = measure_sample(sample, root, {channel: Path(channel) for channel in CHANNELS[:2]},
+                                            root / 'manifest.json', 'libreoffice', 2)
+                for channel in CHANNELS[:2]:
+                    self.assertEqual(result[channel]['status'], status)
+                    self.assertNotIn('fonts_sha256', result[channel])
+                if format == 'pptx':
+                    self.assertEqual(len(result['published']['elapsed_ms']), 2)
+                else:
+                    self.assertIn('no list of replayed font faces', result['commit']['error'])
+
     def test_the_old_font_map_is_allowed_only_for_a_published_release_no_newer_than_the_last_without_the_registry_exports(self):
         self.assertEqual(LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS, '0.5.1')
         old = dict(path='bench-manifest', version='0.5.1', last_release_without_registry_exports=LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS)

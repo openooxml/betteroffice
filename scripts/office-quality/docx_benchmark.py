@@ -178,12 +178,13 @@ def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0, 
                         raise ValueError('Native CLI returned invalid render metadata')
                     if chains is not None and metadata.get('font_path') != font_paths[channel]:
                         raise ValueError(f"Native CLI took the {metadata.get('font_path')} font path, expected {font_paths[channel]}")
-                    faces = metadata.get('faces')
-                    if not isinstance(faces, list) or not all(isinstance(face, str) and face for face in faces):
-                        raise ValueError('Native CLI reported no list of replayed font faces')
-                    replayed = hashlib.sha256('\n'.join(faces).encode()).hexdigest()
-                    if results[channel].setdefault('fonts_sha256', replayed) != replayed:
-                        raise ValueError('Native CLI replayed different font faces across trials')
+                    if format == 'docx':
+                        faces = metadata.get('faces')
+                        if not isinstance(faces, list) or not all(isinstance(face, str) and face for face in faces):
+                            raise ValueError('Native CLI reported no list of replayed font faces')
+                        replayed = hashlib.sha256('\n'.join(faces).encode()).hexdigest()
+                        if results[channel].setdefault('fonts_sha256', replayed) != replayed:
+                            raise ValueError('Native CLI replayed different font faces across trials')
                     results[channel]['native'] = metadata
                 results[channel]['png'] = png
                 if repeat:
@@ -254,6 +255,9 @@ def summarize_font_paths(samples, method, paths=None):
     notes = font_path_notes(paths, method)
     lines = [f"- {channel}: {', '.join(sorted({row['timings'][channel].get('font_path', 'bench-manifest') for row in samples})) or 'no documents'}; {notes[channel]}"
              for channel in CHANNELS[:2]]
+    for channel in CHANNELS[:2]:
+        rejected = [row['timings'][channel].get('rejected_embedded', []) for row in samples]
+        lines.append(f'- {channel}: {sum(map(len, rejected))} rejected embedded font faces in {sum(map(bool, rejected))} documents')
     text = '### DOCX native font path\n\n' + '\n'.join(lines) + '\n'
     print(text, flush=True)
     if os.environ.get('GITHUB_STEP_SUMMARY'):
@@ -311,6 +315,8 @@ def main():
         print(f"DOCX shard {job['shard']}: {index + 1}/{len(job['samples'])} {sample['id']}", flush=True)
         chains = product_chains(chains_root, font_paths, sample) if chains_root else {}
         timings = measure_sample(sample, directory, binaries, manifest, soffice, job['trials'], index, chains=chains)
+        for channel, path in chains.items():
+            timings[channel]['rejected_embedded'] = json.loads(path.read_text())['rejectedEmbedded']
         print(f"{sample['id']}: LibreOffice fidelity", flush=True)
         fidelity = libreoffice_fidelity(sample, directory, soffice, version)
         report['samples'].append(dict(id=sample['id'], source_sha256=sample['metadata']['source']['sha256'],
