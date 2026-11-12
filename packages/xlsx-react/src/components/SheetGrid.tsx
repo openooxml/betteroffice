@@ -7,29 +7,9 @@ import { columnLetter } from '../columnLetter';
 /** Fixed header band sizes; column widths and row heights inside them follow the sheet zoom. */
 export const COLUMN_HEADER_HEIGHT = 24;
 const ROW_HEADER_WIDTH = 44;
-/**
- * The handle that sits on a collapsed hidden span: a transparent hit area
- * `LENGTH` along the band and `THICKNESS` across it, straddling the boundary and
- * carrying two outward triangles. Excel uses the same pair of numbers on both
- * axes (16 along, 8 across).
- */
-const HIDDEN_HANDLE_LENGTH = 16;
-const HIDDEN_HANDLE_THICKNESS = 8;
-/** How deep the handle sits inside the band, clear of its leading edge. */
-const HIDDEN_HANDLE_INSET = 1;
-/** Where the row-band handle starts across the band, clear of its leading border. */
-const ROW_HANDLE_INSET = 2;
-/**
- * Where a boundary resize strip starts on each axis: the strip covers the
- * boundary everywhere the hidden-span handle does not, so the corner of the
- * boundary stays a reveal and the rest of it stays a resize.
- */
-const COLUMN_RESIZE_STRIP_TOP = HIDDEN_HANDLE_INSET + HIDDEN_HANDLE_THICKNESS;
-const ROW_RESIZE_STRIP_LEFT = ROW_HANDLE_INSET + HIDDEN_HANDLE_THICKNESS;
-/** Half the base of a handle triangle; the arrow itself is 4px deep. */
-const HIDDEN_HANDLE_ARROW_HALF = 3;
-const HIDDEN_HANDLE_ARROW = 4;
-const HIDDEN_HANDLE_COLOR = '#5f6368';
+/** Where a boundary resize strip starts across the band on each axis. */
+const COLUMN_RESIZE_STRIP_TOP = 9;
+const ROW_RESIZE_STRIP_LEFT = 10;
 
 /**
  * The freeze split chrome, mirrored from `crates/xlsx-render` (`PANE_DIVIDER_COLOR`
@@ -120,14 +100,6 @@ export interface SheetGridHeaderHandlers {
    * refuses a move that would tear a merged range.
    */
   onHeaderReorder?(axis: 'col' | 'row', at: number, before: number, count: number): void;
-  /**
-   * A press on the handle painted over a collapsed hidden span: reveal `spans`,
-   * in sheet indices. Supplying this (together with `unhideLabels`) paints one
-   * handle on every boundary a hidden run collapsed onto, so the reader can see
-   * and undo the collapse where it happened instead of guessing which side of
-   * the pressed header is hidden.
-   */
-  onHeaderUnhide?(axis: 'col' | 'row', spans: [number, number][]): void;
   /**
    * A press on the corner above the row numbers and left of the letters: the
    * spreadsheet gesture that selects every cell.
@@ -249,7 +221,7 @@ export interface HiddenSpanHandle {
  * ordinary edge. A span with no visible track after it in the window has no
  * boundary to mark, and one with no visible track before it has no left
  * neighbour to separate from, so both are skipped. Spans that share a boundary
- * are merged into one run, so a single reveal covers the whole gap.
+ * are merged into one run, so a single separator marks the whole gap.
  *
  * A frozen lead pins its tracks above the scrolling body, so a span that ends
  * before the body's first track collapsed onto a boundary between the frozen
@@ -498,9 +470,7 @@ interface TrackDrag extends GestureOrigin {
  * on a track the selection already covers in full arms a reorder of the whole
  * selected run, and a release without a drag is handed back as the surface's
  * press, so a click still collapses the run to the pressed track. A press
- * anywhere else drags the selection instead. With
- * `onHeaderUnhide` a collapsed hidden span also gets a small handle on its
- * boundary, so the reveal happens where the reader can see the gap. Bands stay
+ * anywhere else drags the selection instead. Bands stay
  * `aria-hidden` either way; the accessible grid is A11yGridTable, which no
  * pointer gesture here touches.
  *
@@ -508,14 +478,14 @@ interface TrackDrag extends GestureOrigin {
  * it is what tells a fully selected track (a reorder) from a cell range that
  * merely reaches one (a selection drag).
  */
-export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selection, sheet, unhideLabels, selectAllLabel, showSheetHeaders = false, children }: {
+export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selection, sheet, selectAllLabel, showSheetHeaders = false, children }: {
   frame?: DisplayList | null;
   zoom: number;
   /** Space left of the row header for a plugin gutter. */
   leadingInset?: number;
   /** Whether to paint the column and row header bands. */
   showSheetHeaders?: boolean;
-  /** Selection, header menu, resize, reorder and reveal callbacks; absent leaves the bands inert. */
+  /** Selection, header menu, resize and reorder callbacks; absent leaves the bands inert. */
   headerHandlers?: SheetGridHeaderHandlers;
   /** Current selection, used only to highlight fully selected tracks. */
   selection?: Selection | null;
@@ -528,11 +498,6 @@ export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selec
    * the frame object stands in for the sheet, so any repaint mid-drag cancels.
    */
   sheet?: string | number | null;
-  /**
-   * Titles for the hidden-span handles, one per axis. The surface translates
-   * them; the band only paints them, so this file stays free of i18n.
-   */
-  unhideLabels?: { col: string; row: string };
   children: ReactNode;
 }) {
   const grid = frame?.grid;
@@ -885,71 +850,6 @@ export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selec
               height: 1, background: '#9aa0a6', pointerEvents: 'none' }} />);
     });
 
-  // Excel puts a handle on the collapsed boundary itself instead of leaving the
-  // reveal to the header menu: a pressed header cannot say which side of it is
-  // hidden, the gap can. One handle per boundary, centred on the snapped
-  // hairline; the doubled separator stays drawn beneath. The handle has no
-  // visible box — it is a transparent hit area over the gap, sized so it stays
-  // clear of the band's resize strip and carries only the two triangles.
-  const hiddenHandles = (axis: 'col' | 'row', tracks: HeaderTrack[]) => {
-    const unhide = headerHandlers?.onHeaderUnhide;
-    if (!unhide) return null;
-    const label = unhideLabels?.[axis];
-    const column = axis === 'col';
-    // outward-pointing triangles name both sides of the collapse; they are
-    // decoration only, so the wrapper stays the hit area.
-    const triangle = (side: 'lead' | 'trail'): CSSProperties => column
-      ? { position: 'absolute', top: '50%', marginTop: -HIDDEN_HANDLE_ARROW_HALF,
-          width: 0, height: 0, pointerEvents: 'none',
-          borderTop: `${HIDDEN_HANDLE_ARROW_HALF}px solid transparent`,
-          borderBottom: `${HIDDEN_HANDLE_ARROW_HALF}px solid transparent`,
-          ...(side === 'lead'
-            ? { left: 0, borderRight: `${HIDDEN_HANDLE_ARROW}px solid ${HIDDEN_HANDLE_COLOR}` }
-            : { right: 0, borderLeft: `${HIDDEN_HANDLE_ARROW}px solid ${HIDDEN_HANDLE_COLOR}` }) }
-      : { position: 'absolute', left: '50%', marginLeft: -HIDDEN_HANDLE_ARROW_HALF,
-          width: 0, height: 0, pointerEvents: 'none',
-          borderLeft: `${HIDDEN_HANDLE_ARROW_HALF}px solid transparent`,
-          borderRight: `${HIDDEN_HANDLE_ARROW_HALF}px solid transparent`,
-          ...(side === 'lead'
-            ? { top: 0, borderBottom: `${HIDDEN_HANDLE_ARROW}px solid ${HIDDEN_HANDLE_COLOR}` }
-            : { bottom: 0, borderTop: `${HIDDEN_HANDLE_ARROW}px solid ${HIDDEN_HANDLE_COLOR}` }) };
-    return hiddenSpanHandles(grid, axis, tracks).map((handle) => {
-      const at = Math.round(tracks[handle.position].offset * zoom);
-      return <div
-        key={`${axis}:hidden-handle:${handle.start}:${handle.end}`}
-        data-testid="xlsx-hidden-handle"
-        data-axis={axis}
-        data-start={handle.start}
-        data-end={handle.end}
-        role="button"
-        title={label}
-        aria-label={label}
-        style={{
-          position: 'absolute',
-          // the wrapper hugs the top of the column band (and the leading edge of
-          // the row band), so its thickness stays off the boundary drag strip.
-          ...(column
-            ? { left: at - HIDDEN_HANDLE_LENGTH / 2, top: HIDDEN_HANDLE_INSET,
-                width: HIDDEN_HANDLE_LENGTH, height: HIDDEN_HANDLE_THICKNESS }
-            : { left: ROW_HANDLE_INSET, top: at - HIDDEN_HANDLE_LENGTH / 2,
-                width: HIDDEN_HANDLE_THICKNESS, height: HIDDEN_HANDLE_LENGTH }),
-          // no box: only the triangles paint, the wrapper is just the hit area.
-          zIndex: 5,
-          pointerEvents: 'auto',
-          cursor: 'pointer',
-        }}
-        // the band must never arm a resize, reorder or selection drag from the
-        // handle: its press is a reveal, and the pointer lives on it alone.
-        onPointerDown={(event) => event.stopPropagation()}
-        onMouseDown={(event) => event.stopPropagation()}
-        onClick={() => unhide(axis, [[handle.start, handle.end]])}
-      >
-        <span aria-hidden style={triangle('lead')} />
-        <span aria-hidden style={triangle('trail')} />
-      </div>;
-    });
-  };
-
   // A fully selected track marks itself with a two-pixel accent on the edge that
   // faces the cells. It is drawn over the band edge (which stays a hairline for
   // every other track) so the accent replaces that edge instead of stacking a
@@ -967,9 +867,7 @@ export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selec
   const resizeStrips = (axis: 'col' | 'row', tracks: HeaderTrack[]) => {
     if (!headerHandlers?.onHeaderResize) return null;
     const vertical = axis === 'col';
-    // the last track has no successor, so it has no boundary strip. The strip
-    // starts where the hidden-span handle ends, so a boundary stays a reveal
-    // over the handle's corner and a resize everywhere else it is painted.
+    // the last track has no successor, so it has no boundary strip.
     return tracks.slice(0, -1).map((track) => <div
       key={`${axis}:${track.index}`}
       data-resize-axis={axis}
@@ -1130,7 +1028,6 @@ export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selec
       </div>)}
       {trackDividers('col', preview('col', columns))}
       {hiddenDividers('col', preview('col', columns))}
-      {hiddenHandles('col', preview('col', columns))}
       {/* the split replaces the boundary line it sits on: drawn after the track
           dividers so the two-pixel split covers the one-pixel gridline, as the
           canvas does. */}
@@ -1183,7 +1080,6 @@ export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selec
       </div>)}
       {trackDividers('row', preview('row', rows))}
       {hiddenDividers('row', preview('row', rows))}
-      {hiddenHandles('row', preview('row', rows))}
       {dividerY !== undefined && <div
         data-testid="xlsx-freeze-divider"
         data-axis="row"

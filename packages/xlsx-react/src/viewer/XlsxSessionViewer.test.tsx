@@ -310,7 +310,11 @@ describe('workbook session viewer', () => {
       .toEqual(['1px solid #217346', 'rgba(33, 115, 70, 0.12)', '']);
     expect([marquee.style.left, marquee.style.top, marquee.style.width, marquee.style.height])
       .toEqual(['0px', '0px', '96px', '24px']);
-    const active = view.getByTestId('xlsx-active-cell') as HTMLElement;
+    expect(view.queryByTestId('xlsx-active-cell')).toBeNull();
+    const boxes = Array.from(view.getByTestId('xlsx-overlay-host').children)
+      .filter((box) => !box.hasAttribute('data-testid'));
+    expect(boxes).toHaveLength(1);
+    const active = boxes[0] as HTMLElement;
     expect([active.style.border, active.style.boxShadow, active.style.left, active.style.width, active.style.height])
       .toEqual(['2px solid #217346', '', '0px', '96px', '24px']);
     expect(view.queryAllByTestId('xlsx-selection-fill')).toHaveLength(0);

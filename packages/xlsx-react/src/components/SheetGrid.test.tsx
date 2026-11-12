@@ -40,14 +40,13 @@ const geometry = { startRow: 0, startCol: 0,
 // each test owns a fresh record of what the surface was told.
 const mount = (handlers: SheetGridHeaderHandlers, zoom = 1,
   grid: DisplayList['grid'] = geometry, selection: Selection | null = null,
-  sheet?: number | null, unhideLabels?: { col: string; row: string }) => {
+  sheet?: number | null) => {
   presses.length = 0;
   resizes.length = 0;
   reorders.length = 0;
   selects.length = 0;
-  unhides.length = 0;
   return render(<SheetGrid frame={frame(grid)} zoom={zoom} showSheetHeaders headerHandlers={handlers}
-    selection={selection} sheet={sheet} unhideLabels={unhideLabels}><div /></SheetGrid>);
+    selection={selection} sheet={sheet}><div /></SheetGrid>);
 };
 // a whole-track selection on one axis: the only state a label press reorders from.
 const wholeColumn = (col: number): Selection => ({
@@ -71,13 +70,11 @@ const presses: { axis: string; index: number; shift: boolean }[] = [];
 const resizes: { axis: string; index: number; size: number; run?: { at: number; count: number } }[] = [];
 const reorders: { axis: string; at: number; before: number; count: number }[] = [];
 const selects: { axis: string; index: number }[] = [];
-const unhides: { axis: string; spans: [number, number][] }[] = [];
 const handlers: SheetGridHeaderHandlers = {
   onHeaderMouseDown: (axis, index, event) => presses.push({ axis, index, shift: event.shiftKey }),
   onHeaderResize: (axis, index, size, run) => resizes.push({ axis, index, size, run }),
   onHeaderReorder: (axis, at, before, count) => reorders.push({ axis, at, before, count }),
   onHeaderDragSelect: (axis, index) => selects.push({ axis, index }),
-  onHeaderUnhide: (axis, spans) => unhides.push({ axis, spans }),
 };
 // happy-dom has no layout, so the band's rect is the origin and every pointer
 // coordinate is read straight off the painted frame geometry.
@@ -185,22 +182,20 @@ test('a frozen lead drops a collapsed span that lies above the scrolling body', 
   // and the body, where the reader can never scroll to it.
   const { container } = mount(handlers, 1, { startRow: 0, startCol: 0,
     frozenRows: 1, dividerY: 20, colOffsets: [0, 80], rowIndices: [0, 11, 12], rowOffsets: [0, 20, 40, 60],
-    hiddenRowSpans: [[7, 7]] }, null, null, labelsFor);
-  expect(hiddenHandles(container)).toEqual([]);
+    hiddenRowSpans: [[7, 7]] });
   expect(container.querySelectorAll('[data-testid="xlsx-hidden-divider"]')).toHaveLength(0);
 });
 
 test('a frozen lead keeps a collapsed span that lies inside the scrolling body', () => {
   // the same pinned row 1, but the body starts at row 3 and the hidden row 7
-  // collapsed onto row 8, which the body paints: the handle stays.
+  // collapsed onto row 8, which the body paints: the separator stays.
   const { container } = mount(handlers, 1, { startRow: 0, startCol: 0,
     frozenRows: 1, dividerY: 20, colOffsets: [0, 80], rowIndices: [0, 3, 4, 8],
     rowOffsets: [0, 20, 40, 60, 80],
-    hiddenRowSpans: [[7, 7]] }, null, null, labelsFor);
-  const [handle] = hiddenHandles(container);
-  expect([handle!.dataset.axis, handle!.getAttribute('data-start'), handle!.style.top])
-    .toEqual(['row', '7', '52px']);
-  expect(container.querySelectorAll('[data-testid="xlsx-hidden-divider"]')).toHaveLength(2);
+    hiddenRowSpans: [[7, 7]] });
+  const markers = Array.from(container.querySelectorAll<HTMLElement>('[data-testid="xlsx-hidden-divider"]'));
+  expect(markers.map((marker) => [marker.getAttribute('data-axis'), marker.style.top]))
+    .toEqual([['row', '58px'], ['row', '62px']]);
 });
 
 test('a compacted hidden row span draws the doubled separator across the row band', () => {
@@ -224,167 +219,17 @@ const hiddenGrid = {
   rowIndices: [0, 3], rowOffsets: [0, 20, 40],
   hiddenColSpans: [[1, 2]] as [number, number][], hiddenRowSpans: [[1, 2]] as [number, number][],
 };
-const hiddenHandles = (root: Element) =>
-  Array.from(root.querySelectorAll<HTMLElement>('[data-testid="xlsx-hidden-handle"]'));
-const labelsFor = { col: 'Show columns A:B', row: 'Show rows 1:2' };
-
-test('a collapsed hidden span gets a transparent handle at the top of the band', () => {
-  const { container } = mount(handlers, 1, hiddenGrid, null, null, labelsFor);
-  const handles = hiddenHandles(container);
-  expect(handles.map((handle) => [handle.dataset.axis,
-    handle.getAttribute('data-start'), handle.getAttribute('data-end')]))
-    .toEqual([['col', '1', '2'], ['row', '1', '2']]);
-  // 16 along the band, 8 across it, straddling the boundary at 80 and at 20 but
-  // hugging the band's leading corner so the boundary drag strip stays free.
-  const [col, row] = handles;
-  expect([col!.style.left, col!.style.top, col!.style.width, col!.style.height])
-    .toEqual(['72px', '1px', '16px', '8px']);
-  expect([row!.style.left, row!.style.top, row!.style.width, row!.style.height])
-    .toEqual(['2px', '12px', '8px', '16px']);
-  // no box at all: only the two triangles paint.
-  expect([col!.style.background, col!.style.borderRadius, col!.style.border])
-    .toEqual(['', '', '']);
-  expect([row!.style.background, row!.style.borderRadius, row!.style.border])
-    .toEqual(['', '', '']);
-  expect(col!.querySelectorAll('span')).toHaveLength(2);
-  expect([col!.style.zIndex, col!.style.pointerEvents]).toEqual(['5', 'auto']);
-});
-
-test('the handle keeps its corner of the boundary clear of the resize strip', () => {
-  const { container } = mount(handlers, 1, hiddenGrid, null, null, labelsFor);
-  const [col, row] = hiddenHandles(container);
-  const colStrip = container.querySelector<HTMLElement>('[data-resize-axis="col"]')!;
-  const rowStrip = container.querySelector<HTMLElement>('[data-resize-axis="row"]')!;
-  // the strips start exactly where the handle's thickness ends, so the two
-  // never overlap: no boundary press can go to both.
-  expect(colStrip.style.top).toBe('9px');
-  expect(parseFloat(col!.style.top) + parseFloat(col!.style.height))
-    .toBeLessThanOrEqual(parseFloat(colStrip.style.top));
-  expect(rowStrip.style.left).toBe('10px');
-  expect(parseFloat(row!.style.left) + parseFloat(row!.style.width))
-    .toBeLessThanOrEqual(parseFloat(rowStrip.style.left));
-  // the rest of each boundary is still a resize strip: the band height (24) and
-  // width (44) minus the strip's starting inset.
-  expect(colStrip.style.height).toBe('15px');
-  expect(rowStrip.style.width).toBe('34px');
-});
-
-test('the handle follows the snapped boundary at fractional zoom', () => {
-  const { container } = mount(handlers, 1.25, { startRow: 0, startCol: 0,
-    colIndices: [0, 3], colOffsets: [0, 102, 204], rowIndices: [0, 3],
-    rowOffsets: [0, 25, 50], hiddenColSpans: [[1, 2]], hiddenRowSpans: [[1, 2]] },
-    null, null, labelsFor);
-  // 102 * 1.25 = 127.5 snaps to 128, 25 * 1.25 = 31.25 snaps to 31.
-  const [col, row] = hiddenHandles(container);
-  expect([col!.style.left, col!.style.top]).toEqual(['120px', '1px']);
-  expect([row!.style.left, row!.style.top]).toEqual(['2px', '23px']);
-});
-
-test('the handle marks both sides of the collapse with outward triangles', () => {
-  const { container } = mount(handlers, 1, hiddenGrid, null, null, labelsFor);
-  const [col, row] = hiddenHandles(container);
-  const colArrows = Array.from(col!.querySelectorAll<HTMLElement>('span'));
-  // flush against the wrapper's left and right edges, centred across it.
-  expect(colArrows.map((arrow) => [arrow.style.left, arrow.style.right, arrow.style.top,
-    arrow.style.marginTop, arrow.style.borderTop, arrow.style.borderBottom,
-    arrow.style.borderRight, arrow.style.borderLeft])).toEqual([
-    ['0px', '', '50%', '-3px', '3px solid transparent', '3px solid transparent',
-      '4px solid #5f6368', ''],
-    ['', '0px', '50%', '-3px', '3px solid transparent', '3px solid transparent',
-      '', '4px solid #5f6368'],
-  ]);
-  const rowArrows = Array.from(row!.querySelectorAll<HTMLElement>('span'));
-  expect(rowArrows.map((arrow) => [arrow.style.top, arrow.style.bottom, arrow.style.left,
-    arrow.style.marginLeft, arrow.style.borderLeft, arrow.style.borderRight,
-    arrow.style.borderBottom, arrow.style.borderTop])).toEqual([
-    ['0px', '', '50%', '-3px', '3px solid transparent', '3px solid transparent',
-      '4px solid #5f6368', ''],
-    ['', '0px', '50%', '-3px', '3px solid transparent', '3px solid transparent',
-      '', '4px solid #5f6368'],
-  ]);
-  // the arrows are decoration: the wrapper stays the hit area, gap included.
-  expect(colArrows.every((arrow) => arrow.style.pointerEvents === 'none')).toBe(true);
-  expect(rowArrows.every((arrow) => arrow.style.pointerEvents === 'none')).toBe(true);
-});
-
-test('the handle names the span in its title and aria-label', () => {
-  const { container } = mount(handlers, 1, hiddenGrid, null, null, labelsFor);
-  expect(hiddenHandles(container).map((handle) =>
-    [handle.getAttribute('role'), handle.getAttribute('title'), handle.getAttribute('aria-label')]))
-    .toEqual([['button', 'Show columns A:B', 'Show columns A:B'],
-      ['button', 'Show rows 1:2', 'Show rows 1:2']]);
-});
-
-test('clicking the handle asks the surface to reveal the span it marks', () => {
-  const { container } = mount(handlers, 1, hiddenGrid, null, null, labelsFor);
-  const [col, row] = hiddenHandles(container);
-  fireEvent.click(col!);
-  fireEvent.click(row!);
-  expect(unhides).toEqual([{ axis: 'col', spans: [[1, 2]] }, { axis: 'row', spans: [[1, 2]] }]);
-});
-
-test('a press on the handle starts no band gesture', () => {
-  const { container } = mount(handlers, 1, hiddenGrid, null, null, labelsFor);
-  const band = container.querySelector('[data-testid="xlsx-column-headers"]')!;
-  stubRect(band);
-  const handle = hiddenHandles(container)[0]!;
-  // the boundary under the handle would otherwise resize column A.
-  fireEvent.pointerDown(handle, { button: 0, clientX: 80, clientY: 0, pointerId: 1 });
-  fireEvent.pointerMove(band, { clientX: 120, clientY: 0, pointerId: 1 });
-  fireEvent.pointerUp(band, { clientX: 120, clientY: 0, pointerId: 1 });
-  fireEvent.mouseDown(handle, {});
-  expect(resizes).toEqual([]);
-  expect(reorders).toEqual([]);
-  expect(selects).toEqual([]);
-  expect(presses).toEqual([]);
-  expect(container.querySelector('[data-testid="xlsx-resize-guide"]')).toBeNull();
-  expect(container.querySelector('[data-testid="xlsx-reorder-guide"]')).toBeNull();
-  // the doubled separator the handle sits on is still drawn beneath it.
-  expect(band.querySelectorAll('[data-testid="xlsx-hidden-divider"]')).toHaveLength(2);
-});
-
-test('a press on the handle reveals, and the boundary beside it resizes', () => {
-  const { container } = mount(handlers, 1, hiddenGrid, null, null, labelsFor);
-  const columnBand = container.querySelector('[data-testid="xlsx-column-headers"]')!;
-  const rowBand = container.querySelector('[data-testid="xlsx-row-headers"]')!;
-  stubRect(columnBand);
-  stubRect(rowBand);
-  const [col, row] = hiddenHandles(container);
-  // the column handle straddles the boundary at x=80, over y 1..9.
-  fireEvent.pointerDown(col!, { button: 0, clientX: 80, clientY: 5, pointerId: 1 });
-  fireEvent.click(col!);
-  // the row handle sits across the row band's leading edge, over x 2..10.
-  fireEvent.pointerDown(row!, { button: 0, clientX: 6, clientY: 20, pointerId: 2 });
-  fireEvent.click(row!);
-  expect(resizes).toEqual([]);
-  expect(unhides).toEqual([{ axis: 'col', spans: [[1, 2]] }, { axis: 'row', spans: [[1, 2]] }]);
-  // below the column handle the boundary is a resize strip again ...
-  fireEvent.pointerDown(columnBand, { button: 0, clientX: 80, clientY: 15, pointerId: 3 });
-  fireEvent.pointerMove(columnBand, { clientX: 120, clientY: 15, pointerId: 3 });
-  fireEvent.pointerUp(columnBand, { clientX: 120, clientY: 15, pointerId: 3 });
-  // ... and so is the stretch of the row boundary past the handle.
-  fireEvent.pointerDown(rowBand, { button: 0, clientX: 30, clientY: 20, pointerId: 4 });
-  fireEvent.pointerMove(rowBand, { clientX: 30, clientY: 35, pointerId: 4 });
-  fireEvent.pointerUp(rowBand, { clientX: 30, clientY: 35, pointerId: 4 });
-  expect(resizes).toEqual([{ axis: 'col', index: 0, size: 120 }, { axis: 'row', index: 0, size: 35 }]);
-});
-
-test('spans that collapse onto the same boundary share one handle', () => {
+test('spans that collapse onto the same boundary share one separator', () => {
   const { container } = mount(handlers, 1, { startRow: 0, startCol: 0,
     colIndices: [0, 3], colOffsets: [0, 80, 160], rowOffsets: [0, 20],
-    // columns 1 and 2 are hidden separately: one gap, one handle over both.
-    hiddenColSpans: [[1, 1], [2, 2]] }, null, null, labelsFor);
-  const handles = hiddenHandles(container);
-  expect(handles.map((handle) => [handle.getAttribute('data-start'), handle.getAttribute('data-end')]))
-    .toEqual([['1', '2']]);
+    hiddenColSpans: [[1, 1], [2, 2]] });
+  expect(container.querySelectorAll('[data-testid="xlsx-hidden-divider"]')).toHaveLength(2);
 });
 
-test('without onHeaderUnhide the band paints no handle', () => {
-  // a viewer supplies only a press: the doubled separator is all it gets.
-  const { container } = mount({ onHeaderMouseDown: handlers.onHeaderMouseDown },
-    1, hiddenGrid, null, null, labelsFor);
-  expect(hiddenHandles(container)).toEqual([]);
+test('a collapsed hidden span paints the doubled separator and no reveal handle', () => {
+  const { container } = mount(handlers, 1, hiddenGrid);
   expect(container.querySelectorAll('[data-testid="xlsx-hidden-divider"]')).toHaveLength(4);
+  expect(container.querySelectorAll('[role="button"]')).toHaveLength(0);
 });
 
 test('the select-all corner is live only with an onSelectAll handler', () => {

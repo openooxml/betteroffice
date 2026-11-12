@@ -1789,21 +1789,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         : { type: 'setRowHeight', sheet, row: index, height: rowHeightFromPx(size) }];
     command({ kind: 'applyOps', payload: { args: [ops] } });
   };
-  const onHeaderUnhide = (axis: 'col' | 'row', spans: [number, number][]) => {
-    if (!editable()) return;
-    const frame = sourceRef.current?.painted;
-    if (!frame || frame.request.sheet !== activeRef.current) return;
-    const sheet = activeRef.current;
-    const ops = spans.map(([start, end]) => axis === 'col'
-      ? { type: 'setColsVisibility', sheet, col: start, count: end - start + 1, hidden: false }
-      : { type: 'setRowsVisibility', sheet, row: start, count: end - start + 1, hidden: false });
-    // one transaction keeps a whole handle press a single undo step.
-    if (ops.length > 0) command({ kind: 'applyOps', payload: { args: [ops] } });
-  };
   // keyed on the session: the first render has run === null, and a `[]` memo
   // would freeze that closure so the `!run?.ready` guard never passed again.
   const headerHandlers = useMemo<SheetGridHeaderHandlers>(
-    () => ({ onHeaderMouseDown, onHeaderResize, onHeaderUnhide, onSelectAll,
+    () => ({ onHeaderMouseDown, onHeaderResize, onSelectAll,
       // a drag from an unselected header extends from the anchor the press set;
       // the press already committed the drafts and took focus.
       onHeaderDragSelect: (axis, index) => {
@@ -2112,8 +2101,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
             painted={pluginHost.painted} zoom={zoom} top={props.showSheetHeaders ? COLUMN_HEADER_HEIGHT : 0} />}
           <PeerlessSheetGrid store={presentation} active={active} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0} showSheetHeaders={Boolean(props.showSheetHeaders)} headerHandlers={headerHandlers}
-            selectAllLabel={t('commands.selectAll')}
-            unhideLabels={{ col: t('commands.unhideColumns'), row: t('commands.unhideRows') }}>
+            selectAllLabel={t('commands.selectAll')}>
           <div ref={scrollRef} id={gridId} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
             role="group" aria-roledescription={t('a11y.gridRoleDescription')}
             aria-label={sheets.find((sheet) => sheet.index === active)?.name || t('a11y.gridLabel')}

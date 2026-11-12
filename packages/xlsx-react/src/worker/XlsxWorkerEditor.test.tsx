@@ -9465,9 +9465,8 @@ describe('workbook worker editor header interactions', () => {
     ]);
   });
 
-  // The unhide fixtures press a track the harness window stops short of, so the
-  // painted frame is widened on both axes. Hidden spans ride along untouched:
-  // they are sheet coordinates, not window positions.
+  // The run fixtures press a track the harness window stops short of, so the
+  // painted frame is widened on both axes.
   const paintWideTracks = (frame: FrameMock) => {
     const base = frame.getMockImplementation()!;
     frame.mockImplementation(async (viewport, options) => {
@@ -9481,55 +9480,6 @@ describe('workbook worker editor header interactions', () => {
         rowOffsets: Array.from({ length: 10 }, (_, index) => index * 24) } } };
     });
   };
-  const hiddenHandle = (view: { container: HTMLElement }, axis: 'col' | 'row') => {
-    const handle = view.container.querySelector<HTMLElement>(
-      `[data-testid="xlsx-hidden-handle"][data-axis="${axis}"]`);
-    expect(handle).not.toBeNull();
-    return handle!;
-  };
-
-  it('reveals the hidden column from its band handle as one legacy edit', async () => {
-    const host = harness();
-    host.hidden.cols.push([4, 4]);
-    paintWideTracks(host.sessionMethods.frame);
-    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
-    Object.assign(host.editMethods, { applyOps });
-    const view = await mountLegacy();
-    fireEvent.click(hiddenHandle(view, 'col'));
-    expect(applyOps).toHaveBeenCalledTimes(1);
-    expect(applyOps.mock.calls[0]![0]).toEqual([
-      { type: 'setColsVisibility', sheet: 0, col: 4, count: 1, hidden: false },
-    ]);
-  });
-
-  it('reveals the hidden column from its handle through one peerless applyOps transaction', async () => {
-    const host = peerlessHarness();
-    host.hidden.cols.push([4, 4]);
-    paintWideTracks(host.frame);
-    const view = await host.mount(undefined, false, { showSheetHeaders: true });
-    fireEvent.click(hiddenHandle(view, 'col'));
-    await waitFor(() => expect(host.sent.some((command) => command.kind === 'applyOps')).toBe(true));
-    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([
-      expect.objectContaining({ payload: { args: [[
-        { type: 'setColsVisibility', sheet: 0, col: 4, count: 1, hidden: false },
-      ]] } }),
-    ]);
-  });
-
-  it('reveals the hidden row from its band handle as one legacy edit', async () => {
-    const host = harness();
-    host.hidden.rows.push([6, 6]);
-    paintWideTracks(host.sessionMethods.frame);
-    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
-    Object.assign(host.editMethods, { applyOps });
-    const view = await mountLegacy();
-    fireEvent.click(hiddenHandle(view, 'row'));
-    expect(applyOps).toHaveBeenCalledTimes(1);
-    expect(applyOps.mock.calls[0]![0]).toEqual([
-      { type: 'setRowsVisibility', sheet: 0, row: 6, count: 1, hidden: false },
-    ]);
-  });
-
   it('writes a dragged column width in characters, not pixels', async () => {
     const host = harness();
     const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
@@ -9867,13 +9817,20 @@ describe('workbook worker editor header interactions', () => {
   });
 
   // Without headers the marquee keeps its bordered, washed box on the cell rect.
-  const expectBorderedMarquee = (view: ReturnType<typeof render>, activeTestId: string) => {
+  const untaggedOverlay = (view: ReturnType<typeof render>) => {
+    const boxes = Array.from(view.getByTestId('xlsx-overlay-host').children)
+      .filter((box) => !box.hasAttribute('data-testid'));
+    expect(boxes).toHaveLength(1);
+    return boxes[0] as HTMLElement;
+  };
+  const expectBorderedMarquee = (view: ReturnType<typeof render>, activeTestId?: string) => {
     const marquee = view.getByTestId('xlsx-selection') as HTMLElement;
     expect([marquee.style.border, marquee.style.background, marquee.style.boxShadow])
       .toEqual(['1px solid #217346', 'rgba(33, 115, 70, 0.12)', '']);
     expect([marquee.style.left, marquee.style.top, marquee.style.width, marquee.style.height])
       .toEqual(['0px', '0px', '96px', '24px']);
-    const active = view.getByTestId(activeTestId) as HTMLElement;
+    expect(view.queryByTestId('xlsx-active-cell')).toBeNull();
+    const active = activeTestId ? view.getByTestId(activeTestId) as HTMLElement : untaggedOverlay(view);
     expect([active.style.border, active.style.boxShadow, active.style.left, active.style.width, active.style.height])
       .toEqual(['2px solid #217346', '', '0px', '96px', '24px']);
     expect(view.queryAllByTestId('xlsx-selection-fill')).toHaveLength(0);
@@ -9884,7 +9841,7 @@ describe('workbook worker editor header interactions', () => {
     const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
     await opened();
     await waitFor(() => view.getByTestId('xlsx-selection'));
-    expectBorderedMarquee(view, 'xlsx-active-cell');
+    expectBorderedMarquee(view);
   });
 
   it('keeps the bordered peerless marquee without headers', async () => {

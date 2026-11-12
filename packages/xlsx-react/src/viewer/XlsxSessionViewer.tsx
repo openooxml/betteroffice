@@ -566,7 +566,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
                       {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
                         style={headers ? ring(scaledRect(selectionRect, paintedZoom))
                           : outline(selectionRect, `1px solid ${BRAND}`, 'rgba(33, 115, 70, 0.12)')} />}
-                      {focusRect && !selectedChart && <div data-testid="xlsx-active-cell"
+                      {focusRect && !selectedChart && <div data-testid={headers ? 'xlsx-active-cell' : undefined}
                         style={headers ? ring(scaledRect(focusRect, paintedZoom), ACTIVE_CELL_WIDTH)
                           : outline(focusRect, `2px solid ${BRAND}`)} />}
                       {chartRect && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart} aria-hidden

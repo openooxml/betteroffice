@@ -129,23 +129,6 @@ interface Fixture {
   charts: ChartRegion[];
 }
 
-/** A copy of `bytes` whose engine model hides the given tracks. */
-function withHiddenTracks(
-  bytes: Uint8Array,
-  hidden: { columns?: number[]; rows?: number[] }
-): Uint8Array {
-  const handle = openWorkbook(bytes);
-  try {
-    handle.applyOps([
-      ...(hidden.columns ?? []).map((col) => ({ type: 'setColsVisibility', sheet: 0, col, count: 1, hidden: true })),
-      ...(hidden.rows ?? []).map((row) => ({ type: 'setRowsVisibility', sheet: 0, row, count: 1, hidden: true })),
-    ]);
-    return handle.save();
-  } finally {
-    handle.dispose();
-  }
-}
-
 function fixtureFrom(bytes: Uint8Array): Fixture {
   const probe = openWorkbook(bytes);
   try {
@@ -283,6 +266,13 @@ async function mountEditor(
 
 function mountWithHeaders(fixture: Fixture = plain) {
   return mountEditor(fixture, undefined, true);
+}
+
+function headerlessActiveCell(surface: HTMLElement): HTMLElement {
+  const boxes = Array.from(surface.querySelectorAll<HTMLElement>('div:not([data-testid])'))
+    .filter((box) => box.style.border === '2px solid #217346');
+  expect(boxes).toHaveLength(1);
+  return boxes[0]!;
 }
 
 // the centre of a chart's visible region, which is where the editor paints it.
@@ -447,8 +437,8 @@ describe('XlsxEditor grid pointer handling', () => {
     expect(marquee.style.boxShadow).toBe('');
     expect(parseFloat(marquee.style.left)).toBeCloseTo(cell.x);
     expect(parseFloat(marquee.style.width)).toBeCloseTo(cell.w);
-    const active = view.view.getByTestId('xlsx-active-cell');
-    expect(active.style.border).toBe('2px solid #217346');
+    expect(view.view.queryByTestId('xlsx-active-cell')).toBeNull();
+    const active = headerlessActiveCell(view.surface);
     expect(active.style.boxShadow).toBe('');
     expect(parseFloat(active.style.left)).toBeCloseTo(cell.x);
     expect(parseFloat(active.style.height)).toBeCloseTo(cell.h);
@@ -771,47 +761,6 @@ describe('XlsxEditor grid pointer handling', () => {
     expect(applyOps).toHaveBeenCalledTimes(1);
     expect(applyOps.mock.calls[0]![0]).toEqual([
       { type: 'setFreezePane', sheet: 0, pane: { rows: 0, cols: 1, top_left: { row: 0, col: 1 } } },
-    ]);
-  });
-
-  it('unhides the hidden column from its band handle', async () => {
-    const view = await mountWithHeaders(fixtureFrom(withHiddenTracks(plain.bytes, { columns: [4] })));
-    const handle = view.view.container.querySelector<HTMLElement>(
-      '[data-testid="xlsx-hidden-handle"][data-axis="col"]')!;
-    expect(handle).not.toBeNull();
-    const applyOps = spyOn(view.workbook(), 'applyOps');
-    fireEvent.click(handle);
-    // one range op, one batch, so the reveal is one undo step.
-    expect(applyOps).toHaveBeenCalledTimes(1);
-    expect(applyOps.mock.calls[0]![0]).toEqual([
-      { type: 'setColsVisibility', sheet: 0, col: 4, count: 1, hidden: false },
-    ]);
-  });
-
-  it('unhides a hidden run from its band handle as one range op', async () => {
-    const view = await mountWithHeaders(fixtureFrom(withHiddenTracks(plain.bytes, { columns: [4, 5] })));
-    const handle = view.view.container.querySelector<HTMLElement>(
-      '[data-testid="xlsx-hidden-handle"][data-axis="col"]')!;
-    expect(handle.dataset.start).toBe('4');
-    expect(handle.dataset.end).toBe('5');
-    const applyOps = spyOn(view.workbook(), 'applyOps');
-    fireEvent.click(handle);
-    expect(applyOps).toHaveBeenCalledTimes(1);
-    expect(applyOps.mock.calls[0]![0]).toEqual([
-      { type: 'setColsVisibility', sheet: 0, col: 4, count: 2, hidden: false },
-    ]);
-  });
-
-  it('unhides the hidden row from its band handle', async () => {
-    const view = await mountWithHeaders(fixtureFrom(withHiddenTracks(plain.bytes, { rows: [6] })));
-    const handle = view.view.container.querySelector<HTMLElement>(
-      '[data-testid="xlsx-hidden-handle"][data-axis="row"]')!;
-    expect(handle).not.toBeNull();
-    const applyOps = spyOn(view.workbook(), 'applyOps');
-    fireEvent.click(handle);
-    expect(applyOps).toHaveBeenCalledTimes(1);
-    expect(applyOps.mock.calls[0]![0]).toEqual([
-      { type: 'setRowsVisibility', sheet: 0, row: 6, count: 1, hidden: false },
     ]);
   });
 
@@ -1182,7 +1131,8 @@ describe('fill handle with sheet headers', () => {
     expect(view.view.queryByTestId('xlsx-grid')).toBeNull();
     expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
     expect(view.view.queryByTestId('xlsx-focus')).toBeNull();
-    expect(view.view.getByTestId('xlsx-active-cell').style.border).toBe('2px solid #217346');
+    expect(view.view.queryByTestId('xlsx-active-cell')).toBeNull();
+    expect(headerlessActiveCell(view.surface).style.border).toBe('2px solid #217346');
   });
 
   it('renders no handle with headers on and the fill handle off', async () => {

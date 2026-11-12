@@ -2239,21 +2239,6 @@ export function XlsxEditorContent({
     [applyHeaderOps]
   );
 
-  /** Reveal the hidden spans the painted band marked, as one undoable edit. */
-  const unhideHeaderTracks = useCallback(
-    (axis: 'col' | 'row', spans: [number, number][]): void => {
-      const painted = paintedRef.current;
-      if (!painted || painted.sheet !== activeSheetRef.current) return;
-      const sheet = painted.sheet;
-      const ops: unknown[] = spans.map(([start, end]) => axis === 'col'
-        ? { type: 'setColsVisibility', sheet, col: start, count: end - start + 1, hidden: false }
-        : { type: 'setRowsVisibility', sheet, row: start, count: end - start + 1, hidden: false });
-      // one batch keeps a whole handle press a single undo step.
-      if (ops.length > 0) applyHeaderOps(ops);
-    },
-    [applyHeaderOps]
-  );
-
   const headerHandlers = useMemo<SheetGridHeaderHandlers>(() => ({
     onHeaderMouseDown: (axis, index, event) => {
       if (fromPlugin(event)) return;
@@ -2272,9 +2257,8 @@ export function XlsxEditorContent({
       selectHeaderTrack(axis, index, 'extend');
     },
     onHeaderResize: resizeHeaderTrack,
-    onHeaderUnhide: unhideHeaderTracks,
     onSelectAll: selectAll,
-  }), [selectHeaderTrack, resizeHeaderTrack, unhideHeaderTracks, selectAll, focusContainer]);
+  }), [selectHeaderTrack, resizeHeaderTrack, selectAll, focusContainer]);
 
   const headerMenu = useContextMenu({
     // the bands are siblings of the scroller, so their contextmenu never
@@ -2877,8 +2861,7 @@ export function XlsxEditorContent({
           <SheetGrid frame={frame} zoom={zoom} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0}
             showSheetHeaders={showSheetHeaders}
             headerHandlers={headerHandlers} selection={selection} sheet={activeSheet}
-            selectAllLabel={t('commands.selectAll')}
-            unhideLabels={{ col: t('commands.unhideColumns'), row: t('commands.unhideRows') }}>
+            selectAllLabel={t('commands.selectAll')}>
           <div
             ref={scrollRef}
             data-testid="xlsx-scroll"
@@ -3018,7 +3001,7 @@ export function XlsxEditorContent({
                 )}
                 {scaledFocusRect && focusMarquee && !selectedChart && !editing && (
                   <div
-                    data-testid="xlsx-active-cell"
+                    data-testid={showSheetHeaders ? 'xlsx-active-cell' : undefined}
                     style={showSheetHeaders ? {
                       position: 'absolute',
                       left: focusMarquee.left,

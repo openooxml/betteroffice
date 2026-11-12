@@ -1935,20 +1935,10 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       ? { type: 'setColWidth', sheet, col: index, width: columnWidthFromPx(size) }
       : { type: 'setRowHeight', sheet, row: index, height: rowHeightFromPx(size) });
   };
-  const onHeaderUnhide = (axis: 'col' | 'row', spans: [number, number][]) => {
-    const painted = sourceRef.current?.painted;
-    if (!painted || painted.request.sheet !== activeRef.current) return;
-    const sheet = activeRef.current;
-    const ops = spans.map(([start, end]) => axis === 'col'
-      ? { type: 'setColsVisibility', sheet, col: start, count: end - start + 1, hidden: false }
-      : { type: 'setRowsVisibility', sheet, row: start, count: end - start + 1, hidden: false });
-    // one batch keeps a whole handle press a single undo step.
-    if (ops.length > 0) applyStructuralOps(ops);
-  };
   // keyed on the session for the same reason the peerless editor is: the first
   // render has no session, and a `[]` memo would pin handlers bound to it.
   const headerHandlers = useMemo<SheetGridHeaderHandlers>(() => ({
-    onHeaderMouseDown, onHeaderResize, onHeaderUnhide, onSelectAll,
+    onHeaderMouseDown, onHeaderResize, onSelectAll,
     // a drag from an unselected header extends from the anchor the press set;
     // the press already committed the draft and took focus.
     onHeaderDragSelect: (axis, index) => {
@@ -2080,8 +2070,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                 painted={pluginHost.painted} zoom={zoom} top={props.showSheetHeaders ? COLUMN_HEADER_HEIGHT : 0} />}
               <SheetGrid frame={frame} zoom={paintedZoom} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0} showSheetHeaders={headers} headerHandlers={headerHandlers} selection={selection}
                 sheet={painted?.request.sheet}
-                selectAllLabel={t('commands.selectAll')}
-                unhideLabels={{ col: t('commands.unhideColumns'), row: t('commands.unhideRows') }}>
+                selectAllLabel={t('commands.selectAll')}>
               <div ref={scrollRef} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
                 onMouseDown={onMouseDown} onMouseMove={onMouseMove} onClick={onClick}
                 onDoubleClick={(event) => {
@@ -2119,7 +2108,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                         rectForRange={fillPreviewRect} cellAt={cellAtPointForFill} onFill={fillSelection}
                         ariaLabel={t('a11y.fillHandleLabel')} />
                     )}
-                    {focusRect && !selectedChart && !editing && <div data-testid="xlsx-active-cell"
+                    {focusRect && !selectedChart && !editing && <div data-testid={headers ? 'xlsx-active-cell' : undefined}
                       style={headers ? marquee(focusRect, ACTIVE_CELL_WIDTH) : outline(focusRect, `2px solid ${BRAND}`)} />}
                     {chartRect && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart?.id} aria-hidden
                       style={{ ...(headers ? edgeOutline(chartRect, BRAND) : outline(chartRect, `2px solid ${BRAND}`)),
