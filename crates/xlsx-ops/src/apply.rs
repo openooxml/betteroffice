@@ -153,7 +153,10 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
 /// Refuses a track move unless built with `unstable-track-moves`, and a track
 /// visibility range unless built with `unstable-track-visibility`.
 #[cfg_attr(
-    all(feature = "unstable-track-moves", feature = "unstable-track-visibility"),
+    all(
+        feature = "unstable-track-moves",
+        feature = "unstable-track-visibility"
+    ),
     allow(unused_variables)
 )]
 pub fn ensure_op_available(op: &Op) -> Result<(), OpError> {
@@ -6208,8 +6211,7 @@ mod track_visibility_unavailable_tests {
     use super::*;
     use crate::UndoStack;
 
-    const REFUSAL: &str =
-        "cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet";
+    const REFUSAL: &str = "cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet";
 
     fn ranges() -> [Op; 2] {
         [

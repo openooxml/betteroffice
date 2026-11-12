@@ -359,7 +359,10 @@ fn all_ops() -> Vec<Op> {
 
 fn refused_on_recovery(op: &Op) -> bool {
     cfg!(not(feature = "unstable-track-visibility"))
-        && matches!(op, Op::SetColsVisibility { .. } | Op::SetRowsVisibility { .. })
+        && matches!(
+            op,
+            Op::SetColsVisibility { .. } | Op::SetRowsVisibility { .. }
+        )
 }
 
 fn recoverable_ops() -> Vec<Op> {
@@ -385,8 +388,7 @@ fn every_op_has_a_fixed_tag_and_round_trips() {
 #[cfg(not(feature = "unstable-track-visibility"))]
 #[test]
 fn a_recovery_checkpoint_holding_a_visibility_range_is_refused() {
-    const REFUSAL: &str =
-        "cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet";
+    const REFUSAL: &str = "cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet";
     for range in all_ops().into_iter().filter(refused_on_recovery) {
         assert_eq!(
             Op::read(&mut Reader::new(&encoded(&range)))
@@ -406,7 +408,8 @@ fn a_recovery_checkpoint_holding_a_visibility_range_is_refused() {
                 .unwrap();
         }
         workbook.undo(options).unwrap();
-        workbook.undo = UndoStack::from_recovery_stacks(vec![vec![range.clone()]], vec![vec![range]]);
+        workbook.undo =
+            UndoStack::from_recovery_stacks(vec![vec![range.clone()]], vec![vec![range]]);
         let bytes = workbook
             .recovery_checkpoint_with_history(1, None, true)
             .unwrap();

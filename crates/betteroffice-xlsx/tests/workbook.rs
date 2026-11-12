@@ -1,4 +1,4 @@
-#[cfg(feature = "unstable-track-visibility")]
+#[cfg(any(feature = "unstable-track-moves", feature = "unstable-track-visibility"))]
 use betteroffice_xlsx::MAX_COLS;
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
