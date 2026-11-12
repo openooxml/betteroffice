@@ -3690,13 +3690,19 @@ fn write_hyperlinks(
 }
 
 fn write_sheet_views(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
-    let Some(pane) = sheet.freeze_pane else {
+    let hide = sheet.format.hide_gridlines;
+    if sheet.freeze_pane.is_none() && !hide {
         return Ok(());
-    };
+    }
     w.create_element("sheetViews").write_inner_content(|w| {
-        w.create_element("sheetView")
-            .with_attribute(("workbookViewId", "0"))
-            .write_inner_content(|w| write_pane(w, pane))?;
+        let view = w
+            .create_element("sheetView")
+            .with_attributes(hide.then_some(("showGridLines", "0")))
+            .with_attribute(("workbookViewId", "0"));
+        match sheet.freeze_pane {
+            Some(pane) => view.write_inner_content(|w| write_pane(w, pane))?,
+            None => view.write_empty()?,
+        };
         Ok(())
     })?;
     Ok(())
