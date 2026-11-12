@@ -14,10 +14,38 @@ use xlsx_model::workbook::ColumnDefaults;
 use xlsx_model::{CellFormat, CellRange, CellRef, SheetId, Workbook as WorkbookModel};
 use xlsx_ops::{CellState, Op};
 
+use crate::workbook::PreservedSheetState;
 use crate::{Error, Result};
 
 fn refuses(feature: &str) -> Error {
     Error::InvalidOperation(format!("fill cannot safely preserve {feature}"))
+}
+
+fn covers_partially(ranges: &[CellRange], area: CellRange) -> bool {
+    let mut covered = false;
+    let mut uncovered = false;
+    for row in area.start.row..=area.end.row {
+        for col in area.start.col..=area.end.col {
+            if ranges.iter().any(|range| range.contains(CellRef::new(row, col))) {
+                covered = true;
+            } else {
+                uncovered = true;
+            }
+            if covered && uncovered {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn rule_ranges(sqref: &str) -> Option<Vec<CellRange>> {
+    let ranges = sqref
+        .split_whitespace()
+        .map(CellRange::parse_a1)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (!ranges.is_empty()).then_some(ranges)
 }
 
 /// The cells `destination` fills, each as the source cell whose tile it repeats.
@@ -28,6 +56,36 @@ fn tiled_source(source: CellRange, row: u32, col: u32) -> CellRef {
         source.start.row + (row - source.start.row) % rows,
         source.start.col + (col - source.start.col) % cols,
     )
+}
+
+/// Refuses a fill over the data validations and comments a source sheet part
+/// keeps. Once rows or columns moved since opening, any validation refuses.
+pub(crate) fn preserved_fill_refusal(
+    package: &xlsx_parse::PreservedPackage,
+    preserved: &PreservedSheetState,
+    sheet: SheetId,
+    destination: CellRange,
+) -> Option<Error> {
+    let origin = preserved.origins.get(sheet.0 as usize).copied().flatten()?;
+    let axes = preserved
+        .axes
+        .get(sheet.0 as usize)
+        .and_then(Option::as_ref);
+    let exact = axes.is_some_and(xlsx_parse::SheetAxes::is_identity);
+    let feature = package.fill_unsupported_feature(
+        origin,
+        |ranges| !exact || covers_partially(ranges, destination),
+        |at| {
+            axes.and_then(|axes| {
+                Some(CellRef::new(
+                    axes.rows.current(at.row)?,
+                    axes.cols.current(at.col)?,
+                ))
+            })
+            .is_none_or(|at| destination.contains(at))
+        },
+    )?;
+    Some(refuses(feature))
 }
 
 /// Builds the `SetCell` ops that tile `source` over `destination`.
@@ -76,6 +134,24 @@ pub(crate) fn fill_range_ops(
         })
     }) {
         return Err(refuses("charts anchored in the filled range"));
+    }
+    if target
+        .hyperlinks
+        .iter()
+        .any(|link| link.range.overlaps(&source) || link.range.overlaps(&destination))
+    {
+        return Err(refuses("hyperlinks"));
+    }
+    for group in &target.conditional_formats {
+        match rule_ranges(&group.sqref) {
+            Some(ranges) if covers_partially(&ranges, destination) => {
+                return Err(refuses("conditional formats"));
+            }
+            None if !group.sqref.trim().is_empty() => {
+                return Err(refuses("conditional formats"));
+            }
+            _ => {}
+        }
     }
 
     let rows = (source.end.row - source.start.row + 1) as usize;
@@ -131,10 +207,11 @@ pub(crate) fn fill_range_ops(
             // plain xf when the workbook has none and records it in the edit,
             // so the pin has no effect on refusals and saves/undoes with the
             // rest of the fill.
-            let target_style = target
-                .cell(at)
-                .map(|cell| cell.style)
-                .unwrap_or_else(|| defaults.effective_style(at));
+            let target_style = if state == CellState::default() {
+                defaults.inherited_style(at)
+            } else {
+                state.style
+            };
             let plain = model.styles.resolved_format(None);
             if state.style.is_none()
                 && target_style

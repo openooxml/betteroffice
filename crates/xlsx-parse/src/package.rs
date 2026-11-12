@@ -5,7 +5,7 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer};
 use xlsx_model::sort::sort_by_shared;
-use xlsx_model::{CellRef, SheetId, Workbook};
+use xlsx_model::{CellRange, CellRef, SheetId, Workbook};
 
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
@@ -431,6 +431,45 @@ impl PreservedPackage {
         None
     }
 
+    /// What of source sheet `index` a fill cannot keep: a data validation for
+    /// which `partial` holds, or a comment on a cell `comment_affected` names.
+    #[doc(hidden)]
+    pub fn fill_unsupported_feature(
+        &self,
+        index: usize,
+        partial: impl Fn(&[CellRange]) -> bool,
+        comment_affected: impl Fn(CellRef) -> bool,
+    ) -> Option<&'static str> {
+        let sheet = self.sheets.get(index)?;
+        let validations = find_part(&self.parts, &sheet.path).and_then(validation_ranges);
+        if validations.is_none_or(|rules| rules.iter().any(|ranges| partial(ranges))) {
+            return Some("data validations");
+        }
+        let relationships = match find_part(&self.parts, &relationship_part_path(&sheet.path)) {
+            Some(bytes) => match parse_relationships(bytes) {
+                Ok(relationships) => relationships,
+                Err(_) => return Some("comments"),
+            },
+            None => return None,
+        };
+        for relationship in relationships {
+            if !relationship.has_type("comments") && !relationship.has_type("threadedComment") {
+                continue;
+            }
+            let Some(target) = relationship.target() else {
+                return Some("comments");
+            };
+            let base = sheet.path.rsplit_once('/').map_or("", |(base, _)| base);
+            let Some(bytes) = find_part(&self.parts, &resolve_part_path(base, target)) else {
+                return Some("comments");
+            };
+            if comment_move_unsupported(bytes, &comment_affected).unwrap_or(true) {
+                return Some("comments");
+            }
+        }
+        None
+    }
+
     fn stranded(&self, disturbed: impl Fn(&UnpatchableReference) -> bool) -> Option<&str> {
         self.unpatchable_references
             .iter()
@@ -642,6 +681,42 @@ fn comment_move_unsupported(
         }
     }
 }
+
+/// Each data validation's ranges in a worksheet part, read from the `sqref`
+/// attribute or, for extension validations, the `sqref` element. `None` when
+/// a range cannot be read.
+fn validation_ranges(bytes: &[u8]) -> Option<Vec<Vec<CellRange>>> {
+    let parse = |sqref: &str| {
+        let ranges = sqref
+            .split_whitespace()
+            .map(CellRange::parse_a1)
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        (!ranges.is_empty()).then_some(ranges)
+    };
+    let mut xml = reader(bytes);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    let mut rules = Vec::new();
+    loop {
+        match next_event(&mut xml, &mut buffer, &mut depth).ok()? {
+            Event::Start(start) | Event::Empty(start)
+                if local_name(&start).as_slice() == b"dataValidation" =>
+            {
+                if let Some(sqref) = attr(&start, b"sqref").ok()? {
+                    rules.push(parse(&sqref)?);
+                }
+            }
+            Event::Start(start) if local_name(&start).as_slice() == b"sqref" => {
+                let sqref = collect_text(&mut xml, &mut buffer, &mut depth).ok()?;
+                rules.push(parse(&sqref)?);
+            }
+            Event::Eof => return Some(rules),
+            _ => {}
+        }
+    }
+}
+
 
 /// A sheet's `state` in the workbook part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

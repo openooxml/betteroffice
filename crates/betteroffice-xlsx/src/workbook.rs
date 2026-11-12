@@ -2412,6 +2412,16 @@ impl Workbook {
     ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, source)?;
         self.validate_bounded_range(sheet, destination)?;
+        if let Some(package) = self.source_package.as_ref()
+            && let Some(error) = crate::fill::preserved_fill_refusal(
+                package.materialize()?,
+                &self.preserved,
+                sheet,
+                destination,
+            )
+        {
+            return Err(error);
+        }
         let ops = crate::fill::fill_range_ops(&self.model, sheet, source, destination)?;
         self.apply_carried_ops(ops, options)
     }

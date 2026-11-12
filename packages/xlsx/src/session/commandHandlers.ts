@@ -402,7 +402,7 @@ function preflight(handle: WorkbookHandle, state: WorkbookCommandState, op: Work
  * What a structural edit was refused to protect, as an editor names it to the user: a chart,
  * a table, a pivot table, or anything else that names the cells the edit would move.
  */
-export type WorkbookStructuralRefusalCause = 'chart' | 'table' | 'pivot' | 'other';
+export type WorkbookStructuralRefusalCause = 'chart' | 'table' | 'pivot' | 'fill' | 'other';
 
 /** The structural refusal result an `unsupported` status carries: the engine's message and its cause. */
 export interface WorkbookStructuralRefusalResult {
@@ -415,6 +415,10 @@ export function structuralRefusalCause(message: string): WorkbookStructuralRefus
     message === 'fill cannot safely preserve charts anchored in the filled range') return 'chart';
   if (message === 'range move cannot safely preserve Excel tables' ||
     message === 'fill cannot safely preserve Excel tables') return 'table';
+  if (message === 'fill cannot safely preserve hyperlinks' ||
+    message === 'fill cannot safely preserve comments' ||
+    message === 'fill cannot safely preserve data validations' ||
+    message === 'fill cannot safely preserve conditional formats') return 'fill';
   const part = /^(.+?) references cells this (?:edit would move|move would relocate), and it cannot be rewritten$/
     .exec(message)?.[1].toLowerCase().replace(/^\//, '');
   if (!part) return 'other';

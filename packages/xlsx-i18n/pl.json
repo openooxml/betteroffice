@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Tej zmiany nie można zastosować: wykres używa komórek, które zostałyby przesunięte. Skoroszyt nie został zmieniony.",
       "editUnsupportedTable": "Tej zmiany nie można zastosować: tabela używa komórek, które zostałyby przesunięte. Skoroszyt nie został zmieniony.",
       "editUnsupportedPivot": "Tej zmiany nie można zastosować: tabela przestawna używa komórek, które zostałyby przesunięte. Skoroszyt nie został zmieniony.",
+      "editUnsupportedFill": "Tego wypełnienia nie można zastosować: zmieniłoby komórki z linkami, notatkami lub regułami. Skoroszyt nie został zmieniony.",
       "sheetProtected": "Ta komórka znajduje się w chronionym arkuszu.",
       "hostRefused": "Ta zmiana jest niedozwolona.",
       "tooManyToCheck": "Za dużo komórek do sprawdzenia przez wtyczki (limit {limit}).",

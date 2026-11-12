@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Diese Bearbeitung kann nicht ausgeführt werden: Ein Diagramm verwendet Zellen, die sie verschieben würde. Die Arbeitsmappe bleibt unverändert.",
       "editUnsupportedTable": "Diese Bearbeitung kann nicht ausgeführt werden: Eine Tabelle verwendet Zellen, die sie verschieben würde. Die Arbeitsmappe bleibt unverändert.",
       "editUnsupportedPivot": "Diese Bearbeitung kann nicht ausgeführt werden: Eine Pivot-Tabelle verwendet Zellen, die sie verschieben würde. Die Arbeitsmappe bleibt unverändert.",
+      "editUnsupportedFill": "Diese Füllung kann nicht ausgeführt werden: Sie würde Zellen mit Links, Notizen oder Regeln ändern. Die Arbeitsmappe bleibt unverändert.",
       "sheetProtected": "Diese Zelle liegt auf einem geschützten Blatt.",
       "hostRefused": "Diese Bearbeitung ist nicht zulässig.",
       "tooManyToCheck": "Zu viele Zellen für die Prüfung durch Plugins (Limit {limit}).",

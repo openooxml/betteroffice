@@ -92,7 +92,8 @@ destination rectangle as one undo step. `destination` includes the source and mu
 top-left corner; cells outside the source are filled by tiling the source block. Values, cached
 formula results, and styles are copied, and formulas are translated by their relative offset with
 `$` references kept. This is copy tiling only — there is no series or trend detection. Array
-formulas, merged cells, Excel tables, and charts anchored in either rectangle are refused before
+formulas, merged cells, Excel tables, charts anchored in either rectangle, hyperlinks, comments, and
+data validations or conditional formats covering only part of the filled cells are refused before
 the workbook changes, so surface the error and keep the selection where it was.
 
 ## Printing and PNG export

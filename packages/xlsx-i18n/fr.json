@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Cette modification ne peut pas être appliquée : un graphique utilise des cellules qu’elle déplacerait. Le classeur n’a pas changé.",
       "editUnsupportedTable": "Cette modification ne peut pas être appliquée : un tableau utilise des cellules qu’elle déplacerait. Le classeur n’a pas changé.",
       "editUnsupportedPivot": "Cette modification ne peut pas être appliquée : un tableau croisé dynamique utilise des cellules qu’elle déplacerait. Le classeur n’a pas changé.",
+      "editUnsupportedFill": "Cette recopie ne peut pas être appliquée : elle modifierait des cellules avec des liens, des notes ou des règles. Le classeur n’a pas changé.",
       "sheetProtected": "Cette cellule se trouve sur une feuille protégée.",
       "hostRefused": "Cette modification n’est pas autorisée.",
       "tooManyToCheck": "Trop de cellules à vérifier pour les plugins (limite {limit}).",

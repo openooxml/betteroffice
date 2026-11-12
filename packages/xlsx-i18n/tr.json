@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Bu düzenleme uygulanamıyor: bir grafik, düzenlemenin taşıyacağı hücreleri kullanıyor. Çalışma kitabı değişmedi.",
       "editUnsupportedTable": "Bu düzenleme uygulanamıyor: bir tablo, düzenlemenin taşıyacağı hücreleri kullanıyor. Çalışma kitabı değişmedi.",
       "editUnsupportedPivot": "Bu düzenleme uygulanamıyor: bir pivot tablo, düzenlemenin taşıyacağı hücreleri kullanıyor. Çalışma kitabı değişmedi.",
+      "editUnsupportedFill": "Bu doldurma uygulanamıyor: bağlantı, not veya kural içeren hücreleri değiştirir. Çalışma kitabı değişmedi.",
       "sheetProtected": "Bu hücre korumalı bir sayfada.",
       "hostRefused": "Bu düzenlemeye izin verilmiyor.",
       "tooManyToCheck": "Eklentilerin denetlemesi için çok fazla hücre var (sınır {limit}).",

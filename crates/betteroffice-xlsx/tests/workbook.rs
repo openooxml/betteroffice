@@ -4611,6 +4611,271 @@ fn fill_range_refuses_a_chart_anchored_in_the_filled_range() {
 }
 
 #[test]
+fn fill_range_pins_plain_style_over_an_unstyled_target_it_clears() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    let mut model = WorkbookModel::default();
+    let styled = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#ff0000".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let mut sheet = Sheet::new("Data");
+    sheet.col_styles.push(ColStyle {
+        first: 1,
+        last: 1,
+        xf: styled,
+    });
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Text {
+                value: "text".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            CellRange::new(cell("A1"), cell("B1")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let filled = workbook.model().sheets[0].cell(cell("B1"));
+    assert_eq!(
+        filled.and_then(|filled| filled.style),
+        Some(0),
+        "a cleared unstyled target keeps the plain look instead of taking the column's"
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_hyperlink_on_a_source_cell() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.hyperlinks.push(Hyperlink {
+        range: CellRange::new(cell("A1"), cell("A1")),
+        external_target: Some("https://example.com".into()),
+        location: None,
+        tooltip: None,
+        display: None,
+    });
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:A2",
+        "hyperlinks",
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_hyperlink_on_a_target_cell() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.hyperlinks.push(Hyperlink {
+        range: CellRange::new(cell("A2"), cell("A2")),
+        external_target: Some("https://example.com".into()),
+        location: None,
+        tooltip: None,
+        display: None,
+    });
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:A2",
+        "hyperlinks",
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_comment_on_a_target_cell() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".into(),
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/></Relationships>"#.into_bytes(),
+    ));
+    parts.push((
+        "xl/comments/comment1.xml".into(),
+        r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="A2" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#.into_bytes(),
+    ));
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A2")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains("comments")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+fn fill_validation_bytes(sqref: &str) -> Vec<u8> {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><dataValidations count="1"><dataValidation type="whole" sqref="{sqref}"><formula1>1</formula1></dataValidation></dataValidations></worksheet>"#
+        )
+        .into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn fill_range_refuses_a_validation_covering_only_the_source() {
+    let mut workbook = Workbook::open(&fill_validation_bytes("A1")).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains("data validations")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_allows_a_validation_covering_source_and_target() {
+    let mut workbook = Workbook::open(&fill_validation_bytes("A1:A3")).unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            CellRange::new(cell("A1"), cell("A3")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.cell(SheetId(0), cell("A3")).unwrap().input, "10");
+    let saved = workbook.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    assert!(test_part_text(&parts, "xl/worksheets/sheet1.xml").contains(r#"sqref="A1:A3""#));
+}
+
+#[test]
+fn fill_range_refuses_two_validations_that_split_the_filled_cells() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><dataValidations count="2"><dataValidation type="whole" sqref="A1"><formula1>1</formula1></dataValidation><dataValidation type="decimal" sqref="A2:A3"><formula1>2</formula1></dataValidation></dataValidations></worksheet>"#.to_vec(),
+    );
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("data validations")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_refuses_a_validation_once_rows_moved_since_opening() {
+    let mut workbook = Workbook::open(&fill_validation_bytes("A1:A3")).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A2"), cell("A2")),
+        CellRange::new(cell("A2"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("data validations")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_refuses_a_conditional_format_covering_only_the_target() {
+    use xlsx_model::{ConditionalFormatRule, ConditionalFormatting};
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.conditional_formats.push(ConditionalFormatting {
+        sqref: "B1".into(),
+        rules: vec![ConditionalFormatRule {
+            id: "cf:0".into(),
+            rule_type: "expression".into(),
+            operator: None,
+            formulas: vec!["B1>0".into()],
+            priority: 1,
+            dxf_id: None,
+            format: Default::default(),
+            raw_xml: None,
+        }],
+    });
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:B1",
+        "conditional formats",
+    );
+}
+
+#[test]
 fn move_range_refuses_related_comment_anchors_without_mutation() {
     for anchor in ["A1", "B1"] {
         for relationship_type in ["comments", "threadedComment"] {

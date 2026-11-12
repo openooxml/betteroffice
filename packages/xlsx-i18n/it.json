@@ -139,6 +139,7 @@
       "editUnsupportedChart": "Questa modifica non può essere applicata: un grafico usa celle che sposterebbe. La cartella di lavoro non è cambiata.",
       "editUnsupportedTable": "Questa modifica non può essere applicata: una tabella usa celle che sposterebbe. La cartella di lavoro non è cambiata.",
       "editUnsupportedPivot": "Questa modifica non può essere applicata: una tabella pivot usa celle che sposterebbe. La cartella di lavoro non è cambiata.",
+      "editUnsupportedFill": "Questo riempimento non può essere applicato: modificherebbe celle con collegamenti, note o regole. La cartella di lavoro non è cambiata.",
       "sheetProtected": "Questa cella si trova in un foglio protetto.",
       "hostRefused": "Questa modifica non è consentita.",
       "tooManyToCheck": "Troppe celle da controllare per i plugin (limite {limit}).",
