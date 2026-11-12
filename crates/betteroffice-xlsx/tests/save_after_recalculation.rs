@@ -264,10 +264,7 @@ fn a_stale_open_keeps_an_empty_string_array_follower_cached() {
 #[test]
 fn a_stale_open_keeps_an_empty_string_result_cached() {
     let source = package(
-        &CACHED.replace(
-            "</row>",
-            r#"<c r="D1" t="str"><f>""</f><v></v></c></row>"#,
-        ),
+        &CACHED.replace("</row>", r#"<c r="D1" t="str"><f>""</f><v></v></c></row>"#),
         "",
     );
     let workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
