@@ -3816,6 +3816,34 @@ impl EditingDoc {
         max_bytes: u32,
         segments_per_slice: usize,
     ) -> PrimeSlice {
+        self.prime_last_slice_bytes.store(0, Ordering::Relaxed);
+        let mut left = max_bytes as usize;
+        let outcome = self.prime_slice_step(
+            max_paragraphs,
+            max_inflated_bytes,
+            max_bytes,
+            segments_per_slice,
+            &mut left,
+        );
+        let digested = (max_bytes as usize).saturating_sub(left) as u64;
+        self.prime_last_slice_bytes.store(digested, Ordering::Relaxed);
+        outcome
+    }
+
+    /// The bytes the last [`Self::prime_save_seed_states_slice`] call digested, 0 for a call
+    /// that digested none.
+    pub fn prime_last_slice_bytes(&self) -> u64 {
+        self.prime_last_slice_bytes.load(Ordering::Relaxed)
+    }
+
+    fn prime_slice_step(
+        &self,
+        max_paragraphs: u32,
+        max_inflated_bytes: u32,
+        max_bytes: u32,
+        segments_per_slice: usize,
+        left: &mut usize,
+    ) -> PrimeSlice {
         let sliced = max_bytes != u32::MAX;
         let mut progress = self.prime_progress.lock().unwrap();
         let bytes = match self.source.lock().unwrap().as_ref() {
@@ -3908,7 +3936,6 @@ impl EditingDoc {
                 return PrimeSlice::Pending;
             }
         }
-        let mut left = max_bytes as usize;
         loop {
             if state.current.is_none() {
                 let Some(story) = state.stories.pop_front() else {
@@ -3922,7 +3949,7 @@ impl EditingDoc {
                 };
                 let anchors = state.anchors.remove(&story).unwrap_or_default();
                 let comments = crate::canonical::resolve_comment_anchors(&txn, &anchors);
-                left = left.saturating_sub(PRIME_STORY_COST);
+                *left = left.saturating_sub(PRIME_STORY_COST);
                 match StoryFingerprint::start(
                     self,
                     &txn,
@@ -3945,7 +3972,7 @@ impl EditingDoc {
                             *progress = None;
                             return PrimeSlice::Declined;
                         }
-                        if left == 0 {
+                        if *left == 0 {
                             return PrimeSlice::Pending;
                         }
                         continue;
@@ -3955,12 +3982,13 @@ impl EditingDoc {
             let Some((_, fingerprint)) = state.current.as_mut() else {
                 continue;
             };
-            let advanced = fingerprint.advance(&txn, &mut state.budget, left.max(1));
+            let advanced = fingerprint.advance(&txn, &mut state.budget, (*left).max(1));
             if fingerprint.vanished {
                 *progress = None;
                 return PrimeSlice::Declined;
             }
-            if let Some((false, _)) = advanced {
+            if let Some((false, used)) = advanced {
+                *left = left.saturating_sub(used);
                 return PrimeSlice::Pending;
             }
             let Some((story, fingerprint)) = state.current.take() else {
@@ -3968,7 +3996,7 @@ impl EditingDoc {
             };
             let comments = state.comments.remove(&story).unwrap_or_default();
             if let Some((true, used)) = advanced {
-                left = left.saturating_sub(used);
+                *left = left.saturating_sub(used);
                 if let Some((fingerprint, units, _)) = fingerprint.finish() {
                     let root = state.roots.get(&story).cloned().unwrap_or_default();
                     let story_state = Arc::new(StoryState {
@@ -3984,7 +4012,7 @@ impl EditingDoc {
                 *progress = None;
                 return PrimeSlice::Declined;
             }
-            if left == 0 {
+            if *left == 0 {
                 return PrimeSlice::Pending;
             }
         }

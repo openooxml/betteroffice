@@ -170,6 +170,11 @@ impl EditSessionCore {
         }
     }
 
+    /// The bytes the last [`Self::prime_save_seed_states_slice`] call digested.
+    pub fn prime_last_slice_bytes(&self) -> u64 {
+        self.engine.doc().prime_last_slice_bytes()
+    }
+
     /// The paragraph IDs a save applies, as the package writer's
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
     /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,

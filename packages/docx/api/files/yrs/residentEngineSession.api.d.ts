@@ -160,6 +160,8 @@ export type ResidentEngineSession = Pick<YrsSession, 'clientId' | 'applyDelete' 
     primeSaveSeedStates(maxParagraphs: number, maxInflatedBytes: number): boolean;
     /** One slice of {@link primeSaveSeedStates} digesting about `maxBytes` bytes: 0 known, 1 more to do, 2 declined. */
     primeSaveSeedStatesSlice(maxParagraphs: number, maxInflatedBytes: number, maxBytes: number): number;
+    /** The bytes the last {@link primeSaveSeedStatesSlice} call digested. */
+    primeLastSliceBytes(): number;
     /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
     openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
     /** The whole document state as one yrs v1 update. */

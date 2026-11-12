@@ -1308,10 +1308,21 @@ const SAVE_WARMUP_IDLE_MS = 300;
 const SAVE_WARMUP_INPUT_IDLE_MS = 600;
 const SAVE_SEED_MAX_PARAGRAPHS = 4096;
 const SAVE_SEED_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
-const SAVE_SEED_SLICE_BYTES = 16 * 1024;
-const SAVE_SEED_MIN_SLICE_BYTES = 2 * 1024;
-const SAVE_SEED_MAX_SLICE_BYTES = 1024 * 1024;
+export const SAVE_SEED_SLICE_BYTES = 16 * 1024;
+export const SAVE_SEED_MIN_SLICE_BYTES = 2 * 1024;
+export const SAVE_SEED_MAX_SLICE_BYTES = 1024 * 1024;
 const SAVE_SEED_SLICE_TARGET_MS = 10;
+
+/**
+ * The byte budget of the next save seed prime slice: `targetMs` at the byte rate the last
+ * slice measured, between the floor and the cap; a slice that digested no bytes keeps `current`.
+ */
+export function nextPrimeByteBudget(current: number, bytesDigested: number, elapsedMs: number, targetMs: number): number {
+  if (bytesDigested <= 0) return current;
+  if (elapsedMs <= 0) return SAVE_SEED_MAX_SLICE_BYTES;
+  return Math.min(SAVE_SEED_MAX_SLICE_BYTES, Math.max(SAVE_SEED_MIN_SLICE_BYTES,
+    Math.round((targetMs * bytesDigested) / elapsedMs)));
+}
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
@@ -4092,9 +4103,8 @@ function primeSaveSeedStatesOnce(): void {
       const started = performance.now();
       const state = owner.primeSaveSeedStatesSlice(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES, maxBytes);
       const elapsed = performance.now() - started;
-      const target = Math.min(budgetMs, SAVE_SEED_SLICE_TARGET_MS);
-      maxBytes = Math.min(SAVE_SEED_MAX_SLICE_BYTES, Math.max(SAVE_SEED_MIN_SLICE_BYTES,
-        Math.round((maxBytes * target) / Math.max(1, elapsed))));
+      maxBytes = nextPrimeByteBudget(maxBytes, owner.primeLastSliceBytes(), elapsed,
+        Math.min(budgetMs, SAVE_SEED_SLICE_TARGET_MS));
       return state === 1 ? 'yield' : 'done';
     },
   });

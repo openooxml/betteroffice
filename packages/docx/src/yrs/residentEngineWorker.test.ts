@@ -313,6 +313,7 @@ function worker() {
       initializeComments() {},
       primeSaveSeedStates: mock(() => true),
       primeSaveSeedStatesSlice: mock((_paragraphs: number, _inflated: number, _bytes: number) => 0),
+      primeLastSliceBytes: mock(() => 0),
       partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
