@@ -267,8 +267,8 @@ export type ResidentEngineSession = Pick<
   primeSaveSeedStates(maxParagraphs: number, maxInflatedBytes: number): boolean;
   /** One slice of {@link primeSaveSeedStates} digesting about `maxBytes` bytes: 0 known, 1 more to do, 2 declined. */
   primeSaveSeedStatesSlice(maxParagraphs: number, maxInflatedBytes: number, maxBytes: number): number;
-  /** The bytes the last {@link primeSaveSeedStatesSlice} call digested. */
-  primeLastSliceBytes(): number;
+  /** What the last {@link primeSaveSeedStatesSlice} call charged against its `maxBytes`. */
+  primeLastSliceCost(): number;
   /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
   openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
   /** The whole document state as one yrs v1 update. */
@@ -995,7 +995,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     primeSaveSeedStates: (maxParagraphs, maxInflatedBytes) => session.prime_save_seed_states(maxParagraphs, maxInflatedBytes),
     primeSaveSeedStatesSlice: (maxParagraphs, maxInflatedBytes, maxBytes) =>
       session.prime_save_seed_states_slice(maxParagraphs, maxInflatedBytes, maxBytes),
-    primeLastSliceBytes: () => session.prime_last_slice_bytes(),
+    primeLastSliceCost: () => session.prime_last_slice_cost(),
     saveDocument: async (host, comments, record) => {
       if (!parsedFacade || !partBase) throw new Error('The document worker holds no parsed document');
       const { saveEditorDocument, mergeDocxHostMetadata } = await import('./editorSave');

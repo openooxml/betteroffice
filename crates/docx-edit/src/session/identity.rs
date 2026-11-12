@@ -170,9 +170,9 @@ impl EditSessionCore {
         }
     }
 
-    /// The bytes the last [`Self::prime_save_seed_states_slice`] call digested.
-    pub fn prime_last_slice_bytes(&self) -> u64 {
-        self.engine.doc().prime_last_slice_bytes()
+    /// What the last [`Self::prime_save_seed_states_slice`] call charged against its `max_bytes`.
+    pub fn prime_last_slice_cost(&self) -> u64 {
+        self.engine.doc().prime_last_slice_cost()
     }
 
     /// The paragraph IDs a save applies, as the package writer's

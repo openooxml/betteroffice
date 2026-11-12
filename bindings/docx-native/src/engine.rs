@@ -2495,10 +2495,10 @@ impl EditSession {
             .prime_save_seed_states_slice(paragraphs, inflated, max_bytes))
     }
 
-    #[napi(catch_unwind, js_name = "prime_last_slice_bytes")]
-    pub fn prime_last_slice_bytes(&self, env: Env) -> Result<f64> {
+    #[napi(catch_unwind, js_name = "prime_last_slice_cost")]
+    pub fn prime_last_slice_cost(&self, env: Env) -> Result<f64> {
         let _call = EngineCall::new(env);
-        Ok(self.document(env)?.prime_last_slice_bytes() as f64)
+        Ok(self.document(env)?.prime_last_slice_cost() as f64)
     }
 
     #[napi(catch_unwind, js_name = "paragraph_save_plan")]

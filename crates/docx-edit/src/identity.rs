@@ -1809,8 +1809,8 @@ struct StoryFingerprint<'a> {
     position: u32,
     bytes: Vec<u8>,
     section_bytes: Vec<u8>,
-    /// Bytes digested over every [`Self::advance`] call, counted as each segment goes in.
-    hashed: usize,
+    /// The cost charged over every [`Self::advance`] call, counted as each segment goes in.
+    charged: u64,
 }
 
 impl<'a> StoryFingerprint<'a> {
@@ -1861,7 +1861,7 @@ impl<'a> StoryFingerprint<'a> {
             position: 0,
             bytes: Vec::new(),
             section_bytes: Vec::new(),
-            hashed: 0,
+            charged: 0,
         })
     }
 
@@ -1884,7 +1884,7 @@ impl<'a> StoryFingerprint<'a> {
             segment_canonical(&segment, &mut self.bytes, &mut self.section_bytes);
             let segment_bytes = self.bytes.len() + PRIME_SEGMENT_COST;
             digested = digested.saturating_add(segment_bytes);
-            self.hashed = self.hashed.saturating_add(segment_bytes);
+            self.charged = self.charged.saturating_add(segment_bytes as u64);
             self.unit.segment(&self.bytes);
             self.section_content.update(&self.section_bytes);
             self.section_content.update(b"\n");
@@ -3821,24 +3821,24 @@ impl EditingDoc {
         max_bytes: u32,
         segments_per_slice: usize,
     ) -> PrimeSlice {
-        self.prime_last_slice_bytes.store(0, Ordering::Relaxed);
-        let mut hashed = 0usize;
+        self.prime_last_slice_cost.store(0, Ordering::Relaxed);
+        let mut cost = 0u64;
         let outcome = self.prime_slice_step(
             max_paragraphs,
             max_inflated_bytes,
             max_bytes,
             segments_per_slice,
-            &mut hashed,
+            &mut cost,
         );
-        self.prime_last_slice_bytes
-            .store(hashed as u64, Ordering::Relaxed);
+        self.prime_last_slice_cost.store(cost, Ordering::Relaxed);
         outcome
     }
 
-    /// The bytes the last [`Self::prime_save_seed_states_slice`] call digested, 0 for a call
-    /// that digested none.
-    pub fn prime_last_slice_bytes(&self) -> u64 {
-        self.prime_last_slice_bytes.load(Ordering::Relaxed)
+    /// What the last [`Self::prime_save_seed_states_slice`] call charged against its
+    /// `max_bytes`, story and segment costs and any overshoot included; 0 for a call that
+    /// charged nothing.
+    pub fn prime_last_slice_cost(&self) -> u64 {
+        self.prime_last_slice_cost.load(Ordering::Relaxed)
     }
 
     fn prime_slice_step(
@@ -3847,7 +3847,7 @@ impl EditingDoc {
         max_inflated_bytes: u32,
         max_bytes: u32,
         segments_per_slice: usize,
-        hashed: &mut usize,
+        cost: &mut u64,
     ) -> PrimeSlice {
         let sliced = max_bytes != u32::MAX;
         let mut progress = self.prime_progress.lock().unwrap();
@@ -3956,6 +3956,7 @@ impl EditingDoc {
                 let anchors = state.anchors.remove(&story).unwrap_or_default();
                 let comments = crate::canonical::resolve_comment_anchors(&txn, &anchors);
                 left = left.saturating_sub(PRIME_STORY_COST);
+                *cost = cost.saturating_add(PRIME_STORY_COST as u64);
                 match StoryFingerprint::start(
                     self,
                     &txn,
@@ -3988,9 +3989,9 @@ impl EditingDoc {
             let Some((_, fingerprint)) = state.current.as_mut() else {
                 continue;
             };
-            let before = fingerprint.hashed;
+            let before = fingerprint.charged;
             let advanced = fingerprint.advance(&txn, &mut state.budget, left.max(1));
-            *hashed = hashed.saturating_add(fingerprint.hashed - before);
+            *cost = cost.saturating_add(fingerprint.charged - before);
             if fingerprint.vanished {
                 *progress = None;
                 return PrimeSlice::Declined;

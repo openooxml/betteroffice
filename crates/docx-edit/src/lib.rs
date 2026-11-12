@@ -777,7 +777,7 @@ pub struct EditingDoc {
     save_story_states: Arc<Mutex<identity::StoryStateCache>>,
     /// A save seed state prime in progress; see [`EditingDoc::prime_save_seed_states_slice`].
     prime_progress: Mutex<Option<identity::PrimeProgress>>,
-    prime_last_slice_bytes: AtomicU64,
+    prime_last_slice_cost: AtomicU64,
     #[cfg(test)]
     save_story_cache_disabled: AtomicBool,
     sticky_positions: Mutex<sticky_positions::StickyPositions>,
@@ -889,7 +889,7 @@ impl EditingDoc {
             paragraph_indexes: Mutex::default(),
             save_story_states,
             prime_progress: Mutex::new(None),
-            prime_last_slice_bytes: AtomicU64::new(0),
+            prime_last_slice_cost: AtomicU64::new(0),
             #[cfg(test)]
             save_story_cache_disabled: AtomicBool::new(false),
             sticky_positions: Mutex::default(),
