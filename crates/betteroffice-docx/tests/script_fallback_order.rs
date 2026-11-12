@@ -39,16 +39,28 @@ fn table_families() -> BTreeSet<String> {
     widths.chain(lines).map(str::to_owned).collect()
 }
 
-fn input(mut run: Value) -> LayoutInput {
-    let length = run["text"].as_str().unwrap_or_default().chars().count();
-    run["kind"] = json!("text");
-    run["pmStart"] = json!(1);
-    run["pmEnd"] = json!(length + 1);
-    serde_json::from_value(json!({
-        "measured": [{
-            "block": {"kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": length + 2, "runs": [run]},
+fn input(run: Value) -> LayoutInput {
+    paragraphs(vec![run])
+}
+
+/// One paragraph per run, all in one body, so every run shares one font store.
+fn paragraphs(runs: Vec<Value>) -> LayoutInput {
+    let mut start = 0;
+    let mut measured = Vec::new();
+    for (index, mut run) in runs.into_iter().enumerate() {
+        let length = run["text"].as_str().unwrap_or_default().chars().count();
+        run["kind"] = json!("text");
+        run["pmStart"] = json!(start + 1);
+        run["pmEnd"] = json!(start + length + 1);
+        let end = start + length + 2;
+        measured.push(json!({
+            "block": {"kind": "paragraph", "id": index + 1, "pmStart": start, "pmEnd": end, "runs": [run]},
             "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0}
-        }],
+        }));
+        start = end;
+    }
+    serde_json::from_value(json!({
+        "measured": measured,
         "options": {"pageSize": {"w": 816, "h": 1056},
                     "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}}
     }))
@@ -214,30 +226,25 @@ fn a_character_both_faces_cover_keeps_the_family_face_next_to_kana() {
     let mut mismatches = Vec::new();
     for shared in ['\u{2026}', '\u{201C}', '\u{00D7}'] {
         checked.push(format!("{family} {shared:?}"));
-        let alone = Document::open(&package)
+        let both = Document::open(&package)
             .unwrap()
-            .layout(input(json!({"text": format!("A{shared}A"),
-                                 "fontFamily": family, "fontSize": FONT_SIZE_PT})))
+            .layout(paragraphs(vec![
+                json!({"text": format!("A{shared}A"), "fontFamily": family, "fontSize": FONT_SIZE_PT}),
+                json!({"text": format!("ひ{shared}か"), "fontFamily": family, "fontSize": FONT_SIZE_PT}),
+            ]))
             .unwrap();
-        let mixed = Document::open(&package)
-            .unwrap()
-            .layout(input(json!({"text": format!("ひ{shared}か"),
-                                 "fontFamily": family, "fontSize": FONT_SIZE_PT})))
-            .unwrap();
-        let Some((_, own_font, own_id, own_advance)) = glyphs(&alone)
-            .into_iter()
-            .find(|&(character, ..)| character == shared)
-        else {
-            mismatches.push(format!("{family}: {shared:?} drew no glyph on its own"));
-            continue;
-        };
-        let drawn = glyphs(&mixed);
+        let drawn = glyphs(&both);
         let kana_fonts: BTreeSet<u32> = drawn
             .iter()
             .filter(|(character, ..)| "ひか".contains(*character))
             .map(|&(_, font, ..)| font)
             .collect();
-        match drawn.iter().find(|&&(character, ..)| character == shared) {
+        let mut occurrences = drawn.iter().filter(|&&(character, ..)| character == shared);
+        let Some(&(_, own_font, own_id, own_advance)) = occurrences.next() else {
+            mismatches.push(format!("{family}: {shared:?} drew no glyph next to Latin text"));
+            continue;
+        };
+        match occurrences.next() {
             Some(&(_, font, id, advance))
                 if font == own_font
                     && id == own_id
