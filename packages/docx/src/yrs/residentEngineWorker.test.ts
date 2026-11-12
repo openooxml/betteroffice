@@ -57,6 +57,12 @@ import {
 } from './residentEngineWorkerProtocol';
 import type { EchoGlyphProvider } from './residentCommandViewProjection';
 import { saveWarmupPolicy } from './saveWarmupPolicy';
+import {
+  SAVE_SEED_MAX_SLICE_BYTES,
+  SAVE_SEED_MIN_SLICE_BYTES,
+  SAVE_SEED_SLICE_BYTES,
+  nextPrimeByteBudget,
+} from './residentEngineWorker';
 
 let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown, schedule: unknown, unschedule: unknown) => void;
 const retireWorkerTimers: (() => void)[] = [];
@@ -2604,6 +2610,58 @@ describe('document worker warmup', () => {
     } finally {
       client.destroy();
     }
+  });
+
+  test('prime byte budget bounds are 16 KiB initially, 2 KiB at the floor and 1 MiB at the cap', () => {
+    expect([SAVE_SEED_SLICE_BYTES, SAVE_SEED_MIN_SLICE_BYTES, SAVE_SEED_MAX_SLICE_BYTES])
+      .toEqual([16 * 1024, 2 * 1024, 1024 * 1024]);
+  });
+
+  test('prime byte budget holds through slices that digest no bytes', () => {
+    let budget = SAVE_SEED_SLICE_BYTES;
+    for (const elapsed of [0, 0.1, 0.2, 0.3, 0.4, 0.5]) {
+      budget = nextPrimeByteBudget(budget, 0, elapsed, 10);
+      expect(budget).toBe(SAVE_SEED_SLICE_BYTES);
+    }
+  });
+
+  test('prime byte budget stays where the last byte slice left it across zero-byte slices', () => {
+    const measured = nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 64 * 1024, 20, 10);
+    let budget = measured;
+    for (const elapsed of [0, 0.25, 0.5]) {
+      budget = nextPrimeByteBudget(budget, 0, elapsed, 10);
+      expect(budget).toBe(measured);
+    }
+  });
+
+  test('prime byte budget is the target times the measured byte rate', () => {
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 64 * 1024, 20, 10)).toBe(32 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_MAX_SLICE_BYTES, 64 * 1024, 20, 10)).toBe(32 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_MIN_SLICE_BYTES, 64 * 1024, 20, 10)).toBe(32 * 1024);
+  });
+
+  test('prime byte budget holds the cap and the floor', () => {
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 64 * 1024 * 1024, 1, 10)).toBe(SAVE_SEED_MAX_SLICE_BYTES);
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 1, 100, 10)).toBe(SAVE_SEED_MIN_SLICE_BYTES);
+  });
+
+  test('prime byte budget takes the cap for a byte slice that took no measurable time', () => {
+    const budget = nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 4 * 1024, 0, 10);
+    expect(Number.isFinite(budget)).toBe(true);
+    expect(budget).toBe(SAVE_SEED_MAX_SLICE_BYTES);
+  });
+
+  test('the first byte slice after zero-byte slices is offered the initial budget', () => {
+    const offered: number[] = [];
+    let budget = SAVE_SEED_SLICE_BYTES;
+    const slices: Array<[bytes: number, elapsed: number]> = [[0, 0], [0, 0.1], [0, 0.2], [0, 0.4], [0, 0.5], [8 * 1024, 4], [0, 0.1]];
+    for (const [bytes, elapsed] of slices) {
+      offered.push(budget);
+      budget = nextPrimeByteBudget(budget, bytes, elapsed, 10);
+    }
+    expect(offered.slice(0, 6)).toEqual(Array(6).fill(SAVE_SEED_SLICE_BYTES));
+    expect(offered[6]).toBe(20 * 1024);
+    expect(budget).toBe(20 * 1024);
   });
 
   test('read-only opens do not prime save seed states', async () => {

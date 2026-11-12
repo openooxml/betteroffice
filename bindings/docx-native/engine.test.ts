@@ -1472,6 +1472,31 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('prime_last_slice_bytes reports the same bytes after each slice as wasm', () => {
+    const expected = new wasm.EditSession(64);
+    const actual = new native.EditSession(64);
+    try {
+      expected.seed_from_docx(fixture, 'opening');
+      actual.seed_from_docx(fixture, 'opening');
+      expect(Number(actual.prime_last_slice_bytes())).toBe(Number(expected.prime_last_slice_bytes()));
+      let answer = 1;
+      let sawBytes = false;
+      for (let slice = 0; slice < 10_000 && answer === 1; slice += 1) {
+        answer = expected.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64);
+        expect(actual.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64)).toBe(answer);
+        const bytes = Number(expected.prime_last_slice_bytes());
+        expect(Number(actual.prime_last_slice_bytes())).toBe(bytes);
+        expect(bytes).toBeLessThanOrEqual(64);
+        sawBytes ||= bytes > 0;
+      }
+      expect(answer).toBe(0);
+      expect(sawBytes).toBe(true);
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
   test('RunInheritance resolves the same attributes and formatting', () => {
     const expectedSession = new wasm.EditSession(71);
     const actualSession = new native.EditSession(71);

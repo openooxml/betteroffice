@@ -6264,6 +6264,43 @@ mod tests {
     }
 
     #[test]
+    fn prime_last_slice_bytes_reports_the_story_bytes_each_slice_digested() {
+        let bytes = multi_chunk_docx();
+        let max_bytes = 4096u32;
+        let session = bytes_session(&bytes);
+        let doc = session.engine.doc();
+        assert_eq!(doc.prime_last_slice_bytes(), 0);
+        for step in ["start", "scan", "anchors"] {
+            assert_eq!(
+                doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
+                PrimeSlice::Pending,
+                "{step}"
+            );
+            assert_eq!(doc.prime_last_slice_bytes(), 0, "{step}");
+        }
+        let mut byte_slices = 0;
+        loop {
+            let outcome = doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes);
+            let digested = doc.prime_last_slice_bytes();
+            assert!(digested <= u64::from(max_bytes), "{digested}");
+            if digested > 0 {
+                byte_slices += 1;
+            }
+            match outcome {
+                PrimeSlice::Pending => {}
+                PrimeSlice::Known => break,
+                PrimeSlice::Declined => panic!("declined"),
+            }
+        }
+        assert!(byte_slices > 1, "{byte_slices}");
+        assert_eq!(
+            doc.prime_save_seed_states_slice(u32::MAX, u32::MAX, max_bytes),
+            PrimeSlice::Known
+        );
+        assert_eq!(doc.prime_last_slice_bytes(), 0);
+    }
+
+    #[test]
     fn priming_any_number_of_segments_at_a_time_matches_one_shot() {
         let bytes = multi_chunk_docx();
         let whole = bytes_session(&bytes);
