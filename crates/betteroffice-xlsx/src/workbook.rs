@@ -65,10 +65,10 @@ use xlsx_render::region::{
 };
 use xlsx_render::scaled;
 use xlsx_render::{
-    ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
-    build_display_list_with_geometry, build_print_display_list_with_charts, chart_at_point,
-    display_text, display_viewport_with_geometry, moved_chart_anchor, resolve_chart_anchor,
-    visible_merged_ranges_with_geometry,
+    ChartRegion, ChartResize, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError,
+    Viewport, build_display_list_with_geometry, build_print_display_list_with_charts,
+    chart_at_point, display_text, display_viewport_with_geometry, moved_chart_anchor,
+    resized_chart_anchor, resolve_chart_anchor, visible_merged_ranges_with_geometry,
 };
 
 #[cfg(feature = "raster")]
@@ -3346,6 +3346,68 @@ impl Workbook {
                     "chart {frame} is pinned to the sheet and cannot be moved"
                 ))
             })?;
+        let ops = self
+            .model
+            .sheets
+            .iter()
+            .enumerate()
+            .flat_map(|(index, sheet)| {
+                sheet
+                    .charts
+                    .iter()
+                    .filter(|held| held.frame_id() == frame)
+                    .map(move |held| Op::SetChartAnchor {
+                        sheet: SheetId(index as u32),
+                        frame: frame.to_owned(),
+                        part: held.part.clone(),
+                        from: held.anchor,
+                        to,
+                    })
+            })
+            .collect();
+        self.apply_carried_ops(ops, options)
+    }
+
+    /// Resize the chart frame `frame` names — a `ChartRegion` id — by moving
+    /// its edges `edges` content pixels, clamped to the grid and to a 1x1px
+    /// minimum. One undo step; the new anchor is written back on save.
+    ///
+    /// Only a two-cell anchor can resize: its corners are written whole, so a
+    /// resize is expressible. A one-cell anchor keeps its size in `xdr:ext`,
+    /// which a save never rewrites, and an absolute anchor is pinned to the
+    /// sheet. Either is refused rather than saved with half the change lost.
+    ///
+    /// A frame is one element in one drawing part, and two sheets may both
+    /// anchor it. Every sheet holding it is repinned together, or the save
+    /// would refuse a drawing its sheets no longer agree on.
+    pub fn resize_chart(
+        &mut self,
+        sheet: SheetId,
+        frame: &str,
+        edges: ChartResize,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        let sheet_ref = self.sheet(sheet)?;
+        let chart = sheet_ref
+            .charts
+            .iter()
+            .find(|chart| chart.frame_id() == frame)
+            .ok_or_else(|| chart_frame_not_found(frame))?;
+        let geometry = self.sheet_geometry(sheet)?;
+        let to = resized_chart_anchor(chart.anchor, &geometry, edges).ok_or_else(|| {
+            let message = match chart.anchor {
+                ChartAnchor::Absolute { .. } => {
+                    format!("chart {frame} is pinned to the sheet and cannot be resized")
+                }
+                ChartAnchor::OneCell { .. } => format!(
+                    "chart {frame} cannot be resized: a one-cell extent is not written back"
+                ),
+                ChartAnchor::TwoCell { .. } => {
+                    format!("chart {frame} cannot be resized to that size")
+                }
+            };
+            Error::InvalidOperation(message)
+        })?;
         let ops = self
             .model
             .sheets

@@ -261,7 +261,18 @@
     "sheetActivated": "{name}, शीट {count} में से {index}",
     "cellInputLabel": "सेल {address} संपादित करें",
     "gridRoleDescription": "वर्कशीट",
-    "fillHandleLabel": "भरण हैंडल"
+    "fillHandleLabel": "भरण हैंडल",
+    "chartResizeNw": "चार्ट का आकार ऊपरी बाएँ कोने से बदलें",
+    "chartResizeN": "चार्ट का आकार ऊपरी किनारे से बदलें",
+    "chartResizeNe": "चार्ट का आकार ऊपरी दाएँ कोने से बदलें",
+    "chartResizeE": "चार्ट का आकार दाएँ किनारे से बदलें",
+    "chartResizeSe": "चार्ट का आकार निचले दाएँ कोने से बदलें",
+    "chartResizeS": "चार्ट का आकार निचले किनारे से बदलें",
+    "chartResizeSw": "चार्ट का आकार निचले बाएँ कोने से बदलें",
+    "chartResizeW": "चार्ट का आकार बाएँ किनारे से बदलें",
+    "chartResizeHintBoth": "{label} (तीर कुंजियाँ; 10 px के लिए Shift दबाए रखें)",
+    "chartResizeHintHorizontal": "{label} (बाएँ और दाएँ तीर; 10 px के लिए Shift दबाए रखें)",
+    "chartResizeHintVertical": "{label} (ऊपर और नीचे तीर; 10 px के लिए Shift दबाए रखें)"
   },
   "plugins": {
     "toolbarGroup": "प्लगइन",

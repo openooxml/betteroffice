@@ -20,7 +20,8 @@ type Engine = Pick<
   | 'vertical_move_json'
 >;
 
-const binding = createRequire(import.meta.url)('../index.js') as Engine;
+const binding = createRequire(import.meta.url)('../index.js') as Engine & { install_panic_hook(): void };
+binding.install_panic_hook();
 
 export const close_display_list = binding.close_display_list;
 export const hit_test_regions_by_handle = binding.hit_test_regions_by_handle;

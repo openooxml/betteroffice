@@ -261,7 +261,18 @@
     "sheetActivated": "{name}, sayfa {index} / {count}",
     "cellInputLabel": "{address} hücresini düzenle",
     "gridRoleDescription": "çalışma sayfası",
-    "fillHandleLabel": "Doldurma tutamacı"
+    "fillHandleLabel": "Doldurma tutamacı",
+    "chartResizeNw": "Grafiği sol üst köşeden yeniden boyutlandır",
+    "chartResizeN": "Grafiği üst kenardan yeniden boyutlandır",
+    "chartResizeNe": "Grafiği sağ üst köşeden yeniden boyutlandır",
+    "chartResizeE": "Grafiği sağ kenardan yeniden boyutlandır",
+    "chartResizeSe": "Grafiği sağ alt köşeden yeniden boyutlandır",
+    "chartResizeS": "Grafiği alt kenardan yeniden boyutlandır",
+    "chartResizeSw": "Grafiği sol alt köşeden yeniden boyutlandır",
+    "chartResizeW": "Grafiği sol kenardan yeniden boyutlandır",
+    "chartResizeHintBoth": "{label} (ok tuşları; 10 piksel için Shift tuşunu basılı tutun)",
+    "chartResizeHintHorizontal": "{label} (sol ve sağ oklar; 10 piksel için Shift tuşunu basılı tutun)",
+    "chartResizeHintVertical": "{label} (yukarı ve aşağı oklar; 10 piksel için Shift tuşunu basılı tutun)"
   },
   "plugins": {
     "toolbarGroup": "Eklentiler",

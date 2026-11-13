@@ -23,6 +23,7 @@ export interface MemberInfo {
 export interface Surface {
   classes: Map<string, Map<string, MemberInfo>>;
   functions: Map<string, MemberInfo>;
+  consts: Set<string>;
 }
 
 interface FormatConfig {
@@ -86,7 +87,6 @@ export const FORMATS: Record<string, FormatConfig> = {
 
 const IGNORED_FUNCTIONS = new Set([
   "free",
-  "install_panic_hook",
   "initSync",
   "default",
   "__wbg_init",
@@ -253,7 +253,8 @@ export function parseSurface(text: string, options: ParseOptions = {}): Surface 
   if (defaultRe.test(topLevel)) {
     // default init is ignored by contract
   }
-  return { classes, functions };
+  const consts = new Set([...topLevel.matchAll(/export\s+(?:declare\s+)?const\s+(\w+)/g)].map((match) => match[1]!));
+  return { classes, functions, consts };
 }
 
 function describe(member: MemberInfo): string {

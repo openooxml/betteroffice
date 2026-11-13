@@ -261,7 +261,18 @@
     "sheetActivated": "{name}, 시트 {index}/{count}",
     "cellInputLabel": "셀 {address} 편집",
     "gridRoleDescription": "워크시트",
-    "fillHandleLabel": "채우기 핸들"
+    "fillHandleLabel": "채우기 핸들",
+    "chartResizeNw": "왼쪽 위 모서리에서 차트 크기 조정",
+    "chartResizeN": "위쪽 가장자리에서 차트 크기 조정",
+    "chartResizeNe": "오른쪽 위 모서리에서 차트 크기 조정",
+    "chartResizeE": "오른쪽 가장자리에서 차트 크기 조정",
+    "chartResizeSe": "오른쪽 아래 모서리에서 차트 크기 조정",
+    "chartResizeS": "아래쪽 가장자리에서 차트 크기 조정",
+    "chartResizeSw": "왼쪽 아래 모서리에서 차트 크기 조정",
+    "chartResizeW": "왼쪽 가장자리에서 차트 크기 조정",
+    "chartResizeHintBoth": "{label} (화살표 키, Shift 키를 누른 채로 10px)",
+    "chartResizeHintHorizontal": "{label} (왼쪽 및 오른쪽 화살표, Shift 키를 누른 채로 10px)",
+    "chartResizeHintVertical": "{label} (위쪽 및 아래쪽 화살표, Shift 키를 누른 채로 10px)"
   },
   "plugins": {
     "toolbarGroup": "추가 기능",

@@ -261,7 +261,18 @@
     "sheetActivated": "{name}, feuille {index} sur {count}",
     "cellInputLabel": "Modifier la cellule {address}",
     "gridRoleDescription": "feuille de calcul",
-    "fillHandleLabel": "Poignée de recopie"
+    "fillHandleLabel": "Poignée de recopie",
+    "chartResizeNw": "Redimensionner le graphique depuis le coin supérieur gauche",
+    "chartResizeN": "Redimensionner le graphique depuis le bord supérieur",
+    "chartResizeNe": "Redimensionner le graphique depuis le coin supérieur droit",
+    "chartResizeE": "Redimensionner le graphique depuis le bord droit",
+    "chartResizeSe": "Redimensionner le graphique depuis le coin inférieur droit",
+    "chartResizeS": "Redimensionner le graphique depuis le bord inférieur",
+    "chartResizeSw": "Redimensionner le graphique depuis le coin inférieur gauche",
+    "chartResizeW": "Redimensionner le graphique depuis le bord gauche",
+    "chartResizeHintBoth": "{label} (touches fléchées ; maintenez Maj pour 10 px)",
+    "chartResizeHintHorizontal": "{label} (flèches gauche et droite ; maintenez Maj pour 10 px)",
+    "chartResizeHintVertical": "{label} (flèches haut et bas ; maintenez Maj pour 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Plugins",

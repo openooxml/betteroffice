@@ -261,7 +261,18 @@
     "sheetActivated": "{name}, hoja {index} de {count}",
     "cellInputLabel": "Editar celda {address}",
     "gridRoleDescription": "hoja de cálculo",
-    "fillHandleLabel": "Controlador de relleno"
+    "fillHandleLabel": "Controlador de relleno",
+    "chartResizeNw": "Cambiar el tamaño del gráfico desde la esquina superior izquierda",
+    "chartResizeN": "Cambiar el tamaño del gráfico desde el borde superior",
+    "chartResizeNe": "Cambiar el tamaño del gráfico desde la esquina superior derecha",
+    "chartResizeE": "Cambiar el tamaño del gráfico desde el borde derecho",
+    "chartResizeSe": "Cambiar el tamaño del gráfico desde la esquina inferior derecha",
+    "chartResizeS": "Cambiar el tamaño del gráfico desde el borde inferior",
+    "chartResizeSw": "Cambiar el tamaño del gráfico desde la esquina inferior izquierda",
+    "chartResizeW": "Cambiar el tamaño del gráfico desde el borde izquierdo",
+    "chartResizeHintBoth": "{label} (teclas de flecha; mantén Mayús para 10 px)",
+    "chartResizeHintHorizontal": "{label} (flechas izquierda y derecha; mantén Mayús para 10 px)",
+    "chartResizeHintVertical": "{label} (flechas arriba y abajo; mantén Mayús para 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Complementos",

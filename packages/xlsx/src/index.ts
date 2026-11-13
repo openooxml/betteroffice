@@ -234,7 +234,7 @@ export type {
 
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
 
-export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName } from './charts';
+export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName, ChartResizeEdges } from './charts';
 export { fontPackDiagnostics } from './fontPackDiagnostics';
 export type { FontPackDiagnostic } from './fontPackDiagnostics';
 

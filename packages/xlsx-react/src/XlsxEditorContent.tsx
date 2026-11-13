@@ -34,6 +34,7 @@ import type {
   CellRange,
   CapturedFormat,
   ChartRegion,
+  ChartResizeEdges,
   DisplayList,
   DrawCmd,
   Direction,
@@ -54,6 +55,9 @@ import type {
 } from '@betteroffice/xlsx';
 import type { AwarenessPeer, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import { CellClipboard, clipboardMarker, parseCellClipboardText, readCellClipboard } from './clipboard';
+import { chartResizeRect, chartResizeSpace, type ChartDragPreview, type SelectedChart } from './worker/chartResize';
+import { ChartResizeHandles } from './worker/ChartResizeHandles';
+import { useChartResizeGesture } from './worker/useChartResizeGesture';
 import { useTranslation } from './i18n';
 import { editorExportFaces, useDefaultFonts } from './useDefaultFonts';
 import {
@@ -142,6 +146,8 @@ const MAX_OVERLAY_MERGED_RANGES = 1024;
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const CHART_NUDGE_PX = 1;
 const CHART_NUDGE_MULTIPLIER = 10;
+const SHEET_MAX_ROW = 1_048_575;
+const SHEET_MAX_COL = 16_383;
 // how long a run of arrow presses may stay local before it lands as one edit.
 const CHART_NUDGE_SETTLE_MS = 250;
 const PAINT_SETTLE_MS = 1000;
@@ -455,7 +461,8 @@ export function XlsxEditorContent({
   // repaints are rAF-coalesced and a mutation republishes the frame, so hit
   // testing reads this snapshot rather than the live scroll offset or the
   // current model, either would answer for pixels that are not on screen.
-  const paintedRef = useRef<{ frame: DisplayList; zoom: number; sheet: number; handle: WorkbookHandle | null } | null>(null);
+  const paintedRef = useRef<{ frame: DisplayList; zoom: number; sheet: number;
+    viewport: Viewport; handle: WorkbookHandle | null } | null>(null);
   const rafRef = useRef<number | null>(null);
   const [cellClipboard] = useState(() => new CellClipboard());
   const rootRef = useRef<HTMLDivElement>(null);
@@ -537,13 +544,17 @@ export function XlsxEditorContent({
   const [dragging, setDragging] = useState(false);
   // the selected chart, and the live pointer offset while it is dragged.
   // `movable` rides along so the arrow keys never depend on a frame lookup.
-  const [selectedChart, setSelectedChart, selectedChartRef] = useSyncedState<{
-    id: string;
-    movable: boolean;
-  } | null>(
-    null
-  );
-  const [chartDragOffset, setChartDragOffset] = useState<{ x: number; y: number } | null>(null);
+  const [selectedChart, setSelectedChart, selectedChartRef] = useSyncedState<SelectedChart | null>(null);
+  const [chartPreview, setChartPreview] = useState<ChartDragPreview | null>(null);
+  // the resize commit lives behind a ref so the gesture hook can be installed
+  // before the read-only cleanup effect that cancels it.
+  const resizeChartRef = useRef<(edges: ChartResizeEdges) => void>(() => {});
+  const { start: startChartResize, cancel: cancelChartResize, nudge: nudgeChartResize,
+    active: chartResizeActive } = useChartResizeGesture({
+    zoom: () => zoomRef.current,
+    preview: setChartPreview,
+    commit: (_handle, edges) => resizeChartRef.current(edges),
+  });
   // logical-px preview of an arrow burst that has not landed yet.
   const [nudgeOffset, setNudgeOffset] = useState<{ x: number; y: number } | null>(null);
   const [visibleMergedRanges, setVisibleMergedRanges] = useState<readonly MergedRange[]>([]);
@@ -622,6 +633,7 @@ export function XlsxEditorContent({
     if (!settlePendingEditsRef.current()) return;
     setSelection(null);
     setSelectedChart(null);
+    setChartPreview(null);
     dropDrafts();
     setCapturedFormat(null);
     paintSourceRef.current = null;
@@ -644,6 +656,7 @@ export function XlsxEditorContent({
       setSheetInfo(handle.sheetInfo());
       setSelection(next ? structuredClone(next) : null);
       setSelectedChart(null);
+      setChartPreview(null);
       dropDrafts();
       setCapturedFormat(null);
       paintSourceRef.current = null;
@@ -743,12 +756,13 @@ export function XlsxEditorContent({
     setCapturedFormat(null);
     paintSourceRef.current = null;
     chartDragRef.current = null;
-    setChartDragOffset(null);
+    cancelChartResize();
+    setChartPreview(null);
     nudgeRef.current = null;
     setNudgeOffset(null);
     if (nudgeTimerRef.current != null) clearTimeout(nudgeTimerRef.current);
     nudgeTimerRef.current = null;
-  }, [readOnly]);
+  }, [readOnly, cancelChartResize]);
 
   // whether the embedded core was built with png export (raster cargo feature).
   // stable for the module's lifetime, so the export control can pre-disable.
@@ -922,6 +936,8 @@ export function XlsxEditorContent({
     setOpenedHandle(null);
     dropDrafts();
     setSelectedChart(null);
+    cancelChartResize();
+    setChartPreview(null);
     // a burst belongs to the document it was typed on: its timer would fire
     // against whatever workbook `handleRef` holds by then.
     nudgeRef.current = null;
@@ -1247,7 +1263,7 @@ export function XlsxEditorContent({
       return;
     }
     frameRef.current = dl;
-    paintedRef.current = { frame: dl, zoom, sheet: activeSheet, handle };
+    paintedRef.current = { frame: dl, zoom, sheet: activeSheet, viewport, handle };
     let version: string | null = null;
     try {
       version = handle ? handle.version() : null;
@@ -1544,7 +1560,8 @@ export function XlsxEditorContent({
     if (!handleRef.current) return false;
     flushNudgeRef.current();
     chartDragRef.current = null;
-    setChartDragOffset(null);
+    cancelChartResize();
+    setChartPreview(null);
     setDragging(false);
     return coordinator.settle();
   };
@@ -1644,9 +1661,10 @@ export function XlsxEditorContent({
     // drop any armed drag with it.
     flushNudgeRef.current();
     chartDragRef.current = null;
-    setChartDragOffset(null);
+    cancelChartResize();
+    setChartPreview(null);
     setSelectedChart(null);
-  }, [frame, selectedChart]);
+  }, [frame, selectedChart, cancelChartResize]);
 
   // slide a chart through the engine's edit path, so the new anchor is
   // undoable and reaches the drawing part on save.
@@ -1668,6 +1686,30 @@ export function XlsxEditorContent({
     },
     [activeSheet, applyResult, readOnly, coordinator]
   );
+
+  // resize the selected chart's anchor as one undoable edit. every pointer
+  // gesture lands exactly one call here, so one drag is one undo step.
+  const resizeChartBy = useCallback(
+    (edges: ChartResizeEdges) => {
+      const handle = handleRef.current;
+      const chart = selectedChartRef.current;
+      if (!handle || !chart || readOnly ||
+        (edges.left === 0 && edges.top === 0 && edges.right === 0 && edges.bottom === 0)) return;
+      const sheet = activeSheet;
+      void coordinator.input(() => {
+        if (handleRef.current !== handle || readOnlyRef.current) return;
+        try {
+          applyResult(handle.resizeChart(sheet, chart.id, edges));
+          return true;
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+          return false;
+        }
+      });
+    },
+    [activeSheet, applyResult, readOnly, coordinator]
+  );
+  resizeChartRef.current = resizeChartBy;
 
   // land a run of arrow nudges as one edit. key repeat fires as fast as the os
   // pleases and every move is a whole-workbook semantic sync, so presses only
@@ -1718,7 +1760,7 @@ export function XlsxEditorContent({
       // any release ends the gesture; only a primary one lands it, so a
       // non-primary release cannot leave the drag armed for a later mouseup.
       chartDragRef.current = null;
-      setChartDragOffset(null);
+      setChartPreview(null);
       if (!drag || event.button !== 0) return;
       moveChartBy(
         drag.id,
@@ -1728,7 +1770,7 @@ export function XlsxEditorContent({
     };
     const cancel = () => {
       chartDragRef.current = null;
-      setChartDragOffset(null);
+      setChartPreview(null);
       flushNudgeRef.current();
     };
     window.addEventListener('mouseup', commit);
@@ -2109,7 +2151,8 @@ export function XlsxEditorContent({
           // escape cancels the whole gesture, pointer or keyboard: an armed
           // drag must not land a move the user just abandoned.
           chartDragRef.current = null;
-          setChartDragOffset(null);
+          cancelChartResize();
+          setChartPreview(null);
           nudgeRef.current = null;
           setNudgeOffset(null);
           if (nudgeTimerRef.current != null) {
@@ -2236,14 +2279,15 @@ export function XlsxEditorContent({
       }
       const chart = pointToChart(e.clientX, e.clientY);
       if (chart) {
-        setSelectedChart({ id: chart.id, movable: !readOnly && chart.movable });
+        setSelectedChart({ id: chart.id, movable: !readOnly && chart.movable,
+          resizable: !readOnly && chart.resizable, placeholder: chart.placeholder ?? false });
         // only a primary press starts a drag: a right-press opens a context
         // menu whose release this window never sees, and an armed drag would
         // then land on whatever the next unrelated click released over.
         if (!readOnly && chart.movable && e.button === 0) {
           chartDragRef.current = { id: chart.id, clientX: e.clientX, clientY: e.clientY };
         }
-        setChartDragOffset(null);
+        setChartPreview(null);
         // no click start: a press on a chart is not a cell click, so it must
         // not follow a hyperlink in whatever cell sits behind it.
         clickStartRef.current = null;
@@ -2253,7 +2297,7 @@ export function XlsxEditorContent({
       }
 
       setSelectedChart(null);
-      setChartDragOffset(null);
+      setChartPreview(null);
       // an async reopen leaves the previous frame painted, so a chart here can
       // outlive `selection` for a moment. that is fine: the chart branch has
       // already returned above, and selecting a chart the user can still see is
@@ -2284,18 +2328,21 @@ export function XlsxEditorContent({
         }
         return;
       }
+      // a captured resize handle owns hover feedback until it is released.
+      if (chartResizeActive()) return;
       if (chartDrag) {
         // the button came back up somewhere this window never heard about, so
         // the gesture is over; do not keep accumulating it.
         if (e.buttons === 0) {
           chartDragRef.current = null;
-          setChartDragOffset(null);
+          setChartPreview(null);
           return;
         }
         e.currentTarget.style.cursor = 'move';
         // a tooltip from whatever cell was hovered before must not ride along.
         e.currentTarget.title = '';
-        setChartDragOffset({
+        setChartPreview({
+          kind: 'move',
           x: e.clientX - chartDrag.clientX,
           y: e.clientY - chartDrag.clientY,
         });
@@ -2446,11 +2493,36 @@ export function XlsxEditorContent({
   const scaledEditRect = editRect ? scaledRect(editRect, zoom) : null;
   const editColors = editRect ? cellEditorColors(frameRef.current, editRect) : null;
 
-  // the selected chart's outline, placed from the engine-published region and
-  // offset by the live drag so the box tracks the pointer before it commits.
-  const chartOutlineRect = selectedChartRegion
-    ? scaledRect(selectedChartRegion.rect, zoom)
-    : null;
+  // the selected chart's outline, placed from the engine-published region. A
+  // resize preview is clamped in sheet space, then projected back; a move
+  // preview is a plain CSS-pixel offset so the box tracks the pointer.
+  // the engine clamps to the last cell's far edge, not to the used range, so
+  // read that edge once per chart and frame rather than on every preview move.
+  const chartSheetExtent = useMemo(() => {
+    const handle = handleRef.current;
+    if (!selectedChartRegion || !handle) return undefined;
+    try {
+      const last = handle.cellRect(activeSheet, SHEET_MAX_ROW, SHEET_MAX_COL);
+      return { width: last.x + last.w, height: last.y + last.h };
+    } catch {
+      return undefined;
+    }
+  }, [selectedChartRegion, activeSheet, frame]);
+  const paintedFrame = paintedRef.current;
+  const chartSpace = selectedChartRegion && paintedFrame && paintedFrame.frame === frame && sheetInfo
+    ? chartResizeSpace(selectedChartRegion, {
+        x: paintedFrame.viewport.x, y: paintedFrame.viewport.y,
+        frozenRows: sheetInfo.frozenRows, frozenCols: sheetInfo.frozenCols,
+        sheetWidth: chartSheetExtent?.width, sheetHeight: chartSheetExtent?.height,
+      })
+    : undefined;
+  const chartPreviewRect = selectedChartRegion && chartPreview?.kind === 'resize'
+    ? chartResizeRect(selectedChartRegion.rect, chartPreview.handle, chartPreview.dx, chartPreview.dy, chartSpace)
+    : selectedChartRegion?.rect ?? null;
+  const chartOutlineRect = chartPreviewRect ? scaledRect(chartPreviewRect, zoom) : null;
+  const chartMovePreview = chartPreview?.kind === 'move' ? chartPreview : null;
+  const showChartHandles = Boolean(chartOutlineRect && selectedChart?.movable && selectedChart.resizable &&
+    !selectedChart.placeholder && !readOnly && !chartMovePreview && !nudgeOffset);
 
   const spacerWidth = sheetInfo ? sheetInfo.contentWidth * zoom : undefined;
   const spacerHeight = sheetInfo ? sheetInfo.contentHeight * zoom : undefined;
@@ -2470,6 +2542,8 @@ export function XlsxEditorContent({
       pendingSheetViewRef.current = true;
       setSelection(selectionAt({ row: 0, col: 0 }));
       setSelectedChart(null);
+      cancelChartResize();
+      setChartPreview(null);
       dropDrafts();
       setCapturedFormat(null);
       paintSourceRef.current = null;
@@ -2832,20 +2906,28 @@ export function XlsxEditorContent({
                       position: 'absolute',
                       left:
                         chartOutlineRect.x +
-                        (chartDragOffset?.x ?? 0) +
+                        (chartMovePreview?.x ?? 0) +
                         (nudgeOffset?.x ?? 0) * zoom,
                       top:
                         chartOutlineRect.y +
-                        (chartDragOffset?.y ?? 0) +
+                        (chartMovePreview?.y ?? 0) +
                         (nudgeOffset?.y ?? 0) * zoom,
                       width: chartOutlineRect.w,
                       height: chartOutlineRect.h,
                       boxSizing: 'border-box',
                       border: `2px solid ${BRAND}`,
                       boxShadow: '0 1px 6px rgba(0, 0, 0, 0.25)',
-                      background: chartDragOffset ? 'rgba(33, 115, 70, 0.08)' : 'transparent',
+                      background: chartMovePreview ? 'rgba(33, 115, 70, 0.08)' : 'transparent',
                     }}
                   />
+                )}
+                {chartOutlineRect && showChartHandles && (
+                  <ChartResizeHandles rect={chartOutlineRect}
+                    onStart={(handle, event) => {
+                      flushNudgeRef.current();
+                      startChartResize(handle, event);
+                    }}
+                    onNudge={nudgeChartResize} />
                 )}
                 {scaledFocusRect && !selectedChart && !editing && (
                   <div

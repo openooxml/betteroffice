@@ -45,6 +45,28 @@ fn zero_height_parts() -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
+fn sheet_format_reads_default_column_widths() {
+    for (format, default, base) in [
+        (
+            r#"<sheetFormatPr baseColWidth="10" defaultColWidth="10.66" defaultRowHeight="13"/>"#,
+            Some(10.66),
+            Some(10),
+        ),
+        (r#"<sheetFormatPr baseColWidth="12"/>"#, None, Some(12)),
+        (
+            r#"<sheetFormatPr defaultColWidth="300" baseColWidth="-1"/>"#,
+            None,
+            None,
+        ),
+    ] {
+        let parts = package(&format!("{format}<sheetData/>"), &[], false);
+        let sheet = &parse_workbook(&parts).unwrap().sheets[0];
+        assert_eq!(sheet.format.default_col_width, default, "{format}");
+        assert_eq!(sheet.format.base_col_width, base, "{format}");
+    }
+}
+
+#[test]
 fn zero_height_keeps_content_rows_visible_and_empty_rows_hidden() {
     let workbook = parse_workbook(&zero_height_parts()).unwrap();
     let sheet = &workbook.sheets[0];
@@ -7791,6 +7813,168 @@ fn three_d_charts_read_as_their_flat_families() {
         .expect("3-D chart");
         assert_eq!(deep, flat, "{deep_plot}");
     }
+}
+
+/// Every text a one-series chart over 3750 and 33750, cached as `"$"#,##0`,
+/// draws.
+fn chart_texts(plot: &str, labels: &str, value_axis: &str) -> Vec<String> {
+    let part = format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:{plot}><c:ser><c:idx val="0"/><c:order val="0"/>{labels}"#,
+            r#"<c:cat><c:strRef><c:f>S!$A$1:$A$2</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>North</c:v></c:pt><c:pt idx="1"><c:v>South</c:v></c:pt></c:strCache></c:strRef></c:cat>"#,
+            r##"<c:val><c:numRef><c:f>S!$B$1:$B$2</c:f><c:numCache><c:formatCode>"$"#,##0</c:formatCode><c:ptCount val="2"/>"##,
+            r#"<c:pt idx="0"><c:v>3750</c:v></c:pt><c:pt idx="1"><c:v>33750</c:v></c:pt></c:numCache></c:numRef></c:val>"#,
+            r#"</c:ser><c:axId val="1"/><c:axId val="2"/></c:{plot}>"#,
+            r#"<c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/>{value_axis}<c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart></c:chartSpace>"#,
+        ),
+        plot = plot,
+        labels = labels,
+        value_axis = value_axis,
+    );
+    part_texts(&part)
+}
+
+/// Every text a bar chart over 0.123 and 0.8 draws, its cache carrying
+/// `cache_format` (a `c:formatCode`, or nothing).
+fn fraction_texts(labels: &str, cache_format: &str) -> Vec<String> {
+    part_texts(&format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:order val="0"/>{labels}"#,
+            r#"<c:cat><c:strRef><c:f>S!$A$1:$A$2</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>North</c:v></c:pt><c:pt idx="1"><c:v>South</c:v></c:pt></c:strCache></c:strRef></c:cat>"#,
+            r#"<c:val><c:numRef><c:f>S!$B$1:$B$2</c:f><c:numCache>{cache_format}<c:ptCount val="2"/>"#,
+            r#"<c:pt idx="0"><c:v>0.123</c:v></c:pt><c:pt idx="1"><c:v>0.8</c:v></c:pt></c:numCache></c:numRef></c:val>"#,
+            r#"</c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart>"#,
+            r#"<c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart></c:chartSpace>"#,
+        ),
+        labels = labels,
+        cache_format = cache_format,
+    ))
+}
+
+/// Every text a chart part draws, through the xlsx chart parser.
+fn part_texts(part: &str) -> Vec<String> {
+    let space = crate::chart_space(part.as_bytes(), &Default::default()).expect("chart");
+    let rect = ooxml_drawingml::chart::PlotRect {
+        x: 0.0,
+        y: 0.0,
+        w: 400.0,
+        h: 300.0,
+    };
+    ooxml_drawingml::chart::plot_chart(&ooxml_drawingml::chart::PlotChart::from(&space), rect)
+        .into_iter()
+        .filter_map(|op| match op {
+            ooxml_drawingml::chart::PlotOp::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn source_linked_labels_and_value_axes_read_the_cached_cell_format() {
+    let linked = r#"<c:numFmt formatCode="General" sourceLinked="1"/>"#;
+    let texts = chart_texts(
+        "barChart",
+        &format!(r#"<c:dLbls>{linked}<c:showVal val="1"/></c:dLbls>"#),
+        linked,
+    );
+    assert!(texts.contains(&"$3,750".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"$33,750".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"$40,000".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn an_unlinked_label_number_format_wins_over_the_cached_cell_format() {
+    let texts = chart_texts(
+        "barChart",
+        r#"<c:dLbls><c:numFmt formatCode="0.0" sourceLinked="0"/><c:showVal val="1"/></c:dLbls>"#,
+        r#"<c:numFmt formatCode="General" sourceLinked="1"/>"#,
+    );
+    assert!(texts.contains(&"3750.0".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"33750.0".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"$40,000".to_owned()), "{texts:?}");
+    assert!(!texts.contains(&"$3,750".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn a_linked_label_without_a_cached_format_keeps_its_own_code() {
+    let texts = fraction_texts(
+        r#"<c:dLbls><c:numFmt formatCode="0.00%" sourceLinked="1"/><c:showVal val="1"/></c:dLbls>"#,
+        "",
+    );
+    assert!(texts.contains(&"12.30%".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"80.00%".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn a_linked_point_label_reads_the_cache_not_its_unlinked_parent() {
+    let texts = fraction_texts(
+        concat!(
+            r#"<c:dLbls><c:dLbl><c:idx val="0"/><c:numFmt formatCode="General" sourceLinked="1"/><c:showVal val="1"/></c:dLbl>"#,
+            r#"<c:numFmt formatCode="[$$-409]#,##0" sourceLinked="0"/><c:showVal val="1"/></c:dLbls>"#,
+        ),
+        "<c:formatCode>0%</c:formatCode>",
+    );
+    assert!(texts.contains(&"12%".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"$1".to_owned()), "{texts:?}");
+    assert!(!texts.contains(&"$0".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn a_scatter_y_axis_linked_to_its_cells_reads_the_y_cache_format() {
+    let texts = part_texts(concat!(
+        r#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:scatterChart><c:scatterStyle val="lineMarker"/><c:ser><c:idx val="0"/><c:order val="0"/>"#,
+        r#"<c:xVal><c:numRef><c:f>S!$A$1:$A$2</c:f><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:xVal>"#,
+        r#"<c:yVal><c:numRef><c:f>S!$B$1:$B$2</c:f><c:numCache><c:formatCode>[$$-409]#,##0</c:formatCode><c:ptCount val="2"/>"#,
+        r#"<c:pt idx="0"><c:v>3750</c:v></c:pt><c:pt idx="1"><c:v>33750</c:v></c:pt></c:numCache></c:numRef></c:yVal>"#,
+        r#"</c:ser><c:axId val="1"/><c:axId val="2"/></c:scatterChart>"#,
+        r#"<c:valAx><c:axId val="1"/><c:axPos val="b"/><c:numFmt formatCode="0.0" sourceLinked="1"/><c:crossAx val="2"/></c:valAx>"#,
+        r#"<c:valAx><c:axId val="2"/><c:axPos val="l"/><c:numFmt formatCode="0.0" sourceLinked="1"/><c:crossAx val="1"/></c:valAx>"#,
+        r#"</c:plotArea></c:chart></c:chartSpace>"#,
+    ));
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.starts_with('$') && text.contains(',')),
+        "{texts:?}"
+    );
+    // The x axis plots `c:xVal`, which caches no format, so it keeps its own.
+    assert!(
+        texts.iter().any(|text| text == "1.0" || text == "2.0"),
+        "{texts:?}"
+    );
+}
+
+#[test]
+fn a_pie_share_reads_an_unlinked_label_code_but_not_the_cached_one() {
+    let share = |source_linked: &str| {
+        chart_texts(
+            "pieChart",
+            &format!(
+                r##"<c:dLbls><c:numFmt formatCode="#,##0" sourceLinked="{source_linked}"/><c:showVal val="0"/><c:showPercent val="1"/></c:dLbls>"##
+            ),
+            "",
+        )
+    };
+    let unlinked = share("0");
+    assert!(unlinked.contains(&"0".to_owned()), "{unlinked:?}");
+    assert!(unlinked.contains(&"1".to_owned()), "{unlinked:?}");
+    let linked = share("1");
+    assert!(linked.contains(&"10%".to_owned()), "{linked:?}");
+    assert!(linked.contains(&"90%".to_owned()), "{linked:?}");
+    assert!(!linked.contains(&"$0".to_owned()), "{linked:?}");
+}
+
+#[test]
+fn a_pie_percent_label_reads_its_own_number_format() {
+    let texts = chart_texts(
+        "pieChart",
+        r#"<c:dLbls><c:numFmt formatCode="0.0%" sourceLinked="0"/><c:showVal val="0"/><c:showPercent val="1"/></c:dLbls>"#,
+        "",
+    );
+    assert!(texts.contains(&"10.0%".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"90.0%".to_owned()), "{texts:?}");
 }
 
 /// A reference carrying markup-significant characters must come back escaped,

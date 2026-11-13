@@ -33,6 +33,7 @@ type EngineDocument = {
   sheetInfoJson(): string;
   displayListJson(viewportJson: string): string;
   editCellJson(args: string): string;
+  resizeChartJson(args: string): string;
   setCalculationContextJson(context: string): void;
   recalculateJson(): string;
   encodeStateVector(): Uint8Array;
@@ -530,6 +531,35 @@ describe('xlsx native engine parity', () => {
     }
   });
 
+  test('resizeChartJson lands the same anchor on both engines and keeps the untouched marker', async () => {
+    const zip = await JSZip.loadAsync(readFileSync(new URL('../../packages/xlsx/test-fixtures/charts.xlsx', import.meta.url)));
+    const original = await zip.file('xl/drawings/drawing1.xml')!.async('string');
+    const fromMarker = (xml: string) => [...(xml.match(/<(\w+:)?from>[\s\S]*?<\/\1from>/)?.[0] ?? '')
+      .matchAll(/<(?:\w+:)?(col|colOff|row|rowOff)>(\d+)</g)].map(([, name, value]) => `${name}=${value}`);
+    const drawing = original.replace(/<(\w+:)?from>[\s\S]*?<\/\1from>/, (marker) =>
+      marker.replace(/(<(?:\w+:)?rowOff>)\d+(<\/(?:\w+:)?rowOff>)/, '$1381000$2'));
+    expect(fromMarker(drawing)).toContain('rowOff=381000');
+    expect(fromMarker(drawing)).not.toEqual(fromMarker(original));
+    zip.file('xl/drawings/drawing1.xml', drawing);
+    const source = await zip.generateAsync({ type: 'uint8array' });
+    const args = JSON.stringify({ sheet: 0, chart: 'xl/drawings/drawing1.xml#0', left: 0, top: 0, right: 0, bottom: 30 });
+    const wasmDoc = WasmDocument.openWithCalculationJson(source, context) as EngineDocument;
+    const nativeDoc = native.XlsxDocument.openWithCalculationJson(source, context) as EngineDocument;
+    try {
+      const wasmResult = wasmDoc.resizeChartJson(args);
+      expect(withoutVersion(nativeDoc.resizeChartJson(args))).toBe(withoutVersion(wasmResult));
+      expect(JSON.parse(wasmResult)).toMatchObject({ applied: true });
+      expect(nativeDoc.displayListJson(viewport)).toBe(wasmDoc.displayListJson(viewport));
+      const wasmSaved = new Uint8Array(wasmDoc.saveBytes());
+      expect(new Uint8Array(nativeDoc.saveBytes())).toEqual(wasmSaved);
+      const saved = await (await JSZip.loadAsync(wasmSaved)).file('xl/drawings/drawing1.xml')!.async('string');
+      expect(fromMarker(saved)).toEqual(fromMarker(drawing));
+    } finally {
+      wasmDoc.free();
+      nativeDoc.free();
+    }
+  });
+
   test('renderPngTarget draws both target forms, scales and caps them, and refuses bad input', () => {
     const doc = native.XlsxDocument.openWithCalculationJson(new Uint8Array(fixture), context) as EngineDocument;
     const size = (bytes: Uint8Array) => {
@@ -818,4 +848,57 @@ test('standalone font preflight has native and wasm parity on synthetic bytes', 
   expect(JSON.parse(nativePreflight(bytes))).toEqual(expected);
   const invalid = new Uint8Array([1, 2, 3]);
   expectThrownParity(() => wasmFontPreflight(invalid), () => nativePreflight(invalid));
+});
+
+describe('xlsx native panic hook', () => {
+  test('install_panic_hook returns undefined on every call', () => {
+    expect(typeof native.install_panic_hook).toBe('function');
+    expect(native.install_panic_hook()).toBeUndefined();
+    expect(native.install_panic_hook()).toBeUndefined();
+  });
+
+  test.skipIf(process.platform === 'win32')('a panic writes one prefixed line before the default report and throws the same Error', () => {
+    const script = join(mkdtempSync(join(tmpdir(), 'xlsx-native-panic-')), 'panic.mjs');
+    const path = (relative: string) => JSON.stringify(fileURLToPath(new URL(relative, import.meta.url)));
+    writeFileSync(script, `
+      import { createRequire } from 'node:module';
+      import { readFileSync } from 'node:fs';
+      const engine = await import(${path('./js/engine.ts')});
+      const raw = createRequire(import.meta.url)(${path('./index.js')});
+      engine.install_panic_hook();
+      const document = engine.XlsxDocument.open(new Uint8Array(readFileSync(${path('../../crates/ooxml-opc/tests/fixtures/sample.xlsx')})));
+      raw.setHeapLimit(1);
+      let caught;
+      try {
+        engine.displayListCellLimit();
+      } catch (error) {
+        caught = error;
+      } finally {
+        raw.setHeapLimit(0);
+        document.free();
+      }
+      process.stdout.write('\\n' + JSON.stringify({
+        isError: caught instanceof Error,
+        name: caught?.name,
+        message: caught?.message,
+        code: caught?.code,
+      }));
+    `);
+    const child = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+    expect(child.status, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout.trim().split('\n').at(-1)!)).toEqual({
+      isError: true,
+      name: 'Error',
+      message: expect.stringMatching(/^BetterOffice engine memory budget exceeded \(\d+ bytes over a 1-byte budget\)$/),
+      code: 'GenericFailure',
+    });
+    const lines = child.stderr.split('\n');
+    const prefixed = lines.flatMap((line, index) => (line.startsWith('[xlsx-native] panic: ') ? [index] : []));
+    expect(prefixed, child.stderr).toHaveLength(1);
+    expect(lines[prefixed[0]!]).toContain('panicked at');
+    expect(lines[prefixed[0]!]).toContain('\\n');
+    expect(lines[prefixed[0]!]).toContain('BetterOffice engine memory budget exceeded');
+    const report = lines.findIndex((line, index) => index > prefixed[0]! && /^thread .* panicked at /.test(line));
+    expect(report, child.stderr).toBeGreaterThan(prefixed[0]!);
+  });
 });

@@ -7,7 +7,8 @@ const root = resolve(import.meta.dirname, '../..');
 const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const relationships = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const packageRelationships = 'http://schemas.openxmlformats.org/package/2006/relationships';
-const columnWidth = 145;
+const screenPixels = (width: number) => Math.floor(((256 * width + Math.floor(128 / 7)) / 256) * 7);
+const columnWidth = screenPixels(20);
 const rowHeight = 40;
 const canvas = (page: Page) => page.getByTestId('xlsx-scroll').locator('canvas');
 type Rect = { x: number; y: number; width: number; height: number };
@@ -168,8 +169,8 @@ async function wheel(page: Page, dx: number, dy: number) {
 
 async function selectShowcaseChart(page: Page) {
   const box = (await canvas(page).boundingBox())!;
-  const left = [16, 10, 14, 14, 10, 12, 8.43]
-    .reduce((sum, width) => sum + Math.round((width * 7 + 5) / 7 * 256) / 256 * 7, 0);
+  const left = [16, 10, 14, 14, 10, 12]
+    .reduce((sum, width) => sum + Math.floor((256 * width + 18) / 256 * 7), 64);
   await page.mouse.click(box.x + left + 40, box.y + 80);
   await expect(page.getByTestId('xlsx-chart-selection')).toBeVisible();
   return (await page.getByTestId('xlsx-chart-selection').boundingBox())!;
@@ -356,24 +357,24 @@ test('xlsx view: file column widths and row heights scale accurately with zoom',
   }]);
   await open(page, source);
   const a1 = await selectionBox(page);
-  expect(a1.width).toBeCloseTo(75, 0);
+  expect(a1.width).toBeCloseTo(screenPixels(10), 0);
   expect(a1.height).toBeCloseTo(40, 0);
   await page.getByTestId('xlsx-scroll').press('ArrowRight');
   await expect(page.getByTestId('xlsx-name-box')).toHaveValue('B1');
   const b1 = await selectionBox(page);
-  expect(b1.x - a1.x).toBeCloseTo(75, 0);
-  expect(b1.width).toBeCloseTo(145, 0);
+  expect(b1.x - a1.x).toBeCloseTo(screenPixels(10), 0);
+  expect(b1.width).toBeCloseTo(columnWidth, 0);
   await page.mouse.click(a1.x + 20, a1.y + 60);
   await expect(page.getByTestId('xlsx-name-box')).toHaveValue('A2');
   const a2 = await selectionBox(page);
   expect(a2.y - a1.y).toBeCloseTo(40, 0);
   expect(a2.height).toBeCloseTo(80, 0);
   await zoom(page, 150);
-  await expect.poll(async () => (await selectionBox(page)).width).toBeCloseTo(112.5, 0);
+  await expect.poll(async () => (await selectionBox(page)).width).toBeCloseTo(screenPixels(10) * 1.5, 0);
   await expect.poll(async () => (await selectionBox(page)).height).toBeCloseTo(120, 0);
   await zoom(page, 100);
   await roundTrip(page, info, source);
-  expect((await selectionBox(page)).width).toBeCloseTo(75, 0);
+  expect((await selectionBox(page)).width).toBeCloseTo(screenPixels(10), 0);
 });
 
 test('xlsx view: merged cells have no interior grid lines and select the whole merge', async ({ page }, info) => {

@@ -261,7 +261,18 @@
     "sheetActivated": "{name}, sheet {index} of {count}",
     "cellInputLabel": "Edit cell {address}",
     "gridRoleDescription": "worksheet",
-    "fillHandleLabel": "Fill handle"
+    "fillHandleLabel": "Fill handle",
+    "chartResizeNw": "Resize chart from the top-left corner",
+    "chartResizeN": "Resize chart from the top edge",
+    "chartResizeNe": "Resize chart from the top-right corner",
+    "chartResizeE": "Resize chart from the right edge",
+    "chartResizeSe": "Resize chart from the bottom-right corner",
+    "chartResizeS": "Resize chart from the bottom edge",
+    "chartResizeSw": "Resize chart from the bottom-left corner",
+    "chartResizeW": "Resize chart from the left edge",
+    "chartResizeHintBoth": "{label} (arrow keys; hold Shift for 10px)",
+    "chartResizeHintHorizontal": "{label} (left and right arrows; hold Shift for 10px)",
+    "chartResizeHintVertical": "{label} (up and down arrows; hold Shift for 10px)"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
