@@ -26,9 +26,9 @@ import { toolbarTheme } from '../../../../shared/react-toolbar/theme';
 export interface ReplaceDialogSheet {
   sheetId: string;
   name: string;
-  /** Hidden sheets are left out of a workbook search. */
+  /** From the engine's sheet catalog; only the sheet count shown for a workbook search reads it. */
   hidden?: boolean;
-  /** Only worksheets are searched across the workbook; omitted means a worksheet. */
+  /** As `hidden`; omitted means a worksheet. */
   kind?: XlsxSheetEntry['kind'];
 }
 
@@ -121,12 +121,18 @@ function scopeTargets(
   if (scope === 'sheet') {
     return [{ sheetId: target.sheetId, range: WHOLE_SHEET_RANGE }];
   }
-  const sheets: readonly ReplaceDialogSheet[] = target.sheets?.length
-    ? target.sheets
-    : [{ sheetId: target.sheetId, name: target.label }];
-  return sheets
-    .filter((sheet) => !sheet.hidden && (sheet.kind ?? 'worksheet') === 'worksheet')
-    .map((sheet) => ({ sheetId: sheet.sheetId, range: WHOLE_SHEET_RANGE }));
+  return workbookSheets(target).map((sheet) => ({ sheetId: sheet.sheetId, range: WHOLE_SHEET_RANGE }));
+}
+
+/** Every sheet in order; the engine skips the ones a workbook search leaves out. */
+function workbookSheets(target: ReplaceDialogTarget): readonly ReplaceDialogSheet[] {
+  return target.sheets?.length ? target.sheets : [{ sheetId: target.sheetId, name: target.label }];
+}
+
+/** The sheets the engine's catalog says a workbook search covers. */
+function searchedSheetCount(target: ReplaceDialogTarget): number {
+  return workbookSheets(target)
+    .filter((sheet) => !sheet.hidden && (sheet.kind ?? 'worksheet') === 'worksheet').length;
 }
 
 function sumReplaceStats(
@@ -315,7 +321,7 @@ export function ReplaceDialog({
   const stats = phase.kind === 'preview' || phase.kind === 'applied' ? phase.stats : null;
   const activeSheetName = target?.sheets?.find((sheet) => sheet.sheetId === target.sheetId)?.name
     ?? target?.label ?? '';
-  const workbookSheetCount = target ? scopeTargets(target, 'workbook').length : 1;
+  const workbookSheetCount = target ? searchedSheetCount(target) : 1;
 
   const findMatches = async (
     query: string,
@@ -329,7 +335,6 @@ export function ReplaceDialog({
     const result = await Promise.resolve(api.find(scope === 'workbook'
       ? {
         text: query,
-        sheetIds: ranges.map((range) => range.sheetId),
         lookIn: mode,
         entireCell,
         matchCase,
@@ -460,6 +465,7 @@ export function ReplaceDialog({
         entireCell,
         lookIn: REPLACE_LOOK_IN,
         matchCase,
+        ...(scope === 'workbook' ? { within: 'workbook' as const } : {}),
       }));
       if (steps.length === 0) {
         setMatch({ index: -1, total: 0, truncated: false });

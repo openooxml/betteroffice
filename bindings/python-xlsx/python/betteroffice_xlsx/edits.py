@@ -126,6 +126,7 @@ class ReplaceText(_Step, total=False):
     entireCell: bool
     lookIn: Literal["values", "formulas"]
     matchCase: bool
+    within: Literal["sheet", "workbook"]
 
 
 EditStep = Union[SetCellInputs, SetFormulas, SetNumberFormat, PatchStyle, ReplaceText]

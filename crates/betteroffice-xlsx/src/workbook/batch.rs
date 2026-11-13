@@ -146,6 +146,22 @@ pub enum ReplaceLookIn {
     Formulas,
 }
 
+/// What a `replaceText` step searches, as Excel's Within. `workbook` marks one sheet of a
+/// replace across the workbook: a hidden, very hidden or non-worksheet target is skipped.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReplaceWithin {
+    #[default]
+    Sheet,
+    Workbook,
+}
+
+impl ReplaceWithin {
+    fn is_sheet(&self) -> bool {
+        *self == Self::Sheet
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(
     tag = "op",
@@ -198,6 +214,8 @@ pub enum EditOperation {
         /// Match letter case exactly.
         #[serde(default)]
         match_case: bool,
+        #[serde(default, skip_serializing_if = "ReplaceWithin::is_sheet")]
+        within: ReplaceWithin,
     },
 }
 
@@ -1044,13 +1062,17 @@ impl Workbook {
                 entire_cell,
                 look_in,
                 match_case,
+                within,
                 ..
             } => {
                 let sheet_ref = &self.model.sheets[resolved.sheet.0 as usize];
                 let mut states = Vec::new();
                 let mut stats = ReplaceStats::default();
-                let cells = self
-                    .is_worksheet(resolved.sheet)
+                let searched = match within {
+                    ReplaceWithin::Sheet => self.is_worksheet(resolved.sheet),
+                    ReplaceWithin::Workbook => self.searched_by_default(resolved.sheet.0 as usize),
+                };
+                let cells = searched
                     .then(|| sheet_ref.cells_in_range(resolved.range))
                     .into_iter()
                     .flatten();

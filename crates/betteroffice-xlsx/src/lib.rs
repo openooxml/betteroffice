@@ -59,8 +59,8 @@ pub use workbook::batch::{
     CalculationRequest, CellGuard, DocumentVersion, EditApplication, EditCalculation, EditFailure,
     EditFailureCode, EditHistory, EditOperation, EditOutcome, EditPreview, EditReceipt,
     EditRefusal, EditRequest, EditSource, EditStep, EditValidation, MAX_REQUEST_BYTES,
-    MAX_RESPONSE_BYTES, RefusedCell, ReplaceLookIn, ReplaceStats, StepGuard, ValidationOutcome,
-    outcome_json,
+    MAX_RESPONSE_BYTES, RefusedCell, ReplaceLookIn, ReplaceStats, ReplaceWithin, StepGuard,
+    ValidationOutcome, outcome_json,
 };
 #[doc(hidden)]
 pub use workbook::reads::SheetInfoWire;

@@ -571,6 +571,8 @@ export type XlsxEditOperation = {
     lookIn?: 'values' | 'formulas';
     /** Match letter case exactly. */
     matchCase?: boolean;
+    /** Defaults to `sheet`. `workbook` skips a hidden, very hidden or non-worksheet target. */
+    within?: 'sheet' | 'workbook';
 };
 export type XlsxEditStep = XlsxEditOperation & {
     expect?: {

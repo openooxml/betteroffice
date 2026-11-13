@@ -415,7 +415,7 @@ impl Workbook {
     }
 
     /// Whether a search over every sheet covers `sheet`: a worksheet that is not hidden.
-    fn searched_by_default(&self, index: usize) -> bool {
+    pub(super) fn searched_by_default(&self, index: usize) -> bool {
         let facts = self.source_package.as_ref().map(|slot| slot.facts());
         let visibility = crate::structured::sheet_visibility(
             self.preserved.origins.get(index).copied().flatten(),
