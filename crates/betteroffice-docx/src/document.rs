@@ -525,6 +525,9 @@ impl Document {
     /// The editing session's paragraph save plan for the current model, as the
     /// product's session save writes it; `None` saves the whole model.
     fn session_save_plan(&self) -> Result<Option<S13ParagraphIds>> {
+        if self.dirty == Dirty::ModelChanged {
+            return Ok(None);
+        }
         let Some(baseline) = &self.session_baseline else {
             return Ok(None);
         };
@@ -1513,10 +1516,10 @@ mod session_save_tests {
     fn known_limit_model_mut_borrow_without_change_takes_the_full_write() {
         let mut document = open();
         document.model_mut();
-        let (_, writes) = counted(|| {
+        let counts = counted(|| {
             document.save().unwrap();
         });
-        assert_eq!(writes, 1);
+        assert_eq!(counts, (0, 1));
     }
 
     #[test]
@@ -1607,15 +1610,22 @@ mod session_save_tests {
     }
 
     #[test]
-    fn unchanged_model_mut_keeps_the_plan() {
+    fn model_mut_borrow_takes_the_full_write() {
         let mut document = open();
         document
             .replace_paragraph_text("0000000B", "Charlie edited")
             .unwrap();
         document.model_mut();
-        let unchanged = [first_paragraph(), paragraph("0000000C", &run("Delta"))];
-        let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
-        assert_plan_keeps(&document, &unchanged, "Charlie edited");
+        assert!(document.session_save_plan().unwrap().is_none());
+        let counts = counted(|| {
+            document.save().unwrap();
+        });
+        assert_eq!(counts, (0, 1));
+        let mut expected = open();
+        expected
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert_eq!(main_part(&document), full_write(expected));
     }
 
     #[test]

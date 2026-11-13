@@ -69,22 +69,6 @@ fn written_ids(xml: &str) -> Vec<String> {
         .collect()
 }
 
-fn without_paragraph_id_values(xml: &str) -> String {
-    const ATTRIBUTE: &str = r#"w14:paraId=""#;
-    let mut output = String::with_capacity(xml.len());
-    let mut rest = xml;
-    while let Some(at) = rest.find(ATTRIBUTE) {
-        let value = at + ATTRIBUTE.len();
-        output.push_str(&rest[..value]);
-        let end = rest[value..]
-            .find('"')
-            .map_or(rest.len(), |end| value + end);
-        rest = &rest[end..];
-    }
-    output.push_str(rest);
-    output
-}
-
 #[test]
 fn unedited_save_keeps_main_part_bytes() {
     let source = main_part(
@@ -107,7 +91,7 @@ fn unedited_save_keeps_main_part_bytes() {
 }
 
 #[test]
-fn reassigned_paragraph_ids_are_the_only_main_part_change() {
+fn model_mut_borrow_writes_the_reassigned_paragraph_ids() {
     let source = main_part(
         &[
             paragraph("1A2B3C4D", &run("first")),
@@ -125,12 +109,14 @@ fn reassigned_paragraph_ids_are_the_only_main_part_change() {
     assert_ne!(fresh[1], "1A2B3C4D");
     document.model_mut();
     let saved = saved_main_part(&document.save().unwrap());
-    assert_eq!(
-        without_paragraph_id_values(&saved),
-        without_paragraph_id_values(&source),
-        "source bytes differ beyond w14:paraId values"
-    );
     assert_eq!(written_ids(&saved), fresh);
+    let reopened = Document::open(&docx(&saved)).unwrap();
+    let texts: Vec<String> = reopened
+        .paragraphs()
+        .into_iter()
+        .map(betteroffice_docx::get_paragraph_text)
+        .collect();
+    assert_eq!(texts, ["first", "second", "third"]);
 }
 
 #[test]
