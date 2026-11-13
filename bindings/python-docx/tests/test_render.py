@@ -404,3 +404,27 @@ def test_every_display_list_reader_agrees_on_a_layout(
 
         png = document.render_display_list_png(display_list, len(pages) - 1)
         assert png.bytes[:8] == PNG_MAGIC
+
+
+def test_a_display_list_keeps_its_json_for_every_reader(
+    minimal_bytes: bytes,
+    layout_input: "dict[str, Any]",
+    tmp_path: Path,
+) -> None:
+    overflow = LAYOUT_TESTS / "fixtures" / "multi-page-paragraph-overflow.input.json"
+    envelopes = [*_layout_envelopes(layout_input), json.loads(overflow.read_text())]
+    document = Document.open(minimal_bytes)
+    for index, envelope in enumerate(envelopes):
+        layout = document.layout(envelope)
+        display_list = layout.display_list
+        text = display_list.json
+
+        assert display_list.json == text
+        assert display_list.json is text
+        assert layout.display_list.json is text
+        assert display_list.to_dict() == json.loads(display_list.json)
+
+        target = tmp_path / f"kept-display-list-{index}.json"
+        display_list.write(target)
+        assert target.read_bytes() == display_list.json.encode()
+        assert display_list.json is text
