@@ -195,7 +195,7 @@ it.each(['projected', 'native'])('applies conditional paragraph spacing (seeder:
         [160, 160, 160, 160, 160],
         [160, 160, 160, 160, 160],
       ],
-      Array.from({ length: 5 }, () => [10, 10, 10, 10, 10]),
+      Array.from({ length: 5 }, () => [170, 180, 170, 180, 170]),
       [
         [190, 110, 200],
         [170, 180, 170],

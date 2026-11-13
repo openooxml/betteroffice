@@ -5277,15 +5277,16 @@ fn table_cell_style_properties(
         columns,
         rowspan,
     );
-    let layers = std::iter::once((field(style, "tcPr"), [true; 4])).chain(regions.into_iter().map(
-        |(region, edges)| {
+    let mut shading = field(field(style, "tcPr"), "shading");
+    let layers = regions
+        .into_iter()
+        .filter(|(region, _)| *region != "wholeTable")
+        .map(|(region, edges)| {
             let conditional = parts
                 .iter()
                 .find(|part| string(field(Some(part), "type")) == Some(region));
             (field(conditional, "tcPr"), edges)
-        },
-    ));
-    let mut shading = None;
+        });
     let mut borders = Map::new();
     for (properties, [top, bottom, left, right]) in layers {
         if let Some(value) = field(properties, "shading") {
@@ -5324,7 +5325,16 @@ fn table_style_regions(
     let mask = string(field(look, "value"))
         .and_then(|value| u32::from_str_radix(value, 16).ok())
         .unwrap_or(if look.is_none() { 0x04a0 } else { 0 });
-    let flag = |key, bit| boolean(field(look, key)).unwrap_or(mask & bit != 0);
+    let named = ["firstRow", "lastRow", "firstColumn", "lastColumn", "noHBand", "noVBand"]
+        .into_iter()
+        .any(|key| boolean(field(look, key)).is_some());
+    let flag = |key, bit| {
+        if named {
+            boolean(field(look, key)) == Some(true)
+        } else {
+            mask & bit != 0
+        }
+    };
     let first_row = flag("firstRow", 0x20);
     let last_row = flag("lastRow", 0x40);
     let first_column = flag("firstColumn", 0x80);
@@ -5342,7 +5352,7 @@ fn table_style_regions(
     let at_first_column = first_column && start_column == 0;
     let at_last_column = last_column && end_column == columns;
     let band_size = |key| {
-        number(field(formatting, key).or_else(|| field(style_formatting, key))).unwrap_or(1.0)
+        number(field(formatting, key).or_else(|| field(style_formatting, key))).unwrap_or(0.0)
     };
     let row_band_size = band_size("styleRowBandSize");
     let column_band_size = band_size("styleColBandSize");

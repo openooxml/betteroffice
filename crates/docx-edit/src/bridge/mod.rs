@@ -2582,13 +2582,15 @@ fn table_look_first_column(tbl_pr: &std::collections::HashMap<String, Any>) -> b
     let Some(look) = tbl_pr.get("look").and_then(any_map) else {
         return false;
     };
-    map_bool(look, "firstColumn")
-        .or_else(|| {
-            map_string(look, "value")
-                .and_then(|value| u32::from_str_radix(value.trim(), 16).ok())
-                .map(|bits| bits & 0x0080 != 0)
-        })
-        .unwrap_or(false)
+    let named = ["firstRow", "lastRow", "firstColumn", "lastColumn", "noHBand", "noVBand"]
+        .into_iter()
+        .any(|key| map_bool(look, key).is_some());
+    if named {
+        return map_bool(look, "firstColumn") == Some(true);
+    }
+    map_string(look, "value")
+        .and_then(|value| u32::from_str_radix(value.trim(), 16).ok())
+        .is_some_and(|bits| bits & 0x0080 != 0)
 }
 
 fn resolve_paragraph_auto_text_color(

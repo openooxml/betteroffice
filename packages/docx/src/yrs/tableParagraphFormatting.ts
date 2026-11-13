@@ -12,6 +12,17 @@ import { mergeTextFormatting } from '../utils/textFormattingMerge';
 
 type RegionEdges = [top: boolean, bottom: boolean, left: boolean, right: boolean];
 
+type NamedLookFlag = Exclude<keyof TableLook, 'value'>;
+
+const NAMED_LOOK_FLAGS: readonly NamedLookFlag[] = [
+  'firstRow',
+  'lastRow',
+  'firstColumn',
+  'lastColumn',
+  'noHBand',
+  'noVBand',
+];
+
 export function tableCellParagraphFormatting(
   table: Table,
   style: Style | undefined,
@@ -46,13 +57,13 @@ export function tableCellStyleProperties(
 ): Pick<TableCellFormatting, 'shading' | 'borders'> | undefined {
   if (!style?.tcPr && !style?.tblStylePr?.some((part) => part.tcPr)) return undefined;
   const layers: Array<[TableCellFormatting | undefined, RegionEdges]> = [
-    [style.tcPr, [true, true, true, true]],
-    ...tableStyleRegions(table, style, rowIndex, startColumn, endColumn, columns, rowspan).map(
-      ([region, edges]): [TableCellFormatting | undefined, RegionEdges] => [
+    [style.tcPr && { shading: style.tcPr.shading }, [true, true, true, true]],
+    ...tableStyleRegions(table, style, rowIndex, startColumn, endColumn, columns, rowspan)
+      .filter(([region]) => region !== 'wholeTable')
+      .map(([region, edges]): [TableCellFormatting | undefined, RegionEdges] => [
         style.tblStylePr?.find((part) => part.type === region)?.tcPr,
         edges,
-      ]
-    ),
+      ]),
   ];
   let shading: TableCellFormatting['shading'];
   const borders: TableBorders = {};
@@ -110,8 +121,11 @@ function tableStyleRegions(
   rowspan = 1
 ): Array<[string, RegionEdges]> {
   const look = table.formatting?.look ?? style.tblPr?.look;
-  const flag = (key: Exclude<keyof TableLook, 'value'>, mask: number) =>
-    look?.[key] ?? (Number.parseInt(look?.value ?? (look ? '0' : '04A0'), 16) & mask) !== 0;
+  const named = NAMED_LOOK_FLAGS.some((key) => typeof look?.[key] === 'boolean');
+  const flag = (key: NamedLookFlag, mask: number) =>
+    named
+      ? look?.[key] === true
+      : (Number.parseInt(look?.value ?? (look ? '0' : '04A0'), 16) & mask) !== 0;
   const firstRow = flag('firstRow', 0x20);
   const lastRow = flag('lastRow', 0x40);
   const firstColumn = flag('firstColumn', 0x80);
@@ -123,8 +137,8 @@ function tableStyleRegions(
   const atLastRow = !!lastRow && rowIndex === table.rows.length - 1;
   const atFirstColumn = !!firstColumn && startColumn === 0;
   const atLastColumn = !!lastColumn && endColumn === columns;
-  const rowBandSize = table.formatting?.styleRowBandSize ?? style.tblPr?.styleRowBandSize ?? 1;
-  const columnBandSize = table.formatting?.styleColBandSize ?? style.tblPr?.styleColBandSize ?? 1;
+  const rowBandSize = table.formatting?.styleRowBandSize ?? style.tblPr?.styleRowBandSize ?? 0;
+  const columnBandSize = table.formatting?.styleColBandSize ?? style.tblPr?.styleColBandSize ?? 0;
   const top = rowIndex === 0;
   const lastSpannedRow = rowIndex + Math.max(1, rowspan) - 1;
   const bottom = lastSpannedRow >= table.rows.length - 1;
