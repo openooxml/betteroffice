@@ -1084,13 +1084,16 @@ fn workbook_with_hidden_and_chartsheet() -> Workbook {
     put(&mut hidden, "A1", text("alpha"), None, None);
     let mut chart = Sheet::new("Chart");
     put(&mut chart, "A1", text("alpha"), None, None);
-    model.sheets.extend([data, hidden, chart]);
+    let mut secret = Sheet::new("Secret");
+    put(&mut secret, "A1", text("alpha"), None, None);
+    model.sheets.extend([data, hidden, chart, secret]);
     let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
     for (path, bytes) in &mut parts {
         if path == "xl/workbook.xml" {
             let xml = String::from_utf8(bytes.clone())
                 .unwrap()
-                .replace(r#"name="Hidden""#, r#"name="Hidden" state="hidden""#);
+                .replace(r#"name="Hidden""#, r#"name="Hidden" state="hidden""#)
+                .replace(r#"name="Secret""#, r#"name="Secret" state="veryHidden""#);
             *bytes = xml.into_bytes();
         } else if path == "xl/_rels/workbook.xml.rels" {
             let xml = String::from_utf8(bytes.clone()).unwrap().replace(
@@ -1112,7 +1115,55 @@ fn workbook_with_hidden_and_chartsheet() -> Workbook {
     .unwrap();
     assert_eq!(read["sheets"][1]["visibility"], "hidden");
     assert_eq!(read["sheets"][2]["editable"], false);
+    assert_eq!(read["sheets"][3]["visibility"], "veryHidden");
     workbook
+}
+
+fn whole_sheet_within(sheet: &str, within: &str) -> Value {
+    json!({
+        "op": "replaceText",
+        "target": {
+            "sheetId": sheet,
+            "range": {
+                "kind": "rowCol",
+                "start": { "row": 0, "col": 0 },
+                "end": { "row": 1048575, "col": 16383 },
+            },
+        },
+        "query": "alpha",
+        "replacement": "omega",
+        "within": within,
+    })
+}
+
+fn apply_steps(workbook: &mut Workbook, steps: Vec<Value>) -> Option<EditOutcome> {
+    let request = serde_json::from_value::<EditRequest>(json!({
+        "expectVersion": workbook.version(),
+        "steps": steps,
+    }))
+    .ok()?;
+    Some(workbook.apply_edits(&request).unwrap())
+}
+
+#[test]
+fn workbook_replace_skips_hidden_and_very_hidden_sheets() {
+    let mut workbook = workbook_with_hidden_and_chartsheet();
+    let steps = ["sheet:0", "sheet:1", "sheet:2", "sheet:3"]
+        .map(|sheet| whole_sheet_within(sheet, "workbook"))
+        .to_vec();
+    let outcome = apply_steps(&mut workbook, steps);
+    let Some(Ok(applied)) = &outcome else {
+        panic!("a workbook replace applies: {outcome:?}");
+    };
+    assert_eq!(stored_on(&workbook, SheetId(0), "A1"), text("omega"));
+    assert_eq!(stored_on(&workbook, SheetId(1), "A1"), text("alpha"));
+    assert_eq!(stored_on(&workbook, SheetId(3), "A1"), text("alpha"));
+    let matched = applied
+        .receipts
+        .iter()
+        .map(|receipt| receipt.replace.as_ref().map_or(0, |stats| stats.matched))
+        .collect::<Vec<_>>();
+    assert_eq!(matched, [1, 0, 0, 0]);
 }
 
 #[test]
