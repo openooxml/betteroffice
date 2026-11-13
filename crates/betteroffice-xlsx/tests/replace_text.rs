@@ -851,6 +851,23 @@ fn a_replacement_that_breaks_a_formula_is_refused_and_the_rest_applies() {
 }
 
 #[test]
+fn replace_reports_the_total_of_refused_cells() {
+    let mut workbook = entry_workbook();
+    let outcome = apply(&mut workbook, typed("A1:H1", "+", "("))
+        .expect("broken formulas are refused per cell");
+
+    let wire = serde_json::to_value(&outcome).unwrap();
+    let stats = &wire["receipts"][0]["replace"];
+    assert_eq!(stats["refused"], 2);
+    assert_eq!(stats["refusedCells"].as_array().map(Vec::len), Some(2));
+
+    let outcome = apply(&mut workbook, typed("A1:A1", "1", "2"))
+        .expect("the batch applies");
+    let wire = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(wire["receipts"][0]["replace"]["refused"], 0);
+}
+
+#[test]
 fn a_formatted_number_is_found_by_its_display_but_replaced_by_its_entry() {
     let mut workbook = entry_workbook();
     let scope = json!({ "sheetId": SHEET, "range": { "kind": "a1", "a1": "D1:D1" } });

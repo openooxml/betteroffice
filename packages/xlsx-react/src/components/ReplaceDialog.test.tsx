@@ -152,6 +152,32 @@ test('names the cells a replace refuses while the rest applies', async () => {
   await findByText(/Not replaced: Data!B1: the new formula =A1\(10 does not parse/);
 });
 
+test('counts every refused cell, not only the listed ones', async () => {
+  const { getByRole, findByText } = view({
+    version: () => 'v1',
+    find: () => ({ ok: true, version: 'v1', matches: [], truncated: false }),
+    validate: () => preview({
+      previews: [{
+        stepIndex: 0, target: { sheetId: target.sheetId, range: target.range }, wouldChange: true,
+        changedCellCount: 1,
+        replace: {
+          matched: 4, replaced: 1, skippedFormulas: 0, skippedLocked: 0, refused: 3,
+          refusedCells: [
+            { cell: 'B1', reason: 'Data!B1 holds rich text that a replace would flatten' },
+            { cell: 'B2', reason: 'Data!B2 holds rich text that a replace would flatten' },
+          ],
+        },
+      }],
+    }),
+    apply: () => { throw new Error('must not apply'); },
+  });
+
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'a');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, 'b');
+  fireEvent.click(getByRole('button', { name: 'Preview' }));
+  await findByText(/Data!B2 holds rich text that a replace would flatten; … \+1/);
+});
+
 test('replace edits the entered text whatever Look in is set to', async () => {
   const finds: XlsxFindRequest[] = [];
   const requests: XlsxEditRequest[] = [];
