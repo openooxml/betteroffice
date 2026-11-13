@@ -57,15 +57,15 @@ impl Workbook {
         if current.formula.is_some() {
             return false;
         }
-        let Some((source_sheet, source_cell)) = self.text_source_cell(sheet, cell) else {
+        let Some(&Some(source_sheet)) = self.preserved.origins.get(sheet.0 as usize) else {
             return false;
         };
-        let rewritten = self
-            .invalidated_text_sources
-            .as_ref()
-            .is_some_and(|invalidated| {
-                invalidated.contains(&(source_sheet, source_cell.row, source_cell.col))
-            });
+        let source_cell = self.text_source_cell(sheet, cell).map(|(_, at)| at);
+        let rewritten = source_cell.is_some_and(|at| {
+            self.invalidated_text_sources
+                .as_ref()
+                .is_some_and(|invalidated| invalidated.contains(&(source_sheet, at.row, at.col)))
+        });
         if rewritten && !self.is_collaborative() {
             return false;
         }
@@ -85,9 +85,12 @@ impl Workbook {
                 self.model.shared_strings.get(index) == Some(value)
                     && package.shared_string_is_rich(index)
             }
-            None => package.source_cell_facts(source_sheet).is_none_or(|facts| {
-                facts.rich_inline.get(&(source_cell.row, source_cell.col)) == Some(value)
-            }),
+            None => package
+                .source_cell_facts(source_sheet)
+                .is_none_or(|facts| match source_cell {
+                    Some(at) => facts.rich_inline.get(&(at.row, at.col)) == Some(value),
+                    None => facts.rich_inline.values().any(|rich| rich == value),
+                }),
         }
     }
 
