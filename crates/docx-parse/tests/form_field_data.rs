@@ -26,18 +26,25 @@ fn saved_document(source: &[u8]) -> String {
 }
 
 fn save(source: &[u8]) -> Result<String, String> {
+    save_with(source, Value::Null)
+}
+
+fn save_with(source: &[u8], selective: Value) -> Result<String, String> {
     let parsed = parse_docx_s9_wire(source, S9ParseOptions::default()).unwrap();
     let mut package: Value = serde_json::to_value(parsed.document.package).unwrap();
     package["document"]
         .as_object_mut()
         .unwrap()
         .remove("sections");
-    let request: S13SaveRequest = serde_json::from_value(json!({
+    let mut request = json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": package["document"],
         "options": {"updateModifiedDate": false}
-    }))
-    .unwrap();
+    });
+    if !selective.is_null() {
+        request["selective"] = selective;
+    }
+    let request: S13SaveRequest = serde_json::from_value(request).unwrap();
     let saved = write_docx_s13(request, source).map_err(|error| error.to_string())?;
     Ok(String::from_utf8(
         ooxml_opc::unzip_parts(&saved)
@@ -121,15 +128,30 @@ fn keeps_a_dirty_field_marked_dirty_when_a_paragraph_is_written_from_the_model()
     assert_eq!(xml.matches("w:dirty=").count(), 1, "{xml}");
 }
 
-#[test]
-fn refuses_to_write_naming_the_field_when_its_form_field_data_uses_a_prefix_it_cannot_bind() {
-    let data = r#"<w:ffData><w:name w:val="Ext1"/><w:enabled/><w:calcOnExit w:val="0"/><w:textInput/><ext:hint ext:val="x"/></w:ffData>"#;
-    let body = format!(
-        "<w:p>{}{}</w:p>",
+const ALIASED: &str = r#"xmlns:ns0="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
+const ALIASED_DATA: &str = r#"<ns0:ffData><ns0:name ns0:val="Ext1"/><ns0:enabled/><ns0:textInput/></ns0:ffData>"#;
+
+fn aliased_document() -> (Vec<u8>, String) {
+    let field = format!(
+        r#"<w:p w14:paraId="73000003">{}{}</w:p>"#,
         text("Label "),
-        form_field(data, "FORMTEXT", &text("Ada")),
+        form_field(ALIASED_DATA, "FORMTEXT", &text("Ada")),
     );
-    let namespaces = format!(r#"{NS} xmlns:ext="urn:example:form-extension""#);
-    let error = save(&fixture_in(&namespaces, &body)).unwrap_err();
+    let body = format!(r#"{field}<w:p w14:paraId="73000004">{}</w:p>"#, text("Other"));
+    (fixture_in(&format!("{NS} {ALIASED}"), &body), field)
+}
+
+#[test]
+fn refuses_to_rewrite_form_field_data_it_cannot_write_naming_the_field_and_the_reason() {
+    let (source, _) = aliased_document();
+    let error = save(&source).unwrap_err();
     assert!(error.contains("\"Ext1\""), "{error}");
+    assert!(error.contains("found ns0:ffData"), "{error}");
+}
+
+#[test]
+fn keeps_the_source_bytes_of_an_untouched_paragraph_whose_form_field_data_it_cannot_write() {
+    let (source, field) = aliased_document();
+    let xml = save_with(&source, json!({"changedParaIds": ["73000004"]})).unwrap();
+    assert_eq!(xml.matches(field.as_str()).count(), 1, "{xml}");
 }

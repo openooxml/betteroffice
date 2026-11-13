@@ -479,9 +479,14 @@ fn write_docx_s13_parts_with_warnings(
         )? {
             Some(patched) => patched,
             None => {
-                let serialized = serialize_document_part(&request.document, &mut context)?;
-                build_patched_document_xml(&original, &serialized, &selective.changed_para_ids)
-                    .ok_or_else(|| save_error("selective document patch is unsafe"))?
+                context.begin_form_data_tokens(&original);
+                let serialized = serialize_document_part(&request.document, &mut context);
+                let deferred = context.end_form_data_tokens();
+                let patched =
+                    build_patched_document_xml(&original, &serialized?, &selective.changed_para_ids)
+                        .ok_or_else(|| save_error("selective document patch is unsafe"))?;
+                super::paragraph::reject_form_data_tokens(&patched, &deferred)?;
+                patched
             }
         }
     } else {
@@ -1633,15 +1638,7 @@ impl StoryParts<'_> {
             Self::splice_written(source, part, assignments, strict, keeps, context, serialize);
         let deferred = context.end_form_data_tokens();
         let written = written?;
-        if let Some((_, field)) = deferred
-            .iter()
-            .find(|(token, _)| written.xml.contains(token.as_str()))
-        {
-            return Err(super::paragraph::form_data_error(
-                field,
-                "its paragraph cannot keep its source bytes",
-            ));
-        }
+        super::paragraph::reject_form_data_tokens(&written.xml, &deferred)?;
         Ok(written)
     }
 
@@ -3627,7 +3624,6 @@ impl<'a> SelectiveParagraphIndex<'a> {
                 Some(())
             }
             InlineNode::ComplexField(field) => {
-                self.raw_subtree(field.raw_form_data_xml.as_deref(), "ffData")?;
                 for run in &field.field_code {
                     self.run(run)?;
                 }

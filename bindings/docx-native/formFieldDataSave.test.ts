@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import * as wasmYrs from '../../packages/docx/src/yrs';
 import * as nativeYrs from '@betteroffice/docx-native/yrs';
+import { attemptSelectiveSave } from '../../packages/docx/src/docx/selectiveSave';
 
 type Yrs = typeof wasmYrs;
 type Session = Awaited<ReturnType<Yrs['createYrsSession']>>;
@@ -20,8 +21,9 @@ const formBegin = (data: string) => `<w:fldChar w:fldCharType="begin">${data}</w
 
 const FORM_PARAGRAPH = `<w:p w14:paraId="73000001">${text('Name: ')}${field(formBegin(TEXT_DATA), 'FORMTEXT', text('Ada'))}${text(' Agree ')}${field(formBegin(CHECK_DATA), 'FORMCHECKBOX', '')}${text(' Pick ')}${field(formBegin(DROP_DATA), 'FORMDROPDOWN', text('Beta'))}${text(' end.')}</w:p>`;
 const DIRTY_PARAGRAPH = `<w:p w14:paraId="73000002">${text('Page ')}${field(DIRTY_BEGIN, 'PAGE', text('1'))}${text(' of many')}</w:p>`;
-const EXT_NAMESPACE = ' xmlns:ext="urn:example:form-extension"';
-const EXT_DATA = '<w:ffData><w:name w:val="Ext1"/><w:enabled/><w:calcOnExit w:val="0"/><w:textInput/><ext:hint ext:val="x"/></w:ffData>';
+const EXT_NAMESPACE = ` xmlns:ns0="${W}"`;
+const EXT_DATA = '<ns0:ffData><ns0:name ns0:val="Ext1"/><ns0:enabled/><ns0:textInput/></ns0:ffData>';
+const UNWRITABLE = /"Ext1".*found ns0:ffData/;
 const EXT_PARAGRAPH = `<w:p w14:paraId="73000003">${text('Label ')}${field(formBegin(EXT_DATA), 'FORMTEXT', text('Ada'))}</w:p>`;
 const OTHER_PARAGRAPH = `<w:p w14:paraId="73000004">${text('Other')}</w:p>`;
 
@@ -105,18 +107,40 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       expect(count(xml, 'w:dirty=')).toBe(1);
     });
 
-    test(`${engine}: refuses to save, naming the field, when form field data it cannot write is beside the typed text (${route})`, async () => {
-      await expect(typedInExtended(yrs, 'Label', route)).rejects.toThrow(/Ext1/);
+    test(`${engine}: refuses to save, naming the field and the reason, when form field data it cannot write is beside the typed text (${route})`, async () => {
+      await expect(typedInExtended(yrs, 'Label', route)).rejects.toThrow(UNWRITABLE);
     });
   }
 
-  test(`${engine}: keeps the source bytes of an untouched paragraph whose form field data it cannot write (product save)`, async () => {
+  test(`${engine}: saves with the same document when the edit is in another paragraph, that paragraph byte-identical (product save)`, async () => {
     const xml = await typedInExtended(yrs, 'Other', 'product save');
     expect(count(xml, EXT_PARAGRAPH)).toBe(1);
     expect(xml).toContain('Otherx');
   });
 
-  test(`${engine}: refuses to save, naming the field, when a whole rewrite would drop form field data it cannot write`, async () => {
-    await expect(typedInExtended(yrs, 'Other', 'whole model rewrite')).rejects.toThrow(/Ext1/);
+  test(`${engine}: saves with the same document when the edit is in another paragraph, that paragraph byte-identical (selective save)`, async () => {
+    const session = await yrs.createYrsSession();
+    try {
+      session.openDocx(await docx(EXT_PARAGRAPH + OTHER_PARAGRAPH, EXT_NAMESPACE), true);
+      const [match] = session.searchText('Other', { caseSensitive: true });
+      session.insertText({ story: 'body', paraId: match!.paraId, offset: match!.end }, 'x');
+      const base = session.materializeDocx()!;
+      const document = yrs.yrsToDocument(session, base);
+      const saved = await attemptSelectiveSave(document, base.originalBuffer!, {
+        changedParaIds: new Set([match!.paraId]),
+        structuralChange: false,
+        hasUntrackedChanges: false,
+      });
+      expect(saved).not.toBeNull();
+      const xml = await documentXml(new Uint8Array(saved!));
+      expect(count(xml, EXT_PARAGRAPH)).toBe(1);
+      expect(xml).toContain('Otherx');
+    } finally {
+      session.destroy();
+    }
+  });
+
+  test(`${engine}: refuses to save, naming the field and the reason, when a whole rewrite would drop form field data it cannot write`, async () => {
+    await expect(typedInExtended(yrs, 'Other', 'whole model rewrite')).rejects.toThrow(UNWRITABLE);
   });
 }

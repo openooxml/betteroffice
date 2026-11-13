@@ -67,7 +67,7 @@ pub struct SerializerContext {
     splice: Option<SpliceRecorder>,
     document_root: Option<String>,
     form_data_token: Option<String>,
-    deferred_form_data: Vec<(String, String)>,
+    deferred_form_data: Vec<(String, String, String)>,
 }
 
 /// The XML written for each model paragraph a spliced part addresses by `sourceOrdinal`.
@@ -132,14 +132,15 @@ impl SerializerContext {
         self.deferred_form_data.clear();
     }
 
-    pub(crate) fn defer_form_data(&mut self, field: String) -> Option<String> {
+    pub(crate) fn defer_form_data(&mut self, field: &str, detail: &str) -> Option<String> {
         let prefix = self.form_data_token.as_deref()?;
         let token = format!("{prefix}{}-->", self.deferred_form_data.len());
-        self.deferred_form_data.push((token.clone(), field));
+        self.deferred_form_data
+            .push((token.clone(), field.to_owned(), detail.to_owned()));
         Some(token)
     }
 
-    pub(crate) fn end_form_data_tokens(&mut self) -> Vec<(String, String)> {
+    pub(crate) fn end_form_data_tokens(&mut self) -> Vec<(String, String, String)> {
         self.form_data_token = None;
         std::mem::take(&mut self.deferred_form_data)
     }

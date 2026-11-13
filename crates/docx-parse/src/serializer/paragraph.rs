@@ -611,8 +611,9 @@ fn serialize_complex_field(
             Ok(()) => output.push_str(raw),
             Err(error) => {
                 let name = form_field_name(field, raw);
-                let Some(token) = context.defer_form_data(name.clone()) else {
-                    return Err(form_data_error(&name, &error.to_string()));
+                let detail = error.to_string();
+                let Some(token) = context.defer_form_data(&name, &detail) else {
+                    return Err(form_data_error(&name, &detail));
                 };
                 output.push_str(&token);
             }
@@ -720,7 +721,8 @@ pub fn serialize_inline_sdt(
 }
 
 fn form_field_name(field: &ComplexField, raw: &str) -> String {
-    raw.split_once("<w:name w:val=\"")
+    raw.split_once(":name ")
+        .and_then(|(_, rest)| rest.split_once(":val=\""))
         .and_then(|(_, rest)| rest.split_once('"'))
         .map(|(name, _)| name)
         .filter(|name| !name.is_empty())
@@ -731,6 +733,17 @@ pub(crate) fn form_data_error(field: &str, detail: &str) -> ParseError {
     ParseError::Canonical(format!(
         "the form field data of field {field:?} cannot be written: {detail}"
     ))
+}
+
+/// Fails when `xml` still holds a token written in place of form field data.
+pub(crate) fn reject_form_data_tokens(
+    xml: &str,
+    deferred: &[(String, String, String)],
+) -> Result<(), ParseError> {
+    match deferred.iter().find(|(token, _, _)| xml.contains(token.as_str())) {
+        Some((_, field, detail)) => Err(form_data_error(field, detail)),
+        None => Ok(()),
+    }
 }
 
 pub(crate) fn serialize_sdt_properties(
