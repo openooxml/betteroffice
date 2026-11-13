@@ -10711,11 +10711,12 @@ fn plot_labels_from<'a>(
     let text = |read: fn(&ChartDataLabelsIn) -> Option<&str>| {
         series.and_then(read).or_else(|| group.and_then(read))
     };
-    let formats = levels
-        .iter()
-        .copied()
-        .flatten()
-        .map(|labels| (labels.number_format.as_deref(), labels.source_linked == Some(true)));
+    let formats = levels.iter().copied().flatten().map(|labels| {
+        (
+            labels.number_format.as_deref(),
+            labels.source_linked == Some(true),
+        )
+    });
     Some(PlotDataLabels {
         show_value: switch(|labels| labels.show_value),
         show_category_name: switch(|labels| labels.show_category_name),

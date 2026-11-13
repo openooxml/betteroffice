@@ -7849,14 +7849,23 @@ fn a_scatter_y_axis_linked_to_its_cells_reads_the_y_cache_format() {
 }
 
 #[test]
-fn a_pie_share_ignores_a_label_code_that_is_not_a_percent() {
-    let texts = chart_texts(
-        "pieChart",
-        r##"<c:dLbls><c:numFmt formatCode="#,##0" sourceLinked="0"/><c:showVal val="0"/><c:showPercent val="1"/></c:dLbls>"##,
-        "",
-    );
-    assert!(texts.contains(&"10%".to_owned()), "{texts:?}");
-    assert!(texts.contains(&"90%".to_owned()), "{texts:?}");
+fn a_pie_share_reads_an_unlinked_label_code_but_not_the_cached_one() {
+    let share = |source_linked: &str| {
+        chart_texts(
+            "pieChart",
+            &format!(
+                r##"<c:dLbls><c:numFmt formatCode="#,##0" sourceLinked="{source_linked}"/><c:showVal val="0"/><c:showPercent val="1"/></c:dLbls>"##
+            ),
+            "",
+        )
+    };
+    let unlinked = share("0");
+    assert!(unlinked.contains(&"0".to_owned()), "{unlinked:?}");
+    assert!(unlinked.contains(&"1".to_owned()), "{unlinked:?}");
+    let linked = share("1");
+    assert!(linked.contains(&"10%".to_owned()), "{linked:?}");
+    assert!(linked.contains(&"90%".to_owned()), "{linked:?}");
+    assert!(!linked.contains(&"$0".to_owned()), "{linked:?}");
 }
 
 #[test]

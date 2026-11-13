@@ -817,11 +817,12 @@ fn plot_labels_from_model<'a>(
     for labels in levels.iter().rev().flatten() {
         style = plot_text_from_model(labels.text.as_ref()).over(style);
     }
-    let formats = levels
-        .iter()
-        .copied()
-        .flatten()
-        .map(|labels| (labels.number_format.as_deref(), labels.source_linked == Some(true)));
+    let formats = levels.iter().copied().flatten().map(|labels| {
+        (
+            labels.number_format.as_deref(),
+            labels.source_linked == Some(true),
+        )
+    });
     Some(PlotDataLabels {
         show_value: switch(|labels| labels.show_value),
         show_category_name: switch(|labels| labels.show_category_name),
@@ -837,8 +838,9 @@ fn plot_labels_from_model<'a>(
 }
 
 /// The code a label cascade formats its values with: the nearest level that
-/// declares a `c:numFmt` decides, and a source-linked one reads `cached`
-/// before its own code.
+/// declares a `c:numFmt` decides. A source-linked one resolves to `None`
+/// while `cached` exists, so a value reads the series' `value_format` and a
+/// share reads as a plain percentage; without a cache it keeps its own code.
 pub fn label_number_format<'a>(
     levels: impl IntoIterator<Item = (Option<&'a str>, bool)>,
     cached: Option<&'a str>,
@@ -846,7 +848,11 @@ pub fn label_number_format<'a>(
     let (code, linked) = levels
         .into_iter()
         .find(|(code, linked)| code.is_some() || *linked)?;
-    if linked { cached.or(code) } else { code }
+    if linked && cached.is_some() {
+        None
+    } else {
+        code
+    }
 }
 
 /// Folds cascade-resolved `c:dLbl` overrides into `points`.
@@ -3571,10 +3577,10 @@ fn label_field(
     }
 }
 
-/// A share as a percentage label reads it: through the label's `c:numFmt`
-/// when that is a percent code, else as [`format_percent`] writes it.
+/// A share as a percentage label reads it: through the label's own
+/// `c:numFmt`, else as [`format_percent`] writes it, as `General` does too.
 fn format_share(share: f64, code: Option<&str>) -> String {
-    code.filter(|code| code.contains('%'))
+    code.filter(|code| !code.eq_ignore_ascii_case("general"))
         .and_then(|code| format_with_code(share, code))
         .unwrap_or_else(|| format_percent(share))
 }
