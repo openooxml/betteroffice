@@ -1,6 +1,7 @@
 //! math and trig functions. rounding follows excel: ROUND is half-away-from-zero,
 //! ROUNDUP/ROUNDDOWN are directional, non-finite results are `#NUM!`.
 
+use xlsx_model::numfmt::fifteen_digits;
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, to_text};
@@ -1733,40 +1734,6 @@ fn exact_at(value: f64, digits: i64) -> bool {
     n <= 22 && twos >= n && odd % 5u64.pow(n as u32) == 0
 }
 
-/// `a` (finite, > 0) at 15 significant digits, half away from zero, exactly:
-/// `(m, e)` with `a ~ m * 10^e` and `m < 10^15`.
-fn fifteen_digits(a: f64) -> (u64, i64) {
-    use std::fmt::Write;
-    let mut text = DigitBuf::default();
-    let _ = write!(text, "{a:.15e}");
-    let (sixteen, exponent) = scientific(text.as_str());
-    let mut m = sixteen / 10;
-    let up = match sixteen % 10 {
-        0..=4 => false,
-        5 => format!("{a:.800e}").as_bytes()[16] >= b'5',
-        _ => true,
-    };
-    let mut e = exponent - 14;
-    if up {
-        m += 1;
-        if m == 1_000_000_000_000_000 {
-            m = 100_000_000_000_000;
-            e += 1;
-        }
-    }
-    (m, e)
-}
-
-/// mantissa digits and exponent of rust's `d.ddde[-]x` form.
-fn scientific(text: &str) -> (u64, i64) {
-    let (mantissa, exponent) = text.split_once('e').unwrap_or((text, "0"));
-    let digits = mantissa
-        .bytes()
-        .filter(u8::is_ascii_digit)
-        .fold(0u64, |acc, b| acc * 10 + u64::from(b - b'0'));
-    (digits, exponent.parse().unwrap_or(0))
-}
-
 /// `q * 10^p` as the nearest double; `q < 2^53` keeps the short paths exact.
 fn decimal_to_f64(q: u64, p: i64) -> f64 {
     const POW10: [f64; 23] = [
@@ -1777,29 +1744,6 @@ fn decimal_to_f64(q: u64, p: i64) -> f64 {
         0..=22 => q as f64 * POW10[p as usize],
         -22..=-1 => q as f64 / POW10[(-p) as usize],
         _ => format!("{q}e{p}").parse().unwrap_or(f64::NAN),
-    }
-}
-
-/// stack buffer for one `{:.15e}` rendering.
-#[derive(Default)]
-struct DigitBuf {
-    bytes: [u8; 32],
-    len: usize,
-}
-
-impl DigitBuf {
-    fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
-    }
-}
-
-impl std::fmt::Write for DigitBuf {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        let end = self.len + s.len();
-        let slot = self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?;
-        slot.copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
     }
 }
 

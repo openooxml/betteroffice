@@ -229,7 +229,18 @@
     "sheetActivated": "{name}, foglio {index} di {count}",
     "cellInputLabel": "Modifica cella {address}",
     "gridRoleDescription": "foglio di lavoro",
-    "fillHandleLabel": "Maniglia di riempimento"
+    "fillHandleLabel": "Maniglia di riempimento",
+    "chartResizeNw": "Ridimensiona il grafico dall'angolo superiore sinistro",
+    "chartResizeN": "Ridimensiona il grafico dal bordo superiore",
+    "chartResizeNe": "Ridimensiona il grafico dall'angolo superiore destro",
+    "chartResizeE": "Ridimensiona il grafico dal bordo destro",
+    "chartResizeSe": "Ridimensiona il grafico dall'angolo inferiore destro",
+    "chartResizeS": "Ridimensiona il grafico dal bordo inferiore",
+    "chartResizeSw": "Ridimensiona il grafico dall'angolo inferiore sinistro",
+    "chartResizeW": "Ridimensiona il grafico dal bordo sinistro",
+    "chartResizeHintBoth": "{label} (tasti freccia; tieni premuto Maiusc per 10 px)",
+    "chartResizeHintHorizontal": "{label} (frecce sinistra e destra; tieni premuto Maiusc per 10 px)",
+    "chartResizeHintVertical": "{label} (frecce su e giù; tieni premuto Maiusc per 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Plugin",

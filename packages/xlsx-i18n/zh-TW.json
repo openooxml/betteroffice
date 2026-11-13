@@ -229,7 +229,18 @@
     "sheetActivated": "{name}，第 {index} 個工作表，共 {count} 個",
     "cellInputLabel": "編輯儲存格 {address}",
     "gridRoleDescription": "工作表",
-    "fillHandleLabel": "填滿控點"
+    "fillHandleLabel": "填滿控點",
+    "chartResizeNw": "從左上角調整圖表大小",
+    "chartResizeN": "從上邊緣調整圖表大小",
+    "chartResizeNe": "從右上角調整圖表大小",
+    "chartResizeE": "從右邊緣調整圖表大小",
+    "chartResizeSe": "從右下角調整圖表大小",
+    "chartResizeS": "從下邊緣調整圖表大小",
+    "chartResizeSw": "從左下角調整圖表大小",
+    "chartResizeW": "從左邊緣調整圖表大小",
+    "chartResizeHintBoth": "{label}（方向鍵；按住 Shift 鍵每次 10 像素）",
+    "chartResizeHintHorizontal": "{label}（左右方向鍵；按住 Shift 鍵每次 10 像素）",
+    "chartResizeHintVertical": "{label}（上下方向鍵；按住 Shift 鍵每次 10 像素）"
   },
   "plugins": {
     "toolbarGroup": "外掛程式",
