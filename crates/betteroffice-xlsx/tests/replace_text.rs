@@ -881,6 +881,171 @@ fn undo_after_replace_all_restores_every_cell_in_one_step() {
     assert_eq!(formula(&workbook, "G1").as_deref(), Some("A1+1"));
 }
 
+fn two_sheet_source() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs.push(Xf::default());
+    let mut data = Sheet::new("Data");
+    put(&mut data, "A1", CellValue::Number { value: 123.0 }, None, None);
+    put(&mut data, "B1", CellValue::Number { value: 153.0 }, Some("A1+30"), None);
+    put(&mut data, "C1", text("item 3"), None, None);
+    let mut other = Sheet::new("Other");
+    put(&mut other, "A1", CellValue::Number { value: 3.0 }, None, None);
+    put(&mut other, "B1", text("3 more"), None, None);
+    model.sheets.extend([data, other]);
+    ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap()
+}
+
+fn whole_sheet_replace(sheet: &str, query: &str, replacement: &str) -> Value {
+    json!({
+        "op": "replaceText",
+        "target": {
+            "sheetId": sheet,
+            "range": {
+                "kind": "rowCol",
+                "start": { "row": 0, "col": 0 },
+                "end": { "row": 1048575, "col": 16383 },
+            },
+        },
+        "query": query,
+        "replacement": replacement,
+        "lookIn": "formulas",
+    })
+}
+
+fn replace_all_in_workbook(workbook: &mut Workbook) -> EditOutcome {
+    let request: EditRequest = serde_json::from_value(json!({
+        "expectVersion": workbook.version(),
+        "steps": [
+            whole_sheet_replace("sheet:0", "3", "4"),
+            whole_sheet_replace("sheet:1", "3", "4"),
+        ],
+    }))
+    .unwrap();
+    workbook.apply_edits(&request).unwrap()
+}
+
+fn formula_on(workbook: &Workbook, sheet: SheetId, a1: &str) -> Option<String> {
+    workbook
+        .sheet(sheet)
+        .unwrap()
+        .cell(cell(a1))
+        .and_then(|cell| cell.formula.clone())
+}
+
+fn assert_original(workbook: &Workbook) {
+    assert_eq!(stored_on(workbook, SheetId(0), "A1"), CellValue::Number { value: 123.0 });
+    assert_eq!(formula_on(workbook, SheetId(0), "B1").as_deref(), Some("A1+30"));
+    assert_eq!(stored_on(workbook, SheetId(0), "B1"), CellValue::Number { value: 153.0 });
+    assert_eq!(stored_on(workbook, SheetId(0), "C1"), text("item 3"));
+    assert_eq!(stored_on(workbook, SheetId(1), "A1"), CellValue::Number { value: 3.0 });
+    assert_eq!(stored_on(workbook, SheetId(1), "B1"), text("3 more"));
+}
+
+fn assert_replaced(workbook: &Workbook) {
+    assert_eq!(stored_on(workbook, SheetId(0), "A1"), CellValue::Number { value: 124.0 });
+    assert_eq!(formula_on(workbook, SheetId(0), "B1").as_deref(), Some("A1+40"));
+    assert_eq!(stored_on(workbook, SheetId(0), "B1"), CellValue::Number { value: 164.0 });
+    assert_eq!(stored_on(workbook, SheetId(0), "C1"), text("item 4"));
+    assert_eq!(stored_on(workbook, SheetId(1), "A1"), CellValue::Number { value: 4.0 });
+    assert_eq!(stored_on(workbook, SheetId(1), "B1"), text("4 more"));
+}
+
+#[test]
+fn redo_after_undoing_replace_all_restores_the_replaced_state_exactly() {
+    let mut workbook = Workbook::open(&two_sheet_source()).unwrap();
+    replace_all_in_workbook(&mut workbook).expect("the batch applies");
+    assert_replaced(&workbook);
+    let replaced = workbook.model().clone();
+
+    assert!(workbook.undo(CalculationOptions::default()).unwrap().applied);
+    assert_original(&workbook);
+    assert!(workbook.redo(CalculationOptions::default()).unwrap().applied);
+    assert_replaced(&workbook);
+    assert_eq!(workbook.model(), &replaced);
+}
+
+#[test]
+fn workbook_replace_all_across_two_sheets_is_one_undo_step() {
+    let mut workbook = Workbook::open(&two_sheet_source()).unwrap();
+    let depth = workbook.history_state().undo_depth;
+    let outcome = replace_all_in_workbook(&mut workbook).expect("the batch applies");
+    assert!(outcome.receipts[0].changed);
+    assert!(outcome.receipts[1].changed);
+    assert_eq!(workbook.history_state().undo_depth, depth + 1);
+    assert_replaced(&workbook);
+
+    assert!(workbook.undo(CalculationOptions::default()).unwrap().applied);
+    assert_original(&workbook);
+    assert_eq!(workbook.history_state().undo_depth, depth);
+}
+
+#[test]
+fn a_peer_editing_a_replaced_cell_during_replace_all_converges() {
+    let bytes = two_sheet_source();
+    let options = CalculationOptions::default();
+    for left_first in [true, false] {
+        let mut left = Workbook::open_collaborative(&bytes, 301).unwrap();
+        let mut right = Workbook::open_collaborative(&bytes, 302).unwrap();
+        replace_all_in_workbook(&mut left).expect("the batch applies");
+        assert!(
+            right
+                .edit_cell(SheetId(0), cell("C1"), "item 33", options)
+                .unwrap()
+                .applied
+        );
+
+        let to_right = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        let to_left = right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap();
+        if left_first {
+            right.apply_update_v1(&to_right, options).unwrap();
+            left.apply_update_v1(&to_left, options).unwrap();
+        } else {
+            left.apply_update_v1(&to_left, options).unwrap();
+            right.apply_update_v1(&to_right, options).unwrap();
+        }
+
+        assert_eq!(
+            left.encode_state_vector_v1(),
+            right.encode_state_vector_v1()
+        );
+        assert_eq!(left.model(), right.model(), "left_first={left_first}");
+        for peer in [&left, &right] {
+            assert_eq!(stored_on(peer, SheetId(0), "A1"), CellValue::Number { value: 124.0 });
+            assert_eq!(formula_on(peer, SheetId(0), "B1").as_deref(), Some("A1+40"));
+            assert_eq!(stored_on(peer, SheetId(1), "B1"), text("4 more"));
+            let c1 = stored_on(peer, SheetId(0), "C1");
+            assert!(c1 == text("item 4") || c1 == text("item 33"), "{c1:?}");
+        }
+    }
+}
+
+#[test]
+fn replaced_cells_keep_their_kind_after_save_and_reopen() {
+    let mut workbook = Workbook::open(&two_sheet_source()).unwrap();
+    replace_all_in_workbook(&mut workbook).expect("the batch applies");
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+
+    assert_replaced(&reopened);
+    assert!(matches!(
+        stored_on(&reopened, SheetId(0), "A1"),
+        CellValue::Number { .. }
+    ));
+    assert_eq!(formula_on(&reopened, SheetId(0), "A1"), None);
+    assert!(matches!(
+        stored_on(&reopened, SheetId(1), "A1"),
+        CellValue::Number { .. }
+    ));
+    assert!(matches!(
+        stored_on(&reopened, SheetId(0), "C1"),
+        CellValue::Text { .. }
+    ));
+    assert_eq!(formula_on(&reopened, SheetId(0), "C1"), None);
+}
+
 fn workbook_with_hidden_and_chartsheet() -> Workbook {
     let mut model = WorkbookModel::default();
     let mut data = Sheet::new("Data");
