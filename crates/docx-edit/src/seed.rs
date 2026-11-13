@@ -9160,7 +9160,12 @@ mod tests {
         assert_eq!(fills(0), vec![json!("000000"); 4]);
         assert_eq!(
             fills(1),
-            vec![json!("000000"), json!("000000"), json!("FF0000"), json!("00FF00")]
+            vec![
+                json!("000000"),
+                json!("000000"),
+                json!("FF0000"),
+                json!("00FF00")
+            ]
         );
         assert_eq!(fills(2), vec![json!("000000"); 4]);
     }
