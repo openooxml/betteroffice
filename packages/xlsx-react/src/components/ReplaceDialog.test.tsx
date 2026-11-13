@@ -126,7 +126,68 @@ test('names the values a replace leaves unchanged', async () => {
   type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, '1');
   type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, '2');
   fireEvent.click(getByRole('button', { name: 'Preview' }));
-  await findByText(/7 matching values are not text and were left unchanged: A2, A3, A4, A5, A6, …/);
+  await findByText(/7 matching dates, TRUE\/FALSE or error values were left unchanged: A2, A3, A4, A5, A6, …/);
+});
+
+test('names the cells a replace refuses while the rest applies', async () => {
+  const { getByRole, findByText } = view({
+    version: () => 'v1',
+    find: () => ({ ok: true, version: 'v1', matches: [], truncated: false }),
+    validate: () => preview({
+      previews: [{
+        stepIndex: 0, target: { sheetId: target.sheetId, range: target.range }, wouldChange: true,
+        changedCellCount: 1,
+        replace: {
+          matched: 2, replaced: 1, skippedFormulas: 0, skippedLocked: 0,
+          refusedCells: [{ cell: 'B1', reason: 'Data!B1: the new formula =A1(10 does not parse' }],
+        },
+      }],
+    }),
+    apply: () => { throw new Error('must not apply'); },
+  });
+
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, '+');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, '(');
+  fireEvent.click(getByRole('button', { name: 'Preview' }));
+  await findByText(/Not replaced: Data!B1: the new formula =A1\(10 does not parse/);
+});
+
+test('replace edits the entered text whatever Look in is set to', async () => {
+  const finds: XlsxFindRequest[] = [];
+  const requests: XlsxEditRequest[] = [];
+  const cell = { sheetId: target.sheetId, row: 0, col: 0, a1: 'A1' };
+  const { getByRole, findByText } = view({
+    version: () => 'v1',
+    find: (request) => {
+      finds.push(request);
+      return { ok: true, version: 'v1', truncated: false, matches: [{ cell, text: '123' }] };
+    },
+    validate: (request) => { requests.push(request); return preview(); },
+    apply: (request) => ({
+      ok: true, applied: true, baseVersion: 'v1', version: 'v2', source: 'host',
+      receipts: [{ stepIndex: 0, changed: true, target: request.steps[0].target,
+        changedCells: [], replace: { matched: 1, replaced: 1, skippedFormulas: 0, skippedLocked: 0 } }],
+      changedSheets: [], calculation: { changed: [], cycleCells: [], limitedCells: [], truncated: false },
+    }),
+  });
+
+  expect((getByRole('radio', { name: 'Values' }) as HTMLInputElement).checked).toBe(true);
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, '1');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, '2');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await findByText('1 of 1');
+  expect(finds[0]).toMatchObject({ text: '1', lookIn: 'values' });
+
+  fireEvent.click(getByRole('button', { name: 'Preview' }));
+  await findByText(/Matched 3, replaced 2/);
+  fireEvent.click(getByRole('button', { name: 'Replace' }));
+  await waitFor(() => expect(requests.length).toBe(2));
+
+  for (const request of requests) {
+    expect(request.steps[0]).toMatchObject({ op: 'replaceText', lookIn: 'formulas' });
+  }
+  expect(finds.slice(1).every((request) => request.lookIn === 'formulas')).toBe(true);
+  expect(finds.length).toBeGreaterThan(1);
 });
 
 test('finds one match at a time and replaces only the current cell', async () => {
