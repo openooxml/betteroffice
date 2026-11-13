@@ -432,6 +432,8 @@ pub struct XmlElement {
     pub bookmark_replay_xml: Option<String>,
     /// Set when the part rebinds a standard prefix.
     pub(crate) matches_local_names: bool,
+    /// Set on a `w:ffData` bound to WordprocessingML whose names are all written with `w`.
+    pub(crate) form_field_data: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1575,10 +1577,10 @@ fn retain_replayed_namespace_aliases(
     {
         return retain_bookmark_bindings(element, ancestors, part, budget);
     }
-    let form_data = element.matches_name("w", "ffData");
-    if form_data {
+    if element.matches_name("w", "ffData") {
         normalize_form_field_data(element, ancestors);
     }
+    let form_data = element.form_field_data;
     let row = element.name == "w:tr" && !element.attributes.is_empty();
     let smart_art =
         element.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(element);
@@ -1749,6 +1751,7 @@ fn normalize_form_field_data(element: &mut XmlElement, ancestors: &[XmlElement])
         .map(|(prefix, namespace)| (prefix.to_owned(), namespace.to_owned()))
         .collect();
     rename_wordprocessing_names(element, &mut scope);
+    element.form_field_data = true;
 }
 
 fn bound_to_wordprocessing(scope: &[(String, String)], prefix: &str) -> bool {
@@ -1960,6 +1963,7 @@ fn decode_element(
         bookmark_xml: None,
         bookmark_replay_xml: None,
         matches_local_names: false,
+        form_field_data: false,
     })
 }
 

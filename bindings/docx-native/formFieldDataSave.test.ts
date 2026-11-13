@@ -31,7 +31,6 @@ const FOREIGN = {
   namespaces: ' xmlns:x="urn:x"',
   paragraph: fieldParagraph('<x:ffData><x:name x:val="Ext1"/><x:enabled/></x:ffData>'),
 };
-const UNWRITABLE = /"Ext1".*found x:ffData/;
 const RUN_BOUND_DATA = '<w:ffData><w:name w:val="T"/><ext:foo/></w:ffData>';
 const RUN_BOUND_PARAGRAPH = `<w:p w14:paraId="73000005">${text('Mark ')}${field(`<w:fldChar w:fldCharType="begin">${RUN_BOUND_DATA}</w:fldChar>`, 'FORMTEXT', text('Ada')).replace('<w:r>', '<w:r xmlns:ext="urn:x">')}</w:p>`;
 const OTHER_PARAGRAPH = `<w:p w14:paraId="73000004">${text('Other')}</w:p>`;
@@ -136,8 +135,11 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
         expect(xml).toContain(`${after}x`);
       });
 
-      test(`${engine}: refuses to save, naming the field and the reason, when "${after}" is typed in a part it must rewrite that holds form field data of another namespace (${route})`, async () => {
-        await expect(typedBesideField(yrs, FOREIGN, after, route)).rejects.toThrow(UNWRITABLE);
+      test(`${engine}: saves an ffData element of another namespace as no form field data when "${after}" is typed (${route})`, async () => {
+        const xml = await typedBesideField(yrs, FOREIGN, after, route);
+        expect(count(xml, 'ffData')).toBe(0);
+        expect(count(xml, '<w:fldChar w:fldCharType="begin"/>')).toBe(1);
+        expect(xml).toContain(`${after}x`);
       });
     }
   }

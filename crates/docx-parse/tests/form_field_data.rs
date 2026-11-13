@@ -39,12 +39,21 @@ fn save(source: &[u8]) -> Result<String, String> {
 }
 
 fn save_with(source: &[u8], selective: Value) -> Result<String, String> {
+    save_edited(source, selective, |_| {})
+}
+
+fn save_edited(
+    source: &[u8],
+    selective: Value,
+    edit: impl FnOnce(&mut Value),
+) -> Result<String, String> {
     let parsed = parse_docx_s9_wire(source, S9ParseOptions::default()).unwrap();
     let mut package: Value = serde_json::to_value(parsed.document.package).unwrap();
     package["document"]
         .as_object_mut()
         .unwrap()
         .remove("sections");
+    edit(&mut package["document"]);
     let mut request = json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": package["document"],
@@ -264,12 +273,50 @@ fn keeps_the_source_bytes_of_a_paragraph_with_aliased_form_field_data_when_anoth
 }
 
 #[test]
-fn refuses_to_rewrite_form_field_data_of_another_namespace_naming_the_field_and_the_reason() {
-    let (source, _, field) = two_paragraphs(FOREIGN, FOREIGN_DATA);
-    let error = save(&source).unwrap_err();
-    assert!(error.contains("\"Ext1\""), "{error}");
-    assert!(error.contains("found x:ffData"), "{error}");
-    let xml = save_with(&source, json!({"changedParaIds": ["73000004"]})).unwrap();
+fn saves_an_ff_data_element_of_another_namespace_as_no_form_field_data() {
+    let (source, _, _) = two_paragraphs(FOREIGN, FOREIGN_DATA);
+    for selective in [Value::Null, json!({"changedParaIds": ["73000003"]})] {
+        let xml = save_with(&source, selective).unwrap();
+        assert_eq!(xml.matches("ffData").count(), 0, "{xml}");
+        let begin = r#"<w:fldChar w:fldCharType="begin"/>"#;
+        assert_eq!(xml.matches(begin).count(), 1, "{xml}");
+        parse_docx_s9_wire(&package(xml), S9ParseOptions::default()).unwrap();
+    }
+}
+
+fn replace_raw_form_data(value: &mut Value, raw: &str) -> usize {
+    match value {
+        Value::Object(object) => {
+            let mut own = 0;
+            if let Some(kept) = object.get_mut("rawFormDataXml") {
+                *kept = Value::String(raw.to_owned());
+                own = 1;
+            }
+            own + object
+                .values_mut()
+                .map(|child| replace_raw_form_data(child, raw))
+                .sum::<usize>()
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .map(|child| replace_raw_form_data(child, raw))
+            .sum(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn refuses_to_write_kept_form_field_data_that_is_not_w_ff_data_naming_the_field_and_the_reason() {
+    let (source, _, field) = aliased_document();
+    let unwritable = |document: &mut Value| {
+        assert!(replace_raw_form_data(document, FOREIGN_DATA) > 0);
+    };
+    for selective in [Value::Null, json!({"changedParaIds": ["73000003"]})] {
+        let error = save_edited(&source, selective, unwritable).unwrap_err();
+        assert!(error.contains("\"Ext1\""), "{error}");
+        assert!(error.contains("found x:ffData"), "{error}");
+    }
+    let xml = save_edited(&source, json!({"changedParaIds": ["73000004"]}), unwritable).unwrap();
     assert_eq!(xml.matches(field.as_str()).count(), 1, "{xml}");
 }
 

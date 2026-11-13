@@ -483,7 +483,8 @@ fn parse_field_char(element: &XmlElement) -> RunContent {
         dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         form_data: parse_field_form_data(element),
         raw_form_data_xml: element
-            .child("w", "ffData")
+            .child_elements()
+            .find(|child| child.form_field_data)
             .map(XmlElement::to_raw_inline_xml),
     }
 }
