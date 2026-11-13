@@ -26,6 +26,7 @@ import {
 
 type XlsxEngine = typeof wasmXlsx & { font_preflight: typeof wasmFontPreflight };
 type Doc = wasmXlsx.XlsxDocument;
+type Builder = wasmXlsx.XlsxSnapshotBuilder;
 
 interface Xlsx {
   engine: XlsxEngine;
@@ -108,6 +109,7 @@ async function buildFixture(): Promise<Uint8Array> {
 
 const wasmEngine: XlsxEngine = { ...wasmXlsx, font_preflight: wasmFontPreflight };
 const nativeEngine = createRequire(import.meta.url)('../xlsx-native/index.js') as XlsxEngine;
+const ENGINES = [['wasm', wasmEngine], ['native', nativeEngine]] as const;
 let fixture: Uint8Array;
 
 beforeAll(async () => {
@@ -171,6 +173,177 @@ const drainAll = (doc: Doc) => {
   return events;
 };
 
+const SNAPSHOT_BUDGET = [256, 16 * 1024] as const;
+const ADVANCE_BUDGET = [256, 64 * 1024 * 1024] as const;
+const SNAPSHOT_KINDS = ['', 'Header', 'AuthorityBase', 'Yrs', 'Model', 'Cells', 'Preserved', 'Facts', 'Source', 'End'];
+// snapshot/assembly.rs:248 mints a snapshot id per begin and frames it into every chunk; snapshot/header.rs
+// writes the open's version nonce and its yrs client id and guid; the End chunk is a digest over all of them.
+const SNAPSHOT_RANDOM_FIELDS: Record<string, readonly string[]> = {
+  Header: ['client id', 'guid', 'header snapshot id', 'snapshot id', 'version nonce'],
+  End: ['digest', 'snapshot id'],
+};
+const snapshotRandomFields = (kind: string) => SNAPSHOT_RANDOM_FIELDS[kind] ?? ['snapshot id'];
+const chunkKind = (chunk: Uint8Array) => SNAPSHOT_KINDS[chunk[1]!] ?? `kind ${chunk[1]}`;
+
+interface WireField {
+  name: string;
+  start: number;
+  end: number;
+  value: number;
+}
+
+type WireValue = Uint8Array | number | string;
+
+function snapshotFields(chunk: Uint8Array): WireField[] {
+  const fields: WireField[] = [];
+  let cursor = 0;
+  const raw = (name: string, length: number) => {
+    if (length < 0 || cursor + length > chunk.length) throw new Error(`${name} runs past the ${chunk.length} byte chunk`);
+    fields.push({ name, start: cursor, end: cursor + length, value: length });
+    cursor += length;
+  };
+  const varint = (name: string) => {
+    const start = cursor;
+    let value = 0;
+    for (let scale = 1; ; scale *= 128) {
+      const byte = chunk[cursor++];
+      if (byte === undefined) throw new Error(`${name} runs past the ${chunk.length} byte chunk`);
+      value += (byte & 0x7f) * scale;
+      if (byte < 0x80) break;
+    }
+    fields.push({ name, start, end: cursor, value });
+    return value;
+  };
+  raw('transport frame', 2);
+  varint('transport ordinal');
+  varint('snapshot id');
+  const logicalOrdinal = varint('logical ordinal');
+  varint('logical length');
+  const offset = varint('fragment offset');
+  const kind = chunkKind(chunk);
+  if (kind === 'Header' && logicalOrdinal === 0 && offset === 0) {
+    raw('logical frame', 2);
+    varint('logical frame ordinal');
+    varint('header length');
+    varint('header snapshot id');
+    raw('header flags', 4);
+    varint('active sheet');
+    const seeded = chunk[cursor] === 1;
+    raw('rand seed tag', 1);
+    if (seeded) varint('rand seed');
+    varint('model epoch');
+    raw('version nonce', varint('version nonce length'));
+    varint('committed changes');
+    for (const list of ['changed', 'cycle', 'limited']) {
+      if (varint(`${list} cells`) !== 0) throw new Error(`the snapshot header carries ${list} cells`);
+    }
+    const context = chunk[cursor] === 1;
+    raw('calculation context tag', 1);
+    if (context) {
+      const serial = chunk[cursor] === 1;
+      raw('now serial tag', 1);
+      if (serial) raw('now serial', 8);
+    }
+    varint('client id');
+    raw('guid', varint('guid length'));
+  } else if (kind === 'End' && offset === 0) {
+    raw('logical frame', chunk.length - cursor - 32);
+    raw('digest', 32);
+  }
+  raw('rest', chunk.length - cursor);
+  return fields;
+}
+
+function snapshotValues(chunk: Uint8Array, fields: WireField[], mask: boolean): WireValue[] {
+  const random = snapshotRandomFields(chunkKind(chunk));
+  const width = (name: string) => fields.filter((field) => field.name === name).reduce((total, field) => total + field.end - field.start, 0);
+  const counted = width('header snapshot id') + width('client id');
+  const counts = new Map<string, number>(counted === 0 ? [] : [['header length', counted], ['logical length', counted + width('header length')]]);
+  return fields.map(({ name, start, end, value }) => {
+    if (mask && random.includes(name)) return `<random ${name}>`;
+    const count = counts.get(name);
+    return count === undefined ? Uint8Array.from(chunk.subarray(start, end)) : value - count;
+  });
+}
+
+const sameWireValue = (left: WireValue, right: WireValue) =>
+  left instanceof Uint8Array && right instanceof Uint8Array ? Buffer.from(left).equals(Buffer.from(right)) : left === right;
+const maskedSnapshot = (chunks: Uint8Array[]) => chunks.map((chunk) => {
+  const fields = snapshotFields(chunk);
+  const values = snapshotValues(chunk, fields, true);
+  return fields.map((field, position) => [field.name, values[position]]);
+});
+const drainSnapshot = (doc: Doc) => {
+  const chunks: Uint8Array[] = [];
+  for (let chunk = doc.nextPeerSnapshotChunk(); chunk !== undefined; chunk = doc.nextPeerSnapshotChunk()) {
+    if (chunks.length === 10_000) throw new Error('the peer snapshot did not end within 10000 chunks');
+    chunks.push(Uint8Array.from(chunk));
+  }
+  return chunks;
+};
+const snapshotChain = (doc: Doc) => {
+  doc.beginPeerSnapshot(...SNAPSHOT_BUDGET);
+  return drainSnapshot(doc);
+};
+const advanceUntilReady = (builder: Builder) => {
+  const results: boolean[] = [];
+  while (results.at(-1) !== true) {
+    if (results.length === 1_000) throw new Error('the snapshot builder was not ready after 1000 advances');
+    results.push(builder.advance(...ADVANCE_BUDGET));
+  }
+  return results;
+};
+const withBuilder = <R>(engine: XlsxEngine, use: (builder: Builder) => R): R => {
+  const builder = new engine.XlsxSnapshotBuilder();
+  try {
+    return use(builder);
+  } finally {
+    builder.free();
+  }
+};
+const rebuild = (engine: XlsxEngine, chunks: Uint8Array[]) => {
+  const builder = new engine.XlsxSnapshotBuilder();
+  let consumed = false;
+  try {
+    const pushed = chunks.map((chunk) => builder.push(chunk));
+    const advanced = advanceUntilReady(builder);
+    consumed = true;
+    return { pushed, advanced, reads: scoped(builder.finish(), hydratedReads) };
+  } finally {
+    if (!consumed) builder.free();
+  }
+};
+
+const CHECKPOINT_SEQ = 3;
+// workbook/recovery.rs:716-740 writes the 8 byte magic and the codec byte, then a digest over everything after it.
+const RECOVERY_DIGEST = { name: 'digest', offset: 9, length: 32 };
+const recoveryRandomRanges = (bytes: Uint8Array, nonce: string) => {
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const offset = buffer.indexOf(nonce);
+  if (offset < 0 || buffer.indexOf(nonce, offset + 1) >= 0) throw new Error(`version nonce ${nonce} is not in the checkpoint exactly once`);
+  return [RECOVERY_DIGEST, { name: 'version nonce', offset, length: nonce.length }];
+};
+const maskedBytes = (bytes: Uint8Array, ranges: { name: string; offset: number; length: number }[]) => {
+  const parts: (Uint8Array | string)[] = [];
+  let cursor = 0;
+  for (const { name, offset, length } of [...ranges].sort((left, right) => left.offset - right.offset)) {
+    parts.push(Uint8Array.from(bytes.subarray(cursor, offset)), `<random ${name}>`);
+    cursor = offset + length;
+  }
+  parts.push(Uint8Array.from(bytes.subarray(cursor)));
+  return parts;
+};
+const differingRanges = (left: Uint8Array, right: Uint8Array) => {
+  const ranges: { offset: number; length: number }[] = [];
+  left.forEach((byte, offset) => {
+    if (byte === right[offset]) return;
+    const last = ranges.at(-1);
+    if (last && last.offset + last.length === offset) last.length += 1;
+    else ranges.push({ offset, length: 1 });
+  });
+  return ranges;
+};
+
 const rows: Row<Xlsx>[] = [
   { method: 'XlsxDocument.open', call: ({ engine }) => scoped(engine.XlsxDocument.open(fixture), (d) => [d.sheetInfoJson(), d.saveWarningsJson()]) },
   {
@@ -197,6 +370,33 @@ const rows: Row<Xlsx>[] = [
     name: 'XlsxDocument.openRecoveryCheckpoint (empty)',
     throws: { name: 'Error', reason: 'empty bytes are not a checkpoint' },
     call: ({ engine }) => engine.XlsxDocument.openRecoveryCheckpoint(new Uint8Array(), 0),
+  },
+  {
+    method: 'XlsxDocument.openRecoveryCheckpoint',
+    name: 'XlsxDocument.openRecoveryCheckpoint (checkpoint from the other engine)',
+    call: ({ engine }) => {
+      const { checkpoint, nonce } = scoped(editedCollab(otherEngine(engine)), (d) => ({ checkpoint: d.recoveryCheckpoint(CHECKPOINT_SEQ), nonce: versionNonce(d) }));
+      return scoped(engine.XlsxDocument.openRecoveryCheckpoint(checkpoint, CHECKPOINT_SEQ), (d) => [...hydratedReads(d), d.clientId].map((value) => generatedTokens(value, [nonce])));
+    },
+  },
+  {
+    method: 'XlsxDocument.recoveryCheckpoint',
+    call: ({ engine }) => scoped(collab(engine), (d) => {
+      const bytes = d.recoveryCheckpoint(CHECKPOINT_SEQ);
+      return maskedBytes(bytes, recoveryRandomRanges(bytes, versionNonce(d)));
+    }),
+  },
+  {
+    method: 'XlsxDocument.recoveryCheckpoint',
+    name: 'XlsxDocument.recoveryCheckpoint (history on a collaborative workbook)',
+    throws: { name: 'Error', reason: 'history recovery needs a standalone workbook' },
+    call: ({ engine }) => scoped(collab(engine), (d) => d.recoveryCheckpoint(CHECKPOINT_SEQ, true)),
+  },
+  {
+    method: 'XlsxDocument.recoveryCheckpoint',
+    name: 'XlsxDocument.recoveryCheckpoint (fractional sequence)',
+    throws: { name: 'TypeError', reason: 'a recovery sequence must be a whole number' },
+    call: ({ doc }) => doc.recoveryCheckpoint(1.5),
   },
   { method: 'XlsxDocument.clientId', call: ({ engine }) => scoped(engine.XlsxDocument.openCollaborative(fixture, CLIENT), (d) => d.clientId) },
   { method: 'XlsxDocument.encodeStateVector', call: ({ engine }) => scoped(editedCollab(engine), (d) => d.encodeStateVector()) },
@@ -269,6 +469,124 @@ const rows: Row<Xlsx>[] = [
       const hydration = scoped(otherEngine(engine).XlsxDocument.openWithCalculationJson(fixture, CONTEXT), (d) => d.peerHydrationJson());
       return scoped(engine.XlsxDocument.openWithPeerHydrationJson(fixture, hydration), (d) => withoutNonce(d, hydratedReads(d)));
     },
+  },
+  {
+    method: 'XlsxDocument.beginPeerSnapshot',
+    call: ({ doc }) => {
+      const began = doc.beginPeerSnapshot(...SNAPSHOT_BUDGET);
+      const chunks = drainSnapshot(doc);
+      return { began, count: chunks.length, chunks: maskedSnapshot(chunks) };
+    },
+  },
+  {
+    method: 'XlsxDocument.beginPeerSnapshot',
+    name: 'XlsxDocument.beginPeerSnapshot (empty budget)',
+    throws: { name: 'Error', reason: 'a snapshot budget must be positive' },
+    call: ({ doc }) => doc.beginPeerSnapshot(0, SNAPSHOT_BUDGET[1]),
+  },
+  {
+    method: 'XlsxDocument.beginPeerSnapshot',
+    name: 'XlsxDocument.beginPeerSnapshot (byte budget below framing)',
+    throws: { name: 'Error', reason: 'a chunk budget under 64 bytes cannot hold the framing' },
+    call: ({ doc }) => doc.beginPeerSnapshot(SNAPSHOT_BUDGET[0], 63),
+  },
+  defineRow({
+    method: 'XlsxDocument.beginPeerSnapshot',
+    name: 'XlsxDocument.beginPeerSnapshot refuses an edited workbook',
+    throws: { name: 'Error', reason: 'a peer snapshot needs an unedited workbook' },
+    setup: ({ doc }: Xlsx) => editCell(doc, 1, 1, '12'),
+    call: ({ doc }) => doc.beginPeerSnapshot(...SNAPSHOT_BUDGET),
+  }),
+  {
+    method: 'XlsxDocument.beginPeerSnapshot',
+    name: 'XlsxDocument.beginPeerSnapshot refuses a collaborative workbook',
+    throws: { name: 'Error', reason: 'a peer snapshot needs a standalone workbook' },
+    call: ({ engine }) => scoped(collab(engine), (d) => d.beginPeerSnapshot(...SNAPSHOT_BUDGET)),
+  },
+  {
+    method: 'XlsxDocument.nextPeerSnapshotChunk',
+    call: ({ doc }) => {
+      doc.beginPeerSnapshot(...SNAPSHOT_BUDGET);
+      const abandoned = maskedSnapshot([0, 1].map(() => Uint8Array.from(doc.nextPeerSnapshotChunk()!)));
+      const restarted = maskedSnapshot(snapshotChain(doc));
+      return { abandoned, restarted, afterEnd: [doc.nextPeerSnapshotChunk(), doc.nextPeerSnapshotChunk()] };
+    },
+  },
+  {
+    method: 'XlsxDocument.nextPeerSnapshotChunk',
+    name: 'XlsxDocument.nextPeerSnapshotChunk (no snapshot begun)',
+    throws: { name: 'Error', reason: 'chunks need an active peer snapshot' },
+    call: ({ doc }) => doc.nextPeerSnapshotChunk(),
+  },
+  {
+    method: 'XlsxDocument.nextPeerSnapshotChunk',
+    name: 'XlsxDocument.nextPeerSnapshotChunk refuses after an edit',
+    throws: { name: 'Error', reason: 'an edit after begin changes the workbook under the snapshot' },
+    call: ({ doc }) => {
+      doc.beginPeerSnapshot(...SNAPSHOT_BUDGET);
+      doc.nextPeerSnapshotChunk();
+      editCell(doc, 1, 1, '12');
+      return doc.nextPeerSnapshotChunk();
+    },
+  },
+  {
+    method: 'XlsxDocument.endPeerSnapshot',
+    call: ({ doc }) => {
+      doc.beginPeerSnapshot(...SNAPSHOT_BUDGET);
+      doc.nextPeerSnapshotChunk();
+      const ended = doc.endPeerSnapshot();
+      return { ended, restarted: maskedSnapshot(snapshotChain(doc)) };
+    },
+  },
+  {
+    method: 'XlsxDocument.endPeerSnapshot',
+    name: 'XlsxDocument.endPeerSnapshot then nextPeerSnapshotChunk',
+    throws: { name: 'Error', reason: 'end discards the active peer snapshot' },
+    call: ({ doc }) => {
+      doc.beginPeerSnapshot(...SNAPSHOT_BUDGET);
+      doc.nextPeerSnapshotChunk();
+      doc.endPeerSnapshot();
+      return doc.nextPeerSnapshotChunk();
+    },
+  },
+  { method: 'XlsxSnapshotBuilder.push', call: ({ engine, doc }) => rebuild(engine, snapshotChain(doc)) },
+  {
+    method: 'XlsxSnapshotBuilder.push',
+    name: 'XlsxSnapshotBuilder.push refuses a chunk out of order',
+    throws: { name: 'Error', reason: 'the builder takes the chunks in the order they were made' },
+    call: ({ engine, doc }) => withBuilder(engine, (builder) => builder.push(snapshotChain(doc)[1]!)),
+  },
+  {
+    method: 'XlsxSnapshotBuilder.advance',
+    call: ({ engine, doc }) => {
+      const chunks = snapshotChain(doc);
+      return withBuilder(engine, (builder) => {
+        for (const chunk of chunks) builder.push(chunk);
+        const advanced = advanceUntilReady(builder);
+        return { advanced, afterReady: builder.advance(...ADVANCE_BUDGET) };
+      });
+    },
+  },
+  {
+    method: 'XlsxSnapshotBuilder.advance',
+    name: 'XlsxSnapshotBuilder.advance (byte budget below one sheet)',
+    throws: { name: 'Error', reason: 'an advance budget must hold one sheet' },
+    call: ({ engine }) => withBuilder(engine, (builder) => builder.advance(ADVANCE_BUDGET[0], 1)),
+  },
+  {
+    method: 'XlsxSnapshotBuilder.finish',
+    name: 'XlsxSnapshotBuilder.finish (chunks from the other engine)',
+    call: ({ engine }) => scoped(otherEngine(engine).XlsxDocument.openWithCalculationJson(fixture, CONTEXT), (source) => {
+      const nonce = versionNonce(source);
+      const { pushed, advanced, reads } = rebuild(engine, snapshotChain(source));
+      return { pushed, advanced, reads: reads.map((value) => generatedTokens(value, [nonce])) };
+    }),
+  },
+  {
+    method: 'XlsxSnapshotBuilder.finish',
+    name: 'XlsxSnapshotBuilder.finish refuses an incomplete snapshot',
+    throws: { name: 'Error', reason: 'finish needs a builder that is ready' },
+    call: ({ engine }) => new engine.XlsxSnapshotBuilder().finish(),
   },
   {
     method: 'XlsxDocument.adoptPeerVersion',
@@ -437,10 +755,7 @@ const exclusions: Exclusion[] = [
 
 const knownDifferences: KnownDifference[] = [];
 
-const notYetCovered: string[] = [
-  'XlsxDocument.beginPeerSnapshot', 'XlsxDocument.endPeerSnapshot', 'XlsxDocument.nextPeerSnapshotChunk', 'XlsxDocument.recoveryCheckpoint',
-  'XlsxSnapshotBuilder.advance', 'XlsxSnapshotBuilder.finish', 'XlsxSnapshotBuilder.push',
-];
+const notYetCovered: string[] = [];
 
 const NO_RASTERIZER = 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/xlsx/src/wasm/enginePng.ts';
 const FONT_PACKS = 'native reads installed font pack directories; wasm has no filesystem and loads @betteroffice/fonts bytes in JS (packages/xlsx/src/wasm/enginePngFonts.ts:11)';
@@ -471,7 +786,7 @@ describe('xlsx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(7);
+    expect(notYetCovered.length).toBe(0);
   });
 
   test('the hydration version nonce differs between two openings on each engine', () => {
@@ -480,6 +795,63 @@ describe('xlsx native and wasm parity table', () => {
       console.log(`HYDRATION-NONCE-PROBE ${side} ${JSON.stringify(nonces)}`);
       expect(nonces[0]).not.toBe(nonces[1]);
     }
+  });
+
+  test('the collaborative version nonce differs between two openings on each engine', () => {
+    for (const [side, engine] of ENGINES) {
+      const nonces = [0, 1].map(() => scoped(collab(engine), versionNonce));
+      console.log(`COLLAB-NONCE-PROBE ${side} ${JSON.stringify(nonces)}`);
+      expect(nonces[0]).not.toBe(nonces[1]);
+    }
+  });
+
+  test('the peer snapshot differs between two openings only in its pinned random fields on each engine', () => {
+    const measured = Object.fromEntries(ENGINES.map(([side, engine]) => {
+      const [first, second] = [0, 1].map(() =>
+        scoped(engine.XlsxDocument.openWithCalculationJson(fixture, CONTEXT), (d) => ({ chunks: snapshotChain(d), nonce: versionNonce(d) })));
+      expect(second!.chunks.length).toBe(first!.chunks.length);
+      const random = new Map<string, Set<string>>();
+      first!.chunks.forEach((chunk, index) => {
+        const other = second!.chunks[index]!;
+        const fields = snapshotFields(chunk);
+        const otherFields = snapshotFields(other);
+        expect(otherFields.map((field) => field.name)).toEqual(fields.map((field) => field.name));
+        const ours = snapshotValues(chunk, fields, false);
+        const theirs = snapshotValues(other, otherFields, false);
+        const kind = chunkKind(chunk);
+        fields.forEach((field, position) => {
+          if (field.name === 'version nonce') expect(new TextDecoder().decode(ours[position] as Uint8Array)).toBe(first!.nonce);
+          if (sameWireValue(ours[position]!, theirs[position]!)) return;
+          console.log(`PEER-SNAPSHOT-PROBE ${side} ${kind} offset=${field.start} length=${field.end - field.start} ${field.name}`);
+          random.set(kind, (random.get(kind) ?? new Set<string>()).add(field.name));
+        });
+      });
+      const found = Object.fromEntries([...random].map(([kind, names]) => [kind, [...names].sort()] as const));
+      expect(Object.keys(found).length).toBeGreaterThan(0);
+      const kinds = [...new Set(first!.chunks.map(chunkKind))];
+      expect(found).toEqual(Object.fromEntries(kinds.map((kind) => [kind, [...snapshotRandomFields(kind)].sort()] as const)));
+      return [side, found] as const;
+    }));
+    expect(measured.native).toEqual(measured.wasm);
+  });
+
+  test('the recovery checkpoint differs between two openings only in its digest and version nonce on each engine', () => {
+    const layouts = Object.fromEntries(ENGINES.map(([side, engine]) => {
+      const [first, second] = [0, 1].map(() =>
+        scoped(collab(engine), (d) => ({ bytes: Uint8Array.from(d.recoveryCheckpoint(CHECKPOINT_SEQ)), nonce: versionNonce(d) })));
+      expect(second!.bytes.length).toBe(first!.bytes.length);
+      const ranges = differingRanges(first!.bytes, second!.bytes);
+      for (const { offset, length } of ranges) console.log(`RECOVERY-CHECKPOINT-PROBE ${side} offset=${offset} length=${length}`);
+      expect(ranges.length).toBeGreaterThan(0);
+      const pinned = recoveryRandomRanges(first!.bytes, first!.nonce);
+      expect(recoveryRandomRanges(second!.bytes, second!.nonce)).toEqual(pinned);
+      const within = (range: { offset: number; length: number }, field: { offset: number; length: number }) =>
+        range.offset >= field.offset && range.offset + range.length <= field.offset + field.length;
+      expect(ranges.filter((range) => !pinned.some((field) => within(range, field)))).toEqual([]);
+      expect(pinned.filter((field) => !ranges.some((range) => within(range, field))).map((field) => field.name)).toEqual([]);
+      return [side, pinned] as const;
+    }));
+    expect(layouts.native).toEqual(layouts.wasm);
   });
 
   for (const row of rows) {
