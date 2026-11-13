@@ -2,10 +2,10 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import { fireEvent } from '@testing-library/react';
 import type {
-  XlsxEditRequest, XlsxFindRequest, XlsxFindResult, XlsxValidationResult,
+  XlsxEditRequest, XlsxEditResult, XlsxFindRequest, XlsxFindResult, XlsxValidationResult,
 } from '@betteroffice/xlsx';
 import { LocaleProvider } from '../i18n';
-import { ReplaceDialog, type ReplaceDialogApi } from './ReplaceDialog';
+import { ReplaceDialog, type ReplaceDialogApi, type ReplaceDialogTarget } from './ReplaceDialog';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -665,4 +665,209 @@ test('defaults to all sheets when only one cell is selected', () => {
     </LocaleProvider>,
   );
   expect((getByRole('combobox', { name: 'Search in' }) as HTMLSelectElement).value).toBe('workbook');
+});
+
+function foundAt(row: number, col: number, a1: string) {
+  return { cell: { sheetId: target.sheetId, row, col, a1 }, text: 'alpha' };
+}
+
+function applySuccess(request: XlsxEditRequest): XlsxEditResult {
+  return {
+    ok: true, applied: true, baseVersion: request.expectVersion, version: 'v9', source: 'host',
+    receipts: request.steps.map((step, index) => ({
+      stepIndex: index, changed: true, target: step.target, changedCells: [],
+      replace: { matched: 1, replaced: 1, skippedFormulas: 0, skippedLocked: 0 },
+    })),
+    changedSheets: [], calculation: { changed: [], cycleCells: [], limitedCells: [], truncated: false },
+  };
+}
+
+function staleFind(version: () => string) {
+  const finds: XlsxFindRequest[] = [];
+  const revealed: string[] = [];
+  const validated: XlsxEditRequest[] = [];
+  const applied: XlsxEditRequest[] = [];
+  const pending: ((result: XlsxFindResult) => void)[] = [];
+  const api: ReplaceDialogApi = {
+    version,
+    find: (request) => {
+      finds.push(request);
+      if (finds.length === 1) {
+        return new Promise<XlsxFindResult>((resolve) => { pending.push(resolve); });
+      }
+      return {
+        ok: true, version: version(), truncated: false,
+        matches: [foundAt(1, 1, 'B2'), foundAt(2, 2, 'C3')],
+      };
+    },
+    reveal: (cell) => { revealed.push(cell.a1); },
+    validate: (request) => { validated.push(request); return preview(); },
+    apply: (request) => { applied.push(request); return applySuccess(request); },
+  };
+  const settleStale = async () => {
+    await waitFor(() => expect(pending.length).toBe(1));
+    await act(async () => {
+      pending[0]({ ok: true, version: 'v1', truncated: false, matches: [foundAt(1, 1, 'B2')] });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+  const replaceSelectsWithoutEditing = async (
+    getByRole: (role: string, options: { name: string }) => HTMLElement,
+  ) => {
+    fireEvent.click(getByRole('button', { name: 'Replace' }));
+    await waitFor(() => expect(revealed).toEqual(['B2']));
+    expect(validated).toEqual([]);
+    expect(applied).toEqual([]);
+  };
+  return { api, finds, revealed, applied, settleStale, replaceSelectsWithoutEditing };
+}
+
+function dialog(api: ReplaceDialogApi, current: ReplaceDialogTarget, open = true) {
+  return <LocaleProvider>
+    <ReplaceDialog open={open} target={current} api={api} onClose={() => {}} />
+  </LocaleProvider>;
+}
+
+test('a find answered after the query was edited selects nothing and Replace never edits its match', async () => {
+  const stale = staleFind(() => 'v1');
+  const { getByRole, queryByText } = render(dialog(stale.api, target));
+  const findInput = getByRole('textbox', { name: 'Find' }) as HTMLInputElement;
+  type(findInput, 'alpha');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, 'beta');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await waitFor(() => expect(stale.finds.length).toBe(1));
+  type(findInput, 'gamma');
+  await stale.settleStale();
+
+  expect(stale.revealed).toEqual([]);
+  expect(queryByText('1 of 1')).toBeNull();
+  await stale.replaceSelectsWithoutEditing(getByRole);
+  expect(stale.finds[1]).toMatchObject({ text: 'gamma' });
+
+  fireEvent.click(getByRole('button', { name: 'Replace all' }));
+  await waitFor(() => expect(stale.applied.length).toBe(1));
+  expect(stale.applied[0].steps[0]).toMatchObject({ query: 'gamma', target: { range: target.range } });
+});
+
+test('a find answered after the target changed selects nothing and Replace never edits its match', async () => {
+  const stale = staleFind(() => 'v1');
+  const moved: ReplaceDialogTarget = {
+    sheetId: target.sheetId,
+    range: { kind: 'rowCol', start: { row: 0, col: 1 }, end: { row: 9, col: 3 } },
+    label: 'B1:D10',
+  };
+  const { getByRole, queryByText, rerender } = render(dialog(stale.api, target));
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, 'beta');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await waitFor(() => expect(stale.finds.length).toBe(1));
+  rerender(dialog(stale.api, moved));
+  await stale.settleStale();
+
+  expect(stale.revealed).toEqual([]);
+  expect(queryByText('1 of 1')).toBeNull();
+  await stale.replaceSelectsWithoutEditing(getByRole);
+  expect(stale.finds[1]).toMatchObject({ text: 'alpha', range: moved.range });
+
+  fireEvent.click(getByRole('button', { name: 'Replace all' }));
+  await waitFor(() => expect(stale.applied.length).toBe(1));
+  expect(stale.applied[0].steps[0]).toMatchObject({ query: 'alpha', target: { range: moved.range } });
+});
+
+test('a find answered after the workbook version moved selects nothing and Replace never edits its match', async () => {
+  let version = 'v1';
+  const stale = staleFind(() => version);
+  const { getByRole, queryByText } = render(dialog(stale.api, target));
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, 'beta');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await waitFor(() => expect(stale.finds.length).toBe(1));
+  version = 'v2';
+  await stale.settleStale();
+
+  expect(stale.revealed).toEqual([]);
+  expect(queryByText('1 of 1')).toBeNull();
+  await stale.replaceSelectsWithoutEditing(getByRole);
+
+  fireEvent.click(getByRole('button', { name: 'Replace all' }));
+  await waitFor(() => expect(stale.applied.length).toBe(1));
+  expect(stale.applied[0]).toMatchObject({ expectVersion: 'v2', steps: [{ query: 'alpha' }] });
+});
+
+test('closing the dialog with a find in flight shows and selects no match on reopen', async () => {
+  const stale = staleFind(() => 'v1');
+  const { getByRole, queryByText, rerender } = render(dialog(stale.api, target));
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await waitFor(() => expect(stale.finds.length).toBe(1));
+  rerender(dialog(stale.api, target, false));
+  await stale.settleStale();
+  rerender(dialog(stale.api, target));
+
+  expect(stale.revealed).toEqual([]);
+  expect(queryByText('1 of 1')).toBeNull();
+  expect(queryByText('Checking…')).toBeNull();
+});
+
+test('workbook replace all over one visible and 128 hidden sheets stays within the step limit', async () => {
+  const validated: XlsxEditRequest[] = [];
+  const applied: XlsxEditRequest[] = [];
+  const sheets = [
+    { sheetId: 'sheet:0', name: 'Data' },
+    ...Array.from({ length: 128 }, (_, index) => ({
+      sheetId: `sheet:${index + 1}`, name: `Hidden ${index + 1}`, hidden: true,
+    })),
+  ];
+  const overLimit = (request: XlsxEditRequest) => request.steps.length > 128
+    ? { ok: false as const, version: 'v1', failure: {
+      code: 'limit-exceeded' as const, message: 'a batch has at most 128 steps',
+    } }
+    : null;
+  const { getByRole, findByText } = render(
+    <LocaleProvider>
+      <ReplaceDialog
+        open
+        target={{ ...target, defaultScope: 'workbook', sheets }}
+        api={{
+          version: () => 'v1',
+          find: () => ({ ok: true, version: 'v1', matches: [], truncated: false }),
+          validate: (request) => {
+            validated.push(request);
+            return overLimit(request) ?? {
+              ok: true, baseVersion: 'v1', wouldApply: true,
+              previews: request.steps.map((step, index) => {
+                const visible = step.target.sheetId === 'sheet:0';
+                return {
+                  stepIndex: index, target: step.target, wouldChange: visible,
+                  changedCellCount: visible ? 1 : 0,
+                  replace: {
+                    matched: visible ? 1 : 0, replaced: visible ? 1 : 0,
+                    skippedFormulas: 0, skippedLocked: 0,
+                  },
+                };
+              }),
+            };
+          },
+          apply: (request) => {
+            applied.push(request);
+            return overLimit(request) ?? applySuccess(request);
+          },
+        }}
+        onClose={() => {}}
+      />
+    </LocaleProvider>,
+  );
+
+  expect((getByRole('combobox', { name: 'Search in' }) as HTMLSelectElement).value).toBe('workbook');
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, 'beta');
+  fireEvent.click(getByRole('button', { name: 'Preview' }));
+  await waitFor(() => expect(validated.length).toBe(1));
+  expect(validated[0].steps.length).toBeLessThanOrEqual(128);
+  await findByText(/Matched 1, replaced 1/);
+
+  fireEvent.click(getByRole('button', { name: 'Replace all' }));
+  await waitFor(() => expect(applied.length).toBe(1));
+  expect(applied[0].steps.map((step) => step.target.sheetId)).toEqual(['sheet:0']);
+  await findByText(/Matched 1, replaced 1/);
 });

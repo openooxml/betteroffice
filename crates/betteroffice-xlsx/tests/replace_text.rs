@@ -802,6 +802,62 @@ fn replace_refuses_rich_text_cells_and_keeps_their_runs() {
     );
 }
 
+fn replay_a_peer_edit(workbook: &mut Workbook) {
+    let options = CalculationOptions::default();
+    let mut peer = Workbook::open_collaborative(&rich_source(), 306).unwrap();
+    assert!(
+        peer.edit_cell(SheetId(0), cell("B1"), "peer", options)
+            .unwrap()
+            .applied
+    );
+    let update = peer
+        .encode_diff_v1(&workbook.encode_state_vector_v1())
+        .unwrap();
+    assert!(workbook.apply_update_v1(&update, options).unwrap().applied);
+    assert_eq!(stored(workbook, "B1"), text("peer"));
+}
+
+fn rich_text_refusal_reason() -> String {
+    let mut workbook = Workbook::open_collaborative(&rich_source(), 307).unwrap();
+    let outcome = apply(&mut workbook, replace("A1:A2", "alpha", "omega", false))
+        .expect("the rich text cell is refused and the rest applies");
+    let refused = refused_cells(&outcome.receipts[0].replace.clone().unwrap());
+    assert_eq!(refused.len(), 1);
+    refused[0].1.clone()
+}
+
+fn assert_rich_text_cell_refused(workbook: &mut Workbook) {
+    let outcome = apply(workbook, replace("A1:A2", "alpha", "omega", false))
+        .expect("the rich text cell is refused and the rest applies");
+    let stats = outcome.receipts[0].replace.clone().unwrap();
+    assert_eq!(stored(workbook, "A1"), text("alpha beta"));
+    assert_eq!(stored(workbook, "A2"), text("omega"));
+    assert_eq!(stats.matched, 2);
+    assert_eq!(stats.replaced, 1);
+    assert_eq!(stats.refused, 1);
+    let refused = refused_cells(&stats);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].0, "A1");
+    assert_eq!(refused[0].1, rich_text_refusal_reason());
+}
+
+#[test]
+fn replace_refuses_rich_text_cells_after_a_remote_replay() {
+    let mut workbook = Workbook::open_collaborative(&rich_source(), 304).unwrap();
+    replay_a_peer_edit(&mut workbook);
+    assert_rich_text_cell_refused(&mut workbook);
+}
+
+#[test]
+fn replace_refuses_rich_text_cells_in_a_recovered_replayed_session() {
+    let mut workbook = Workbook::open_collaborative(&rich_source(), 305).unwrap();
+    replay_a_peer_edit(&mut workbook);
+    let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+    let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+    assert_eq!(stored(&restored, "A1"), text("alpha beta"));
+    assert_rich_text_cell_refused(&mut restored);
+}
+
 fn number_workbook() -> Workbook {
     let mut model = WorkbookModel::default();
     model.styles.cell_xfs.push(Xf::default());
