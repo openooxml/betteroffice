@@ -1121,12 +1121,15 @@ impl Workbook {
                         continue;
                     }
                     let place = format!("{}!{}", sheet_ref.name, cell.to_a1());
-                    if self
-                        .cell_text_runs(resolved.sheet, cell)
-                        .is_some_and(|runs| !runs.is_empty())
-                    {
-                        let reason =
-                            format!("{place} holds rich text that a replace would flatten");
+                    if self.cell_text_may_be_rich(resolved.sheet, cell) {
+                        let reason = if self
+                            .cell_text_runs(resolved.sheet, cell)
+                            .is_some_and(|runs| !runs.is_empty())
+                        {
+                            format!("{place} holds rich text that a replace would flatten")
+                        } else {
+                            format!("{place} may hold rich text that a replace would flatten")
+                        };
                         refuse_cell(&mut stats, cell, reason);
                         continue;
                     }

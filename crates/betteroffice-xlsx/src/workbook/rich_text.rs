@@ -45,6 +45,49 @@ impl Workbook {
         }
     }
 
+    /// Whether a rewrite of `cell` could flatten source runs: `false` only when its text is
+    /// known to be plain, in every session kind.
+    pub(super) fn cell_text_may_be_rich(&self, sheet: SheetId, cell: CellRef) -> bool {
+        let Some(current) = self.model.sheet(sheet).and_then(|cells| cells.cell(cell)) else {
+            return false;
+        };
+        let CellValue::Text { value } = &current.value else {
+            return false;
+        };
+        if current.formula.is_some() {
+            return false;
+        }
+        let Some((source_sheet, source_cell)) = self.text_source_cell(sheet, cell) else {
+            return false;
+        };
+        let rewritten = self.invalidated_text_sources.as_ref().is_some_and(|invalidated| {
+            invalidated.contains(&(source_sheet, source_cell.row, source_cell.col))
+        });
+        if rewritten && !self.is_collaborative() {
+            return false;
+        }
+        let Some(source) = self.source_package.as_ref() else {
+            return false;
+        };
+        let Ok(package) = source.materialize() else {
+            return true;
+        };
+        match self
+            .preserved
+            .shared_string_cells
+            .get(sheet.0 as usize)
+            .and_then(|cells| cells.get(&(cell.row, cell.col)))
+        {
+            Some(&index) => {
+                self.model.shared_strings.get(index) == Some(value)
+                    && package.shared_string_is_rich(index)
+            }
+            None => package.source_cell_facts(source_sheet).is_none_or(|facts| {
+                facts.rich_inline.get(&(source_cell.row, source_cell.col)) == Some(value)
+            }),
+        }
+    }
+
     pub(super) fn invalidate_text_source(&mut self, sheet: SheetId, cell: CellRef) {
         let Some((source_sheet, source_cell)) = self.text_source_cell(sheet, cell) else {
             return;
