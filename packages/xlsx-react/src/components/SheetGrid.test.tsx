@@ -268,6 +268,26 @@ test('a press on the select-all corner arms no band gesture', () => {
   expect(reorders).toEqual([]);
 });
 
+test('every press on the header chrome is reported at pointer down, before any release', () => {
+  let reported = 0;
+  const { container } = mount({ ...handlers, onSelectAll: () => {}, onHeaderPress: () => { reported += 1; } });
+  const band = container.querySelector('[data-testid="xlsx-column-headers"]')!;
+  stubRect(band);
+  fireEvent.pointerDown(columnLabel(container, 0), { button: 0, clientX: 40, clientY: 0, pointerId: 1 });
+  expect(reported).toBe(1);
+  fireEvent.pointerUp(band, { clientX: 40, clientY: 0, pointerId: 1 });
+  fireEvent.pointerDown(columnLabel(container, 1), { button: 2, clientX: 120, clientY: 0, pointerId: 2 });
+  expect(reported).toBe(2);
+  fireEvent.pointerDown(container.querySelector('[data-testid="xlsx-grid-corner"]')!,
+    { button: 0, clientX: 0, clientY: 0, pointerId: 3 });
+  expect(reported).toBe(3);
+  fireEvent.pointerDown(band, { button: 0, clientX: 80, clientY: 0, pointerId: 4 });
+  expect(reported).toBe(4);
+  fireEvent.pointerMove(band, { clientX: 120, clientY: 0, pointerId: 4 });
+  fireEvent.pointerUp(band, { clientX: 120, clientY: 0, pointerId: 4 });
+  expect(resizes).toEqual([{ axis: 'col', index: 0, size: 120 }]);
+});
+
 test('a frozen label still takes its press and a frozen boundary still resizes', () => {
   const { container } = mount(handlers, 1, { startRow: 0, startCol: 0,
     frozenRows: 1, frozenCols: 1, dividerX: 80, dividerY: 20,
