@@ -11,6 +11,7 @@
     "values": "Values",
     "formulas": "Formulas",
     "entireCell": "Match entire cell contents",
+    "matchCase": "Cocokkan huruf besar/kecil",
     "range": "Range: {range}",
     "scope": "Search in",
     "scopeSelection": "Selection",

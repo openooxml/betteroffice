@@ -113,7 +113,7 @@ class PatchStyle(_Guarded):
 
 
 class ReplaceText(_Step, total=False):
-    """Literal, case-sensitive replacement; other cells are skipped.
+    """Literal replacement, case-insensitive unless ``matchCase``; other cells are skipped.
 
     ``lookIn`` defaults to ``values``; ``formulas`` also rewrites formula source.
     """
@@ -123,6 +123,7 @@ class ReplaceText(_Step, total=False):
     replacement: str
     entireCell: bool
     lookIn: Literal["values", "formulas"]
+    matchCase: bool
 
 
 EditStep = Union[SetCellInputs, SetFormulas, SetNumberFormat, PatchStyle, ReplaceText]
@@ -269,16 +270,17 @@ class _FindRequest(TypedDict):
 
 
 class FindRequest(_FindRequest, total=False):
-    """Exact, case-sensitive search; ``limit`` defaults to 100.
+    """Literal search, case-insensitive unless ``matchCase``; ``limit`` defaults to 100.
 
-    Omit ``lookIn`` to search display text of every stored cell. ``values`` and
-    ``formulas`` narrow to cells ``ReplaceText`` can rewrite.
+    Omit ``lookIn`` or pass ``values`` to search display text of every stored cell;
+    ``formulas`` narrows to text cells and formula source.
     """
 
     sheetIds: List[str]
     range: RangeTarget
     lookIn: Literal["values", "formulas"]
     entireCell: bool
+    matchCase: bool
     limit: int
 
 

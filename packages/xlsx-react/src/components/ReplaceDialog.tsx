@@ -116,9 +116,12 @@ function searchKey(
   query: string,
   lookIn: 'values' | 'formulas',
   entireCell: boolean,
+  matchCase: boolean,
 ): string {
   const sheetIds = target.sheets?.map((sheet) => sheet.sheetId).join(',') ?? target.sheetId;
-  return [target.sheetId, target.label, sheetIds, scope, query, lookIn, String(entireCell)].join('\u0000');
+  return [
+    target.sheetId, target.label, sheetIds, scope, query, lookIn, String(entireCell), String(matchCase),
+  ].join('\u0000');
 }
 
 /** A single active cell means "search everything"; an explicit multi-cell selection means itself. */
@@ -157,6 +160,7 @@ export function ReplaceDialog({
   const [lookIn, setLookIn] = useState<'values' | 'formulas'>('values');
   const [scope, setScope] = useState<ReplaceScope>('selection');
   const [entireCell, setEntireCell] = useState(false);
+  const [matchCase, setMatchCase] = useState(false);
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const [match, setMatch] = useState<{ index: number; total: number } | null>(null);
   const [position, setPosition] = useState({ x: 0, y: 0 });
@@ -170,6 +174,7 @@ export function ReplaceDialog({
   const replaceId = useId();
   const lookInId = useId();
   const entireId = useId();
+  const matchCaseId = useId();
   const scopeId = useId();
 
   useLayoutEffect(() => {
@@ -216,7 +221,7 @@ export function ReplaceDialog({
 
   const findMatches = async (query: string): Promise<FindCache | null> => {
     if (!target) return null;
-    const key = searchKey(target, scope, query, lookIn, entireCell);
+    const key = searchKey(target, scope, query, lookIn, entireCell, matchCase);
     if (cache.current?.key === key) return cache.current;
     const ranges = scopeTargets(target, scope);
     const result = await Promise.resolve(api.find(scope === 'workbook'
@@ -225,6 +230,7 @@ export function ReplaceDialog({
         sheetIds: ranges.map((range) => range.sheetId),
         lookIn,
         entireCell,
+        matchCase,
         limit: FIND_LIMIT,
       }
       : {
@@ -232,6 +238,7 @@ export function ReplaceDialog({
         range: ranges[0],
         lookIn,
         entireCell,
+        matchCase,
         limit: FIND_LIMIT,
       }));
     if (!result.ok) {
@@ -294,6 +301,7 @@ export function ReplaceDialog({
           replacement,
           entireCell,
           lookIn,
+          matchCase,
         }],
       };
       const validation = await Promise.resolve(api.validate(request));
@@ -341,6 +349,7 @@ export function ReplaceDialog({
         replacement,
         entireCell,
         lookIn,
+        matchCase,
       }));
       const request: XlsxEditRequest = { expectVersion: version, steps };
       const validation = await Promise.resolve(api.validate(request));
@@ -498,6 +507,16 @@ export function ReplaceDialog({
               setEntireCell(event.target.checked);
             }} />
           {t('replaceDialog.entireCell')}
+        </label>
+
+        <label htmlFor={matchCaseId} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input id={matchCaseId} type="checkbox" checked={matchCase}
+            onChange={(event) => {
+              cache.current = null;
+              setMatch(null);
+              setMatchCase(event.target.checked);
+            }} />
+          {t('replaceDialog.matchCase')}
         </label>
 
         <label htmlFor={scopeId} style={{ display: 'grid', gap: 4 }}>

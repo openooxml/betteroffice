@@ -1536,7 +1536,7 @@ fn reads_and_searches_carry_their_version() {
         [("C1", "hello"), ("C2", "shell")]
     );
     assert!(!found.truncated);
-    assert!(find(json!({ "text": "Hello" })).unwrap().matches.is_empty());
+    assert!(find(json!({ "text": "Hello", "matchCase": true })).unwrap().matches.is_empty());
     let limited = find(json!({ "text": "ell", "limit": 1 })).unwrap();
     assert_eq!(limited.matches.len(), 1);
     assert!(limited.truncated);

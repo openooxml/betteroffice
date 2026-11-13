@@ -118,7 +118,7 @@ export type XlsxEditOperation =
   | { op: 'patchStyle'; target: XlsxRangeTarget; patch: RangeStylePatch }
   | {
       /**
-       * Literal, case-sensitive replacement inside `target`.
+       * Literal replacement inside `target`, case-insensitive unless `matchCase`.
        *
        * `values` rewrites stored text in non-formula cells and reports matching formula
        * results as skipped. `formulas` rewrites text cells and formula source. Numeric,
@@ -133,6 +133,8 @@ export type XlsxEditOperation =
       entireCell?: boolean;
       /** Defaults to `values`. */
       lookIn?: 'values' | 'formulas';
+      /** Match letter case exactly. */
+      matchCase?: boolean;
     };
 
 export type XlsxEditStep = XlsxEditOperation & { expect?: { cells: XlsxCellGuard[][] } };
@@ -309,7 +311,7 @@ export type XlsxReadResult =
     }
   | XlsxEditRefusal;
 
-/** An exact, case-sensitive substring search over display text. */
+/** A literal substring search over display text, case-insensitive unless `matchCase`. */
 export interface XlsxFindRequest {
   text: string;
   /** Defaults to every sheet. */
@@ -317,13 +319,14 @@ export interface XlsxFindRequest {
   /** Restricts the search to one rectangle. Takes precedence over `sheetIds`. */
   range?: XlsxRangeTarget;
   /**
-   * Omit to search the display text of every stored cell. `values` narrows to text cells and
-   * formula results; `formulas` narrows to text cells and formula source, matching what
-   * `replaceText` can rewrite.
+   * Omit or pass `values` to search the display text of every stored cell; `formulas`
+   * narrows to text cells and formula source, matching what `replaceText` can rewrite.
    */
   lookIn?: 'values' | 'formulas';
   /** Match only cells whose whole searched text equals `text`. */
   entireCell?: boolean;
+  /** Match letter case exactly. */
+  matchCase?: boolean;
   /** Defaults to 100; at most 10,000. */
   limit?: number;
 }

@@ -147,7 +147,7 @@ fn replaces_literal_text_in_range_and_preserves_style() {
     assert_eq!(outcome.receipts.len(), 1);
     assert!(outcome.receipts[0].changed);
     assert_eq!(outcome.receipts[0].changed_cells.len(), 2);
-    assert_eq!(stored(&workbook, "A1"), text("Alpha beta ALPHA"));
+    assert_eq!(stored(&workbook, "A1"), text("ALPHA beta ALPHA"));
     assert_eq!(stored(&workbook, "A2"), text("ALPHA"));
     assert_eq!(stored(&workbook, "E1"), text("alpha alpha"));
     assert_eq!(style(&workbook, "D1"), Some(1));
@@ -189,7 +189,7 @@ fn skips_formulas_non_text_merged_followers_and_untouched_columns() {
         .expect("the batch applies");
 
     assert_eq!(outcome.receipts[0].changed_cells.len(), 4);
-    assert_eq!(stored(&workbook, "A1"), text("Alpha beta omega"));
+    assert_eq!(stored(&workbook, "A1"), text("omega beta omega"));
     assert_eq!(stored(&workbook, "B1"), CellValue::Number { value: 10.0 });
     assert_eq!(stored(&workbook, "C1"), text("alpha"));
     assert_eq!(
@@ -284,7 +284,7 @@ fn a_large_sparse_range_scans_stored_cells_only() {
     )
     .expect("the batch applies");
     assert!(outcome.receipts[0].changed);
-    assert_eq!(stored(&workbook, "A1"), text("Alpha beta omega"));
+    assert_eq!(stored(&workbook, "A1"), text("omega beta omega"));
     assert_eq!(stored(&workbook, "A2"), text("omega"));
 }
 
@@ -500,10 +500,7 @@ fn find_text_scopes_to_a_range_and_searches_formula_source() {
     );
     let scope = json!({ "sheetId": SHEET, "range": { "kind": "a1", "a1": "A1:C1" } });
     assert_eq!(addresses(json!({ "text": "10", "range": scope })), ["B1"]);
-    assert!(
-        addresses(json!({ "text": "10", "range": scope, "lookIn": "values" })).is_empty(),
-        "replaceable values skip numeric cells"
-    );
+    assert_eq!(addresses(json!({ "text": "10", "range": scope, "lookIn": "values" })), ["B1"]);
     assert!(
         addresses(json!({ "text": "10", "range": scope, "lookIn": "formulas" })).is_empty(),
         "replaceable formulas skip numeric cells"

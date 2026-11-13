@@ -1,7 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import { fireEvent } from '@testing-library/react';
-import type { XlsxEditRequest, XlsxValidationResult } from '@betteroffice/xlsx';
+import type { XlsxEditRequest, XlsxFindRequest, XlsxValidationResult } from '@betteroffice/xlsx';
 import { LocaleProvider } from '../i18n';
 import { ReplaceDialog } from './ReplaceDialog';
 
@@ -163,6 +163,31 @@ test('finds one match at a time and replaces only the current cell', async () =>
     op: 'replaceText', query: 'alpha', replacement: 'beta',
     target: { sheetId: target.sheetId, range: { start: { row: 0, col: 0 }, end: { row: 0, col: 0 } } },
   });
+});
+
+test('sends matchCase when Match case is ticked', async () => {
+  const finds: XlsxFindRequest[] = [];
+  const requests: XlsxEditRequest[] = [];
+  const { getByRole, findByText } = view({
+    version: () => 'v1',
+    find: (request) => {
+      finds.push(request);
+      return { ok: true, version: 'v1', matches: [], truncated: false };
+    },
+    validate: (request) => { requests.push(request); return preview(); },
+    apply: () => { throw new Error('must not apply'); },
+  });
+
+  const findInput = getByRole('textbox', { name: 'Find' }) as HTMLInputElement;
+  type(findInput, 'alpha');
+  fireEvent.click(getByRole('checkbox', { name: 'Match case' }));
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await findByText(/No matches/);
+  fireEvent.click(getByRole('button', { name: 'Preview' }));
+  await findByText(/Matched 3, replaced 2/);
+
+  expect(finds[0]).toMatchObject({ text: 'alpha', matchCase: true });
+  expect(requests[0].steps[0]).toMatchObject({ op: 'replaceText', query: 'alpha', matchCase: true });
 });
 
 test('drags the dialog by its header', () => {

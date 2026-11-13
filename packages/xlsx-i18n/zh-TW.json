@@ -11,6 +11,7 @@
     "values": "值",
     "formulas": "公式",
     "entireCell": "符合整個儲存格內容",
+    "matchCase": "大小寫須相符",
     "range": "範圍：{range}",
     "scope": "搜尋範圍",
     "scopeSelection": "目前選取範圍",

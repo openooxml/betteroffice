@@ -11,6 +11,7 @@
     "values": "Values",
     "formulas": "Formulas",
     "entireCell": "Match entire cell contents",
+    "matchCase": "大文字と小文字を区別する",
     "range": "Range: {range}",
     "scope": "Search in",
     "scopeSelection": "Selection",

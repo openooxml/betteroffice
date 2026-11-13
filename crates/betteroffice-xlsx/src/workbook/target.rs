@@ -9,7 +9,7 @@ use xlsx_render::display_text;
 use super::Workbook;
 use super::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditOperation, EditRefusal,
-    MAX_DIAGNOSTIC_CELLS, ReplaceLookIn, failure, refusal,
+    MAX_DIAGNOSTIC_CELLS, ReplaceLookIn, failure, refusal, text_matches,
 };
 use crate::{CellAddress, Result, XlsxSheetVisibility};
 
@@ -145,7 +145,7 @@ pub struct CellsRead {
 
 pub type ReadOutcome = std::result::Result<CellsRead, EditRefusal>;
 
-/// An exact, case-sensitive search over cell text, optionally scoped and formula-aware.
+/// A literal search over cell text, optionally case-sensitive, scoped and formula-aware.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FindRequest {
@@ -156,13 +156,14 @@ pub struct FindRequest {
     /// Restricts the search to one rectangle. Takes precedence over `sheet_ids`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<RangeTarget>,
-    /// Omit to search display text of every stored cell. `values` narrows to text cells and
-    /// formula results; `formulas` narrows to text cells and formula source.
+    /// Omit or pass `values` to search the display text of every stored cell; `formulas`
+    /// narrows to text cells and formula source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look_in: Option<ReplaceLookIn>,
     /// Match only cells whose whole searched text equals `text`.
     #[serde(default)]
     pub entire_cell: bool,
+    /// Match letter case exactly.
     #[serde(default)]
     pub match_case: bool,
     /// Defaults to 100; at most 10,000.
@@ -589,8 +590,8 @@ impl Workbook {
         }
     }
 
-    /// Finds cells whose display text contains `request.text`, case-sensitively, with the
-    /// version they were read at. `Err` is an internal failure.
+    /// Finds cells whose display text contains `request.text`, ignoring case unless
+    /// `match_case`, with the version they were read at. `Err` is an internal failure.
     pub fn find_text(&self, request: &FindRequest) -> Result<FindOutcome> {
         let version = self.version();
         let refused =
@@ -708,15 +709,7 @@ impl Workbook {
                 _ => None,
             };
             let searched = match request.look_in {
-                // Legacy callers get display text for every cell, numbers included.
-                None => display.as_str(),
-                Some(ReplaceLookIn::Values) => match cell.formula.as_deref() {
-                    Some(_) => display.as_str(),
-                    None => match stored_text {
-                        Some(value) => value,
-                        None => continue,
-                    },
-                },
+                None | Some(ReplaceLookIn::Values) => display.as_str(),
                 Some(ReplaceLookIn::Formulas) => match cell.formula.as_deref() {
                     Some(formula) => formula,
                     None => match stored_text {
@@ -725,12 +718,7 @@ impl Workbook {
                     },
                 },
             };
-            let matched = if request.entire_cell {
-                searched == request.text.as_str()
-            } else {
-                searched.contains(request.text.as_str())
-            };
-            if !matched {
+            if !text_matches(searched, &request.text, request.entire_cell, request.match_case) {
                 continue;
             }
             if matches.len() == limit as usize {

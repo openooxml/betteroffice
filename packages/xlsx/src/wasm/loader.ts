@@ -695,7 +695,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   listDefinedNames(request?: XlsxDefinedNamesRequest): XlsxDefinedNamesResult;
   /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
   readCells(request: XlsxReadRequest): XlsxReadResult;
-  /** Exact, case-sensitive search over display text, one match per cell. */
+  /** Literal search over display text, one match per cell; ignores case unless `matchCase`. */
   findText(request: XlsxFindRequest): XlsxFindResult;
   /** Resolves, stages and rehearses a batch like `applyEdits`, changing nothing. */
   validateEdits(request: XlsxEditRequest): XlsxValidationResult;

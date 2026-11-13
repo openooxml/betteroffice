@@ -11,6 +11,7 @@
     "values": "值",
     "formulas": "公式",
     "entireCell": "匹配整个单元格内容",
+    "matchCase": "区分大小写",
     "range": "范围：{range}",
     "scope": "搜索范围",
     "scopeSelection": "当前选区",

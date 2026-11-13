@@ -177,7 +177,7 @@ pub enum EditOperation {
         target: RangeTarget,
         patch: StylePatch,
     },
-    /// Literal, case-sensitive replacement inside `target`.
+    /// Literal replacement inside `target`, case-insensitive unless `match_case`.
     ///
     /// `values` rewrites stored text in non-formula cells; formula cells are reported as
     /// skipped. `formulas` rewrites text cells and formula source. Numeric, boolean,
@@ -192,6 +192,7 @@ pub enum EditOperation {
         entire_cell: bool,
         #[serde(default)]
         look_in: ReplaceLookIn,
+        /// Match letter case exactly.
         #[serde(default)]
         match_case: bool,
     },
@@ -541,20 +542,87 @@ fn utf16_units(text: &str) -> u64 {
     text.encode_utf16().count() as u64
 }
 
-/// Literal, case-sensitive replacement; `None` when `text` does not match `query`.
+/// Lowercased text plus each original char boundary as (folded, original) byte offsets.
+fn fold_case(text: &str) -> (String, Vec<(usize, usize)>) {
+    let mut folded = String::with_capacity(text.len());
+    let mut bounds = Vec::with_capacity(text.len() + 1);
+    for (at, ch) in text.char_indices() {
+        bounds.push((folded.len(), at));
+        folded.extend(ch.to_lowercase());
+    }
+    bounds.push((folded.len(), text.len()));
+    (folded, bounds)
+}
+
+/// Byte ranges in `text` of non-overlapping `query` matches, left to right.
+fn match_ranges(text: &str, query: &str, match_case: bool) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    if match_case {
+        return text
+            .match_indices(query)
+            .map(|(at, found)| (at, at + found.len()))
+            .collect();
+    }
+    let (haystack, bounds) = fold_case(text);
+    let (needle, _) = fold_case(query);
+    let original = |offset: usize| {
+        bounds
+            .binary_search_by_key(&offset, |&(folded, _)| folded)
+            .ok()
+            .map(|index| bounds[index].1)
+    };
+    let mut ranges = Vec::new();
+    let mut from = 0;
+    while let Some(found) = haystack[from..].find(needle.as_str()) {
+        let start = from + found;
+        let end = start + needle.len();
+        if let (Some(first), Some(last)) = (original(start), original(end)) {
+            ranges.push((first, last));
+            from = end;
+        } else {
+            from = start + haystack[start..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    ranges
+}
+
+/// Whether `text` matches `query` as Excel's Find does: case-insensitive unless `match_case`.
+pub(super) fn text_matches(text: &str, query: &str, entire_cell: bool, match_case: bool) -> bool {
+    if !entire_cell {
+        !match_ranges(text, query, match_case).is_empty()
+    } else if match_case {
+        text == query
+    } else {
+        fold_case(text).0 == fold_case(query).0
+    }
+}
+
+/// Literal replacement; `None` when `text` does not match `query`.
 fn replacement_match(
     text: &str,
     query: &str,
     replacement: &str,
     entire_cell: bool,
+    match_case: bool,
 ) -> Option<String> {
     if entire_cell {
-        (text == query).then(|| replacement.to_owned())
-    } else if text.contains(query) {
-        Some(text.replace(query, replacement))
-    } else {
-        None
+        return text_matches(text, query, true, match_case).then(|| replacement.to_owned());
     }
+    let ranges = match_ranges(text, query, match_case);
+    if ranges.is_empty() {
+        return None;
+    }
+    let mut next = String::with_capacity(text.len());
+    let mut last = 0;
+    for (start, end) in ranges {
+        next.push_str(&text[last..start]);
+        next.push_str(replacement);
+        last = end;
+    }
+    next.push_str(&text[last..]);
+    Some(next)
 }
 
 fn validate_formula(source: &str) -> std::result::Result<(), String> {
@@ -951,6 +1019,7 @@ impl Workbook {
                 replacement,
                 entire_cell,
                 look_in,
+                match_case,
                 ..
             } => {
                 let sheet_ref = &self.model.sheets[resolved.sheet.0 as usize];
@@ -970,15 +1039,14 @@ impl Workbook {
                             // visible to the user but has no independent text to rewrite.
                             let display =
                                 display_text(&self.model.styles, self.model.date_system, stored);
-                            if replacement_match(&display, query, replacement, *entire_cell).is_some()
-                            {
+                            if text_matches(&display, query, *entire_cell, *match_case) {
                                 stats.matched += 1;
                                 stats.skipped_formulas += 1;
                             }
                             continue;
                         }
                         let Some(next) =
-                            replacement_match(source, query, replacement, *entire_cell)
+                            replacement_match(source, query, replacement, *entire_cell, *match_case)
                         else {
                             continue;
                         };
@@ -1028,7 +1096,8 @@ impl Workbook {
                     let CellValue::Text { value } = &stored.value else {
                         continue;
                     };
-                    let Some(next) = replacement_match(value, query, replacement, *entire_cell)
+                    let Some(next) =
+                        replacement_match(value, query, replacement, *entire_cell, *match_case)
                     else {
                         continue;
                     };
