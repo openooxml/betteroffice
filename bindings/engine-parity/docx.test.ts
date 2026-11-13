@@ -731,8 +731,12 @@ const HEX_DIGEST = /^[0-9a-f]{16}$/;
 
 interface MediaSourcesWire { key: string[]; parts: [string, number][] }
 
-function mediaSourcesShape({ key, parts }: MediaSourcesWire) {
-  return { key: key.map((half) => HEX_DIGEST.test(half)), parts: parts.map(([digest, index]) => [HEX_DIGEST.test(digest), index]) };
+function mediaSourcesShape({ key, parts, ...rest }: MediaSourcesWire) {
+  return {
+    ...rest,
+    key: key.map((half) => HEX_DIGEST.test(half)),
+    parts: parts.map(([digest, ...entry]) => [HEX_DIGEST.test(digest), ...entry]),
+  };
 }
 
 const engineName = (engine: DocxEngine) => (engine === wasmEngine ? 'wasm' : 'native');
@@ -1679,8 +1683,10 @@ const rows: Row<Docx>[] = [
   },
   {
     method: 'EditSession.compare_docx_json',
-    call: ({ fresh }) => {
+    mutates: true,
+    call: ({ fresh, saveFrom }) => {
       const f = fresh();
+      saveFrom(f, compareOriginal);
       const result = comparedInto(f);
       return { result, version: f.version(), paragraphs: f.paragraphs('body'), revisions: f.list_revisions() };
     },
@@ -2153,7 +2159,9 @@ const rows: Row<Docx>[] = [
           if (reader.media_type(token) !== seeder.media_type(token)) throw new Error(`${token} has another media type than on the seeding engine`);
           return { token, type: reader.media_type(token), bytes, png: Buffer.compare(Buffer.from(bytes), Buffer.from(PNG)) === 0 };
         });
-        return { before: before.map((src) => src.slice(0, src.indexOf(','))), media, reloaded: reader.media_sources_json() === json };
+        const reloaded = reader.media_sources_json();
+        if (reloaded !== json) throw new Error(`the loaded media sources read back as ${reloaded}, not ${json}`);
+        return { before, media };
       } finally {
         seeder.free();
       }
