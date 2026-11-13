@@ -552,7 +552,10 @@ fn find_text_scopes_to_a_range_and_searches_formula_source() {
     );
     let scope = json!({ "sheetId": SHEET, "range": { "kind": "a1", "a1": "A1:C1" } });
     assert_eq!(addresses(json!({ "text": "10", "range": scope })), ["B1"]);
-    assert_eq!(addresses(json!({ "text": "10", "range": scope, "lookIn": "values" })), ["B1"]);
+    assert_eq!(
+        addresses(json!({ "text": "10", "range": scope, "lookIn": "values" })),
+        ["B1"]
+    );
     assert_eq!(
         addresses(json!({ "text": "10", "range": scope, "lookIn": "formulas" })),
         ["B1"],
@@ -618,32 +621,51 @@ fn find_values_matches_the_displayed_text_of_every_cell_kind() {
     let scope = json!({ "sheetId": SHEET, "range": { "kind": "a1", "a1": "A1:A6" } });
 
     assert_eq!(
-        found(&workbook, json!({ "text": "1,234.50", "range": scope, "lookIn": "values" })),
+        found(
+            &workbook,
+            json!({ "text": "1,234.50", "range": scope, "lookIn": "values" })
+        ),
         ["A1"],
         "a formatted number is found by its displayed text"
     );
     assert_eq!(
-        found(&workbook, json!({ "text": "1/1/20", "range": scope, "lookIn": "values" })),
+        found(
+            &workbook,
+            json!({ "text": "1/1/20", "range": scope, "lookIn": "values" })
+        ),
         ["A2"],
         "a date serial is found by its displayed date"
     );
     assert_eq!(
-        found(&workbook, json!({ "text": "TRUE", "range": scope, "lookIn": "values" })),
+        found(
+            &workbook,
+            json!({ "text": "TRUE", "range": scope, "lookIn": "values" })
+        ),
         ["A3"],
         "a boolean is found by its displayed text"
     );
     assert_eq!(
-        found(&workbook, json!({ "text": "2,469.00", "range": scope, "lookIn": "values" })),
+        found(
+            &workbook,
+            json!({ "text": "2,469.00", "range": scope, "lookIn": "values" })
+        ),
         ["A4"],
         "a formula's numeric result is found by its displayed text"
     );
     assert_eq!(
-        found(&workbook, json!({ "text": "A1*2", "range": scope, "lookIn": "formulas" })),
+        found(
+            &workbook,
+            json!({ "text": "A1*2", "range": scope, "lookIn": "formulas" })
+        ),
         ["A4"],
         "formulas mode still searches formula source"
     );
     assert!(
-        found(&workbook, json!({ "text": "A1*2", "range": scope, "lookIn": "values" })).is_empty()
+        found(
+            &workbook,
+            json!({ "text": "A1*2", "range": scope, "lookIn": "values" })
+        )
+        .is_empty()
     );
 }
 
@@ -652,9 +674,15 @@ fn find_ignores_case_by_default_and_matches_exactly_under_match_case() {
     let workbook = display_workbook();
     let scope = json!({ "sheetId": SHEET, "range": { "kind": "a1", "a1": "A5:A6" } });
 
-    assert_eq!(found(&workbook, json!({ "text": "abc", "range": scope })), ["A5", "A6"]);
     assert_eq!(
-        found(&workbook, json!({ "text": "abc", "range": scope, "lookIn": "values" })),
+        found(&workbook, json!({ "text": "abc", "range": scope })),
+        ["A5", "A6"]
+    );
+    assert_eq!(
+        found(
+            &workbook,
+            json!({ "text": "abc", "range": scope, "lookIn": "values" })
+        ),
         ["A5", "A6"]
     );
     assert_eq!(
@@ -665,7 +693,10 @@ fn find_ignores_case_by_default_and_matches_exactly_under_match_case() {
         ["A5", "A6"]
     );
     assert_eq!(
-        found(&workbook, json!({ "text": "abc", "range": scope, "matchCase": true })),
+        found(
+            &workbook,
+            json!({ "text": "abc", "range": scope, "matchCase": true })
+        ),
         ["A6"]
     );
     assert_eq!(
@@ -794,7 +825,10 @@ fn replace_all_rewrites_numbers_through_their_entered_text() {
     let workbook = number_workbook();
     let scope = json!({ "sheetId": SHEET, "range": { "kind": "a1", "a1": "A1:A3" } });
     assert_eq!(
-        found(&workbook, json!({ "text": "1", "range": scope, "lookIn": "values" })),
+        found(
+            &workbook,
+            json!({ "text": "1", "range": scope, "lookIn": "values" })
+        ),
         ["A1", "A2", "A3"],
         "find shows the number by its displayed text"
     );
@@ -963,7 +997,10 @@ fn a_formatted_number_is_found_by_its_display_but_replaced_by_its_entry() {
     let mut workbook = entry_workbook();
     let scope = json!({ "sheetId": SHEET, "range": { "kind": "a1", "a1": "D1:D1" } });
     assert_eq!(
-        found(&workbook, json!({ "text": "1,234", "range": scope, "lookIn": "values" })),
+        found(
+            &workbook,
+            json!({ "text": "1,234", "range": scope, "lookIn": "values" })
+        ),
         ["D1"]
     );
 
@@ -1137,9 +1174,19 @@ fn redo_after_undoing_replace_all_restores_the_replaced_state_exactly() {
     assert_replaced(&workbook);
     let replaced = workbook.model().clone();
 
-    assert!(workbook.undo(CalculationOptions::default()).unwrap().applied);
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
     assert_original(&workbook);
-    assert!(workbook.redo(CalculationOptions::default()).unwrap().applied);
+    assert!(
+        workbook
+            .redo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
     assert_replaced(&workbook);
     assert_eq!(workbook.model(), &replaced);
 }
@@ -1154,7 +1201,12 @@ fn workbook_replace_all_across_two_sheets_is_one_undo_step() {
     assert_eq!(workbook.history_state().undo_depth, depth + 1);
     assert_replaced(&workbook);
 
-    assert!(workbook.undo(CalculationOptions::default()).unwrap().applied);
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
     assert_original(&workbook);
     assert_eq!(workbook.history_state().undo_depth, depth);
 }
