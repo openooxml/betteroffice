@@ -729,6 +729,21 @@ function tokenizedImage(fresh: () => Session): { f: Session; src: string } {
 const HEADER_ALIASES = JSON.stringify([{ isHeader: true, partPath: 'word/header1.xml', relationshipIds: ['rIdHeader', 'rIdHeaderAlias'] }]);
 const HEX_DIGEST = /^[0-9a-f]{16}$/;
 
+interface MediaSourcesWire { key: string[]; parts: [string, number][] }
+
+function mediaSourcesShape({ key, parts }: MediaSourcesWire) {
+  return { key: key.map((half) => HEX_DIGEST.test(half)), parts: parts.map(([digest, index]) => [HEX_DIGEST.test(digest), index]) };
+}
+
+const engineName = (engine: DocxEngine) => (engine === wasmEngine ? 'wasm' : 'native');
+
+function imageSources(session: Session, input: string): string[] {
+  const json = session.layout_document_with_regions_json(input);
+  const sources = [...json.matchAll(/"src":"((?:data:image|media:)[^"]*)"/g)].map(([, src]) => src!);
+  if (sources.length === 0) throw new Error('the layout carries no image source');
+  return sources;
+}
+
 const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
 
 const rows: Row<Docx>[] = [
@@ -2083,24 +2098,65 @@ const rows: Row<Docx>[] = [
       return aliases;
     },
   }),
-  // The key is drawn per opening and keys every digest, so the row compares their form, the part indices and a reload.
+  // The key is drawn per opening and keys every digest, so the row compares their form, the part indices and a reload, and requires a second opening to draw another digest.
   {
     method: 'EditSession.media_sources_json',
-    call: ({ fresh }) => {
+    call: ({ engine, fresh }) => {
       const f = fresh();
       const unseeded = f.media_sources_json();
       f.open_docx(fixture, true, GENERATION);
       const json = f.media_sources_json();
-      const { key, parts } = JSON.parse(json) as { key: string[]; parts: [string, number][] };
-      if (parts.length === 0) throw new Error(`the seeded image left no media source: ${json}`);
+      const sources = JSON.parse(json) as MediaSourcesWire;
+      if (sources.parts.length === 0) throw new Error(`the seeded image left no media source: ${json}`);
+      const again = fresh();
+      again.open_docx(fixture, true, GENERATION);
+      const reopened = JSON.parse(again.media_sources_json()) as MediaSourcesWire;
+      const [first, second] = [sources.parts[0]![0], reopened.parts[0]?.[0]];
+      console.log(`MEDIA-DIGEST-PROBE ${engineName(engine)} ${first} ${String(second)} same=${first === second}`);
+      if (first === second) throw new Error(`two openings drew the same media digest ${first}`);
+      const shape = mediaSourcesShape(sources);
+      if (JSON.stringify(mediaSourcesShape(reopened)) !== JSON.stringify(shape)) throw new Error(`a second opening changed the media sources beyond their digests: ${json} then ${again.media_sources_json()}`);
       const reader = fresh();
       reader.load_media_sources(json);
       return {
         unseeded,
-        key: key.map((half) => HEX_DIGEST.test(half)),
-        parts: parts.map(([digest, index]) => [HEX_DIGEST.test(digest), index]),
+        ...shape,
+        reopened: mediaSourcesShape(reopened),
         reloaded: reader.media_sources_json() === json,
       };
+    },
+  },
+  // Sources only carry a key and digests, so each engine lays the other's seeded images out as the same tokens and resolves them to the same part.
+  {
+    method: 'EditSession.load_media_sources',
+    call: ({ engine, fresh }) => {
+      const other = engine === wasmEngine ? nativeEngine : wasmEngine;
+      const seeder = new other.EditSession(HOST_CLIENT);
+      try {
+        seeder.open_docx(fixture, true, GENERATION);
+        const json = seeder.media_sources_json();
+        if (!json) throw new Error('the other engine seeded no media source');
+        const reader = fresh();
+        reader.open_docx(fixture, false, GENERATION);
+        reader.apply_update(seeder.encode_state());
+        const { input } = layoutInput(reader);
+        const tokensInput = JSON.stringify({ ...JSON.parse(input), renderEnv: { mediaTokens: true } });
+        const before = imageSources(reader, tokensInput);
+        if (!before.every((src) => src.startsWith('data:image'))) throw new Error(`the reader tokenized images before loading sources: ${JSON.stringify(before)}`);
+        reader.load_media_sources(json);
+        const tokens = imageSources(reader, tokensInput);
+        if (!tokens.every((src) => src.startsWith('media:'))) throw new Error(`the other engine's sources left images untokenized: ${JSON.stringify(tokens)}`);
+        const media = tokens.map((token) => {
+          const bytes = reader.media_bytes(token);
+          const seeded = seeder.media_bytes(token);
+          if (!bytes || !seeded || Buffer.compare(Buffer.from(bytes), Buffer.from(seeded)) !== 0) throw new Error(`${token} resolves to other bytes than on the seeding engine`);
+          if (reader.media_type(token) !== seeder.media_type(token)) throw new Error(`${token} has another media type than on the seeding engine`);
+          return { token, type: reader.media_type(token), bytes, png: Buffer.compare(Buffer.from(bytes), Buffer.from(PNG)) === 0 };
+        });
+        return { before: before.map((src) => src.slice(0, src.indexOf(','))), media, reloaded: reader.media_sources_json() === json };
+      } finally {
+        seeder.free();
+      }
     },
   },
   defineRow({
@@ -2154,7 +2210,7 @@ const notYetCovered: string[] = [
   'EditSession.layout_document_with_regions_after_edit', 'EditSession.layout_document_with_regions_exact_prefix_retained',
   'EditSession.layout_document_with_regions_prefix_retained_json',
   'EditSession.layout_document_with_regions_retained_json', 'EditSession.layout_document_with_regions_retained_meta',
-  'EditSession.load', 'EditSession.load_media_sources', 'EditSession.load_note_separators',
+  'EditSession.load', 'EditSession.load_note_separators',
   'EditSession.measure_paragraph_json', 'EditSession.media_data_url',
   'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.outline_glyph_json',
   'EditSession.paragraph_id_count', 'EditSession.paragraph_unit',
@@ -2209,7 +2265,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(97);
+    expect(notYetCovered.length).toBe(96);
   });
 
   for (const row of rows) {
