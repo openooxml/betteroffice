@@ -1625,7 +1625,10 @@ mod session_save_tests {
         expected.replace_paragraph_text("0000000E", "X").unwrap();
         assert_eq!(saved, full_write(expected));
         let saved = reopened(&document);
-        assert_eq!(get_paragraph_text(saved.paragraph("0000000E").unwrap()), "X");
+        assert_eq!(
+            get_paragraph_text(saved.paragraph("0000000E").unwrap()),
+            "X"
+        );
     }
 }
 
