@@ -346,7 +346,25 @@ function timedEdits(session: Session, gap: () => unknown) {
   return { result, undone: session.undo(), after: session.paragraphs('body') };
 }
 
-const HYPERLINK = JSON.stringify({ href: 'https://example.com/', tooltip: null, rId: null });
+function typedUndoSteps(session: Session, gap: number) {
+  session.track_undo();
+  session.select_story('body');
+  const epoch = residentFrame(session);
+  caretIn(session, 'Second body', 6);
+  session.set_undo_input_time(5_000, 5_000);
+  const first = session.apply_input('a', epoch);
+  session.set_undo_input_time(5_000 + gap, 5_000 + gap);
+  const second = session.apply_input('b', frameEpoch(session));
+  const typed = session.paragraphs('body');
+  let steps = 0;
+  while (session.can_undo() && steps < 10) {
+    session.undo();
+    steps += 1;
+  }
+  return { first, second, typed, steps, after: session.paragraphs('body') };
+}
+
+const HYPERLINK =JSON.stringify({ href: 'https://example.com/', tooltip: null, rId: null });
 const GEOMETRY = JSON.stringify({ widthEmu: 190500, heightEmu: 95250, other: { width: 20, height: 10 } });
 const MODULE_OPTIONS = { pageSize: { w: 816, h: 1056 }, margins: { top: 96, right: 96, bottom: 96, left: 96 }, pageGap: 20 };
 const NOT_DOCX = Uint8Array.from([1, 2, 3]);
@@ -868,6 +886,18 @@ const rows: Row<Docx>[] = [
     method: 'EditSession.set_undo_input_time',
     mutates: true,
     call: ({ session: s }) => timedEdits(s, () => s.set_undo_input_time(5_100, 5_100)),
+  },
+  {
+    method: 'EditSession.set_undo_input_time',
+    name: 'EditSession.set_undo_input_time (typing within the window)',
+    mutates: true,
+    call: ({ session: s }) => typedUndoSteps(s, 100),
+  },
+  {
+    method: 'EditSession.set_undo_input_time',
+    name: 'EditSession.set_undo_input_time (typing past the window)',
+    mutates: true,
+    call: ({ session: s }) => typedUndoSteps(s, 600),
   },
   {
     method: 'EditSession.clear_undo_input_time',
