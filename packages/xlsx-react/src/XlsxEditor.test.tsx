@@ -1793,10 +1793,6 @@ describe('XlsxEditor chart objects', () => {
 describe('XlsxEditor chart objects with sheet headers', () => {
   const headerGrid = (view: Awaited<ReturnType<typeof mountEditor>>) =>
     view.surface.closest('[data-testid="xlsx-grid"]')!;
-  const headerFill = (view: Awaited<ReturnType<typeof mountEditor>>, axis: 'col' | 'row', index: number) =>
-    headerGrid(view).querySelector<HTMLElement>(
-      `[data-testid="${axis === 'col' ? 'xlsx-column-headers' : 'xlsx-row-headers'}"] [data-${axis}="${index}"]`
-    )!.style.backgroundColor;
   const presses: [string, (view: Awaited<ReturnType<typeof mountEditor>>) => void][] = [
     ['a column header', (view) => {
       fireEvent.mouseDown(headerGrid(view).querySelector('[data-testid="xlsx-column-headers"] [data-col="0"]')!);
@@ -1861,17 +1857,23 @@ describe('XlsxEditor chart objects with sheet headers', () => {
     });
   }
 
-  it('hides the cell marquee and fill handle under a selected chart while the bands keep the range', async () => {
+  it('hides the cell marquee and fill handle under a selected chart and keeps the cell selection', async () => {
     const [chart] = charted.charts;
     const view = await mountEditor(charted, undefined, true);
+    const selected = () =>
+      Array.from(view.view.queryAllByRole('gridcell', { selected: true }) as Element[],
+        (cell) => (cell.textContent ?? '').split(',')[0]!.trim()).sort();
+    const key = (key: string, shiftKey = false) =>
+      act(async () => { fireEvent.keyDown(view.surface, { key, shiftKey }); });
+    // charts.xlsx hides column C and row 3, so the arrows step from B2 to D4.
     view.click({ row: 1, col: 1 });
-    await act(async () => {
-      fireEvent.keyDown(view.surface, { key: 'ArrowDown', shiftKey: true });
-    });
-    await act(async () => {
-      fireEvent.keyDown(view.surface, { key: 'ArrowRight', shiftKey: true });
-    });
-    await waitFor(() => expect(headerFill(view, 'col', 2)).toBe('#eceff1'), MOUNTED);
+    await key('ArrowDown');
+    await key('ArrowRight');
+    await key('ArrowRight', true);
+    await key('ArrowRight', true);
+    await key('ArrowDown', true);
+    await waitFor(() => expect(selected()).toEqual(['D4', 'D5', 'E4', 'E5', 'F4', 'F5']), MOUNTED);
+    expect(view.nameBox().value).toBe('D4');
     expect(view.selectionBox()).not.toBeNull();
     expect(view.view.queryByTestId('xlsx-fill-handle')).not.toBeNull();
 
@@ -1881,10 +1883,12 @@ describe('XlsxEditor chart objects with sheet headers', () => {
     expect(view.view.queryAllByTestId('xlsx-selection-fill')).toEqual([]);
     expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
     expect(view.view.queryByTestId('xlsx-active-cell')).toBeNull();
-    expect([0, 1, 2, 3].map((index) => headerFill(view, 'col', index)))
-      .toEqual(['', '#eceff1', '#eceff1', '']);
-    expect([0, 1, 2, 3].map((index) => headerFill(view, 'row', index)))
-      .toEqual(['', '#eceff1', '#eceff1', '']);
+
+    fireEvent.keyDown(view.surface, { key: 'Escape' });
+    await waitFor(() => expect(view.outline()).toBeNull());
+    await waitFor(() => expect(view.selectionBox()).not.toBeNull());
+    expect(selected()).toEqual(['D4', 'D5', 'E4', 'E5', 'F4', 'F5']);
+    expect(view.nameBox().value).toBe('D4');
   });
 });
 
