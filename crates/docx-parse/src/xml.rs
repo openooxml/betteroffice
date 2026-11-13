@@ -1575,6 +1575,10 @@ fn retain_replayed_namespace_aliases(
     {
         return retain_bookmark_bindings(element, ancestors, part, budget);
     }
+    let form_data = element.matches_name("w", "ffData");
+    if form_data {
+        normalize_form_field_data(element, ancestors);
+    }
     let row = element.name == "w:tr" && !element.attributes.is_empty();
     let smart_art =
         element.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(element);
@@ -1592,7 +1596,7 @@ fn retain_replayed_namespace_aliases(
         && !bookmarked_drawing
         && !text_box_drawing
         && !matches!(element.local_name(), "pict" | "object")
-        && !element.matches_name("w", "ffData")
+        && !form_data
     {
         return Ok(());
     }
@@ -1601,7 +1605,9 @@ fn retain_replayed_namespace_aliases(
         for (name, value) in &ancestor.attributes {
             if name == "xmlns" || name.starts_with("xmlns:") {
                 let prefix = name.strip_prefix("xmlns:").unwrap_or("");
-                if canonical_namespace(prefix) == Some(value.as_str()) {
+                if canonical_namespace(prefix) == Some(value.as_str())
+                    || (form_data && prefix == "w" && is_wordprocessing(Some(value.as_str())))
+                {
                     bindings.shift_remove(name.as_str());
                 } else {
                     bindings.insert(name.as_str(), value.as_str());
@@ -1685,6 +1691,111 @@ fn retain_replayed_namespace_aliases(
         element.attributes.insert(name.to_owned(), value.to_owned());
     }
     Ok(())
+}
+
+fn namespace_declaration<'a>(
+    (name, value): (&'a String, &'a String),
+) -> Option<(&'a str, &'a str)> {
+    match name.strip_prefix("xmlns") {
+        Some("") => Some(("", value.as_str())),
+        Some(rest) => rest.strip_prefix(':').map(|prefix| (prefix, value.as_str())),
+        None => None,
+    }
+}
+
+fn is_wordprocessing(namespace: Option<&str>) -> bool {
+    namespace.is_some_and(|namespace| {
+        namespace == namespaces::W || strict_namespace(namespaces::W) == Some(namespace)
+    })
+}
+
+fn resolve<'a>(scope: &[(&'a str, &'a str)], prefix: &str) -> Option<&'a str> {
+    scope
+        .iter()
+        .rev()
+        .find(|(declared, _)| *declared == prefix)
+        .map(|(_, namespace)| *namespace)
+}
+
+fn declares_foreign_w(element: &XmlElement) -> bool {
+    element
+        .attributes
+        .get("xmlns:w")
+        .is_some_and(|namespace| !is_wordprocessing(Some(namespace.as_str())))
+        || element.child_elements().any(declares_foreign_w)
+}
+
+/// Writes every name in a kept `w:ffData` bound to WordprocessingML with the `w` prefix and drops
+/// the declarations that bound it, so the fragment replays as written under any story root.
+fn normalize_form_field_data(element: &mut XmlElement, ancestors: &[XmlElement]) {
+    let scope: Vec<(&str, &str)> = ancestors
+        .iter()
+        .flat_map(|ancestor| ancestor.attributes.iter())
+        .filter_map(namespace_declaration)
+        .collect();
+    let own: Vec<(&str, &str)> = scope
+        .iter()
+        .copied()
+        .chain(element.attributes.iter().filter_map(namespace_declaration))
+        .collect();
+    if !is_wordprocessing(resolve(&scope, "w"))
+        || !is_wordprocessing(resolve(&own, element.namespace_prefix().unwrap_or("")))
+        || declares_foreign_w(element)
+    {
+        return;
+    }
+    let mut scope: Vec<(String, String)> = scope
+        .into_iter()
+        .map(|(prefix, namespace)| (prefix.to_owned(), namespace.to_owned()))
+        .collect();
+    rename_wordprocessing_names(element, &mut scope);
+}
+
+fn bound_to_wordprocessing(scope: &[(String, String)], prefix: &str) -> bool {
+    is_wordprocessing(
+        scope
+            .iter()
+            .rev()
+            .find(|(declared, _)| declared == prefix)
+            .map(|(_, namespace)| namespace.as_str()),
+    )
+}
+
+fn rename_wordprocessing_names(element: &mut XmlElement, scope: &mut Vec<(String, String)>) {
+    let declared = scope.len();
+    scope.extend(
+        element
+            .attributes
+            .iter()
+            .filter_map(namespace_declaration)
+            .map(|(prefix, namespace)| (prefix.to_owned(), namespace.to_owned())),
+    );
+    let current: &[(String, String)] = scope;
+    if bound_to_wordprocessing(current, element.namespace_prefix().unwrap_or("")) {
+        element.name = format!("w:{}", element.local_name());
+    }
+    element.attributes = std::mem::take(&mut element.attributes)
+        .into_iter()
+        .filter(|(name, value)| {
+            namespace_declaration((name, value)).is_none()
+                || !is_wordprocessing(Some(value.as_str()))
+        })
+        .map(|(name, value)| {
+            let renamed = name
+                .split_once(':')
+                .filter(|(prefix, _)| {
+                    !matches!(*prefix, "xml" | "xmlns") && bound_to_wordprocessing(current, prefix)
+                })
+                .map(|(_, local)| format!("w:{local}"));
+            (renamed.unwrap_or(name), value)
+        })
+        .collect();
+    for child in &mut element.children {
+        if let XmlNode::Element(child) = child {
+            rename_wordprocessing_names(child, scope);
+        }
+    }
+    scope.truncate(declared);
 }
 
 /// Records, beside the exact source slice, the bindings a block bookmark needs

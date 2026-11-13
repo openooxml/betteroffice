@@ -21,10 +21,17 @@ const formBegin = (data: string) => `<w:fldChar w:fldCharType="begin">${data}</w
 
 const FORM_PARAGRAPH = `<w:p w14:paraId="73000001">${text('Name: ')}${field(formBegin(TEXT_DATA), 'FORMTEXT', text('Ada'))}${text(' Agree ')}${field(formBegin(CHECK_DATA), 'FORMCHECKBOX', '')}${text(' Pick ')}${field(formBegin(DROP_DATA), 'FORMDROPDOWN', text('Beta'))}${text(' end.')}</w:p>`;
 const DIRTY_PARAGRAPH = `<w:p w14:paraId="73000002">${text('Page ')}${field(DIRTY_BEGIN, 'PAGE', text('1'))}${text(' of many')}</w:p>`;
-const EXT_NAMESPACE = ` xmlns:ns0="${W}"`;
-const EXT_DATA = '<ns0:ffData><ns0:name ns0:val="Ext1"/><ns0:enabled/><ns0:textInput/></ns0:ffData>';
-const UNWRITABLE = /"Ext1".*found ns0:ffData/;
-const EXT_PARAGRAPH = `<w:p w14:paraId="73000003">${text('Label ')}${field(formBegin(EXT_DATA), 'FORMTEXT', text('Ada'))}</w:p>`;
+const fieldParagraph = (data: string) => `<w:p w14:paraId="73000003">${text('Label ')}${field(formBegin(data), 'FORMTEXT', text('Ada'))}</w:p>`;
+const ALIASED = {
+  namespaces: ` xmlns:ns0="${W}"`,
+  paragraph: fieldParagraph('<ns0:ffData><ns0:name ns0:val="Ext1"/><ns0:enabled/><ns0:textInput/></ns0:ffData>'),
+};
+const NORMALIZED_BEGIN = formBegin('<w:ffData><w:name w:val="Ext1"/><w:enabled/><w:textInput/></w:ffData>');
+const FOREIGN = {
+  namespaces: ' xmlns:x="urn:x"',
+  paragraph: fieldParagraph('<x:ffData><x:name x:val="Ext1"/><x:enabled/></x:ffData>'),
+};
+const UNWRITABLE = /"Ext1".*found x:ffData/;
 const RUN_BOUND_DATA = '<w:ffData><w:name w:val="T"/><ext:foo/></w:ffData>';
 const RUN_BOUND_PARAGRAPH = `<w:p w14:paraId="73000005">${text('Mark ')}${field(`<w:fldChar w:fldCharType="begin">${RUN_BOUND_DATA}</w:fldChar>`, 'FORMTEXT', text('Ada')).replace('<w:r>', '<w:r xmlns:ext="urn:x">')}</w:p>`;
 const OTHER_PARAGRAPH = `<w:p w14:paraId="73000004">${text('Other')}</w:p>`;
@@ -69,16 +76,23 @@ async function typedAndSaved(yrs: Yrs, paragraph: string, after: string, route: 
   }
 }
 
-async function typedInExtended(yrs: Yrs, after: string, route: string): Promise<string> {
+type Source = typeof ALIASED;
+
+async function typedBesideField(yrs: Yrs, source: Source, after: string, route: string): Promise<string> {
   const session = await yrs.createYrsSession();
+  const reopened = await yrs.createYrsSession();
   try {
-    session.openDocx(await docx(EXT_PARAGRAPH + OTHER_PARAGRAPH, EXT_NAMESPACE), true);
+    session.openDocx(await docx(source.paragraph + OTHER_PARAGRAPH, source.namespaces), true);
     const [match] = session.searchText(after, { caseSensitive: true });
     expect(match).toBeDefined();
     session.insertText({ story: 'body', paraId: match!.paraId, offset: match!.end }, 'x');
-    return documentXml(await ROUTES[route]!(yrs, session));
+    const bytes = await ROUTES[route]!(yrs, session);
+    reopened.openDocx(bytes, true);
+    expect(reopened.searchText(`${after}x`, { caseSensitive: true })).toHaveLength(1);
+    return documentXml(bytes);
   } finally {
     session.destroy();
+    reopened.destroy();
   }
 }
 
@@ -114,15 +128,24 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       expect(count(xml, '<w:ffData xmlns:ext="urn:x"><w:name w:val="T"/><ext:foo/></w:ffData>')).toBe(1);
     });
 
-    test(`${engine}: refuses to save, naming the field and the reason, when form field data it cannot write is beside the typed text (${route})`, async () => {
-      await expect(typedInExtended(yrs, 'Label', route)).rejects.toThrow(UNWRITABLE);
-    });
+    for (const after of ['Label', 'Other']) {
+      test(`${engine}: keeps form field data bound through a root alias of the w namespace, written with w, when "${after}" is typed (${route})`, async () => {
+        const xml = await typedBesideField(yrs, ALIASED, after, route);
+        expect(count(xml, NORMALIZED_BEGIN)).toBe(1);
+        expect(count(xml, 'ffData')).toBe(2);
+        expect(xml).toContain(`${after}x`);
+      });
+
+      test(`${engine}: refuses to save, naming the field and the reason, when "${after}" is typed in a part it must rewrite that holds form field data of another namespace (${route})`, async () => {
+        await expect(typedBesideField(yrs, FOREIGN, after, route)).rejects.toThrow(UNWRITABLE);
+      });
+    }
   }
 
-  test(`${engine}: saves with the same document when the edit is in another paragraph, that paragraph byte-identical (selective save)`, async () => {
+  test(`${engine}: keeps the paragraph holding form field data of another namespace byte-identical when the edit is in another paragraph (selective save)`, async () => {
     const session = await yrs.createYrsSession();
     try {
-      session.openDocx(await docx(EXT_PARAGRAPH + OTHER_PARAGRAPH, EXT_NAMESPACE), true);
+      session.openDocx(await docx(FOREIGN.paragraph + OTHER_PARAGRAPH, FOREIGN.namespaces), true);
       const [match] = session.searchText('Other', { caseSensitive: true });
       session.insertText({ story: 'body', paraId: match!.paraId, offset: match!.end }, 'x');
       const base = session.materializeDocx()!;
@@ -134,16 +157,10 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       });
       expect(saved).not.toBeNull();
       const xml = await documentXml(new Uint8Array(saved!));
-      expect(count(xml, EXT_PARAGRAPH)).toBe(1);
+      expect(count(xml, FOREIGN.paragraph)).toBe(1);
       expect(xml).toContain('Otherx');
     } finally {
       session.destroy();
     }
   });
-
-  for (const route of Object.keys(ROUTES)) {
-    test(`${engine}: refuses to save, naming the field and the reason, when a part it cannot splice holds form field data it cannot write (${route})`, async () => {
-      await expect(typedInExtended(yrs, 'Other', route)).rejects.toThrow(UNWRITABLE);
-    });
-  }
 }

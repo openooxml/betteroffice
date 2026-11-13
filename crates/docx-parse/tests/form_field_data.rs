@@ -142,30 +142,133 @@ const ALIASED: &str = r#"xmlns:ns0="http://schemas.openxmlformats.org/wordproces
 const ALIASED_DATA: &str =
     r#"<ns0:ffData><ns0:name ns0:val="Ext1"/><ns0:enabled/><ns0:textInput/></ns0:ffData>"#;
 
-fn aliased_document() -> (Vec<u8>, String) {
+const NORMALIZED_DATA: &str =
+    r#"<w:ffData><w:name w:val="Ext1"/><w:enabled/><w:textInput/></w:ffData>"#;
+const FOREIGN: &str =
+    r#"xmlns:x="urn:x" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
+const FOREIGN_DATA: &str = r#"<x:ffData><x:name x:val="Ext1"/><x:enabled/></x:ffData>"#;
+const W_URI: &[u8] = b"http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+fn two_paragraphs(namespaces: &str, data: &str) -> (Vec<u8>, String, String) {
     let field = format!(
         r#"<w:p w14:paraId="73000003">{}{}</w:p>"#,
         text("Label "),
-        form_field(ALIASED_DATA, "FORMTEXT", &text("Ada")),
+        form_field(data, "FORMTEXT", &text("Ada")),
     );
     let body = format!(
         r#"{field}<w:p w14:paraId="73000004">{}</w:p>"#,
         text("Other")
     );
-    (fixture_in(&format!("{NS} {ALIASED}"), &body), field)
+    let document = format!(
+        "<w:document {NS} {namespaces}><w:body>{body}<w:sectPr/></w:body></w:document>"
+    );
+    (package(document.clone()), document, field)
+}
+
+fn aliased_document() -> (Vec<u8>, String, String) {
+    two_paragraphs(ALIASED, ALIASED_DATA)
+}
+
+fn lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Each element and attribute inside `w:ffData`, by namespace URI and local name, in order;
+/// panics on any prefix of the part that no declaration binds.
+fn form_data_events(xml: &str) -> Vec<String> {
+    let mut reader = NsReader::from_str(xml);
+    let mut events = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        let (resolved, event) = reader.read_resolved_event().unwrap();
+        let namespace = match resolved {
+            ResolveResult::Unknown(prefix) => panic!("unbound prefix {}: {xml}", lossy(&prefix)),
+            ResolveResult::Bound(Namespace(uri)) => uri.to_vec(),
+            ResolveResult::Unbound => Vec::new(),
+        };
+        let (element, empty) = match &event {
+            Event::Start(element) => (element, false),
+            Event::Empty(element) => (element, true),
+            Event::End(_) if depth > 0 => {
+                events.push("/".to_owned());
+                depth -= 1;
+                continue;
+            }
+            Event::Eof => return events,
+            _ => continue,
+        };
+        let local = lossy(element.local_name().as_ref());
+        let mut attributes = Vec::new();
+        for attribute in element.attributes() {
+            let attribute = attribute.unwrap();
+            if attribute.key.as_ref().starts_with(b"xmlns")
+                || attribute.key.as_ref().starts_with(b"xml:")
+            {
+                continue;
+            }
+            let (resolved, name) = reader.resolver().resolve_attribute(attribute.key);
+            let uri = match resolved {
+                ResolveResult::Unknown(prefix) => {
+                    panic!("unbound attribute prefix {}: {xml}", lossy(&prefix))
+                }
+                ResolveResult::Bound(Namespace(uri)) => lossy(uri),
+                ResolveResult::Unbound => String::new(),
+            };
+            attributes.push(format!(
+                "{uri} {}={}",
+                lossy(name.as_ref()),
+                lossy(&attribute.value)
+            ));
+        }
+        if depth == 0 && !(local == "ffData" && namespace == W_URI) {
+            continue;
+        }
+        events.push(format!("{} {local} {attributes:?}", lossy(&namespace)));
+        if !empty {
+            depth += 1;
+        }
+    }
+}
+
+fn assert_same_form_data(source: &str, xml: &str) {
+    let events = form_data_events(source);
+    assert!(events.len() > 1, "{source}");
+    assert_eq!(form_data_events(xml), events, "{xml}");
 }
 
 #[test]
-fn refuses_to_rewrite_form_field_data_it_cannot_write_naming_the_field_and_the_reason() {
-    let (source, _) = aliased_document();
+fn keeps_form_field_data_bound_through_a_root_alias_on_a_full_write() {
+    let (source, document, _) = aliased_document();
+    let xml = save(&source).unwrap();
+    assert_same_form_data(&document, &xml);
+    assert_eq!(xml.matches(NORMALIZED_DATA).count(), 1, "{xml}");
+    let reopened = package(xml.clone());
+    parse_docx_s9_wire(&reopened, S9ParseOptions::default()).unwrap();
+    assert_same_form_data(&document, &save(&reopened).unwrap());
+}
+
+#[test]
+fn keeps_form_field_data_bound_through_a_root_alias_when_its_own_paragraph_is_written() {
+    let (source, document, _) = aliased_document();
+    let xml = save_with(&source, json!({"changedParaIds": ["73000003"]})).unwrap();
+    assert_same_form_data(&document, &xml);
+    assert_eq!(xml.matches(NORMALIZED_DATA).count(), 1, "{xml}");
+}
+
+#[test]
+fn keeps_the_source_bytes_of_a_paragraph_with_aliased_form_field_data_when_another_is_written() {
+    let (source, document, field) = aliased_document();
+    let xml = save_with(&source, json!({"changedParaIds": ["73000004"]})).unwrap();
+    assert_eq!(xml.matches(field.as_str()).count(), 1, "{xml}");
+    assert_same_form_data(&document, &xml);
+}
+
+#[test]
+fn refuses_to_rewrite_form_field_data_of_another_namespace_naming_the_field_and_the_reason() {
+    let (source, _, field) = two_paragraphs(FOREIGN, FOREIGN_DATA);
     let error = save(&source).unwrap_err();
     assert!(error.contains("\"Ext1\""), "{error}");
-    assert!(error.contains("found ns0:ffData"), "{error}");
-}
-
-#[test]
-fn keeps_the_source_bytes_of_an_untouched_paragraph_whose_form_field_data_it_cannot_write() {
-    let (source, field) = aliased_document();
+    assert!(error.contains("found x:ffData"), "{error}");
     let xml = save_with(&source, json!({"changedParaIds": ["73000004"]})).unwrap();
     assert_eq!(xml.matches(field.as_str()).count(), 1, "{xml}");
 }
