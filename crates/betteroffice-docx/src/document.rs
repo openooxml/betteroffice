@@ -1216,11 +1216,13 @@ fn has_floating_zones(
 #[cfg(test)]
 mod session_save_tests {
     use super::{
-        Document, EditCtx, SessionEdit, find_paragraph_mut, replace_plain_run,
-        replace_section_paragraphs,
+        Document, EditCtx, InlineNode, Paragraph, ParagraphContent, SessionEdit,
+        find_paragraph_mut, get_paragraph_text, replace_plain_run, replace_section_paragraphs,
     };
 
     use std::cell::RefCell;
+
+    use docx_parse::{TabStop, TextFormatting};
 
     thread_local! {
         static SEED_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -1243,18 +1245,27 @@ mod session_save_tests {
     }
 
     fn source() -> String {
-        let body = [
-            first_paragraph(),
-            paragraph("0000000B", &run("Charlie")),
-            paragraph("0000000C", &run("Delta")),
-        ]
-        .concat();
+        document_xml(
+            &[
+                first_paragraph(),
+                paragraph("0000000B", &run("Charlie")),
+                paragraph("0000000C", &run("Delta")),
+            ]
+            .concat(),
+        )
+    }
+
+    fn document_xml(body: &str) -> String {
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n<w:document {NAMESPACES}><w:body>{body}<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr></w:body></w:document>"
         )
     }
 
     fn open() -> Document {
+        open_with(&source())
+    }
+
+    fn open_with(document_xml: &str) -> Document {
         let parts = vec![
             (
                 "[Content_Types].xml".to_owned(),
@@ -1264,9 +1275,57 @@ mod session_save_tests {
                 "_rels/.rels".to_owned(),
                 br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
             ),
-            ("word/document.xml".to_owned(), source().into_bytes()),
+            ("word/document.xml".to_owned(), document_xml.as_bytes().to_vec()),
         ];
         Document::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+    }
+
+    fn reopened(document: &Document) -> Document {
+        Document::open(&document.save().unwrap()).unwrap()
+    }
+
+    fn change_model(document: &mut Document, para_id: &str, change: impl FnOnce(&mut Paragraph)) {
+        let body = &mut document.model_mut().body;
+        let paragraph = find_paragraph_mut(&mut body.content, para_id).unwrap();
+        change(&mut *paragraph);
+        let replacement = paragraph.clone();
+        replace_section_paragraphs(body, para_id, &replacement);
+    }
+
+    fn center(paragraph: &mut Paragraph) {
+        let formatting = paragraph.formatting.get_or_insert_with(Default::default);
+        formatting.alignment = Some("center".to_owned());
+    }
+
+    fn tab_stop(paragraph: &mut Paragraph) {
+        let formatting = paragraph.formatting.get_or_insert_with(Default::default);
+        formatting.tabs = Some(vec![TabStop {
+            position: 4320.0,
+            alignment: "center".to_owned(),
+            leader: None,
+        }]);
+    }
+
+    fn alignment(paragraph: &Paragraph) -> Option<&str> {
+        paragraph.formatting.as_ref()?.alignment.as_deref()
+    }
+
+    fn bold_run(paragraph: &mut Paragraph) {
+        let Some(ParagraphContent::Inline(InlineNode::Run(run))) = paragraph.content.first_mut()
+        else {
+            panic!("paragraph without a first run");
+        };
+        run.formatting = Some(TextFormatting {
+            bold: Some(true),
+            ..Default::default()
+        });
+    }
+
+    fn run_bold(paragraph: &Paragraph) -> Option<bool> {
+        match paragraph.content.first() {
+            Some(ParagraphContent::Inline(InlineNode::Run(run))) => run.formatting.as_ref()?.bold,
+            _ => None,
+        }
     }
 
     fn main_part(document: &Document) -> String {
@@ -1426,6 +1485,113 @@ mod session_save_tests {
         let unchanged = [first_paragraph(), paragraph("0000000C", &run("Delta"))];
         let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
         assert_plan_keeps(&document, &unchanged, "Charlie edited");
+    }
+
+    #[test]
+    fn model_alignment_then_logged_edit_on_one_paragraph_both_survive() {
+        let mut document = open();
+        change_model(&mut document, "0000000B", center);
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = reopened(&document);
+        let edited = saved.paragraph("0000000B").unwrap();
+        assert_eq!(get_paragraph_text(edited), "Charlie edited");
+        assert_eq!(alignment(edited), Some("center"));
+    }
+
+    #[test]
+    fn model_alignment_and_logged_edit_on_other_paragraphs_both_survive() {
+        let mut document = open();
+        change_model(&mut document, "0000000C", center);
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = reopened(&document);
+        let changed = saved.paragraph("0000000C").unwrap();
+        assert_eq!(get_paragraph_text(changed), "Delta");
+        assert_eq!(alignment(changed), Some("center"));
+        let edited = saved.paragraph("0000000B").unwrap();
+        assert_eq!(get_paragraph_text(edited), "Charlie edited");
+    }
+
+    #[test]
+    fn logged_edit_then_model_alignment_on_one_paragraph_both_survive() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        change_model(&mut document, "0000000B", center);
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = reopened(&document);
+        let edited = saved.paragraph("0000000B").unwrap();
+        assert_eq!(get_paragraph_text(edited), "Charlie edited");
+        assert_eq!(alignment(edited), Some("center"));
+    }
+
+    fn bold_then_edit(document: &mut Document) {
+        change_model(document, "0000000B", bold_run);
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+    }
+
+    #[test]
+    fn model_run_property_then_logged_edit_saves_as_the_full_write() {
+        let mut document = open();
+        bold_then_edit(&mut document);
+        assert!(document.session_save_plan().unwrap().is_none());
+        let mut expected = open();
+        bold_then_edit(&mut expected);
+        assert_eq!(main_part(&document), full_write(expected));
+        let saved = reopened(&document);
+        let edited = saved.paragraph("0000000B").unwrap();
+        assert_eq!(get_paragraph_text(edited), "Charlie edited");
+        assert_eq!(run_bold(edited), Some(true));
+    }
+
+    #[test]
+    fn model_tab_stop_then_logged_edit_on_one_paragraph_both_survive() {
+        let mut document = open();
+        change_model(&mut document, "0000000B", tab_stop);
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = reopened(&document);
+        let edited = saved.paragraph("0000000B").unwrap();
+        assert_eq!(get_paragraph_text(edited), "Charlie edited");
+        let tabs = edited
+            .formatting
+            .as_ref()
+            .and_then(|formatting| formatting.tabs.as_deref())
+            .unwrap_or_default();
+        assert!(tabs.iter().any(|tab| tab.alignment == "center"), "{tabs:?}");
+    }
+
+    #[test]
+    fn known_limit_edited_empty_paragraph_with_mark_formatting_takes_the_full_write() {
+        let empty = r#"<w:p w14:paraId="0000000E" w14:textId="77777777"><w:pPr><w:rPr><w:b/></w:rPr></w:pPr></w:p>"#;
+        let source = document_xml(
+            &[
+                first_paragraph(),
+                empty.to_owned(),
+                paragraph("0000000C", &run("Delta")),
+            ]
+            .concat(),
+        );
+        let mut document = open_with(&source);
+        document.replace_paragraph_text("0000000E", "X").unwrap();
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = main_part(&document);
+        assert!(!saved.contains("w:proofErr"), "{saved}");
+        let mut expected = open_with(&source);
+        expected.replace_paragraph_text("0000000E", "X").unwrap();
+        assert_eq!(saved, full_write(expected));
+        let saved = reopened(&document);
+        assert_eq!(get_paragraph_text(saved.paragraph("0000000E").unwrap()), "X");
     }
 }
 
