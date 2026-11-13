@@ -463,6 +463,30 @@ impl FontRequirementCollector {
         }
     }
 
+    /// Adds the face a text watermark stretched to its shape box paints with.
+    pub fn collect_watermark(&mut self, watermark: &Value) {
+        if watermark["kind"] != "text"
+            || watermark["widthEmu"].is_null()
+            || watermark["heightEmu"].is_null()
+        {
+            return;
+        }
+        let Some(text) = watermark["text"].as_str().filter(|text| !text.is_empty()) else {
+            return;
+        };
+        let family = watermark["font"]
+            .as_str()
+            .unwrap_or(crate::display_list::DEFAULT_FONT_FAMILY);
+        let scripts =
+            ooxml_text::paragraph_scripts_with_languages(std::iter::once((text, None)), false);
+        let mut characters = FontCharacters::default();
+        for ch in text.chars() {
+            characters.insert(ch);
+        }
+        self.name(family, false, false, &scripts, true);
+        self.characters(family, false, false, characters);
+    }
+
     /// Adds preview fonts and returns whether marker characters stay valid.
     pub fn collect_preview<'a>(
         &mut self,
@@ -8004,6 +8028,27 @@ mod tests {
         let mut named = BTreeMap::new();
         collect_font_requirements_into(&blocks, "Calibri", &mut named);
         assert!(named.contains_key("aptos|1|0"));
+    }
+
+    #[test]
+    fn fitted_text_watermarks_name_the_face_they_paint_with() {
+        let fitted = json!({
+            "kind": "text", "text": "SAMPLE", "font": "Liberation Serif",
+            "widthEmu": 6550025, "heightEmu": 1871345
+        });
+        let mut collector = FontRequirementCollector::default();
+        collector.collect_watermark(&fitted);
+        collector.collect_watermark(&json!({"kind": "text", "text": "DRAFT", "font": "Auto"}));
+        let requirements = collector.finish();
+        assert_eq!(
+            requirements.keys().collect::<Vec<_>>(),
+            ["liberation serif|0|0"]
+        );
+        let characters: String = requirements["liberation serif|0|0"]
+            .characters
+            .iter()
+            .collect();
+        assert_eq!(characters, "AELMPS");
     }
 
     #[test]

@@ -1772,6 +1772,11 @@ pub(crate) struct TextWatermarkIn {
     /// points; absent means Word's "Auto" sizing
     #[serde(default)]
     font_size: Option<f64>,
+    /// The shape box the text stretches to fill; wins over `font_size`.
+    #[serde(default)]
+    width_emu: Option<f64>,
+    #[serde(default)]
+    height_emu: Option<f64>,
     #[serde(default)]
     decorative: Option<bool>,
 }
@@ -3681,7 +3686,7 @@ fn block_key(id: &Value) -> Cow<'_, str> {
 }
 
 const DEFAULT_FONT_PT: f64 = 11.0;
-const DEFAULT_FONT_FAMILY: &str = "Calibri";
+pub(crate) const DEFAULT_FONT_FAMILY: &str = "Calibri";
 const REVISION_INS_COLOR: &str = "#2e7d32";
 const REVISION_DEL_COLOR: &str = "#c62828";
 const REVISION_MERGE_COLOR: &str = "#5f6368";
@@ -4179,12 +4184,20 @@ pub(crate) fn capped_relationship_id(id: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn emit_watermark(prims: &mut Vec<Primitive>, watermark: &WatermarkIn, page: &PageIn) {
+fn emit_watermark(
+    prims: &mut Vec<Primitive>,
+    watermark: &WatermarkIn,
+    page: &PageIn,
+    shape: Option<&ShapeFonts<'_>>,
+) {
     match watermark {
-        WatermarkIn::Text(wm) => emit_text_watermark(prims, wm, page),
+        WatermarkIn::Text(wm) => emit_text_watermark(prims, wm, page, shape),
         WatermarkIn::Picture(wm) => emit_picture_watermark(prims, wm, page),
     }
 }
+
+/// The cap height, in ems, a watermark stretched to its shape box fills that box with.
+const FITTED_WATERMARK_CAP_EM: f64 = 0.7;
 
 fn watermark_auto_font_px(text: &str, available_width_px: f64) -> f64 {
     let chars = text.trim().chars().count().max(1) as f64;
@@ -4192,39 +4205,87 @@ fn watermark_auto_font_px(text: &str, available_width_px: f64) -> f64 {
     size.clamp(24.0, 180.0)
 }
 
-fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &PageIn) {
+/// The advance `text` shapes to in the face its family's chain paints first.
+fn watermark_shaped_advance(
+    fonts: &ShapeFonts<'_>,
+    family: &str,
+    text: &str,
+    font_px: f64,
+) -> Option<f64> {
+    let font = *fonts.chain_for(family, false, false)?.ids.first()?;
+    let glyphs = ooxml_text::shape_with_direction(
+        fonts.store,
+        font,
+        text,
+        font_px as f32,
+        &[],
+        ooxml_text::ShapeDirection::Ltr,
+    )
+    .ok()?;
+    let advance: f64 = glyphs.iter().map(|glyph| f64::from(glyph.x_advance)).sum();
+    (advance.is_finite() && advance > 0.0).then_some(advance)
+}
+
+fn emit_text_watermark(
+    prims: &mut Vec<Primitive>,
+    wm: &TextWatermarkIn,
+    page: &PageIn,
+    shape: Option<&ShapeFonts<'_>>,
+) {
     if wm.text.is_empty() {
         return;
     }
     let text: String = wm.text.chars().take(MAX_ALT_TEXT_CHARS).collect();
     let content_width = page.size.w - page.margins.left - page.margins.right;
-    let target_width = if wm.layout.as_deref() == Some("diagonal") {
+    let diagonal = wm.layout.as_deref() == Some("diagonal");
+    let target_width = if diagonal {
         content_width * 1.3
     } else {
         content_width
     };
-    let font_px = wm
-        .font_size
-        .map(|pt| pt * 96.0 / 72.0)
-        .filter(|px| px.is_finite() && *px > 0.0)
-        .unwrap_or_else(|| watermark_auto_font_px(&text, target_width));
-    let width = (text.trim().chars().count().max(1) as f64) * font_px * 0.62;
-    let x = (page.size.w - width) / 2.0;
-    // textRunRect centers at baseline - 0.2em; choose the baseline so the
-    // primitive's geometry center is exactly the page center before rotation.
-    let baseline = page.size.h / 2.0 + font_px * 0.2;
+    let fitted = wm
+        .width_emu
+        .zip(wm.height_emu)
+        .map(|(w, h)| (emu_to_px(w), emu_to_px(h)))
+        .filter(|(w, h)| w.is_finite() && h.is_finite() && *w > 0.0 && *h > 0.0);
+    let font_px = match fitted {
+        Some((_, box_h)) => box_h / FITTED_WATERMARK_CAP_EM,
+        None => wm
+            .font_size
+            .map(|pt| pt * 96.0 / 72.0)
+            .filter(|px| px.is_finite() && *px > 0.0)
+            .unwrap_or_else(|| watermark_auto_font_px(&text, target_width)),
+    };
     let family = wm.font.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
-    let font = format!("700 {}px {}, sans-serif", px(font_px), family);
+    let advance = fitted
+        .and(shape)
+        .and_then(|fonts| watermark_shaped_advance(fonts, family, &text, font_px))
+        .unwrap_or_else(|| (text.trim().chars().count().max(1) as f64) * font_px * 0.62);
+    let width = fitted.map_or(advance, |(box_w, _)| box_w);
+    // textRunRect centers at baseline - 0.2em, the point rotation turns about;
+    // a fitted watermark lifts it so its cap-height middle lands on the page
+    // center after rotation, otherwise the geometry center sits there.
+    let lift = if fitted.is_some() {
+        font_px * (FITTED_WATERMARK_CAP_EM / 2.0 - 0.2)
+    } else {
+        0.0
+    };
+    let (sin, cos) = if diagonal {
+        (-45f64).to_radians().sin_cos()
+    } else {
+        (0.0, 1.0)
+    };
+    let x = page.size.w / 2.0 - lift * sin - width / 2.0;
+    let baseline = page.size.h / 2.0 + lift * cos + font_px * 0.2;
+    let weight = if fitted.is_some() { "" } else { "700 " };
+    let font = format!("{weight}{}px {}, sans-serif", px(font_px), family);
+    let horizontal_scale = fitted.map(|(box_w, _)| px(100.0 * box_w / advance));
     let opacity = if wm.semitransparent == Some(true) {
         0.5
     } else {
         0.85
     };
-    let rotation = if wm.layout.as_deref() == Some("diagonal") {
-        Some(px(-45.0))
-    } else {
-        None
-    };
+    let rotation = if diagonal { Some(px(-45.0)) } else { None };
 
     let attrs = DocAttrs {
         decorative: Some(wm.decorative.unwrap_or(true)),
@@ -4245,7 +4306,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         rtl: None,
         opacity: Some(px(opacity)),
         rotation_deg: rotation,
-        horizontal_scale: None,
+        horizontal_scale,
         substitute_scale: None,
         all_caps: false,
         small_caps: false,
@@ -6210,9 +6271,9 @@ fn build_display_list_selected(
         if let Some(watermark) = input
             .headers_footers
             .as_ref()
-            .and_then(|hf| hf.watermark.as_ref())
+            .and_then(|hf| crate::hf_bands::page_watermark(hf, page, page_index))
         {
-            emit_watermark(&mut prims, watermark, page);
+            emit_watermark(&mut prims, watermark, page, shape_fonts.as_ref());
         }
         let watermark_primitive_count = (!prims.is_empty()).then_some(prims.len());
         if let Some(border) = page_border_primitive(

@@ -42,6 +42,12 @@ export function getDocumentWatermark(doc: Document | null | undefined): Watermar
   return undefined;
 }
 
+/** Each header's own watermark, by relationship id. */
+export function getHeaderWatermarks(doc: Document | null | undefined): Record<string, Watermark> | undefined {
+  const entries = [...(doc?.package.headers ?? [])].filter(([, hf]) => hf.watermark);
+  return entries.length ? Object.fromEntries(entries.map(([rId, hf]) => [rId, hf.watermark!])) : undefined;
+}
+
 /** Strip the watermark from every header. */
 function removeFromAllHeaders(doc: Document): Document {
   const headers = doc.package.headers;

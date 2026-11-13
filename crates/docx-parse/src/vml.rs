@@ -160,6 +160,11 @@ pub enum Watermark {
         layout: String,
         #[serde(rename = "fontSize", skip_serializing_if = "Option::is_none")]
         font_size: Option<f64>,
+        /// The shape box the text is stretched to fill (`fitshape`).
+        #[serde(rename = "widthEmu", skip_serializing_if = "Option::is_none")]
+        width_emu: Option<f64>,
+        #[serde(rename = "heightEmu", skip_serializing_if = "Option::is_none")]
+        height_emu: Option<f64>,
     },
     Picture {
         #[serde(rename = "relId", skip_serializing_if = "Option::is_none")]
@@ -1068,6 +1073,12 @@ pub fn extract_watermark(
                 .and_then(|element| element.attribute(None, "opacity"))
                 .and_then(parse_javascript_float_prefix)
                 .is_some_and(|value| value < 1.0);
+            let fits = fits_shape(root, shape, text_path);
+            let fitted = |key: &str| {
+                fits.then(|| vml_length_to_px(style.get(key).map(String::as_str)))
+                    .flatten()
+                    .and_then(pixels_to_emu)
+            };
             return Some(Watermark::Text {
                 text,
                 font,
@@ -1075,6 +1086,8 @@ pub fn extract_watermark(
                 semitransparent,
                 layout: if diagonal { "diagonal" } else { "horizontal" }.to_owned(),
                 font_size: None,
+                width_emu: fitted("width"),
+                height_emu: fitted("height"),
             });
         }
         if let Some(image_data) = image_data {
@@ -1103,6 +1116,36 @@ pub fn extract_watermark(
         }
     }
     None
+}
+
+/// Whether a text path stretches to its shape box, set on the shape's own
+/// `v:textpath` or on the `v:shapetype` it names.
+fn fits_shape(root: &XmlElement, shape: &XmlElement, text_path: &XmlElement) -> bool {
+    let fit = |path: &XmlElement| {
+        path.attribute(None, "fitshape")
+            .map(|value| matches!(value, "t" | "true" | "1"))
+    };
+    if let Some(fit) = fit(text_path) {
+        return fit;
+    }
+    let Some(type_id) = shape
+        .attribute(None, "type")
+        .and_then(|value| value.strip_prefix('#'))
+    else {
+        return false;
+    };
+    let mut shape_types = Vec::new();
+    collect_named(root, "v:shapetype", 0, &mut shape_types, MAX_VML_SHAPES);
+    shape_types
+        .into_iter()
+        .find(|shape_type| shape_type.attribute(None, "id") == Some(type_id))
+        .and_then(|shape_type| {
+            shape_type
+                .child_elements()
+                .find(|child| child.local_name() == "textpath")
+        })
+        .and_then(fit)
+        .unwrap_or(false)
 }
 
 #[derive(Default)]
@@ -2060,9 +2103,45 @@ mod tests {
                 semitransparent: true,
                 layout: "diagonal".to_owned(),
                 font_size: None,
+                width_emu: None,
+                height_emu: None,
             })
         );
         assert!(parse_vml_image_content(&header, None, None).is_none());
+    }
+
+    #[test]
+    fn word_text_watermark_keeps_the_box_its_shapetype_fits() {
+        let header = |text_path: &str| {
+            root(&format!(
+                r##"<w:hdr xmlns:w="w" xmlns:v="v"><w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Watermarks"/></w:docPartObj></w:sdtPr><w:sdtContent><w:p><w:r><w:pict><v:shapetype id="_x0000_t136" coordsize="21600,21600"><v:textpath on="t" fitshape="t"/></v:shapetype><v:shape id="PowerPlusWaterMarkObject25163611" type="#_x0000_t136" style="position:absolute;width:515.75pt;height:147.35pt;rotation:315" fillcolor="silver" stroked="f"><v:fill opacity=".5"/>{text_path}</v:shape></w:pict></w:r></w:p></w:sdtContent></w:sdt></w:hdr>"##
+            ))
+        };
+        let fitted = header(
+            r#"<v:textpath style="font-family:&quot;Liberation Serif&quot;;font-size:1pt" string="SAMPLE"/>"#,
+        );
+        assert_eq!(
+            extract_watermark(Some(&fitted), None, None),
+            Some(Watermark::Text {
+                text: "SAMPLE".to_owned(),
+                font: "Liberation Serif".to_owned(),
+                color: "silver".to_owned(),
+                semitransparent: true,
+                layout: "diagonal".to_owned(),
+                font_size: None,
+                width_emu: Some(6_550_025.0),
+                height_emu: Some(1_871_345.0),
+            })
+        );
+        let unfitted = header(r#"<v:textpath fitshape="f" string="SAMPLE"/>"#);
+        assert!(matches!(
+            extract_watermark(Some(&unfitted), None, None),
+            Some(Watermark::Text {
+                width_emu: None,
+                height_emu: None,
+                ..
+            })
+        ));
     }
 
     #[test]

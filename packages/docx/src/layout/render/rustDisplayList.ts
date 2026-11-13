@@ -52,6 +52,8 @@ export interface DisplayListHfVariant {
    * ride the char-distributed fallback width on every page.
    */
   fieldWidths?: DisplayListFieldWidths[];
+  /** The header part's own watermark; wins over the envelope's on the pages it heads. */
+  watermark?: DisplayListWatermark;
 }
 
 /**
@@ -97,6 +99,9 @@ export interface DisplayListTextWatermark {
   semitransparent: boolean;
   layout: 'diagonal' | 'horizontal';
   fontSize?: number;
+  /** The shape box the text stretches to fill; wins over `fontSize`. */
+  widthEmu?: number;
+  heightEmu?: number;
   /** Undefined defaults to true for watermarks. */
   decorative?: boolean;
 }
