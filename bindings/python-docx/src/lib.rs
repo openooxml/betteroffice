@@ -824,7 +824,8 @@ impl PyDisplayList {
 
     #[getter]
     fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyString>> {
-        self.payload(py).map_err(|error| LayoutError::new_err(error.to_string()))
+        self.payload(py)
+            .map_err(|error| LayoutError::new_err(error.to_string()))
     }
 
     #[getter]
