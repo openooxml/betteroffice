@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyInt};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyString};
 use python_common::map_io_error;
 
 use betteroffice_docx::{
@@ -780,12 +780,17 @@ fn offset_repr(offset: Option<u32>) -> String {
     frozen,
     from_py_object
 )]
-#[derive(Clone)]
 pub struct PyDisplayList {
     inner: DisplayList,
-    payload: OnceLock<String>,
+    payload: OnceLock<Py<PyString>>,
     #[pyo3(get)]
     contract_version: Option<u32>,
+}
+
+impl Clone for PyDisplayList {
+    fn clone(&self) -> Self {
+        Self::new(self.inner.clone())
+    }
 }
 
 impl PyDisplayList {
@@ -797,12 +802,13 @@ impl PyDisplayList {
         }
     }
 
-    fn payload(&self, py: Python<'_>) -> Result<&str, serde_json::Error> {
+    fn payload<'py>(&self, py: Python<'py>) -> Result<Bound<'py, PyString>, serde_json::Error> {
         if let Some(text) = self.payload.get() {
-            return Ok(text);
+            return Ok(text.bind(py).clone());
         }
         let text = py.detach(|| serde_json::to_string(&self.inner))?;
-        Ok(self.payload.get_or_init(|| text))
+        let text = PyString::new(py, &text).unbind();
+        Ok(self.payload.get_or_init(|| text).bind(py).clone())
     }
 }
 
@@ -817,7 +823,7 @@ impl PyDisplayList {
     }
 
     #[getter]
-    fn json(&self, py: Python<'_>) -> PyResult<&str> {
+    fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyString>> {
         self.payload(py).map_err(|error| LayoutError::new_err(error.to_string()))
     }
 
@@ -839,7 +845,9 @@ impl PyDisplayList {
         let payload = self
             .payload(py)
             .map_err(|error| map_io_error(&io::Error::from(error), &path))?;
-        py.detach(|| fs::write(&path, payload.as_bytes()))
+        let bytes = payload.encode_utf8()?;
+        let bytes = bytes.as_bytes();
+        py.detach(|| fs::write(&path, bytes))
             .map_err(|error| map_io_error(&error, &path))
     }
 
