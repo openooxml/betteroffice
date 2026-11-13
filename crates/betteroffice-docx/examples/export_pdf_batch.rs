@@ -64,6 +64,15 @@ use serde_json::{Map, Value, json};
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".source"];
 const USAGE: &str = "usage: export_pdf_batch <input_dir> <output_dir> [options]";
 
+/// The only fixtures allowed to be recorded as unsupported. Keep this list in
+/// sync with `ALLOWED_UNSUPPORTED_FIXTURES` in `pdf_matrix.py`.
+const ALLOWED_UNSUPPORTED: &[&str] = &[
+    "cjk-rtl-emoji/generated-emoji.docx",
+    "page-fragments/pages.docx",
+    "structured-export/principal.docx",
+];
+const PDFA_MISSING_GLYPH: &str = "PDF/A-2u text needs a glyph the registered fonts do not cover";
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("export_pdf_batch: {error}");
@@ -175,7 +184,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 record.insert("text_chars".into(), json!(text_chars));
                 record.insert("error".into(), Value::Null);
             }
-            Err(error) if allow_unsupported && error.contains("PDF/A-2u") => {
+            Err(error) if allow_unsupported && is_allowed_unsupported(&relative, &error) => {
                 unsupported += 1;
                 eprintln!(
                     "[{}/{total}] SKIP {}: {error}",
@@ -273,6 +282,10 @@ fn value(
     inline
         .or_else(|| args.next())
         .ok_or_else(|| format!("{flag} needs a value"))
+}
+
+fn is_allowed_unsupported(relative: &Path, error: &str) -> bool {
+    ALLOWED_UNSUPPORTED.contains(&portable(relative).as_str()) && error.contains(PDFA_MISSING_GLYPH)
 }
 
 fn export_one(
@@ -467,4 +480,35 @@ fn absolute(path: &Path) -> String {
     fs::canonicalize(path)
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| path.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MISSING_GLYPH: &str = "export: unsupported PDF content: PDF/A-2u text needs a glyph the registered fonts do not cover";
+
+    #[test]
+    fn allows_only_the_known_missing_glyph_fixtures() {
+        assert!(is_allowed_unsupported(
+            Path::new("cjk-rtl-emoji/generated-emoji.docx"),
+            MISSING_GLYPH
+        ));
+        assert!(is_allowed_unsupported(
+            Path::new("page-fragments/pages.docx"),
+            MISSING_GLYPH
+        ));
+        assert!(is_allowed_unsupported(
+            Path::new("structured-export/principal.docx"),
+            MISSING_GLYPH
+        ));
+        assert!(!is_allowed_unsupported(
+            Path::new("report.docx"),
+            MISSING_GLYPH
+        ));
+        assert!(!is_allowed_unsupported(
+            Path::new("page-fragments/pages.docx"),
+            "export: unsupported PDF content: PDF/A-2u text cannot address .notdef"
+        ));
+    }
 }

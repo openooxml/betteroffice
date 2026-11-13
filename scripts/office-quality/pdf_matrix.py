@@ -156,6 +156,26 @@ GENERATED_TEXT_FIXTURES = (
 GENERATED_GROUP = 'cjk-rtl-emoji'
 EXPECTATIONS_FILE = 'expected.json'
 
+# The only fixtures allowed to be absent after a PDF/A-2u export. Keep this
+# list in sync with `ALLOWED_UNSUPPORTED` in export_pdf_batch.rs.
+ALLOWED_UNSUPPORTED_FIXTURES = frozenset({
+    'cjk-rtl-emoji/generated-emoji.docx',
+    'page-fragments/pages.docx',
+    'structured-export/principal.docx',
+})
+UNSUPPORTED_MISSING_GLYPH = (
+    'PDF/A-2u text needs a glyph the registered fonts do not cover'
+)
+
+
+def is_allowed_unsupported(relative: Path, entry: dict[str, Any]) -> bool:
+    """Whether an unsupported entry is one of the reviewed emoji fixtures."""
+    path = str(relative).replace('\\', '/')
+    return (
+        path in ALLOWED_UNSUPPORTED_FIXTURES
+        and UNSUPPORTED_MISSING_GLYPH in str(entry.get('error') or '')
+    )
+
 LARGE_SOURCE = 'crates/betteroffice-docx/tests/corpus/fixtures/betteroffice-demo.docx'
 LARGE_REPEATS = 30
 
@@ -962,7 +982,11 @@ def main(argv: list[str] | None = None) -> int:
         pdf_root = args.pdf_dir or manifest_path.parent
         for entry in entries:
             relative = Path(entry['path'])
-            if args.allow_unsupported and entry.get('status') == 'unsupported':
+            if (
+                args.allow_unsupported
+                and entry.get('status') == 'unsupported'
+                and is_allowed_unsupported(relative, entry)
+            ):
                 report['unsupported'].append({
                     'path': str(relative),
                     'error': entry.get('error'),
@@ -1013,7 +1037,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f'[{state}] {group}/{relative}: {detail}')
 
     fixtures = report['fixtures']
-    if not fixtures:
+    if not fixtures and not report['unsupported']:
         print('pdf_matrix: the manifests contain no fixtures', file=sys.stderr)
         return 2
     pages = sum(fixture['pages'] or 0 for fixture in fixtures)

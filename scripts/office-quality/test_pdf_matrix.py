@@ -11,7 +11,9 @@ from pathlib import Path
 from unittest import mock
 
 from pdf_matrix import (
+    ALLOWED_UNSUPPORTED_FIXTURES,
     GENERATED_TEXT_FIXTURES,
+    UNSUPPORTED_MISSING_GLYPH,
     DocxInfo,
     describe_verapdf_failure,
     find_verapdf,
@@ -20,6 +22,7 @@ from pdf_matrix import (
     main,
     make_large_docx,
     manifest_declares_pdfa_2u,
+    is_allowed_unsupported,
     is_emoji_char,
     make_text_docx,
     normalize_text,
@@ -745,6 +748,84 @@ class PdfaGateTests(unittest.TestCase):
                 ])
             self.assertEqual(code, 2)
             self.assertIn('needs veraPDF', stderr)
+
+
+    def test_allow_unsupported_only_skips_reviewed_fixtures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            size = write_pdf(root / 'pdfs' / 'report.pdf')
+            reason = f'export: unsupported PDF content: {UNSUPPORTED_MISSING_GLYPH}'
+            write_manifest(
+                root / 'pdfs' / 'manifest.json',
+                [
+                    ok_entry('report.docx', size),
+                    {
+                        'path': 'cjk-rtl-emoji/generated-emoji.docx',
+                        'status': 'unsupported',
+                        'error': reason,
+                    },
+                ],
+                {'conformance': 'pdfa-2u'},
+            )
+            report_path = root / 'report.json'
+            with mock.patch.dict(sys.modules, {'pypdfium2': fake_pdfium('hello')}):
+                code, stdout, stderr = run_main([
+                    str(root / 'pdfs' / 'manifest.json'),
+                    '--allow-unsupported',
+                    '--json', str(report_path),
+                ])
+            report = json.loads(report_path.read_text())
+
+            self.assertEqual(code, 0, (stdout, stderr))
+            self.assertEqual(report['summary']['fixtures'], 1)
+            self.assertEqual(report['summary']['unsupported'], 1)
+            self.assertEqual(
+                report['unsupported'][0]['path'],
+                'cjk-rtl-emoji/generated-emoji.docx',
+            )
+
+    def test_unreviewed_unsupported_entry_still_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reason = f'export: unsupported PDF content: {UNSUPPORTED_MISSING_GLYPH}'
+            write_manifest(
+                root / 'pdfs' / 'manifest.json',
+                [{
+                    'path': 'report.docx',
+                    'status': 'unsupported',
+                    'error': reason,
+                }],
+                {'conformance': 'pdfa-2u'},
+            )
+            report_path = root / 'report.json'
+            with mock.patch.dict(sys.modules, {'pypdfium2': fake_pdfium('hello')}):
+                code, stdout, stderr = run_main([
+                    str(root / 'pdfs' / 'manifest.json'),
+                    '--allow-unsupported',
+                    '--json', str(report_path),
+                ])
+            report = json.loads(report_path.read_text())
+
+            self.assertEqual(code, 1, (stdout, stderr))
+            self.assertEqual(report['summary']['unsupported'], 0)
+            checks = report['failures'][0]['checks']
+            self.assertIn('export', [check for check, _ in checks])
+            self.assertIn('pdf', [check for check, _ in checks])
+
+    def test_unsupported_allowlist_requires_the_missing_glyph_reason(self):
+        entry = {
+            'status': 'unsupported',
+            'error': f'export: unsupported PDF content: {UNSUPPORTED_MISSING_GLYPH}',
+        }
+        for path in ALLOWED_UNSUPPORTED_FIXTURES:
+            self.assertTrue(is_allowed_unsupported(Path(path), entry))
+        self.assertFalse(is_allowed_unsupported(Path('report.docx'), entry))
+        self.assertFalse(
+            is_allowed_unsupported(
+                Path('page-fragments/pages.docx'),
+                {'error': 'export: unsupported PDF content: PDF/A-2u text cannot address .notdef'},
+            )
+        )
 
     def test_without_the_flag_validation_is_skipped(self):
         code, report, _stdout, _stderr, reports = self.run_case(
