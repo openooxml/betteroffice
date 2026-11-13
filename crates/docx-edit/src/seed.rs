@@ -9116,6 +9116,52 @@ mod tests {
     }
 
     #[test]
+    fn solid_shading_takes_its_pattern_colour_black_when_automatic() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Solid",
+                "tblStylePr": [
+                    { "type": "firstRow", "tcPr": { "shading": {
+                        "pattern": "solid", "color": { "auto": true }, "fill": { "rgb": "0000FF" }
+                    } } },
+                    { "type": "lastRow", "tcPr": { "shading": {
+                        "pattern": "solid", "fill": { "rgb": "0000FF" }
+                    } } }
+                ]
+            }]
+        });
+        let cell = |shading: Value| json!({ "type": "tableCell", "formatting": { "shading": shading }, "content": [] });
+        let plain = || json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Solid", "look": { "firstRow": true, "lastRow": true } },
+            "rows": [
+                { "cells": [plain(), plain(), plain(), plain()] },
+                { "cells": [
+                    cell(json!({ "pattern": "solid", "color": { "auto": true }, "fill": { "rgb": "FFFF00" } })),
+                    cell(json!({ "pattern": "solid", "fill": { "rgb": "FFFF00" } })),
+                    cell(json!({ "pattern": "solid", "color": { "rgb": "FF0000" }, "fill": { "rgb": "FFFF00" } })),
+                    cell(json!({ "pattern": "clear", "color": { "auto": true }, "fill": { "rgb": "00FF00" } }))
+                ] },
+                { "cells": [plain(), plain(), plain(), plain()] }
+            ]
+        });
+        let cells = seeded_cells(&definitions, &table);
+        let fills = |row: usize| {
+            cells[row]
+                .iter()
+                .map(|cell| cell["backgroundColor"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fills(0), vec![json!("000000"); 4]);
+        assert_eq!(
+            fills(1),
+            vec![json!("000000"), json!("000000"), json!("FF0000"), json!("00FF00")]
+        );
+        assert_eq!(fills(2), vec![json!("000000"); 4]);
+    }
+
+    #[test]
     fn vertically_merged_cell_takes_its_region_bottom_border() {
         let definitions = json!({
             "styles": [{

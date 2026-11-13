@@ -348,6 +348,36 @@ it('lets a direct shd element replace the style shading in both seeders', async 
   }
 });
 
+it('gives solid shading its pattern colour, black when automatic, in both seeders', async () => {
+  const styles =
+    '<w:style w:type="table" w:styleId="Solid">' +
+    '<w:tblStylePr w:type="firstRow"><w:tcPr><w:shd w:val="solid" w:color="auto" w:fill="0000FF"/></w:tcPr></w:tblStylePr>' +
+    '<w:tblStylePr w:type="lastRow"><w:tcPr><w:shd w:val="solid" w:fill="0000FF"/></w:tcPr></w:tblStylePr></w:style>';
+  const body = styledTable(
+    'Solid',
+    '<w:tblLook w:firstRow="1" w:lastRow="1" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/>',
+    [
+      ['', '', '', ''],
+      [
+        '<w:shd w:val="solid" w:color="auto" w:fill="FFFF00"/>',
+        '<w:shd w:val="solid" w:fill="FFFF00"/>',
+        '<w:shd w:val="solid" w:color="FF0000" w:fill="FFFF00"/>',
+        '<w:shd w:val="clear" w:color="auto" w:fill="00FF00"/>',
+      ],
+      ['', '', '', ''],
+    ],
+    4
+  );
+  const seeded = await seedBoth(body, styles);
+  for (const engine of ['projected', 'native']) {
+    expect(seeded[engine]![0]!.map((row) => row.map((cell) => cell.backgroundColor))).toEqual([
+      ['000000', '000000', '000000', '000000'],
+      ['000000', '000000', 'FF0000', '00FF00'],
+      ['000000', '000000', '000000', '000000'],
+    ]);
+  }
+});
+
 it('gives a vertically merged cell its region bottom border in both seeders', async () => {
   const styles =
     '<w:style w:type="table" w:styleId="Edged"><w:tblStylePr w:type="firstCol"><w:tcPr><w:tcBorders>' +
