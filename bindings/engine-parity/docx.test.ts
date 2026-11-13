@@ -743,6 +743,20 @@ const rows: Row<Docx>[] = [
     method: 'EditSession.prime_save_seed_states',
     call: ({ session: s }) => [s.prime_save_seed_states(1, 1), s.prime_save_seed_states(100_000, 64 * 1024 * 1024)],
   },
+  {
+    method: 'EditSession.prime_last_slice_cost',
+    mutates: true,
+    call: ({ session: s }) => {
+      const before = s.prime_last_slice_cost();
+      const slices: [number, number][] = [];
+      let answer = 1;
+      for (let slice = 0; slice < 10_000 && answer === 1; slice += 1) {
+        answer = s.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64);
+        slices.push([answer, s.prime_last_slice_cost()]);
+      }
+      return { before, slices };
+    },
+  },
   defineRow({
     method: 'EditSession.apply_update',
     mutates: true,
@@ -1067,7 +1081,7 @@ const notYetCovered: string[] = [
   'EditSession.media_sources_json', 'EditSession.media_type', 'EditSession.move_embed',
   'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.outline_glyph_json',
   'EditSession.page_texts_json', 'EditSession.paragraph_id_count', 'EditSession.paragraph_unit',
-  'EditSession.patch_style_languages_xml', 'EditSession.prime_last_slice_cost', 'EditSession.prime_save_seed_states_slice',
+  'EditSession.patch_style_languages_xml', 'EditSession.prime_save_seed_states_slice',
   'EditSession.proposal_revision_ranges_json', 'EditSession.rebuild_media_sources', 'EditSession.record_saved_paragraph_ids',
   'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.repeat_content_control_at', 'EditSession.reset_frame_base',
   'EditSession.resident_caret_snapshot_json', 'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
@@ -1124,7 +1138,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(144);
+    expect(notYetCovered.length).toBe(143);
   });
 
   for (const row of rows) {
