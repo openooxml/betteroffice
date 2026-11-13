@@ -201,8 +201,8 @@ function searchKey(
 ): string {
   const sheetIds = scopeTargets(target, scope).map((range) => range.sheetId).join(',');
   return [
-    target.sheetId, target.label, sheetIds, scope, query, lookIn, String(entireCell), String(matchCase),
-    version,
+    target.sheetId, target.label, JSON.stringify(target.range), sheetIds, scope, query, lookIn,
+    String(entireCell), String(matchCase), version,
   ].join('\u0000');
 }
 
@@ -289,6 +289,9 @@ export function ReplaceDialog({
   const entireId = useId();
   const matchCaseId = useId();
   const scopeId = useId();
+  /** This render's inputs, so a find that resolves later can tell whether they still hold. */
+  const current = useRef({ open, target, scope, entireCell, matchCase });
+  current.current = { open, target, scope, entireCell, matchCase };
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -366,7 +369,15 @@ export function ReplaceDialog({
         matchCase,
         limit: FIND_LIMIT,
       }));
-    if (generation.current !== started) {
+    const nowVersion = await Promise.resolve(api.version());
+    const now = current.current;
+    if (
+      generation.current !== started
+      || !now.open || !now.target
+      || searchKey(
+        now.target, now.scope, inputRef.current?.value ?? '', mode, now.entireCell, now.matchCase, nowVersion,
+      ) !== key
+    ) {
       setPhase({ kind: 'idle' });
       return null;
     }
