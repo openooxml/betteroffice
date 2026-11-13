@@ -241,12 +241,12 @@ test('every step that reads the corpus runs through the private-step wrapper', (
     for (const line of String(step.run ?? '').split('\n')) {
       const invoked = [...line.matchAll(/\b(?:node|python3?|bun|bash) scripts\/office-quality\/([\w.-]+\.(?:mjs|py|ts|sh))/g)].map((match) => match[1]);
       if (!invoked.length || invoked.every((name) => CORPUS_FREE.has(name))) continue;
-      const wrapped = line.trim().match(/^node scripts\/office-quality\/private-step\.mjs ([a-z0-9-]+) -- (node|python) scripts\/office-quality\/[\w.-]+$/);
+      const wrapped = line.trim().match(/^node scripts\/office-quality\/private-step\.mjs ([a-z0-9-]+) -- (node|python|bun) scripts\/office-quality\/[\w.-]+$/);
       expect({ job, line: line.trim(), wrapped: Boolean(wrapped) }).toEqual({ job, line: line.trim(), wrapped: true });
       labels.push(`${job}/${wrapped![1]}`);
     }
   }
-  expect(labels.length).toBe(17);
+  expect(labels.length).toBe(18);
   expect(new Set(labels).size).toBe(labels.length);
 });
 

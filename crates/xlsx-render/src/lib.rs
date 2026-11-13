@@ -30,8 +30,9 @@ use xlsx_model::{
 };
 
 pub use chart::{
-    AnchorError, MAX_CHART_OPS_PER_FRAME, RenderError, ResolvedChartAnchor, chart_regions,
-    moved_chart_anchor, resolve_chart_anchor,
+    AnchorError, ChartResize, MAX_CHART_OPS_PER_FRAME, MIN_CHART_EXTENT_PX, RenderError,
+    ResolvedChartAnchor, chart_regions, moved_chart_anchor, resized_chart_anchor,
+    resolve_chart_anchor,
 };
 pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
@@ -840,7 +841,8 @@ where
         .map(|g| (g.row, g.col))
         .collect();
 
-    let grid_commands = if print.is_some_and(|(_, gridlines)| !gridlines) {
+    let gridlines = print.map_or(!sheet_ref.format.hide_gridlines, |(_, gridlines)| gridlines);
+    let grid_commands = if !gridlines {
         Vec::new()
     } else {
         emit_grid_segments(

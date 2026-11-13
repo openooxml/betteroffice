@@ -11,7 +11,7 @@ import { corpusOrigin } from './samples.mjs';
 
 export const CHANNELS = ['published', 'commit', 'libreoffice'];
 export const TRIALS = 5;
-export const METHOD = 'docx-cli-page1-v1';
+export const METHOD = 'docx-cli-page1-v2';
 export const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 export function docxShards(plan) {
@@ -69,7 +69,7 @@ export function mergeDocxBenchmarks(plan, report, inputs, planHash) {
     const config = part.benchmark;
     if (config?.method !== METHOD || config.trials !== TRIALS || config.dpi !== 96 ||
         !/^\d+(?:\.\d+){2,3}$/.test(config.libreoffice_version ?? '') ||
-        !/^[a-f0-9]{64}$/.test(config.fonts_sha256 ?? '') ||
+        !/^[a-f0-9]{64}$/.test(config.libreoffice_fonts_sha256 ?? '') || 'fonts_sha256' in config ||
         config.published_version !== plan.versions.docx ||
         !config.builds || Object.keys(config.builds).length !== 2 ||
         config.builds?.published?.source_sha !== plan.docx_published_source_sha ||
@@ -93,6 +93,10 @@ export function mergeDocxBenchmarks(plan, report, inputs, planHash) {
         fail('duplicate, unexpected, or misplaced sample');
       const sample = plan.samples.find((sample) => sample.id === row.id);
       if (row.source_sha256 !== sample.metadata.source.sha256) fail('source hash mismatch');
+      for (const channel of CHANNELS.slice(0, 2)) {
+        if (row.timings?.[channel]?.status === 'ok' && !/^[a-f0-9]{64}$/.test(row.timings[channel].fonts_sha256 ?? ''))
+          fail('native timing without the hash of its replayed fonts');
+      }
       const result = row.libreoffice;
       if (result?.channel !== 'libreoffice' || result.version !== config.libreoffice_version)
         fail('LibreOffice comparison identity mismatch');

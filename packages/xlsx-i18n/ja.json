@@ -229,7 +229,18 @@
     "sheetActivated": "{name}、シート {index}/{count}",
     "cellInputLabel": "セル {address} を編集",
     "gridRoleDescription": "ワークシート",
-    "fillHandleLabel": "フィルハンドル"
+    "fillHandleLabel": "フィルハンドル",
+    "chartResizeNw": "左上隅からグラフのサイズを変更",
+    "chartResizeN": "上端からグラフのサイズを変更",
+    "chartResizeNe": "右上隅からグラフのサイズを変更",
+    "chartResizeE": "右端からグラフのサイズを変更",
+    "chartResizeSe": "右下隅からグラフのサイズを変更",
+    "chartResizeS": "下端からグラフのサイズを変更",
+    "chartResizeSw": "左下隅からグラフのサイズを変更",
+    "chartResizeW": "左端からグラフのサイズを変更",
+    "chartResizeHintBoth": "{label} (方向キー、Shift キーを押しながらで 10 px)",
+    "chartResizeHintHorizontal": "{label} (左右の方向キー、Shift キーを押しながらで 10 px)",
+    "chartResizeHintVertical": "{label} (上下の方向キー、Shift キーを押しながらで 10 px)"
   },
   "plugins": {
     "toolbarGroup": "プラグイン",

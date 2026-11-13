@@ -415,6 +415,76 @@ describe('wasm loader', () => {
     }
   });
 
+  it('reports which chart anchors a resize can write back', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const charts = handle.displayList(viewport).charts ?? [];
+      expect(charts.map((chart) => [chart.movable, chart.resizable])).toEqual([
+        [true, true],
+        [true, false],
+        [false, false],
+        [true, true],
+      ]);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('resizes a two-cell chart by edge deltas that survive save and undo', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const before = (handle.displayList(viewport).charts ?? [])[0];
+      const depth = handle.historyState().undoDepth;
+      expect(handle.resizeChart(0, before.id, { left: 0, top: 0, right: 96, bottom: 48 }).applied)
+        .toBe(true);
+      expect(handle.historyState().undoDepth).toBe(depth + 1);
+
+      const resized = (handle.displayList(viewport).charts ?? [])[0];
+      expect(resized.rect.x).toBeCloseTo(before.rect.x, 1);
+      expect(resized.rect.y).toBeCloseTo(before.rect.y, 1);
+      expect(resized.rect.w).toBeCloseTo(before.rect.w + 96, 1);
+      expect(resized.rect.h).toBeCloseTo(before.rect.h + 48, 1);
+
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect((reopened.displayList(viewport).charts ?? [])[0].rect).toEqual(resized.rect);
+      } finally {
+        reopened.dispose();
+      }
+
+      handle.undo();
+      expect((handle.displayList(viewport).charts ?? [])[0].rect).toEqual(before.rect);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('refuses to resize a one-cell or an absolute chart without changing the workbook', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const charts = handle.displayList(viewport).charts ?? [];
+      const oneCell = charts.find((chart) => chart.movable && !chart.resizable)!;
+      const absolute = charts.find((chart) => !chart.movable)!;
+      const version = handle.version();
+      const saved = handle.save();
+      const history = handle.historyState();
+      expect(() =>
+        handle.resizeChart(0, oneCell.id, { left: 0, top: 0, right: 24, bottom: 24 })
+      ).toThrow(/one-cell extent/);
+      expect(() =>
+        handle.resizeChart(0, absolute.id, { left: 0, top: 0, right: 24, bottom: 24 })
+      ).toThrow(/pinned/);
+      expect(handle.version()).toBe(version);
+      expect(handle.historyState()).toEqual(history);
+      expect(handle.save()).toEqual(saved);
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('refuses a row insert inside a multi-level chart range before it applies', async () => {
     const zip = await JSZip.loadAsync(chartBytes());
     const chart = await zip.file('xl/charts/chart1.xml')!.async('string');

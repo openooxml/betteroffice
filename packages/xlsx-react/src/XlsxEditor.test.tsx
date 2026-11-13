@@ -185,11 +185,15 @@ function pointAt(fixture: Fixture, addr: CellAddr): { clientX: number; clientY: 
   return { clientX: rect.x + rect.w / 2, clientY: rect.y + rect.h / 2 };
 }
 
-async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array) => void, fillHandle = true) {
+async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array) => void,
+  options: boolean | { readOnly?: boolean; fillHandle?: boolean } = true) {
+  const settings = typeof options === 'boolean' ? { fillHandle: options } : options;
+  const fillHandle = settings.fillHandle ?? true;
   const ready: { handle: WorkbookHandle | null; api: XlsxEditorApi | null } = { handle: null, api: null };
   const view = render(
     <XlsxEditor legacySyncApi experimentalWorkerOpen={false} fillHandle={fillHandle}
       file={fixture.bytes.slice()}
+      readOnly={settings.readOnly}
       onSave={onSave}
       onReady={(api) => {
         ready.handle = api.handle;
@@ -218,6 +222,7 @@ async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array
         view.rerender(
           <XlsxEditor legacySyncApi experimentalWorkerOpen={false} fillHandle={fillHandle}
             file={next.bytes.slice()}
+            readOnly={settings.readOnly}
             onSave={onSave}
             onReady={(api) => {
               ready.handle = api.handle;
@@ -247,6 +252,8 @@ async function mountEditor(fixture: Fixture = plain, onSave?: (bytes: Uint8Array
       return !undo.disabled && undo.getAttribute('aria-disabled') !== 'true';
     },
     outline: () => view.queryByTestId('xlsx-chart-selection'),
+    handles: () => view.queryAllByTestId('xlsx-chart-resize-handle'),
+    handle: (handle: string) => view.container.querySelector<HTMLElement>(`[data-handle="${handle}"]`),
     selectionBox: () => view.queryByTestId('xlsx-selection'),
     error: () => view.queryByTestId('xlsx-error'),
     outlineAt: () => {
@@ -815,6 +822,147 @@ describe('XlsxEditor chart objects', () => {
       expect(at.x).toBe(Math.round(chart.rect.x + 40));
       expect(at.y).toBe(Math.round(chart.rect.y + 24));
     });
+  });
+
+  it('draws eight resize handles and commits one south-east resize', async () => {
+    const [chart] = charted.charts;
+    const view = await mountEditor(charted);
+    await selectChart(view, chart);
+
+    const handles = view.handles();
+    expect(handles.map((handle) => handle.dataset.handle)).toEqual(
+      ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
+    );
+    expect(handles.every((handle) => handle.tagName === 'BUTTON')).toBe(true);
+    expect(handles.every((handle) => !handle.hasAttribute('aria-hidden'))).toBe(true);
+    expect(handles.every((handle) => handle.getAttribute('aria-label')?.startsWith('Resize chart'))).toBe(true);
+    expect(view.handle('n')!.getAttribute('aria-keyshortcuts')).toBe('ArrowUp ArrowDown');
+    expect(view.handle('e')!.getAttribute('aria-keyshortcuts')).toBe('ArrowLeft ArrowRight');
+    expect(view.handle('ne')!.getAttribute('aria-keyshortcuts')).toBe('ArrowLeft ArrowRight ArrowUp ArrowDown');
+
+    const se = view.handle('se')!;
+    const resize = spyOn(view.workbook(), 'resizeChart');
+    const undoDepth = view.workbook().historyState().undoDepth;
+    const outline = view.outline()!;
+    const width = parseFloat(outline.style.width);
+    const height = parseFloat(outline.style.height);
+
+    fireEvent.pointerDown(se, { button: 0, pointerId: 7, clientX: 200, clientY: 200 });
+    fireEvent.pointerMove(window, { pointerId: 7, clientX: 220, clientY: 210 });
+    // the live preview follows the pointer in content pixels.
+    expect(parseFloat(outline.style.width)).toBeCloseTo(width + 20);
+    expect(parseFloat(outline.style.height)).toBeCloseTo(height + 10);
+
+    fireEvent.pointerUp(window, { pointerId: 7, button: 0, clientX: 220, clientY: 210 });
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(resize.mock.calls[0]).toEqual([0, chart.id, { left: 0, top: 0, right: 20, bottom: 10 }]);
+
+    await waitFor(() => {
+      const resized = (view.workbook().displayList({ x: 0, y: 0, ...VIEWPORT }).charts ?? [])
+        .find((candidate) => candidate.id === chart.id);
+      expect(resized!.rect.w).toBeCloseTo(chart.rect.w + 20, 1);
+      expect(resized!.rect.h).toBeCloseTo(chart.rect.h + 10, 1);
+    });
+    // one gesture is one undo step.
+    expect(view.workbook().historyState().undoDepth).toBe(undoDepth + 1);
+  });
+
+  it('cancels a resize preview on escape without touching the workbook', async () => {
+    const [chart] = charted.charts;
+    const view = await mountEditor(charted);
+    await selectChart(view, chart);
+    const se = view.handle('se')!;
+    const resize = spyOn(view.workbook(), 'resizeChart');
+    const undoDepth = view.workbook().historyState().undoDepth;
+    const outline = view.outline()!;
+    const width = parseFloat(outline.style.width);
+
+    fireEvent.pointerDown(se, { button: 0, pointerId: 8, clientX: 200, clientY: 200 });
+    fireEvent.pointerMove(window, { pointerId: 8, clientX: 260, clientY: 240 });
+    expect(parseFloat(outline.style.width)).toBeCloseTo(width + 60);
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(parseFloat(outline.style.width)).toBeCloseTo(width);
+    fireEvent.pointerUp(window, { pointerId: 8, button: 0, clientX: 260, clientY: 240 });
+
+    expect(resize).not.toHaveBeenCalled();
+    expect(view.workbook().historyState().undoDepth).toBe(undoDepth);
+  });
+
+  it('resizes from a focused handle with the arrow keys', async () => {
+    const [chart] = charted.charts;
+    const view = await mountEditor(charted);
+    await selectChart(view, chart);
+    const se = view.handle('se')!;
+    const resize = spyOn(view.workbook(), 'resizeChart');
+    const undoDepth = view.workbook().historyState().undoDepth;
+
+    se.focus();
+    fireEvent.keyDown(se, { key: 'ArrowRight', shiftKey: true });
+    expect(resize).toHaveBeenCalledTimes(1);
+    expect(resize.mock.calls[0]).toEqual([0, chart.id, { left: 0, top: 0, right: 10, bottom: 0 }]);
+    await waitFor(() => expect(view.workbook().historyState().undoDepth).toBe(undoDepth + 1));
+  });
+
+  it('consumes out-of-axis arrows on a handle instead of nudging the chart', async () => {
+    const [chart] = charted.charts;
+    const view = await mountEditor(charted);
+    await selectChart(view, chart);
+    const move = spyOn(view.workbook(), 'moveChart');
+    const resize = spyOn(view.workbook(), 'resizeChart');
+    const undoDepth = view.workbook().historyState().undoDepth;
+
+    // ArrowRight on the north handle has no resize axis, but it must still be
+    // swallowed: bubbling it would start the selected chart's nudge timer.
+    fireEvent.keyDown(view.handle('n')!, { key: 'ArrowRight' });
+    await settle();
+
+    expect(move).not.toHaveBeenCalled();
+    expect(resize).not.toHaveBeenCalled();
+    expect(view.workbook().historyState().undoDepth).toBe(undoDepth);
+    expect(view.outlineAt().x).toBe(Math.round(chart.rect.x));
+  });
+
+  it('draws no handles before a chart is selected', async () => {
+    const view = await mountEditor(charted);
+    expect(view.handles()).toHaveLength(0);
+  });
+
+  it('withholds handles from a chart whose anchor cannot resize', async () => {
+    // a one-cell/absolute anchor paints a region but the engine refuses resize.
+    const oneCell = charted.charts.find((chart) => !chart.resizable)!;
+    const view = await mountEditor(charted);
+    await selectChart(view, oneCell);
+    expect(view.handles()).toHaveLength(0);
+  });
+
+  it('withholds handles from a placeholder chart', async () => {
+    const placeholder = undrawable.charts.find((chart) => chart.placeholder)!;
+    const view = await mountEditor(undrawable);
+    await selectChart(view, placeholder);
+    expect(view.handles()).toHaveLength(0);
+  });
+
+  it('withholds handles from a pinned chart', async () => {
+    const pinned = charted.charts.find((chart) => !chart.movable)!;
+    const view = await mountEditor(charted);
+    await selectChart(view, pinned);
+    expect(view.handles()).toHaveLength(0);
+  });
+
+  it('withholds handles when the editor is read-only', async () => {
+    // read-only hides the formula bar, so readiness is the painted selection,
+    // not the name box the editable harness waits on.
+    const view = render(
+      <XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={charted.bytes.slice()} readOnly />
+    );
+    await waitFor(() => expect(view.queryByTestId('xlsx-selection')).not.toBeNull(), MOUNTED);
+    const surface = view.getByTestId('xlsx-scroll');
+    const chart = charted.charts[0];
+    fireEvent.mouseDown(surface, chartCenter(chart));
+    await waitFor(() => expect(view.queryByTestId('xlsx-chart-selection')).not.toBeNull());
+    fireEvent.mouseUp(window, chartCenter(chart));
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toHaveLength(0);
   });
 
   it('lands a run of arrow nudges as one undoable edit', async () => {

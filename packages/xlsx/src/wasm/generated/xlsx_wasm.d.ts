@@ -142,6 +142,10 @@ export class XlsxDocument {
      */
     rejectProposalJson(args: string): string;
     /**
+     * move a chart's edges by pixel deltas as one undo step.
+     */
+    resizeChartJson(args: string): string;
+    /**
      * serialize the current workbook back to `.xlsx` bytes.
      */
     saveBytes(): Uint8Array;
@@ -305,6 +309,7 @@ export interface InitOutput {
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_resizeChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly xlsxdocument_saveWarningsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];

@@ -124,6 +124,7 @@ describe('chartRegionAtPoint', () => {
     rect,
     clip,
     movable: true,
+    resizable: true,
   });
 
   it('bounds the hit by the clipped region, half-open like the engine', () => {

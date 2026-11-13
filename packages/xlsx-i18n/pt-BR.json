@@ -229,7 +229,18 @@
     "sheetActivated": "{name}, planilha {index} de {count}",
     "cellInputLabel": "Editar célula {address}",
     "gridRoleDescription": "planilha",
-    "fillHandleLabel": "Alça de preenchimento"
+    "fillHandleLabel": "Alça de preenchimento",
+    "chartResizeNw": "Redimensionar o gráfico pelo canto superior esquerdo",
+    "chartResizeN": "Redimensionar o gráfico pela borda superior",
+    "chartResizeNe": "Redimensionar o gráfico pelo canto superior direito",
+    "chartResizeE": "Redimensionar o gráfico pela borda direita",
+    "chartResizeSe": "Redimensionar o gráfico pelo canto inferior direito",
+    "chartResizeS": "Redimensionar o gráfico pela borda inferior",
+    "chartResizeSw": "Redimensionar o gráfico pelo canto inferior esquerdo",
+    "chartResizeW": "Redimensionar o gráfico pela borda esquerda",
+    "chartResizeHintBoth": "{label} (teclas de seta; segure Shift para 10 px)",
+    "chartResizeHintHorizontal": "{label} (setas para a esquerda e para a direita; segure Shift para 10 px)",
+    "chartResizeHintVertical": "{label} (setas para cima e para baixo; segure Shift para 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
