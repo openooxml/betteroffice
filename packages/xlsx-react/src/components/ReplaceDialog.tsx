@@ -26,7 +26,7 @@ import { toolbarTheme } from '../../../../shared/react-toolbar/theme';
 export interface ReplaceDialogSheet {
   sheetId: string;
   name: string;
-  /** From the engine's sheet catalog; only the sheet count shown for a workbook search reads it. */
+  /** From the engine's sheet catalog; a workbook search leaves hidden sheets out. */
   hidden?: boolean;
   /** As `hidden`; omitted means a worksheet. */
   kind?: XlsxSheetEntry['kind'];
@@ -121,18 +121,18 @@ function scopeTargets(
   if (scope === 'sheet') {
     return [{ sheetId: target.sheetId, range: WHOLE_SHEET_RANGE }];
   }
-  return workbookSheets(target).map((sheet) => ({ sheetId: sheet.sheetId, range: WHOLE_SHEET_RANGE }));
+  return searchedSheets(target).map((sheet) => ({ sheetId: sheet.sheetId, range: WHOLE_SHEET_RANGE }));
 }
 
-/** Every sheet in order; the engine skips the ones a workbook search leaves out. */
+/** Every sheet in order; the engine still skips any a workbook search leaves out. */
 function workbookSheets(target: ReplaceDialogTarget): readonly ReplaceDialogSheet[] {
   return target.sheets?.length ? target.sheets : [{ sheetId: target.sheetId, name: target.label }];
 }
 
 /** The sheets the engine's catalog says a workbook search covers. */
-function searchedSheetCount(target: ReplaceDialogTarget): number {
+function searchedSheets(target: ReplaceDialogTarget): readonly ReplaceDialogSheet[] {
   return workbookSheets(target)
-    .filter((sheet) => !sheet.hidden && (sheet.kind ?? 'worksheet') === 'worksheet').length;
+    .filter((sheet) => !sheet.hidden && (sheet.kind ?? 'worksheet') === 'worksheet');
 }
 
 function sumReplaceStats(
@@ -335,7 +335,7 @@ export function ReplaceDialog({
   const stats = phase.kind === 'preview' || phase.kind === 'applied' ? phase.stats : null;
   const activeSheetName = target?.sheets?.find((sheet) => sheet.sheetId === target.sheetId)?.name
     ?? target?.label ?? '';
-  const workbookSheetCount = target ? searchedSheetCount(target) : 1;
+  const workbookSheetCount = target ? searchedSheets(target).length : 1;
 
   const optionsChanged = () => {
     generation.current += 1;

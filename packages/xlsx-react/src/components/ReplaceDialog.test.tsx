@@ -584,7 +584,7 @@ test('replaces every sheet when the scope is all sheets', async () => {
   });
 });
 
-test('workbook scope leaves hidden sheets and chartsheets to the engine', async () => {
+test('workbook scope sends no hidden sheets or chartsheets', async () => {
   const finds: XlsxFindRequest[] = [];
   const requests: XlsxEditRequest[] = [];
   const { getByRole, getByText, findByText } = render(
@@ -635,7 +635,7 @@ test('workbook scope leaves hidden sheets and chartsheets to the engine', async 
   expect(finds[0].sheetIds).toBeUndefined();
   expect(finds[0].range).toBeUndefined();
   expect(requests[0].steps.map((step) => step.target.sheetId))
-    .toEqual(['sheet:0', 'sheet:1', 'sheet:2', 'sheet:3']);
+    .toEqual(['sheet:0', 'sheet:3']);
   expect(requests[0].steps.every((step) => step.op === 'replaceText' && step.within === 'workbook')).toBe(true);
   expect(getByText('All sheets (2)')).toBeTruthy();
 });
