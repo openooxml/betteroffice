@@ -1100,13 +1100,9 @@ fn an_unedited_save_keeps_every_part_and_every_authored_paragraph_id() {
     }
 }
 
-/// A suggestion withdrawn by a plain edit: an unchanged model the save takes through the full write.
-fn suggest_and_withdraw(document: &mut Document) {
-    let context =
-        betteroffice_docx::EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z").suggesting();
-    document
-        .replace_paragraph_text_with(W14_ID, "first", 1, &context)
-        .unwrap();
+/// An unchanged model, taken for change, that the save takes through the full write.
+fn touch_the_model(document: &mut Document) {
+    document.model_mut();
     document.replace_paragraph_text(W14_ID, "first").unwrap();
 }
 
@@ -1120,11 +1116,11 @@ fn a_full_write_keeps_repeated_ids_addressable_across_save_and_reopen_cycles() {
     );
 
     let mut opened = Document::open(&input).unwrap();
-    suggest_and_withdraw(&mut opened);
+    touch_the_model(&mut opened);
     let first = opened.save().unwrap();
     let mut reopened = Document::open(&first).unwrap();
     assert_eq!(paragraph_ids(&reopened), ids);
-    suggest_and_withdraw(&mut reopened);
+    touch_the_model(&mut reopened);
     assert_eq!(reopened.save().unwrap(), first);
 
     let mut cycled = input;
@@ -1132,11 +1128,11 @@ fn a_full_write_keeps_repeated_ids_addressable_across_save_and_reopen_cycles() {
         let mut document = Document::open(&cycled).unwrap();
         assert_eq!(paragraph_ids(&document), ids);
         document.replace_paragraph_text(&ids[index], text).unwrap();
-        suggest_and_withdraw(&mut document);
+        touch_the_model(&mut document);
         cycled = document.save().unwrap();
     }
     let mut reopened = Document::open(&cycled).unwrap();
-    suggest_and_withdraw(&mut reopened);
+    touch_the_model(&mut reopened);
     assert_eq!(
         identified_texts(&reopened),
         [
