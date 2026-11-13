@@ -1777,9 +1777,10 @@ const rows: Row<Docx>[] = [
       const result = f.insert_watermark('body', paraId(f, 'Created'), 0, WATERMARK);
       const text = watermarkText(WATERMARK);
       const inSession = JSON.stringify(watermarkUnits(f)).includes(text);
-      const inSaved = (await savedBody(await saved(f, fixture))).includes(text);
-      if (result !== undefined || !inSession || inSaved) {
-        throw new Error(`expected an undefined return, the watermark in the session and none saved; got ${JSON.stringify({ result, inSession, inSaved })}`);
+      const body = await savedBody(await saved(f, fixture));
+      const inSaved = body.includes(text);
+      if (result !== undefined || !inSession || inSaved || !body.includes('Created')) {
+        throw new Error(`expected an undefined return, the watermark in the session and none saved, with the paragraph saved; got ${JSON.stringify({ result, inSession, inSaved, paragraphSaved: body.includes('Created') })}`);
       }
       return { result, inSession, inSaved };
     },
@@ -1870,6 +1871,7 @@ const rows: Row<Docx>[] = [
   },
   defineRow({
     method: 'EditSession.drain_update_event',
+    mutates: true,
     setup: (docx: Docx) => pendingUpdate(docx),
     call: ({ session: s }, first) => {
       const local = drainEvents(s);
@@ -1880,6 +1882,7 @@ const rows: Row<Docx>[] = [
   }),
   defineRow({
     method: 'EditSession.has_pending_update',
+    mutates: true,
     setup: (docx: Docx) => pendingUpdate(docx),
     call: ({ session: s }, first) => {
       const pending = s.has_pending_update();
@@ -2171,6 +2174,7 @@ const rows: Row<Docx>[] = [
       if (JSON.stringify(mediaSourcesShape(reopened)) !== JSON.stringify(shape)) throw new Error(`a second opening changed the media sources beyond their digests: ${json} then ${again.media_sources_json()}`);
       const reader = fresh();
       reader.load_media_sources(json);
+      if (reader.media_sources_json() !== json) throw new Error(`the loaded media sources read back as ${reader.media_sources_json()}, not ${json}`);
       return {
         unseeded,
         ...shape,
@@ -2196,7 +2200,7 @@ const rows: Row<Docx>[] = [
         const tokensInput = JSON.stringify({ ...JSON.parse(input), renderEnv: { mediaTokens: true } });
         const before = imageSources(reader, tokensInput);
         if (!before.every((src) => src.startsWith('data:image'))) throw new Error(`the reader tokenized images before loading sources: ${JSON.stringify(before)}`);
-        reader.load_media_sources(json);
+        const loaded = reader.load_media_sources(json);
         const tokens = imageSources(reader, tokensInput);
         if (!tokens.every((src) => src.startsWith('media:'))) throw new Error(`the other engine's sources left images untokenized: ${JSON.stringify(tokens)}`);
         const media = tokens.map((token) => {
@@ -2204,11 +2208,12 @@ const rows: Row<Docx>[] = [
           const seeded = seeder.media_bytes(token);
           if (!bytes || !seeded || Buffer.compare(Buffer.from(bytes), Buffer.from(seeded)) !== 0) throw new Error(`${token} resolves to other bytes than on the seeding engine`);
           if (reader.media_type(token) !== seeder.media_type(token)) throw new Error(`${token} has another media type than on the seeding engine`);
+          if (Buffer.compare(Buffer.from(bytes), Buffer.from(PNG)) !== 0) throw new Error(`${token} does not resolve to the fixture PNG`);
           return { token, type: reader.media_type(token), bytes, png: Buffer.compare(Buffer.from(bytes), Buffer.from(PNG)) === 0 };
         });
         const reloaded = reader.media_sources_json();
         if (reloaded !== json) throw new Error(`the loaded media sources read back as ${reloaded}, not ${json}`);
-        return { before, media };
+        return { loaded, before, media };
       } finally {
         seeder.free();
       }
