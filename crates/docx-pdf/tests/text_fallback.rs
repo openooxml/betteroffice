@@ -63,6 +63,31 @@ fn font_bytes(name: &str) -> Vec<u8> {
     std::fs::read(font_dir().join(name)).expect("font fixture")
 }
 
+/// DejaVu Sans is used only as a system outline face for non-BMP/fallback
+/// coverage. Arch, Debian/Ubuntu and Fedora install it under different roots.
+fn dejavu_sans() -> Option<Vec<u8>> {
+    [
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+    ]
+    .iter()
+    .find_map(|path| std::fs::read(path).ok())
+}
+
+/// Returns the face or skips locally. CI must fail instead of silently
+/// dropping the non-BMP and fallback assertions.
+fn dejavu_sans_or_skip() -> Option<Vec<u8>> {
+    let bytes = dejavu_sans();
+    if bytes.is_none() && std::env::var_os("CI").is_some() {
+        panic!("DejaVu Sans is required for the PDF text fallback tests in CI");
+    }
+    if bytes.is_none() {
+        eprintln!("skipping: DejaVu Sans is unavailable");
+    }
+    bytes
+}
+
 /// A font under the repository fixtures that covers CJK, when one exists.
 fn cjk_font() -> Option<Vec<u8>> {
     let roots = [
@@ -606,9 +631,7 @@ fn pdfa_collects_real_glyphs_and_maps_every_painted_code() {
 
 #[test]
 fn pdfa_tounicode_encodes_non_bmp_scalars_as_surrogate_pairs() {
-    let fallback_path = Path::new("/usr/share/fonts/TTF/DejaVuSans.ttf");
-    let Ok(fallback_bytes) = std::fs::read(fallback_path) else {
-        eprintln!("skipping: {} is unavailable", fallback_path.display());
+    let Some(fallback_bytes) = dejavu_sans_or_skip() else {
         return;
     };
     let mut store = FontStore::default();
@@ -998,9 +1021,7 @@ fn pdfa_paints_fully_covered_glyph_runs() {
 
 #[test]
 fn pdfa_glyph_runs_re_resolve_notdef_clusters_through_fallbacks() {
-    let fallback_path = Path::new("/usr/share/fonts/TTF/DejaVuSans.ttf");
-    let Ok(fallback_bytes) = std::fs::read(fallback_path) else {
-        eprintln!("skipping: {} is unavailable", fallback_path.display());
+    let Some(fallback_bytes) = dejavu_sans_or_skip() else {
         return;
     };
     let mut store = FontStore::default();

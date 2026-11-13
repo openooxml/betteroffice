@@ -432,11 +432,11 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install qpdf, Poppler and a JRE
+      - name: Install qpdf, Poppler, a JRE and DejaVu Sans
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            default-jre-headless poppler-utils qpdf
+            default-jre-headless fonts-dejavu-core poppler-utils qpdf
           python -m pip install pypdfium2==5.13.0
 
       - name: Install the pinned veraPDF 1.30.4
@@ -451,6 +451,11 @@ jobs:
         env:
           VERAPDF: ${{ runner.temp }}/verapdf/bin/verapdf
         run: cargo test -p betteroffice-docx-pdf --test pdfa
+
+      - name: Run the non-BMP and fallback text tests
+        run: |
+          test -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+          cargo test -p betteroffice-docx-pdf --test text_fallback
 
       - name: Run the 24/103 PDF/A-2u matrices
         env:
