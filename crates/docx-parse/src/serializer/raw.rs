@@ -61,6 +61,53 @@ pub(crate) fn validate_raw_subtree(
     expected_prefix: &str,
     expected_local_name: &str,
 ) -> Result<(), ParseError> {
+    with_raw_subtree(xml, |_, child| {
+        require_name(child, expected_prefix, expected_local_name)
+    })
+}
+
+/// Also requires each prefix to be declared in the fragment or by every story root.
+pub(crate) fn validate_form_field_data(xml: &str) -> Result<(), ParseError> {
+    with_raw_subtree(xml, |root, child| {
+        require_name(child, "w", "ffData")?;
+        let mut scope: Vec<&str> = root
+            .attributes
+            .keys()
+            .filter_map(|name| name.strip_prefix("xmlns:"))
+            .filter(|prefix| super::parts::is_story_root_prefix(prefix))
+            .collect();
+        require_bound_prefixes(child, &mut scope)
+    })
+}
+
+fn require_bound_prefixes<'a>(
+    element: &'a XmlElement,
+    scope: &mut Vec<&'a str>,
+) -> Result<(), ParseError> {
+    let outer = scope.len();
+    scope.extend(
+        element
+            .attributes
+            .keys()
+            .filter_map(|name| name.strip_prefix("xmlns:")),
+    );
+    let names = std::iter::once(&element.name).chain(element.attributes.keys());
+    for (prefix, _) in names.filter_map(|name| name.split_once(':')) {
+        if !matches!(prefix, "xml" | "xmlns") && !scope.contains(&prefix) {
+            return Err(ParseError::Canonical(format!("unbound prefix {prefix}")));
+        }
+    }
+    for child in element.child_elements() {
+        require_bound_prefixes(child, scope)?;
+    }
+    scope.truncate(outer);
+    Ok(())
+}
+
+fn with_raw_subtree(
+    xml: &str,
+    check: impl for<'e> FnOnce(&'e XmlElement, &'e XmlElement) -> Result<(), ParseError>,
+) -> Result<(), ParseError> {
     let source = format!("{CONTENT_FRAGMENT_PREFIX}{xml}</s11:root>");
     let limits = ParseLimits::default();
     let document = parse_xml_strict(
@@ -80,7 +127,7 @@ pub(crate) fn validate_raw_subtree(
             "validated XML fragment must contain exactly one subtree".to_owned(),
         ));
     }
-    require_name(child, expected_prefix, expected_local_name)
+    check(root, child)
 }
 
 pub(crate) fn validate_math_subtree(xml: &str) -> Result<(), ParseError> {
@@ -143,6 +190,29 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn form_field_data_requires_each_prefix_bound_in_the_fragment_or_by_every_story_root() {
+        validate_form_field_data(
+            r#"<w:ffData xmlns:ext="urn:x"><w:name w:val="T"/><ext:foo w14:x="1" xml:space="preserve"/></w:ffData>"#,
+        )
+        .unwrap();
+        for (xml, prefix) in [
+            (r#"<w:ffData><ext:foo/></w:ffData>"#, "ext"),
+            (r#"<w:ffData><w:name ext:val="T"/></w:ffData>"#, "ext"),
+            (
+                r#"<w:ffData><w:name><ext:foo xmlns:ext="urn:x"/></w:name><ext:bar/></w:ffData>"#,
+                "ext",
+            ),
+            (r#"<w:ffData><w16du:foo/></w:ffData>"#, "w16du"),
+        ] {
+            let error = validate_form_field_data(xml).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("unbound prefix {prefix}")),
+                "{xml}: {error}"
+            );
+        }
     }
 }
 

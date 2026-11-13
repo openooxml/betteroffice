@@ -4,6 +4,7 @@ use quick_xml::events::Event;
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
 
@@ -47,21 +48,27 @@ fn save_edited(
     selective: Value,
     edit: impl FnOnce(&mut Value),
 ) -> Result<String, String> {
+    save_request(source, |request| {
+        if !selective.is_null() {
+            request["selective"] = selective;
+        }
+        edit(&mut request["document"]);
+    })
+}
+
+fn save_request(source: &[u8], edit: impl FnOnce(&mut Value)) -> Result<String, String> {
     let parsed = parse_docx_s9_wire(source, S9ParseOptions::default()).unwrap();
     let mut package: Value = serde_json::to_value(parsed.document.package).unwrap();
     package["document"]
         .as_object_mut()
         .unwrap()
         .remove("sections");
-    edit(&mut package["document"]);
     let mut request = json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": package["document"],
         "options": {"updateModifiedDate": false}
     });
-    if !selective.is_null() {
-        request["selective"] = selective;
-    }
+    edit(&mut request);
     let request: S13SaveRequest = serde_json::from_value(request).unwrap();
     let saved = write_docx_s13(request, source).map_err(|error| error.to_string())?;
     Ok(String::from_utf8(
@@ -373,4 +380,86 @@ fn keeps_form_field_data_bound_to_a_prefix_declared_on_the_run_the_begin_or_the_
         parse_docx_s9_wire(&reopened, S9ParseOptions::default()).unwrap();
         assert!(binds_ext_foo(&save(&reopened).unwrap()), "{xml}");
     }
+}
+
+#[test]
+fn refuses_model_form_field_data_with_an_unbound_prefix_naming_the_field_and_the_prefix() {
+    let source = fixture(&form_paragraph());
+    let unbound = r#"<w:ffData><w:name w:val="T"/><ext:foo/></w:ffData>"#;
+    let error = save_edited(&source, Value::Null, |document| {
+        assert!(replace_raw_form_data(document, unbound) > 0);
+    })
+    .unwrap_err();
+    assert!(error.contains("\"T\""), "{error}");
+    assert!(error.contains("unbound prefix ext"), "{error}");
+    let declared = r#"<w:ffData xmlns:ext="urn:x"><w:name w:val="T"/><ext:foo/></w:ffData>"#;
+    let xml = save_edited(&source, Value::Null, |document| {
+        assert_eq!(replace_raw_form_data(document, declared), 3);
+    })
+    .unwrap();
+    assert_eq!(xml.matches(declared).count(), 3, "{xml}");
+}
+
+const XSI: &str = "http://www.w3.org/2001/XMLSchema-instance";
+
+#[test]
+fn keeps_the_declaration_of_a_w_alias_an_attribute_value_of_the_form_field_data_names() {
+    let w = lossy(W_URI);
+    let own = format!(
+        r#"<w:ffData xmlns:q="{w}" xmlns:xsi="{XSI}" xsi:type="q:CT_FFData"><q:name q:val="T"/></w:ffData>"#
+    );
+    let carried = format!(
+        r#"<w:ffData xmlns:xsi="{XSI}" xsi:type="q:CT_FFData"><q:name q:val="T"/></w:ffData>"#
+    );
+    let on_run = format!(r#" xmlns:q="{w}""#);
+    for (run, data) in [("", own.as_str()), (on_run.as_str(), carried.as_str())] {
+        let body = format!(
+            r#"<w:p>{}<w:r{run}><w:fldChar w:fldCharType="begin">{data}</w:fldChar></w:r><w:r><w:instrText xml:space="preserve"> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{}<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+            text("Label "),
+            text("Ada"),
+        );
+        let xml = saved_document(&fixture(&body));
+        let data = &xml[xml.find("<w:ffData").expect(&xml)..];
+        let tag = &data[..data.find('>').unwrap()];
+        assert!(tag.contains(&format!(r#"xmlns:q="{w}""#)), "{xml}");
+        assert!(tag.contains(r#"xsi:type="q:CT_FFData""#), "{xml}");
+        assert!(data.starts_with(&format!(r#"{tag}><w:name w:val="T"/></w:ffData>"#)), "{xml}");
+    }
+}
+
+#[test]
+fn saves_model_form_field_data_holding_the_placeholder_text_of_a_field_kept_as_source() {
+    let first = format!(
+        "<w:p>{}{}</w:p>",
+        text("Label "),
+        form_field(TEXT_DATA, "FORMTEXT", &text("Ada")),
+    );
+    let second = format!(
+        "<w:p>{}{}</w:p>",
+        text("Agree "),
+        form_field(CHECK_DATA, "FORMCHECKBOX", ""),
+    );
+    let document =
+        format!("<w:document {NS}><w:body>{first}{second}<w:sectPr/></w:body></w:document>");
+    let sha256 = format!("{:x}", Sha256::digest(document.as_bytes()));
+    let commented = r#"<w:ffData><w:name w:val="Check1"/><!--bo-ffdata 0--></w:ffData>"#;
+    let xml = save_request(&package(document), |request| {
+        let paragraphs = request["document"]["content"].as_array_mut().unwrap();
+        assert_eq!(paragraphs.len(), 2);
+        for (ordinal, paragraph) in paragraphs.iter_mut().enumerate() {
+            paragraph["sourceOrdinal"] = json!(ordinal);
+        }
+        assert_eq!(replace_raw_form_data(&mut paragraphs[0], FOREIGN_DATA), 1);
+        assert_eq!(replace_raw_form_data(&mut paragraphs[1], commented), 1);
+        request["paragraphIds"] = json!({"splicedParts": [{
+            "part": "word/document.xml",
+            "sha256": sha256,
+            "paragraphs": [0, 1],
+            "changed": [1],
+        }]});
+    })
+    .unwrap();
+    assert_eq!(xml.matches(first.as_str()).count(), 1, "{xml}");
+    let begin = format!(r#"<w:fldChar w:fldCharType="begin">{commented}</w:fldChar>"#);
+    assert_eq!(xml.matches(begin.as_str()).count(), 1, "{xml}");
 }

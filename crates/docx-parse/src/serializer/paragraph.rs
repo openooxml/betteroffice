@@ -18,7 +18,10 @@ use crate::xml::ParseError;
 
 use super::context::SerializerContext;
 use super::foundation::{BorderSide, write_border};
-use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
+use super::raw::{
+    validate_form_field_data, validate_math_subtree, validate_raw_subtree,
+    validate_replayed_fragment,
+};
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, serialize_deleted_run,
     serialize_run, serialize_text_formatting, write_shading,
@@ -607,7 +610,7 @@ fn serialize_complex_field(
     }
     if let Some(raw) = field.raw_form_data_xml.as_deref() {
         output.push('>');
-        match validate_raw_subtree(raw, "w", "ffData") {
+        match validate_form_field_data(raw) {
             Ok(()) => output.push_str(raw),
             Err(error) => {
                 let name = form_field_name(field, raw);

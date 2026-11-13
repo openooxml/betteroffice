@@ -1656,6 +1656,12 @@ fn retain_replayed_namespace_aliases(
             {
                 used_prefixes.insert(prefix.to_owned());
             }
+            if form_data
+                && !name.starts_with("xmlns")
+                && let Some(prefix) = value_prefix(value)
+            {
+                used_prefixes.insert(prefix.to_owned());
+            }
         }
         if !row {
             pending.extend(
@@ -1750,7 +1756,30 @@ fn normalize_form_field_data(element: &mut XmlElement, ancestors: &[XmlElement])
         .into_iter()
         .map(|(prefix, namespace)| (prefix.to_owned(), namespace.to_owned()))
         .collect();
-    rename_wordprocessing_names(element, &mut scope);
+    let mut kept = std::collections::HashSet::new();
+    collect_value_prefixes(element, &mut kept);
+    rename_wordprocessing_names(element, &mut scope, &kept);
+}
+
+/// The prefix an attribute value names a QName with, as `xsi:type="q:CT_FFData"` does.
+fn value_prefix(value: &str) -> Option<&str> {
+    let (prefix, _) = value.split_once(':')?;
+    let qualified = !prefix.is_empty()
+        && prefix.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    qualified.then_some(prefix)
+}
+
+fn collect_value_prefixes(element: &XmlElement, prefixes: &mut std::collections::HashSet<String>) {
+    for (name, value) in &element.attributes {
+        if namespace_declaration((name, value)).is_none()
+            && let Some(prefix) = value_prefix(value)
+        {
+            prefixes.insert(prefix.to_owned());
+        }
+    }
+    for child in element.child_elements() {
+        collect_value_prefixes(child, prefixes);
+    }
 }
 
 fn bound_to_wordprocessing(scope: &[(String, String)], prefix: &str) -> bool {
@@ -1763,7 +1792,11 @@ fn bound_to_wordprocessing(scope: &[(String, String)], prefix: &str) -> bool {
     )
 }
 
-fn rename_wordprocessing_names(element: &mut XmlElement, scope: &mut Vec<(String, String)>) {
+fn rename_wordprocessing_names(
+    element: &mut XmlElement,
+    scope: &mut Vec<(String, String)>,
+    kept: &std::collections::HashSet<String>,
+) {
     let declared = scope.len();
     scope.extend(
         element
@@ -1778,9 +1811,11 @@ fn rename_wordprocessing_names(element: &mut XmlElement, scope: &mut Vec<(String
     }
     element.attributes = std::mem::take(&mut element.attributes)
         .into_iter()
-        .filter(|(name, value)| {
-            namespace_declaration((name, value)).is_none()
-                || !is_wordprocessing(Some(value.as_str()))
+        .filter(|(name, value)| match namespace_declaration((name, value)) {
+            Some((prefix, namespace)) => {
+                !is_wordprocessing(Some(namespace)) || kept.contains(prefix)
+            }
+            None => true,
         })
         .map(|(name, value)| {
             let renamed = name
@@ -1794,7 +1829,7 @@ fn rename_wordprocessing_names(element: &mut XmlElement, scope: &mut Vec<(String
         .collect();
     for child in &mut element.children {
         if let XmlNode::Element(child) = child {
-            rename_wordprocessing_names(child, scope);
+            rename_wordprocessing_names(child, scope, kept);
         }
     }
     scope.truncate(declared);

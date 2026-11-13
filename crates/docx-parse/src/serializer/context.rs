@@ -67,7 +67,49 @@ pub struct SerializerContext {
     splice: Option<SpliceRecorder>,
     document_root: Option<String>,
     form_data_token: Option<String>,
+    form_data_reserved: usize,
     deferred_form_data: Vec<(String, String, String)>,
+}
+
+const FORM_DATA_TOKEN: &str = "<!--bo-ffdata ";
+
+/// The longest run of `_` written right after [`FORM_DATA_TOKEN`], if it was written at all.
+#[derive(Default)]
+struct FormDataTokenScan {
+    matched: usize,
+    run: Option<usize>,
+    longest: Option<usize>,
+}
+
+impl std::io::Write for FormDataTokenScan {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        for &byte in bytes {
+            if let Some(run) = self.run {
+                if byte == b'_' {
+                    self.run = Some(run + 1);
+                    self.longest = self.longest.max(self.run);
+                    continue;
+                }
+                self.run = None;
+            }
+            let token = FORM_DATA_TOKEN.as_bytes();
+            if token.get(self.matched) == Some(&byte) {
+                self.matched += 1;
+            } else {
+                self.matched = usize::from(byte == token[0]);
+            }
+            if self.matched == FORM_DATA_TOKEN.len() {
+                self.matched = 0;
+                self.run = Some(0);
+                self.longest = self.longest.max(self.run);
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The XML written for each model paragraph a spliced part addresses by `sourceOrdinal`.
@@ -118,13 +160,26 @@ impl SerializerContext {
             splice: None,
             document_root: None,
             form_data_token: None,
+            form_data_reserved: 0,
             deferred_form_data: Vec::new(),
         })
     }
 
+    /// Keeps form field data tokens out of every string the save request holds.
+    pub(crate) fn reserve_form_data_tokens(
+        &mut self,
+        request: &impl serde::Serialize,
+    ) -> Result<(), ParseError> {
+        let mut scan = FormDataTokenScan::default();
+        serde_json::to_writer(&mut scan, request)
+            .map_err(|error| ParseError::Canonical(error.to_string()))?;
+        self.form_data_reserved = scan.longest.map_or(0, |run| run + 1);
+        Ok(())
+    }
+
     /// Writes an unreplayable `w:ffData` as a token absent from `source` instead of failing.
     pub(crate) fn begin_form_data_tokens(&mut self, source: &str) {
-        let mut prefix = "<!--bo-ffdata ".to_owned();
+        let mut prefix = format!("{FORM_DATA_TOKEN}{}", "_".repeat(self.form_data_reserved));
         while source.contains(&prefix) {
             prefix.push('_');
         }
