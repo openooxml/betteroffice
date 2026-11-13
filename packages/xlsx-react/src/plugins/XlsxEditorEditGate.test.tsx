@@ -30,7 +30,7 @@ if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor: settleWithin } = await import('@testing-library/react');
 
 let tornDown = false;
-const waits = new Set<Promise<void>>();
+const waits = new Set<Promise<unknown>>();
 
 /** A waitFor whose callback stops reaching the editor once teardown starts; afterEach awaits every one still pending. */
 function waitFor<T>(callback: () => T | Promise<T>, options?: Parameters<typeof settleWithin>[1]): Promise<T> {
@@ -38,9 +38,9 @@ function waitFor<T>(callback: () => T | Promise<T>, options?: Parameters<typeof 
     if (tornDown) throw new Error('the test ended before this wait settled');
     return callback();
   }, options);
-  const settled = wait.then(() => {}, () => {});
-  waits.add(settled);
-  void settled.then(() => waits.delete(settled));
+  const forget = () => { waits.delete(wait); };
+  waits.add(wait);
+  void wait.then(forget, forget);
   return wait;
 }
 
@@ -89,7 +89,7 @@ afterEach(async () => {
   tornDown = true;
   try {
     await act(async () => { cleanup(); });
-    await Promise.all(waits);
+    await Promise.allSettled(waits);
     for (const session of sessions.splice(0)) await session.dispose();
     for (const restore of restorers.splice(0).reverse()) restore();
   } finally {
