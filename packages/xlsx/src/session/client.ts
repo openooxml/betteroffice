@@ -171,6 +171,7 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
     collaborative: options.collaborative,
     clientId: options.clientId,
     calculation: calculation ? { ...calculation } : undefined,
+    recalculate: options.recalculate,
     retainPeerHydration: options.retainPeerHydration,
     initialViewport: options.initialViewport ? { ...options.initialViewport } : undefined,
     includeEditState: options.includeEditState,

@@ -457,6 +457,31 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    /// [`Workbook::open_recalculating_stale`], under `context` when given, as in
+    /// [`Session::open_with_calculation_json`].
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        now_serial: Option<f64>,
+        context: Option<&str>,
+    ) -> Result<Self, String> {
+        let context: Option<WorkbookCalculationContext> = context
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| format!("bad calculation context: {error}"))?;
+        let rand_seed = context.as_ref().map(|context| context.rand_seed);
+        let calculation_context = context
+            .map(WorkbookCalculationContext::options)
+            .transpose()?;
+        let options = calculation_context.unwrap_or_else(|| calculation_options(now_serial));
+        Workbook::open_recalculating_stale(bytes, options, rand_seed)
+            .map(|workbook| Self {
+                workbook,
+                calculation_context,
+                snapshot: None,
+            })
+            .map_err(|error| error.to_string())
+    }
+
     pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), String> {
         let context: Option<WorkbookCalculationContext> = serde_json::from_str(context)
             .map_err(|error| format!("bad calculation context: {error}"))?;
@@ -1652,6 +1677,24 @@ mod tests {
             peer.workbook.save().unwrap(),
             worker.workbook.save().unwrap()
         );
+    }
+
+    #[test]
+    fn open_recalculating_stale_keeps_cached_results_under_an_optional_context() {
+        let bytes = formula_xlsx();
+        let b1 = |session: &Session| {
+            session.workbook.model().sheets[0]
+                .cell(CellRef::parse_a1("B1").unwrap())
+                .map(|cell| cell.value.clone())
+        };
+        let recalculated = Session::open(&bytes, None).unwrap();
+        assert_eq!(b1(&recalculated), Some(CellValue::Number { value: 15.0 }));
+        for context in [None, Some(r#"{"nowSerial":45000.75,"randSeed":42}"#)] {
+            let session = Session::open_recalculating_stale(&bytes, None, context).unwrap();
+            assert_eq!(b1(&session), Some(CellValue::Number { value: 999.0 }));
+            assert_eq!(session.calculation_context.is_some(), context.is_some());
+        }
+        assert!(Session::open_recalculating_stale(&bytes, None, Some("{}")).is_err());
     }
 
     #[test]

@@ -866,6 +866,32 @@ impl Workbook {
         Ok(workbook)
     }
 
+    /// Opens keeping the results the file cached. Recalculates every formula, as
+    /// [`Workbook::open_recalculated_with_seed`] does, only when a formula has no cached
+    /// result or `calcPr` asks for a full calculation on load.
+    /// A blank formula result, or a blank or missing array follower, counts as uncached.
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        options: CalculationOptions,
+        rand_seed: Option<u32>,
+    ) -> Result<Self> {
+        let mut workbook = Self::open_internal(bytes, false, None)?;
+        workbook.set_rand_seed(rand_seed);
+        let full_calculation = match &workbook.source_package {
+            Some(package) => package.materialize()?.requests_full_calculation(),
+            None => false,
+        };
+        if full_calculation
+            || workbook.has_uncached_source_formulas()
+            || workbook.has_blank_formula_results()?
+        {
+            workbook.recalculate(options);
+        } else {
+            workbook.derive_unevaluated(Some(options));
+        }
+        Ok(workbook)
+    }
+
     pub fn set_rand_seed(&mut self, seed: Option<u32>) {
         if self.rand_seed != seed {
             self.snapshot_package_lineage = None;
@@ -1736,6 +1762,56 @@ impl Workbook {
         self.source_package
             .as_ref()
             .is_some_and(|package| package.facts().has_uncached_source_formulas())
+    }
+
+    fn has_blank_formula_results(&self) -> Result<bool> {
+        if self.model().sheets.iter().any(|sheet| {
+            sheet
+                .iter_cells()
+                .any(|(_, cell)| cell.formula.is_some() && cell.value == CellValue::Empty)
+                || sheet.array_formulas().any(|(anchor, range)| {
+                    (range.start.row..=range.end.row).any(|row| {
+                        (range.start.col..=range.end.col).any(|col| {
+                            let at = CellRef::new(row, col);
+                            at != anchor
+                                && sheet
+                                    .cell(at)
+                                    .is_none_or(|cell| cell.value == CellValue::Empty)
+                        })
+                    })
+                })
+        }) {
+            return Ok(true);
+        }
+        let Some(package) = self.source_package.as_ref() else {
+            return Ok(false);
+        };
+        let package = package.materialize()?;
+        Ok(self
+            .model()
+            .sheets
+            .iter()
+            .enumerate()
+            .any(|(index, sheet)| {
+                let Some(facts) = package.source_cell_facts(index) else {
+                    return false;
+                };
+                facts.alternate_formulas
+                    || facts.dropped_array_ranges
+                    || facts.blank_results.iter().any(|&(row, col)| {
+                        sheet
+                            .cell(CellRef::new(row, col))
+                            .is_some_and(|cell| cell.formula.is_some())
+                    })
+                    || sheet.array_formulas().any(|(anchor, range)| {
+                        (range.start.row..=range.end.row).any(|row| {
+                            facts
+                                .blank_results
+                                .range((row, range.start.col)..=(row, range.end.col))
+                                .any(|&(row, col)| CellRef::new(row, col) != anchor)
+                        })
+                    })
+            }))
     }
 
     /// The committed state a structured export reads.

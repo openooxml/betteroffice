@@ -1054,6 +1054,24 @@ impl XlsxDocument {
             .map_err(|error| map_error(env, error))
     }
 
+    /// Open keeping cached formula results, recalculating only a file with an uncached formula
+    /// or a `calcPr` full calculation request.
+    #[napi(catch_unwind, factory, js_name = "openRecalculatingStale")]
+    pub fn open_recalculating_stale(
+        env: Env,
+        bytes: Uint8Array,
+        context: Option<String>,
+    ) -> Result<Self> {
+        let bytes = bytes.to_vec();
+        let _call = EngineCall::new(env);
+        Document::open_recalculating_stale(&bytes, context.as_deref(), native_host())
+            .map(|inner| Self {
+                inner: Some(inner),
+                failure: RefCell::new(None),
+            })
+            .map_err(|error| map_error(env, error))
+    }
+
     /// Checkpoints are only restorable by the same engine version and codec.
     #[napi(catch_unwind, factory, js_name = "openRecoveryCheckpoint")]
     pub fn open_recovery_checkpoint(env: Env, bytes: Uint8Array, through_seq: f64) -> Result<Self> {

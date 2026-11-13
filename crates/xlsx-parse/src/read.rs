@@ -644,6 +644,10 @@ fn push_item_text(text: &mut Option<(usize, String)>, out: &mut String, value: &
 pub struct SourceCellFacts {
     /// Formula cells written without a cached `<v>` result.
     pub uncached_formulas: BTreeSet<(u32, u32)>,
+    /// Cells with a formula or `t` type but no `<v>` text and no `t="inlineStr"` `<is>` text.
+    pub blank_results: BTreeSet<(u32, u32)>,
+    /// Whether an array formula's range was too large or malformed to keep.
+    pub dropped_array_ranges: bool,
     /// Inline strings authored with formatted runs, with the text the model keeps.
     pub rich_inline: BTreeMap<(u32, u32), String>,
     /// Whether a formula cell sits inside `mc:AlternateContent`, where another
@@ -760,6 +764,8 @@ fn parse_worksheet(
                             shared_formulas.record(&e, origin, &text)?;
                             if let Some(range) = array_ref.filter(|range| range.contains(origin)) {
                                 sheet.set_array_formula(origin, range);
+                            } else if attr(&e, b"t")?.as_deref() == Some("array") {
+                                facts.dropped_array_ranges = true;
                             }
                         }
                         c.formula = Some(text);
@@ -1198,6 +1204,17 @@ fn finalize_cell(
     };
     if c.formula.is_some() && c.value_text.is_none() && c.inline_text.is_none() {
         facts.uncached_formulas.insert((addr.row, addr.col));
+    }
+    let cached = c
+        .value_text
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || (c.ty.as_deref() == Some("inlineStr")
+            && c.inline_text
+                .as_deref()
+                .is_some_and(|text| !text.is_empty()));
+    if (c.formula.is_some() || c.ty.is_some()) && !cached {
+        facts.blank_results.insert((addr.row, addr.col));
     }
     if c.inline_runs
         && c.ty.as_deref() == Some("inlineStr")

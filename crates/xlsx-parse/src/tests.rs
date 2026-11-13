@@ -1462,6 +1462,21 @@ fn records_uncached_formulas_and_rich_inline_strings() {
 }
 
 #[test]
+fn records_blank_results() {
+    let parts = package(
+        r#"<sheetData><row r="1"><c r="A1"><f>1</f><v/></c><c r="B1" t="str"><f>""</f><v></v></c><c r="C1" t="b"/><c r="D1" s="1"/><c r="E1"><v>3</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let facts = parsed.package.source_cell_facts(0).unwrap();
+    assert_eq!(
+        facts.blank_results.iter().copied().collect::<Vec<_>>(),
+        [(0, 0), (0, 1), (0, 2)]
+    );
+}
+
+#[test]
 fn honors_1904_date_system() {
     let wb = parse_workbook(&package("<sheetData/>", &[], true)).unwrap();
     assert_eq!(wb.date_system, DateSystem::V1904);

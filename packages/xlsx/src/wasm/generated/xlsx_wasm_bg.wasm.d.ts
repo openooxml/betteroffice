@@ -62,6 +62,7 @@ export const xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [n
 export const xlsxdocument_nextPeerSnapshotChunk: (a: number) => [number, number, number];
 export const xlsxdocument_open: (a: number, b: number) => [number, number, number];
 export const xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
+export const xlsxdocument_openRecalculatingStale: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const xlsxdocument_openRecoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number];
 export const xlsxdocument_openWithCalculationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const xlsxdocument_openWithPeerHydrationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
