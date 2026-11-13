@@ -1,11 +1,11 @@
 {
   "replaceDialog": {
-    "title": "Find and replace",
-    "find": "Find",
+    "title": "찾기 및 바꾸기",
+    "find": "찾기",
     "replaceWith": "Replace with",
     "findPrevious": "Find previous",
     "findNext": "Find next",
-    "replace": "Replace",
+    "replace": "바꾸기",
     "matchPosition": "{index} of {total}",
     "matchPositionTruncated": "{total}개 이상 중 {index}번째",
     "lookIn": "Look in",
@@ -23,7 +23,7 @@
     "noRange": "Select a cell range first.",
     "formulaWarning": "'찾는 위치'는 찾기에만 적용됩니다. 바꾸기는 각 셀의 입력 내용을 직접 입력한 것처럼 편집하고 수식을 다시 계산합니다.",
     "preview": "Preview",
-    "replaceAll": "Replace all",
+    "replaceAll": "모두 바꾸기",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
@@ -134,7 +134,7 @@
     "redo": "다시 실행"
   },
   "commands": {
-    "findReplace": "Find and replace",
+    "findReplace": "찾기 및 바꾸기",
     "fontSizeStep": "글꼴 크기 변경",
     "numberFormat": "표시 형식",
     "decimalPlaces": "소수 자릿수 변경",

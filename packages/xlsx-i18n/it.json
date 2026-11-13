@@ -1,11 +1,11 @@
 {
   "replaceDialog": {
-    "title": "Find and replace",
-    "find": "Find",
+    "title": "Trova e sostituisci",
+    "find": "Trova",
     "replaceWith": "Replace with",
     "findPrevious": "Find previous",
     "findNext": "Find next",
-    "replace": "Replace",
+    "replace": "Sostituisci",
     "matchPosition": "{index} of {total}",
     "matchPositionTruncated": "{index} di oltre {total}",
     "lookIn": "Look in",
@@ -23,7 +23,7 @@
     "noRange": "Select a cell range first.",
     "formulaWarning": "«Cerca in» vale solo per Trova. Sostituisci modifica il contenuto di ogni cella come se fosse digitato e ricalcola le formule.",
     "preview": "Preview",
-    "replaceAll": "Replace all",
+    "replaceAll": "Sostituisci tutto",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
@@ -134,7 +134,7 @@
     "redo": "Ripeti"
   },
   "commands": {
-    "findReplace": "Find and replace",
+    "findReplace": "Trova e sostituisci",
     "fontSizeStep": "Modifica dimensione carattere",
     "numberFormat": "Formato numero",
     "decimalPlaces": "Modifica posizioni decimali",

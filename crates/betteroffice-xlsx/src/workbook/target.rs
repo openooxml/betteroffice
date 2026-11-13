@@ -316,6 +316,13 @@ fn sheet_header_footer(
     }
 }
 
+/// What one search looks for and how many matches it may return.
+#[derive(Clone, Copy)]
+struct FindOptions<'a> {
+    request: &'a FindRequest,
+    limit: u32,
+}
+
 fn sheet_kind(
     origin: Option<usize>,
     facts: Option<&xlsx_parse::PackageFactsView<'_>>,
@@ -687,6 +694,7 @@ impl Workbook {
                 .map(|index| (SheetId(index as u32), None))
                 .collect()
         };
+        let options = FindOptions { request, limit };
         let mut matches = Vec::new();
         let mut text_bytes = 0_usize;
         for (sheet, range) in scopes {
@@ -696,8 +704,7 @@ impl Workbook {
                     &keys,
                     sheet,
                     cells.cells_in_range(range),
-                    request,
-                    limit,
+                    &options,
                     &mut matches,
                     &mut text_bytes,
                 ),
@@ -705,8 +712,7 @@ impl Workbook {
                     &keys,
                     sheet,
                     cells.iter_cells(),
-                    request,
-                    limit,
+                    &options,
                     &mut matches,
                     &mut text_bytes,
                 ),
@@ -736,11 +742,11 @@ impl Workbook {
         keys: &[String],
         sheet: SheetId,
         cells: impl Iterator<Item = (CellRef, &'a xlsx_model::Cell)>,
-        request: &FindRequest,
-        limit: u32,
+        options: &FindOptions<'_>,
         matches: &mut Vec<FindMatch>,
         text_bytes: &mut usize,
     ) -> std::result::Result<bool, (EditFailureCode, String)> {
+        let FindOptions { request, limit } = *options;
         let defined = DefinedFunctionNames::new(&self.model.defined_names);
         let names = defined.visible_from(Some(sheet));
         for (at, cell) in cells {

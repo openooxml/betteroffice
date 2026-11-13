@@ -860,11 +860,7 @@ impl Workbook {
                     })
                     .sum::<u64>();
             }
-            EditOperation::ReplaceText {
-                query,
-                replacement,
-                ..
-            } => {
+            EditOperation::ReplaceText { query, replacement, .. } => {
                 if query.is_empty() {
                     return Err(at(
                         EditFailureCode::InvalidStep,
@@ -930,9 +926,7 @@ impl Workbook {
             return Err(conflict);
         }
         let sheet = &self.model.sheets[resolved.sheet.0 as usize];
-        if !replaces
-            && let Some((cell, reason)) = write_lock(sheet, resolved.range)
-        {
+        if !replaces && let Some((cell, reason)) = write_lock(sheet, resolved.range) {
             return Err(at(
                 EditFailureCode::LockedTarget,
                 format!("{} {reason}", cell.to_a1()),
@@ -1117,8 +1111,7 @@ impl Workbook {
                     // A merged follower, an array-filled cell or a locked cell on a
                     // protected sheet has no independent text to rewrite; skip it
                     // instead of blocking the whole replace.
-                    if !allow_protected
-                        && self.content_locked_cell(resolved.sheet, cell).is_some()
+                    if !allow_protected && self.content_locked_cell(resolved.sheet, cell).is_some()
                     {
                         stats.skipped_locked += 1;
                         continue;
@@ -1142,7 +1135,9 @@ impl Workbook {
                     if *units > MAX_TEXT_UNITS {
                         return Err(at(
                             EditFailureCode::LimitExceeded,
-                            format!("a batch carries at most {MAX_TEXT_UNITS} UTF-16 units of text"),
+                            format!(
+                                "a batch carries at most {MAX_TEXT_UNITS} UTF-16 units of text"
+                            ),
                         ));
                     }
                     if typed_formula_fails(&self.model, resolved.sheet, cell, &input) {

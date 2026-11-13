@@ -1,11 +1,11 @@
 {
   "replaceDialog": {
-    "title": "Find and replace",
-    "find": "Find",
+    "title": "البحث والاستبدال",
+    "find": "بحث",
     "replaceWith": "Replace with",
     "findPrevious": "Find previous",
     "findNext": "Find next",
-    "replace": "Replace",
+    "replace": "استبدال",
     "matchPosition": "{index} of {total}",
     "matchPositionTruncated": "{index} من أكثر من {total}",
     "lookIn": "Look in",
@@ -23,7 +23,7 @@
     "noRange": "Select a cell range first.",
     "formulaWarning": "يسري «البحث في» على البحث فقط. يعدّل الاستبدال محتوى كل خلية كما لو كُتب يدويًا ويعيد حساب الصيغ.",
     "preview": "Preview",
-    "replaceAll": "Replace all",
+    "replaceAll": "استبدال الكل",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
@@ -134,7 +134,7 @@
     "redo": "إعادة"
   },
   "commands": {
-    "findReplace": "Find and replace",
+    "findReplace": "البحث والاستبدال",
     "fontSizeStep": "تغيير حجم الخط",
     "numberFormat": "تنسيق الأرقام",
     "decimalPlaces": "تغيير المنازل العشرية",

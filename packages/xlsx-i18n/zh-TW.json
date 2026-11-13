@@ -1,6 +1,6 @@
 {
   "replaceDialog": {
-    "title": "尋找與取代",
+    "title": "尋找及取代",
     "find": "尋找",
     "replaceWith": "取代為",
     "findPrevious": "尋找上一個",
@@ -134,7 +134,7 @@
     "redo": "取消復原"
   },
   "commands": {
-    "findReplace": "尋找與取代",
+    "findReplace": "尋找及取代",
     "fontSizeStep": "變更字型大小",
     "numberFormat": "數值格式",
     "decimalPlaces": "變更小數位數",

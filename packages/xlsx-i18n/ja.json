@@ -1,11 +1,11 @@
 {
   "replaceDialog": {
-    "title": "Find and replace",
-    "find": "Find",
+    "title": "検索と置換",
+    "find": "検索",
     "replaceWith": "Replace with",
     "findPrevious": "Find previous",
     "findNext": "Find next",
-    "replace": "Replace",
+    "replace": "置換",
     "matchPosition": "{index} of {total}",
     "matchPositionTruncated": "{total} 件以上中 {index} 件目",
     "lookIn": "Look in",
@@ -23,7 +23,7 @@
     "noRange": "Select a cell range first.",
     "formulaWarning": "「検索対象」は検索にのみ適用されます。置換は各セルの入力内容を入力し直したものとして編集し、数式を再計算します。",
     "preview": "Preview",
-    "replaceAll": "Replace all",
+    "replaceAll": "すべて置換",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
@@ -134,7 +134,7 @@
     "redo": "やり直し"
   },
   "commands": {
-    "findReplace": "Find and replace",
+    "findReplace": "検索と置換",
     "fontSizeStep": "フォント サイズの変更",
     "numberFormat": "表示形式",
     "decimalPlaces": "小数点以下の桁数の変更",

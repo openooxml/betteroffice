@@ -1,11 +1,11 @@
 {
   "replaceDialog": {
-    "title": "Find and replace",
-    "find": "Find",
+    "title": "חיפוש והחלפה",
+    "find": "חיפוש",
     "replaceWith": "Replace with",
     "findPrevious": "Find previous",
     "findNext": "Find next",
-    "replace": "Replace",
+    "replace": "החלף",
     "matchPosition": "{index} of {total}",
     "matchPositionTruncated": "{index} מתוך יותר מ-{total}",
     "lookIn": "Look in",
@@ -23,7 +23,7 @@
     "noRange": "Select a cell range first.",
     "formulaWarning": "האפשרות 'חפש ב' חלה רק על חיפוש. החלפה עורכת את תוכן כל תא כאילו הוקלד ומחשבת מחדש את הנוסחאות.",
     "preview": "Preview",
-    "replaceAll": "Replace all",
+    "replaceAll": "החלף הכל",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
@@ -134,7 +134,7 @@
     "redo": "בצע שוב"
   },
   "commands": {
-    "findReplace": "Find and replace",
+    "findReplace": "חיפוש והחלפה",
     "fontSizeStep": "שנה גודל גופן",
     "numberFormat": "תבנית מספר",
     "decimalPlaces": "שנה מקומות עשרוניים",
