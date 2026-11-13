@@ -359,3 +359,48 @@ def test_layout_reads_whole_number_floats_from_a_parsed_model(minimal_bytes: byt
 
     with pytest.raises(ValueError, match="gridBefore must be a nonnegative integer, got 0.5"):
         document.layout(_with_table_row_grid(envelope, 0.5))
+
+
+def test_a_layout_hands_out_one_display_list(
+    minimal_bytes: bytes, layout_input: "dict[str, Any]"
+) -> None:
+    layout = Document.open(minimal_bytes).layout(layout_input)
+
+    first = layout.display_list
+    assert layout.display_list is first
+    del layout
+    assert len(first) == 1
+
+
+def _layout_envelopes(layout_input: "dict[str, Any]") -> "list[dict[str, Any]]":
+    table = LAYOUT_TESTS / "fixtures" / "table-splits-with-repeated-header.input.json"
+    return [layout_input, json.loads(table.read_text())]
+
+
+def test_every_display_list_reader_agrees_on_a_layout(
+    minimal_bytes: bytes,
+    layout_input: "dict[str, Any]",
+    tmp_path: Path,
+) -> None:
+    document = Document.open(minimal_bytes)
+    for index, envelope in enumerate(_layout_envelopes(layout_input)):
+        display_list = document.layout(envelope).display_list
+        text = display_list.json
+
+        assert display_list.json == text
+        assert document.layout(envelope).display_list.json == text
+        assert DisplayList.from_json(text).json == text
+        assert display_list.to_dict() == json.loads(text)
+
+        target = tmp_path / f"display-list-{index}.json"
+        display_list.write(target)
+        assert target.read_bytes() == text.encode()
+
+        pages = json.loads(text)["pages"]
+        primitives = sum(len(page["primitives"]) for page in pages)
+        assert len(display_list) == len(pages) > 0
+        assert display_list.primitives == primitives > 0
+        assert repr(display_list) == f"DisplayList(pages={len(pages)}, primitives={primitives})"
+
+        png = document.render_display_list_png(display_list, len(pages) - 1)
+        assert png.bytes[:8] == PNG_MAGIC
