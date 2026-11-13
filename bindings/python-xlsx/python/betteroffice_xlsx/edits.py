@@ -183,6 +183,7 @@ class ReplaceStats(TypedDict):
     skippedValues: int
     skippedCells: list[str]
     refusedCells: list[RefusedCell]
+    refused: int
 
 
 class _OptionalReplace(TypedDict, total=False):

@@ -145,6 +145,7 @@ function sumReplaceStats(
   let skippedValues = 0;
   const skippedCells: string[] = [];
   const refusedCells: { cell: string; reason: string }[] = [];
+  let refused = 0;
   let found = false;
   for (const preview of previews) {
     if (!preview.replace) continue;
@@ -161,8 +162,13 @@ function sumReplaceStats(
       skippedCells.push(sheetName ? `${sheetName}!${cell}` : cell);
     }
     refusedCells.push(...(preview.replace.refusedCells ?? []));
+    refused += refusedTotal(preview.replace);
   }
-  return found ? { ...total, skippedValues, skippedCells, refusedCells } : null;
+  return found ? { ...total, skippedValues, skippedCells, refusedCells, refused } : null;
+}
+
+function refusedTotal(stats: XlsxReplaceStats): number {
+  return stats.refused ?? stats.refusedCells?.length ?? 0;
 }
 
 const SKIPPED_CELLS_SHOWN = 5;
@@ -172,11 +178,12 @@ function skippedCellList(stats: XlsxReplaceStats): string {
   return (stats.skippedValues ?? 0) > SKIPPED_CELLS_SHOWN ? `${shown}, …` : shown;
 }
 
-/** The engine's reasons for the first refused cells; each reason names its cell. */
+/** The engine's reasons for the first refused cells and how many more it refused. */
 function refusedCellList(stats: XlsxReplaceStats): string {
-  const refused = stats.refusedCells ?? [];
-  const shown = refused.slice(0, SKIPPED_CELLS_SHOWN).map((entry) => entry.reason).join('; ');
-  return refused.length > SKIPPED_CELLS_SHOWN ? `${shown}; …` : shown;
+  const listed = (stats.refusedCells ?? []).slice(0, SKIPPED_CELLS_SHOWN);
+  const shown = listed.map((entry) => entry.reason).join('; ');
+  const more = refusedTotal(stats) - listed.length;
+  return more > 0 ? `${shown}; … +${more}` : shown;
 }
 
 function refusalMessage(result: { failure: { message: string } }): string {
@@ -692,7 +699,7 @@ export function ReplaceDialog({
               count: stats.skippedValues, cells: skippedCellList(stats),
             })}`
             : null}
-          {stats?.refusedCells?.length
+          {stats && refusedTotal(stats) > 0
             ? <span style={{ color: '#b3261e' }}>
               {` ${t('replaceDialog.refused', { message: refusedCellList(stats) })}`}
             </span>

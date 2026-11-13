@@ -388,6 +388,9 @@ pub struct ReplaceStats {
     /// Matched cells left unchanged because their new entry cannot be stored, at most 10,000.
     #[serde(default)]
     pub refused_cells: Vec<RefusedCell>,
+    /// Every refused cell, including those past the `refused_cells` cap.
+    #[serde(default)]
+    pub refused: u32,
 }
 
 /// One matched cell a replace left unchanged, and why.
@@ -400,6 +403,7 @@ pub struct RefusedCell {
 }
 
 fn refuse_cell(stats: &mut ReplaceStats, cell: CellRef, reason: String) {
+    stats.refused = stats.refused.saturating_add(1);
     if stats.refused_cells.len() < MAX_DIAGNOSTIC_CELLS {
         stats.refused_cells.push(RefusedCell {
             cell: cell.to_a1(),

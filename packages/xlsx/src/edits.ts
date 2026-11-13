@@ -194,6 +194,8 @@ export interface XlsxReplaceStats {
   skippedCells?: string[];
   /** Matched cells left unchanged because their new entry cannot be stored, at most 10,000. */
   refusedCells?: { cell: string; reason: string }[];
+  /** Every refused cell, including those past the `refusedCells` cap. */
+  refused?: number;
 }
 
 export interface XlsxEditReceipt {

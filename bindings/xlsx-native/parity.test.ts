@@ -241,8 +241,10 @@ describe('xlsx native/wasm package parity', () => {
       };
     }, await findFixture());
     if (!('receipts' in result.applied)) throw new Error('Expected applied edits');
-    const receipts = result.applied.receipts as { replace?: { refusedCells?: { cell: string }[] } }[];
+    const receipts = result.applied.receipts as { replace?: { refused?: number; refusedCells?: { cell: string }[] } }[];
     expect(receipts[1]?.replace?.refusedCells?.map((refused) => refused.cell)).toEqual(['B1']);
+    expect(receipts[1]?.replace?.refused).toBe(1);
+    expect(receipts[0]?.replace?.refused).toBe(0);
     expect(cellsOf(result.edited)).toEqual(['sheet:0!A3']);
     expect(cellsOf(result.kept)).toEqual(['sheet:0!B1']);
   });

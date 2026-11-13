@@ -621,6 +621,8 @@ export interface XlsxReplaceStats {
         cell: string;
         reason: string;
     }[];
+    /** Every refused cell, including those past the `refusedCells` cap. */
+    refused?: number;
 }
 export interface XlsxEditReceipt {
     stepIndex: number;
