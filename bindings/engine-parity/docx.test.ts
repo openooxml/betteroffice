@@ -7,6 +7,7 @@ import initPreflight, { font_preflight as wasmFontPreflight } from '../../packag
 import * as wasmYrs from '../../packages/docx/src/yrs';
 import * as nativeYrs from '@betteroffice/docx-native/yrs';
 import { readTableFragment, type ClipboardTableReader } from '../../packages/docx/src/yrs/clipboardFragment';
+import { decodeEncodedSelection } from '../../packages/docx/src/yrs/encodedSelection';
 import type { YrsStorySegment } from '../../packages/docx/src/yrs/index';
 import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
 import {
@@ -765,6 +766,61 @@ function imageSources(session: Session, input: string): string[] {
   const sources = [...json.matchAll(/"src":"((?:data:image|media:)[^"]*)"/g)].map(([, src]) => src!);
   if (sources.length === 0) throw new Error('the layout carries no image source');
   return sources;
+}
+
+const MISSING_STORY = 'parity-missing';
+
+function stickyAt(session: Session, prefix: string, index: number): [string, string, number] {
+  return ['body', paraId(session, prefix), textAt(session, prefix, index)];
+}
+
+function paragraphEnd(session: Session, prefix: string): [string, string, number] {
+  const id = paraId(session, prefix);
+  const { start, end } = JSON.parse(session.locate_paragraph('body', id)) as { start: number; end: number };
+  return ['body', id, end - start];
+}
+
+function encodedSelection(session: Session) {
+  const cursor = decodeEncodedSelection(session.encoded_selection());
+  if (!cursor) throw new Error('the session has no encoded selection');
+  return cursor;
+}
+
+function otherEngineReplica(engine: DocxEngine, source: Session): Session {
+  const replica = new (engine === wasmEngine ? nativeEngine : wasmEngine).EditSession(FRESH_CLIENT);
+  try {
+    replica.open_docx(fixture, false, GENERATION);
+    replica.apply_update(source.encode_state());
+    return replica;
+  } catch (error) {
+    replica.free();
+    throw error;
+  }
+}
+
+function seededSeparators(fresh: () => Session): Uint8Array {
+  const f = fresh();
+  f.open_docx(fixture, true, GENERATION);
+  const state = f.note_separators_state();
+  if (state.length === 0) throw new Error('the seeded fixture carries no separator notes');
+  return state;
+}
+
+type Anchor = Record<string, unknown>;
+
+function paragraphAnchors(session: Session): Anchor[] {
+  const { paragraphs } = JSON.parse(session.paragraph_identities()) as {
+    paragraphs: { session: Anchor | null; persisted: Anchor | null; source: Anchor | null }[];
+  };
+  const held = paragraphs.find((paragraph) => paragraph.session && paragraph.persisted);
+  if (!held?.session || !held.persisted) throw new Error('no paragraph carries both a session and a persisted anchor');
+  return [
+    held.session,
+    held.persisted,
+    ...(held.source ? [held.source] : []),
+    { ...held.session, sessionId: 'parity-foreign' },
+    { ...held.persisted, paraId: '7FFFFFFF' },
+  ];
 }
 
 const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
@@ -2228,6 +2284,228 @@ const rows: Row<Docx>[] = [
       return [type, f.media_type('media:missing')];
     },
   }),
+  {
+    method: 'EditSession.load',
+    mutates: true,
+    call: ({ session: s, fresh, saveFrom }) => {
+      const f = fresh();
+      f.open_docx(fixture, false, GENERATION);
+      const result = f.load(s.encode_state());
+      saveFrom(f);
+      return { result, stories: f.list_stories_json(), segments: f.story_segments('body'), comments: f.list_comments() };
+    },
+  },
+  {
+    method: 'EditSession.load',
+    name: 'EditSession.load (malformed update)',
+    throws: { name: 'string', reason: 'an update that does not decode is refused' },
+    call: ({ fresh }) => fresh().load(MALFORMED_UPDATE),
+  },
+  {
+    method: 'EditSession.note_separators_state',
+    call: ({ session: s, fresh }) => ({ session: s.note_separators_state(), seeded: seededSeparators(fresh), bare: fresh().note_separators_state() }),
+  },
+  defineRow({
+    method: 'EditSession.load_note_separators',
+    setup: ({ fresh }: Docx) => seededSeparators(fresh),
+    call: ({ fresh }, state) => {
+      const r = fresh();
+      const before = r.note_separators_state();
+      const result = r.load_note_separators(state);
+      const loaded = r.note_separators_state();
+      const again = r.load_note_separators(state);
+      const cleared = r.load_note_separators(new Uint8Array(0));
+      return { before, result, loaded, again, cleared, after: r.note_separators_state() };
+    },
+  }),
+  {
+    method: 'EditSession.load_note_separators',
+    name: 'EditSession.load_note_separators (malformed state)',
+    throws: { name: 'string', reason: 'separator state that does not decode as an update is refused' },
+    call: ({ fresh }) => fresh().load_note_separators(MALFORMED_UPDATE),
+  },
+  {
+    method: 'EditSession.set_partial_document',
+    call: ({ session: s }) => {
+      const whole = layout(s).layout;
+      const marked = s.set_partial_document(true);
+      const partial = layout(s).layout;
+      const unmarked = s.set_partial_document(false);
+      return { whole, marked, partial, unmarked, restored: layout(s).layout };
+    },
+  },
+  {
+    method: 'EditSession.selection',
+    mutates: true,
+    call: ({ session: s }) => {
+      const before = s.selection();
+      s.set_selection(...textSpan(s, 'Second body', 0, 6));
+      const set = s.selection();
+      peerEdit(s, 'Second body', 'Moved ');
+      return { before, set, after: s.selection() };
+    },
+  },
+  {
+    method: 'EditSession.encoded_selection',
+    call: ({ session: s }) => {
+      const before = s.encoded_selection();
+      s.set_selection(...textSpan(s, 'Second body', 0, 6));
+      return { before, after: s.encoded_selection() };
+    },
+  },
+  defineRow({
+    method: 'EditSession.resolve_encoded_selection',
+    mutates: true,
+    setup: ({ session: s }: Docx) => {
+      s.set_selection(...textSpan(s, 'Second body', 0, 6));
+      return encodedSelection(s);
+    },
+    call: ({ session: s }, { story, anchor, head }) => {
+      const before = s.resolve_encoded_selection(story, anchor, head);
+      peerEdit(s, 'Second body', 'Moved ');
+      return { before, after: s.resolve_encoded_selection(story, anchor, head) };
+    },
+  }),
+  {
+    method: 'EditSession.resolve_encoded_selection',
+    name: 'EditSession.resolve_encoded_selection (malformed positions)',
+    throws: { name: 'string', reason: 'sticky positions that do not decode are refused' },
+    call: ({ session: s }) => s.resolve_encoded_selection('body', MALFORMED_UPDATE, MALFORMED_UPDATE),
+  },
+  {
+    method: 'EditSession.resolve_encoded_selection',
+    name: 'EditSession.resolve_encoded_selection (encoded on the other engine)',
+    call: ({ engine, session: s }) => {
+      const other = otherEngineReplica(engine, s);
+      try {
+        const range = textSpan(s, 'Second body', 0, 6);
+        s.set_selection(...range);
+        other.set_selection(...range);
+        const ours = encodedSelection(s);
+        const theirs = encodedSelection(other);
+        return {
+          ours,
+          theirs,
+          oursThere: other.resolve_encoded_selection(ours.story, ours.anchor, ours.head),
+          theirsHere: s.resolve_encoded_selection(theirs.story, theirs.anchor, theirs.head),
+        };
+      } finally {
+        other.free();
+      }
+    },
+  },
+  {
+    method: 'EditSession.encode_sticky_position',
+    call: ({ session: s }) => [s.encode_sticky_position(...stickyAt(s, 'Second body', 0)), s.encode_sticky_position(...stickyAt(s, 'Second body', 6))],
+  },
+  {
+    method: 'EditSession.encode_sticky_position',
+    name: 'EditSession.encode_sticky_position (unknown paragraph)',
+    throws: { name: 'string', reason: 'a paragraph id the story does not hold is refused' },
+    call: ({ session: s }) => s.encode_sticky_position('body', '7FFFFFFF', 0),
+  },
+  defineRow({
+    method: 'EditSession.resolve_sticky_position',
+    mutates: true,
+    setup: ({ session: s }: Docx) => s.encode_sticky_position(...stickyAt(s, 'Second body', 6)),
+    call: ({ session: s }, position) => {
+      const before = s.resolve_sticky_position('body', position);
+      peerEdit(s, 'Second body', 'Moved ');
+      return { before, after: s.resolve_sticky_position('body', position) };
+    },
+  }),
+  {
+    method: 'EditSession.resolve_sticky_position',
+    name: 'EditSession.resolve_sticky_position (malformed position)',
+    throws: { name: 'string', reason: 'a sticky position that does not decode is refused' },
+    call: ({ session: s }) => s.resolve_sticky_position('body', MALFORMED_UPDATE),
+  },
+  {
+    method: 'EditSession.resolve_sticky_position',
+    name: 'EditSession.resolve_sticky_position (encoded on the other engine)',
+    call: ({ engine, session: s }) => {
+      const other = otherEngineReplica(engine, s);
+      try {
+        const at = stickyAt(s, 'Second body', 6);
+        const ours = s.encode_sticky_position(...at);
+        const theirs = other.encode_sticky_position(...at);
+        return { ours, theirs, oursThere: other.resolve_sticky_position('body', ours), theirsHere: s.resolve_sticky_position('body', theirs) };
+      } finally {
+        other.free();
+      }
+    },
+  },
+  {
+    method: 'EditSession.resolve_paragraph_anchor',
+    call: ({ session: s }) => paragraphAnchors(s).map((anchor) => ({ anchor, resolved: s.resolve_paragraph_anchor(JSON.stringify(anchor)) })),
+  },
+  {
+    method: 'EditSession.resolve_paragraph_anchor',
+    name: 'EditSession.resolve_paragraph_anchor (unknown kind)',
+    throws: { name: 'string', reason: 'an anchor of an unknown kind is refused' },
+    call: ({ session: s }) => s.resolve_paragraph_anchor(JSON.stringify({ kind: 'bogus' })),
+  },
+  {
+    method: 'EditSession.select_story',
+    mutates: true,
+    call: ({ session: s }) => timedEdits(s, () => {
+      s.select_story(MISSING_STORY);
+      return s.select_story('body');
+    }),
+  },
+  {
+    method: 'EditSession.next_paragraph_style',
+    call: ({ session: s }) => ['Parity heading', 'First body'].map((prefix) => ({
+      end: s.next_paragraph_style(...paragraphEnd(s, prefix)),
+      start: s.next_paragraph_style('body', paraId(s, prefix), 0),
+    })),
+  },
+  {
+    method: 'EditSession.next_paragraph_style',
+    name: 'EditSession.next_paragraph_style (unknown paragraph)',
+    throws: { name: 'string', reason: 'a paragraph id the story does not hold is refused' },
+    call: ({ session: s }) => s.next_paragraph_style('body', '7FFFFFFF', 0),
+  },
+  {
+    method: 'EditSession.paragraph_unit',
+    call: ({ session: s }) => [...['Parity heading', 'First body', 'Final'].map((prefix) => paraId(s, prefix)), '7FFFFFFF'].map((id) => s.paragraph_unit('body', id)),
+  },
+  {
+    method: 'EditSession.paragraph_unit',
+    name: 'EditSession.paragraph_unit (unknown story)',
+    throws: { name: 'string', reason: 'a story the document does not hold is refused' },
+    call: ({ session: s }) => s.paragraph_unit(MISSING_STORY, paraId(s, 'First body')),
+  },
+  {
+    method: 'EditSession.paragraph_id_count',
+    call: ({ session: s }) => [...['Parity heading', 'First body', 'Final'].map((prefix) => paraId(s, prefix)), '7FFFFFFF'].map((id) => s.paragraph_id_count('body', id)),
+  },
+  {
+    method: 'EditSession.paragraph_id_count',
+    name: 'EditSession.paragraph_id_count (unknown story)',
+    throws: { name: 'string', reason: 'a story the document does not hold is refused' },
+    call: ({ session: s }) => s.paragraph_id_count(MISSING_STORY, paraId(s, 'First body')),
+  },
+  { method: 'EditSession.story_segment_units', call: ({ session: s }) => s.story_segment_units('body', Uint32Array.from([0, 1, 6])) },
+  {
+    method: 'EditSession.story_segment_units',
+    name: 'EditSession.story_segment_units (unit past the end)',
+    throws: { name: 'string', reason: 'a unit index past the last unit is refused' },
+    call: ({ session: s }) => s.story_segment_units('body', Uint32Array.from([9_999])),
+  },
+  {
+    method: 'EditSession.resident_caret_snapshot_json',
+    call: ({ session: s }) => {
+      const bare = s.resident_caret_snapshot_json();
+      residentFrame(s);
+      const framed = s.resident_caret_snapshot_json();
+      caretIn(s, 'Second body', 6);
+      const caret = s.resident_caret_snapshot_json();
+      if ((JSON.parse(caret) as { caretRect: unknown }).caretRect === null) throw new Error(`the collapsed caret has no rect: ${caret}`);
+      s.set_selection(...textSpan(s, 'Second body', 0, 6));
+      return { bare, framed, caret, range: s.resident_caret_snapshot_json() };
+    },
+  },
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
@@ -2264,29 +2542,27 @@ const notYetCovered: string[] = [
   'EditSession.direct_batches_applied', 'EditSession.display_hit_test_regions_json', 'EditSession.display_range_rects_batch', 'EditSession.display_range_rects_json',
   'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json', 'EditSession.display_vertical_move_json',
   'EditSession.echo_glyph_set_json', 'EditSession.encode_diff_chunks',
-  'EditSession.encode_peer_metadata', 'EditSession.encode_sticky_position',
-  'EditSession.encoded_selection', 'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json',
+  'EditSession.encode_peer_metadata',
+  'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json',
   'EditSession.geometry_position_outline_json',
   'EditSession.layout_document_with_regions_after_edit', 'EditSession.layout_document_with_regions_exact_prefix_retained',
   'EditSession.layout_document_with_regions_prefix_retained_json',
   'EditSession.layout_document_with_regions_retained_json', 'EditSession.layout_document_with_regions_retained_meta',
-  'EditSession.load', 'EditSession.load_note_separators',
   'EditSession.measure_paragraph_json', 'EditSession.media_data_url',
-  'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.outline_glyph_json',
-  'EditSession.paragraph_id_count', 'EditSession.paragraph_unit',
+  'EditSession.outline_glyph_json',
   'EditSession.patch_style_languages_xml', 'EditSession.prime_save_seed_states_slice',
   'EditSession.rebuild_media_sources',
   'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.reset_frame_base',
-  'EditSession.resident_caret_snapshot_json', 'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
-  'EditSession.resolve_encoded_selection', 'EditSession.resolve_paragraph_anchor', 'EditSession.resolve_sticky_position', 'EditSession.resume_region_layout',
+  'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
+  'EditSession.resume_region_layout',
   'EditSession.retained_headers_footers_json', 'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json',
-  'EditSession.seed_opaque_sequences', 'EditSession.select_story', 'EditSession.selection',
+  'EditSession.seed_opaque_sequences',
   'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages',
   'EditSession.set_header_footer_aliases',
-  'EditSession.set_local_lowering', 'EditSession.set_media_tokens', 'EditSession.set_partial_document',
+  'EditSession.set_local_lowering', 'EditSession.set_media_tokens',
   'EditSession.set_windowed_incremental_builds',
   'EditSession.start_update_event_observation',
-  'EditSession.story_segment_unit_digests', 'EditSession.story_segment_units',
+  'EditSession.story_segment_unit_digests',
   'EditSession.update_measure_font_outlines', 'EditSession.yrs_blocks_for_story',
   'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.page_sizes', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.page_count',
   'RetainedLayoutMeta.partial', 'RetainedLayoutMeta.provisional',
@@ -2325,7 +2601,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(96);
+    expect(notYetCovered.length).toBe(80);
   });
 
   for (const row of rows) {
