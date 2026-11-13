@@ -92,8 +92,10 @@ fn splice_work(rows: usize) -> SpliceWork {
     test_counters::take();
     let saved = write_pptx_with_edits(&package, &edit).unwrap();
     let work = test_counters::take();
-    let parts: BTreeMap<String, Vec<u8>> =
-        ooxml_opc::unzip_parts(&saved).unwrap().into_iter().collect();
+    let parts: BTreeMap<String, Vec<u8>> = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .collect();
     let xml = String::from_utf8(parts["ppt/slides/slide1.xml"].clone()).unwrap();
     let edited_row = TABLE_ROW.replace("<a:t>Same</a:t>", "<a:t>Edited</a:t>");
     assert_eq!(xml.matches(TABLE_ROW).count(), rows - 1, "{rows} rows");
@@ -122,12 +124,21 @@ fn editing_one_row_of_a_large_table_splices_in_linear_work() {
     assert_eq!(middle.dp_cells, large.dp_cells, "{works:?}");
     assert!(small.dp_cells <= MAX_CONSTANT_WORK, "{works:?}");
 
-    assert_eq!(small.fragment_elements, middle.fragment_elements, "{works:?}");
-    assert_eq!(middle.fragment_elements, large.fragment_elements, "{works:?}");
+    assert_eq!(
+        small.fragment_elements, middle.fragment_elements,
+        "{works:?}"
+    );
+    assert_eq!(
+        middle.fragment_elements, large.fragment_elements,
+        "{works:?}"
+    );
     assert!(small.fragment_elements > 0, "{works:?}");
     assert!(small.fragment_elements <= MAX_CONSTANT_WORK, "{works:?}");
 
     let added_equal_calls = assert_doubles("equal_calls", &works, |work| work.equal_calls);
-    assert!(added_equal_calls <= 2 * (ROWS[1] - ROWS[0]) as i64, "{works:?}");
+    assert!(
+        added_equal_calls <= 2 * (ROWS[1] - ROWS[0]) as i64,
+        "{works:?}"
+    );
     assert_doubles("hashed_nodes", &works, |work| work.hashed_nodes);
 }
