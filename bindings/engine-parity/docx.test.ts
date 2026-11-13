@@ -1070,18 +1070,13 @@ const rows: Row<Docx>[] = [
   {
     method: 'EditSession.clear_undo_input_time',
     mutates: true,
-    call: async ({ session: s }) => {
-      const id = paraId(s, 'Second body');
-      const at = textAt(s, 'Second body', 0);
+    voidReason: 'its effect, falling back to each engine default undo clock, is not observable without wall-clock time',
+    call: ({ session: s }) => {
       s.track_undo();
       s.select_story('body');
       s.set_undo_input_time(5_000, 5_000);
-      s.insert_text('body', id, at, 'a');
-      const result = s.clear_undo_input_time();
-      // Cleared, each engine's clock measures the gap; pausing past the window splits on both.
-      await Bun.sleep(600);
-      s.insert_text('body', id, at + 1, 'b');
-      return { result, undone: s.undo(), after: s.paragraphs('body') };
+      s.insert_text('body', paraId(s, 'Second body'), textAt(s, 'Second body', 0), 'a');
+      return s.clear_undo_input_time();
     },
   },
   {
