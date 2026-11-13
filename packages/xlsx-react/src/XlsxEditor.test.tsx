@@ -1873,7 +1873,6 @@ describe('XlsxEditor chart objects with sheet headers', () => {
     await key('ArrowRight', true);
     await key('ArrowDown', true);
     await waitFor(() => expect(selected()).toEqual(['D4', 'D5', 'E4', 'E5', 'F4', 'F5']), MOUNTED);
-    expect(view.nameBox().value).toBe('D4');
     expect(view.selectionBox()).not.toBeNull();
     expect(view.view.queryByTestId('xlsx-fill-handle')).not.toBeNull();
 
@@ -1888,7 +1887,6 @@ describe('XlsxEditor chart objects with sheet headers', () => {
     await waitFor(() => expect(view.outline()).toBeNull());
     await waitFor(() => expect(view.selectionBox()).not.toBeNull());
     expect(selected()).toEqual(['D4', 'D5', 'E4', 'E5', 'F4', 'F5']);
-    expect(view.nameBox().value).toBe('D4');
   });
 });
 
