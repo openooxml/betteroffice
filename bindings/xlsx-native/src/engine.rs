@@ -602,6 +602,14 @@ impl XlsxDocument {
     }
 
     #[napi(catch_unwind)]
+    pub fn resize_chart_json(&mut self, env: Env, args: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document_mut(env)?
+            .resize_chart_json(&args)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
     pub fn render_png_target(
         &self,
         env: Env,

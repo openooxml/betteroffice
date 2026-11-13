@@ -2079,6 +2079,8 @@ describe('workbook commands', () => {
       ['applyOps', 'chart reference in xl/charts/chart1.xml cannot be safely rewritten', 'chart'],
       ['applyOps', 'anchor 0 of xl/drawings/drawing1.xml is held by two sheets that disagree on where it sits', 'chart'],
       ['applyOps', 'chart xl/charts/chart1.xml cannot change how it follows a grid edit', 'chart'],
+      ['resizeChart', 'chart xl/drawings/drawing1.xml#0 is pinned to the sheet and cannot be resized', 'chart'],
+      ['resizeChart', 'chart xl/drawings/drawing1.xml#0 cannot be resized: a one-cell extent is not written back', 'chart'],
       ['applyOps', 'formula at sheet 0, B1 cannot be safely rewritten', 'other'],
       ['applyOps', 'defined name Dynamic cannot be safely rewritten', 'other'],
       ['fillRange', 'fill cannot safely preserve hyperlinks', 'fill'],
@@ -2109,6 +2111,8 @@ describe('workbook commands', () => {
 
   test('copy origin errors from batch edits are classified as invalid commands', () => {
     expect(classifyRefusal(new Error('bad edit args: copy origin is outside the grid'), 'editCells'))
+      .toMatchObject({ reason: 'invalid-command' });
+    expect(classifyRefusal(new Error('bad chart resize args: missing field `sheet`'), 'resizeChart'))
       .toMatchObject({ reason: 'invalid-command' });
   });
 
@@ -2235,6 +2239,12 @@ describe('workbook commands', () => {
             const chart = main.displayList({ x: 0, y: 0, width: 800, height: 800 }).charts?.find((item) => item.movable);
             if (!chart) throw new Error('Missing synthetic movable chart');
             payload = { args: [0, chart.id, 24, 12] };
+            break;
+          }
+          case 'resizeChart': {
+            const chart = main.displayList({ x: 0, y: 0, width: 800, height: 800 }).charts?.find((item) => item.resizable);
+            if (!chart) throw new Error('Missing synthetic resizable chart');
+            payload = { args: [0, chart.id, { left: 0, top: 0, right: 24, bottom: 12 }] };
             break;
           }
           case 'moveRange': payload = { args: [0, 'A1', 'A2'] }; break;

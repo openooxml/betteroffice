@@ -35,6 +35,7 @@ export declare class XlsxDocument {
   displayListProfiledJson(viewportJson: string): string
   chartAtPointJson(args: string): string
   moveChartJson(args: string): string
+  resizeChartJson(args: string): string
   renderPngTarget(targetJson: string, optionsJson: string, fonts?: Array<PngFontFace> | undefined | null): Uint8Array
   sheetInfoJson(): string
   sheetCount(): number
