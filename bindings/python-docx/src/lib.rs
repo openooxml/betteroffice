@@ -87,6 +87,7 @@ fn map_error(error: CoreError) -> PyErr {
         CoreError::ParagraphNotFound(_) | CoreError::AmbiguousParagraph(_) => {
             PyKeyError::new_err(message)
         }
+        CoreError::ParagraphIndexOutOfRange { .. } => PyIndexError::new_err(message),
         CoreError::UnsupportedParagraphEdit(_) => UnsupportedEditError::new_err(message),
         CoreError::Layout(_) | CoreError::DisplayList(_) => LayoutError::new_err(message),
         CoreError::Font(_) | CoreError::Image(_) => PyValueError::new_err(message),
@@ -730,6 +731,8 @@ pub struct PyEdit {
     #[pyo3(get)]
     para_id: Option<String>,
     #[pyo3(get)]
+    index: Option<usize>,
+    #[pyo3(get)]
     story: Option<String>,
     #[pyo3(get)]
     start: Option<u32>,
@@ -746,6 +749,7 @@ impl PyEdit {
         let range = receipt.range;
         Self {
             para_id: range.as_ref().map(|range| range.start.para.clone()),
+            index: None,
             story: range.as_ref().map(|range| range.start.story.clone()),
             start: range.as_ref().map(|range| range.start.offset),
             end: range.as_ref().map(|range| range.end.offset),
@@ -1194,6 +1198,46 @@ impl PyDocument {
 
     fn replace_paragraph_text(&mut self, para_id: &str, text: &str) -> PyResult<PyEdit> {
         self.replace_text(para_id, text)
+    }
+
+    /// Rewrite the paragraph at `index` in `paragraphs()`, which needs no paragraph ID.
+    ///
+    /// Raises `IndexError` for an index out of range and `TypeError` for a non-int.
+    fn replace_text_at(&mut self, index: &Bound<'_, PyAny>, text: &str) -> PyResult<PyEdit> {
+        if index.is_instance_of::<PyBool>() || !index.is_instance_of::<PyInt>() {
+            return Err(PyTypeError::new_err("paragraph index must be an int"));
+        }
+        let (position, para_id) = {
+            let paragraphs = self.inner.paragraphs();
+            let len = paragraphs.len();
+            let position = index.extract::<usize>().map_err(|_| {
+                PyIndexError::new_err(format!(
+                    "paragraph index {index} out of range for {len} paragraph(s)"
+                ))
+            })?;
+            let para_id = paragraphs
+                .get(position)
+                .and_then(|paragraph| paragraph.para_id.clone());
+            (position, para_id)
+        };
+        let context = self.edit_ctx();
+        let receipt = self
+            .inner
+            .replace_paragraph_text_at_with(position, text, EDIT_CLIENT_ID, &context)
+            .map_err(map_error)?;
+        Ok(PyEdit {
+            para_id,
+            index: Some(position),
+            ..PyEdit::from_core(receipt)
+        })
+    }
+
+    fn replace_paragraph_text_at(
+        &mut self,
+        index: &Bound<'_, PyAny>,
+        text: &str,
+    ) -> PyResult<PyEdit> {
+        self.replace_text_at(index, text)
     }
 
     /// Export the document as read-only structured content: a dict with the
