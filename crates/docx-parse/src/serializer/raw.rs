@@ -31,7 +31,7 @@ pub(crate) const CONTENT_FRAGMENT_PREFIX: &str = concat!(
     "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
 );
 
-/// Binds exactly the story-root prefixes, so no wrapper binding outside them can leak into the fragment.
+/// A fragment wrapper binding exactly the story-root prefixes.
 const STORY_ROOT_FRAGMENT_PREFIX: &str = concat!(
     "<s11:root xmlns:s11=\"urn:openooxml:serializer-fragment\" ",
     "xmlns:wpc=\"http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas\" ",
@@ -91,7 +91,7 @@ pub(crate) fn validate_raw_subtree(
     })
 }
 
-/// Also requires each prefix to be declared in the fragment or by every story root.
+/// Validates a kept `w:ffData` whose prefixes are each declared in it or by every story root.
 pub(crate) fn validate_form_field_data(xml: &str) -> Result<(), ParseError> {
     with_raw_subtree(xml, STORY_ROOT_FRAGMENT_PREFIX, |root, child| {
         require_name(child, "w", "ffData")?;

@@ -1733,8 +1733,7 @@ fn declares_foreign_w(element: &XmlElement) -> bool {
         || element.child_elements().any(declares_foreign_w)
 }
 
-/// Writes every name in a kept `w:ffData` bound to WordprocessingML with the `w` prefix and drops
-/// the declarations that bound it, so the fragment replays as written under any story root.
+/// Rewrites a kept `w:ffData` to the `w` prefix and drops its own WordprocessingML declarations.
 fn normalize_form_field_data(element: &mut XmlElement, ancestors: &[XmlElement]) {
     let scope: Vec<(&str, &str)> = ancestors
         .iter()
