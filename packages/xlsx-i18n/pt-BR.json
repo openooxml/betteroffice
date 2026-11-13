@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "“Procurar em” vale apenas para Localizar. Substituir edita o conteúdo de cada célula como se fosse digitado e recalcula as fórmulas.",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "{count} valores correspondentes não são texto e não foram alterados: {cells}"
+    "skippedValues": "{count} datas, valores TRUE/FALSE ou de erro correspondentes não foram alterados: {cells}"
   },
   "_lang": "pt-BR",
   "toolbar": {

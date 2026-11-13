@@ -13,17 +13,19 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, parse_formula, recalc_after_with_seed};
+use xlsx_model::numfmt::format_renders_date;
 use xlsx_model::{CellRange, CellRef, CellValue, Sheet, SheetId};
 use xlsx_ops::{CellState, NumberFormatMutation, Op, OpError, StylePatch, StyleProperty};
 use xlsx_parse::{DefinedFunctionNames, FormulaNames, display_formula};
-use xlsx_render::display_text;
+use xlsx_render::{display_text, format_code_for_cell};
 
 use super::staging::CommitHistory;
 use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved, cell_target};
 use super::{
     StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
-    committed_formula, current_cell_state, edit_cell_state, entered_formula, validate_cell_state,
-    validate_model_sheets, validate_op, written_cell_style,
+    committed_formula, current_cell_state, edit_cell_state, entered_formula, entered_text,
+    typed_formula_fails, validate_cell_state, validate_model_sheets, validate_op,
+    written_cell_style,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
 use crate::{CalculationOptions, Error, Result};
@@ -134,8 +136,8 @@ pub struct StepGuard {
     pub cells: Vec<Vec<CellGuard>>,
 }
 
-/// What `replaceText` searches. Formula mode searches text cells and formula source; value
-/// mode searches text cells and reports formula-result matches without rewriting them.
+/// Which formula cells `replaceText` rewrites. Both modes search each cell's entered text;
+/// value mode reports formula cells whose result matches instead of rewriting them.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ReplaceLookIn {
@@ -177,12 +179,13 @@ pub enum EditOperation {
         target: RangeTarget,
         patch: StylePatch,
     },
-    /// Literal replacement inside `target`, case-insensitive unless `match_case`.
+    /// Literal replacement in each cell's entered text inside `target`, case-insensitive
+    /// unless `match_case`; the result is entered as if typed, as `setCellInputs` does.
     ///
-    /// `values` rewrites stored text in non-formula cells; formula cells are reported as
-    /// skipped. `formulas` rewrites text cells and formula source. Numeric, boolean,
-    /// merged-follower, array-filled and locked cells are skipped; cell formatting is
-    /// preserved. Limit exhaustion refuses the whole batch. It takes no `expect` guards.
+    /// `values` reports formula cells as skipped; `formulas` rewrites them too. Dates,
+    /// booleans, errors, merged followers, array-filled and locked cells are skipped; a
+    /// rich text cell or an entry that would not parse is refused alone while the rest
+    /// applies. Limit exhaustion refuses the whole batch. It takes no `expect` guards.
     ReplaceText {
         target: RangeTarget,
         query: String,
@@ -358,12 +361,33 @@ pub struct ReplaceStats {
     pub skipped_formulas: u32,
     /// Matches on merged followers, array fills or locked cells of a protected sheet.
     pub skipped_locked: u32,
-    /// Non-text values whose display text matched in `values` mode; they are untouched.
+    /// Dates, booleans and errors whose displayed or entered text matched; they are untouched.
     #[serde(default)]
     pub skipped_values: u32,
     /// A1 references of the first skipped values, at most 10,000.
     #[serde(default)]
     pub skipped_cells: Vec<String>,
+    /// Matched cells left unchanged because their new entry cannot be stored, at most 10,000.
+    #[serde(default)]
+    pub refused_cells: Vec<RefusedCell>,
+}
+
+/// One matched cell a replace left unchanged, and why.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefusedCell {
+    /// A1 reference on the step's sheet.
+    pub cell: String,
+    pub reason: String,
+}
+
+fn refuse_cell(stats: &mut ReplaceStats, cell: CellRef, reason: String) {
+    if stats.refused_cells.len() < MAX_DIAGNOSTIC_CELLS {
+        stats.refused_cells.push(RefusedCell {
+            cell: cell.to_a1(),
+            reason,
+        });
+    }
 }
 
 /// What one step did, in request order.
@@ -1044,74 +1068,34 @@ impl Workbook {
                             format!("a replace scans at most {MAX_CELL_VISITS} stored cells"),
                         ));
                     }
-                    if let Some(source) = stored.formula.as_deref() {
-                        if *look_in == ReplaceLookIn::Values {
-                            // Excel's value search still finds a formula's result; it is
-                            // visible to the user but has no independent text to rewrite.
-                            let display =
-                                display_text(&self.model.styles, self.model.date_system, stored);
-                            if text_matches(&display, query, *entire_cell, *match_case) {
-                                stats.matched += 1;
-                                stats.skipped_formulas += 1;
-                            }
-                            continue;
+                    if stored.formula.is_some() && *look_in == ReplaceLookIn::Values {
+                        // Excel's value search still finds a formula's result; it is
+                        // visible to the user but has no independent text to rewrite.
+                        let display =
+                            display_text(&self.model.styles, self.model.date_system, stored);
+                        if text_matches(&display, query, *entire_cell, *match_case) {
+                            stats.matched += 1;
+                            stats.skipped_formulas += 1;
                         }
-                        let Some(next) =
-                            replacement_match(source, query, replacement, *entire_cell, *match_case)
-                        else {
-                            continue;
-                        };
-                        stats.matched += 1;
-                        if next == source {
-                            continue;
-                        }
-                        if !allow_protected
-                            && self.content_locked_cell(resolved.sheet, cell).is_some()
-                        {
-                            stats.skipped_locked += 1;
-                            continue;
-                        }
-                        if write_lock(sheet_ref, CellRange::new(cell, cell)).is_some() {
-                            stats.skipped_locked += 1;
-                            continue;
-                        }
-                        validate_formula(&next).map_err(|error| {
-                            at(
-                                EditFailureCode::InvalidStep,
-                                format!("the replacement formula for {}: {error}", cell.to_a1()),
-                            )
-                        })?;
-                        *units = units.saturating_add(utf16_units(&next));
-                        if *units > MAX_TEXT_UNITS {
-                            return Err(at(
-                                EditFailureCode::LimitExceeded,
-                                format!(
-                                    "a batch carries at most {MAX_TEXT_UNITS} UTF-16 units of text"
-                                ),
-                            ));
-                        }
-                        let state = CellState {
-                            value: CellValue::Empty,
-                            formula: Some(next),
-                            style: written_cell_style(&self.model, resolved.sheet, cell, false),
-                        };
-                        validate_cell_state(&state).map_err(|error| {
-                            at(
-                                EditFailureCode::InvalidStep,
-                                format!("the replacement for {}: {error}", cell.to_a1()),
-                            )
-                        })?;
-                        states.push((cell, state, None));
                         continue;
                     }
-                    let CellValue::Text { value } = &stored.value else {
-                        if *look_in == ReplaceLookIn::Values
-                            && text_matches(
-                                &display_text(&self.model.styles, self.model.date_system, stored),
-                                query,
-                                *entire_cell,
-                                *match_case,
-                            )
+                    let (prefix, entered) =
+                        entered_text(&self.model, resolved.sheet, cell, stored, names);
+                    // Dates, booleans and errors have no locale-free entry, so they stay.
+                    let locale_shaped = stored.formula.is_none()
+                        && match &stored.value {
+                            CellValue::Bool { .. } | CellValue::Error { .. } => true,
+                            CellValue::Number { value } => format_renders_date(
+                                &format_code_for_cell(&self.model.styles, stored),
+                                *value,
+                            ),
+                            CellValue::Empty | CellValue::Text { .. } => false,
+                        };
+                    if locale_shaped {
+                        let display =
+                            display_text(&self.model.styles, self.model.date_system, stored);
+                        if text_matches(&display, query, *entire_cell, *match_case)
+                            || text_matches(&entered, query, *entire_cell, *match_case)
                         {
                             stats.matched += 1;
                             stats.skipped_values += 1;
@@ -1120,14 +1104,14 @@ impl Workbook {
                             }
                         }
                         continue;
-                    };
+                    }
                     let Some(next) =
-                        replacement_match(value, query, replacement, *entire_cell, *match_case)
+                        replacement_match(&entered, query, replacement, *entire_cell, *match_case)
                     else {
                         continue;
                     };
                     stats.matched += 1;
-                    if next == *value {
+                    if next == entered {
                         continue;
                     }
                     // A merged follower, an array-filled cell or a locked cell on a
@@ -1143,43 +1127,55 @@ impl Workbook {
                         stats.skipped_locked += 1;
                         continue;
                     }
+                    let place = format!("{}!{}", sheet_ref.name, cell.to_a1());
                     if self
                         .cell_text_runs(resolved.sheet, cell)
                         .is_some_and(|runs| !runs.is_empty())
                     {
-                        return Err(at(
-                            EditFailureCode::Unsupported,
-                            format!(
-                                "{}!{} holds rich text that a replace would flatten",
-                                sheet_ref.name,
-                                cell.to_a1()
-                            ),
-                        ));
+                        let reason =
+                            format!("{place} holds rich text that a replace would flatten");
+                        refuse_cell(&mut stats, cell, reason);
+                        continue;
                     }
-                    *units = units.saturating_add(utf16_units(&next));
+                    let input = format!("{prefix}{next}");
+                    *units = units.saturating_add(utf16_units(&input));
                     if *units > MAX_TEXT_UNITS {
                         return Err(at(
                             EditFailureCode::LimitExceeded,
                             format!("a batch carries at most {MAX_TEXT_UNITS} UTF-16 units of text"),
                         ));
                     }
-                    let clears = next.is_empty();
-                    let state = CellState {
-                        value: if clears {
-                            CellValue::Empty
-                        } else {
-                            CellValue::Text { value: next }
-                        },
-                        formula: None,
-                        style: written_cell_style(&self.model, resolved.sheet, cell, clears),
-                    };
-                    validate_cell_state(&state).map_err(|error| {
-                        at(
-                            EditFailureCode::InvalidStep,
-                            format!("the replacement for {}: {error}", cell.to_a1()),
+                    if typed_formula_fails(&self.model, resolved.sheet, cell, &input) {
+                        let reason = format!("{place}: the new formula {input} does not parse");
+                        refuse_cell(&mut stats, cell, reason);
+                        continue;
+                    }
+                    let (mut state, format) = edit_cell_state(
+                        &self.model,
+                        &defined,
+                        resolved.sheet,
+                        cell,
+                        &input,
+                        now_serial,
+                    );
+                    let typed = state.formula.take();
+                    let stored_as = entered_formula(&self.model, resolved.sheet, cell, typed)
+                        .and_then(|formula| {
+                            state.formula = formula;
+                            validate_cell_state(&state)
+                        });
+                    if let Err(error) = stored_as {
+                        refuse_cell(&mut stats, cell, format!("{place}: {error}"));
+                        continue;
+                    }
+                    if format.is_some()
+                        || !cell_states_semantically_equal(
+                            &current_cell_state(&self.model, resolved.sheet, cell),
+                            &state,
                         )
-                    })?;
-                    states.push((cell, state, None));
+                    {
+                        states.push((cell, state, format));
+                    }
                 }
                 stats.replaced = states.len() as u32;
                 replace = Some(stats);

@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "„Szukaj w” dotyczy tylko wyszukiwania. Zamień edytuje zawartość każdej komórki tak, jakby została wpisana, i przelicza formuły.",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "Pasujące wartości, które nie są tekstem, pozostały bez zmian ({count}): {cells}"
+    "skippedValues": "Pasujące daty, wartości TRUE/FALSE lub błędów pozostały bez zmian ({count}): {cells}"
   },
   "_lang": "pl",
   "toolbar": {

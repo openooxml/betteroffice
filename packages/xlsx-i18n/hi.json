@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "'इसमें खोजें' केवल खोज पर लागू होता है। बदलें हर सेल की प्रविष्टि को ऐसे संपादित करता है मानो उसे टाइप किया गया हो और सूत्रों की पुनर्गणना करता है।",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "मेल खाने वाले गैर-पाठ मान नहीं बदले गए ({count}): {cells}"
+    "skippedValues": "मेल खाने वाली तिथियाँ, TRUE/FALSE या त्रुटि मान नहीं बदले गए ({count}): {cells}"
   },
   "_lang": "hi",
   "toolbar": {

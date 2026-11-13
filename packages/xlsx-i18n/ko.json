@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "'찾는 위치'는 찾기에만 적용됩니다. 바꾸기는 각 셀의 입력 내용을 직접 입력한 것처럼 편집하고 수식을 다시 계산합니다.",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "텍스트가 아닌 일치 값 {count}개는 변경되지 않았습니다: {cells}"
+    "skippedValues": "일치하는 날짜, TRUE/FALSE 또는 오류 값 {count}개는 변경되지 않았습니다: {cells}"
   },
   "_lang": "ko",
   "toolbar": {

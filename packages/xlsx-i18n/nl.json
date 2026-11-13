@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "‘Zoeken in’ geldt alleen voor Zoeken. Vervangen bewerkt de invoer van elke cel alsof die getypt is en herberekent formules.",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "{count} overeenkomende waarden zijn geen tekst en zijn niet gewijzigd: {cells}"
+    "skippedValues": "{count} overeenkomende datums, TRUE/FALSE- of foutwaarden zijn niet gewijzigd: {cells}"
   },
   "_lang": "nl",
   "toolbar": {

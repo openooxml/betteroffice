@@ -6,11 +6,11 @@ use xlsx_model::{CellRange, CellRef, CellValue, MAX_COLS, MAX_ROWS, Sheet, Sheet
 use xlsx_parse::{DefinedFunctionNames, FormulaNames, SourceSheetKind, display_formula};
 use xlsx_render::display_text;
 
-use super::Workbook;
 use super::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditOperation, EditRefusal,
     MAX_DIAGNOSTIC_CELLS, ReplaceLookIn, failure, refusal, text_matches,
 };
+use super::{Workbook, entered_text};
 use crate::{CellAddress, Result, XlsxSheetKind, XlsxSheetVisibility};
 
 /// Most cells one read may return.
@@ -160,7 +160,7 @@ pub struct FindRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<RangeTarget>,
     /// Omit or pass `values` to search the display text of every stored cell; `formulas`
-    /// narrows to text cells and formula source.
+    /// searches the entered text the formula bar shows, `=` and formula source included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub look_in: Option<ReplaceLookIn>,
     /// Match only cells whose whole searched text equals `text`.
@@ -741,21 +741,17 @@ impl Workbook {
         matches: &mut Vec<FindMatch>,
         text_bytes: &mut usize,
     ) -> std::result::Result<bool, (EditFailureCode, String)> {
+        let defined = DefinedFunctionNames::new(&self.model.defined_names);
+        let names = defined.visible_from(Some(sheet));
         for (at, cell) in cells {
             let display = display_text(&self.model.styles, self.model.date_system, cell);
-            let stored_text = match &cell.value {
-                CellValue::Text { value } => Some(value.as_str()),
-                _ => None,
-            };
+            let entered;
             let searched = match request.look_in {
                 None | Some(ReplaceLookIn::Values) => display.as_str(),
-                Some(ReplaceLookIn::Formulas) => match cell.formula.as_deref() {
-                    Some(formula) => formula,
-                    None => match stored_text {
-                        Some(value) => value,
-                        None => continue,
-                    },
-                },
+                Some(ReplaceLookIn::Formulas) => {
+                    entered = entered_text(&self.model, sheet, at, cell, names).1;
+                    entered.as_str()
+                }
             };
             if !text_matches(searched, &request.text, request.entire_cell, request.match_case) {
                 continue;

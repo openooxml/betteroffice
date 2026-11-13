@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "「検索対象」は検索にのみ適用されます。置換は各セルの入力内容を入力し直したものとして編集し、数式を再計算します。",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "テキストではない一致した値 {count} 件は変更されませんでした: {cells}"
+    "skippedValues": "一致した日付、TRUE/FALSE、エラー値 {count} 件は変更されませんでした: {cells}"
   },
   "_lang": "ja",
   "toolbar": {

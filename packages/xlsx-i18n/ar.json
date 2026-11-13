@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "يسري «البحث في» على البحث فقط. يعدّل الاستبدال محتوى كل خلية كما لو كُتب يدويًا ويعيد حساب الصيغ.",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "لم تُغيَّر القيم المطابقة غير النصية ({count}): {cells}"
+    "skippedValues": "لم تُغيَّر التواريخ أو قيم TRUE/FALSE أو قيم الخطأ المطابقة ({count}): {cells}"
   },
   "_lang": "ar",
   "toolbar": {

@@ -101,6 +101,8 @@ const DIALOG_WIDTH = 420;
 const BUTTON = { height: 30, padding: '0 12px', borderRadius: 4 } as const;
 const NAV_BUTTON = { ...BUTTON, width: 30, padding: 0 } as const;
 const FIND_LIMIT = 10_000;
+/** Replace edits each cell's entered text, as Excel does; Look in only steers Find. */
+const REPLACE_LOOK_IN = 'formulas';
 const SHEET_LAST_ROW = 1_048_575;
 const SHEET_LAST_COLUMN = 16_383;
 const WHOLE_SHEET_RANGE: XlsxRangeAddress = {
@@ -136,6 +138,7 @@ function sumReplaceStats(
   };
   let skippedValues = 0;
   const skippedCells: string[] = [];
+  const refusedCells: { cell: string; reason: string }[] = [];
   let found = false;
   for (const preview of previews) {
     if (!preview.replace) continue;
@@ -151,8 +154,9 @@ function sumReplaceStats(
     for (const cell of preview.replace.skippedCells ?? []) {
       skippedCells.push(sheetName ? `${sheetName}!${cell}` : cell);
     }
+    refusedCells.push(...(preview.replace.refusedCells ?? []));
   }
-  return found ? { ...total, skippedValues, skippedCells } : null;
+  return found ? { ...total, skippedValues, skippedCells, refusedCells } : null;
 }
 
 const SKIPPED_CELLS_SHOWN = 5;
@@ -160,6 +164,13 @@ const SKIPPED_CELLS_SHOWN = 5;
 function skippedCellList(stats: XlsxReplaceStats): string {
   const shown = (stats.skippedCells ?? []).slice(0, SKIPPED_CELLS_SHOWN).join(', ');
   return (stats.skippedValues ?? 0) > SKIPPED_CELLS_SHOWN ? `${shown}, …` : shown;
+}
+
+/** The engine's reasons for the first refused cells; each reason names its cell. */
+function refusedCellList(stats: XlsxReplaceStats): string {
+  const refused = stats.refusedCells ?? [];
+  const shown = refused.slice(0, SKIPPED_CELLS_SHOWN).map((entry) => entry.reason).join('; ');
+  return refused.length > SKIPPED_CELLS_SHOWN ? `${shown}; …` : shown;
 }
 
 function refusalMessage(result: { failure: { message: string } }): string {
@@ -306,17 +317,20 @@ export function ReplaceDialog({
     ?? target?.label ?? '';
   const workbookSheetCount = target ? scopeTargets(target, 'workbook').length : 1;
 
-  const findMatches = async (query: string): Promise<FindCache | null> => {
+  const findMatches = async (
+    query: string,
+    mode: 'values' | 'formulas' = lookIn,
+  ): Promise<FindCache | null> => {
     if (!target) return null;
     const version = await Promise.resolve(api.version());
-    const key = searchKey(target, scope, query, lookIn, entireCell, matchCase, version);
+    const key = searchKey(target, scope, query, mode, entireCell, matchCase, version);
     if (cache.current?.key === key) return cache.current;
     const ranges = scopeTargets(target, scope);
     const result = await Promise.resolve(api.find(scope === 'workbook'
       ? {
         text: query,
         sheetIds: ranges.map((range) => range.sheetId),
-        lookIn,
+        lookIn: mode,
         entireCell,
         matchCase,
         limit: FIND_LIMIT,
@@ -324,7 +338,7 @@ export function ReplaceDialog({
       : {
         text: query,
         range: ranges[0],
-        lookIn,
+        lookIn: mode,
         entireCell,
         matchCase,
         limit: FIND_LIMIT,
@@ -371,7 +385,7 @@ export function ReplaceDialog({
     if (!target || query.length === 0 || busy || readOnly) return;
     setPhase({ kind: 'busy' });
     try {
-      const found = await findMatches(query);
+      const found = await findMatches(query, REPLACE_LOOK_IN);
       if (!found) return;
       if (found.matches.length === 0) {
         setMatch({ index: -1, total: 0, truncated: false });
@@ -392,7 +406,7 @@ export function ReplaceDialog({
           query,
           replacement,
           entireCell,
-          lookIn,
+          lookIn: REPLACE_LOOK_IN,
           matchCase,
         }],
       };
@@ -419,7 +433,7 @@ export function ReplaceDialog({
       onApplied?.(result);
       cache.current = null;
       cursor.current = cell;
-      const fresh = await findMatches(query);
+      const fresh = await findMatches(query, REPLACE_LOOK_IN);
       if (!fresh) return;
       if (fresh.matches.length === 0) {
         setMatch({ index: -1, total: 0, truncated: false });
@@ -444,7 +458,7 @@ export function ReplaceDialog({
         query,
         replacement,
         entireCell,
-        lookIn,
+        lookIn: REPLACE_LOOK_IN,
         matchCase,
       }));
       if (steps.length === 0) {
@@ -649,7 +663,7 @@ export function ReplaceDialog({
                 : t('replaceDialog.workbookScope', { count: workbookSheetCount })
             : t('replaceDialog.noRange')}
         </div>
-        {lookIn === 'formulas' && <div style={{ fontSize: 12, color: '#b06000' }}>{t('replaceDialog.formulaWarning')}</div>}
+        <div style={{ fontSize: 12, color: '#b06000' }}>{t('replaceDialog.formulaWarning')}</div>
 
         <div role="status" aria-live="polite" style={{ minHeight: 18, fontSize: 12, color: toolbarTheme.inkMuted }}>
           {phase.kind === 'refused' && <span style={{ color: '#b3261e' }}>{t('replaceDialog.refused', { message: phase.message })}</span>}
@@ -671,6 +685,11 @@ export function ReplaceDialog({
             ? ` ${t('replaceDialog.skippedValues', {
               count: stats.skippedValues, cells: skippedCellList(stats),
             })}`
+            : null}
+          {stats?.refusedCells?.length
+            ? <span style={{ color: '#b3261e' }}>
+              {` ${t('replaceDialog.refused', { message: refusedCellList(stats) })}`}
+            </span>
             : null}
         </div>
 

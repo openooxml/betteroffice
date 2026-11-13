@@ -113,9 +113,11 @@ class PatchStyle(_Guarded):
 
 
 class ReplaceText(_Step, total=False):
-    """Literal replacement, case-insensitive unless ``matchCase``; other cells are skipped.
+    """Literal replacement in each cell's entered text, entered again as if typed.
 
-    ``lookIn`` defaults to ``values``; ``formulas`` also rewrites formula source.
+    Case-insensitive unless ``matchCase``. ``lookIn`` defaults to ``values``, which skips
+    formula cells; ``formulas`` rewrites them too. Rich text cells and entries that would
+    not parse are refused one by one and listed in ``refusedCells``.
     """
 
     op: Literal["replaceText"]
@@ -163,6 +165,13 @@ class Refusal(TypedDict):
     failure: EditFailure
 
 
+class RefusedCell(TypedDict):
+    """One matched cell a replace left unchanged, and why."""
+
+    cell: str
+    reason: str
+
+
 class ReplaceStats(TypedDict):
     """Counts for one ``replaceText`` step; omitted for other operations."""
 
@@ -172,6 +181,7 @@ class ReplaceStats(TypedDict):
     skippedLocked: int
     skippedValues: int
     skippedCells: list[str]
+    refusedCells: list[RefusedCell]
 
 
 class _OptionalReplace(TypedDict, total=False):
@@ -275,7 +285,7 @@ class FindRequest(_FindRequest, total=False):
     """Literal search, case-insensitive unless ``matchCase``; ``limit`` defaults to 100.
 
     Omit ``lookIn`` or pass ``values`` to search display text of every stored cell;
-    ``formulas`` narrows to text cells and formula source.
+    ``formulas`` searches the entered text the formula bar shows.
     """
 
     sheetIds: List[str]

@@ -21,14 +21,14 @@
     "sheetScope": "工作表：{sheet}",
     "workbookScope": "全部工作表（{count} 个）",
     "noRange": "请先选择单元格区域。",
-    "formulaWarning": "这会修改公式并重新计算结果。",
+    "formulaWarning": "“查找范围”仅适用于查找。替换会像重新键入一样编辑每个单元格的输入内容，并重新计算公式。",
     "preview": "预览",
     "replaceAll": "全部替换",
     "working": "正在检查…",
     "noMatches": "没有匹配项。",
     "summary": "匹配 {matched} 个，替换 {replaced} 个，跳过 {formulas} 个公式结果和 {locked} 个锁定单元格。",
     "refused": "未替换：{message}",
-    "skippedValues": "{count} 个匹配的值不是文本，未更改：{cells}"
+    "skippedValues": "{count} 个匹配的日期、TRUE/FALSE 或错误值未更改：{cells}"
   },
   "_lang": "zh-CN",
   "toolbar": {

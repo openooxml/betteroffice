@@ -118,12 +118,13 @@ export type XlsxEditOperation =
   | { op: 'patchStyle'; target: XlsxRangeTarget; patch: RangeStylePatch }
   | {
       /**
-       * Literal replacement inside `target`, case-insensitive unless `matchCase`.
+       * Literal replacement in each cell's entered text inside `target`, case-insensitive
+       * unless `matchCase`; the result is entered as if typed, as `setCellInputs` does.
        *
-       * `values` rewrites stored text in non-formula cells and reports matching formula
-       * results as skipped. `formulas` rewrites text cells and formula source. Numeric,
-       * boolean, merged-follower, array-filled and locked cells are skipped; formatting is
-       * preserved. Limit exhaustion refuses the whole batch. It takes no `expect` guards.
+       * `values` reports formula cells as skipped; `formulas` rewrites them too. Dates,
+       * booleans, errors, merged-follower, array-filled and locked cells are skipped; a rich
+       * text cell or an entry that would not parse is refused alone while the rest applies.
+       * Limit exhaustion refuses the whole batch. It takes no `expect` guards.
        */
       op: 'replaceText';
       target: XlsxRangeTarget;
@@ -185,10 +186,12 @@ export interface XlsxReplaceStats {
   skippedFormulas: number;
   /** Matches on merged followers, array fills or locked cells of a protected sheet. */
   skippedLocked: number;
-  /** Non-text values whose display text matched in `values` mode; they are untouched. */
+  /** Dates, booleans and errors whose displayed or entered text matched; they are untouched. */
   skippedValues?: number;
   /** A1 references of the first skipped values, at most 10,000. */
   skippedCells?: string[];
+  /** Matched cells left unchanged because their new entry cannot be stored, at most 10,000. */
+  refusedCells?: { cell: string; reason: string }[];
 }
 
 export interface XlsxEditReceipt {
@@ -326,7 +329,7 @@ export interface XlsxFindRequest {
   range?: XlsxRangeTarget;
   /**
    * Omit or pass `values` to search the display text of every stored cell; `formulas`
-   * narrows to text cells and formula source, matching what `replaceText` can rewrite.
+   * searches the entered text the formula bar shows, which is what `replaceText` edits.
    */
   lookIn?: 'values' | 'formulas';
   /** Match only cells whose whole searched text equals `text`. */

@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "«Шукати в» діє лише для пошуку. Заміна змінює вміст кожної клітинки так, ніби його введено вручну, і перераховує формули.",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "Збіжні значення, які не є текстом, не змінено ({count}): {cells}"
+    "skippedValues": "Збіжні дати, значення TRUE/FALSE або помилки не змінено ({count}): {cells}"
   },
   "_lang": "uk",
   "toolbar": {

@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "האפשרות 'חפש ב' חלה רק על חיפוש. החלפה עורכת את תוכן כל תא כאילו הוקלד ומחשבת מחדש את הנוסחאות.",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "ערכים תואמים שאינם טקסט לא שונו ({count}): {cells}"
+    "skippedValues": "תאריכים, ערכי TRUE/FALSE או ערכי שגיאה תואמים לא שונו ({count}): {cells}"
   },
   "_lang": "he",
   "toolbar": {

@@ -21,14 +21,14 @@
     "sheetScope": "工作表：{sheet}",
     "workbookScope": "全部工作表（{count} 個）",
     "noRange": "請先選取儲存格範圍。",
-    "formulaWarning": "這會修改公式並重新計算結果。",
+    "formulaWarning": "「搜尋範圍」只適用於尋找。取代會像重新輸入一樣編輯每個儲存格的內容，並重新計算公式。",
     "preview": "預覽",
     "replaceAll": "全部取代",
     "working": "正在檢查…",
     "noMatches": "沒有符合項目。",
     "summary": "符合 {matched} 個，取代 {replaced} 個，略過 {formulas} 個公式結果和 {locked} 個鎖定儲存格。",
     "refused": "未取代：{message}",
-    "skippedValues": "{count} 個相符的值不是文字，未變更：{cells}"
+    "skippedValues": "{count} 個相符的日期、TRUE/FALSE 或錯誤值未變更：{cells}"
   },
   "_lang": "zh-TW",
   "toolbar": {

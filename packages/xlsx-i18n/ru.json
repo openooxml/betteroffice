@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "«Область поиска» действует только для поиска. Замена изменяет содержимое каждой ячейки так, будто оно введено вручную, и пересчитывает формулы.",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "Совпавшие значения, которые не являются текстом, не изменены ({count}): {cells}"
+    "skippedValues": "Совпавшие даты, значения TRUE/FALSE или ошибки не изменены ({count}): {cells}"
   },
   "_lang": "ru",
   "toolbar": {

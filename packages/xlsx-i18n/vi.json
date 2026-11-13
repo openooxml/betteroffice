@@ -21,14 +21,14 @@
     "sheetScope": "Sheet: {sheet}",
     "workbookScope": "All sheets ({count})",
     "noRange": "Select a cell range first.",
-    "formulaWarning": "This changes formulas and recalculates results.",
+    "formulaWarning": "“Tìm trong” chỉ áp dụng cho Tìm. Thay thế sửa nội dung từng ô như khi gõ và tính lại công thức.",
     "preview": "Preview",
     "replaceAll": "Replace all",
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
     "refused": "Not replaced: {message}",
-    "skippedValues": "{count} giá trị khớp không phải văn bản và không được thay đổi: {cells}"
+    "skippedValues": "{count} ngày, giá trị TRUE/FALSE hoặc giá trị lỗi khớp không được thay đổi: {cells}"
   },
   "_lang": "vi",
   "toolbar": {
