@@ -248,7 +248,8 @@ function defaultScopeFor(target: ReplaceDialogTarget | null): ReplaceScope {
 
 /**
  * Find and replace over one range. Find next/previous selects one matching cell at a time;
- * Replace rewrites only that cell. Replace all still stages one `replaceText` step.
+ * Replace rewrites only that cell, or only selects the next match when that cell does not match.
+ * Replace all still stages one `replaceText` step.
  */
 export function ReplaceDialog({
   open,
@@ -405,8 +406,12 @@ export function ReplaceDialog({
         return;
       }
       const from = cursor.current ?? activeCellOf(target);
-      const current = found.matches.findIndex((entry) => compareCells(found.sheetOrder, entry.cell, from) === 0);
-      const index = current < 0 ? stepFrom(found, from, 1) : current;
+      const index = found.matches.findIndex((entry) => compareCells(found.sheetOrder, entry.cell, from) === 0);
+      if (index < 0) {
+        setPhase({ kind: 'idle' });
+        await selectMatch(found, stepFrom(found, from, 1));
+        return;
+      }
       const cell = found.matches[index].cell;
       const at = { row: cell.row, col: cell.col };
       const version = await Promise.resolve(api.version());
