@@ -511,6 +511,12 @@ describe('native package release wiring', () => {
     );
     expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
+    const crateSave = job.steps.find((step: any) => step.name === 'Check the crate save against the product save');
+    expect(crateSave.env).toEqual({ DOCX_CRATE_PARITY_DIR: '${{ runner.temp }}/docx-crate-parity' });
+    expect(crateSave.run).toBe(
+      'bun test bindings/engine-parity/docx-crate-save.test.ts\ncargo test --locked -p betteroffice-docx --test wasm_parity -- --ignored\n'
+    );
+    expect(job.steps.indexOf(crateSave)).toBe(job.steps.indexOf(parity) + 1);
     const xlsx = job.steps.find(
       (step: any) => step.name === 'Test the xlsx packages on the native engine'
     );
