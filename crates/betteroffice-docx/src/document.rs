@@ -244,6 +244,9 @@ impl Document {
         client_id: u64,
         context: &EditCtx,
     ) -> Result<Receipt> {
+        if context.suggesting.is_some() {
+            return Err(Error::SuggestingEditUnsupported);
+        }
         self.replace_located_text(Locator::Id(para_id), para_id, text, client_id, context)
     }
 
@@ -261,6 +264,9 @@ impl Document {
         client_id: u64,
         context: &EditCtx,
     ) -> Result<Receipt> {
+        if context.suggesting.is_some() {
+            return Err(Error::SuggestingEditUnsupported);
+        }
         let paragraphs = self.paragraphs();
         let len = paragraphs.len();
         let paragraph = paragraphs
@@ -324,7 +330,7 @@ impl Document {
         self.authored_ids
             .retain(|_, (fresh, _)| edited_id.as_ref() != Some(&*fresh));
         let mirrored = match (&mut self.session_baseline, replacement.source_ordinal) {
-            (Some(baseline), Some(ordinal)) if context.suggesting.is_none() => baseline
+            (Some(baseline), Some(ordinal)) => baseline
                 .replace_text(locator, &edited)
                 .then(|| SessionEdit {
                     para_id: edited_id,
