@@ -277,6 +277,8 @@ export function ReplaceDialog({
   const [dragging, setDragging] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number; baseX: number; baseY: number } | null>(null);
   const cache = useRef<FindCache | null>(null);
+  /** Bumped whenever the options change, so a find started before is dropped. */
+  const generation = useRef(0);
   const cursor = useRef<CellPosition | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
@@ -290,6 +292,7 @@ export function ReplaceDialog({
 
   useLayoutEffect(() => {
     if (!open) return;
+    generation.current += 1;
     cache.current = null;
     cursor.current = null;
     setMatch(null);
@@ -331,11 +334,18 @@ export function ReplaceDialog({
     ?? target?.label ?? '';
   const workbookSheetCount = target ? searchedSheetCount(target) : 1;
 
+  const optionsChanged = () => {
+    generation.current += 1;
+    cache.current = null;
+    setMatch(null);
+  };
+
   const findMatches = async (
     query: string,
     mode: 'values' | 'formulas' = lookIn,
   ): Promise<FindCache | null> => {
     if (!target) return null;
+    const started = generation.current;
     const version = await Promise.resolve(api.version());
     const key = searchKey(target, scope, query, mode, entireCell, matchCase, version);
     if (cache.current?.key === key) return cache.current;
@@ -356,6 +366,10 @@ export function ReplaceDialog({
         matchCase,
         limit: FIND_LIMIT,
       }));
+    if (generation.current !== started) {
+      setPhase({ kind: 'idle' });
+      return null;
+    }
     if (!result.ok) {
       setPhase({ kind: 'refused', message: refusalMessage(result) });
       return null;
@@ -624,11 +638,11 @@ export function ReplaceDialog({
           <div role="radiogroup" aria-labelledby={lookInId} style={{ display: 'flex', gap: 16 }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <input type="radio" name="replace-look-in" checked={lookIn === 'values'}
-                onChange={() => { cache.current = null; setMatch(null); setLookIn('values'); }} /> {t('replaceDialog.values')}
+                onChange={() => { optionsChanged(); setLookIn('values'); }} /> {t('replaceDialog.values')}
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <input type="radio" name="replace-look-in" checked={lookIn === 'formulas'}
-                onChange={() => { cache.current = null; setMatch(null); setLookIn('formulas'); }} /> {t('replaceDialog.formulas')}
+                onChange={() => { optionsChanged(); setLookIn('formulas'); }} /> {t('replaceDialog.formulas')}
             </label>
           </div>
         </fieldset>
@@ -636,8 +650,7 @@ export function ReplaceDialog({
         <label htmlFor={entireId} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <input id={entireId} type="checkbox" checked={entireCell}
             onChange={(event) => {
-              cache.current = null;
-              setMatch(null);
+              optionsChanged();
               setEntireCell(event.target.checked);
             }} />
           {t('replaceDialog.entireCell')}
@@ -646,8 +659,7 @@ export function ReplaceDialog({
         <label htmlFor={matchCaseId} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <input id={matchCaseId} type="checkbox" checked={matchCase}
             onChange={(event) => {
-              cache.current = null;
-              setMatch(null);
+              optionsChanged();
               setMatchCase(event.target.checked);
             }} />
           {t('replaceDialog.matchCase')}
@@ -659,8 +671,7 @@ export function ReplaceDialog({
             id={scopeId}
             value={scope}
             onChange={(event) => {
-              cache.current = null;
-              setMatch(null);
+              optionsChanged();
               setPhase({ kind: 'idle' });
               setScope(event.target.value as ReplaceScope);
             }}
