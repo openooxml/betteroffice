@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellRef, CellValue, EditOutcome, EditRequest, ReplaceStats, Sheet,
-    SheetId, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellRef, CellValue, EditOutcome, EditRequest, ReadRequest,
+    ReplaceStats, Sheet, SheetId, Workbook, WorkbookModel,
 };
 use serde_json::{Value, json};
 use xlsx_model::{CellRange, Protection, Xf};
@@ -631,4 +631,184 @@ fn replace_ignores_case_by_default_and_matches_exactly_under_match_case() {
     assert_eq!(outcome.receipts[0].changed_cells.len(), 1);
     assert_eq!(stored(&workbook, "A5"), text("xABCx"));
     assert_eq!(stored(&workbook, "A6"), text("xzx"));
+}
+
+fn rich_workbook() -> Workbook {
+    let model = WorkbookModel {
+        sheets: vec![Sheet::new("Sheet1")],
+        ..WorkbookModel::default()
+    };
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let sheet = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    sheet.1 = br#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><r><rPr><rFont val="Arial"/><b/></rPr><t>alpha</t></r><r><rPr><rFont val="Courier New"/><i/></rPr><t xml:space="preserve"> beta</t></r></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>alpha</t></is></c></row></sheetData></worksheet>"#.to_vec();
+    Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+}
+
+#[test]
+fn replace_refuses_rich_text_cells_and_keeps_their_runs() {
+    let mut workbook = rich_workbook();
+    let runs = workbook
+        .cell_text_runs(SheetId(0), cell("A1"))
+        .expect("A1 holds rich text")
+        .to_vec();
+    assert_eq!(runs.len(), 2);
+    let before = workbook.version();
+
+    let refusal = apply(&mut workbook, replace("A1:A2", "alpha", "omega", false))
+        .expect_err("rewriting rich text as plain text would drop its runs");
+    assert!(
+        refusal.failure.message.contains("Sheet1!A1"),
+        "{}",
+        refusal.failure.message
+    );
+    assert_eq!(workbook.version(), before);
+    assert_eq!(stored(&workbook, "A1"), text("alpha beta"));
+    assert_eq!(stored(&workbook, "A2"), text("alpha"));
+    assert_eq!(
+        workbook.cell_text_runs(SheetId(0), cell("A1")),
+        Some(runs.as_slice())
+    );
+}
+
+fn number_workbook() -> Workbook {
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs.push(Xf::default());
+    let mut data = Sheet::new("Data");
+    put(&mut data, "A1", text("item 1"), None, None);
+    put(&mut data, "A2", CellValue::Number { value: 123.0 }, None, None);
+    put(&mut data, "A3", text("1 more"), None, None);
+    model.sheets.push(data);
+    let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+}
+
+#[test]
+fn replace_all_skips_and_reports_values_it_cannot_rewrite() {
+    let workbook = number_workbook();
+    let scope = json!({ "sheetId": SHEET, "range": { "kind": "a1", "a1": "A1:A3" } });
+    assert_eq!(
+        found(&workbook, json!({ "text": "1", "range": scope, "lookIn": "values" })),
+        ["A1", "A2", "A3"],
+        "find shows the number by its displayed text"
+    );
+
+    let request: EditRequest = serde_json::from_value(json!({
+        "expectVersion": workbook.version(),
+        "steps": [replace("A1:A3", "1", "2", false)],
+    }))
+    .unwrap();
+    let validation = workbook.validate_edits(&request).unwrap().unwrap();
+    let preview = serde_json::to_value(&validation.previews[0]).unwrap();
+    assert_eq!(preview["replace"]["matched"], 3);
+    assert_eq!(preview["replace"]["replaced"], 2);
+    assert_eq!(preview["replace"]["skippedValues"], 1);
+    assert_eq!(preview["replace"]["skippedCells"], json!(["A2"]));
+
+    let mut workbook = workbook;
+    let outcome = apply(&mut workbook, replace("A1:A3", "1", "2", false))
+        .expect("the batch applies");
+    assert_eq!(outcome.receipts[0].changed_cells.len(), 2);
+    assert_eq!(stored(&workbook, "A1"), text("item 2"));
+    assert_eq!(stored(&workbook, "A2"), CellValue::Number { value: 123.0 });
+    assert_eq!(stored(&workbook, "A3"), text("2 more"));
+    let wire = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(wire["receipts"][0]["replace"]["matched"], 3);
+    assert_eq!(wire["receipts"][0]["replace"]["replaced"], 2);
+    assert_eq!(wire["receipts"][0]["replace"]["skippedValues"], 1);
+    assert_eq!(wire["receipts"][0]["replace"]["skippedCells"], json!(["A2"]));
+}
+
+fn workbook_with_hidden_and_chartsheet() -> Workbook {
+    let mut model = WorkbookModel::default();
+    let mut data = Sheet::new("Data");
+    put(&mut data, "A1", text("alpha"), None, None);
+    let mut hidden = Sheet::new("Hidden");
+    put(&mut hidden, "A1", text("alpha"), None, None);
+    let mut chart = Sheet::new("Chart");
+    put(&mut chart, "A1", text("alpha"), None, None);
+    model.sheets.extend([data, hidden, chart]);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "xl/workbook.xml" {
+            let xml = String::from_utf8(bytes.clone())
+                .unwrap()
+                .replace(r#"name="Hidden""#, r#"name="Hidden" state="hidden""#);
+            *bytes = xml.into_bytes();
+        } else if path == "xl/_rels/workbook.xml.rels" {
+            let xml = String::from_utf8(bytes.clone()).unwrap().replace(
+                "relationships/worksheet\" Target=\"worksheets/sheet3.xml",
+                "relationships/chartsheet\" Target=\"worksheets/sheet3.xml",
+            );
+            *bytes = xml.into_bytes();
+        } else if path == "xl/worksheets/sheet3.xml" {
+            *bytes = br#"<chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#.to_vec();
+        }
+    }
+    let workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let read = serde_json::to_value(
+        workbook
+            .read_cells(&ReadRequest::default())
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(read["sheets"][1]["visibility"], "hidden");
+    assert_eq!(read["sheets"][2]["editable"], false);
+    workbook
+}
+
+#[test]
+fn find_over_all_sheets_skips_hidden_sheets_and_chartsheets() {
+    let workbook = workbook_with_hidden_and_chartsheet();
+    let matches = workbook
+        .find_text(&serde_json::from_value(json!({ "text": "alpha" })).unwrap())
+        .unwrap()
+        .expect("a chartsheet does not refuse a workbook search")
+        .matches;
+    assert_eq!(
+        matches
+            .into_iter()
+            .map(|found| (found.cell.sheet_id, found.cell.a1))
+            .collect::<Vec<_>>(),
+        [("sheet:0".to_owned(), "A1".to_owned())]
+    );
+}
+
+#[test]
+fn replace_over_a_sheet_list_with_a_chartsheet_does_not_refuse_the_batch() {
+    let mut workbook = workbook_with_hidden_and_chartsheet();
+    let whole = |sheet: &str| {
+        json!({
+            "op": "replaceText",
+            "target": {
+                "sheetId": sheet,
+                "range": {
+                    "kind": "rowCol",
+                    "start": { "row": 0, "col": 0 },
+                    "end": { "row": 1048575, "col": 16383 },
+                },
+            },
+            "query": "alpha",
+            "replacement": "omega",
+        })
+    };
+    let request: EditRequest = serde_json::from_value(json!({
+        "expectVersion": workbook.version(),
+        "steps": [whole("sheet:0"), whole("sheet:2")],
+    }))
+    .unwrap();
+
+    let outcome = workbook
+        .apply_edits(&request)
+        .unwrap()
+        .expect("a chartsheet in the sheet list is skipped, not refused");
+    assert_eq!(outcome.receipts.len(), 2);
+    assert!(outcome.receipts[0].changed);
+    assert!(!outcome.receipts[1].changed);
+    assert!(outcome.receipts[1].changed_cells.is_empty());
+    assert_eq!(stored_on(&workbook, SheetId(0), "A1"), text("omega"));
+    assert_eq!(stored_on(&workbook, SheetId(1), "A1"), text("alpha"));
 }

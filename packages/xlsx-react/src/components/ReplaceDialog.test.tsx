@@ -261,6 +261,58 @@ test('replaces every sheet when the scope is all sheets', async () => {
   });
 });
 
+test('workbook scope sends no hidden sheets or chartsheets', async () => {
+  const finds: XlsxFindRequest[] = [];
+  const requests: XlsxEditRequest[] = [];
+  const { getByRole, findByText } = render(
+    <LocaleProvider>
+      <ReplaceDialog
+        open
+        target={{
+          ...target,
+          sheets: [
+            { sheetId: 'sheet:0', name: 'Data' },
+            { sheetId: 'sheet:1', name: 'Secret', hidden: true },
+            { sheetId: 'sheet:2', name: 'Chart', kind: 'chartsheet' },
+            { sheetId: 'sheet:3', name: 'Summary', kind: 'worksheet' },
+          ],
+        }}
+        api={{
+          version: () => 'v1',
+          find: (request) => {
+            finds.push(request);
+            return { ok: true, version: 'v1', matches: [], truncated: false };
+          },
+          validate: (request) => {
+            requests.push(request);
+            return {
+              ok: true, baseVersion: 'v1', wouldApply: true,
+              previews: request.steps.map((step, index) => ({
+                stepIndex: index, target: step.target, wouldChange: false,
+                changedCellCount: 0,
+                replace: { matched: 0, replaced: 0, skippedFormulas: 0, skippedLocked: 0 },
+              })),
+            };
+          },
+          apply: () => { throw new Error('must not apply'); },
+        }}
+        onClose={() => {}}
+      />
+    </LocaleProvider>,
+  );
+
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, 'beta');
+  fireEvent.change(getByRole('combobox', { name: 'Search in' }), { target: { value: 'workbook' } });
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await findByText(/No matches/);
+  fireEvent.click(getByRole('button', { name: 'Preview' }));
+  await waitFor(() => expect(requests.length).toBe(1));
+
+  expect(finds[0].sheetIds).toEqual(['sheet:0', 'sheet:3']);
+  expect(requests[0].steps.map((step) => step.target.sheetId)).toEqual(['sheet:0', 'sheet:3']);
+});
+
 test('defaults to all sheets when only one cell is selected', () => {
   const { getByRole } = render(
     <LocaleProvider>
