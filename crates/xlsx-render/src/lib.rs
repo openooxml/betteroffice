@@ -840,7 +840,8 @@ where
         .map(|g| (g.row, g.col))
         .collect();
 
-    let grid_commands = if print.is_some_and(|(_, gridlines)| !gridlines) {
+    let gridlines = print.map_or(!sheet_ref.format.hide_gridlines, |(_, gridlines)| gridlines);
+    let grid_commands = if !gridlines {
         Vec::new()
     } else {
         emit_grid_segments(

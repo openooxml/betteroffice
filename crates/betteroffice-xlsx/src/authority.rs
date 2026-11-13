@@ -1061,10 +1061,11 @@ impl WorkbookAuthority {
         writer.var_usize(update.len());
         let mut tail = Writer::new();
         base.row_styles.write(&mut tail);
-        let sized = base
-            .formats
-            .iter()
-            .any(|format| format.default_col_width.is_some() || format.base_col_width.is_some());
+        let gridless = base.formats.iter().any(|format| format.hide_gridlines);
+        let sized = gridless
+            || base.formats.iter().any(|format| {
+                format.default_col_width.is_some() || format.base_col_width.is_some()
+            });
         if sized
             || base.auto_filters.iter().any(Option::is_some)
             || base
@@ -1084,6 +1085,13 @@ impl WorkbookAuthority {
                 base.formats
                     .iter()
                     .map(|format| (format.default_col_width, format.base_col_width))
+                    .collect::<Vec<_>>()
+                    .write(&mut tail);
+            }
+            if gridless {
+                base.formats
+                    .iter()
+                    .map(|format| format.hide_gridlines)
                     .collect::<Vec<_>>()
                     .write(&mut tail);
             }
@@ -1195,6 +1203,17 @@ impl WorkbookAuthority {
             for (format, (width, digits)) in base.formats.iter_mut().zip(defaults) {
                 format.default_col_width = width;
                 format.base_col_width = digits;
+            }
+        }
+        if !reader.is_empty() {
+            let gridless: Vec<bool> = Codec::read(&mut reader)?;
+            if gridless.len() != base.formats.len() {
+                return Err(SnapshotError::new(
+                    "Recovery gridlines sheet count mismatch",
+                ));
+            }
+            for (format, hidden) in base.formats.iter_mut().zip(gridless) {
+                format.hide_gridlines = hidden;
             }
         }
         reader.finish()?;
@@ -8304,6 +8323,48 @@ mod tests {
         assert!(
             matches!(sheet.get(&txn, CONDITIONAL_FORMATS), Some(Out::Any(Any::String(value))) if value.as_ref() == "[]")
         );
+    }
+
+    #[test]
+    fn recovery_state_without_gridless_sheets_keeps_the_released_layout() {
+        use super::snapshot::Codec;
+        use crate::snapshot::wire::Writer;
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Plain"));
+        model.sheets.push(Sheet::new("Rules"));
+        let mut ruled = model.clone();
+        ruled.sheets[1].conditional_formats = source_conditional_formats();
+        for (client, model) in [(106, model), (107, ruled)] {
+            let authority = WorkbookAuthority::from_model_with_client_id(&model, client).unwrap();
+            let base = &authority.base;
+            assert!(base.formats.iter().all(|format| !format.hide_gridlines));
+            let mut released = Writer::new();
+            base.row_styles.write(&mut released);
+            let filtered = base.auto_filters.iter().any(Option::is_some);
+            if filtered
+                || base
+                    .conditional_formats
+                    .iter()
+                    .any(|formats| !formats.is_empty())
+            {
+                released.bytes(&serde_json::to_vec(&base.conditional_formats).unwrap());
+                if filtered {
+                    released.bytes(&serde_json::to_vec(&base.auto_filters).unwrap());
+                }
+            }
+            let [_, _, tail] = authority.recovery_state_parts().unwrap();
+            assert_eq!(tail, released.into_bytes());
+
+            let mut formats = base.formats.clone();
+            let mut plain = Writer::new();
+            formats.write(&mut plain);
+            for format in &mut formats {
+                format.hide_gridlines = true;
+            }
+            let mut flagged = Writer::new();
+            formats.write(&mut flagged);
+            assert_eq!(plain.into_bytes(), flagged.into_bytes());
+        }
     }
 
     #[test]

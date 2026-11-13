@@ -59,6 +59,8 @@ const CHART_XML: u8 = 34;
 /// A sheet record laid out as `HIDDEN_SHEET` whose format also carries the
 /// default column widths; a sheet without any keeps its other layouts.
 const SIZED_SHEET: u8 = 35;
+/// A sheet record laid out as `SIZED_SHEET` whose sheet hides its gridlines.
+const GRIDLESS_SHEET: u8 = 36;
 
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
@@ -67,7 +69,7 @@ const BORDER_V2: u8 = 23;
 fn run_tag(tag: u8) -> u8 {
     match tag {
         CONDITIONAL_HEADER | AUTO_FILTER_HEADER => HEADER,
-        STYLED_SHEET | HIDDEN_SHEET | SIZED_SHEET => SHEET,
+        STYLED_SHEET | HIDDEN_SHEET | SIZED_SHEET | GRIDLESS_SHEET => SHEET,
         CHART_XML => CHART,
         XF_V2 => XF,
         CONDITIONAL_FORMATS_V2 => CONDITIONAL_FORMATS,
@@ -462,6 +464,8 @@ impl MetadataCursor {
                 CHART_REF
             } else if self.sheet_phase == CHART && sheet.charts[self.index].raw_xml.is_some() {
                 CHART_XML
+            } else if self.sheet_phase == SHEET && sheet.format.hide_gridlines {
+                GRIDLESS_SHEET
             } else if self.sheet_phase == SHEET && sized(&sheet.format) {
                 SIZED_SHEET
             } else if self.sheet_phase == SHEET
@@ -478,7 +482,7 @@ impl MetadataCursor {
                     w.str(&sheet.name);
                     w.option(sheet.freeze_pane.as_ref(), write_pane);
                     write_format(w, &sheet.format);
-                    let sized = sized(&sheet.format);
+                    let sized = sheet.format.hide_gridlines || sized(&sheet.format);
                     if sized {
                         w.option(sheet.format.default_col_width, Writer::f64);
                         w.option(sheet.format.base_col_width, Writer::var_u32);
@@ -1029,7 +1033,7 @@ impl ModelSnapshotBuilder {
             INDEXED => g.ensure(m, |m| Ok(&mut m.styles.indexed_colors), budget),
             TABLE => g.ensure(m, |m| Ok(&mut m.tables), budget),
             TABLE_COLUMN => g.ensure(m, |m| Ok(&mut m.tables.last_mut().unwrap().columns), budget),
-            SHEET | STYLED_SHEET | HIDDEN_SHEET | SIZED_SHEET => {
+            SHEET | STYLED_SHEET | HIDDEN_SHEET | SIZED_SHEET | GRIDLESS_SHEET => {
                 g.ensure(m, |m| Ok(&mut m.sheets), budget)
             }
             HYPERLINK => g.ensure(
@@ -1257,7 +1261,9 @@ impl ModelSnapshotBuilder {
                 .ok_or_else(|| SnapshotError::new("snapshot table column has no table"))?
                 .columns
                 .push(r.str()?.to_owned()),
-            SHEET | STYLED_SHEET | HIDDEN_SHEET | SIZED_SHEET => self.read_sheet(r, raw)?,
+            SHEET | STYLED_SHEET | HIDDEN_SHEET | SIZED_SHEET | GRIDLESS_SHEET => {
+                self.read_sheet(r, raw)?
+            }
             CHART_XML => self.read_sheet_record(raw, r)?,
             _ => self.read_sheet_record(tag, r)?,
         }
@@ -1283,13 +1289,14 @@ impl ModelSnapshotBuilder {
         sheet.auto_filter = self.auto_filters.next().unwrap_or_default();
         sheet.freeze_pane = r.option(read_pane)?;
         sheet.format = read_format(r)?;
-        if tag == SIZED_SHEET {
+        sheet.format.hide_gridlines = tag == GRIDLESS_SHEET;
+        if matches!(tag, SIZED_SHEET | GRIDLESS_SHEET) {
             sheet.format.default_col_width = r.option(Reader::f64)?;
             sheet.format.base_col_width = r.option(Reader::var_u32)?;
         }
         let mut counts = [0; 11];
         let count = match tag {
-            HIDDEN_SHEET | SIZED_SHEET => 11,
+            HIDDEN_SHEET | SIZED_SHEET | GRIDLESS_SHEET => 11,
             STYLED_SHEET => 9,
             _ => 8,
         };
@@ -1690,6 +1697,7 @@ fn write_format(w: &mut Writer, value: &SheetFormat) {
         zero_height,
         default_col_width: _,
         base_col_width: _,
+        hide_gridlines: _,
     } = value;
     w.option(*default_row_height_pt, Writer::f64);
     w.bool(*custom_height);
@@ -2630,7 +2638,7 @@ mod tests {
                 .unwrap();
             let (kind, ordinal, payload) = unframe(chunk).unwrap();
             let mut payload = payload.to_vec();
-            payload[0] = 35;
+            payload[0] = GRIDLESS_SHEET + 1;
             *chunk = frame(kind, ordinal, &payload);
             let mut builder = ModelSnapshotBuilder::new();
             let refused = unknown
