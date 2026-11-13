@@ -96,6 +96,8 @@ pub enum RunContent {
         dirty: Option<bool>,
         #[serde(rename = "formData", skip_serializing_if = "Option::is_none")]
         form_data: Option<FieldFormData>,
+        #[serde(skip)]
+        raw_form_data_xml: Option<String>,
     },
     #[serde(rename = "instrText")]
     InstrText { text: String },
@@ -480,6 +482,9 @@ fn parse_field_char(element: &XmlElement) -> RunContent {
             .then_some(true),
         dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         form_data: parse_field_form_data(element),
+        raw_form_data_xml: element
+            .child("w", "ffData")
+            .map(XmlElement::to_raw_inline_xml),
     }
 }
 
@@ -1224,6 +1229,8 @@ pub struct ComplexField {
     pub fld_lock: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
+    #[serde(rename = "rawFormDataXml", skip_serializing_if = "Option::is_none")]
+    pub raw_form_data_xml: Option<String>,
     #[serde(rename = "structuredCode", skip_serializing_if = "Option::is_none")]
     pub structured_code: Option<StructuredFieldContent>,
     #[serde(rename = "structuredResult", skip_serializing_if = "Option::is_none")]
@@ -2193,6 +2200,7 @@ pub(crate) struct OpenComplexField {
     mode: FieldMode,
     fld_lock: bool,
     dirty: bool,
+    raw_form_data_xml: Option<String>,
     formatting: Option<TextFormatting>,
 }
 
@@ -2203,8 +2211,13 @@ impl OpenComplexField {
                 char_type,
                 fld_lock,
                 dirty,
+                raw_form_data_xml,
                 ..
-            } if char_type == "begin" => Some((*fld_lock == Some(true), *dirty == Some(true))),
+            } if char_type == "begin" => Some((
+                *fld_lock == Some(true),
+                *dirty == Some(true),
+                raw_form_data_xml.clone(),
+            )),
             _ => None,
         });
         Self {
@@ -2216,8 +2229,9 @@ impl OpenComplexField {
             instruction_runs: Vec::new(),
             children: Vec::new(),
             mode: FieldMode::Code,
-            fld_lock: flags.is_some_and(|flags| flags.0),
-            dirty: flags.is_some_and(|flags| flags.1),
+            fld_lock: flags.as_ref().is_some_and(|flags| flags.0),
+            dirty: flags.as_ref().is_some_and(|flags| flags.1),
+            raw_form_data_xml: flags.and_then(|flags| flags.2),
             formatting: run.formatting.clone(),
         }
     }
@@ -2320,6 +2334,7 @@ impl OpenComplexField {
             formatting: self.formatting,
             fld_lock: self.fld_lock.then_some(true),
             dirty: self.dirty.then_some(true),
+            raw_form_data_xml: self.raw_form_data_xml,
             structured_code,
             structured_result,
             field_tree: Some(field_tree),

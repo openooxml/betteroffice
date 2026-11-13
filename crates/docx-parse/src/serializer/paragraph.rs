@@ -602,7 +602,25 @@ fn serialize_complex_field(
     if field.fld_lock == Some(true) {
         output.push_str(" w:fldLock=\"true\"");
     }
-    output.push_str("/></w:r>");
+    if field.dirty == Some(true) {
+        output.push_str(" w:dirty=\"true\"");
+    }
+    if let Some(raw) = field.raw_form_data_xml.as_deref() {
+        output.push('>');
+        match validate_raw_subtree(raw, "w", "ffData") {
+            Ok(()) => output.push_str(raw),
+            Err(error) => {
+                let name = form_field_name(field, raw);
+                let Some(token) = context.defer_form_data(name.clone()) else {
+                    return Err(form_data_error(&name, &error.to_string()));
+                };
+                output.push_str(&token);
+            }
+        }
+        output.push_str("</w:fldChar></w:r>");
+    } else {
+        output.push_str("/></w:r>");
+    }
     let code_nodes = field
         .structured_code
         .as_ref()
@@ -699,6 +717,20 @@ pub fn serialize_inline_sdt(
     result?;
     writer.end_element().end_element();
     Ok(writer.finish())
+}
+
+fn form_field_name(field: &ComplexField, raw: &str) -> String {
+    raw.split_once("<w:name w:val=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(name, _)| name)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| field.instruction.clone(), str::to_owned)
+}
+
+pub(crate) fn form_data_error(field: &str, detail: &str) -> ParseError {
+    ParseError::Canonical(format!(
+        "the form field data of field {field:?} cannot be written: {detail}"
+    ))
 }
 
 pub(crate) fn serialize_sdt_properties(

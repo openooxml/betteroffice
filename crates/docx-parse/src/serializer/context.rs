@@ -66,6 +66,8 @@ pub struct SerializerContext {
     pub(crate) in_revision: bool,
     splice: Option<SpliceRecorder>,
     document_root: Option<String>,
+    form_data_token: Option<String>,
+    deferred_form_data: Vec<(String, String)>,
 }
 
 /// The XML written for each model paragraph a spliced part addresses by `sourceOrdinal`.
@@ -115,7 +117,31 @@ impl SerializerContext {
             in_revision: false,
             splice: None,
             document_root: None,
+            form_data_token: None,
+            deferred_form_data: Vec::new(),
         })
+    }
+
+    /// Writes an unreplayable `w:ffData` as a token absent from `source` instead of failing.
+    pub(crate) fn begin_form_data_tokens(&mut self, source: &str) {
+        let mut prefix = "<!--bo-ffdata ".to_owned();
+        while source.contains(&prefix) {
+            prefix.push('_');
+        }
+        self.form_data_token = Some(prefix);
+        self.deferred_form_data.clear();
+    }
+
+    pub(crate) fn defer_form_data(&mut self, field: String) -> Option<String> {
+        let prefix = self.form_data_token.as_deref()?;
+        let token = format!("{prefix}{}-->", self.deferred_form_data.len());
+        self.deferred_form_data.push((token.clone(), field));
+        Some(token)
+    }
+
+    pub(crate) fn end_form_data_tokens(&mut self) -> Vec<(String, String)> {
+        self.form_data_token = None;
+        std::mem::take(&mut self.deferred_form_data)
     }
 
     pub(crate) fn set_document_source(&mut self, source: Option<&str>) {
