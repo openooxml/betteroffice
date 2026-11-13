@@ -8993,7 +8993,7 @@ mod tests {
         let definitions = json!({
             "styles": [{
                 "type": "table", "styleId": "Shaded",
-                "tblPr": { "borders": { "insideH": line("000000") } },
+                "tblPr": { "styleRowBandSize": 1, "borders": { "insideH": line("000000") } },
                 "tblStylePr": [
                     { "type": "firstRow", "tcPr": {
                         "shading": fill("FF0000"),
@@ -9202,6 +9202,111 @@ mod tests {
             cells[1][0]["borders"]["bottom"]["color"]["rgb"],
             json!("0000FF")
         );
+    }
+
+    fn styled_cells(style: Value, look: Value, rows: usize, columns: usize) -> Vec<Vec<Value>> {
+        let cells = vec![json!({ "type": "tableCell", "content": [] }); columns];
+        let rows: Vec<Value> = (0..rows).map(|_| json!({ "cells": cells.clone() })).collect();
+        let style_id = style["styleId"].clone();
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": style_id, "look": look },
+            "rows": rows
+        });
+        seeded_cells(&json!({ "styles": [style] }), &table)
+    }
+
+    fn first_column_fills(cells: &[Vec<Value>]) -> Vec<Value> {
+        cells
+            .iter()
+            .map(|row| row[0]["backgroundColor"].clone())
+            .collect()
+    }
+
+    fn shading_part(region: &str, color: &str) -> Value {
+        json!({ "type": region, "tcPr": { "shading": { "fill": { "rgb": color } } } })
+    }
+
+    fn edge_style() -> Value {
+        json!({
+            "type": "table", "styleId": "Edges",
+            "tblStylePr": [shading_part("firstRow", "FF0000"), shading_part("lastRow", "0000FF")]
+        })
+    }
+
+    #[test]
+    fn table_look_named_flags_ignore_the_hex_mask() {
+        let cells = styled_cells(edge_style(), json!({ "value": "04A0", "lastRow": true }), 3, 1);
+        assert_eq!(
+            first_column_fills(&cells),
+            vec![Value::Null, Value::Null, json!("0000FF")]
+        );
+    }
+
+    #[test]
+    fn table_look_hex_mask_applies_without_named_flags() {
+        let cells = styled_cells(edge_style(), json!({ "value": "04A0" }), 3, 1);
+        assert_eq!(
+            first_column_fills(&cells),
+            vec![json!("FF0000"), Value::Null, Value::Null]
+        );
+    }
+
+    fn banded_style(band_size: Option<u32>) -> Value {
+        let mut style = json!({
+            "type": "table", "styleId": "Banded",
+            "tblStylePr": [shading_part("band1Horz", "D3DFEE")]
+        });
+        if let Some(size) = band_size {
+            style["tblPr"] = json!({ "styleRowBandSize": size });
+        }
+        style
+    }
+
+    #[test]
+    fn absent_row_band_size_applies_no_horizontal_banding() {
+        let cells = styled_cells(banded_style(None), json!({ "noVBand": true }), 3, 1);
+        assert_eq!(first_column_fills(&cells), vec![Value::Null; 3]);
+    }
+
+    #[test]
+    fn explicit_row_band_size_of_one_bands_alternate_rows() {
+        let cells = styled_cells(banded_style(Some(1)), json!({ "noVBand": true }), 3, 1);
+        assert_eq!(
+            first_column_fills(&cells),
+            vec![json!("D3DFEE"), Value::Null, json!("D3DFEE")]
+        );
+    }
+
+    #[test]
+    fn whole_table_part_shading_does_not_reach_cells() {
+        let style = json!({
+            "type": "table", "styleId": "Whole",
+            "tblStylePr": [shading_part("wholeTable", "00FF00")]
+        });
+        let cells = styled_cells(style, json!({ "noHBand": true, "noVBand": true }), 2, 2);
+        let fills: Vec<Value> = cells
+            .iter()
+            .flatten()
+            .map(|cell| cell["backgroundColor"].clone())
+            .collect();
+        assert_eq!(fills, vec![Value::Null; 4]);
+    }
+
+    #[test]
+    fn style_level_cell_borders_do_not_reach_cells() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "0000FF" } });
+        let style = json!({
+            "type": "table", "styleId": "Boxed",
+            "tcPr": { "borders": { "top": line, "bottom": line, "left": line, "right": line } }
+        });
+        let cells = styled_cells(style, json!({ "noHBand": true, "noVBand": true }), 2, 2);
+        let edges: Vec<Value> = cells
+            .iter()
+            .flatten()
+            .map(|cell| json!([cell["borders"]["top"], cell["borders"]["left"]]))
+            .collect();
+        assert_eq!(edges, vec![json!([null, null]); 4]);
     }
 
     #[test]

@@ -441,3 +441,67 @@ it('seeds identical conditional cell shading and borders in both engines', async
   expect(all![5]![5]!.backgroundColor).toBe('00000A');
   expect(all![2]![2]!.backgroundColor).toBe('ABCDEF');
 });
+
+const shadingPart = (type: string, fill: string) =>
+  `<w:tblStylePr w:type="${type}"><w:tcPr><w:shd w:val="clear" w:color="auto" w:fill="${fill}"/></w:tcPr></w:tblStylePr>`;
+const edgeStyles = `<w:style w:type="table" w:styleId="Edges">${shadingPart('firstRow', 'FF0000')}${shadingPart('lastRow', '0000FF')}</w:style>`;
+const bandedStyles = (bandSize: string) =>
+  `<w:style w:type="table" w:styleId="Banded">${bandSize}${shadingPart('band1Horz', 'D3DFEE')}</w:style>`;
+const flagsOff =
+  '<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>';
+const firstColumnFills = (seeded: Record<string, SeededCell[][][]>, engine: string) =>
+  seeded[engine]![0]!.map((row) => row[0]!.backgroundColor);
+
+it('ignores the tblLook hex mask once a named flag is present in both seeders', async () => {
+  const body = styledTable('Edges', '<w:tblLook w:val="04A0" w:lastRow="1"/>', [[''], [''], ['']], 1);
+  const seeded = await seedBoth(body, edgeStyles);
+  for (const engine of ['projected', 'native']) {
+    expect(firstColumnFills(seeded, engine)).toEqual([null, null, '0000FF']);
+  }
+});
+
+it('reads the tblLook hex mask when no named flag is present in both seeders', async () => {
+  const body = styledTable('Edges', '<w:tblLook w:val="04A0"/>', [[''], [''], ['']], 1);
+  const seeded = await seedBoth(body, edgeStyles);
+  for (const engine of ['projected', 'native']) {
+    expect(firstColumnFills(seeded, engine)).toEqual(['FF0000', null, null]);
+  }
+});
+
+it('applies no horizontal banding without a row band size in both seeders', async () => {
+  const seeded = await seedBoth(styledTable('Banded', flagsOff, [[''], [''], ['']], 1), bandedStyles(''));
+  for (const engine of ['projected', 'native']) {
+    expect(firstColumnFills(seeded, engine)).toEqual([null, null, null]);
+  }
+});
+
+it('bands alternate rows with an explicit row band size of one in both seeders', async () => {
+  const seeded = await seedBoth(
+    styledTable('Banded', flagsOff, [[''], [''], ['']], 1),
+    bandedStyles('<w:tblPr><w:tblStyleRowBandSize w:val="1"/></w:tblPr>')
+  );
+  for (const engine of ['projected', 'native']) {
+    expect(firstColumnFills(seeded, engine)).toEqual(['D3DFEE', null, 'D3DFEE']);
+  }
+});
+
+it('keeps wholeTable part shading off the cells in both seeders', async () => {
+  const styles = `<w:style w:type="table" w:styleId="Whole">${shadingPart('wholeTable', '00FF00')}</w:style>`;
+  const seeded = await seedBoth(styledTable('Whole', flagsOff, [['', ''], ['', '']], 2), styles);
+  for (const engine of ['projected', 'native']) {
+    expect(seeded[engine]![0]!.flat().map((cell) => cell.backgroundColor)).toEqual([null, null, null, null]);
+  }
+});
+
+it('keeps style-level tcBorders off the cells in both seeders', async () => {
+  const line = (side: string) => `<w:${side} w:val="single" w:sz="8" w:space="0" w:color="0000FF"/>`;
+  const styles =
+    '<w:style w:type="table" w:styleId="Boxed"><w:tcPr><w:tcBorders>' +
+    `${line('top')}${line('left')}${line('bottom')}${line('right')}</w:tcBorders></w:tcPr></w:style>`;
+  const seeded = await seedBoth(styledTable('Boxed', flagsOff, [['', ''], ['', '']], 2), styles);
+  for (const engine of ['projected', 'native']) {
+    expect(
+      seeded[engine]![0]!.flat().map((cell) => [cell.borders?.top ?? null, cell.borders?.left ?? null])
+    ).toEqual(Array.from({ length: 4 }, () => [null, null]));
+  }
+});
