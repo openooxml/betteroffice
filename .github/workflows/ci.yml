@@ -695,6 +695,13 @@ jobs:
           bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts bindings/engine-parity/docx.test.ts bindings/engine-parity/xlsx.test.ts bindings/engine-parity/pptx.test.ts
           bun test bindings/raw-surface.test.ts
 
+      - name: Check the crate save against the product save
+        env:
+          DOCX_CRATE_PARITY_DIR: ${{ runner.temp }}/docx-crate-parity
+        run: |
+          bun test bindings/engine-parity/docx-crate-save.test.ts
+          cargo test --locked -p betteroffice-docx --test wasm_parity -- --ignored
+
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
 
