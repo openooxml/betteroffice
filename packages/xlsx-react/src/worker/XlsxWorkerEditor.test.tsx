@@ -9890,6 +9890,48 @@ describe('workbook worker editor header interactions', () => {
     expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
   });
 
+  for (const axis of ['col', 'row'] as const) {
+    const label = (view: ReturnType<typeof render>) => view.getByTestId(axis === 'col' ? 'xlsx-column-headers' : 'xlsx-row-headers')
+      .querySelector(axis === 'col' ? '[data-col="1"]' : '[data-row="1"]')!;
+    const menu = axis === 'col' ? 'xlsx-column-header-menu' : 'xlsx-row-header-menu';
+
+    it(`ends a peerless chart move at a right-button press on a ${axis} header, before its menu opens`, async () => {
+      const host = peerlessHarness();
+      host.charts.push(peerlessChart);
+      const view = await host.mount(undefined, false, { showSheetHeaders: true });
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+      await waitFor(() => expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy());
+      fireEvent.mouseMove(view.getByTestId('xlsx-scroll'), { clientX: 240, clientY: 130, buttons: 1 });
+      await act(async () => { fireEvent.pointerDown(label(view), { pointerId: 2, button: 2 }); });
+      expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+      expect(view.queryByTestId(menu)).toBeNull();
+      fireEvent.contextMenu(label(view), { button: 2, clientX: 120, clientY: 30 });
+      await waitFor(() => view.getByTestId(menu));
+      fireEvent.mouseUp(window, { clientX: 240, clientY: 130, button: 0 });
+      await act(async () => {});
+      expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+      expect(host.sent.filter((command) => command.kind === 'moveChart')).toEqual([]);
+    });
+
+    it(`ends a legacy chart move at a right-button press on a ${axis} header, before its menu opens`, async () => {
+      const host = harness();
+      host.charts.push(legacyChart);
+      const view = await mountLegacy();
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+      fireEvent.mouseMove(view.getByTestId('xlsx-scroll'), { clientX: 150, clientY: 140, buttons: 1 });
+      expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(30px, 20px)');
+      fireEvent.pointerDown(label(view), { pointerId: 2, button: 2 });
+      expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+      expect(view.queryByTestId(menu)).toBeNull();
+      fireEvent.contextMenu(label(view), { button: 2, clientX: 120, clientY: 30 });
+      await waitFor(() => view.getByTestId(menu));
+      fireEvent.mouseUp(window, { clientX: 150, clientY: 140, button: 0 });
+      await act(async () => {});
+      expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+      expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+    });
+  }
+
   it('anchors a shifted column header on the pressed track, not on a merged cell', async () => {
     const host = harness();
     widen(host.sessionMethods.frame);

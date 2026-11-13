@@ -757,6 +757,43 @@ describe('XlsxEditor grid pointer handling', () => {
     await waitFor(() => expect(view.nameBox().value).toBe('F1'), MOUNTED);
   });
 
+  for (const axis of ['col', 'row'] as const) {
+    it(`still selects, focuses, opens the menu and resizes from a ${axis} header press with no chart`, async () => {
+      const view = await mountWithHeaders();
+      const band = view.surface.closest('[data-testid="xlsx-grid"]')!
+        .querySelector(axis === 'col' ? '[data-testid="xlsx-column-headers"]' : '[data-testid="xlsx-row-headers"]')!;
+      const label = band.querySelector(axis === 'col' ? '[data-col="4"]' : '[data-row="4"]')!;
+      const offsets = axis === 'col' ? plain.grid.colOffsets : plain.grid.rowOffsets;
+      const at = (offset: number) => axis === 'col' ? { clientX: offset, clientY: 5 } : { clientX: 20, clientY: offset };
+      const applyOps = spyOn(view.workbook(), 'applyOps');
+      view.click({ row: 2, col: 2 });
+      await waitFor(() => expect(document.activeElement).toBe(view.surface), MOUNTED);
+      (view.surface as HTMLElement).blur();
+
+      const middle = at((offsets[4]! + offsets[5]!) / 2);
+      fireEvent.pointerDown(label, { button: 0, pointerId: 1, ...middle });
+      fireEvent.mouseDown(label, middle);
+      fireEvent.pointerUp(band, { pointerId: 1, ...middle });
+      await waitFor(() => expect(selectedAddresses(view))
+        .toHaveLength(axis === 'col' ? VIEWPORT_ROWS : VIEWPORT_COLUMNS), MOUNTED);
+      expect(document.activeElement).toBe(view.surface);
+
+      fireEvent.pointerDown(label, { button: 2, pointerId: 2, ...middle });
+      fireEvent.contextMenu(label, { button: 2, ...middle });
+      await waitFor(() => view.view.getByTestId(axis === 'col' ? 'xlsx-column-header-menu' : 'xlsx-row-header-menu'));
+
+      const start = offsets[2]!;
+      const size = (axis === 'col' ? plain.grid.colSizes?.[1] : plain.grid.rowSizes?.[1]) ?? start - offsets[1]!;
+      fireEvent.pointerDown(band, { button: 0, pointerId: 3, ...at(start) });
+      fireEvent.pointerMove(band, { pointerId: 3, ...at(start + 32) });
+      fireEvent.pointerUp(band, { pointerId: 3, ...at(start + 32) });
+      expect(applyOps).toHaveBeenCalledTimes(1);
+      expect(applyOps.mock.calls[0]![0]).toEqual([axis === 'col'
+        ? { type: 'setColWidth', sheet: 0, col: 1, width: columnWidthFromPx(size + 32) }
+        : { type: 'setRowHeight', sheet: 0, row: 1, height: rowHeightFromPx(size + 32) }]);
+    });
+  }
+
   it('freezes the columns left of the header the menu opened on', async () => {
     const view = await mountWithHeaders();
     const band = view.surface.closest('[data-testid="xlsx-grid"]')!
@@ -1913,6 +1950,66 @@ describe('XlsxEditor chart objects with sheet headers', () => {
       { type: 'setColWidth', sheet: 0, col: 1, width: columnWidthFromPx(size + 35) },
     ]);
   });
+
+  for (const axis of ['col', 'row'] as const) {
+    const band = (view: Awaited<ReturnType<typeof mountEditor>>) => headerGrid(view)
+      .querySelector(axis === 'col' ? '[data-testid="xlsx-column-headers"]' : '[data-testid="xlsx-row-headers"]')!;
+    const at = (offset: number) => axis === 'col' ? { clientX: offset, clientY: 5 } : { clientX: 20, clientY: offset };
+
+    it(`ends a chart move at pointer down on a ${axis} label, before any release`, async () => {
+      const [chart] = charted.charts;
+      const view = await mountEditor(charted, undefined, true);
+      const start = chartCenter(chart);
+      const move = spyOn(view.workbook(), 'moveChart');
+      fireEvent.mouseDown(view.surface, start);
+      await waitFor(() => view.outline()!);
+      fireEvent.mouseMove(view.surface, { clientX: start.clientX + 40, clientY: start.clientY + 24, buttons: 1 });
+      expect(view.outline()!.style.left).toBe(`${chart.rect.x + 40}px`);
+
+      const offsets = axis === 'col' ? charted.grid.colOffsets : charted.grid.rowOffsets;
+      const middle = at((offsets[0]! + offsets[1]!) / 2);
+      fireEvent.pointerDown(band(view).querySelector(axis === 'col' ? '[data-col="0"]' : '[data-row="0"]')!,
+        { button: 0, pointerId: 5, ...middle });
+      expect(view.outline()).toBeNull();
+      expect(view.handles()).toHaveLength(0);
+      fireEvent.pointerUp(band(view), { pointerId: 5, ...middle });
+      await act(async () => {
+        fireEvent.mouseUp(window, { clientX: start.clientX + 40, clientY: start.clientY + 24 });
+      });
+      await settle();
+
+      expect(move).not.toHaveBeenCalled();
+      expect(view.canUndo()).toBe(false);
+    });
+
+    it(`ends a chart resize at pointer down on a ${axis} resize edge and still resizes the ${axis}`, async () => {
+      const [chart] = charted.charts;
+      const view = await mountEditor(charted, undefined, true);
+      await selectChart(view, chart);
+      const resize = spyOn(view.workbook(), 'resizeChart');
+      const applyOps = spyOn(view.workbook(), 'applyOps');
+      const width = parseFloat(view.outline()!.style.width);
+      fireEvent.pointerDown(view.handle('se')!, { button: 0, pointerId: 11, clientX: 200, clientY: 200 });
+      fireEvent.pointerMove(window, { pointerId: 11, clientX: 220, clientY: 210 });
+      expect(parseFloat(view.outline()!.style.width)).toBeCloseTo(width + 20);
+
+      const offsets = axis === 'col' ? charted.grid.colOffsets : charted.grid.rowOffsets;
+      const start = offsets[1]!;
+      const size = (axis === 'col' ? charted.grid.colSizes?.[0] : charted.grid.rowSizes?.[0]) ?? start - offsets[0]!;
+      fireEvent.pointerDown(band(view), { button: 0, pointerId: 3, ...at(start) });
+      expect(view.outline()).toBeNull();
+      expect(view.handles()).toHaveLength(0);
+      fireEvent.pointerMove(band(view), { pointerId: 3, ...at(start + 35) });
+      fireEvent.pointerUp(band(view), { pointerId: 3, ...at(start + 35) });
+      fireEvent.pointerUp(window, { pointerId: 11, button: 0, clientX: 220, clientY: 210 });
+
+      await waitFor(() => expect(applyOps).toHaveBeenCalledTimes(1));
+      expect(applyOps.mock.calls[0]![0]).toEqual([axis === 'col'
+        ? { type: 'setColWidth', sheet: 0, col: 0, width: columnWidthFromPx(size + 35) }
+        : { type: 'setRowHeight', sheet: 0, row: 0, height: rowHeightFromPx(size + 35) }]);
+      expect(resize).not.toHaveBeenCalled();
+    });
+  }
 
   it('hides the cell marquee and fill handle under a selected chart and keeps the cell selection', async () => {
     const [chart] = charted.charts;

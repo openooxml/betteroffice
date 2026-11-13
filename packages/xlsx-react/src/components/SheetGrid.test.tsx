@@ -288,6 +288,24 @@ test('every press on the header chrome is reported at pointer down, before any r
   expect(resizes).toEqual([{ axis: 'col', index: 0, size: 120 }]);
 });
 
+test('every press on the row header chrome is reported at pointer down, before any release', () => {
+  let reported = 0;
+  const { container } = mount({ ...handlers, onHeaderPress: () => { reported += 1; } });
+  const band = container.querySelector('[data-testid="xlsx-row-headers"]')!;
+  stubRect(band);
+  fireEvent.pointerDown(rowLabel(container, 0), { button: 0, clientX: 0, clientY: 10, pointerId: 1 });
+  expect(reported).toBe(1);
+  fireEvent.pointerUp(band, { clientX: 0, clientY: 10, pointerId: 1 });
+  fireEvent.pointerDown(rowLabel(container, 1), { button: 2, clientX: 0, clientY: 30, pointerId: 2 });
+  expect(reported).toBe(2);
+  fireEvent.pointerDown(band, { button: 0, clientX: 0, clientY: 20, pointerId: 3 });
+  expect(reported).toBe(3);
+  fireEvent.pointerMove(band, { clientX: 0, clientY: 35, pointerId: 3 });
+  fireEvent.pointerUp(band, { clientX: 0, clientY: 35, pointerId: 3 });
+  expect(resizes).toEqual([{ axis: 'row', index: 0, size: 35 }]);
+  expect(presses).toEqual([]);
+});
+
 test('a frozen label still takes its press and a frozen boundary still resizes', () => {
   const { container } = mount(handlers, 1, { startRow: 0, startCol: 0,
     frozenRows: 1, frozenCols: 1, dividerX: 80, dividerY: 20,
