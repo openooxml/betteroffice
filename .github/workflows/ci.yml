@@ -410,11 +410,15 @@ jobs:
       - name: Remove the workspace test binaries
         if: steps.ws.outputs.present == 'true'
         run: |
+          if ! command -v jq >/dev/null; then
+            echo "::error::jq is required to list the test binaries and is not on this runner"; exit 1; fi
           set -euo pipefail
-          mapfile -t bins < <(find target/debug -regextype posix-extended -type f -executable \
-            -regex 'target/debug/(deps|build/[^/]+/[^/]+/out)/[^/]+' \
-            ! -name '*.so' ! -name 'build-script-build*' ! -name 'build_script_build-*')
-          [ "${#bins[@]}" -gt 0 ] || { echo "::error::no test binaries under target/debug/deps or target/debug/build/*/*/out"; exit 1; }
+          json="${RUNNER_TEMP:-/tmp}/test-artifacts.jsonl"
+          cargo test --no-run --message-format=json > "$json"
+          jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null) | .executable' "$json" \
+            | sort -u > "$json.bins"
+          mapfile -t bins < "$json.bins"
+          [ "${#bins[@]}" -gt 0 ] || { echo "::error::cargo listed no test binaries"; exit 1; }
           mb=$(du -cm "${bins[@]}" | tail -n 1 | cut -f 1)
           rm -f "${bins[@]}"
           echo "Removed ${#bins[@]} test binaries, ${mb} MB"
@@ -690,7 +694,7 @@ jobs:
 
       - name: Check native and wasm parity
         run: |
-          bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts bindings/engine-parity/docx.test.ts
+          bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts bindings/engine-parity/docx.test.ts bindings/engine-parity/xlsx.test.ts bindings/engine-parity/pptx.test.ts
           bun test bindings/raw-surface.test.ts
 
       - name: Check generated declarations
