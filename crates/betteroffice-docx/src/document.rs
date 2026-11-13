@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::sync::Arc;
 #[cfg(any(feature = "fonts", feature = "raster"))]
 use std::sync::Mutex;
@@ -16,21 +16,29 @@ use docx_edit::structured::{
     DocxStructuredContent, ExportOptions, MarkdownContent, MarkdownOptions,
     export_package_structured,
 };
-use docx_edit::{EditCtx, EditingDoc, Receipt, StoryRange};
+use docx_edit::{
+    EditCtx, EditingDoc, ParagraphIdentities, ParagraphRef, ParagraphSavePlan, Receipt,
+    SegmentContent, SpliceAnchor, StoryRange, StorySegment, seed_from_docx_with_generation,
+};
 use docx_layout::types::Input as LayoutInput;
 use docx_parse::block::BlockContent;
 use docx_parse::document::{DocumentBody, Section, get_paragraph_text};
 use docx_parse::inline::{InlineNode, Run, RunContent, RunType};
+use docx_parse::notes::Note;
+use docx_parse::numbering::NumberingDefinitions;
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
 use docx_parse::paragraph_identity::{
     allocate_paragraph_id, format_paragraph_id, package_paragraph_ids,
 };
+use docx_parse::relationships::Relationship;
 use docx_parse::s9::{
     S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions, S9SectionWire,
     S9WireEnvelope,
 };
+use docx_parse::serializer::paragraph_ids::{S13TouchedPart, S13WholePart};
 use docx_parse::serializer::{
-    S13SaveOptions, S13SaveRequest, SerializerDeterminism, write_docx_s13_parts,
+    S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SaveOptions, S13SaveRequest,
+    S13SpliceAnchor, S13SplicedPart, SerializerDeterminism, write_docx_s13_parts,
 };
 use docx_parse::table::Table;
 use docx_parse::xml::ParseLimits;
@@ -44,18 +52,33 @@ use crate::{
 pub struct Document {
     /// Inflated package parts retained from open for `save` to reuse.
     pub(crate) original_parts: Vec<(String, Vec<u8>)>,
+    source: Vec<u8>,
     seed: String,
     model: DocumentModel,
     /// By body paragraph ordinal, the fresh ID handed to a paragraph that
     /// repeats an earlier paragraph's ID and the authored ID it saves with
     /// until it is edited or the model is changed.
     authored_ids: BTreeMap<usize, (String, String)>,
+    opened_ids: BTreeMap<usize, (String, String)>,
+    /// What a save writes when the model holds only the session edits; `None` once it cannot.
+    session_baseline: Option<SavedFields>,
+    session_edits: Vec<SessionEdit>,
+    dirty: Dirty,
     #[cfg(any(feature = "fonts", feature = "raster"))]
     pub(crate) fonts: Mutex<crate::font::FontRegistry>,
     #[cfg(feature = "fonts")]
     pub(crate) font_manager: FontManager,
     #[cfg(feature = "raster")]
     pub(crate) images: crate::render::ImageRegistry,
+}
+
+/// What changed since open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dirty {
+    Clean,
+    LoggedEdits,
+    /// Set by any `model_mut` borrow.
+    ModelChanged,
 }
 
 impl Document {
@@ -85,7 +108,10 @@ impl Document {
         let font_manager = FontManager::new(&options.font_source, options.font_loading)?;
         let (parsed, original_parts) = docx_parse::parse_docx_s9_wire_parts_with_limits(
             bytes,
-            S9ParseOptions::default(),
+            S9ParseOptions {
+                source_ordinals: true,
+                ..S9ParseOptions::default()
+            },
             limits,
         )?;
         let mut document = parsed.document;
@@ -98,8 +124,13 @@ impl Document {
         );
         let document = Self {
             original_parts,
+            source: bytes.to_vec(),
             seed: format!("{:x}", Sha256::digest(bytes)),
+            session_baseline: Some(SavedFields::of(&model)),
+            session_edits: Vec::new(),
+            dirty: Dirty::Clean,
             model,
+            opened_ids: authored_ids.clone(),
             authored_ids,
             #[cfg(any(feature = "fonts", feature = "raster"))]
             fonts: Mutex::new(crate::font::FontRegistry::default()),
@@ -126,6 +157,7 @@ impl Document {
     /// The model, for any change. Paragraphs that repeat an earlier
     /// paragraph's ID then save with the fresh IDs they read with.
     pub fn model_mut(&mut self) -> &mut DocumentModel {
+        self.dirty = Dirty::ModelChanged;
         self.authored_ids.clear();
         &mut self.model
     }
@@ -237,16 +269,29 @@ impl Document {
             .next()
             .map(|paragraph| paragraph.text)
             .unwrap_or_default();
-        replace_plain_run(paragraph, edited, template);
+        replace_plain_run(paragraph, edited.clone(), template);
         let replacement = paragraph.clone();
-        if let Some(sections) = &mut self.model.body.sections {
-            for section in sections {
-                if let Some(section_paragraph) = find_paragraph_mut(&mut section.content, para_id) {
-                    *section_paragraph = replacement.clone();
-                }
-            }
+        replace_section_paragraphs(&mut self.model.body, para_id, &replacement);
+        if self.dirty == Dirty::Clean {
+            self.dirty = Dirty::LoggedEdits;
         }
         self.authored_ids.retain(|_, (fresh, _)| fresh != para_id);
+        let mirrored = match (&mut self.session_baseline, replacement.source_ordinal) {
+            (Some(baseline), Some(ordinal)) if context.suggesting.is_none() => baseline
+                .replace_text(para_id, &edited)
+                .then(|| SessionEdit {
+                    para_id: para_id.to_owned(),
+                    ordinal,
+                    text: text.to_owned(),
+                    expected: edited,
+                    context: context.clone(),
+                }),
+            _ => None,
+        };
+        match mirrored {
+            Some(edit) => self.session_edits.push(edit),
+            None => self.session_baseline = None,
+        }
         Ok(receipt)
     }
 
@@ -443,11 +488,19 @@ impl Document {
     }
 
     pub fn save_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
+        let determinism = SerializerDeterminism {
+            seed: self.seed.clone(),
+            now: options.now,
+        };
+        if self.dirty == Dirty::Clean
+            && !options.update_modified_date
+            && options.modified_by.is_none()
+        {
+            determinism.validate()?;
+            return Ok(self.source.clone());
+        }
         let request = S13SaveRequest {
-            determinism: SerializerDeterminism {
-                seed: self.seed.clone(),
-                now: options.now,
-            },
+            determinism,
             document: self.with_authored_ids(self.model.body.clone()),
             header_entries: self.model.headers.clone(),
             footer_entries: self.model.footers.clone(),
@@ -462,9 +515,147 @@ impl Document {
                 modified_by: options.modified_by,
             },
             selective: None,
-            paragraph_ids: None,
+            paragraph_ids: self.session_save_plan()?,
         };
+        #[cfg(test)]
+        session_save_tests::count_package_write();
         write_docx_s13_parts(request, &self.original_parts, None).map_err(Error::from)
+    }
+
+    /// The editing session's paragraph save plan for the current model, as the
+    /// product's session save writes it; `None` saves the whole model.
+    fn session_save_plan(&self) -> Result<Option<S13ParagraphIds>> {
+        if self.dirty == Dirty::ModelChanged {
+            return Ok(None);
+        }
+        let Some(baseline) = &self.session_baseline else {
+            return Ok(None);
+        };
+        if !baseline.saves_as(&self.model) {
+            return Ok(None);
+        }
+        let Some(reassigned) = self.reassigned_ids() else {
+            return Ok(None);
+        };
+        let session = EditingDoc::new(1);
+        #[cfg(test)]
+        session_save_tests::count_session_seed();
+        let seeded = seed_from_docx_with_generation(&session, &self.source, &self.seed[..32]);
+        #[cfg(test)]
+        let seeded = seeded.and_then(|()| session_save_tests::injected_seed_error());
+        if seeded.is_err() {
+            return Ok(None);
+        }
+        let identities = session.paragraph_identities();
+        let body_part = body_part(&identities);
+        let Some(seeded) = session_paragraphs(&session, &body_part) else {
+            return Ok(None);
+        };
+        let replayed = self
+            .session_edits
+            .iter()
+            .all(|edit| edit.replay(&session, &identities, &body_part).is_ok());
+        if !replayed {
+            return Ok(None);
+        }
+        match session_paragraphs(&session, &body_part) {
+            Some(replayed) if self.session_agrees(baseline, &seeded, &replayed) => {}
+            _ => return Ok(None),
+        }
+        let mut plan = session_paragraph_ids(session.paragraph_save_plan());
+        if !reassigned.is_empty() {
+            if let Some(patched) = plan
+                .patched_parts
+                .iter_mut()
+                .find(|patched| patched.part == body_part)
+            {
+                patched
+                    .para_ids
+                    .retain(|(ordinal, _)| !reassigned.iter().any(|(source, _)| source == ordinal));
+                patched.para_ids.extend(reassigned);
+                patched.para_ids.sort_by_key(|(ordinal, _)| *ordinal);
+            } else if plan
+                .spliced_parts
+                .iter()
+                .any(|spliced| spliced.part == body_part)
+            {
+                let moved: BTreeSet<u32> = reassigned.iter().map(|(ordinal, _)| *ordinal).collect();
+                plan.assignments
+                    .retain(|id| id.part != body_part || !moved.contains(&id.ordinal));
+                for (ordinal, para_id) in reassigned {
+                    plan.assignments.push(S13ParagraphId {
+                        part: body_part.clone(),
+                        ordinal,
+                        para_id,
+                    });
+                }
+            } else {
+                return Ok(None);
+            }
+        }
+        Ok(Some(plan))
+    }
+
+    /// Whether each changed body paragraph saves from the session as the model holds it.
+    fn session_agrees(
+        &self,
+        baseline: &SavedFields,
+        seeded: &SessionParagraphs,
+        replayed: &SessionParagraphs,
+    ) -> bool {
+        if seeded.count != replayed.count || seeded.body.len() != replayed.body.len() {
+            return false;
+        }
+        let mut model = BTreeMap::new();
+        for paragraph in self.paragraphs() {
+            if let Some(ordinal) = paragraph.source_ordinal
+                && model.insert(ordinal, paragraph).is_some()
+            {
+                return false;
+            }
+        }
+        let edited: BTreeSet<u32> = self
+            .session_edits
+            .iter()
+            .map(|session_edit| session_edit.ordinal)
+            .collect();
+        if !edited.iter().all(|at| seeded.body.contains_key(at)) {
+            return false;
+        }
+        let session = baseline.paragraphs_by_ordinal();
+        seeded.body.iter().all(|(ordinal, before)| {
+            let Some(after) = replayed.body.get(ordinal) else {
+                return false;
+            };
+            if !same_properties(model.get(ordinal).copied(), session.get(ordinal).copied()) {
+                return false;
+            }
+            if after == before && !edited.contains(ordinal) {
+                return true;
+            }
+            model
+                .get(ordinal)
+                .is_some_and(|paragraph| get_paragraph_text(paragraph) == after.text)
+                && after.keeps_formatting_of(before)
+        })
+    }
+
+    /// `(source ordinal, ID)` of each body paragraph that saves with the fresh
+    /// ID it was given on open; `None` when one has no source ordinal.
+    fn reassigned_ids(&self) -> Option<Vec<(u32, String)>> {
+        let paragraphs = self.paragraphs();
+        self.opened_ids
+            .iter()
+            .filter(|(ordinal, _)| !self.authored_ids.contains_key(*ordinal))
+            .filter_map(|(ordinal, (fresh, _))| {
+                let paragraph = paragraphs.get(*ordinal)?;
+                (paragraph.para_id.as_ref() == Some(fresh)).then(|| {
+                    paragraph
+                        .source_ordinal
+                        .map(|source| (source, fresh.clone()))
+                })
+            })
+            .collect()
     }
 
     /// `body` as it saves: a paragraph still at its ordinal with its fresh ID
@@ -485,6 +676,326 @@ impl Document {
             });
         }
         body
+    }
+}
+
+/// The model fields a save writes.
+struct SavedFields {
+    body: DocumentBody,
+    headers: Vec<(String, docx_parse::HeaderFooter)>,
+    footers: Vec<(String, docx_parse::HeaderFooter)>,
+    footnotes: Vec<Note>,
+    endnotes: Vec<Note>,
+    footnote_separators: Vec<Note>,
+    endnote_separators: Vec<Note>,
+    relationships: Vec<(String, Relationship)>,
+    numbering: NumberingDefinitions,
+}
+
+impl SavedFields {
+    fn of(model: &DocumentModel) -> Self {
+        Self {
+            body: model.body.clone(),
+            headers: model.headers.clone(),
+            footers: model.footers.clone(),
+            footnotes: model.footnotes.clone(),
+            endnotes: model.endnotes.clone(),
+            footnote_separators: model.footnote_separators.clone(),
+            endnote_separators: model.endnote_separators.clone(),
+            relationships: model.relationships.clone(),
+            numbering: model.numbering.clone(),
+        }
+    }
+
+    fn saves_as(&self, model: &DocumentModel) -> bool {
+        self.body == model.body
+            && self.headers == model.headers
+            && self.footers == model.footers
+            && self.footnotes == model.footnotes
+            && self.endnotes == model.endnotes
+            && self.footnote_separators == model.footnote_separators
+            && self.endnote_separators == model.endnote_separators
+            && self.relationships == model.relationships
+            && self.numbering == model.numbering
+    }
+
+    /// Replaces only the text of the paragraph with `para_id`, as the logged edit did.
+    fn replace_text(&mut self, para_id: &str, text: &str) -> bool {
+        let Some(paragraph) = find_paragraph_mut(&mut self.body.content, para_id) else {
+            return false;
+        };
+        let Some(template) = plain_run_template(paragraph) else {
+            return false;
+        };
+        replace_plain_run(paragraph, text.to_owned(), template);
+        let replacement = paragraph.clone();
+        replace_section_paragraphs(&mut self.body, para_id, &replacement);
+        true
+    }
+
+    /// The body paragraphs by source ordinal.
+    fn paragraphs_by_ordinal(&self) -> BTreeMap<u32, &Paragraph> {
+        let mut paragraphs = Vec::new();
+        collect_paragraphs(&self.body.content, &mut paragraphs);
+        paragraphs
+            .into_iter()
+            .filter_map(|paragraph| paragraph.source_ordinal.map(|ordinal| (ordinal, paragraph)))
+            .collect()
+    }
+}
+
+/// A text replacement the save replays into the editing session.
+struct SessionEdit {
+    para_id: String,
+    /// The paragraph's `w:p` occurrence in the body part.
+    ordinal: u32,
+    text: String,
+    expected: String,
+    context: EditCtx,
+}
+
+impl SessionEdit {
+    fn replay(
+        &self,
+        session: &EditingDoc,
+        identities: &ParagraphIdentities,
+        body_part: &str,
+    ) -> Result<()> {
+        let (story, key) = identities
+            .paragraphs
+            .iter()
+            .find_map(|identity| match (&identity.paragraph, &identity.source) {
+                (ParagraphRef::Session { story, para_id }, Some(source))
+                    if source.paragraph_ordinal == self.ordinal
+                        && part_path(&source.part_uri) == body_part =>
+                {
+                    Some((story, para_id))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| Error::ParagraphNotFound(self.para_id.clone()))?;
+        let range = story_paragraph_range(session, story, key)?
+            .ok_or_else(|| Error::ParagraphNotFound(self.para_id.clone()))?;
+        session.replace_range(&self.context, range, &self.text)?;
+        let replayed = session
+            .paragraphs(story)?
+            .into_iter()
+            .find(|paragraph| paragraph.para_id == *key)
+            .map(|paragraph| paragraph.text);
+        if replayed.as_deref() != Some(self.expected.as_str()) {
+            return Err(Error::UnsupportedParagraphEdit(self.para_id.clone()));
+        }
+        Ok(())
+    }
+}
+
+/// An editing session's paragraphs: how many, and the body part's by source ordinal.
+struct SessionParagraphs {
+    count: usize,
+    body: BTreeMap<u32, SessionParagraph>,
+}
+
+#[derive(PartialEq)]
+struct SessionParagraph {
+    text: String,
+    runs: Vec<StorySegment>,
+}
+
+impl SessionParagraph {
+    fn new(runs: Vec<StorySegment>) -> Self {
+        let text: String = runs
+            .iter()
+            .filter_map(|run| match &run.content {
+                SegmentContent::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        Self { text, runs }
+    }
+
+    /// Every run carries the one formatting `before` had, none when it had no text.
+    fn keeps_formatting_of(&self, before: &SessionParagraph) -> bool {
+        match before.runs.first() {
+            Some(first) => before
+                .runs
+                .iter()
+                .chain(&self.runs)
+                .all(|run| run.attributes == first.attributes),
+            None => self.runs.iter().all(|run| run.attributes.is_empty()),
+        }
+    }
+}
+
+/// Whether both hold the same paragraph properties and the same runs, run properties included.
+fn same_properties(model: Option<&Paragraph>, session: Option<&Paragraph>) -> bool {
+    match (model, session) {
+        (Some(model), Some(session)) => {
+            model.formatting == session.formatting && model.content == session.content
+        }
+        (model, session) => model.is_none() && session.is_none(),
+    }
+}
+
+fn session_paragraphs(session: &EditingDoc, body_part: &str) -> Option<SessionParagraphs> {
+    let identities = session.paragraph_identities();
+    let mut stories: BTreeMap<String, BTreeMap<String, SessionParagraph>> = BTreeMap::new();
+    let mut paragraphs = SessionParagraphs {
+        count: 0,
+        body: BTreeMap::new(),
+    };
+    for identity in &identities.paragraphs {
+        let ParagraphRef::Session { story, para_id } = &identity.paragraph else {
+            continue;
+        };
+        paragraphs.count += 1;
+        let Some(source) = identity
+            .source
+            .as_ref()
+            .filter(|source| part_path(&source.part_uri) == body_part)
+        else {
+            continue;
+        };
+        let in_story = match stories.entry(story.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(story_paragraphs(session, story).ok()?),
+        };
+        let paragraph = in_story.remove(para_id)?;
+        let ordinal = source.paragraph_ordinal;
+        if paragraphs.body.insert(ordinal, paragraph).is_some() {
+            return None;
+        }
+    }
+    Some(paragraphs)
+}
+
+/// The text runs of each paragraph in `story`, by pilcrow key.
+fn story_paragraphs(
+    session: &EditingDoc,
+    story: &str,
+) -> Result<BTreeMap<String, SessionParagraph>> {
+    let mut paragraphs = BTreeMap::new();
+    let mut runs = Vec::new();
+    for segment in session.story_segments(story)? {
+        if matches!(segment.content, SegmentContent::Text(_)) {
+            runs.push(segment);
+        } else if let SegmentContent::Pilcrow(properties) = segment.content {
+            paragraphs.insert(
+                properties.para_id,
+                SessionParagraph::new(std::mem::take(&mut runs)),
+            );
+        }
+    }
+    Ok(paragraphs)
+}
+
+/// The content of the paragraph closed by the pilcrow `key` in `story`.
+fn story_paragraph_range(
+    session: &EditingDoc,
+    story: &str,
+    key: &str,
+) -> Result<Option<StoryRange>> {
+    let (mut start, mut offset) = (0, 0);
+    for segment in session.story_segments(story)? {
+        match segment.content {
+            SegmentContent::Text(text) => offset += utf16_len(&text),
+            SegmentContent::Pilcrow(properties) if properties.para_id == key => {
+                return Ok(Some(StoryRange::new(story, start, offset)));
+            }
+            SegmentContent::Pilcrow(_) => {
+                offset += 1;
+                start = offset;
+            }
+            SegmentContent::OtherEmbed { .. } => offset += 1,
+        }
+    }
+    Ok(None)
+}
+
+fn part_path(uri: &str) -> &str {
+    uri.strip_prefix('/').unwrap_or(uri)
+}
+
+fn body_part(identities: &ParagraphIdentities) -> String {
+    identities
+        .paragraphs
+        .iter()
+        .find_map(|identity| match (&identity.paragraph, &identity.source) {
+            (ParagraphRef::Session { story, .. }, Some(source)) if story == "body" => {
+                Some(part_path(&source.part_uri).to_owned())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| "word/document.xml".to_owned())
+}
+
+/// `plan` as the package writer's request field, every planned part kept.
+fn session_paragraph_ids(plan: ParagraphSavePlan) -> S13ParagraphIds {
+    S13ParagraphIds {
+        removed_comment_ids: Vec::new(),
+        section_edits: None,
+        assignments: plan
+            .assignments
+            .into_iter()
+            .map(|(part, ordinal, para_id)| S13ParagraphId {
+                part,
+                ordinal,
+                para_id,
+            })
+            .collect(),
+        patched_parts: plan
+            .patched_parts
+            .into_iter()
+            .map(|(part, para_ids)| S13PatchedPart { part, para_ids })
+            .collect(),
+        spliced_parts: plan
+            .spliced_parts
+            .into_iter()
+            .map(|part| S13SplicedPart {
+                part: part.part,
+                sha256: part.sha256,
+                paragraphs: part
+                    .paragraphs
+                    .into_iter()
+                    .map(|(ordinal, _)| ordinal)
+                    .collect(),
+                changed: part.changed,
+                inserted: part
+                    .inserted
+                    .into_iter()
+                    .map(|anchor| match anchor {
+                        SpliceAnchor::Before(ordinal) => S13SpliceAnchor::Before(ordinal),
+                        SpliceAnchor::After(ordinal) => S13SpliceAnchor::After(ordinal),
+                    })
+                    .collect(),
+                removed: part.removed,
+                paragraph_patches: part.paragraph_patches,
+                legacy_paragraphs: part.legacy_paragraphs,
+                table_patches: part.table_patches,
+                format_only: part.format_only,
+            })
+            .collect(),
+        whole_parts: plan
+            .whole_parts
+            .into_iter()
+            .map(|part| S13WholePart {
+                part: part.part,
+                sha256: part.sha256,
+                changed: part.changed,
+            })
+            .collect(),
+        touched_parts: plan
+            .touched_parts
+            .into_iter()
+            .map(|(part, touched)| S13TouchedPart { part, touched })
+            .collect(),
+    }
+}
+
+fn replace_section_paragraphs(body: &mut DocumentBody, para_id: &str, replacement: &Paragraph) {
+    for section in body.sections.iter_mut().flatten() {
+        if let Some(paragraph) = find_paragraph_mut(&mut section.content, para_id) {
+            *paragraph = replacement.clone();
+        }
     }
 }
 
@@ -763,6 +1274,468 @@ fn has_floating_zones(
             has_floating_zones(&LayoutBlock::Paragraph(paragraph.clone()), width, config)
         }),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod session_save_tests {
+    use super::{
+        Document, EditCtx, InlineNode, Paragraph, ParagraphContent, SessionEdit,
+        find_paragraph_mut, get_paragraph_text, replace_plain_run, replace_section_paragraphs,
+    };
+
+    use std::cell::{Cell, RefCell};
+
+    use docx_parse::{TabStop, TextFormatting};
+
+    thread_local! {
+        static SEED_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+        static SESSION_SEEDS: Cell<usize> = const { Cell::new(0) };
+        static PACKAGE_WRITES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn injected_seed_error() -> Result<(), String> {
+        SEED_ERROR.with(|error| error.borrow().clone().map_or(Ok(()), Err))
+    }
+
+    pub(super) fn count_session_seed() {
+        SESSION_SEEDS.with(|seeds| seeds.set(seeds.get() + 1));
+    }
+
+    pub(super) fn count_package_write() {
+        PACKAGE_WRITES.with(|writes| writes.set(writes.get() + 1));
+    }
+
+    /// `(session seeds, package writes)` during `run`.
+    fn counted(run: impl FnOnce()) -> (usize, usize) {
+        SESSION_SEEDS.with(|seeds| seeds.set(0));
+        PACKAGE_WRITES.with(|writes| writes.set(0));
+        run();
+        (
+            SESSION_SEEDS.with(|seeds| seeds.get()),
+            PACKAGE_WRITES.with(|writes| writes.get()),
+        )
+    }
+
+    const NAMESPACES: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
+
+    fn paragraph(id: &str, content: &str) -> String {
+        format!(
+            r#"<w:p w14:paraId="{id}" w14:textId="77777777" w:rsidR="00A1B2C3" w:rsidRDefault="00A1B2C3"><w:pPr><w:spacing w:after="120"/></w:pPr>{content}</w:p>"#
+        )
+    }
+
+    fn run(text: &str) -> String {
+        format!(r#"<w:r w:rsidRPr="00D4E5F6"><w:t xml:space="preserve">{text}</w:t></w:r>"#)
+    }
+
+    fn source() -> String {
+        document_xml(
+            &[
+                first_paragraph(),
+                paragraph("0000000B", &run("Charlie")),
+                paragraph("0000000C", &run("Delta")),
+            ]
+            .concat(),
+        )
+    }
+
+    fn document_xml(body: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n<w:document {NAMESPACES}><w:body>{body}<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr></w:body></w:document>"
+        )
+    }
+
+    fn open() -> Document {
+        open_with(&source())
+    }
+
+    fn open_with(document_xml: &str) -> Document {
+        Document::open(&package(document_xml)).unwrap()
+    }
+
+    fn package(document_xml: &str) -> Vec<u8> {
+        let parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+            ),
+            ("word/document.xml".to_owned(), document_xml.as_bytes().to_vec()),
+        ];
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn reopened(document: &Document) -> Document {
+        Document::open(&document.save().unwrap()).unwrap()
+    }
+
+    fn change_model(document: &mut Document, para_id: &str, change: impl FnOnce(&mut Paragraph)) {
+        let body = &mut document.model_mut().body;
+        let paragraph = find_paragraph_mut(&mut body.content, para_id).unwrap();
+        change(&mut *paragraph);
+        let replacement = paragraph.clone();
+        replace_section_paragraphs(body, para_id, &replacement);
+    }
+
+    fn center(paragraph: &mut Paragraph) {
+        let formatting = paragraph.formatting.get_or_insert_with(Default::default);
+        formatting.alignment = Some("center".to_owned());
+    }
+
+    fn tab_stop(paragraph: &mut Paragraph) {
+        let formatting = paragraph.formatting.get_or_insert_with(Default::default);
+        formatting.tabs = Some(vec![TabStop {
+            position: 4320.0,
+            alignment: "center".to_owned(),
+            leader: None,
+        }]);
+    }
+
+    fn alignment(paragraph: &Paragraph) -> Option<&str> {
+        paragraph.formatting.as_ref()?.alignment.as_deref()
+    }
+
+    fn bold_run(paragraph: &mut Paragraph) {
+        let Some(ParagraphContent::Inline(InlineNode::Run(run))) = paragraph.content.first_mut()
+        else {
+            panic!("paragraph without a first run");
+        };
+        run.formatting = Some(TextFormatting {
+            bold: Some(true),
+            ..Default::default()
+        });
+    }
+
+    fn run_bold(paragraph: &Paragraph) -> Option<bool> {
+        match paragraph.content.first() {
+            Some(ParagraphContent::Inline(InlineNode::Run(run))) => run.formatting.as_ref()?.bold,
+            _ => None,
+        }
+    }
+
+    fn main_part(document: &Document) -> String {
+        let parts = ooxml_opc::unzip_parts(&document.save().unwrap()).unwrap();
+        let (_, bytes) = parts
+            .into_iter()
+            .find(|(name, _)| name == "word/document.xml")
+            .unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    fn full_write(mut document: Document) -> String {
+        document.session_baseline = None;
+        main_part(&document)
+    }
+
+    fn assert_plan_keeps(document: &Document, unchanged: &[&str], edited: &str) {
+        assert!(document.session_save_plan().unwrap().is_some());
+        let saved = main_part(document);
+        assert!(saved.contains(edited), "{saved}");
+        let source = source();
+        for paragraph in unchanged {
+            assert!(
+                source.contains(*paragraph) && saved.contains(*paragraph),
+                "{saved}"
+            );
+        }
+    }
+
+    fn logged(document: &Document, index: usize, text: &str) -> SessionEdit {
+        let paragraph = document.paragraphs()[index];
+        SessionEdit {
+            para_id: paragraph.para_id.clone().unwrap(),
+            ordinal: paragraph.source_ordinal.unwrap(),
+            text: text.to_owned(),
+            expected: text.to_owned(),
+            context: EditCtx::local("betteroffice-docx", "1970-01-01T00:00:00.000Z"),
+        }
+    }
+
+    fn first_paragraph() -> String {
+        paragraph(
+            "0000000A",
+            &format!(
+                r#"{}<w:proofErr w:type="spellStart"/>{}<w:proofErr w:type="spellEnd"/>"#,
+                run("Alpha "),
+                run("bravvo")
+            ),
+        )
+    }
+
+    #[test]
+    fn replace_paragraph_text_saves_through_the_plan() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        let unchanged = [first_paragraph(), paragraph("0000000C", &run("Delta"))];
+        let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
+        assert_plan_keeps(&document, &unchanged, "Charlie edited");
+    }
+
+    #[test]
+    fn replace_paragraph_text_with_saves_through_the_plan() {
+        let mut document = open();
+        let context = EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z");
+        document
+            .replace_paragraph_text_with("0000000C", "Delta edited", 7, &context)
+            .unwrap();
+        document
+            .replace_paragraph_text_with("0000000C", "Delta edited twice", 7, &context)
+            .unwrap();
+        let unchanged = [first_paragraph(), paragraph("0000000B", &run("Charlie"))];
+        let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
+        assert_plan_keeps(&document, &unchanged, "Delta edited twice");
+    }
+
+    #[test]
+    fn an_unedited_save_builds_no_session() {
+        let document = open();
+        let counts = counted(|| {
+            document.save().unwrap();
+        });
+        assert_eq!(counts, (0, 0));
+    }
+
+    #[test]
+    fn an_unedited_save_writes_every_source_entry_as_it_is() {
+        let source = package(&source());
+        let saved = Document::open(&source).unwrap().save().unwrap();
+        assert_eq!(
+            ooxml_opc::unzip_parts(&saved).unwrap(),
+            ooxml_opc::unzip_parts(&source).unwrap()
+        );
+        assert_eq!(saved, source);
+    }
+
+    #[test]
+    fn known_limit_model_mut_borrow_without_change_takes_the_full_write() {
+        let mut document = open();
+        document.model_mut();
+        let counts = counted(|| {
+            document.save().unwrap();
+        });
+        assert_eq!(counts, (0, 1));
+    }
+
+    #[test]
+    fn a_logged_edit_saves_through_one_session() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        let counts = counted(|| {
+            document.save().unwrap();
+        });
+        assert_eq!(counts, (1, 1));
+        let unchanged = [first_paragraph(), paragraph("0000000C", &run("Delta"))];
+        let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
+        assert_plan_keeps(&document, &unchanged, "Charlie edited");
+    }
+
+    #[test]
+    fn diverging_session_takes_the_full_write() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        let planted = logged(&document, 2, "Planted");
+        document.session_edits.push(planted);
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = main_part(&document);
+        assert!(!saved.contains("Planted"), "{saved}");
+        let mut expected = open();
+        expected
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert_eq!(saved, full_write(expected));
+    }
+
+    #[test]
+    fn failed_seed_takes_the_full_write() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        SEED_ERROR.with(|error| {
+            *error.borrow_mut() = Some("XML element limit exceeded".to_owned());
+        });
+        let plan = document.session_save_plan();
+        let saved = main_part(&document);
+        SEED_ERROR.with(|error| *error.borrow_mut() = None);
+        assert!(plan.unwrap().is_none());
+        let mut expected = open();
+        expected
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert_eq!(saved, full_write(expected));
+    }
+
+    #[test]
+    fn failed_replay_takes_the_full_write() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        let mut missing = logged(&document, 2, "Missing");
+        missing.ordinal = 99;
+        document.session_edits.push(missing);
+        assert!(document.session_save_plan().unwrap().is_none());
+        let mut expected = open();
+        expected
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert_eq!(main_part(&document), full_write(expected));
+    }
+
+    #[test]
+    fn model_mut_edit_after_logged_edits_is_saved() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        let body = &mut document.model_mut().body;
+        let paragraph = find_paragraph_mut(&mut body.content, "0000000C").unwrap();
+        replace_plain_run(paragraph, "Delta by model".to_owned(), None);
+        let replacement = paragraph.clone();
+        replace_section_paragraphs(body, "0000000C", &replacement);
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = main_part(&document);
+        assert!(saved.contains("Charlie edited"), "{saved}");
+        assert!(saved.contains("Delta by model"), "{saved}");
+    }
+
+    #[test]
+    fn model_mut_borrow_takes_the_full_write() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        document.model_mut();
+        assert!(document.session_save_plan().unwrap().is_none());
+        let counts = counted(|| {
+            document.save().unwrap();
+        });
+        assert_eq!(counts, (0, 1));
+        let mut expected = open();
+        expected
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert_eq!(main_part(&document), full_write(expected));
+    }
+
+    #[test]
+    fn model_alignment_then_logged_edit_on_one_paragraph_both_survive() {
+        let mut document = open();
+        change_model(&mut document, "0000000B", center);
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = reopened(&document);
+        let edited = saved.paragraph("0000000B").unwrap();
+        assert_eq!(get_paragraph_text(edited), "Charlie edited");
+        assert_eq!(alignment(edited), Some("center"));
+    }
+
+    #[test]
+    fn model_alignment_and_logged_edit_on_other_paragraphs_both_survive() {
+        let mut document = open();
+        change_model(&mut document, "0000000C", center);
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = reopened(&document);
+        let changed = saved.paragraph("0000000C").unwrap();
+        assert_eq!(get_paragraph_text(changed), "Delta");
+        assert_eq!(alignment(changed), Some("center"));
+        let edited = saved.paragraph("0000000B").unwrap();
+        assert_eq!(get_paragraph_text(edited), "Charlie edited");
+    }
+
+    #[test]
+    fn logged_edit_then_model_alignment_on_one_paragraph_both_survive() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        change_model(&mut document, "0000000B", center);
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = reopened(&document);
+        let edited = saved.paragraph("0000000B").unwrap();
+        assert_eq!(get_paragraph_text(edited), "Charlie edited");
+        assert_eq!(alignment(edited), Some("center"));
+    }
+
+    fn bold_then_edit(document: &mut Document) {
+        change_model(document, "0000000B", bold_run);
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+    }
+
+    #[test]
+    fn model_run_property_then_logged_edit_saves_as_the_full_write() {
+        let mut document = open();
+        bold_then_edit(&mut document);
+        assert!(document.session_save_plan().unwrap().is_none());
+        let mut expected = open();
+        bold_then_edit(&mut expected);
+        assert_eq!(main_part(&document), full_write(expected));
+        let saved = reopened(&document);
+        let edited = saved.paragraph("0000000B").unwrap();
+        assert_eq!(get_paragraph_text(edited), "Charlie edited");
+        assert_eq!(run_bold(edited), Some(true));
+    }
+
+    #[test]
+    fn model_tab_stop_then_logged_edit_on_one_paragraph_both_survive() {
+        let mut document = open();
+        change_model(&mut document, "0000000B", tab_stop);
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = reopened(&document);
+        let edited = saved.paragraph("0000000B").unwrap();
+        assert_eq!(get_paragraph_text(edited), "Charlie edited");
+        let tabs = edited
+            .formatting
+            .as_ref()
+            .and_then(|formatting| formatting.tabs.as_deref())
+            .unwrap_or_default();
+        assert!(tabs.iter().any(|tab| tab.alignment == "center"), "{tabs:?}");
+    }
+
+    #[test]
+    fn known_limit_edited_empty_paragraph_with_mark_formatting_takes_the_full_write() {
+        let empty = r#"<w:p w14:paraId="0000000E" w14:textId="77777777"><w:pPr><w:rPr><w:b/></w:rPr></w:pPr></w:p>"#;
+        let source = document_xml(
+            &[
+                first_paragraph(),
+                empty.to_owned(),
+                paragraph("0000000C", &run("Delta")),
+            ]
+            .concat(),
+        );
+        let mut document = open_with(&source);
+        document.replace_paragraph_text("0000000E", "X").unwrap();
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = main_part(&document);
+        assert!(!saved.contains("w:proofErr"), "{saved}");
+        let mut expected = open_with(&source);
+        expected.replace_paragraph_text("0000000E", "X").unwrap();
+        assert_eq!(saved, full_write(expected));
+        let saved = reopened(&document);
+        assert_eq!(
+            get_paragraph_text(saved.paragraph("0000000E").unwrap()),
+            "X"
+        );
     }
 }
 
