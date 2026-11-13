@@ -94,8 +94,13 @@ impl Workbook {
                     None => {
                         facts.rich_inline.values().any(|rich| rich == value)
                             || package
-                                .rich_shared_string_texts()
-                                .any(|rich| rich == value.as_str())
+                                .original_workbook()
+                                .shared_strings
+                                .iter()
+                                .enumerate()
+                                .any(|(index, text)| {
+                                    package.shared_string_is_rich(index) && text == value
+                                })
                     }
                 }
             }
