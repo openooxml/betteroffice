@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use pyo3::create_exception;
@@ -781,20 +782,21 @@ fn offset_repr(offset: Option<u32>) -> String {
 #[derive(Clone)]
 pub struct PyDisplayList {
     inner: DisplayList,
-    payload: String,
     #[pyo3(get)]
     contract_version: Option<u32>,
 }
 
 impl PyDisplayList {
-    fn new(inner: DisplayList) -> PyResult<Self> {
-        let payload = serde_json::to_string(&inner)
-            .map_err(|error| LayoutError::new_err(error.to_string()))?;
-        Ok(Self {
+    fn new(inner: DisplayList) -> Self {
+        Self {
             contract_version: inner.contract_version,
             inner,
-            payload,
-        })
+        }
+    }
+
+    fn payload(&self, py: Python<'_>) -> PyResult<String> {
+        py.detach(|| serde_json::to_string(&self.inner))
+            .map_err(|error| LayoutError::new_err(error.to_string()))
     }
 }
 
@@ -805,12 +807,12 @@ impl PyDisplayList {
     fn from_json(text: &str) -> PyResult<Self> {
         let inner: DisplayList = serde_json::from_str(text)
             .map_err(|error| PyValueError::new_err(format!("invalid display list: {error}")))?;
-        Self::new(inner)
+        Ok(Self::new(inner))
     }
 
     #[getter]
-    fn json(&self) -> &str {
-        &self.payload
+    fn json(&self, py: Python<'_>) -> PyResult<String> {
+        self.payload(py)
     }
 
     #[getter]
@@ -823,13 +825,17 @@ impl PyDisplayList {
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        py.import("json")?
-            .call_method1("loads", (self.payload.as_str(),))
+        let payload = self.payload(py)?;
+        py.import("json")?.call_method1("loads", (payload,))
     }
 
     fn write(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
-        py.detach(|| fs::write(&path, self.payload.as_bytes()))
-            .map_err(|error| map_io_error(&error, &path))
+        py.detach(|| -> io::Result<()> {
+            let mut file = io::BufWriter::new(fs::File::create(&path)?);
+            serde_json::to_writer(&mut file, &self.inner)?;
+            file.flush()
+        })
+        .map_err(|error| map_io_error(&error, &path))
     }
 
     fn __len__(&self) -> usize {
@@ -851,12 +857,16 @@ pub struct PyLayout {
     payload: String,
     #[pyo3(get)]
     pages: usize,
-    #[pyo3(get)]
-    display_list: PyDisplayList,
+    display_list: Py<PyDisplayList>,
 }
 
 #[pymethods]
 impl PyLayout {
+    #[getter]
+    fn display_list(&self, py: Python<'_>) -> Py<PyDisplayList> {
+        self.display_list.clone_ref(py)
+    }
+
     #[getter]
     fn json(&self) -> &str {
         &self.payload
@@ -1324,7 +1334,7 @@ impl PyDocument {
         Ok(PyLayout {
             payload,
             pages: result.layout.pages.len(),
-            display_list: PyDisplayList::new(result.display_list)?,
+            display_list: Py::new(py, PyDisplayList::new(result.display_list))?,
         })
     }
 
