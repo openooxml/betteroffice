@@ -236,7 +236,11 @@ fn equally_styled_paragraph_marks_share_their_payload_keys_and_values() {
         assert!(first_keys.contains(&key), "the mark lacks {key}: {first:?}");
     }
     for other in rest {
-        assert_eq!(mark_keys(other), first_keys, "the marks carry different keys");
+        assert_eq!(
+            mark_keys(other),
+            first_keys,
+            "the marks carry different keys"
+        );
         for key in EQUAL_MARK_VALUES {
             assert_eq!(
                 mark_entry(first, key).map(|(_, _, value)| value),
@@ -259,7 +263,10 @@ fn equally_styled_paragraph_marks_share_their_payload_keys_and_values() {
                 (Any::Array(left), Any::Array(right)) => Arc::ptr_eq(left, right),
                 _ => true,
             };
-            assert!(shared, "{key}: equal payload values are separate allocations");
+            assert!(
+                shared,
+                "{key}: equal payload values are separate allocations"
+            );
         }
     }
 }

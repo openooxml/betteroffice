@@ -10302,9 +10302,7 @@ mod tests {
                 UnitContent::Embed { kind, payload } if kind == crate::PILCROW_KIND => Some(
                     payload
                         .iter()
-                        .map(|(key, value)| {
-                            (key.clone(), any_from_value(value.clone()).unwrap())
-                        })
+                        .map(|(key, value)| (key.clone(), any_from_value(value.clone()).unwrap()))
                         .chain([(crate::KIND_KEY.to_owned(), Any::from(crate::PILCROW_KIND))])
                         .collect(),
                 ),
@@ -10319,7 +10317,10 @@ mod tests {
             ("spaceAfter", Any::Number(240.0)),
             (
                 "defaultTextFormatting",
-                Any::Map(Arc::new(HashMap::from([("bold".to_owned(), Any::Bool(true))]))),
+                Any::Map(Arc::new(HashMap::from([(
+                    "bold".to_owned(),
+                    Any::Bool(true),
+                )]))),
             ),
         ];
         assert_eq!(expected.len(), 3);
