@@ -18,8 +18,7 @@ use docx_edit::structured::{
 };
 use docx_edit::{
     EditCtx, EditingDoc, ParagraphIdentities, ParagraphRef, ParagraphSavePlan, Receipt,
-    SegmentContent, SpliceAnchor, StoryRange, StorySegment, is_opaque_seed_budget_error,
-    seed_from_docx_with_generation,
+    SegmentContent, SpliceAnchor, StoryRange, StorySegment, seed_from_docx_with_generation,
 };
 use docx_layout::types::Input as LayoutInput;
 use docx_parse::block::BlockContent;
@@ -512,11 +511,10 @@ impl Document {
         };
         let session = EditingDoc::new(1);
         let seeded = seed_from_docx_with_generation(&session, &self.source, &self.seed[..32]);
-        if let Err(message) = seeded {
-            if is_opaque_seed_budget_error(&message) {
-                return Ok(None);
-            }
-            return Err(Error::Parse(docx_parse::ParseError::Canonical(message)));
+        #[cfg(test)]
+        let seeded = seeded.and_then(|()| session_save_tests::injected_seed_error());
+        if seeded.is_err() {
+            return Ok(None);
         }
         let identities = session.paragraph_identities();
         let body_part = body_part(&identities);
@@ -1222,6 +1220,16 @@ mod session_save_tests {
         replace_section_paragraphs,
     };
 
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SEED_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn injected_seed_error() -> Result<(), String> {
+        SEED_ERROR.with(|error| error.borrow().clone().map_or(Ok(()), Err))
+    }
+
     const NAMESPACES: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
 
     fn paragraph(id: &str, content: &str) -> String {
@@ -1347,6 +1355,26 @@ mod session_save_tests {
         assert!(document.session_save_plan().unwrap().is_none());
         let saved = main_part(&document);
         assert!(!saved.contains("Planted"), "{saved}");
+        let mut expected = open();
+        expected
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        assert_eq!(saved, full_write(expected));
+    }
+
+    #[test]
+    fn failed_seed_takes_the_full_write() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        SEED_ERROR.with(|error| {
+            *error.borrow_mut() = Some("XML element limit exceeded".to_owned());
+        });
+        let plan = document.session_save_plan();
+        let saved = main_part(&document);
+        SEED_ERROR.with(|error| *error.borrow_mut() = None);
+        assert!(plan.unwrap().is_none());
         let mut expected = open();
         expected
             .replace_paragraph_text("0000000B", "Charlie edited")
