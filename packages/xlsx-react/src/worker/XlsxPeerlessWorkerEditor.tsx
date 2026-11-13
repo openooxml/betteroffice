@@ -1797,6 +1797,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     placeSelection(sheet, next);
     command({ kind: 'select', payload: { selection: rangeTarget(sheet, next) } });
   };
+  const endChartGesture = () => { chartDrag.current = null; cancelChartResize(); setChartPreview(null); };
   /**
    * The corner above the row numbers selects the whole sheet, the same raw
    * path as a header press: the range is the sheet's own extent, not the
@@ -1805,6 +1806,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const onSelectAll = () => {
     if (!run?.ready || run.failure) return;
     draftController.commit('cell'); draftController.commit('formula'); flushNudge();
+    endChartGesture();
     const sheet = activeRef.current;
     const next: Selection = {
       anchor: { row: 0, col: 0 },
@@ -1820,7 +1822,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       draftController.cellInput?.contains(event.target as Node) ||
       draftController.isComposing('cell') || draftController.isComposing('formula')) return;
     draftController.commit('cell'); draftController.commit('formula'); flushNudge();
-    setChartPreview(null); setSelectedChart(null);
+    endChartGesture(); setSelectedChart(null);
     selectHeader(axis, index, event.shiftKey);
     focus();
   };

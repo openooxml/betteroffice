@@ -1934,13 +1934,13 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const focus = axis === 'col' ? { row: 0, col: index } : { row: index, col: 0 };
     setRawSelection({ anchor, focus, range: track });
   };
+  const endChartGesture = () => { chartDrag.current = null; cancelChartResize(); setChartPreview(null); };
   const onHeaderMouseDown = (axis: 'col' | 'row', index: number, event: MouseEvent) => {
     if (event.button !== 0 || fromPlugin(event) || runRef.current?.failure) return;
     if (editingRef.current !== null) commitDraft('cell');
     else if (coordinator.draft?.source === 'formula') commitDraft('formula');
     flushNudgeRef.current();
-    chartDrag.current = null;
-    setChartPreview(null);
+    endChartGesture();
     setSelectedChart(null);
     selectHeader(axis, index, event.shiftKey);
     clickStart.current = null;
@@ -1956,8 +1956,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (editingRef.current !== null) commitDraft('cell');
     else if (coordinator.draft?.source === 'formula') commitDraft('formula');
     flushNudgeRef.current();
-    chartDrag.current = null;
-    setChartPreview(null);
+    endChartGesture();
     setSelectedChart(null);
     setRawSelection({
       anchor: { row: 0, col: 0 },
