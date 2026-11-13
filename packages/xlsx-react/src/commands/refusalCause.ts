@@ -26,7 +26,7 @@ export function refusalCause(status: CommandStatus): XlsxRefusalCause {
 /** The worker commands that change the workbook, whose refusal the banner reports as a declined edit. */
 const EDIT_COMMANDS: ReadonlySet<string> = new Set([
   'editCell', 'editCells', 'applyEdits', 'applyOps', 'patchRangeStyle', 'setNumberFormat', 'applyFormat',
-  'moveChart', 'moveRange', 'fillRange', 'undo', 'redo', 'acceptProposal', 'rejectProposal',
+  'moveChart', 'resizeChart', 'moveRange', 'fillRange', 'undo', 'redo', 'acceptProposal', 'rejectProposal',
 ]);
 
 /** `applyOps` toolbar commands that read or capture rather than edit. */

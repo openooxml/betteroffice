@@ -16,6 +16,7 @@ export const WORKBOOK_REPLAY_MUTATORS = {
   setNumberFormat: true,
   applyFormat: true,
   moveChart: true,
+  resizeChart: true,
   moveRange: true,
   undo: true,
   redo: true,
@@ -279,6 +280,10 @@ function validOp(value: unknown): boolean {
     case 'moveChart':
       return args.length === 4 && integer(args[0]) && typeof args[1] === 'string' &&
         args.slice(2).every(finite);
+    case 'resizeChart':
+      return args.length === 3 && integer(args[0]) && typeof args[1] === 'string' &&
+        record(args[2]) && ['left', 'top', 'right', 'bottom'].every((edge) =>
+          finite((args[2] as Record<string, unknown>)[edge]));
     case 'moveRange':
       return args.length === 3 && integer(args[0]) && typeof args[1] === 'string' &&
         typeof args[2] === 'string';
@@ -329,6 +334,7 @@ export function applyWorkbookReplayOp(
     case 'setNumberFormat': return handle.setNumberFormat(...op.args);
     case 'applyFormat': return handle.applyFormat(...op.args);
     case 'moveChart': return handle.moveChart(...op.args);
+    case 'resizeChart': return handle.resizeChart(...op.args);
     case 'moveRange': return handle.moveRange(...op.args);
     case 'fillRange': return handle.fillRange(...op.args);
     case 'undo': return handle.undo(...op.args);

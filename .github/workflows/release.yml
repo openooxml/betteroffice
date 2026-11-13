@@ -11,6 +11,10 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   release:
     if: github.ref == 'refs/heads/main'
@@ -50,8 +54,8 @@ jobs:
       - name: Detect pending changesets
         id: pending
         run: |
-          count=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md' | wc -l | tr -d ' ')
-          echo "publishing=$([ "$count" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          changesets=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md')
+          echo "publishing=$([ -z "$changesets" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -247,12 +251,14 @@ jobs:
 
           packs=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-"))')
           formats=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-") | not)')
+          # shellcheck disable=SC2086 # binding names contain no spaces
           publish $packs
           if [ $status -ne 0 ] && [ -n "$formats" ]; then
             echo "::error::A font pack did not publish, so no format binding was dispatched: every betteroffice-<format> wheel requires betteroffice-fonts-latin, -intl and -cjk at the versions this commit pins."
             echo "::error::A missing PyPI project needs its pending publisher (environment pypi-fonts-<pack>): RELEASING.md, \"Font pack wheels\". Rerun the release once it exists."
             exit 1
           fi
+          # shellcheck disable=SC2086 # binding names contain no spaces
           publish $formats
           exit $status
 

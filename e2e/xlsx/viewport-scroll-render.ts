@@ -84,6 +84,21 @@ export const viewportScrollRender: XlsxScenario = {
       expect(recorder.op('undo:moveChart', () => handle.undo()).applied).toBe(
         true
       );
+      if (chart.resizable) {
+        expect(
+          recorder.op('resizeChart', () =>
+            handle.resizeChart(SHEET, chart.id, {
+              left: 0,
+              top: 0,
+              right: 24,
+              bottom: 24,
+            })
+          ).applied
+        ).toBe(true);
+        expect(
+          recorder.op('undo:resizeChart', () => handle.undo()).applied
+        ).toBe(true);
+      }
     }
     expect(info.sheetNames.length).toBeGreaterThan(0);
   },

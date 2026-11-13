@@ -229,7 +229,18 @@
     "sheetActivated": "{name}, werkblad {index} van {count}",
     "cellInputLabel": "Cel {address} bewerken",
     "gridRoleDescription": "werkblad",
-    "fillHandleLabel": "Vulgreep"
+    "fillHandleLabel": "Vulgreep",
+    "chartResizeNw": "Grootte van grafiek wijzigen vanuit de linkerbovenhoek",
+    "chartResizeN": "Grootte van grafiek wijzigen vanuit de bovenrand",
+    "chartResizeNe": "Grootte van grafiek wijzigen vanuit de rechterbovenhoek",
+    "chartResizeE": "Grootte van grafiek wijzigen vanuit de rechterrand",
+    "chartResizeSe": "Grootte van grafiek wijzigen vanuit de rechteronderhoek",
+    "chartResizeS": "Grootte van grafiek wijzigen vanuit de onderrand",
+    "chartResizeSw": "Grootte van grafiek wijzigen vanuit de linkeronderhoek",
+    "chartResizeW": "Grootte van grafiek wijzigen vanuit de linkerrand",
+    "chartResizeHintBoth": "{label} (pijltoetsen; houd Shift ingedrukt voor 10 px)",
+    "chartResizeHintHorizontal": "{label} (pijl-links en pijl-rechts; houd Shift ingedrukt voor 10 px)",
+    "chartResizeHintVertical": "{label} (pijl-omhoog en pijl-omlaag; houd Shift ingedrukt voor 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Plug-ins",
