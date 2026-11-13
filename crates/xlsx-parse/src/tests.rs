@@ -45,6 +45,28 @@ fn zero_height_parts() -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
+fn sheet_format_reads_default_column_widths() {
+    for (format, default, base) in [
+        (
+            r#"<sheetFormatPr baseColWidth="10" defaultColWidth="10.66" defaultRowHeight="13"/>"#,
+            Some(10.66),
+            Some(10),
+        ),
+        (r#"<sheetFormatPr baseColWidth="12"/>"#, None, Some(12)),
+        (
+            r#"<sheetFormatPr defaultColWidth="300" baseColWidth="-1"/>"#,
+            None,
+            None,
+        ),
+    ] {
+        let parts = package(&format!("{format}<sheetData/>"), &[], false);
+        let sheet = &parse_workbook(&parts).unwrap().sheets[0];
+        assert_eq!(sheet.format.default_col_width, default, "{format}");
+        assert_eq!(sheet.format.base_col_width, base, "{format}");
+    }
+}
+
+#[test]
 fn zero_height_keeps_content_rows_visible_and_empty_rows_hidden() {
     let workbook = parse_workbook(&zero_height_parts()).unwrap();
     let sheet = &workbook.sheets[0];
@@ -3570,6 +3592,82 @@ fn dxf_fonts_stay_out_of_the_font_pool() {
     let parts = package_styled("<sheetData/>", Some(styles), None);
     let parsed = parse_workbook_with_package(&parts).unwrap();
     assert_eq!(parsed.workbook.styles.fonts.len(), 1);
+}
+
+#[test]
+fn font_underline_kinds_read_and_round_trip() {
+    use xlsx_model::RunUnderline;
+    let source = [
+        ("<u/>", RunUnderline::Single),
+        (r#"<u val="single"/>"#, RunUnderline::Single),
+        (r#"<u val="double"/>"#, RunUnderline::Double),
+        (
+            r#"<u val="singleAccounting"/>"#,
+            RunUnderline::SingleAccounting,
+        ),
+        (
+            r#"<u val="doubleAccounting"/>"#,
+            RunUnderline::DoubleAccounting,
+        ),
+        (r#"<u val="none"/>"#, RunUnderline::None),
+        (r#"<u val="none"></u>"#, RunUnderline::None),
+        ("", RunUnderline::None),
+    ];
+    let fonts: String = source
+        .iter()
+        .map(|(u, _)| format!(r#"<font>{u}<sz val="11"/></font>"#))
+        .collect();
+    let styles = format!(r#"<fonts count="{}">{fonts}</fonts>"#, source.len());
+    let parts = package_styled("<sheetData/>", Some(&styles), None);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let read: Vec<_> = parsed
+        .workbook
+        .styles
+        .fonts
+        .iter()
+        .map(|f| f.underline)
+        .collect();
+    assert_eq!(read, source.map(|(_, kind)| kind));
+    let unchanged = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    assert_eq!(
+        part_bytes(&unchanged, "xl/styles.xml"),
+        part_bytes(&parts, "xl/styles.xml")
+    );
+
+    let kinds = [
+        RunUnderline::Single,
+        RunUnderline::Double,
+        RunUnderline::SingleAccounting,
+        RunUnderline::DoubleAccounting,
+    ];
+    let mut workbook = parsed.workbook.clone();
+    for (col, underline) in kinds.into_iter().enumerate() {
+        let mut format = workbook.styles.cell_format(None);
+        format.font.bold = true;
+        format.font.underline = underline;
+        let style = workbook.styles.intern_cell_format(&format).unwrap();
+        workbook.sheets[0].set_cell(
+            CellRef::new(0, col as u32),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                style,
+                ..Cell::default()
+            },
+        );
+    }
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+    assert!(xml.contains(r#"<font><b/><u val="double"/>"#), "{xml}");
+    let reopened = parse_workbook(&saved).unwrap();
+    for (col, underline) in kinds.into_iter().enumerate() {
+        let cell = reopened.sheets[0]
+            .cell(CellRef::new(0, col as u32))
+            .unwrap();
+        assert_eq!(
+            reopened.styles.cell_format(cell.style).font.underline,
+            underline
+        );
+    }
 }
 
 fn style_branch(content: &str, branch: &str) -> String {

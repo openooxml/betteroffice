@@ -117,7 +117,8 @@ import {
   type RetainedFrame,
 } from '../layout/render/frameDelta';
 import { GlyphCache } from '../layout/render/glyphCache';
-import { WASM32_MEMORY_LIMIT_BYTES, wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { wasmModuleMemories } from '../wasm/loadWasmAsset';
+import { saveWarmupPolicy, type SaveWarmupPolicy } from './saveWarmupPolicy';
 import {
   encodeDisplayListFrameExtras,
   loadRustDisplayListQueryEngine,
@@ -1305,14 +1306,27 @@ interface SaveWarmup {
 let saveWarmup: SaveWarmup | null = null;
 const SAVE_WARMUP_IDLE_MS = 300;
 const SAVE_WARMUP_INPUT_IDLE_MS = 600;
-const SAVE_WARMUP_MIN_HEADROOM_BYTES = 64 * 1024 * 1024;
-const SAVE_WARMUP_HEADROOM_FRACTION = 0.25;
 const SAVE_SEED_MAX_PARAGRAPHS = 4096;
 const SAVE_SEED_MAX_INFLATED_BYTES = 16 * 1024 * 1024;
-const SAVE_SEED_SLICE_BYTES = 16 * 1024;
-const SAVE_SEED_MIN_SLICE_BYTES = 2 * 1024;
-const SAVE_SEED_MAX_SLICE_BYTES = 1024 * 1024;
+export const SAVE_SEED_SLICE_BYTES = 16 * 1024;
+export const SAVE_SEED_MIN_SLICE_BYTES = 2 * 1024;
+export const SAVE_SEED_MAX_SLICE_BYTES = 1024 * 1024;
 const SAVE_SEED_SLICE_TARGET_MS = 10;
+export const SAVE_SEED_MAX_GROWTH = 2;
+
+/**
+ * The budget of the next save seed prime slice: `targetMs` at the rate the last slice charged
+ * its cost, at most `maxGrowth` times `current`, between the floor and the cap; a slice that
+ * charged nothing keeps `current`.
+ */
+export function nextPrimeByteBudget(
+  current: number, charged: number, elapsedMs: number, targetMs: number, maxGrowth: number,
+): number {
+  if (charged <= 0) return current;
+  const measured = Math.round((targetMs * charged) / Math.max(elapsedMs, 1));
+  return Math.min(SAVE_SEED_MAX_SLICE_BYTES, Math.max(SAVE_SEED_MIN_SLICE_BYTES,
+    Math.min(measured, current * maxGrowth)));
+}
 /** Toolbar metadata of the parsed document a source open seeded, read once. */
 let openedParsedToolbar: (() => DocxToolbarMetadata) | null = null;
 let sourcePreviewing = false;
@@ -4078,7 +4092,7 @@ function primeSaveSeedStatesOnce(): void {
   if (saveSeedStatesPrimed || !session || !commandHost || !canPreloadSaveWasm() || slicedCompletion ||
     incompleteLayout || commandLayout?.certifiedPages() != null) return;
   saveSeedStatesPrimed = true;
-  if (!saveWarmupHasHeadroom()) return;
+  if (!currentSaveWarmupPolicy().primeSeeds) return;
   const owner = session;
   let maxBytes = SAVE_SEED_SLICE_BYTES;
   scheduler.schedule({
@@ -4093,9 +4107,8 @@ function primeSaveSeedStatesOnce(): void {
       const started = performance.now();
       const state = owner.primeSaveSeedStatesSlice(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES, maxBytes);
       const elapsed = performance.now() - started;
-      const target = Math.min(budgetMs, SAVE_SEED_SLICE_TARGET_MS);
-      maxBytes = Math.min(SAVE_SEED_MAX_SLICE_BYTES, Math.max(SAVE_SEED_MIN_SLICE_BYTES,
-        Math.round((maxBytes * target) / Math.max(1, elapsed))));
+      maxBytes = nextPrimeByteBudget(maxBytes, owner.primeLastSliceCost(), elapsed,
+        Math.min(budgetMs, SAVE_SEED_SLICE_TARGET_MS), SAVE_SEED_MAX_GROWTH);
       return state === 1 ? 'yield' : 'done';
     },
   });
@@ -4144,27 +4157,21 @@ function interruptSaveWarmup(type: string): void {
 
 function saveWarmupCurrent(attempt: SaveWarmup): boolean {
   return !attempt.cancelled && session === attempt.owner && saveWarmupOwner === attempt.owner &&
-    canPreloadSaveWasm() && saveWarmupHasHeadroom();
+    canPreloadSaveWasm() && currentSaveWarmupPolicy().warm;
 }
 
-function saveWarmupHasHeadroom(): boolean {
-  // Save warmup is sized against a wasm32 memory; the native engine does not run it.
-  if (engineKind === 'native') return false;
+function currentSaveWarmupPolicy(): SaveWarmupPolicy {
   const configured = openedDocument?.heapLimitBytes;
-  if (configured !== undefined && (!Number.isSafeInteger(configured) || configured <= 0)) return false;
+  const unread = saveWarmupPolicy(engineKind, configured, undefined);
+  if (unread.reason === 'no-limit') return unread;
   let memory: ReturnType<typeof wasmModuleMemories>[number] | undefined;
   try {
     memory = wasmModuleMemories().find((module) => module.label === 'docx-edit');
   } catch (error) {
     if (isEngineTrap(error)) trapped(0, error as Error);
-    return false;
+    return unread;
   }
-  const limit = Math.min(configured ?? WASM32_MEMORY_LIMIT_BYTES,
-    memory?.maximumBytes ?? WASM32_MEMORY_LIMIT_BYTES, WASM32_MEMORY_LIMIT_BYTES);
-  if (!Number.isSafeInteger(limit) || limit <= 0) return false;
-  const live = memory?.liveBytes;
-  return typeof live === 'number' && Number.isSafeInteger(live) && live >= 0 &&
-    limit - live >= Math.max(SAVE_WARMUP_MIN_HEADROOM_BYTES, limit * SAVE_WARMUP_HEADROOM_FRACTION);
+  return saveWarmupPolicy(engineKind, configured, memory);
 }
 
 function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
@@ -4191,13 +4198,13 @@ function yieldSaveWarmup(attempt: SaveWarmup): Promise<void> {
 
 function scheduleSaveWarmup(): void {
   if (saveWarmupTimer !== null || saveWarmup || !saveWarmupOwner || session !== saveWarmupOwner ||
-    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm() || !saveWarmupHasHeadroom()) return;
+    saveWarmupFinished || saveWarmupAttempts >= 2 || !canPreloadSaveWasm() || !currentSaveWarmupPolicy().warm) return;
   const owner = saveWarmupOwner;
   const delay = Math.max(0, saveWarmupRequestAt + SAVE_WARMUP_IDLE_MS - performance.now(),
     saveWarmupInputAt + SAVE_WARMUP_INPUT_IDLE_MS - performance.now());
   saveWarmupTimer = setTimeout(() => {
     saveWarmupTimer = null;
-    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished || !saveWarmupHasHeadroom()) return;
+    if (session !== owner || !canPreloadSaveWasm() || saveWarmupFinished || !currentSaveWarmupPolicy().warm) return;
     const attempt: SaveWarmup = { owner, cancelled: false };
     saveWarmup = attempt;
     void yieldSaveWarmup(attempt).then(async () => {

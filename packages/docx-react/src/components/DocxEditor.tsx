@@ -2065,9 +2065,10 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
   // Handle error from editor
   const handleEditorError = useCallback(
     (error: Error) => {
+      pluginHost.host.checkFocus();
       onError?.(error);
     },
-    [onError]
+    [onError, pluginHost.host]
   );
 
   const {

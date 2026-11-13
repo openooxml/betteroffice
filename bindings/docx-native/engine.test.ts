@@ -1,4 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { applyFrameDelta, decodeFrameDelta } from '../../packages/docx/src/layout/render/frameDelta';
 import type { DisplayPage, DisplayPrimitive, GlyphRunPrimitive } from '../../packages/docx/src/layout/render/displayList';
@@ -14,6 +18,13 @@ import {
 } from '../../shared/office-session/trap';
 import { readClipboardSlice, readTableFragment, type ClipboardTableReader } from '../../packages/docx/src/yrs/clipboardFragment';
 import type { YrsStorySegment } from '../../packages/docx/src/yrs/index';
+import {
+  SAVE_SEED_MAX_GROWTH,
+  SAVE_SEED_MAX_SLICE_BYTES,
+  SAVE_SEED_MIN_SLICE_BYTES,
+  SAVE_SEED_SLICE_BYTES,
+  nextPrimeByteBudget,
+} from '../../packages/docx/src/yrs/residentEngineWorker';
 
 type Engine = typeof wasm;
 type Session = wasm.EditSession;
@@ -1472,6 +1483,78 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('prime_last_slice_cost reports the same cost after each slice as wasm', () => {
+    const expected = new wasm.EditSession(64);
+    const actual = new native.EditSession(64);
+    try {
+      expected.seed_from_docx(fixture, 'opening');
+      actual.seed_from_docx(fixture, 'opening');
+      expect(Number(actual.prime_last_slice_cost())).toBe(Number(expected.prime_last_slice_cost()));
+      let answer = 1;
+      let sawCost = false;
+      for (let slice = 0; slice < 10_000 && answer === 1; slice += 1) {
+        answer = expected.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64);
+        expect(actual.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64)).toBe(answer);
+        const cost = Number(expected.prime_last_slice_cost());
+        expect(Number(actual.prime_last_slice_cost())).toBe(cost);
+        sawCost ||= cost > 64;
+      }
+      expect(answer).toBe(0);
+      expect(sawCost).toBe(true);
+    } finally {
+      actual.free();
+      expected.free();
+    }
+  });
+
+  test('priming many tiny stories through the slice budget controller stays off the floor and the cap', () => {
+    const encoder = new TextEncoder();
+    const paragraph = '<w:p><w:r><w:t>C</w:t></w:r></w:p>';
+    let controls = '';
+    let rows = '';
+    for (let index = 0; index < 60; index += 1) {
+      controls += `<w:sdt><w:sdtPr><w:id w:val="${-1000 - index}"/></w:sdtPr><w:sdtContent>${paragraph}</w:sdtContent></w:sdt>`;
+      rows += `<w:tr><w:tc><w:tcPr/>${paragraph}</w:tc></w:tr>`;
+    }
+    const table = `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>${rows}</w:tbl>`;
+    const bytes = wasm.rezip_docx({
+      '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+      '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+      'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraph}${controls}${table}${paragraph}<w:sectPr/></w:body></w:document>`),
+    });
+    for (const engine of [wasm, native]) {
+      const session = new engine.EditSession(65);
+      try {
+        session.seed_from_docx(bytes, 'opening');
+        let budget = SAVE_SEED_SLICE_BYTES;
+        const offered: number[] = [];
+        const costs: number[] = [];
+        let answer = 1;
+        for (let slice = 0; slice < 10_000 && answer === 1; slice += 1) {
+          offered.push(budget);
+          answer = session.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, budget);
+          const cost = Number(session.prime_last_slice_cost());
+          costs.push(cost);
+          budget = nextPrimeByteBudget(budget, cost, 1, 10, SAVE_SEED_MAX_GROWTH);
+        }
+        expect(answer).toBe(0);
+        const firstCharged = costs.findIndex((cost) => cost > 0);
+        expect(firstCharged).toBeGreaterThan(0);
+        expect(offered.slice(0, firstCharged + 1)).toEqual(Array(firstCharged + 1).fill(SAVE_SEED_SLICE_BYTES));
+        for (let slice = 1; slice < offered.length; slice += 1) {
+          expect(offered[slice]).toBeLessThanOrEqual(offered[slice - 1] * SAVE_SEED_MAX_GROWTH);
+        }
+        const total = costs.reduce((sum, cost) => sum + cost, 0);
+        expect(total).toBeGreaterThanOrEqual(60 * 1024);
+        expect(offered.length).toBeLessThanOrEqual(Math.ceil(total / SAVE_SEED_SLICE_BYTES) + 2 + firstCharged);
+        expect(Math.min(...offered)).toBeGreaterThan(SAVE_SEED_MIN_SLICE_BYTES);
+        expect(Math.max(...offered.slice(0, firstCharged + 2))).toBeLessThan(SAVE_SEED_MAX_SLICE_BYTES);
+      } finally {
+        session.free();
+      }
+    }
+  });
+
   test('RunInheritance resolves the same attributes and formatting', () => {
     const expectedSession = new wasm.EditSession(71);
     const actualSession = new native.EditSession(71);
@@ -2526,3 +2609,54 @@ for (const layout of CONTROL_LAYOUTS) {
     });
   });
 }
+
+describe('docx native panic hook', () => {
+  test('install_panic_hook returns undefined on every call', () => {
+    expect(typeof native.install_panic_hook).toBe('function');
+    expect(native.install_panic_hook()).toBeUndefined();
+    expect(native.install_panic_hook()).toBeUndefined();
+  });
+
+  test.skipIf(process.platform === 'win32')('a panic writes one prefixed line before the default report and throws the same Error', () => {
+    const script = join(mkdtempSync(join(tmpdir(), 'docx-native-panic-')), 'panic.mjs');
+    const loader = (name: string) => JSON.stringify(fileURLToPath(new URL(`./js/${name}.ts`, import.meta.url)));
+    writeFileSync(script, `
+      const edit = await import(${loader('engineEdit')});
+      const parse = await import(${loader('engineParse')});
+      edit.install_panic_hook();
+      parse.install_panic_hook();
+      edit.set_wasm_heap_counting(true);
+      edit.set_wasm_heap_limit(1);
+      let caught;
+      try {
+        edit.unzip_docx(edit.rezip_docx({ data: new Uint8Array([1, 2, 255]) }));
+      } catch (error) {
+        caught = error;
+      } finally {
+        edit.set_wasm_heap_limit(Infinity);
+      }
+      process.stdout.write('\\n' + JSON.stringify({
+        isError: caught instanceof Error,
+        name: caught?.name,
+        message: caught?.message,
+        code: caught?.code,
+      }));
+    `);
+    const child = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+    expect(child.status, child.stderr).toBe(0);
+    expect(JSON.parse(child.stdout.trim().split('\n').at(-1)!)).toEqual({
+      isError: true,
+      name: 'Error',
+      message: expect.stringMatching(/^BetterOffice engine memory budget exceeded \(\d+ bytes over a 1-byte budget\)$/),
+      code: 'GenericFailure',
+    });
+    const lines = child.stderr.split('\n');
+    const prefixed = lines.flatMap((line, index) => (line.startsWith('[docx-native] panic: ') ? [index] : []));
+    expect(prefixed, child.stderr).toHaveLength(1);
+    expect(lines[prefixed[0]!]).toContain('panicked at');
+    expect(lines[prefixed[0]!]).toContain('\\n');
+    expect(lines[prefixed[0]!]).toContain('BetterOffice engine memory budget exceeded');
+    const report = lines.findIndex((line, index) => index > prefixed[0]! && /^thread .* panicked at /.test(line));
+    expect(report, child.stderr).toBeGreaterThan(prefixed[0]!);
+  });
+});

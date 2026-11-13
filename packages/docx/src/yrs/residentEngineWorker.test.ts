@@ -56,6 +56,14 @@ import {
   type ResidentProposalOperation,
 } from './residentEngineWorkerProtocol';
 import type { EchoGlyphProvider } from './residentCommandViewProjection';
+import { saveWarmupPolicy } from './saveWarmupPolicy';
+import {
+  SAVE_SEED_MAX_GROWTH,
+  SAVE_SEED_MAX_SLICE_BYTES,
+  SAVE_SEED_MIN_SLICE_BYTES,
+  SAVE_SEED_SLICE_BYTES,
+  nextPrimeByteBudget,
+} from './residentEngineWorker';
 
 let startWorker: (scope: unknown, canvas: unknown, harness: unknown, clock: unknown, fetch: unknown, decode: unknown, schedule: unknown, unschedule: unknown) => void;
 const retireWorkerTimers: (() => void)[] = [];
@@ -118,6 +126,10 @@ beforeAll(async () => {
     '../layout/render/glyphCache':
       'export class GlyphCache { constructor(options) { testHarness.glyphs = options.provider; testHarness.glyphCacheCreations += 1; } }',
     '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => testHarness.memories;',
+    '../wasm/engineEdit': `
+      export let engineKind = 'wasm';
+      testHarness.setEngineKind = (kind) => { engineKind = kind; };
+    `,
     './residentCommandViewProjection':
       'export const projectCommandEchoContext = (input) => testHarness.projectEchoContext?.(input);',
     '../layout/render/frameDelta': `
@@ -266,6 +278,7 @@ function worker() {
       await yieldSave();
       await yieldSave();
     }),
+    setEngineKind: null as ((kind: 'wasm' | 'native') => void) | null,
     saveWarmupState: null as (() => { attempts: number; active: boolean; finished: boolean; record: ResidentSaveRecord; saveDelayMs: number | null }) | null,
     async preloadFrom(source: Promise<WebAssembly.Module | null>): Promise<void> {
       await harness.preload((await source) ?? undefined);
@@ -301,6 +314,7 @@ function worker() {
       initializeComments() {},
       primeSaveSeedStates: mock(() => true),
       primeSaveSeedStatesSlice: mock((_paragraphs: number, _inflated: number, _bytes: number) => 0),
+      primeLastSliceCost: mock(() => 0),
       partGeometry: () => [],
       proposalEngine: { version: () => 'v' },
       geometryReader: { storyIds: () => ['body'] },
@@ -2600,6 +2614,92 @@ describe('document worker warmup', () => {
     }
   });
 
+  test('prime byte budget bounds are 16 KiB initially, 2 KiB at the floor and 1 MiB at the cap', () => {
+    expect([SAVE_SEED_SLICE_BYTES, SAVE_SEED_MIN_SLICE_BYTES, SAVE_SEED_MAX_SLICE_BYTES])
+      .toEqual([16 * 1024, 2 * 1024, 1024 * 1024]);
+  });
+
+  test('prime budget growth limit is 2 or 4 times a slice', () => {
+    expect([2, 4]).toContain(SAVE_SEED_MAX_GROWTH);
+  });
+
+  test('prime budget holds through slices that charge nothing', () => {
+    let budget = SAVE_SEED_SLICE_BYTES;
+    for (const elapsed of [0, 0.1, 0.2, 0.3, 0.4, 0.5]) {
+      budget = nextPrimeByteBudget(budget, 0, elapsed, 10, 4);
+      expect(budget).toBe(SAVE_SEED_SLICE_BYTES);
+    }
+  });
+
+  test('prime budget stays where the last charged slice left it across slices that charge nothing', () => {
+    const measured = nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 64 * 1024, 20, 10, 4);
+    let budget = measured;
+    for (const elapsed of [0, 0.25, 0.5]) {
+      budget = nextPrimeByteBudget(budget, 0, elapsed, 10, 4);
+      expect(budget).toBe(measured);
+    }
+  });
+
+  test('prime budget is the target times the measured charge rate within the growth limit', () => {
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 64 * 1024, 20, 10, 4)).toBe(32 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 64 * 1024, 20, 10, 2)).toBe(32 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_MIN_SLICE_BYTES, 64 * 1024, 20, 10, 4)).toBe(8 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_MIN_SLICE_BYTES, 64 * 1024, 20, 10, 2)).toBe(4 * 1024);
+  });
+
+  test('prime budget grows by at most the growth limit after a slice that took no measurable time', () => {
+    for (const elapsed of [0, 0.01, 0.25]) {
+      expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 16 * 1024, elapsed, 10, 4)).toBe(64 * 1024);
+      expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 16 * 1024, elapsed, 10, 2)).toBe(32 * 1024);
+    }
+  });
+
+  test('prime budget shrinks without limit', () => {
+    expect(nextPrimeByteBudget(SAVE_SEED_MAX_SLICE_BYTES, 64 * 1024, 20, 10, 2)).toBe(32 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_MAX_SLICE_BYTES, 64 * 1024, 20, 10, 4)).toBe(32 * 1024);
+    expect(nextPrimeByteBudget(SAVE_SEED_MAX_SLICE_BYTES, 1, 100, 10, 2)).toBe(SAVE_SEED_MIN_SLICE_BYTES);
+  });
+
+  test('prime budget holds the cap and the floor', () => {
+    expect(nextPrimeByteBudget(512 * 1024, 64 * 1024 * 1024, 1, 10, 4)).toBe(SAVE_SEED_MAX_SLICE_BYTES);
+    expect(nextPrimeByteBudget(SAVE_SEED_MAX_SLICE_BYTES, 64 * 1024 * 1024, 0, 10, 4)).toBe(SAVE_SEED_MAX_SLICE_BYTES);
+    expect(nextPrimeByteBudget(SAVE_SEED_SLICE_BYTES, 1, 100, 10, 4)).toBe(SAVE_SEED_MIN_SLICE_BYTES);
+  });
+
+  test('a run of cheap slices raises the prime budget one growth step at a time', () => {
+    const offered: number[] = [];
+    let budget = SAVE_SEED_SLICE_BYTES;
+    for (let slice = 0; slice < 4; slice += 1) {
+      offered.push(budget);
+      budget = nextPrimeByteBudget(budget, budget, 0.01, 10, 4);
+    }
+    expect(offered).toEqual([16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024]);
+    expect(offered[1]).toBeLessThan(SAVE_SEED_MAX_SLICE_BYTES);
+    expect(offered[2]).toBeLessThan(SAVE_SEED_MAX_SLICE_BYTES);
+  });
+
+  test('a heavy slice after sub-millisecond slices that charge nothing is offered the initial budget', () => {
+    let budget = SAVE_SEED_SLICE_BYTES;
+    for (let slice = 0; slice < 3; slice += 1) budget = nextPrimeByteBudget(budget, 0, 0.1, 10, SAVE_SEED_MAX_GROWTH);
+    expect(budget).toBe(SAVE_SEED_SLICE_BYTES);
+    const next = nextPrimeByteBudget(budget, 16 * 1024, 0.1, 10, SAVE_SEED_MAX_GROWTH);
+    expect(next).toBeLessThanOrEqual(budget * SAVE_SEED_MAX_GROWTH);
+    expect(next).toBeLessThan(SAVE_SEED_MAX_SLICE_BYTES);
+  });
+
+  test('the first charged slice after slices that charge nothing is offered the initial budget', () => {
+    const offered: number[] = [];
+    let budget = SAVE_SEED_SLICE_BYTES;
+    const slices: Array<[charged: number, elapsed: number]> = [[0, 0], [0, 0.1], [0, 0.2], [0, 0.4], [0, 0.5], [8 * 1024, 4], [0, 0.1]];
+    for (const [charged, elapsed] of slices) {
+      offered.push(budget);
+      budget = nextPrimeByteBudget(budget, charged, elapsed, 10, 4);
+    }
+    expect(offered.slice(0, 6)).toEqual(Array(6).fill(SAVE_SEED_SLICE_BYTES));
+    expect(offered[6]).toBe(20 * 1024);
+    expect(budget).toBe(20 * 1024);
+  });
+
   test('read-only opens do not prime save seed states', async () => {
     const { w, client } = await commandWorker();
     w.harness.now = () => now;
@@ -2626,6 +2726,47 @@ describe('document worker warmup', () => {
       client.destroy();
     }
   });
+
+  const MiB = 1024 * 1024;
+  test.each([
+    ['wasm', undefined, { liveBytes: 100 }, { warm: true, primeSeeds: true, reason: 'ok' }],
+    ['wasm', 512 * MiB, { liveBytes: 100 }, { warm: true, primeSeeds: true, reason: 'ok' }],
+    ['wasm', 512 * MiB, { liveBytes: 385 * MiB }, { warm: false, primeSeeds: false, reason: 'low-headroom' }],
+    ['wasm', 512 * MiB, undefined, { warm: false, primeSeeds: false, reason: 'no-stats' }],
+    ['native', undefined, { liveBytes: 100 }, { warm: false, primeSeeds: false, reason: 'no-limit' }],
+    ['native', 512 * MiB, { liveBytes: 100 }, { warm: false, primeSeeds: false, reason: 'engine-native' }],
+    ['native', 512 * MiB, { liveBytes: 385 * MiB }, { warm: false, primeSeeds: false, reason: 'low-headroom' }],
+    ['native', 512 * MiB, undefined, { warm: false, primeSeeds: false, reason: 'no-stats' }],
+  ] as const)('save warmup policy: %s engine, limit=%p, memory=%o', (engine, limit, memory, expected) => {
+    expect(saveWarmupPolicy(engine, limit, memory)).toEqual(expected);
+  });
+
+  test.each([['wasm', 1], ['native', 0]] as const)(
+    '%s engine with a 512 MiB limit and ample headroom warms the save and primes seeds %i times',
+    async (engine, runs) => {
+      const { w, client } = await commandWorker({ heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES });
+      w.harness.setEngineKind!(engine);
+      w.harness.now = () => now;
+      try {
+        await client.commandInit(COMMAND_INIT);
+        client.prepareSave();
+        advanceTimers(0);
+        await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+        advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+        await settleWarmup(() => runs === 0 || (w.harness.saveWarmupState!().finished &&
+          w.harness.session.primeSaveSeedStatesSlice.mock.calls.length === runs));
+        for (let turn = 0; turn < 10; turn += 1) {
+          advanceTimers(SAVE_WARMUP_INPUT_IDLE_MS);
+          await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+        }
+        expect(w.harness.warmSave).toHaveBeenCalledTimes(runs);
+        expect(w.harness.session.primeSaveSeedStatesSlice).toHaveBeenCalledTimes(runs);
+        expect(w.harness.saveWarmupState!().attempts).toBe(runs);
+      } finally {
+        client.destroy();
+      }
+    },
+  );
 
   test('save warmup waits for save intent, wasm loading and command idle, then runs once', async () => {
     const { w, client } = await commandWorker({ heapLimitBytes: SAVE_WARMUP_HEAP_LIMIT_BYTES });

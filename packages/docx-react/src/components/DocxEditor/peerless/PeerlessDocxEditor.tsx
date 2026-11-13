@@ -401,10 +401,15 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     shellState.view?.identity.incarnation, shellState.view?.identity.epoch]);
   useLayoutEffect(() => {
     if (!managedPlugins) return;
-    return trackFocus(() => {
+    const tracker = trackFocus(() => {
       const surface = host.current?.querySelector('[data-docx-worker-editor]');
       return surface ? [surface] : [];
     }, (focused) => pluginHost.focusChanged(focused));
+    pluginHost.setFocusCheck(tracker.recheck);
+    return () => {
+      pluginHost.setFocusCheck(null);
+      tracker();
+    };
   }, [pluginHost, managedPlugins]);
   const activations = useSyncExternalStore(pluginHost.subscribe, pluginHost.activations, pluginHost.activations);
   const reservations = usePluginReservations(pluginHost, activations);
@@ -517,6 +522,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
   const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
   const reportError = useCallback((error: Error) => { workerCollaboration.retire(); controller.fail(error); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
+  const reportShellError = useCallback((error: Error) => { pluginHost.checkFocus(); reportError(error); }, [reportError, pluginHost]);
   const [previewJob, setPreviewJob] = useState<WorkerPreviewJob | null>(null);
   const onPreviewPresented = useCallback((frame: WorkerPreviewJob['frame']) => {
     controller.previewPresented(frame);
@@ -1386,7 +1392,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const minLayoutWidth = pageWidth * zoom + 2 * outlineWidth + sidebarWidth;
   useLayoutEffect(() => { pluginHost.geometryChanged(); }, [pluginHost, minLayoutWidth, documentShift, outlineWidth, zoom]);
   return <DocxCommandProvider commands={controller.commands.store}>
-    <DocxEditorShell i18n={props.i18n} isDark={isDark} onEditorError={reportError}
+    <DocxEditorShell i18n={props.i18n} isDark={isDark} onEditorError={reportShellError}
       containerRef={container} scrollContainerRef={scroller} editorContentRef={content}
       className={className} containerStyle={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%', minHeight: 0, minWidth: 0, backgroundColor: 'var(--doc-bg)', ...style }}
       mainContentStyle={{ display: 'flex', flex: 1, minHeight: 0, minWidth: 0 }}

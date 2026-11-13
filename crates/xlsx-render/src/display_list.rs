@@ -4,7 +4,7 @@
 use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use xlsx_model::PatternType;
+use xlsx_model::{PatternType, RunUnderline};
 
 /// horizontal text anchoring within a cell's clip rect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +111,9 @@ pub enum DrawCmd {
         italic: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         underline: bool,
+        /// The kind of `underline` when it is not single.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        underline_style: Option<RunUnderline>,
         #[serde(default, skip_serializing_if = "is_false")]
         strike: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -320,6 +323,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 bold,
                 italic,
                 underline,
+                underline_style,
                 strike,
                 highlight,
                 dashed_underline,
@@ -343,6 +347,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 bold,
                 italic,
                 underline,
+                underline_style,
                 strike,
                 highlight,
                 dashed_underline,
@@ -533,6 +538,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    underline_style: None,
                     strike: false,
                     highlight: None,
                     dashed_underline: false,
