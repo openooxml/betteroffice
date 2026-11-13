@@ -494,6 +494,8 @@ impl Document {
             selective: None,
             paragraph_ids: self.session_save_plan()?,
         };
+        #[cfg(test)]
+        session_save_tests::count_package_write();
         write_docx_s13_parts(request, &self.original_parts, None).map_err(Error::from)
     }
 
@@ -510,6 +512,8 @@ impl Document {
             return Ok(None);
         };
         let session = EditingDoc::new(1);
+        #[cfg(test)]
+        session_save_tests::count_session_seed();
         let seeded = seed_from_docx_with_generation(&session, &self.source, &self.seed[..32]);
         #[cfg(test)]
         let seeded = seeded.and_then(|()| session_save_tests::injected_seed_error());
@@ -1254,16 +1258,37 @@ mod session_save_tests {
         find_paragraph_mut, get_paragraph_text, replace_plain_run, replace_section_paragraphs,
     };
 
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use docx_parse::{TabStop, TextFormatting};
 
     thread_local! {
         static SEED_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+        static SESSION_SEEDS: Cell<usize> = const { Cell::new(0) };
+        static PACKAGE_WRITES: Cell<usize> = const { Cell::new(0) };
     }
 
     pub(super) fn injected_seed_error() -> Result<(), String> {
         SEED_ERROR.with(|error| error.borrow().clone().map_or(Ok(()), Err))
+    }
+
+    pub(super) fn count_session_seed() {
+        SESSION_SEEDS.with(|seeds| seeds.set(seeds.get() + 1));
+    }
+
+    pub(super) fn count_package_write() {
+        PACKAGE_WRITES.with(|writes| writes.set(writes.get() + 1));
+    }
+
+    /// `(session seeds, package writes)` during `run`.
+    fn counted(run: impl FnOnce()) -> (usize, usize) {
+        SESSION_SEEDS.with(|seeds| seeds.set(0));
+        PACKAGE_WRITES.with(|writes| writes.set(0));
+        run();
+        (
+            SESSION_SEEDS.with(|seeds| seeds.get()),
+            PACKAGE_WRITES.with(|writes| writes.get()),
+        )
     }
 
     const NAMESPACES: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
@@ -1300,6 +1325,10 @@ mod session_save_tests {
     }
 
     fn open_with(document_xml: &str) -> Document {
+        Document::open(&package(document_xml)).unwrap()
+    }
+
+    fn package(document_xml: &str) -> Vec<u8> {
         let parts = vec![
             (
                 "[Content_Types].xml".to_owned(),
@@ -1311,7 +1340,7 @@ mod session_save_tests {
             ),
             ("word/document.xml".to_owned(), document_xml.as_bytes().to_vec()),
         ];
-        Document::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+        ooxml_opc::rezip_parts(&parts).unwrap()
     }
 
     fn reopened(document: &Document) -> Document {
@@ -1435,6 +1464,51 @@ mod session_save_tests {
         let unchanged = [first_paragraph(), paragraph("0000000B", &run("Charlie"))];
         let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
         assert_plan_keeps(&document, &unchanged, "Delta edited twice");
+    }
+
+    #[test]
+    fn an_unedited_save_builds_no_session() {
+        let document = open();
+        let counts = counted(|| {
+            document.save().unwrap();
+        });
+        assert_eq!(counts, (0, 0));
+    }
+
+    #[test]
+    fn an_unedited_save_writes_every_source_entry_as_it_is() {
+        let source = package(&source());
+        let saved = Document::open(&source).unwrap().save().unwrap();
+        assert_eq!(
+            ooxml_opc::unzip_parts(&saved).unwrap(),
+            ooxml_opc::unzip_parts(&source).unwrap()
+        );
+        assert_eq!(saved, source);
+    }
+
+    #[test]
+    fn known_limit_model_mut_borrow_without_change_takes_the_full_write() {
+        let mut document = open();
+        document.model_mut();
+        let (_, writes) = counted(|| {
+            document.save().unwrap();
+        });
+        assert_eq!(writes, 1);
+    }
+
+    #[test]
+    fn a_logged_edit_saves_through_one_session() {
+        let mut document = open();
+        document
+            .replace_paragraph_text("0000000B", "Charlie edited")
+            .unwrap();
+        let counts = counted(|| {
+            document.save().unwrap();
+        });
+        assert_eq!(counts, (1, 1));
+        let unchanged = [first_paragraph(), paragraph("0000000C", &run("Delta"))];
+        let unchanged: Vec<&str> = unchanged.iter().map(String::as_str).collect();
+        assert_plan_keeps(&document, &unchanged, "Charlie edited");
     }
 
     #[test]
