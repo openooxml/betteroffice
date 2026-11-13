@@ -1402,3 +1402,38 @@ fn an_editing_session_reads_a_fresh_id_only_once_saved() {
     assert_eq!(resolve(&ids[4]), AnchorResolution::Missing);
     assert!(matches!(resolve(W14_ID), AnchorResolution::Ambiguous(_)));
 }
+
+#[test]
+fn saving_an_edited_document_twice_gives_the_same_bytes() {
+    let mut document = Document::open(&sample_docx()).unwrap();
+    document
+        .replace_paragraph_text("11111111", "Edited natively")
+        .unwrap();
+
+    let first = document.save().unwrap();
+    let second = document.save().unwrap();
+    assert_eq!(first, second);
+}
+
+#[test]
+fn saving_between_edits_matches_applying_both_edits_before_one_save() {
+    let source = sample_docx();
+    let mut document = Document::open(&source).unwrap();
+    document
+        .replace_paragraph_text("11111111", "First edit")
+        .unwrap();
+    document.save().unwrap();
+    document
+        .replace_paragraph_text("33333333", "Second edit")
+        .unwrap();
+    let saved_between = document.save().unwrap();
+
+    let mut fresh = Document::open(&source).unwrap();
+    fresh
+        .replace_paragraph_text("11111111", "First edit")
+        .unwrap();
+    fresh
+        .replace_paragraph_text("33333333", "Second edit")
+        .unwrap();
+    assert_eq!(saved_between, fresh.save().unwrap());
+}
