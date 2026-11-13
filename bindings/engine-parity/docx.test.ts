@@ -612,11 +612,23 @@ function drainEvents(session: Session): Uint8Array[] {
   return events;
 }
 
+// The later chunk continues the text the first inserted, so it depends on it: yrs integrates an
+// out-of-order chunk with no missing dependency at once behind a skip, leaving nothing pending.
+function dependentChunks({ session, fresh }: Docx): Uint8Array[] {
+  const peer = fresh();
+  peer.apply_update(session.encode_state());
+  peerEdit(peer, 'Second body', 'Remote ');
+  const first = peer.encode_diff(session.encode_state_vector());
+  const middle = peer.encode_state_vector();
+  peer.insert_text('body', paraId(peer, 'Remote Second body'), textAt(peer, 'Remote Second body', 'Remote '.length), 'later ');
+  return [first, peer.encode_diff(middle)];
+}
+
 // Observes a local edit, then applies a remote update whose predecessor has not arrived; returns the predecessor.
 function pendingUpdate(docx: Docx): Uint8Array {
   const { session: s } = docx;
   s.start_update_event_observation();
-  const [first, later] = remoteChunks(docx);
+  const [first, later] = dependentChunks(docx);
   s.insert_text('body', paraId(s, 'First body'), textAt(s, 'First body', 0), 'Local ');
   s.apply_update(later!);
   return first!;
