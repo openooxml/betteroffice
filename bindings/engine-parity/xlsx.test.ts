@@ -315,6 +315,8 @@ const rebuild = (engine: XlsxEngine, chunks: Uint8Array[]) => {
 };
 
 const CHECKPOINT_SEQ = 3;
+// authority.rs:1220-1231 restores a checkpoint under a fresh Doc::new() client, never the checkpoint's own.
+const recoveredClientShape = (client: number) => ({ type: typeof client, safeInteger: Number.isSafeInteger(client), sourceClient: client === CLIENT });
 // workbook/recovery.rs:716-740 writes the 8 byte magic and the codec byte, then a digest over everything after it.
 const RECOVERY_DIGEST = { name: 'digest', offset: 9, length: 32 };
 const recoveryRandomRanges = (bytes: Uint8Array, nonce: string) => {
@@ -376,7 +378,8 @@ const rows: Row<Xlsx>[] = [
     name: 'XlsxDocument.openRecoveryCheckpoint (checkpoint from the other engine)',
     call: ({ engine }) => {
       const { checkpoint, nonce } = scoped(editedCollab(otherEngine(engine)), (d) => ({ checkpoint: d.recoveryCheckpoint(CHECKPOINT_SEQ), nonce: versionNonce(d) }));
-      return scoped(engine.XlsxDocument.openRecoveryCheckpoint(checkpoint, CHECKPOINT_SEQ), (d) => [...hydratedReads(d), d.clientId].map((value) => generatedTokens(value, [nonce])));
+      return scoped(engine.XlsxDocument.openRecoveryCheckpoint(checkpoint, CHECKPOINT_SEQ), (d) =>
+        [...hydratedReads(d).map((value) => generatedTokens(value, [nonce])), recoveredClientShape(d.clientId)]);
     },
   },
   {
@@ -852,6 +855,15 @@ describe('xlsx native and wasm parity table', () => {
       return [side, pinned] as const;
     }));
     expect(layouts.native).toEqual(layouts.wasm);
+  });
+
+  test('the client id a recovery checkpoint opens with differs between two openings on each engine', () => {
+    for (const [side, engine] of ENGINES) {
+      const checkpoint = scoped(editedCollab(engine), (d) => Uint8Array.from(d.recoveryCheckpoint(CHECKPOINT_SEQ)));
+      const clients = [0, 1].map(() => scoped(engine.XlsxDocument.openRecoveryCheckpoint(checkpoint, CHECKPOINT_SEQ), (d) => d.clientId));
+      console.log(`RECOVERY-OPEN-CLIENT-PROBE ${side} ${JSON.stringify(clients)}`);
+      expect(clients[0]).not.toBe(clients[1]);
+    }
   });
 
   for (const row of rows) {
