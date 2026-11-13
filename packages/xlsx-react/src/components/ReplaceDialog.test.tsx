@@ -276,6 +276,57 @@ test('finds one match at a time and replaces only the current cell', async () =>
   });
 });
 
+test('replace on a cell that does not match only selects the next match', async () => {
+  const valueMatch = { sheetId: target.sheetId, row: 0, col: 0, a1: 'A1' };
+  const entryMatch = { sheetId: target.sheetId, row: 1, col: 1, a1: 'B2' };
+  const revealed: string[] = [];
+  const changed: string[] = [];
+  const validated: XlsxEditRequest[] = [];
+  const { getByRole, findByText } = view({
+    version: () => 'v1',
+    find: (request) => ({
+      ok: true, version: 'v1', truncated: false,
+      matches: [{ cell: request.lookIn === 'formulas' ? entryMatch : valueMatch, text: 'alpha' }],
+    }),
+    reveal: (cell) => { revealed.push(cell.a1); },
+    validate: (request) => {
+      validated.push(request);
+      return {
+        ok: true, baseVersion: 'v1', wouldApply: true,
+        previews: [{
+          stepIndex: 0, target: request.steps[0].target, wouldChange: true, changedCellCount: 1,
+          replace: { matched: 1, replaced: 1, skippedFormulas: 0, skippedLocked: 0 },
+        }],
+      };
+    },
+    apply: (request) => {
+      const range = request.steps[0].target.range;
+      if (range.kind === 'rowCol') changed.push(`${range.start.row}:${range.start.col}`);
+      return {
+        ok: true, applied: true, baseVersion: 'v1', version: 'v2', source: 'host',
+        receipts: [{ stepIndex: 0, changed: true, target: request.steps[0].target,
+          changedCells: [], replace: { matched: 1, replaced: 1, skippedFormulas: 0, skippedLocked: 0 } }],
+        changedSheets: [], calculation: { changed: [], cycleCells: [], limitedCells: [], truncated: false },
+      };
+    },
+  });
+
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, 'beta');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await findByText('1 of 1');
+  expect(revealed).toEqual(['A1']);
+
+  fireEvent.click(getByRole('button', { name: 'Replace' }));
+  await waitFor(() => expect(revealed.length).toBeGreaterThan(1));
+  expect(changed).toEqual([]);
+  expect(validated).toEqual([]);
+  expect(revealed[revealed.length - 1]).toBe('B2');
+
+  fireEvent.click(getByRole('button', { name: 'Replace' }));
+  await waitFor(() => expect(changed).toEqual(['1:1']));
+});
+
 test('find next starts after the active cell and find previous before it', async () => {
   const cells = [
     { sheetId: target.sheetId, row: 0, col: 0, a1: 'A1' },
