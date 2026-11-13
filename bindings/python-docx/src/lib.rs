@@ -1200,9 +1200,7 @@ impl PyDocument {
         self.replace_text(para_id, text)
     }
 
-    /// Rewrite the paragraph at `index` in `paragraphs()`, which needs no paragraph ID.
-    ///
-    /// Raises `IndexError` for an index out of range and `TypeError` for a non-int.
+    /// Replace paragraph `index`'s text; raises IndexError out of range, TypeError for a non-int.
     fn replace_text_at(&mut self, index: &Bound<'_, PyAny>, text: &str) -> PyResult<PyEdit> {
         if index.is_instance_of::<PyBool>() || !index.is_instance_of::<PyInt>() {
             return Err(PyTypeError::new_err("paragraph index must be an int"));

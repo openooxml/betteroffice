@@ -194,10 +194,7 @@ class Document:
         return self._inner.replace_paragraph_text(para_id, text)
 
     def replace_text_at(self, index: int, text: str) -> Edit:
-        """Rewrite the paragraph at ``index`` in ``paragraphs()``, which needs no paragraph ID.
-
-        Raises ``IndexError`` for an index out of range and ``TypeError`` for a non-int.
-        """
+        """Replace paragraph ``index``'s text; IndexError out of range, TypeError for a non-int."""
         return self._inner.replace_text_at(index, text)
 
     def replace_paragraph_text_at(self, index: int, text: str) -> Edit:
