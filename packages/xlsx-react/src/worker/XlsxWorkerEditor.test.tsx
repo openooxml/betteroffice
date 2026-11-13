@@ -9633,6 +9633,90 @@ describe('workbook worker editor header interactions', () => {
       await act(async () => {});
       expect(host.sent.filter((command) => command.kind === 'resizeChart')).toEqual([]);
     });
+
+    it(`disarms a dragged peerless chart move when ${target} is pressed`, async () => {
+      const host = peerlessHarness();
+      host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: true,
+        rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
+      const view = await host.mount(undefined, false, { showSheetHeaders: true });
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+      fireEvent.mouseMove(view.getByTestId('xlsx-scroll'), { clientX: 240, clientY: 130, buttons: 1 });
+      await act(async () => {
+        if (target === 'a column header') {
+          fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+        } else {
+          fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+        }
+      });
+      fireEvent.mouseUp(window, { clientX: 240, clientY: 130, button: 0 });
+      await act(async () => {});
+      expect(host.sent.filter((command) => command.kind === 'moveChart')).toEqual([]);
+      expect(await host.commands().execute('save', null))
+        .not.toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+    });
+
+    it(`ends a peerless chart resize when ${target} is pressed`, async () => {
+      const host = peerlessHarness();
+      host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: true,
+        rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
+      const view = await host.mount(undefined, false, { showSheetHeaders: true });
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+      await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+      const width = view.getByTestId('xlsx-chart-selection').style.width;
+      fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+        .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+      await act(async () => {
+        if (target === 'a column header') {
+          fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+        } else {
+          fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+        }
+      });
+      expect(await host.commands().execute('save', null))
+        .not.toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+      // the chart is selected again, so a still-live resize would preview and commit on it.
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+      await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 444, clientY: 222 });
+      expect(view.getByTestId('xlsx-chart-selection').style.width).toBe(width);
+      fireEvent.pointerUp(window, { pointerId: 1, clientX: 444, clientY: 222, button: 0 });
+      await act(async () => {});
+      expect(host.sent.filter((command) => command.kind === 'resizeChart')).toEqual([]);
+    });
+
+    it(`ends a legacy chart resize when ${target} is pressed`, async () => {
+      const host = harness();
+      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+        rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+      let api!: XlsxWorkerEditorApi;
+      const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} showSheetHeaders
+        onReady={(value) => { api = value; }} />);
+      await opened();
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+      fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+        .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+      expect(view.getByTestId('xlsx-chart-selection').style.width).toBe('230px');
+      if (target === 'a column header') {
+        fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+      } else {
+        fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+      }
+      let saved!: unknown;
+      await act(async () => { saved = await api.commands.execute('save', null); });
+      expect(saved).not.toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 360, clientY: 240 });
+      expect(view.getByTestId('xlsx-chart-selection').style.width).toBe('200px');
+      fireEvent.pointerUp(window, { pointerId: 1, clientX: 360, clientY: 240, button: 0 });
+      await act(async () => {});
+      expect(host.editMethods.resizeChart).not.toHaveBeenCalled();
+    });
   }
 
   it('anchors a shifted column header on the pressed track, not on a merged cell', async () => {
