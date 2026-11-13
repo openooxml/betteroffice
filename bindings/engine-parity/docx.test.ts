@@ -13,6 +13,9 @@ import {
   coverageProblems,
   defineRow,
   FramedZipReturn,
+  oneEngineExports,
+  oneEngineProblems,
+  printParityCounts,
   rowName,
   runKnownDifference,
   runRow,
@@ -22,6 +25,7 @@ import {
   type EngineHandle,
   type Exclusion,
   type KnownDifference,
+  type OneEngineOnly,
   type Row,
 } from './harness';
 
@@ -154,6 +158,7 @@ function engineFor(engine: DocxEngine, yrs: Yrs) {
 }
 
 const makeWasm = engineFor(wasmEngine, wasmYrs);
+const facadeShape = (yrs: object) => Object.entries(yrs).map(([name, value]) => `${name}:${typeof value}`).sort();
 const makeNative = engineFor(nativeEngine, nativeYrs as unknown as Yrs);
 
 function paraId(session: Session, prefix: string): string {
@@ -630,15 +635,31 @@ const notYetCovered: string[] = [
   'update_display_list', 'vertical_move_by_handle', 'vertical_move_json',
 ];
 
-function docxSurface(): string[] {
+const NO_RASTERIZER = 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/docx/src/wasm/enginePng.ts';
+const oneEngineOnly: OneEngineOnly[] = [
+  { name: 'EditSession.renderPngTarget', side: 'native', reason: 'BY_DESIGN', note: NO_RASTERIZER },
+  { name: 'EditSession.renderPngTargetReport', side: 'native', reason: 'BY_DESIGN', note: NO_RASTERIZER },
+  { name: '__napiBindingTarget', side: 'native', reason: 'BUILD_METADATA', note: 'napi-rs build target marker' },
+];
+
+function docxSurfaces() {
   const read = (path: string) => parseSurface(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8'));
   const wasm = Object.entries(FORMATS).filter(([name]) => name === 'docx' || name.startsWith('docx-')).map(([, format]) => read(format.wasm));
-  return surfaceMethods(wasm, read(FORMATS.docx!.native));
+  const native = read(FORMATS.docx!.native);
+  return { surface: surfaceMethods(wasm, native), oneEngine: oneEngineExports(wasm, native) };
 }
 
 describe('docx native and wasm parity table', () => {
   test('every method on both engines is a row, an exclusion or not yet covered', () => {
-    expect(coverageProblems(docxSurface(), { rows, exclusions, notYetCovered, knownDifferences })).toEqual([]);
+    const { surface, oneEngine } = docxSurfaces();
+    const plan = { rows, exclusions, notYetCovered, knownDifferences, oneEngineOnly };
+    printParityCounts('docx', surface, plan);
+    expect(coverageProblems(surface, plan)).toEqual([]);
+    expect(oneEngineProblems(oneEngine, oneEngineOnly)).toEqual([]);
+  });
+
+  test('the yrs host facade exports the same names and kinds on both engines', () => {
+    expect(facadeShape(nativeYrs)).toEqual(facadeShape(wasmYrs));
   });
 
   test('the not yet covered list only shrinks', () => {
