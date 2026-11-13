@@ -27,7 +27,22 @@ import { MOUNTED } from '../__fixtures__/mounted';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor: settleWithin } = await import('@testing-library/react');
+
+let tornDown = false;
+const waits = new Set<Promise<void>>();
+
+/** A waitFor whose callback stops reaching the editor once teardown starts; afterEach awaits every one still pending. */
+function waitFor<T>(callback: () => T | Promise<T>, options?: Parameters<typeof settleWithin>[1]): Promise<T> {
+  const wait = settleWithin(() => {
+    if (tornDown) throw new Error('the test ended before this wait settled');
+    return callback();
+  }, options);
+  const settled = wait.then(() => {}, () => {});
+  waits.add(settled);
+  void settled.then(() => waits.delete(settled));
+  return wait;
+}
 
 const WASM = resolve(import.meta.dir, '../../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const VIEWPORT = { width: 800, height: 600 };
@@ -71,10 +86,16 @@ const restorers: (() => void)[] = [];
 const sessions: WorkbookSession[] = [];
 
 afterEach(async () => {
-  await act(async () => { cleanup(); });
-  for (const session of sessions.splice(0)) await session.dispose();
-  for (const restore of restorers.splice(0).reverse()) restore();
-});
+  tornDown = true;
+  try {
+    await act(async () => { cleanup(); });
+    await Promise.all(waits);
+    for (const session of sessions.splice(0)) await session.dispose();
+    for (const restore of restorers.splice(0).reverse()) restore();
+  } finally {
+    tornDown = false;
+  }
+}, 10_000);
 
 afterAll(async () => {
   HTMLCanvasElement.prototype.getContext = originalGetContext;
