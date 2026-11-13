@@ -1663,7 +1663,8 @@ fn edits_by_index_and_by_id_share_one_save() {
 
 #[test]
 fn an_edit_by_index_mints_no_paragraph_id() {
-    let mut document = Document::open(&unidentified_docx()).unwrap();
+    let source = unidentified_docx();
+    let mut document = Document::open(&source).unwrap();
     let r = document.replace_paragraph_text_at(1, "Rewritten middle");
     assert!(r.is_ok(), "{r:?}");
     let receipt = r.unwrap();
@@ -1685,6 +1686,22 @@ fn an_edit_by_index_mints_no_paragraph_id() {
         "Rewritten middle".encode_utf16().count() as u32
     );
     assert_eq!(document.paragraphs()[1].para_id, None);
+    let saved = document.save().unwrap();
+
+    let original = Document::open(&source).unwrap();
+    let reopened = Document::open(&saved).unwrap();
+    assert_eq!(
+        get_paragraph_text(reopened.paragraphs()[1]),
+        "Rewritten middle"
+    );
+    assert_eq!(
+        get_paragraph_text(reopened.paragraphs()[0]),
+        get_paragraph_text(original.paragraphs()[0])
+    );
+    assert_eq!(
+        get_paragraph_text(reopened.paragraphs()[2]),
+        get_paragraph_text(original.paragraphs()[2])
+    );
 }
 
 #[test]
