@@ -752,7 +752,7 @@ describe('peer-less plugins', () => {
     test(`selecting current cells clears the chart after an ${status} acknowledgement`, async () => {
       const host = pluginWorker();
       const plugin = recorder('navigator');
-      host.charts.push({ id: 'chart', label: 'Chart', movable: false,
+      host.charts.push({ id: 'chart', label: 'Chart', movable: false, resizable: false,
         rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
       try {
         const view = await host.mount({ plugins: [plugin.plugin] });
