@@ -814,7 +814,10 @@ const rows: Row<Docx>[] = [
       return f;
     },
     call: (_, f) => {
-      const result = f.load_json(JSON.stringify([{ storyId: 'body', paragraphs: [{ text: 'Loaded' }, { text: 'Centred', alignment: 'center' }] }]));
+      const result = f.load_json(JSON.stringify([
+        { storyId: 'body', paragraphs: [{ text: 'Loaded' }, { text: 'Centred', alignment: 'center' }] },
+        { storyId: 'fn:1', paragraphs: [{ text: 'Parity footnote' }] },
+      ]));
       return { result, after: f.paragraphs('body'), reads: replicaReads(f) };
     },
   }),
@@ -1162,6 +1165,7 @@ const rows: Row<Docx>[] = [
     setup: ({ fresh, saveFrom }: Docx) => {
       const f = fresh();
       f.begin_opening(GENERATION);
+      f.create_story('fn:1', 'Parity footnote', 'Normal', 'left');
       saveFrom(f);
       return f;
     },
