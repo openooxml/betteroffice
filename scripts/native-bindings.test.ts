@@ -481,8 +481,16 @@ describe('native package release wiring', () => {
     expect(wasmCache.with.key).toBe('wasm-pack-${{ steps.wasm.outputs.key }}');
     const runtime = job.steps.find((step: any) => step.uses?.startsWith('actions/setup-node@'));
     expect(runtime.with['node-version']).toBe('24');
+    expect(job.env.DENO_VERSION).toBe('2.9.0');
     const deno = job.steps.find((step: any) => step.uses === 'denoland/setup-deno@v2');
-    expect(deno.with['deno-version']).toBe('v2.9.0');
+    expect(deno.with['deno-version']).toBe('${{ env.DENO_VERSION }}');
+    const denoCache = job.steps.find((step: any) => step.name === 'Restore the Deno binary');
+    expect(denoCache.uses).toBe('actions/cache@v6.1.0');
+    expect(denoCache.with).toEqual({
+      path: '${{ runner.tool_cache }}/deno/${{ env.DENO_VERSION }}',
+      key: 'deno-${{ runner.os }}-${{ runner.arch }}-${{ env.DENO_VERSION }}',
+    });
+    expect(job.steps.indexOf(denoCache)).toBe(job.steps.indexOf(deno) - 1);
     expect(job.steps.some((step: any) => step.run === 'bun install --frozen-lockfile')).toBe(true);
     const build = job.steps.find((step: any) => step.name === 'Build and test');
     expect(build.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
