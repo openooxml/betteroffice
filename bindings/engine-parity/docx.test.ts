@@ -606,6 +606,25 @@ function inlineControlAt(session: Session, ordinal: number): { paraId: string; o
 
 const WATERMARK = JSON.stringify({ kind: 'text', text: 'DRAFT', font: 'Liberation Sans', color: 'C0C0C0', semitransparent: true, layout: 'diagonal' });
 
+const watermarkText = (watermark: string) => (JSON.parse(watermark) as { text: string }).text;
+
+function watermarkUnits(session: Session): Unit[] {
+  return units(session).filter(({ segment }) => segment.kind === 'embed' && segment.embedKind === 'watermark');
+}
+
+function sessionWatermarks(session: Session, watermark: string): Unit[] {
+  const found = watermarkUnits(session);
+  const text = watermarkText(watermark);
+  if (!JSON.stringify(found).includes(text)) throw new Error(`the session has no watermark embed carrying ${text}`);
+  return found;
+}
+
+async function savedBody(bytes: Uint8Array): Promise<string> {
+  const part = new Map((await zipEntries(bytes)).parts).get('word/document.xml');
+  if (!part) throw new Error('the saved package has no word/document.xml');
+  return new TextDecoder().decode(part);
+}
+
 function drainEvents(session: Session): Uint8Array[] {
   const events: Uint8Array[] = [];
   for (let event = session.drain_update_event(); event.length > 0 && events.length < 100; event = session.drain_update_event()) events.push(event);
@@ -1736,7 +1755,35 @@ const rows: Row<Docx>[] = [
     },
     call: (_, f) => ({ result: f.delete_story('fn:2'), reads: replicaReads(f) }),
   }),
-  { method: 'EditSession.insert_watermark', mutates: true, call: ({ session: s }) => s.insert_watermark('body', paraId(s, 'Final'), 0, WATERMARK) },
+  {
+    method: 'EditSession.insert_watermark',
+    mutates: true,
+    call: ({ session: s }) => {
+      const result = s.insert_watermark('body', paraId(s, 'Final'), 0, WATERMARK);
+      return { result, watermarks: sessionWatermarks(s, WATERMARK) };
+    },
+  },
+  // Save rewrites the paragraph without the watermark embed; when it is saved, this row fails and must change.
+  defineRow({
+    method: 'EditSession.insert_watermark',
+    name: 'EditSession.insert_watermark (insert_watermark on the body is not saved)',
+    setup: ({ fresh }: Docx) => {
+      const f = fresh();
+      f.begin_opening(GENERATION);
+      f.create_story('body', 'Created', 'Heading1', 'center');
+      return f;
+    },
+    call: async ({ saved }, f) => {
+      const result = f.insert_watermark('body', paraId(f, 'Created'), 0, WATERMARK);
+      const text = watermarkText(WATERMARK);
+      const inSession = JSON.stringify(watermarkUnits(f)).includes(text);
+      const inSaved = (await savedBody(await saved(f, fixture))).includes(text);
+      if (result !== undefined || !inSession || inSaved) {
+        throw new Error(`expected an undefined return, the watermark in the session and none saved; got ${JSON.stringify({ result, inSession, inSaved })}`);
+      }
+      return { result, inSession, inSaved };
+    },
+  }),
   {
     method: 'EditSession.move_embed',
     mutates: true,
