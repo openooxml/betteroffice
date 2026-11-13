@@ -435,6 +435,7 @@ jobs:
           cargo test -p betteroffice-pptx --all-features
           cargo test -p betteroffice-xlsx-ops -p betteroffice-xlsx --features unstable-track-moves,unstable-track-visibility
           cargo test -p betteroffice-pptx-edit --features test-counters --test attach_scaling
+          cargo test -p betteroffice-pptx-parse --features test-counters --test splice_scaling
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm --lib -- wasm:: wasm_memory::
           cargo test -p betteroffice-docx-layout --no-default-features --test without_base_latin
