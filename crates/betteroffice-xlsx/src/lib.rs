@@ -101,9 +101,9 @@ pub use xlsx_ops::{
 };
 pub use xlsx_parse::translate_formula;
 pub use xlsx_render::{
-    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridGeometry, GridMeta,
-    HyperlinkRegion, PathStroke, PrintMetrics, Rect, RenderError, Viewport, viewport_for_range,
-    viewport_for_used_range, viewport_for_used_range_within,
+    Align, ChartA11yAttrs, ChartRegion, ChartResize, DisplayList, DrawCmd, GridGeometry, GridMeta,
+    HyperlinkRegion, PathStroke, PrintMetrics, Rect, RenderError, Viewport, resolve_chart_anchor,
+    viewport_for_range, viewport_for_used_range, viewport_for_used_range_within,
 };
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -451,6 +451,12 @@ impl XlsxDocument {
         self.inner.move_chart_json(args).map_err(map_engine_error)
     }
 
+    /// move a chart's edges by pixel deltas as one undo step.
+    #[wasm_bindgen(js_name = resizeChartJson)]
+    pub fn resize_chart_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.inner.resize_chart_json(args).map_err(map_engine_error)
+    }
+
     #[wasm_bindgen(js_name = pngDisplayListJson)]
     pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, JsValue> {
         self.inner

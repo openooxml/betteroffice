@@ -229,7 +229,18 @@
     "sheetActivated": "{name}, trang tính {index}/{count}",
     "cellInputLabel": "Chỉnh sửa ô {address}",
     "gridRoleDescription": "trang tính",
-    "fillHandleLabel": "Tay nắm điền"
+    "fillHandleLabel": "Tay nắm điền",
+    "chartResizeNw": "Đổi kích thước biểu đồ từ góc trên bên trái",
+    "chartResizeN": "Đổi kích thước biểu đồ từ cạnh trên",
+    "chartResizeNe": "Đổi kích thước biểu đồ từ góc trên bên phải",
+    "chartResizeE": "Đổi kích thước biểu đồ từ cạnh phải",
+    "chartResizeSe": "Đổi kích thước biểu đồ từ góc dưới bên phải",
+    "chartResizeS": "Đổi kích thước biểu đồ từ cạnh dưới",
+    "chartResizeSw": "Đổi kích thước biểu đồ từ góc dưới bên trái",
+    "chartResizeW": "Đổi kích thước biểu đồ từ cạnh trái",
+    "chartResizeHintBoth": "{label} (phím mũi tên; giữ Shift để thay đổi 10 px)",
+    "chartResizeHintHorizontal": "{label} (mũi tên trái và phải; giữ Shift để thay đổi 10 px)",
+    "chartResizeHintVertical": "{label} (mũi tên lên và xuống; giữ Shift để thay đổi 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Plugin",

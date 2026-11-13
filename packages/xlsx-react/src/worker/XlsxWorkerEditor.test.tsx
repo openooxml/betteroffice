@@ -162,6 +162,16 @@ function harness(realFacade = false, normalizeInput = false) {
       version += 1;
       return result();
     }),
+    resizeChart: mock((_sheet: number, id: string, edges: xlsx.ChartResizeEdges) => {
+      if (!realFacade) throw new Error('Direct peer chart mutation forbidden');
+      const chart = charts.find((entry) => entry.id === id)!;
+      chart.rect = { ...chart.rect, x: chart.rect.x + edges.left,
+        w: chart.rect.w + edges.right - edges.left, h: chart.rect.h + edges.bottom - edges.top,
+        y: chart.rect.y + edges.top };
+      log.push(`recover:resize:${id}:${edges.left}:${edges.top}:${edges.right}:${edges.bottom}`);
+      version += 1;
+      return result();
+    }),
     save: mock(() => {
       if (realFacade) return new TextEncoder().encode(JSON.stringify([...cells]));
       throw new Error('Full peer save forbidden');
@@ -192,6 +202,10 @@ function harness(realFacade = false, normalizeInput = false) {
     setActiveSheet: mock((sheet: number) => { active = sheet; sequence += 1; log.push(`sheet:${sheet}`); }),
     moveChart: mock((_sheet: number, id: string, dx: number, dy: number) => {
       sequence += 1; log.push(`chart:${id}:${dx}:${dy}`); return result();
+    }),
+    resizeChart: mock((_sheet: number, id: string, edges: xlsx.ChartResizeEdges) => {
+      sequence += 1; log.push(`resize:${id}:${edges.left}:${edges.top}:${edges.right}:${edges.bottom}`);
+      return result();
     }),
     undo: mock(() => { sequence += 1; log.push('undo'); return result(); }),
     flush: mock(async () => {}), save: mock(async () => new Uint8Array([8, 9]).buffer),
@@ -268,12 +282,14 @@ function harness(realFacade = false, normalizeInput = false) {
       if (op.method === 'editCell') return editMethods.editCell(...op.args);
       if (op.method === 'editCells') return editMethods.editCells(...op.args);
       if (op.method === 'fillRange') return editMethods.fillRange(...op.args);
+      if (op.method === 'resizeChart') return editMethods.resizeChart(...op.args);
       throw new Error('Unexpected mock operation');
     },
     applyRecoveryOp: (op) => {
       if (op.method === 'editCell') return xlsxWorker.createWorkbookRecoveryMutators(edits).editCell(...op.args);
       if (op.method === 'editCells') return peerMethods.editCells(...op.args);
       if (op.method === 'fillRange') return editMethods.fillRange(...op.args);
+      if (op.method === 'resizeChart') return peerMethods.resizeChart(...op.args);
       throw new Error('Unexpected mock recovery operation');
     },
   });
@@ -3970,8 +3986,8 @@ describe('peerless workbook worker editor', () => {
 
   it('answers plugin point queries through the peerless hit test and refuses them after replacement', async () => {
     const host = peerlessHarness();
-    host.charts.push({ id: 'chart', label: 'Chart', movable: true, rect: { x: 192, y: 48, w: 96, h: 48 },
-      clip: { x: 192, y: 48, w: 96, h: 48 } });
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: false,
+      rect: { x: 192, y: 48, w: 96, h: 48 }, clip: { x: 192, y: 48, w: 96, h: 48 } });
     const contexts: XlsxPluginContext<null>[] = [];
     const plugins = [defineXlsxPlugin({ id: 'point', createState: () => null, onEvent(context) { contexts.push(context); } })];
     const view = await host.mount(undefined, false, { plugins });
@@ -3995,8 +4011,8 @@ describe('peerless workbook worker editor', () => {
 
   it('replacement cancels retained chart nudges even with the same chart id', async () => {
     const host = peerlessHarness();
-    host.charts.push({ id: 'chart', label: 'Chart', movable: true, rect: { x: 200, y: 100, w: 100, h: 100 },
-      clip: { x: 200, y: 100, w: 100, h: 100 } });
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: false,
+      rect: { x: 200, y: 100, w: 100, h: 100 }, clip: { x: 200, y: 100, w: 100, h: 100 } });
     const view = await host.mount();
     const original = globalThis.setTimeout;
     let callback: (() => void) | undefined;
@@ -4017,6 +4033,26 @@ describe('peerless workbook worker editor', () => {
     await act(async () => callback!());
     expect(host.sent.filter((command) => command.kind === 'moveChart')).toEqual([]);
     expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+  });
+
+  it('refuses save during an active chart resize as it does during a chart drag', async () => {
+    const host = peerlessHarness();
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
+    const view = await host.mount();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+    await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+    const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!;
+    fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+    expect(await host.commands().execute('save', null))
+      .toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+    expect(host.session.save).not.toHaveBeenCalled();
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 404, clientY: 202, button: 0 });
+    await act(async () => {});
+    expect(host.sent.filter((command) => command.kind === 'resizeChart')).toHaveLength(1);
   });
 
   it('Escape cancels pending offscreen keyboard input before its frame arrives', async () => {
@@ -4655,7 +4691,8 @@ describe('peerless workbook worker editor', () => {
     const host = peerlessHarness();
     const available = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
     restorers.push(() => available.mockRestore());
-    host.charts.push({ id: 'chart', label: 'Chart', movable: true, rect: { x: 200, y: 100, w: 100, h: 100 }, clip: { x: 200, y: 100, w: 100, h: 100 } });
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: false,
+      rect: { x: 200, y: 100, w: 100, h: 100 }, clip: { x: 200, y: 100, w: 100, h: 100 } });
     const view = await host.mount();
     const execute = host.commands().execute('paintFormat', null);
     await act(async () => {});
@@ -5347,8 +5384,8 @@ describe('workbook worker editor', () => {
   for (const pending of ['drag', 'nudge', 'queued move'] as const) {
     it(`${pending === 'queued move' ? 'applies' : 'cancels'} a chart ${pending} across a readOnly flip`, async () => {
       const host = harness();
-      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, rect: { x: 192, y: 96, w: 192, h: 96 },
-        clip: { x: 192, y: 96, w: 192, h: 96 } });
+      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
+        rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
       const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
       await opened();
       const acknowledgment = deferred<void>();
@@ -5997,7 +6034,7 @@ describe('workbook worker editor', () => {
 
   it('rejects the pending cut payload and clipboard write when admission is refused', async () => {
     const host = harness();
-    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
       rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
     const hydration = deferred<WorkbookHandle>();
     host.hydrate.mockReturnValue(hydration.promise);
@@ -6185,7 +6222,7 @@ describe('workbook worker editor', () => {
 
   it('commits a chart drag through the ordered facade without waiting for animation frames', async () => {
     const host = harness();
-    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
       rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
     const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
     await opened();
@@ -6198,9 +6235,142 @@ describe('workbook worker editor', () => {
     expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(0px, 0px)');
   });
 
+  it('shows eight resize handles around a selected two-cell chart', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    const handles = view.getAllByTestId('xlsx-chart-resize-handle');
+    expect(handles.map((handle) => handle.getAttribute('data-handle')))
+      .toEqual(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']);
+    expect(handles.map((handle) => handle.style.cursor)).toEqual([
+      'nwse-resize', 'ns-resize', 'nesw-resize', 'ew-resize',
+      'nwse-resize', 'ns-resize', 'nesw-resize', 'ew-resize',
+    ]);
+    expect(handles.find((handle) => handle.getAttribute('data-handle') === 'se')!.style.left).toBe('300px');
+    expect(handles.find((handle) => handle.getAttribute('data-handle') === 'se')!.style.top).toBe('200px');
+    expect(handles.find((handle) => handle.getAttribute('data-handle') === 'nw')!.style.left).toBe('100px');
+  });
+
+  it('previews a south-east resize and commits it once on release', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.mouseDown(scroll, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!;
+    fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+    const selection = view.getByTestId('xlsx-chart-selection');
+    expect(selection.style.width).toBe('230px');
+    expect(selection.style.height).toBe('120px');
+    expect(view.queryByTestId('xlsx-selection')).toBeNull();
+    expect(view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!.style.left).toBe('330px');
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 330, clientY: 220, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.resizeChart.mock.calls).toEqual([
+      [0, 'chart:1', { left: 0, top: 0, right: 30, bottom: 20 }],
+    ]);
+    expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+  });
+
+  it('cancels a resize preview on Escape without mutating the chart', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.mouseDown(scroll, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 330, clientY: 220, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.resizeChart).not.toHaveBeenCalled();
+    expect(view.getByTestId('xlsx-chart-selection').style.width).toBe('200px');
+    expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8);
+  });
+
+  it('flushes a pending chart nudge before starting a resize', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.mouseDown(scroll, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!;
+    const clock = selectionWindow();
+    act(() => {
+      fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+      expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+      fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+    });
+    await act(async () => {});
+    expect(host.editMethods.moveChart.mock.calls).toEqual([[0, 'chart:1', 1, 0]]);
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+    expect(view.getByTestId('xlsx-chart-selection').style.width).toBe('230px');
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 330, clientY: 220, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.resizeChart.mock.calls).toEqual([
+      [0, 'chart:1', { left: 0, top: 0, right: 30, bottom: 20 }],
+    ]);
+    expect(host.editMethods.moveChart).toHaveBeenCalledTimes(1);
+    await act(async () => { await clock.tick(300); });
+    expect(host.editMethods.moveChart).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows no resize handles for a chart that cannot be resized', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+  });
+
+  it('shows no resize handles for a placeholder chart', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true, placeholder: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+  });
+
+  it('shows no resize handles in a read-only editor', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen readOnly allowHostProposals
+      showToolbar={false} />);
+    await opened();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+  });
+
   it('keeps the origin sheet for a chart drag released after queued navigation', async () => {
     const host = harness();
-    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
       rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
     const hydration = deferred<WorkbookHandle>();
     host.hydrate.mockReturnValue(hydration.promise);
@@ -6226,7 +6396,7 @@ describe('workbook worker editor', () => {
 
   it('recovers an accepted chart nudge when the worker fails before its timer fires', async () => {
     const host = harness(true);
-    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
       rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
     host.peerMethods.save.mockImplementation(() => new TextEncoder().encode(JSON.stringify(host.charts[0].rect)));
     let api!: XlsxWorkerEditorApi;
@@ -6718,7 +6888,7 @@ for (const wait of ['hydration', 'ready'] as const) {
 it('drains a buffered chart nudge before its timer expires on disposal', async () => {
   const host = harness();
   host.charts.push({ id: 'chart', label: 'Chart', rect: { x: 192, y: 96, w: 192, h: 96 },
-    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true });
+    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true, resizable: false });
   const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
   await opened();
   fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
@@ -6794,7 +6964,7 @@ for (const mode of ['unsupported-cut', 'construct-cut', 'throw-cut', 'deny-cut',
 it('renders target-changed and gesture-active command refusals', async () => {
   const host = harness();
   host.charts.push({ id: 'chart', label: 'Chart', rect: { x: 192, y: 96, w: 192, h: 96 },
-    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true });
+    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true, resizable: false });
   let api!: XlsxWorkerEditorApi;
   const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
   await opened();
@@ -6815,6 +6985,31 @@ it('renders target-changed and gesture-active command refusals', async () => {
   reviewEdit(view, 'after refusal');
   await advance();
   expect(host.cells.get('0:0:0')).toBe('after refusal');
+});
+
+it('refuses Ctrl+S during an active chart resize as it does during a chart drag', async () => {
+  const host = harness();
+  host.charts.push({ id: 'chart', label: 'Chart', rect: { x: 192, y: 96, w: 192, h: 96 },
+    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true, resizable: true });
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+  await opened();
+  fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+  fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+  const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
+    .find((handle) => handle.getAttribute('data-handle') === 'se')!;
+  fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+  fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's', ctrlKey: true });
+  await advance();
+  expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('Finish moving the chart first.');
+  expect(host.editMethods.save).not.toHaveBeenCalled();
+  expect(api.failure).toBeNull();
+  fireEvent.pointerUp(window, { pointerId: 1, clientX: 404, clientY: 202, button: 0 });
+  await advance();
+  expect(host.editMethods.resizeChart.mock.calls).toEqual([
+    [0, 'chart', { left: 0, top: 0, right: 20, bottom: 10 }],
+  ]);
 });
 
 for (const route of ['cut', 'bold'] as const) {
@@ -9259,7 +9454,7 @@ it('T19b: XL offscreen selection settles with layout-unavailable', async () => {
 
 it('T20: XL chart selection settles with missing-target', async () => {
   const host = harness(true);
-  host.charts.push({ id: 'chart', label: 'Chart', movable: false,
+  host.charts.push({ id: 'chart', label: 'Chart', movable: false, resizable: false,
     rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
   const clock = selectionWindow();
   const anchors: Array<XlsxAnchorGeometryResult | null> = [];
