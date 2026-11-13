@@ -47,7 +47,7 @@ function fixture(withDefaults: boolean, withControl = true): Uint8Array<ArrayBuf
   return documentFixture(body, styles);
 }
 
-function documentFixture(body: string, styles: string): Uint8Array<ArrayBuffer> {
+function documentFixture(body: string, styles: string, theme?: string): Uint8Array<ArrayBuffer> {
   const parts = new Map<string, Uint8Array>();
   const set = (name: string, xml: string) => parts.set(name, toBytes(xml));
   set(
@@ -60,10 +60,13 @@ function documentFixture(body: string, styles: string): Uint8Array<ArrayBuffer> 
   );
   set(
     'word/_rels/document.xml.rels',
-    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/></Relationships>`
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/>${
+      theme ? `<Relationship Id="theme" Type="${R}/theme" Target="theme/theme1.xml"/>` : ''
+    }</Relationships>`
   );
   set('word/document.xml', `<w:document xmlns:w="${W}"><w:body>${body}</w:body></w:document>`);
   set('word/styles.xml', `<w:styles xmlns:w="${W}">${styles}</w:styles>`);
+  if (theme) set('word/theme/theme1.xml', theme);
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -218,6 +221,78 @@ it.each(['projected', 'native'])('applies conditional paragraph spacing (seeder:
     expect(projected.paragraphs('body:t0:r0c0')[0].properties.lineSpacing).toBe(360);
     expect(projected.paragraphs('body:t4:r0c0')[0].properties.lineSpacing).toBe(480);
     expect(parsed).toEqual(original);
+  } finally {
+    projected.destroy();
+    native.destroy();
+  }
+});
+
+it('applies conditional cell shading and borders identically for both seeders', async () => {
+  const border = (side: string, size: number, color: string) =>
+    `<w:${side} w:val="single" w:sz="${size}" w:space="0" w:color="${color}"/>`;
+  const shading = (fill: string, theme = '') =>
+    `<w:shd w:val="clear" w:color="auto" w:fill="${fill}"${theme}/>`;
+  const styles =
+    '<w:style w:type="table" w:styleId="Shaded"><w:tblPr><w:tblStyleRowBandSize w:val="1"/>' +
+    `<w:tblBorders>${border('insideH', 4, '000000')}</w:tblBorders></w:tblPr>` +
+    `<w:tblStylePr w:type="firstRow"><w:tcPr><w:tcBorders>${border('bottom', 12, 'FF0000')}</w:tcBorders>` +
+    `${shading('4F81BD', ' w:themeFill="accent1"')}</w:tcPr></w:tblStylePr>` +
+    `<w:tblStylePr w:type="firstCol"><w:tcPr>${shading('00FF00')}</w:tcPr></w:tblStylePr>` +
+    `<w:tblStylePr w:type="band1Horz"><w:tcPr>${shading('D3DFEE')}</w:tcPr></w:tblStylePr>` +
+    `<w:tblStylePr w:type="band2Horz"><w:tcPr><w:tcBorders>${border('top', 24, '000000')}</w:tcBorders></w:tcPr></w:tblStylePr></w:style>`;
+  const theme =
+    '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Custom"><a:themeElements>' +
+    '<a:clrScheme name="Custom"><a:accent1><a:srgbClr val="112233"/></a:accent1></a:clrScheme></a:themeElements></a:theme>';
+  const rows = Array.from({ length: 4 }, (_, row) =>
+    `<w:tr>${Array.from({ length: 3 }, (_, column) =>
+      `<w:tc><w:tcPr>${row === 2 && column === 1 ? shading('ABCDEF') : ''}</w:tcPr>${paragraph(`r${row}c${column}`)}</w:tc>`
+    ).join('')}</w:tr>`
+  ).join('');
+  const conditionalTable = (look: string) =>
+    `<w:tbl><w:tblPr><w:tblStyle w:val="Shaded"/>${look}</w:tblPr><w:tblGrid>${'<w:gridCol w:w="3000"/>'.repeat(3)}</w:tblGrid>${rows}</w:tbl>`;
+  const bytes = documentFixture(
+    conditionalTable('<w:tblLook w:val="04A0"/>') +
+      paragraph('Between') +
+      conditionalTable(
+        '<w:tblLook w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/>'
+      ),
+    styles,
+    theme
+  );
+  const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+  const projected = await createYrsSession({ clientId: 74220 });
+  const native = await createYrsSession({ clientId: 74220 });
+  try {
+    documentToYrs(projected, parsed);
+    native.seedFromDocx(bytes);
+    for (const story of native.storyIds()) {
+      expect(projected.yrsBlocksForStory(story)).toEqual(native.yrsBlocksForStory(story));
+    }
+    const cells = (table: number) =>
+      (native.tablePayload('body', table)!.rows as Array<{ cells: Array<{ tcPr: Record<string, any> }> }>).map(
+        (row) => row.cells.map((cell) => cell.tcPr)
+      );
+    const fills = (table: number) =>
+      cells(table).map((row) => row.map((tcPr) => tcPr.backgroundColor ?? null));
+    expect(fills(0)).toEqual([
+      ['112233', '112233', '112233'],
+      ['00FF00', 'D3DFEE', 'D3DFEE'],
+      ['00FF00', 'ABCDEF', null],
+      ['00FF00', 'D3DFEE', 'D3DFEE'],
+    ]);
+    expect(fills(1)).toEqual([
+      ['112233', '112233', '112233'],
+      [null, null, null],
+      [null, 'ABCDEF', null],
+      [null, null, null],
+    ]);
+    const [first, second] = [cells(0), cells(1)];
+    expect(first[0][0].borders.bottom).toMatchObject({ size: 12, color: { rgb: 'FF0000' } });
+    expect(first[1][1].borders.top).toMatchObject({ size: 4 });
+    expect(first[2][2].borders.top).toMatchObject({ size: 24 });
+    expect(second[2][2].borders.top).toMatchObject({ size: 4 });
+    expect(first[2][1]._originalFormatting.shading.fill.rgb).toBe('ABCDEF');
+    expect(first[1][1]._originalFormatting).toBeUndefined();
   } finally {
     projected.destroy();
     native.destroy();
