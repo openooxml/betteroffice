@@ -689,6 +689,7 @@ fn parse_worksheet(
     let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
     let mut alternate_depth: usize = 0;
+    let mut seen_view = false;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -810,7 +811,13 @@ fn parse_worksheet(
                         base_col_width: attr(&e, b"baseColWidth")?
                             .and_then(|v| v.parse::<u32>().ok())
                             .filter(|w| f64::from(*w) <= MAX_COL_WIDTH_CHARS),
+                        ..sheet.format
                     };
+                }
+                b"sheetView" if !seen_view => {
+                    seen_view = true;
+                    sheet.format.hide_gridlines = attr(&e, b"showGridLines")?
+                        .is_some_and(|value| matches!(value.as_str(), "0" | "false"));
                 }
                 _ => {}
             },

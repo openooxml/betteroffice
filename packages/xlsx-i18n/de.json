@@ -239,7 +239,18 @@
     "sheetActivated": "{name}, Arbeitsblatt {index} von {count}",
     "cellInputLabel": "Zelle {address} bearbeiten",
     "gridRoleDescription": "Arbeitsblatt",
-    "fillHandleLabel": "Füllgriff"
+    "fillHandleLabel": "Füllgriff",
+    "chartResizeNw": "Diagrammgröße an der oberen linken Ecke ändern",
+    "chartResizeN": "Diagrammgröße am oberen Rand ändern",
+    "chartResizeNe": "Diagrammgröße an der oberen rechten Ecke ändern",
+    "chartResizeE": "Diagrammgröße am rechten Rand ändern",
+    "chartResizeSe": "Diagrammgröße an der unteren rechten Ecke ändern",
+    "chartResizeS": "Diagrammgröße am unteren Rand ändern",
+    "chartResizeSw": "Diagrammgröße an der unteren linken Ecke ändern",
+    "chartResizeW": "Diagrammgröße am linken Rand ändern",
+    "chartResizeHintBoth": "{label} (Pfeiltasten; Umschalttaste gedrückt halten für 10 px)",
+    "chartResizeHintHorizontal": "{label} (Pfeiltasten links und rechts; Umschalttaste gedrückt halten für 10 px)",
+    "chartResizeHintVertical": "{label} (Pfeiltasten oben und unten; Umschalttaste gedrückt halten für 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Plugins",

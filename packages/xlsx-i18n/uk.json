@@ -239,7 +239,18 @@
     "sheetActivated": "{name}, аркуш {index} з {count}",
     "cellInputLabel": "Редагувати клітинку {address}",
     "gridRoleDescription": "аркуш",
-    "fillHandleLabel": "Маркер заповнення"
+    "fillHandleLabel": "Маркер заповнення",
+    "chartResizeNw": "Змінити розмір діаграми з лівого верхнього кута",
+    "chartResizeN": "Змінити розмір діаграми з верхнього краю",
+    "chartResizeNe": "Змінити розмір діаграми з правого верхнього кута",
+    "chartResizeE": "Змінити розмір діаграми з правого краю",
+    "chartResizeSe": "Змінити розмір діаграми з правого нижнього кута",
+    "chartResizeS": "Змінити розмір діаграми з нижнього краю",
+    "chartResizeSw": "Змінити розмір діаграми з лівого нижнього кута",
+    "chartResizeW": "Змінити розмір діаграми з лівого краю",
+    "chartResizeHintBoth": "{label} (клавіші зі стрілками; утримуйте Shift для кроку 10 пікс.)",
+    "chartResizeHintHorizontal": "{label} (стрілки вліво та вправо; утримуйте Shift для кроку 10 пікс.)",
+    "chartResizeHintVertical": "{label} (стрілки вгору та вниз; утримуйте Shift для кроку 10 пікс.)"
   },
   "plugins": {
     "toolbarGroup": "Плагіни",

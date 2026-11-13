@@ -225,6 +225,9 @@ pub struct ChartRegion {
     pub clip: Rect,
     /// whether the anchor can be repinned; an absolute one cannot.
     pub movable: bool,
+    /// whether the anchor can be resized. A two-cell anchor writes both
+    /// corners back, so it can; a one-cell extent never is.
+    pub resizable: bool,
 }
 
 /// former name of [`ChartRegion`], when it carried the label alone.
@@ -431,6 +434,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 rect: scale_rect(chart.rect, factor),
                 clip: scale_rect(chart.clip, factor),
                 movable: chart.movable,
+                resizable: chart.resizable,
             })
             .collect(),
     }
@@ -614,6 +618,7 @@ mod tests {
                     h: 40.0,
                 },
                 movable: true,
+                resizable: true,
             }],
         }
     }

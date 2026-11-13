@@ -10,7 +10,8 @@ import {
   selectionKeyReducer, toTsv,
 } from '@betteroffice/xlsx';
 import type {
-  CellAddr, CellInputEdit, CellRange, Proposal, Selection, WorkbookSheetView, WorkbookSheetSummary, XlsxRangeTarget,
+  CellAddr, CellInputEdit, CellRange, ChartResizeEdges, Proposal, Selection, WorkbookSheetView,
+  WorkbookSheetSummary, XlsxRangeTarget,
 } from '@betteroffice/xlsx';
 import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
 import { editorExportFaces, useDefaultFonts } from '../useDefaultFonts';
@@ -73,6 +74,8 @@ import { PeerlessWorkerInputs } from './PeerlessWorkerInputs';
 import { COLUMN_HEADER_HEIGHT, columnWidthFromPx, rowHeightFromPx } from '../components/SheetGrid';
 import type { SheetGridHeaderHandlers } from '../components/SheetGrid';
 import { WorkerPresentationStore } from './WorkerPresentationStore';
+import { useChartResizeGesture } from './useChartResizeGesture';
+import type { ChartDragPreview, SelectedChart } from './chartResize';
 import {
   PeerlessSelectionEffect, PeerlessSheetGrid, PeerlessWorkerAccessibility, PeerlessWorkerExtent,
   PeerlessWorkerOverlay, PeerlessWorkerPresence,
@@ -86,6 +89,8 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
 const chartKeys: Record<string, [number, number] | undefined> = {
   ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
 };
+const SHEET_MAX_ROW = 1_048_575;
+const SHEET_MAX_COL = 16_383;
 
 function address(cell: CellAddr): string {
   let column = '';
@@ -224,8 +229,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const [refusal, setRefusal] = useState<{
     code: XlsxCommandFailureCode; detail?: string; message?: string; cause?: XlsxRefusalCause;
   } | null>(null);
-  const [selectedChart, setSelectedChart, chartRef] = useSyncedState<{ id: string; movable: boolean } | null>(null);
-  const [chartOffset, setChartOffset] = useState<{ x: number; y: number } | null>(null);
+  const [selectedChart, setSelectedChart, chartRef] = useSyncedState<SelectedChart | null>(null);
+  const [chartPreview, setChartPreview] = useState<ChartDragPreview | null>(null);
+  const [chartSheetExtent, setChartSheetExtent] = useState<{ width: number; height: number } | null>(null);
   const [renaming, setRenaming] = useState<number | null>(null);
   const tabsRef = useRef<HTMLDivElement>(null);
   const pendingActivation = useRef<string | null>(null);
@@ -319,6 +325,35 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const editable = () => Boolean(ownerRef.current?.ready && !ownerRef.current.retiring &&
     !ownerRef.current.failure && !ownerRef.current.readOnly && !propsRef.current.readOnly && !coordinatorRef.current?.readOnly);
+  // the resize gesture is installed before its committer so the read-only and
+  // failure effects can cancel a pointer that is still down.
+  const resizeChartRef = useRef<(edges: ChartResizeEdges) => void>(() => {});
+  const { start: startChartResize, cancel: cancelChartResize, nudge: nudgeChartResize,
+    active: chartResizeActive } = useChartResizeGesture({
+    zoom: () => sourceRef.current?.painted?.request.zoom ?? zoomRef.current,
+    preview: setChartPreview,
+    commit: (_handle, edges) => resizeChartRef.current(edges),
+  });
+  // the engine clamps the preview at the far edge of the last cell, not at the
+  // used range; read it once per resize gesture.
+  const chartResizing = chartPreview?.kind === 'resize';
+  useEffect(() => {
+    const owner = run;
+    if (!selectedChart || !chartResizing || !owner?.ready || !owner.current) {
+      setChartSheetExtent(null);
+      return;
+    }
+    let cancelled = false;
+    void owner.session.call.cellGeometry(active, SHEET_MAX_ROW, SHEET_MAX_COL)
+      .then((geometry) => {
+        if (!cancelled) setChartSheetExtent({
+          width: geometry.rect.x + geometry.rect.w,
+          height: geometry.rect.y + geometry.rect.h,
+        });
+      })
+      .catch(() => { if (!cancelled) setChartSheetExtent(null); });
+    return () => { cancelled = true; };
+  }, [run, run?.ready, active, selectedChart, chartResizing]);
   const report = useCallback((error: unknown) => {
     if (error instanceof XlsxHostRefusalError) {
       setRefusal({ code: error.code, message: error.message });
@@ -545,7 +580,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     isReady: () => run?.ready ?? false, readOnly: () => propsRef.current.readOnly ?? false,
     allowHostProposals: () => propsRef.current.allowHostProposals ?? false,
     seal: (): InputSeal => {
-      if (chartDrag.current) return { refused: 'gesture-active' };
+      if (chartDrag.current || chartResizeActive()) return { refused: 'gesture-active' };
       flushNudgeRef.current();
       return draftController.seal();
     },
@@ -1146,12 +1181,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       nudgeTimer.current = null;
       nudge.current = null; chartDrag.current = null; dragging.current = false; clickStart.current = null;
       revealing.current = null;
+      cancelChartResize();
     };
     pluginHost.beginLoad();
     cancelGestures();
     setRefusal(null); presentation.reset();
     activeSheetId.current = undefined;
-    setSelectedChart(null); setChartOffset(null); setFormatToken(null); setProposals([]); setStaleFor({});
+    setSelectedChart(null); setChartPreview(null); setFormatToken(null); setProposals([]); setStaleFor({});
     setProposalsPanelOpen(false); formatSource.current = null;
     setCatalog(run?.session.editState.sheets ?? run?.session.state.sheets ?? []);
     navigation.current += 1;
@@ -1235,7 +1271,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (sourceRef.current === source) sourceRef.current = null;
       if (echoRef.current === echo) echoRef.current = null;
     };
-  }, [run, coordinator, draftController, capture]);
+  }, [run, coordinator, draftController, capture, cancelChartResize]);
   useEffect(() => {
     neighborFrames.clear();
     neighborRevision.current += 1;
@@ -1306,15 +1342,16 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (props.readOnly) {
       flushNudgeRef.current(true);
       draftController.finish(); setFormatToken(null); chartDrag.current = null; nudge.current = null;
-      setChartOffset(null);
+      cancelChartResize();
+      setChartPreview(null);
     }
     void coordinator.setReadOnly(Boolean(props.readOnly), props.allowHostProposals).result.catch(report);
-  }, [run, run?.ready, props.readOnly, props.allowHostProposals, coordinator, draftController]);
+  }, [run, run?.ready, props.readOnly, props.allowHostProposals, coordinator, draftController, cancelChartResize]);
   useEffect(() => {
     if (!run?.failure) return;
     echoRef.current?.dispose(); sourceRef.current?.dispose(); coordinator.fail(run.failure); draftController.dispose();
-    chartDrag.current = null; nudge.current = null;
-  }, [run, run?.failure, coordinator, draftController]);
+    chartDrag.current = null; nudge.current = null; cancelChartResize();
+  }, [run, run?.failure, coordinator, draftController, cancelChartResize]);
 
   const command = (input: PeerlessWorkerCommandInput) => {
     const frame = sourceRef.current?.captureCommandFrame() ?? undefined;
@@ -1570,7 +1607,17 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       !retained && !editable() || dx === 0 && dy === 0) return;
     const target = rangeTarget(sheet, selectionRef.current ?? selectionAt({ row: 0, col: 0 }));
     command({ kind: 'moveChart', payload: { args: [sheet, id, dx, dy], target } });
-    setChartOffset(null);
+    setChartPreview(null);
+  };
+  resizeChartRef.current = (edges) => {
+    const selected = chartRef.current;
+    if (!selected) return;
+    const generation = run?.generation;
+    if (!run?.ready || !run.current || run.retiring || generation !== run.generation || run.failure || !editable()) return;
+    const sheet = activeRef.current;
+    const target = rangeTarget(sheet, selectionRef.current ?? selectionAt({ row: 0, col: 0 }));
+    setChartPreview(null);
+    command({ kind: 'resizeChart', payload: { args: [sheet, selected.id, edges], target } });
   };
   const flushNudge = (retained = false) => {
     const pending = nudge.current;
@@ -1591,9 +1638,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       chartDrag.current = null;
       if (drag && event.button === 0) gestures.current.moveChart(drag.sheet, drag.id,
         (event.clientX - drag.x) / drag.zoom, (event.clientY - drag.y) / drag.zoom, false, drag.generation);
-      else setChartOffset(null);
+      else setChartPreview(null);
     };
-    const cancel = () => { dragging.current = false; chartDrag.current = null; setChartOffset(null); gestures.current.flushNudge(); };
+    const cancel = () => { dragging.current = false; chartDrag.current = null; setChartPreview(null); gestures.current.flushNudge(); };
     window.addEventListener('mouseup', stop); window.addEventListener('blur', cancel);
     return () => {
       window.removeEventListener('mouseup', stop); window.removeEventListener('blur', cancel);
@@ -1664,7 +1711,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   });
   const selectAtPoint = (request: { x: number; y: number }) => {
     const { cell, chart } = point({ clientX: request.x, clientY: request.y });
-    if (chart) { setSelectedChart({ id: chart.id, movable: chart.movable }); return null; }
+    if (chart) {
+      setSelectedChart({ id: chart.id, movable: chart.movable, resizable: chart.resizable,
+        placeholder: chart.placeholder ?? false });
+      return null;
+    }
     if (!cell) return null;
     const sheet = activeRef.current;
     const covers = () => {
@@ -1769,7 +1820,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       draftController.cellInput?.contains(event.target as Node) ||
       draftController.isComposing('cell') || draftController.isComposing('formula')) return;
     draftController.commit('cell'); draftController.commit('formula'); flushNudge();
-    setSelectedChart(null);
+    setChartPreview(null); setSelectedChart(null);
     selectHeader(axis, index, event.shiftKey);
     focus();
   };
@@ -1900,7 +1951,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const { cell, chart } = point(event);
     clickStart.current = null;
     if (chart) {
-      setSelectedChart({ id: chart.id, movable: chart.movable });
+      setSelectedChart({ id: chart.id, movable: chart.movable, resizable: chart.resizable,
+        placeholder: chart.placeholder ?? false });
+      setChartPreview(null);
       if (editable() && chart.movable && event.button === 0) chartDrag.current = {
         generation: run.generation, sheet: activeRef.current, id: chart.id,
         zoom: sourceRef.current?.painted?.request.zoom ?? zoomRef.current,
@@ -1918,9 +1971,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const onMouseMove = (event: MouseEvent<HTMLDivElement>) => {
     if (fromPlugin(event) || run?.failure) return;
+    // a captured resize handle owns hover feedback until it is released.
+    if (chartResizeActive()) return;
     const drag = chartDrag.current;
     if (drag) {
-      setChartOffset({ x: event.clientX - drag.x, y: event.clientY - drag.y });
+      setChartPreview({ kind: 'move', x: event.clientX - drag.x, y: event.clientY - drag.y });
       event.currentTarget.style.cursor = 'move'; return;
     }
     const { cell, chart } = point(event);
@@ -1976,7 +2031,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const chart = chartRef.current;
     if (chart) {
       if (event.key === 'Escape') {
-        chartDrag.current = null; nudge.current = null; setChartOffset(null); setSelectedChart(null);
+        chartDrag.current = null; nudge.current = null; setChartPreview(null); setSelectedChart(null);
         event.preventDefault(); return;
       }
       const delta = !mod && chartKeys[event.key];
@@ -1984,7 +2039,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         const step = event.shiftKey ? 10 : 1;
         const base = nudge.current ?? { generation: run.generation, sheet: activeRef.current, id: chart.id, dx: 0, dy: 0 };
         nudge.current = { ...base, dx: base.dx + delta[0] * step, dy: base.dy + delta[1] * step };
-        setChartOffset({ x: nudge.current.dx * zoomRef.current, y: nudge.current.dy * zoomRef.current });
+        setChartPreview({ kind: 'move', x: nudge.current.dx * zoomRef.current,
+          y: nudge.current.dy * zoomRef.current });
         if (nudgeTimer.current !== null) clearTimeout(nudgeTimer.current);
         const owner = run;
         nudgeTimer.current = setTimeout(() => {
@@ -2121,7 +2177,10 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
             <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>
               <canvas ref={canvasRef} style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} />
               <PeerlessWorkerOverlay store={presentation} active={active} zoom={zoom} selectedChart={selectedChart}
-                chartOffset={chartOffset} controller={draftController} run={run} disabled={Boolean(error) || Boolean(props.readOnly)}
+                chartPreview={chartPreview} chartSheetExtent={chartSheetExtent}
+                onResizeStart={(handle, event) => { flushNudge(); startChartResize(handle, event); }}
+                onResizeNudge={nudgeChartResize}
+                controller={draftController} run={run} disabled={Boolean(error) || Boolean(props.readOnly)}
                 showSheetHeaders={Boolean(props.showSheetHeaders)}
                 onFill={fillSelection} cellAt={fillCellAt} fillHandle={props.fillHandle} />
               <PeerlessWorkerPresence store={presentation} run={run} provider={props.collaboration?.provider}

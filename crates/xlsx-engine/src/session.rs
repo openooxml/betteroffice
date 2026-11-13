@@ -180,6 +180,22 @@ struct MoveChartArgs {
     dy: f32,
 }
 
+/// Pixel movement of each frame edge; an omitted edge stays put.
+#[derive(Deserialize)]
+struct ResizeChartArgs {
+    sheet: u32,
+    /// a `ChartRegion` id: the frame, not the chart part backing it.
+    chart: String,
+    #[serde(default)]
+    left: f32,
+    #[serde(default)]
+    top: f32,
+    #[serde(default)]
+    right: f32,
+    #[serde(default)]
+    bottom: f32,
+}
+
 #[derive(Deserialize)]
 struct StyleArgs {
     sheet: u32,
@@ -597,6 +613,30 @@ impl Session {
                 &args.chart,
                 args.dx,
                 args.dy,
+                self.calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn resize_chart_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: ResizeChartArgs = serde_json::from_str(args)
+            .map_err(|error| format!("bad chart resize args: {error}"))?;
+        let result = self
+            .workbook
+            .resize_chart(
+                SheetId(args.sheet),
+                &args.chart,
+                betteroffice_xlsx::ChartResize {
+                    left: args.left,
+                    top: args.top,
+                    right: args.right,
+                    bottom: args.bottom,
+                },
                 self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;

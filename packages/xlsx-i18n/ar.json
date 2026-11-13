@@ -239,7 +239,18 @@
     "sheetActivated": "{name}، ورقة عمل {index} من {count}",
     "cellInputLabel": "تحرير الخلية {address}",
     "gridRoleDescription": "ورقة عمل",
-    "fillHandleLabel": "مقبض التعبئة"
+    "fillHandleLabel": "مقبض التعبئة",
+    "chartResizeNw": "تغيير حجم المخطط من الزاوية العلوية اليسرى",
+    "chartResizeN": "تغيير حجم المخطط من الحافة العلوية",
+    "chartResizeNe": "تغيير حجم المخطط من الزاوية العلوية اليمنى",
+    "chartResizeE": "تغيير حجم المخطط من الحافة اليمنى",
+    "chartResizeSe": "تغيير حجم المخطط من الزاوية السفلية اليمنى",
+    "chartResizeS": "تغيير حجم المخطط من الحافة السفلية",
+    "chartResizeSw": "تغيير حجم المخطط من الزاوية السفلية اليسرى",
+    "chartResizeW": "تغيير حجم المخطط من الحافة اليسرى",
+    "chartResizeHintBoth": "{label} (مفاتيح الأسهم؛ اضغط باستمرار على Shift للتغيير بمقدار 10 بكسل)",
+    "chartResizeHintHorizontal": "{label} (السهمان الأيسر والأيمن؛ اضغط باستمرار على Shift للتغيير بمقدار 10 بكسل)",
+    "chartResizeHintVertical": "{label} (السهمان لأعلى ولأسفل؛ اضغط باستمرار على Shift للتغيير بمقدار 10 بكسل)"
   },
   "plugins": {
     "toolbarGroup": "المكونات الإضافية",

@@ -239,7 +239,18 @@
     "sheetActivated": "{name}, лист {index} из {count}",
     "cellInputLabel": "Изменить ячейку {address}",
     "gridRoleDescription": "лист",
-    "fillHandleLabel": "Маркер заполнения"
+    "fillHandleLabel": "Маркер заполнения",
+    "chartResizeNw": "Изменить размер диаграммы с левого верхнего угла",
+    "chartResizeN": "Изменить размер диаграммы с верхнего края",
+    "chartResizeNe": "Изменить размер диаграммы с правого верхнего угла",
+    "chartResizeE": "Изменить размер диаграммы с правого края",
+    "chartResizeSe": "Изменить размер диаграммы с правого нижнего угла",
+    "chartResizeS": "Изменить размер диаграммы с нижнего края",
+    "chartResizeSw": "Изменить размер диаграммы с левого нижнего угла",
+    "chartResizeW": "Изменить размер диаграммы с левого края",
+    "chartResizeHintBoth": "{label} (клавиши со стрелками; удерживайте Shift для шага 10 пикс.)",
+    "chartResizeHintHorizontal": "{label} (стрелки влево и вправо; удерживайте Shift для шага 10 пикс.)",
+    "chartResizeHintVertical": "{label} (стрелки вверх и вниз; удерживайте Shift для шага 10 пикс.)"
   },
   "plugins": {
     "toolbarGroup": "Плагины",

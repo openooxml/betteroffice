@@ -113,6 +113,17 @@ export interface ChartInfo {
     richTitle: boolean;
     series: ChartSeriesInfo[];
 }
+/**
+ * How far each edge of a chart frame moves, in content pixels: a positive
+ * value moves the left or right edge right and the top or bottom edge down.
+ * The engine computes the new anchor and clamps the result to the grid.
+ */
+export interface ChartResizeEdges {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+}
 export type ChartSeriesName = {
     text: string;
 } | {
@@ -573,6 +584,8 @@ export interface ChartRegion {
     clip: Rect;
     /** whether the anchor can be repinned; an absolute one cannot. */
     movable: boolean;
+    /** whether the anchor can be resized. A two-cell anchor writes both corners back, so it can. */
+    resizable: boolean;
 }
 /** Former name of {@link ChartRegion}, when it carried the label alone. */
 export type ChartA11yAttrs = ChartRegion;
@@ -1158,7 +1171,7 @@ export type { WasmInitInput, WasmInitOptions, OpenWorkbookOptions, WorkbookCalcu
 export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess, XlsxCellAddress, XlsxCellGuard, XlsxCellPosition, XlsxCellRead, XlsxCellValue, XlsxEditCalculation, XlsxEditFailure, XlsxEditFailureCode, XlsxEditHistory, XlsxEditOperation, XlsxEditPreview, XlsxEditReceipt, XlsxEditRefusal, XlsxEditRequest, XlsxEditResult, XlsxEditSource, XlsxEditStep, XlsxErrorValue, XlsxFindMatch, XlsxFindRequest, XlsxFindResult, XlsxRangeAddress, XlsxRangeRead, XlsxRangeTarget, XlsxReadCalculation, XlsxReadRequest, XlsxUnevaluatedCell, XlsxReadResult, XlsxSheetEntry, XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter, XlsxValidationResult, } from './edits';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, XlsxAnchor, XlsxExportCell, XlsxExportDefinedName, XlsxExportDiagnostic, XlsxExportDiagnosticCode, XlsxExportFailure, XlsxExportFailureCode, XlsxExportHyperlink, XlsxExportMerge, XlsxExportObject, XlsxExportOptions, XlsxExportResult, XlsxExportScope, XlsxExportSheet, XlsxExportTable, XlsxExportValue, XlsxFormulaResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxObjectKind, XlsxSheetIdentity, XlsxSheetVisibility, XlsxSourcePart, XlsxStructuredContent, } from './exports';
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
-export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName } from './charts';
+export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName, ChartResizeEdges } from './charts';
 export { fontPackDiagnostics } from './fontPackDiagnostics';
 export type { FontPackDiagnostic } from './fontPackDiagnostics';
 export { fontPreflight, preloadPreflightWasm } from './wasm/preflight';
@@ -1973,6 +1986,7 @@ export declare const WORKBOOK_REPLAY_MUTATORS: {
     setNumberFormat: true;
     applyFormat: true;
     moveChart: true;
+    resizeChart: true;
     moveRange: true;
     undo: true;
     redo: true;
@@ -3592,6 +3606,10 @@ export class XlsxDocument {
      */
     rejectProposalJson(args: string): string;
     /**
+     * move a chart's edges by pixel deltas as one undo step.
+     */
+    resizeChartJson(args: string): string;
+    /**
      * serialize the current workbook back to `.xlsx` bytes.
      */
     saveBytes(): Uint8Array;
@@ -3755,6 +3773,7 @@ export interface InitOutput {
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_resizeChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly xlsxdocument_saveWarningsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3801,7 +3820,7 @@ export function initSync(module: { module: SyncInitInput } | SyncInitInput): Ini
 export default function __wbg_init (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>): Promise<InitOutput>;
 
 // ---- wasm/loader.d.ts ----
-import type { ChartInfo, ChartMutation } from '../charts';
+import type { ChartInfo, ChartMutation, ChartResizeEdges } from '../charts';
 /**
  * Wasm loader for the xlsx-wasm core.
  *
@@ -4252,6 +4271,14 @@ export interface WorkbookHandle extends CollaborationReplica {
      * absolute anchor.
      */
     moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult;
+    /**
+     * move the edges of the chart frame `chart` names — a {@link ChartRegion} id
+     * — by content-pixel deltas, clamped to the grid and a 1x1px minimum, as one
+     * undo step. the new two-cell anchor is written back on save. throws for a
+     * chart pinned by an absolute anchor or held by a one-cell extent, neither of
+     * which a save can rewrite.
+     */
+    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult;
     setActiveSheet(index: number): void;
     /**
      * apply one user input to a cell (parses number/bool/formula/text) and

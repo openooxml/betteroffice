@@ -22,6 +22,18 @@ export interface ChartInfo {
   series: ChartSeriesInfo[];
 }
 
+/**
+ * How far each edge of a chart frame moves, in content pixels: a positive
+ * value moves the left or right edge right and the top or bottom edge down.
+ * The engine computes the new anchor and clamps the result to the grid.
+ */
+export interface ChartResizeEdges {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
 export type ChartSeriesName = { text: string } | { ref: string };
 export type ChartEdit = { action: 'set_chart_title'; title: string | null } | { action: 'set_series'; series: number; name?: ChartSeriesName; categories?: string; values?: string };
 export type ChartMutation = { sheet: number; chart: number } & ChartEdit;

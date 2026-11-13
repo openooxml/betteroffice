@@ -239,7 +239,18 @@
     "sheetActivated": "{name}, גיליון {index} מתוך {count}",
     "cellInputLabel": "עריכת התא {address}",
     "gridRoleDescription": "גיליון",
-    "fillHandleLabel": "ידית מילוי"
+    "fillHandleLabel": "ידית מילוי",
+    "chartResizeNw": "שינוי גודל התרשים מהפינה השמאלית העליונה",
+    "chartResizeN": "שינוי גודל התרשים מהקצה העליון",
+    "chartResizeNe": "שינוי גודל התרשים מהפינה הימנית העליונה",
+    "chartResizeE": "שינוי גודל התרשים מהקצה הימני",
+    "chartResizeSe": "שינוי גודל התרשים מהפינה הימנית התחתונה",
+    "chartResizeS": "שינוי גודל התרשים מהקצה התחתון",
+    "chartResizeSw": "שינוי גודל התרשים מהפינה השמאלית התחתונה",
+    "chartResizeW": "שינוי גודל התרשים מהקצה השמאלי",
+    "chartResizeHintBoth": "{label} (מקשי החצים; החזק את Shift לצעד של 10 פיקסלים)",
+    "chartResizeHintHorizontal": "{label} (חצים שמאלה וימינה; החזק את Shift לצעד של 10 פיקסלים)",
+    "chartResizeHintVertical": "{label} (חצים למעלה ולמטה; החזק את Shift לצעד של 10 פיקסלים)"
   },
   "plugins": {
     "toolbarGroup": "תוספים",
