@@ -11,7 +11,13 @@ fn cell(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
 }
 
-fn put(sheet: &mut Sheet, address: &str, value: CellValue, formula: Option<&str>, style: Option<u32>) {
+fn put(
+    sheet: &mut Sheet,
+    address: &str,
+    value: CellValue,
+    formula: Option<&str>,
+    style: Option<u32>,
+) {
     sheet.set_cell(
         cell(address),
         Cell {
@@ -45,7 +51,13 @@ fn fixture() -> Vec<u8> {
     let mut data = Sheet::new("Data");
     put(&mut data, "A1", text("Alpha beta alpha"), None, None);
     put(&mut data, "A2", text("alpha"), None, None);
-    put(&mut data, "B1", CellValue::Number { value: 10.0 }, None, None);
+    put(
+        &mut data,
+        "B1",
+        CellValue::Number { value: 10.0 },
+        None,
+        None,
+    );
     put(&mut data, "C1", text("alpha"), Some("\"alpha\""), None);
     put(&mut data, "D1", text("alpha"), None, Some(1));
     put(&mut data, "E1", text("alpha alpha"), None, None);
@@ -54,9 +66,27 @@ fn fixture() -> Vec<u8> {
     put(&mut data, "H1", text("gamma"), None, None);
     put(&mut data, "I1", text("alpha"), None, None);
     put(&mut data, "J1", text("alpha"), None, None);
-    put(&mut data, "K1", CellValue::Number { value: 6.0 }, Some("L1+1"), None);
-    put(&mut data, "L1", CellValue::Number { value: 5.0 }, None, None);
-    put(&mut data, "M1", CellValue::Number { value: 7.0 }, None, None);
+    put(
+        &mut data,
+        "K1",
+        CellValue::Number { value: 6.0 },
+        Some("L1+1"),
+        None,
+    );
+    put(
+        &mut data,
+        "L1",
+        CellValue::Number { value: 5.0 },
+        None,
+        None,
+    );
+    put(
+        &mut data,
+        "M1",
+        CellValue::Number { value: 7.0 },
+        None,
+        None,
+    );
     data.merges.push(CellRange::parse_a1("F1:G1").unwrap());
     data.set_array_formula(cell("I1"), CellRange::parse_a1("I1:J1").unwrap());
     let mut protected = Sheet::new("Protected");
@@ -154,8 +184,8 @@ fn formula(workbook: &Workbook, a1: &str) -> Option<String> {
 #[test]
 fn replaces_literal_text_in_range_and_preserves_style() {
     let mut workbook = workbook();
-    let outcome = apply(&mut workbook, replace("A1:A2", "alpha", "ALPHA", false))
-        .expect("the batch applies");
+    let outcome =
+        apply(&mut workbook, replace("A1:A2", "alpha", "ALPHA", false)).expect("the batch applies");
 
     assert_eq!(outcome.receipts.len(), 1);
     assert!(outcome.receipts[0].changed);
@@ -169,14 +199,14 @@ fn replaces_literal_text_in_range_and_preserves_style() {
     assert_eq!(stored(&workbook, "A1"), text("Alpha beta alpha"));
     assert_eq!(stored(&workbook, "A2"), text("alpha"));
 
-    let outcome = apply(&mut workbook, replace("D1:D1", "alpha", "beta", false))
-        .expect("the batch applies");
+    let outcome =
+        apply(&mut workbook, replace("D1:D1", "alpha", "beta", false)).expect("the batch applies");
     assert!(outcome.receipts[0].changed);
     assert_eq!(stored(&workbook, "D1"), text("beta"));
     assert_eq!(style(&workbook, "D1"), Some(1));
 
-    let outcome = apply(&mut workbook, replace("D1:D1", "beta", "", false))
-        .expect("the batch applies");
+    let outcome =
+        apply(&mut workbook, replace("D1:D1", "beta", "", false)).expect("the batch applies");
     assert!(outcome.receipts[0].changed);
     assert_eq!(stored(&workbook, "D1"), CellValue::Empty);
     assert_eq!(style(&workbook, "D1"), Some(1));
@@ -198,8 +228,8 @@ fn skips_formulas_non_text_merged_followers_and_untouched_columns() {
         .formula
         .clone();
 
-    let outcome = apply(&mut workbook, replace("A1:H1", "alpha", "omega", false))
-        .expect("the batch applies");
+    let outcome =
+        apply(&mut workbook, replace("A1:H1", "alpha", "omega", false)).expect("the batch applies");
 
     assert_eq!(outcome.receipts[0].changed_cells.len(), 4);
     assert_eq!(stored(&workbook, "A1"), text("omega beta omega"));
@@ -221,8 +251,8 @@ fn skips_formulas_non_text_merged_followers_and_untouched_columns() {
 #[test]
 fn entire_cell_matches_only_the_whole_stored_text() {
     let mut workbook = workbook();
-    let outcome = apply(&mut workbook, replace("A1:H1", "alpha", "beta", true))
-        .expect("the batch applies");
+    let outcome =
+        apply(&mut workbook, replace("A1:H1", "alpha", "beta", true)).expect("the batch applies");
 
     assert_eq!(outcome.receipts[0].changed_cells.len(), 2);
     assert_eq!(stored(&workbook, "D1"), text("beta"));
@@ -248,7 +278,10 @@ fn skips_merged_followers_and_array_fills_and_rejects_guards() {
         "expect": { "cells": [[{ "value": { "kind": "text", "value": "alpha" } }]] },
     });
     let refusal = apply(&mut workbook, guarded).expect_err("replaceText takes no guards");
-    assert_eq!(refusal.failure.code, betteroffice_xlsx::EditFailureCode::InvalidStep);
+    assert_eq!(
+        refusal.failure.code,
+        betteroffice_xlsx::EditFailureCode::InvalidStep
+    );
 }
 
 #[test]
@@ -256,19 +289,24 @@ fn refuses_empty_query_and_stale_version_without_changing_anything() {
     let mut workbook = workbook();
     let refusal = apply(&mut workbook, replace("A1:A2", "", "beta", false))
         .expect_err("an empty query is invalid");
-    assert_eq!(refusal.failure.code, betteroffice_xlsx::EditFailureCode::InvalidStep);
+    assert_eq!(
+        refusal.failure.code,
+        betteroffice_xlsx::EditFailureCode::InvalidStep
+    );
     assert_eq!(stored(&workbook, "A1"), text("Alpha beta alpha"));
 
     let stale = workbook.version();
-    apply(&mut workbook, replace("A2:A2", "alpha", "beta", false))
-        .expect("the batch applies");
+    apply(&mut workbook, replace("A2:A2", "alpha", "beta", false)).expect("the batch applies");
     let request: EditRequest = serde_json::from_value(json!({
         "expectVersion": stale,
         "steps": [replace("A1:A1", "alpha", "omega", false)],
     }))
     .unwrap();
     let refusal = workbook.apply_edits(&request).unwrap().unwrap_err();
-    assert_eq!(refusal.failure.code, betteroffice_xlsx::EditFailureCode::StaleVersion);
+    assert_eq!(
+        refusal.failure.code,
+        betteroffice_xlsx::EditFailureCode::StaleVersion
+    );
     assert_eq!(stored(&workbook, "A1"), text("Alpha beta alpha"));
     assert_eq!(stored(&workbook, "A2"), text("beta"));
 }
@@ -340,8 +378,8 @@ fn values_mode_reports_formula_results_without_rewriting_them() {
     );
 
     let mut workbook = workbook;
-    let outcome = apply(&mut workbook, replace("C1:C1", "alpha", "omega", false))
-        .expect("the batch applies");
+    let outcome =
+        apply(&mut workbook, replace("C1:C1", "alpha", "omega", false)).expect("the batch applies");
     assert!(!outcome.receipts[0].changed);
     assert_eq!(
         outcome.receipts[0].replace,
@@ -539,10 +577,28 @@ fn display_workbook() -> Workbook {
         ..Xf::default()
     });
     let mut data = Sheet::new("Data");
-    put(&mut data, "A1", CellValue::Number { value: 1234.5 }, None, Some(1));
-    put(&mut data, "A2", CellValue::Number { value: 43831.0 }, None, Some(2));
+    put(
+        &mut data,
+        "A1",
+        CellValue::Number { value: 1234.5 },
+        None,
+        Some(1),
+    );
+    put(
+        &mut data,
+        "A2",
+        CellValue::Number { value: 43831.0 },
+        None,
+        Some(2),
+    );
     put(&mut data, "A3", CellValue::Bool { value: true }, None, None);
-    put(&mut data, "A4", CellValue::Number { value: 2469.0 }, Some("A1*2"), Some(1));
+    put(
+        &mut data,
+        "A4",
+        CellValue::Number { value: 2469.0 },
+        Some("A1*2"),
+        Some(1),
+    );
     put(&mut data, "A5", text("xABCx"), None, None);
     put(&mut data, "A6", text("xabcx"), None, None);
     model.sheets.push(data);
@@ -639,15 +695,15 @@ fn replace_case(a1: &str, query: &str, replacement: &str, match_case: bool) -> V
 #[test]
 fn replace_ignores_case_by_default_and_matches_exactly_under_match_case() {
     let mut workbook = display_workbook();
-    let outcome = apply(&mut workbook, replace("A5:A6", "abc", "z", false))
-        .expect("the batch applies");
+    let outcome =
+        apply(&mut workbook, replace("A5:A6", "abc", "z", false)).expect("the batch applies");
     assert_eq!(outcome.receipts[0].changed_cells.len(), 2);
     assert_eq!(stored(&workbook, "A5"), text("xzx"));
     assert_eq!(stored(&workbook, "A6"), text("xzx"));
 
     let mut workbook = display_workbook();
-    let outcome = apply(&mut workbook, replace_case("A5:A6", "abc", "z", true))
-        .expect("the batch applies");
+    let outcome =
+        apply(&mut workbook, replace_case("A5:A6", "abc", "z", true)).expect("the batch applies");
     assert_eq!(outcome.receipts[0].changed_cells.len(), 1);
     assert_eq!(stored(&workbook, "A5"), text("xABCx"));
     assert_eq!(stored(&workbook, "A6"), text("xzx"));
@@ -708,7 +764,10 @@ fn replace_refuses_rich_text_cells_and_keeps_their_runs() {
     assert_eq!(refused[0].0, "A1");
     assert!(refused[0].1.contains("Sheet1!A1"), "{}", refused[0].1);
     let wire = serde_json::to_value(&outcome).unwrap();
-    assert_eq!(wire["receipts"][0]["replace"]["refusedCells"][0]["cell"], "A1");
+    assert_eq!(
+        wire["receipts"][0]["replace"]["refusedCells"][0]["cell"],
+        "A1"
+    );
     assert_eq!(stored(&workbook, "A1"), text("alpha beta"));
     assert_eq!(stored(&workbook, "A2"), text("omega"));
     assert_eq!(
@@ -722,7 +781,13 @@ fn number_workbook() -> Workbook {
     model.styles.cell_xfs.push(Xf::default());
     let mut data = Sheet::new("Data");
     put(&mut data, "A1", text("item 1"), None, None);
-    put(&mut data, "A2", CellValue::Number { value: 123.0 }, None, None);
+    put(
+        &mut data,
+        "A2",
+        CellValue::Number { value: 123.0 },
+        None,
+        None,
+    );
     put(&mut data, "A3", text("1 more"), None, None);
     model.sheets.push(data);
     let parts = xlsx_parse::serialize_workbook(&model).unwrap();
@@ -752,8 +817,7 @@ fn replace_all_rewrites_numbers_through_their_entered_text() {
     assert_eq!(preview["replace"]["skippedCells"], json!([]));
 
     let mut workbook = workbook;
-    let outcome = apply(&mut workbook, typed("A1:A3", "1", "2"))
-        .expect("the batch applies");
+    let outcome = apply(&mut workbook, typed("A1:A3", "1", "2")).expect("the batch applies");
     assert_eq!(outcome.receipts[0].changed_cells.len(), 3);
     assert_eq!(stored(&workbook, "A1"), text("item 2"));
     assert_eq!(stored(&workbook, "A2"), CellValue::Number { value: 223.0 });
@@ -780,13 +844,43 @@ fn entry_workbook() -> Workbook {
         ..Xf::default()
     });
     let mut data = Sheet::new("Data");
-    put(&mut data, "A1", CellValue::Number { value: 123.0 }, None, None);
-    put(&mut data, "B1", CellValue::Number { value: 133.0 }, Some("A1+10"), None);
+    put(
+        &mut data,
+        "A1",
+        CellValue::Number { value: 123.0 },
+        None,
+        None,
+    );
+    put(
+        &mut data,
+        "B1",
+        CellValue::Number { value: 133.0 },
+        Some("A1+10"),
+        None,
+    );
     put(&mut data, "C1", text("one 1"), None, None);
-    put(&mut data, "D1", CellValue::Number { value: 1234.5 }, None, Some(1));
-    put(&mut data, "E1", CellValue::Number { value: 43831.0 }, None, Some(2));
+    put(
+        &mut data,
+        "D1",
+        CellValue::Number { value: 1234.5 },
+        None,
+        Some(1),
+    );
+    put(
+        &mut data,
+        "E1",
+        CellValue::Number { value: 43831.0 },
+        None,
+        Some(2),
+    );
     put(&mut data, "F1", CellValue::Bool { value: true }, None, None);
-    put(&mut data, "G1", CellValue::Number { value: 124.0 }, Some("A1+1"), None);
+    put(
+        &mut data,
+        "G1",
+        CellValue::Number { value: 124.0 },
+        Some("A1+1"),
+        None,
+    );
     put(&mut data, "H1", text("a+b"), None, None);
     model.sheets.push(data);
     let parts = xlsx_parse::serialize_workbook(&model).unwrap();
@@ -794,14 +888,16 @@ fn entry_workbook() -> Workbook {
 }
 
 fn stats_of(outcome: &betteroffice_xlsx::EditApplication) -> ReplaceStats {
-    outcome.receipts[0].replace.clone().expect("a replace reports stats")
+    outcome.receipts[0]
+        .replace
+        .clone()
+        .expect("a replace reports stats")
 }
 
 #[test]
 fn replace_enters_a_number_as_typed_and_it_stays_a_number() {
     let mut workbook = entry_workbook();
-    let outcome = apply(&mut workbook, typed("A1:A1", "1", "2"))
-        .expect("the batch applies");
+    let outcome = apply(&mut workbook, typed("A1:A1", "1", "2")).expect("the batch applies");
 
     assert_eq!(stats_of(&outcome).replaced, 1);
     let value = stored(&workbook, "A1");
@@ -814,8 +910,7 @@ fn replace_enters_a_number_as_typed_and_it_stays_a_number() {
 #[test]
 fn replace_reenters_a_formula_and_recalculates_it() {
     let mut workbook = entry_workbook();
-    let outcome = apply(&mut workbook, typed("B1:B1", "10", "20"))
-        .expect("the batch applies");
+    let outcome = apply(&mut workbook, typed("B1:B1", "10", "20")).expect("the batch applies");
 
     assert_eq!(stats_of(&outcome).replaced, 1);
     assert_eq!(formula(&workbook, "B1").as_deref(), Some("A1+20"));
@@ -825,8 +920,7 @@ fn replace_reenters_a_formula_and_recalculates_it() {
 #[test]
 fn replace_keeps_replaced_text_as_text() {
     let mut workbook = entry_workbook();
-    apply(&mut workbook, typed("C1:C1", "one", "two"))
-        .expect("the batch applies");
+    apply(&mut workbook, typed("C1:C1", "one", "two")).expect("the batch applies");
 
     assert_eq!(stored(&workbook, "C1"), text("two 1"));
 }
@@ -841,7 +935,10 @@ fn a_replacement_that_breaks_a_formula_is_refused_and_the_rest_applies() {
     assert_eq!(stats.matched, 3);
     assert_eq!(stats.replaced, 1);
     let refused = refused_cells(&stats);
-    let cells = refused.iter().map(|(cell, _)| cell.as_str()).collect::<Vec<_>>();
+    let cells = refused
+        .iter()
+        .map(|(cell, _)| cell.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(cells, ["B1", "G1"]);
     assert!(refused[0].1.contains("B1"), "{}", refused[0].1);
     assert_eq!(formula(&workbook, "B1").as_deref(), Some("A1+10"));
@@ -861,8 +958,7 @@ fn replace_reports_the_total_of_refused_cells() {
     assert_eq!(stats["refused"], 2);
     assert_eq!(stats["refusedCells"].as_array().map(Vec::len), Some(2));
 
-    let outcome = apply(&mut workbook, typed("A1:A1", "1", "2"))
-        .expect("the batch applies");
+    let outcome = apply(&mut workbook, typed("A1:A1", "1", "2")).expect("the batch applies");
     let wire = serde_json::to_value(&outcome).unwrap();
     assert_eq!(wire["receipts"][0]["replace"]["refused"], 0);
 }
@@ -891,16 +987,17 @@ fn a_formatted_number_is_found_by_its_display_but_replaced_by_its_entry() {
 #[test]
 fn replace_skips_and_reports_dates_and_booleans() {
     let mut workbook = entry_workbook();
-    let outcome = apply(&mut workbook, typed("E1:F1", "1", "9"))
-        .expect("the batch applies");
+    let outcome = apply(&mut workbook, typed("E1:F1", "1", "9")).expect("the batch applies");
     let stats = stats_of(&outcome);
     assert!(!outcome.receipts[0].changed);
     assert_eq!(stats.skipped_values, 1);
     assert_eq!(stats.skipped_cells, ["E1"]);
-    assert_eq!(stored(&workbook, "E1"), CellValue::Number { value: 43831.0 });
+    assert_eq!(
+        stored(&workbook, "E1"),
+        CellValue::Number { value: 43831.0 }
+    );
 
-    let outcome = apply(&mut workbook, typed("E1:F1", "true", "no"))
-        .expect("the batch applies");
+    let outcome = apply(&mut workbook, typed("E1:F1", "true", "no")).expect("the batch applies");
     let stats = stats_of(&outcome);
     assert!(!outcome.receipts[0].changed);
     assert_eq!(stats.skipped_values, 1);
@@ -911,8 +1008,7 @@ fn replace_skips_and_reports_dates_and_booleans() {
 #[test]
 fn undo_after_replace_all_restores_every_cell_in_one_step() {
     let mut workbook = entry_workbook();
-    let outcome = apply(&mut workbook, typed("A1:H1", "1", "2"))
-        .expect("the batch applies");
+    let outcome = apply(&mut workbook, typed("A1:H1", "1", "2")).expect("the batch applies");
     assert!(stats_of(&outcome).replaced >= 4);
     assert_eq!(stored(&workbook, "A1"), CellValue::Number { value: 223.0 });
     assert_eq!(formula(&workbook, "B1").as_deref(), Some("A2+20"));
@@ -932,11 +1028,29 @@ fn two_sheet_source() -> Vec<u8> {
     let mut model = WorkbookModel::default();
     model.styles.cell_xfs.push(Xf::default());
     let mut data = Sheet::new("Data");
-    put(&mut data, "A1", CellValue::Number { value: 123.0 }, None, None);
-    put(&mut data, "B1", CellValue::Number { value: 153.0 }, Some("A1+30"), None);
+    put(
+        &mut data,
+        "A1",
+        CellValue::Number { value: 123.0 },
+        None,
+        None,
+    );
+    put(
+        &mut data,
+        "B1",
+        CellValue::Number { value: 153.0 },
+        Some("A1+30"),
+        None,
+    );
     put(&mut data, "C1", text("item 3"), None, None);
     let mut other = Sheet::new("Other");
-    put(&mut other, "A1", CellValue::Number { value: 3.0 }, None, None);
+    put(
+        &mut other,
+        "A1",
+        CellValue::Number { value: 3.0 },
+        None,
+        None,
+    );
     put(&mut other, "B1", text("3 more"), None, None);
     model.sheets.extend([data, other]);
     ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap()
@@ -980,20 +1094,44 @@ fn formula_on(workbook: &Workbook, sheet: SheetId, a1: &str) -> Option<String> {
 }
 
 fn assert_original(workbook: &Workbook) {
-    assert_eq!(stored_on(workbook, SheetId(0), "A1"), CellValue::Number { value: 123.0 });
-    assert_eq!(formula_on(workbook, SheetId(0), "B1").as_deref(), Some("A1+30"));
-    assert_eq!(stored_on(workbook, SheetId(0), "B1"), CellValue::Number { value: 153.0 });
+    assert_eq!(
+        stored_on(workbook, SheetId(0), "A1"),
+        CellValue::Number { value: 123.0 }
+    );
+    assert_eq!(
+        formula_on(workbook, SheetId(0), "B1").as_deref(),
+        Some("A1+30")
+    );
+    assert_eq!(
+        stored_on(workbook, SheetId(0), "B1"),
+        CellValue::Number { value: 153.0 }
+    );
     assert_eq!(stored_on(workbook, SheetId(0), "C1"), text("item 3"));
-    assert_eq!(stored_on(workbook, SheetId(1), "A1"), CellValue::Number { value: 3.0 });
+    assert_eq!(
+        stored_on(workbook, SheetId(1), "A1"),
+        CellValue::Number { value: 3.0 }
+    );
     assert_eq!(stored_on(workbook, SheetId(1), "B1"), text("3 more"));
 }
 
 fn assert_replaced(workbook: &Workbook) {
-    assert_eq!(stored_on(workbook, SheetId(0), "A1"), CellValue::Number { value: 124.0 });
-    assert_eq!(formula_on(workbook, SheetId(0), "B1").as_deref(), Some("A1+40"));
-    assert_eq!(stored_on(workbook, SheetId(0), "B1"), CellValue::Number { value: 164.0 });
+    assert_eq!(
+        stored_on(workbook, SheetId(0), "A1"),
+        CellValue::Number { value: 124.0 }
+    );
+    assert_eq!(
+        formula_on(workbook, SheetId(0), "B1").as_deref(),
+        Some("A1+40")
+    );
+    assert_eq!(
+        stored_on(workbook, SheetId(0), "B1"),
+        CellValue::Number { value: 164.0 }
+    );
     assert_eq!(stored_on(workbook, SheetId(0), "C1"), text("item 4"));
-    assert_eq!(stored_on(workbook, SheetId(1), "A1"), CellValue::Number { value: 4.0 });
+    assert_eq!(
+        stored_on(workbook, SheetId(1), "A1"),
+        CellValue::Number { value: 4.0 }
+    );
     assert_eq!(stored_on(workbook, SheetId(1), "B1"), text("4 more"));
 }
 
@@ -1061,7 +1199,10 @@ fn a_peer_editing_a_replaced_cell_during_replace_all_converges() {
         );
         assert_eq!(left.model(), right.model(), "left_first={left_first}");
         for peer in [&left, &right] {
-            assert_eq!(stored_on(peer, SheetId(0), "A1"), CellValue::Number { value: 124.0 });
+            assert_eq!(
+                stored_on(peer, SheetId(0), "A1"),
+                CellValue::Number { value: 124.0 }
+            );
             assert_eq!(formula_on(peer, SheetId(0), "B1").as_deref(), Some("A1+40"));
             assert_eq!(stored_on(peer, SheetId(1), "B1"), text("4 more"));
             let c1 = stored_on(peer, SheetId(0), "C1");
@@ -1177,7 +1318,10 @@ fn replace_on_an_explicit_chartsheet_target_is_refused() {
     )
     .expect("the request parses");
     let refusal = outcome.expect_err("a chartsheet target is not a worksheet");
-    assert_eq!(refusal.failure.code, betteroffice_xlsx::EditFailureCode::Unsupported);
+    assert_eq!(
+        refusal.failure.code,
+        betteroffice_xlsx::EditFailureCode::Unsupported
+    );
     assert_eq!(refusal.failure.step_index, Some(1));
     assert_eq!(workbook.version(), before);
     assert_eq!(stored_on(&workbook, SheetId(0), "A1"), text("alpha"));
@@ -1186,14 +1330,16 @@ fn replace_on_an_explicit_chartsheet_target_is_refused() {
 #[test]
 fn replace_without_within_searches_an_explicit_hidden_sheet() {
     let mut workbook = workbook_with_hidden_and_chartsheet();
-    let steps = ["sheet:0", "sheet:1", "sheet:3"].map(whole_sheet_step).to_vec();
+    let steps = ["sheet:0", "sheet:1", "sheet:3"]
+        .map(whole_sheet_step)
+        .to_vec();
     let request = serde_json::from_value::<EditRequest>(json!({
         "expectVersion": workbook.version(),
         "steps": steps.clone(),
     }))
     .unwrap();
-    let explicit = ["sheet:0", "sheet:1", "sheet:3"]
-        .map(|sheet| whole_sheet_within(sheet, "sheet"));
+    let explicit =
+        ["sheet:0", "sheet:1", "sheet:3"].map(|sheet| whole_sheet_within(sheet, "sheet"));
     let defaulted = serde_json::from_value::<EditRequest>(json!({
         "expectVersion": workbook.version(),
         "steps": explicit,

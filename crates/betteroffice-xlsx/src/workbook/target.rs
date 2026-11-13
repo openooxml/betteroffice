@@ -327,7 +327,10 @@ fn sheet_kind(
     origin: Option<usize>,
     facts: Option<&xlsx_parse::PackageFactsView<'_>>,
 ) -> XlsxSheetKind {
-    match origin.zip(facts).and_then(|(origin, facts)| facts.source_sheet_kind(origin)) {
+    match origin
+        .zip(facts)
+        .and_then(|(origin, facts)| facts.source_sheet_kind(origin))
+    {
         None | Some(SourceSheetKind::Worksheet) => XlsxSheetKind::Worksheet,
         Some(SourceSheetKind::Chartsheet) => XlsxSheetKind::Chartsheet,
         Some(SourceSheetKind::Dialogsheet) => XlsxSheetKind::Dialogsheet,
@@ -764,7 +767,12 @@ impl Workbook {
                     entered.as_str()
                 }
             };
-            if !text_matches(searched, &request.text, request.entire_cell, request.match_case) {
+            if !text_matches(
+                searched,
+                &request.text,
+                request.entire_cell,
+                request.match_case,
+            ) {
                 continue;
             }
             if matches.len() == limit as usize {

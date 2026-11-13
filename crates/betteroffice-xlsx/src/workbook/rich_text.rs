@@ -60,9 +60,12 @@ impl Workbook {
         let Some((source_sheet, source_cell)) = self.text_source_cell(sheet, cell) else {
             return false;
         };
-        let rewritten = self.invalidated_text_sources.as_ref().is_some_and(|invalidated| {
-            invalidated.contains(&(source_sheet, source_cell.row, source_cell.col))
-        });
+        let rewritten = self
+            .invalidated_text_sources
+            .as_ref()
+            .is_some_and(|invalidated| {
+                invalidated.contains(&(source_sheet, source_cell.row, source_cell.col))
+            });
         if rewritten && !self.is_collaborative() {
             return false;
         }

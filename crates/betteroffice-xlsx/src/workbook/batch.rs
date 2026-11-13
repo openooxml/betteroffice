@@ -882,7 +882,9 @@ impl Workbook {
                     })
                     .sum::<u64>();
             }
-            EditOperation::ReplaceText { query, replacement, .. } => {
+            EditOperation::ReplaceText {
+                query, replacement, ..
+            } => {
                 if query.is_empty() {
                     return Err(at(
                         EditFailureCode::InvalidStep,
