@@ -109,8 +109,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     groups = parseGroups(process.env.ROUTE_GROUPS ?? '');
     result = await route(process.env, fetch, deadline.signal);
   } catch (error) {
-    const reason = deadline.signal.aborted ? deadline.signal.reason.message : error.message;
-    console.log(`::warning::runner routing fell back to kyora: ${reason}`);
+    console.log(`::warning::runner routing fell back to kyora: ${error.message}`);
     result = { routes: allocate(groups, 0), busy: null };
   } finally {
     clearTimeout(timer);
