@@ -295,6 +295,26 @@ impl Document {
         Ok(receipt)
     }
 
+    /// Replaces the text of the body paragraph at `index` in [`Document::paragraphs`] order.
+    /// The paragraph needs no ID.
+    pub fn replace_paragraph_text_at(&mut self, index: usize, text: &str) -> Result<Receipt> {
+        let context = EditCtx::local("betteroffice-docx", DEFAULT_SERIALIZATION_TIME);
+        self.replace_paragraph_text_at_with(index, text, 1, &context)
+    }
+
+    /// [`Document::replace_paragraph_text_at`] under a caller-supplied client and edit context.
+    pub fn replace_paragraph_text_at_with(
+        &mut self,
+        index: usize,
+        text: &str,
+        client_id: u64,
+        context: &EditCtx,
+    ) -> Result<Receipt> {
+        let _ = (text, client_id, context);
+        let len = self.paragraphs().len();
+        Err(Error::ParagraphIndexOutOfRange { index, len })
+    }
+
     /// Exports the current model as read-only structured content. Anchors address the returned
     /// snapshot; source-part provenance is kept only where the opened package still matches.
     pub fn export_structured(&self, options: &ExportOptions) -> Result<DocxStructuredContent> {
