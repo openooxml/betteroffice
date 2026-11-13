@@ -482,9 +482,12 @@ fn write_docx_s13_parts_with_warnings(
                 context.begin_form_data_tokens(&original);
                 let serialized = serialize_document_part(&request.document, &mut context);
                 let deferred = context.end_form_data_tokens();
-                let patched =
-                    build_patched_document_xml(&original, &serialized?, &selective.changed_para_ids)
-                        .ok_or_else(|| save_error("selective document patch is unsafe"))?;
+                let patched = build_patched_document_xml(
+                    &original,
+                    &serialized?,
+                    &selective.changed_para_ids,
+                )
+                .ok_or_else(|| save_error("selective document patch is unsafe"))?;
                 super::paragraph::reject_form_data_tokens(&patched, &deferred)?;
                 patched
             }

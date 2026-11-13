@@ -130,7 +130,8 @@ fn keeps_a_dirty_field_marked_dirty_when_a_paragraph_is_written_from_the_model()
     );
     let xml = saved_document(&fixture(&body));
     assert_eq!(
-        xml.matches(r#"<w:fldChar w:fldCharType="begin" w:dirty="true"/>"#).count(),
+        xml.matches(r#"<w:fldChar w:fldCharType="begin" w:dirty="true"/>"#)
+            .count(),
         1,
         "{xml}"
     );
@@ -138,7 +139,8 @@ fn keeps_a_dirty_field_marked_dirty_when_a_paragraph_is_written_from_the_model()
 }
 
 const ALIASED: &str = r#"xmlns:ns0="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
-const ALIASED_DATA: &str = r#"<ns0:ffData><ns0:name ns0:val="Ext1"/><ns0:enabled/><ns0:textInput/></ns0:ffData>"#;
+const ALIASED_DATA: &str =
+    r#"<ns0:ffData><ns0:name ns0:val="Ext1"/><ns0:enabled/><ns0:textInput/></ns0:ffData>"#;
 
 fn aliased_document() -> (Vec<u8>, String) {
     let field = format!(
@@ -146,7 +148,10 @@ fn aliased_document() -> (Vec<u8>, String) {
         text("Label "),
         form_field(ALIASED_DATA, "FORMTEXT", &text("Ada")),
     );
-    let body = format!(r#"{field}<w:p w14:paraId="73000004">{}</w:p>"#, text("Other"));
+    let body = format!(
+        r#"{field}<w:p w14:paraId="73000004">{}</w:p>"#,
+        text("Other")
+    );
     (fixture_in(&format!("{NS} {ALIASED}"), &body), field)
 }
 

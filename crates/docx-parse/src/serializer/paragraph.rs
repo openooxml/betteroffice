@@ -740,7 +740,10 @@ pub(crate) fn reject_form_data_tokens(
     xml: &str,
     deferred: &[(String, String, String)],
 ) -> Result<(), ParseError> {
-    match deferred.iter().find(|(token, _, _)| xml.contains(token.as_str())) {
+    match deferred
+        .iter()
+        .find(|(token, _, _)| xml.contains(token.as_str()))
+    {
         Some((_, field, detail)) => Err(form_data_error(field, detail)),
         None => Ok(()),
     }
