@@ -5325,9 +5325,16 @@ fn table_style_regions(
     let mask = string(field(look, "value"))
         .and_then(|value| u32::from_str_radix(value, 16).ok())
         .unwrap_or(if look.is_none() { 0x04a0 } else { 0 });
-    let named = ["firstRow", "lastRow", "firstColumn", "lastColumn", "noHBand", "noVBand"]
-        .into_iter()
-        .any(|key| boolean(field(look, key)).is_some());
+    let named = [
+        "firstRow",
+        "lastRow",
+        "firstColumn",
+        "lastColumn",
+        "noHBand",
+        "noVBand",
+    ]
+    .into_iter()
+    .any(|key| boolean(field(look, key)).is_some());
     let flag = |key, bit| {
         if named {
             boolean(field(look, key)) == Some(true)
@@ -9216,7 +9223,9 @@ mod tests {
 
     fn styled_cells(style: Value, look: Value, rows: usize, columns: usize) -> Vec<Vec<Value>> {
         let cells = vec![json!({ "type": "tableCell", "content": [] }); columns];
-        let rows: Vec<Value> = (0..rows).map(|_| json!({ "cells": cells.clone() })).collect();
+        let rows: Vec<Value> = (0..rows)
+            .map(|_| json!({ "cells": cells.clone() }))
+            .collect();
         let style_id = style["styleId"].clone();
         let table = json!({
             "type": "table",
@@ -9246,7 +9255,12 @@ mod tests {
 
     #[test]
     fn table_look_named_flags_ignore_the_hex_mask() {
-        let cells = styled_cells(edge_style(), json!({ "value": "04A0", "lastRow": true }), 3, 1);
+        let cells = styled_cells(
+            edge_style(),
+            json!({ "value": "04A0", "lastRow": true }),
+            3,
+            1,
+        );
         assert_eq!(
             first_column_fills(&cells),
             vec![Value::Null, Value::Null, json!("0000FF")]

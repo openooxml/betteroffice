@@ -1201,9 +1201,16 @@ fn parse_style_table_borders(element: Option<&XmlElement>) -> Option<Borders> {
 fn parse_table_look(element: Option<&XmlElement>) -> Option<TableLook> {
     let element = element?;
     let mut value = TableLook::default();
-    let named = ["firstRow", "lastRow", "firstColumn", "lastColumn", "noHBand", "noVBand"]
-        .into_iter()
-        .any(|attribute| element.attribute(Some("w"), attribute).is_some());
+    let named = [
+        "firstRow",
+        "lastRow",
+        "firstColumn",
+        "lastColumn",
+        "noHBand",
+        "noVBand",
+    ]
+    .into_iter()
+    .any(|attribute| element.attribute(Some("w"), attribute).is_some());
     if let Some(raw) = element
         .attribute(Some("w"), "val")
         .filter(|raw| !raw.is_empty())

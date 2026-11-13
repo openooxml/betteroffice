@@ -2582,9 +2582,16 @@ fn table_look_first_column(tbl_pr: &std::collections::HashMap<String, Any>) -> b
     let Some(look) = tbl_pr.get("look").and_then(any_map) else {
         return false;
     };
-    let named = ["firstRow", "lastRow", "firstColumn", "lastColumn", "noHBand", "noVBand"]
-        .into_iter()
-        .any(|key| map_bool(look, key).is_some());
+    let named = [
+        "firstRow",
+        "lastRow",
+        "firstColumn",
+        "lastColumn",
+        "noHBand",
+        "noVBand",
+    ]
+    .into_iter()
+    .any(|key| map_bool(look, key).is_some());
     if named {
         return map_bool(look, "firstColumn") == Some(true);
     }

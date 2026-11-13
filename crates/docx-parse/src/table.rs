@@ -230,9 +230,16 @@ pub fn parse_document_shading(element: Option<&XmlElement>) -> Option<ShadingPro
 pub fn parse_document_table_look(element: Option<&XmlElement>) -> Option<TableLook> {
     let element = element?;
     let mut look = TableLook::default();
-    let named = ["firstRow", "lastRow", "firstColumn", "lastColumn", "noHBand", "noVBand"]
-        .into_iter()
-        .any(|attribute| element.attribute(Some("w"), attribute).is_some());
+    let named = [
+        "firstRow",
+        "lastRow",
+        "firstColumn",
+        "lastColumn",
+        "noHBand",
+        "noVBand",
+    ]
+    .into_iter()
+    .any(|attribute| element.attribute(Some("w"), attribute).is_some());
     if let Some(raw) = element
         .attribute(Some("w"), "val")
         .filter(|value| !value.is_empty())
