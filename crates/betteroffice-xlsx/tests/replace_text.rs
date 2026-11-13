@@ -803,8 +803,12 @@ fn replace_refuses_rich_text_cells_and_keeps_their_runs() {
 }
 
 fn replay_a_peer_edit(workbook: &mut Workbook) {
+    replay_a_peer_edit_from(workbook, &rich_source());
+}
+
+fn replay_a_peer_edit_from(workbook: &mut Workbook, source: &[u8]) {
     let options = CalculationOptions::default();
-    let mut peer = Workbook::open_collaborative(&rich_source(), 306).unwrap();
+    let mut peer = Workbook::open_collaborative(source, 306).unwrap();
     assert!(
         peer.edit_cell(SheetId(0), cell("B1"), "peer", options)
             .unwrap()
@@ -856,6 +860,50 @@ fn replace_refuses_rich_text_cells_in_a_recovered_replayed_session() {
     let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
     assert_eq!(stored(&restored, "A1"), text("alpha beta"));
     assert_rich_text_cell_refused(&mut restored);
+}
+
+fn rich_shared_source(first_row: &str) -> Vec<u8> {
+    let model = WorkbookModel {
+        sheets: vec![Sheet::new("Sheet1")],
+        ..WorkbookModel::default()
+    };
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let sheet = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    sheet.1 = format!(
+        r#"<worksheet><sheetData><row r="1">{first_row}</row><row r="2"><c r="A2" t="inlineStr"><is><t>alpha</t></is></c></row></sheetData></worksheet>"#
+    )
+    .into_bytes();
+    let strings = br#"<sst><si><r><rPr><rFont val="Arial"/><b/></rPr><t>alpha</t></r><r><rPr><rFont val="Courier New"/><i/></rPr><t xml:space="preserve"> beta</t></r></si></sst>"#.to_vec();
+    match parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/sharedStrings.xml")
+    {
+        Some(part) => part.1 = strings,
+        None => parts.push(("xl/sharedStrings.xml".into(), strings)),
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn replace_refuses_rich_shared_string_cells_after_a_remote_replay() {
+    let source = rich_shared_source(r#"<c r="A1" t="s"><v>0</v></c>"#);
+    let mut workbook = Workbook::open_collaborative(&source, 308).unwrap();
+    replay_a_peer_edit_from(&mut workbook, &source);
+    assert_rich_text_cell_refused(&mut workbook);
+}
+
+#[test]
+fn replace_refuses_plain_text_equal_to_a_rich_shared_string_after_a_remote_replay() {
+    let source = rich_shared_source(
+        r#"<c r="A1" t="inlineStr"><is><t>alpha beta</t></is></c><c r="C1" t="s"><v>0</v></c>"#,
+    );
+    let mut workbook = Workbook::open_collaborative(&source, 309).unwrap();
+    replay_a_peer_edit_from(&mut workbook, &source);
+    assert_eq!(stored(&workbook, "C1"), text("alpha beta"));
+    assert_rich_text_cell_refused(&mut workbook);
 }
 
 fn number_workbook() -> Workbook {
