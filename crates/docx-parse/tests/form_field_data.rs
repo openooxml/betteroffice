@@ -1,5 +1,8 @@
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use docx_parse::{S9ParseOptions, parse_docx_s9_wire};
+use quick_xml::events::Event;
+use quick_xml::name::{Namespace, ResolveResult};
+use quick_xml::reader::NsReader;
 use serde_json::{Value, json};
 
 const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
@@ -13,10 +16,16 @@ fn fixture(body: &str) -> Vec<u8> {
 }
 
 fn fixture_in(namespaces: &str, body: &str) -> Vec<u8> {
+    package(format!(
+        "<w:document {namespaces}><w:body>{body}<w:sectPr/></w:body></w:document>"
+    ))
+}
+
+fn package(document: String) -> Vec<u8> {
     let parts = vec![
         ("[Content_Types].xml".to_owned(), r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_owned().into_bytes()),
         ("_rels/.rels".to_owned(), r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned().into_bytes()),
-        ("word/document.xml".to_owned(), format!("<w:document {namespaces}><w:body>{body}<w:sectPr/></w:body></w:document>").into_bytes()),
+        ("word/document.xml".to_owned(), document.into_bytes()),
     ];
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
@@ -154,4 +163,60 @@ fn keeps_the_source_bytes_of_an_untouched_paragraph_whose_form_field_data_it_can
     let (source, field) = aliased_document();
     let xml = save_with(&source, json!({"changedParaIds": ["73000004"]})).unwrap();
     assert_eq!(xml.matches(field.as_str()).count(), 1, "{xml}");
+}
+
+fn binds_ext_foo(xml: &str) -> bool {
+    let mut reader = NsReader::from_str(xml);
+    let mut found = false;
+    loop {
+        let (resolved, event) = reader.read_resolved_event().unwrap();
+        let namespace = match resolved {
+            ResolveResult::Unknown(prefix) => {
+                panic!("unbound prefix {}: {xml}", String::from_utf8_lossy(&prefix))
+            }
+            ResolveResult::Bound(Namespace(uri)) => Some(uri.to_vec()),
+            ResolveResult::Unbound => None,
+        };
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                found |= element.local_name().as_ref() == b"foo"
+                    && namespace.as_deref() == Some(b"urn:x".as_slice());
+                for attribute in element.attributes() {
+                    let key = attribute.unwrap().key;
+                    if key.as_ref().starts_with(b"xmlns") || key.as_ref().starts_with(b"xml:") {
+                        continue;
+                    }
+                    if let (ResolveResult::Unknown(prefix), _) =
+                        reader.resolver().resolve_attribute(key)
+                    {
+                        panic!(
+                            "unbound attribute prefix {}: {xml}",
+                            String::from_utf8_lossy(&prefix)
+                        );
+                    }
+                }
+            }
+            Event::Eof => return found,
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn keeps_form_field_data_bound_to_a_prefix_declared_on_the_run_the_begin_or_the_root() {
+    let data = r#"<w:ffData><w:name w:val="T"/><ext:foo/></w:ffData>"#;
+    let ext = r#" xmlns:ext="urn:x""#;
+    for (root, run, begin) in [("", ext, ""), ("", "", ext), (ext, "", "")] {
+        let body = format!(
+            r#"<w:p>{}<w:r{run}><w:fldChar w:fldCharType="begin"{begin}>{data}</w:fldChar></w:r><w:r><w:instrText xml:space="preserve"> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{}<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+            text("Label "),
+            text("Ada"),
+        );
+        let xml = saved_document(&fixture_in(&format!("{NS}{root}"), &body));
+        assert!(binds_ext_foo(&xml), "{xml}");
+        assert_eq!(xml.matches("<w:ffData").count(), 1, "{xml}");
+        let reopened = package(xml.clone());
+        parse_docx_s9_wire(&reopened, S9ParseOptions::default()).unwrap();
+        assert!(binds_ext_foo(&save(&reopened).unwrap()), "{xml}");
+    }
 }

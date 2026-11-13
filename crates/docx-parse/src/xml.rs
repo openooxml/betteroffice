@@ -1592,6 +1592,7 @@ fn retain_replayed_namespace_aliases(
         && !bookmarked_drawing
         && !text_box_drawing
         && !matches!(element.local_name(), "pict" | "object")
+        && !element.matches_name("w", "ffData")
     {
         return Ok(());
     }

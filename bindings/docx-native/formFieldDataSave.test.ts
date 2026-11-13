@@ -25,7 +25,9 @@ const EXT_NAMESPACE = ` xmlns:ns0="${W}"`;
 const EXT_DATA = '<ns0:ffData><ns0:name ns0:val="Ext1"/><ns0:enabled/><ns0:textInput/></ns0:ffData>';
 const UNWRITABLE = /"Ext1".*found ns0:ffData/;
 const EXT_PARAGRAPH = `<w:p w14:paraId="73000003">${text('Label ')}${field(formBegin(EXT_DATA), 'FORMTEXT', text('Ada'))}</w:p>`;
-const OTHER_PARAGRAPH = `<w:p w14:paraId="73000004">${text('Other')}</w:p>`;
+const RUN_BOUND_DATA = '<w:ffData><w:name w:val="T"/><ext:foo/></w:ffData>';
+const RUN_BOUND_PARAGRAPH = `<w:p w14:paraId="73000005">${text('Mark ')}${field(`<w:fldChar w:fldCharType="begin">${RUN_BOUND_DATA}</w:fldChar>`, 'FORMTEXT', text('Ada')).replace('<w:r>', '<w:r xmlns:ext="urn:x">')}</w:p>`;
+const OTHER_PARAGRAPH =`<w:p w14:paraId="73000004">${text('Other')}</w:p>`;
 
 async function docx(body: string, namespaces = ''): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -105,6 +107,11 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
       const xml = await typedAndSaved(yrs, DIRTY_PARAGRAPH, 'Page', route);
       expect(count(xml, DIRTY_BEGIN)).toBe(1);
       expect(count(xml, 'w:dirty=')).toBe(1);
+    });
+
+    test(`${engine}: keeps form field data bound to a prefix its run declares (${route})`, async () => {
+      const xml = await typedAndSaved(yrs, RUN_BOUND_PARAGRAPH, 'Mark', route);
+      expect(count(xml, '<w:ffData xmlns:ext="urn:x"><w:name w:val="T"/><ext:foo/></w:ffData>')).toBe(1);
     });
 
     test(`${engine}: refuses to save, naming the field and the reason, when form field data it cannot write is beside the typed text (${route})`, async () => {
