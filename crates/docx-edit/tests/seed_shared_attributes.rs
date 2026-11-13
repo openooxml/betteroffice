@@ -12,14 +12,20 @@ const NS: &str = concat!(
 
 const FORMATTED: &str = r#"<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/><w:color w:val="C00000"/><w:highlight w:val="yellow"/></w:rPr>"#;
 
-fn package(body: &str) -> Vec<u8> {
+const NORMAL_STYLE: &str =
+    r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#;
+
+const SHARED_PARAGRAPH_STYLE: &str = concat!(
+    r#"<w:style w:type="paragraph" w:styleId="Shared"><w:basedOn w:val="Normal"/>"#,
+    r#"<w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:b/></w:rPr></w:style>"#
+);
+
+fn package(body: &str, styles: &str) -> Vec<u8> {
     let content_types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#;
     let root_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
     let document_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#;
     let document = format!(r#"<w:document {NS}><w:body>{body}<w:sectPr/></w:body></w:document>"#);
-    let styles = format!(
-        r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>"#
-    );
+    let styles = format!(r#"<w:styles {NS}>{NORMAL_STYLE}{styles}</w:styles>"#);
     let parts = vec![
         (
             "[Content_Types].xml".to_owned(),
@@ -39,15 +45,30 @@ fn package(body: &str) -> Vec<u8> {
 /// `First`, `Second` and `Third` carry the same direct formatting; the plain run between the
 /// first two makes the third start its formatting afresh rather than continue the first's.
 fn repeated_formatting() -> Vec<u8> {
-    package(&format!(
-        concat!(
-            r#"<w:p w14:paraId="00000001"><w:r>{rpr}<w:t>First</w:t></w:r>"#,
-            r#"<w:r><w:t xml:space="preserve"> plain </w:t></w:r>"#,
-            r#"<w:r>{rpr}<w:t>Second</w:t></w:r></w:p>"#,
-            r#"<w:p w14:paraId="00000002"><w:r>{rpr}<w:t>Third</w:t></w:r></w:p>"#,
+    package(
+        &format!(
+            concat!(
+                r#"<w:p w14:paraId="00000001"><w:r>{rpr}<w:t>First</w:t></w:r>"#,
+                r#"<w:r><w:t xml:space="preserve"> plain </w:t></w:r>"#,
+                r#"<w:r>{rpr}<w:t>Second</w:t></w:r></w:p>"#,
+                r#"<w:p w14:paraId="00000002"><w:r>{rpr}<w:t>Third</w:t></w:r></w:p>"#,
+            ),
+            rpr = FORMATTED
         ),
-        rpr = FORMATTED
-    ))
+        "",
+    )
+}
+
+/// Three paragraphs with the same style and spacing, so their marks carry equal payload values.
+fn repeated_paragraphs() -> Vec<u8> {
+    let body: String = (1..=3)
+        .map(|index| {
+            format!(
+                r#"<w:p w14:paraId="0000000{index}"><w:pPr><w:pStyle w:val="Shared"/><w:spacing w:before="120" w:after="240"/></w:pPr><w:r><w:t>Paragraph {index}</w:t></w:r></w:p>"#
+            )
+        })
+        .collect();
+    package(&body, SHARED_PARAGRAPH_STYLE)
 }
 
 fn seeded(bytes: &[u8]) -> EditingDoc {
@@ -134,4 +155,89 @@ fn shared_attribute_values_encode_like_unshared_ones() {
         "the replica shares values, so it does not stand for the unshared layout"
     );
     assert!(replica.encode_state_as_update_v1() == shared);
+}
+
+type MarkEntry = (usize, String, Any);
+
+/// Each body paragraph mark's entries, with the address of the stored key.
+fn paragraph_marks(doc: &EditingDoc) -> Vec<Vec<MarkEntry>> {
+    let txn = doc.yrs_doc().transact();
+    let stories = txn.get_map("stories").unwrap();
+    let Some(Out::YText(body)) = yrs::Map::get(&stories, &txn, "body") else {
+        panic!("the body story is text");
+    };
+    body.diff(&txn, YChange::identity)
+        .into_iter()
+        .filter_map(|op| match op.insert {
+            Out::YMap(mark) => Some(mark),
+            _ => None,
+        })
+        .filter(|mark| {
+            matches!(
+                yrs::Map::get(mark, &txn, "_kind"),
+                Some(Out::Any(Any::String(kind))) if &*kind == "pilcrow"
+            )
+        })
+        .map(|mark| {
+            yrs::Map::iter(&mark, &txn)
+                .filter_map(|(key, value)| match value {
+                    Out::Any(value) => Some((key.as_ptr() as usize, key.to_owned(), value)),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn mark_entry<'a>(mark: &'a [MarkEntry], key: &str) -> Option<&'a MarkEntry> {
+    mark.iter().find(|(_, name, _)| name == key)
+}
+
+/// Map iteration borrows each key from the stored item, so key allocations are observable too.
+#[test]
+fn equally_styled_paragraph_marks_share_their_payload_keys_and_values() {
+    let doc = seeded(&repeated_paragraphs());
+    let marks = paragraph_marks(&doc);
+    let styled: Vec<&Vec<MarkEntry>> = marks
+        .iter()
+        .filter(|mark| {
+            mark_entry(mark, "pStyle").is_some_and(|(_, _, value)| *value == Any::from("Shared"))
+        })
+        .collect();
+    assert_eq!(styled.len(), 3, "the paragraph marks: {marks:?}");
+    let (first, rest) = styled.split_first().unwrap();
+    let mut strings = 0;
+    let mut maps = 0;
+    for other in rest {
+        for key in ["pStyle", "defaultTextFormatting", "_originalFormatting"] {
+            let (Some((left_key, _, left)), Some((right_key, _, right))) =
+                (mark_entry(first, key), mark_entry(other, key))
+            else {
+                continue;
+            };
+            assert_eq!(left, right, "{key}: the marks' values differ");
+            assert_eq!(left_key, right_key, "{key}: equal payload keys are separate allocations");
+            match (left, right) {
+                (Any::String(left), Any::String(right)) => {
+                    strings += 1;
+                    assert!(
+                        Arc::ptr_eq(left, right),
+                        "{key}: equal string values are separate allocations"
+                    );
+                }
+                (Any::Map(left), Any::Map(right)) => {
+                    maps += 1;
+                    assert!(
+                        Arc::ptr_eq(left, right),
+                        "{key}: equal map values are separate allocations"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        strings > 0 && maps > 0,
+        "the marks share no string or no map payload value: {first:?}"
+    );
 }
