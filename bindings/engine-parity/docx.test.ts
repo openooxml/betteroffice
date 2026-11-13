@@ -177,7 +177,7 @@ function engineFor(engine: DocxEngine, yrs: Yrs) {
             replicaSave = { replica, source };
           },
         },
-        generated: () => [versionNonce(session)],
+        generated: () => sessions.map(versionNonce),
         save: async () => {
           if (replicaSave) {
             const replicaHost = await yrs.createYrsSession({ clientId: HOST_CLIENT });
