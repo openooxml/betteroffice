@@ -249,13 +249,16 @@ impl Document {
 
     /// Replaces the text of the body paragraph at `index` in [`Document::paragraphs`] order,
     /// through the same logged edit as [`Document::replace_paragraph_text`]; it needs no ID.
+    /// For a paragraph without an ID, the receipt's range key is not a paragraph ID; address the
+    /// paragraph by its index.
     pub fn replace_paragraph_text_at(&mut self, index: usize, text: &str) -> Result<Receipt> {
         let context = EditCtx::local("betteroffice-docx", DEFAULT_SERIALIZATION_TIME);
         self.replace_paragraph_text_at_with(index, text, 1, &context)
     }
 
     /// [`Document::replace_paragraph_text_at`] under a caller-supplied client and edit context.
-    /// A paragraph the document was not opened with is refused.
+    /// A paragraph the document was not opened with is refused. For a paragraph without an ID,
+    /// the receipt's range key is not a paragraph ID; address the paragraph by its index.
     pub fn replace_paragraph_text_at_with(
         &mut self,
         index: usize,

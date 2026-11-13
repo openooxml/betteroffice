@@ -1705,6 +1705,45 @@ fn an_edit_by_index_mints_no_paragraph_id() {
 }
 
 #[test]
+fn edits_by_index_of_two_paragraphs_without_ids_report_the_same_scratch_key() {
+    let source = unidentified_docx();
+    let mut document = Document::open(&source).unwrap();
+    let first = document
+        .replace_paragraph_text_at(0, "Rewritten opening")
+        .unwrap();
+    let last = document
+        .replace_paragraph_text_at(4, "Rewritten closing")
+        .unwrap();
+    assert!(first.new_para_ids.is_empty());
+    assert!(last.new_para_ids.is_empty());
+    let first_range = first.range.unwrap();
+    let last_range = last.range.unwrap();
+    assert_eq!(first_range.start.para, "1:0");
+    assert_eq!(first_range.end.para, "1:0");
+    assert_eq!(last_range.start.para, first_range.start.para);
+    assert_eq!(last_range.end.para, first_range.end.para);
+    let saved = document.save().unwrap();
+
+    let original = Document::open(&source).unwrap();
+    let reopened = Document::open(&saved).unwrap();
+    let mut expected: Vec<String> = original
+        .paragraphs()
+        .into_iter()
+        .map(get_paragraph_text)
+        .collect();
+    expected[0] = "Rewritten opening".to_owned();
+    expected[4] = "Rewritten closing".to_owned();
+    let texts: Vec<String> = reopened
+        .paragraphs()
+        .into_iter()
+        .map(get_paragraph_text)
+        .collect();
+    assert_eq!(texts, expected);
+    let saved_main = package_part(&saved, "word/document.xml");
+    assert!(!saved_main.contains("w14:paraId"));
+}
+
+#[test]
 fn an_edit_by_index_of_a_paragraph_with_an_id_reports_that_id() {
     let source = sample_docx();
     let mut by_index = Document::open(&source).unwrap();
