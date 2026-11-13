@@ -229,7 +229,18 @@
     "sheetActivated": "{name}, arkusz {index} z {count}",
     "cellInputLabel": "Edytuj komórkę {address}",
     "gridRoleDescription": "arkusz",
-    "fillHandleLabel": "Uchwyt wypełniania"
+    "fillHandleLabel": "Uchwyt wypełniania",
+    "chartResizeNw": "Zmień rozmiar wykresu od lewego górnego rogu",
+    "chartResizeN": "Zmień rozmiar wykresu od górnej krawędzi",
+    "chartResizeNe": "Zmień rozmiar wykresu od prawego górnego rogu",
+    "chartResizeE": "Zmień rozmiar wykresu od prawej krawędzi",
+    "chartResizeSe": "Zmień rozmiar wykresu od prawego dolnego rogu",
+    "chartResizeS": "Zmień rozmiar wykresu od dolnej krawędzi",
+    "chartResizeSw": "Zmień rozmiar wykresu od lewego dolnego rogu",
+    "chartResizeW": "Zmień rozmiar wykresu od lewej krawędzi",
+    "chartResizeHintBoth": "{label} (klawisze strzałek; przytrzymaj Shift, aby zmienić o 10 px)",
+    "chartResizeHintHorizontal": "{label} (strzałki w lewo i w prawo; przytrzymaj Shift, aby zmienić o 10 px)",
+    "chartResizeHintVertical": "{label} (strzałki w górę i w dół; przytrzymaj Shift, aby zmienić o 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Wtyczki",

@@ -1043,7 +1043,11 @@ impl WorkbookAuthority {
         base.fingerprint.write(&mut writer);
         base.fingerprints.write(&mut writer);
         base.freeze_panes.write(&mut writer);
-        base.formats.write(&mut writer);
+        base.formats
+            .iter()
+            .map(snapshot::LegacyFormat::from)
+            .collect::<Vec<_>>()
+            .write(&mut writer);
         base.col_styles.write(&mut writer);
         base.hyperlinks.write(&mut writer);
         base.charts.write(&mut writer);
@@ -1057,7 +1061,13 @@ impl WorkbookAuthority {
         writer.var_usize(update.len());
         let mut tail = Writer::new();
         base.row_styles.write(&mut tail);
-        if base.auto_filters.iter().any(Option::is_some)
+        let gridless = base.formats.iter().any(|format| format.hide_gridlines);
+        let sized = gridless
+            || base.formats.iter().any(|format| {
+                format.default_col_width.is_some() || format.base_col_width.is_some()
+            });
+        if sized
+            || base.auto_filters.iter().any(Option::is_some)
             || base
                 .conditional_formats
                 .iter()
@@ -1066,10 +1076,24 @@ impl WorkbookAuthority {
             let formats = serde_json::to_vec(&base.conditional_formats)
                 .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
             tail.bytes(&formats);
-            if base.auto_filters.iter().any(Option::is_some) {
+            if sized || base.auto_filters.iter().any(Option::is_some) {
                 let filters = serde_json::to_vec(&base.auto_filters)
                     .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
                 tail.bytes(&filters);
+            }
+            if sized {
+                base.formats
+                    .iter()
+                    .map(|format| (format.default_col_width, format.base_col_width))
+                    .collect::<Vec<_>>()
+                    .write(&mut tail);
+            }
+            if gridless {
+                base.formats
+                    .iter()
+                    .map(|format| format.hide_gridlines)
+                    .collect::<Vec<_>>()
+                    .write(&mut tail);
             }
         }
         Ok([writer.into_bytes(), update, tail.into_bytes()])
@@ -1136,7 +1160,10 @@ impl WorkbookAuthority {
             fingerprint: Codec::read(&mut reader)?,
             fingerprints: Codec::read(&mut reader)?,
             freeze_panes: Codec::read(&mut reader)?,
-            formats: Codec::read(&mut reader)?,
+            formats: Vec::<snapshot::LegacyFormat>::read(&mut reader)?
+                .into_iter()
+                .map(SheetFormat::from)
+                .collect(),
             col_styles: Codec::read(&mut reader)?,
             row_styles: Vec::new(),
             conditional_formats: Vec::new(),
@@ -1165,6 +1192,29 @@ impl WorkbookAuthority {
         if !reader.is_empty() {
             base.auto_filters = serde_json::from_str(reader.str()?)
                 .map_err(|error| SnapshotError::new(error.to_string()))?;
+        }
+        if !reader.is_empty() {
+            let defaults = Vec::<(Option<f64>, Option<u32>)>::read(&mut reader)?;
+            if defaults.len() != base.formats.len() {
+                return Err(SnapshotError::new(
+                    "Recovery column defaults do not match the sheets",
+                ));
+            }
+            for (format, (width, digits)) in base.formats.iter_mut().zip(defaults) {
+                format.default_col_width = width;
+                format.base_col_width = digits;
+            }
+        }
+        if !reader.is_empty() {
+            let gridless: Vec<bool> = Codec::read(&mut reader)?;
+            if gridless.len() != base.formats.len() {
+                return Err(SnapshotError::new(
+                    "Recovery gridlines sheet count mismatch",
+                ));
+            }
+            for (format, hidden) in base.formats.iter_mut().zip(gridless) {
+                format.hide_gridlines = hidden;
+            }
         }
         reader.finish()?;
         let doc = loop {
@@ -8152,6 +8202,7 @@ pub(crate) mod open_test_cases {
                 default_row_height_pt: Some(16.0),
                 custom_height: true,
                 zero_height: false,
+                ..SheetFormat::default()
             };
             if col_styles {
                 sheet.col_styles.push(ColStyle {
@@ -8275,6 +8326,48 @@ mod tests {
     }
 
     #[test]
+    fn recovery_state_without_gridless_sheets_keeps_the_released_layout() {
+        use super::snapshot::Codec;
+        use crate::snapshot::wire::Writer;
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Plain"));
+        model.sheets.push(Sheet::new("Rules"));
+        let mut ruled = model.clone();
+        ruled.sheets[1].conditional_formats = source_conditional_formats();
+        for (client, model) in [(106, model), (107, ruled)] {
+            let authority = WorkbookAuthority::from_model_with_client_id(&model, client).unwrap();
+            let base = &authority.base;
+            assert!(base.formats.iter().all(|format| !format.hide_gridlines));
+            let mut released = Writer::new();
+            base.row_styles.write(&mut released);
+            let filtered = base.auto_filters.iter().any(Option::is_some);
+            if filtered
+                || base
+                    .conditional_formats
+                    .iter()
+                    .any(|formats| !formats.is_empty())
+            {
+                released.bytes(&serde_json::to_vec(&base.conditional_formats).unwrap());
+                if filtered {
+                    released.bytes(&serde_json::to_vec(&base.auto_filters).unwrap());
+                }
+            }
+            let [_, _, tail] = authority.recovery_state_parts().unwrap();
+            assert_eq!(tail, released.into_bytes());
+
+            let mut formats = base.formats.clone();
+            let mut plain = Writer::new();
+            formats.write(&mut plain);
+            for format in &mut formats {
+                format.hide_gridlines = true;
+            }
+            let mut flagged = Writer::new();
+            formats.write(&mut flagged);
+            assert_eq!(plain.into_bytes(), flagged.into_bytes());
+        }
+    }
+
+    #[test]
     fn yrs_without_conditional_format_key_retains_source_rules() {
         let mut model = WorkbookModel::default();
         model.sheets.push(Sheet::new("Data"));
@@ -8320,6 +8413,182 @@ mod tests {
         }
         model.sheets[0].conditional_formats.clear();
         assert_eq!(restored.materialize().unwrap(), model);
+    }
+
+    const MAIN_CHECKPOINT: &[u8] = &[
+        187, 136, 232, 167, 239, 183, 153, 12, 0, 0, 74, 120, 102, 45, 102, 97, 99, 101, 116, 115,
+        58, 56, 48, 98, 56, 54, 53, 98, 101, 102, 52, 102, 97, 48, 52, 51, 98, 101, 56, 51, 49, 49,
+        57, 48, 52, 98, 52, 53, 100, 102, 54, 48, 48, 57, 52, 53, 51, 50, 101, 57, 57, 97, 99, 98,
+        97, 56, 50, 57, 102, 98, 57, 49, 98, 54, 101, 102, 54, 100, 53, 49, 98, 100, 49, 54, 50, 4,
+        6, 2, 64, 51, 98, 51, 50, 101, 100, 49, 56, 53, 48, 48, 50, 97, 56, 51, 97, 99, 54, 52,
+        101, 100, 100, 48, 56, 98, 53, 54, 101, 100, 49, 98, 54, 54, 98, 55, 51, 57, 51, 51, 97,
+        100, 97, 97, 57, 102, 97, 56, 55, 54, 53, 57, 55, 52, 49, 102, 51, 100, 52, 51, 97, 55, 49,
+        101, 50, 64, 53, 55, 48, 50, 100, 50, 98, 100, 100, 98, 97, 54, 56, 56, 49, 54, 98, 101,
+        102, 101, 55, 53, 100, 102, 102, 52, 97, 97, 52, 50, 102, 53, 98, 99, 99, 98, 102, 49, 99,
+        97, 54, 97, 98, 97, 52, 56, 50, 99, 53, 97, 101, 48, 98, 54, 102, 51, 57, 57, 50, 49, 97,
+        99, 102, 51, 8, 1, 64, 51, 97, 102, 57, 102, 50, 49, 98, 98, 54, 99, 54, 50, 57, 55, 52,
+        55, 48, 55, 56, 100, 56, 99, 48, 57, 100, 101, 50, 97, 48, 48, 57, 48, 57, 55, 102, 102,
+        98, 55, 57, 51, 55, 100, 99, 49, 99, 101, 55, 51, 52, 51, 53, 54, 50, 100, 99, 52, 55, 102,
+        99, 48, 99, 49, 97, 10, 1, 64, 57, 100, 101, 57, 98, 55, 48, 51, 56, 51, 57, 102, 51, 102,
+        102, 51, 51, 51, 98, 49, 100, 53, 53, 49, 100, 57, 49, 57, 55, 98, 55, 98, 57, 101, 98, 52,
+        100, 99, 98, 55, 54, 56, 99, 53, 56, 102, 52, 48, 50, 102, 98, 99, 55, 99, 57, 97, 55, 56,
+        50, 49, 101, 99, 101, 54, 12, 3, 74, 120, 102, 45, 102, 97, 99, 101, 116, 115, 58, 56, 48,
+        98, 56, 54, 53, 98, 101, 102, 52, 102, 97, 48, 52, 51, 98, 101, 56, 51, 49, 49, 57, 48, 52,
+        98, 52, 53, 100, 102, 54, 48, 48, 57, 52, 53, 51, 50, 101, 57, 57, 97, 99, 98, 97, 56, 50,
+        57, 102, 98, 57, 49, 98, 54, 101, 102, 54, 100, 53, 49, 98, 100, 49, 54, 50, 74, 120, 102,
+        45, 102, 97, 99, 101, 116, 115, 58, 56, 54, 53, 51, 99, 48, 54, 98, 54, 50, 57, 97, 98, 53,
+        55, 54, 51, 102, 53, 98, 49, 98, 98, 97, 56, 51, 57, 54, 53, 54, 56, 55, 100, 49, 55, 51,
+        101, 54, 102, 102, 51, 52, 99, 52, 99, 100, 97, 100, 54, 97, 51, 50, 48, 102, 56, 56, 100,
+        49, 49, 50, 102, 55, 48, 50, 64, 52, 101, 100, 55, 52, 98, 99, 102, 55, 102, 101, 98, 48,
+        50, 101, 48, 98, 52, 101, 100, 99, 57, 56, 55, 56, 53, 53, 49, 100, 52, 101, 98, 55, 56,
+        51, 54, 51, 53, 48, 50, 102, 50, 50, 52, 97, 100, 48, 100, 98, 53, 51, 56, 102, 55, 53, 54,
+        50, 54, 55, 50, 54, 100, 57, 99, 2, 0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 48, 64, 1, 0, 0, 0, 0, 2,
+        0, 0, 2, 0, 0, 2, 0, 0, 2, 0, 0, 0, 0, 0, 0, 205, 1, 123, 34, 102, 111, 110, 116, 115, 34,
+        58, 91, 93, 44, 34, 102, 105, 108, 108, 115, 34, 58, 91, 93, 44, 34, 98, 111, 114, 100,
+        101, 114, 115, 34, 58, 91, 93, 44, 34, 99, 101, 108, 108, 95, 120, 102, 115, 34, 58, 91,
+        93, 44, 34, 110, 117, 109, 95, 102, 109, 116, 115, 34, 58, 91, 93, 44, 34, 116, 104, 101,
+        109, 101, 34, 58, 123, 34, 99, 111, 108, 111, 114, 115, 34, 58, 91, 34, 35, 48, 48, 48, 48,
+        48, 48, 34, 44, 34, 35, 102, 102, 102, 102, 102, 102, 34, 44, 34, 35, 52, 52, 53, 52, 54,
+        97, 34, 44, 34, 35, 101, 55, 101, 54, 101, 54, 34, 44, 34, 35, 52, 52, 55, 50, 99, 52, 34,
+        44, 34, 35, 101, 100, 55, 100, 51, 49, 34, 44, 34, 35, 97, 53, 97, 53, 97, 53, 34, 44, 34,
+        35, 102, 102, 99, 48, 48, 48, 34, 44, 34, 35, 53, 98, 57, 98, 100, 53, 34, 44, 34, 35, 55,
+        48, 97, 100, 52, 55, 34, 44, 34, 35, 48, 53, 54, 51, 99, 49, 34, 44, 34, 35, 57, 53, 52,
+        102, 55, 50, 34, 93, 125, 125, 171, 8, 1, 26, 187, 136, 232, 167, 239, 183, 153, 12, 0, 40,
+        1, 17, 120, 108, 115, 120, 58, 99, 101, 108, 108, 45, 102, 111, 114, 109, 97, 116, 115, 64,
+        53, 56, 48, 50, 100, 54, 50, 56, 100, 99, 55, 52, 55, 54, 56, 53, 49, 97, 101, 52, 97, 97,
+        97, 99, 98, 49, 53, 102, 51, 101, 53, 98, 56, 99, 53, 57, 100, 98, 57, 57, 52, 49, 54, 101,
+        55, 53, 55, 56, 100, 56, 50, 100, 56, 100, 55, 99, 101, 55, 101, 98, 101, 102, 101, 54, 1,
+        119, 171, 2, 123, 34, 102, 111, 110, 116, 34, 58, 123, 34, 110, 97, 109, 101, 34, 58, 110,
+        117, 108, 108, 44, 34, 115, 105, 122, 101, 95, 112, 116, 34, 58, 110, 117, 108, 108, 44,
+        34, 98, 111, 108, 100, 34, 58, 102, 97, 108, 115, 101, 44, 34, 105, 116, 97, 108, 105, 99,
+        34, 58, 102, 97, 108, 115, 101, 44, 34, 117, 110, 100, 101, 114, 108, 105, 110, 101, 34,
+        58, 102, 97, 108, 115, 101, 44, 34, 115, 116, 114, 105, 107, 101, 34, 58, 102, 97, 108,
+        115, 101, 44, 34, 99, 111, 108, 111, 114, 34, 58, 110, 117, 108, 108, 125, 44, 34, 102,
+        105, 108, 108, 34, 58, 34, 78, 111, 110, 101, 34, 44, 34, 98, 111, 114, 100, 101, 114, 34,
+        58, 123, 34, 108, 101, 102, 116, 34, 58, 110, 117, 108, 108, 44, 34, 114, 105, 103, 104,
+        116, 34, 58, 110, 117, 108, 108, 44, 34, 116, 111, 112, 34, 58, 110, 117, 108, 108, 44, 34,
+        98, 111, 116, 116, 111, 109, 34, 58, 110, 117, 108, 108, 125, 44, 34, 110, 117, 109, 98,
+        101, 114, 70, 111, 114, 109, 97, 116, 34, 58, 123, 34, 107, 105, 110, 100, 34, 58, 34, 98,
+        117, 105, 108, 116, 105, 110, 34, 44, 34, 105, 100, 34, 58, 48, 125, 44, 34, 97, 108, 105,
+        103, 110, 109, 101, 110, 116, 34, 58, 123, 34, 104, 34, 58, 110, 117, 108, 108, 44, 34,
+        118, 34, 58, 110, 117, 108, 108, 44, 34, 119, 114, 97, 112, 95, 116, 101, 120, 116, 34, 58,
+        102, 97, 108, 115, 101, 44, 34, 115, 104, 114, 105, 110, 107, 95, 116, 111, 95, 102, 105,
+        116, 34, 58, 102, 97, 108, 115, 101, 125, 125, 40, 1, 4, 120, 108, 115, 120, 15, 98, 97,
+        115, 101, 70, 105, 110, 103, 101, 114, 112, 114, 105, 110, 116, 1, 119, 74, 120, 102, 45,
+        102, 97, 99, 101, 116, 115, 58, 56, 48, 98, 56, 54, 53, 98, 101, 102, 52, 102, 97, 48, 52,
+        51, 98, 101, 56, 51, 49, 49, 57, 48, 52, 98, 52, 53, 100, 102, 54, 48, 48, 57, 52, 53, 51,
+        50, 101, 57, 57, 97, 99, 98, 97, 56, 50, 57, 102, 98, 57, 49, 98, 54, 101, 102, 54, 100,
+        53, 49, 98, 100, 49, 54, 50, 33, 1, 4, 120, 108, 115, 120, 13, 115, 99, 104, 101, 109, 97,
+        86, 101, 114, 115, 105, 111, 110, 1, 40, 1, 4, 120, 108, 115, 120, 19, 115, 116, 114, 117,
+        99, 116, 117, 114, 101, 71, 101, 110, 101, 114, 97, 116, 105, 111, 110, 1, 125, 0, 8, 1,
+        16, 120, 108, 115, 120, 58, 115, 104, 101, 101, 116, 45, 111, 114, 100, 101, 114, 2, 119,
+        7, 115, 104, 101, 101, 116, 58, 48, 119, 7, 115, 104, 101, 101, 116, 58, 49, 39, 1, 11,
+        120, 108, 115, 120, 58, 115, 104, 101, 101, 116, 115, 7, 115, 104, 101, 101, 116, 58, 48,
+        1, 39, 0, 187, 136, 232, 167, 239, 183, 153, 12, 6, 9, 99, 111, 108, 87, 105, 100, 116,
+        104, 115, 1, 39, 0, 187, 136, 232, 167, 239, 183, 153, 12, 6, 8, 99, 111, 110, 116, 101,
+        110, 116, 115, 1, 40, 0, 187, 136, 232, 167, 239, 183, 153, 12, 6, 10, 102, 114, 101, 101,
+        122, 101, 80, 97, 110, 101, 1, 126, 40, 0, 187, 136, 232, 167, 239, 183, 153, 12, 6, 10,
+        104, 121, 112, 101, 114, 108, 105, 110, 107, 115, 1, 119, 2, 91, 93, 40, 0, 187, 136, 232,
+        167, 239, 183, 153, 12, 6, 6, 99, 104, 97, 114, 116, 115, 1, 119, 2, 91, 93, 40, 0, 187,
+        136, 232, 167, 239, 183, 153, 12, 6, 6, 109, 101, 114, 103, 101, 115, 1, 117, 0, 40, 0,
+        187, 136, 232, 167, 239, 183, 153, 12, 6, 4, 110, 97, 109, 101, 1, 119, 4, 68, 97, 116, 97,
+        39, 0, 187, 136, 232, 167, 239, 183, 153, 12, 6, 10, 114, 111, 119, 72, 101, 105, 103, 104,
+        116, 115, 1, 39, 0, 187, 136, 232, 167, 239, 183, 153, 12, 6, 6, 115, 116, 121, 108, 101,
+        115, 1, 39, 1, 11, 120, 108, 115, 120, 58, 115, 104, 101, 101, 116, 115, 7, 115, 104, 101,
+        101, 116, 58, 49, 1, 39, 0, 187, 136, 232, 167, 239, 183, 153, 12, 16, 9, 99, 111, 108, 87,
+        105, 100, 116, 104, 115, 1, 39, 0, 187, 136, 232, 167, 239, 183, 153, 12, 16, 8, 99, 111,
+        110, 116, 101, 110, 116, 115, 1, 40, 0, 187, 136, 232, 167, 239, 183, 153, 12, 16, 10, 102,
+        114, 101, 101, 122, 101, 80, 97, 110, 101, 1, 126, 40, 0, 187, 136, 232, 167, 239, 183,
+        153, 12, 16, 10, 104, 121, 112, 101, 114, 108, 105, 110, 107, 115, 1, 119, 2, 91, 93, 40,
+        0, 187, 136, 232, 167, 239, 183, 153, 12, 16, 6, 99, 104, 97, 114, 116, 115, 1, 119, 2, 91,
+        93, 40, 0, 187, 136, 232, 167, 239, 183, 153, 12, 16, 6, 109, 101, 114, 103, 101, 115, 1,
+        117, 0, 40, 0, 187, 136, 232, 167, 239, 183, 153, 12, 16, 4, 110, 97, 109, 101, 1, 119, 5,
+        78, 111, 116, 101, 115, 39, 0, 187, 136, 232, 167, 239, 183, 153, 12, 16, 10, 114, 111,
+        119, 72, 101, 105, 103, 104, 116, 115, 1, 39, 0, 187, 136, 232, 167, 239, 183, 153, 12, 16,
+        6, 115, 116, 121, 108, 101, 115, 1, 168, 187, 136, 232, 167, 239, 183, 153, 12, 2, 1, 125,
+        7, 1, 187, 136, 232, 167, 239, 183, 153, 12, 1, 2, 1, 0,
+    ];
+
+    fn recovery_checkpoint_model() -> WorkbookModel {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.sheets.push(Sheet::new("Notes"));
+        model.sheets[0].format.default_row_height_pt = Some(16.0);
+        model.sheets[0].format.custom_height = true;
+        model
+    }
+
+    fn recovery_checkpoint_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_recovery_checkpoint_hex() {
+        let model = recovery_checkpoint_model();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 109).unwrap();
+        let bytes = authority.encode_recovery_state().unwrap();
+        println!("hex: {}", recovery_checkpoint_hex(&bytes));
+        println!("bytes: {bytes:?}");
+    }
+
+    #[test]
+    #[ignore]
+    fn restore_recovery_checkpoint_hex() {
+        let hex = std::env::var("BO_CHECKPOINT_HEX").unwrap();
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        match WorkbookAuthority::restore_recovery_state(&bytes, 105, 0, true, false) {
+            Ok(_) => println!("Ok"),
+            Err(error) => println!("Err: {error}"),
+        }
+    }
+
+    #[test]
+    fn recovery_state_without_column_defaults_keeps_main_bytes() {
+        let model = recovery_checkpoint_model();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 109).unwrap();
+        assert_eq!(authority.encode_recovery_state().unwrap(), MAIN_CHECKPOINT);
+    }
+
+    #[test]
+    fn recovery_state_round_trips_column_defaults() {
+        let mut model = recovery_checkpoint_model();
+        model.sheets[1].format.default_col_width = Some(22.86);
+        model.sheets[1].format.base_col_width = Some(10);
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 109).unwrap();
+        let recovered = WorkbookAuthority::restore_recovery_state(
+            &authority.encode_recovery_state().unwrap(),
+            105,
+            0,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(recovered.base.formats, authority.base.formats);
+        assert_eq!(recovered.materialize().unwrap(), model);
+    }
+
+    #[test]
+    fn recovery_state_with_column_defaults_is_refused_by_main_tail_reader() {
+        use crate::snapshot::wire::Reader;
+        use snapshot::Codec;
+        let mut model = recovery_checkpoint_model();
+        model.sheets[1].format.default_col_width = Some(22.86);
+        model.sheets[1].format.base_col_width = Some(10);
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 109).unwrap();
+        let [_, _, tail] = authority.recovery_state_parts().unwrap();
+        let mut reader = Reader::new(&tail);
+        Vec::<BTreeMap<u32, u32>>::read(&mut reader).unwrap();
+        if !reader.is_empty() {
+            reader.str().unwrap();
+        }
+        if !reader.is_empty() {
+            reader.str().unwrap();
+        }
+        assert!(reader.finish().is_err());
     }
 
     #[test]

@@ -221,6 +221,13 @@ pub struct SheetFormat {
     pub custom_height: bool,
     /// `zeroHeight`: rows without height, cells or row style are hidden.
     pub zero_height: bool,
+    /// `defaultColWidth`: the stored width of a column no `<col>` sizes.
+    pub default_col_width: Option<f64>,
+    /// `baseColWidth`: digits a default column holds before padding, when
+    /// `defaultColWidth` is absent.
+    pub base_col_width: Option<u32>,
+    /// `showGridLines="0"` on the first `sheetView`: the screen draws no gridlines.
+    pub hide_gridlines: bool,
 }
 
 /// A column run's default style for missing cells.
@@ -259,7 +266,8 @@ pub struct Sheet {
     pub row_heights: BTreeMap<RowId, f64>,
     pub hidden_col_widths: BTreeMap<ColId, f64>,
     pub hidden_row_heights: BTreeMap<RowId, f64>,
-    /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
+    /// parsed from `sheetFormatPr` and the first `sheetView`; read by the
+    /// renderer, never by the writer.
     pub format: SheetFormat,
     /// Column defaults in source order.
     pub col_styles: Vec<ColStyle>,

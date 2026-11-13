@@ -18,6 +18,7 @@ on:
       - 'scripts/*wasm*'
       - 'bun.lock'
       - '.github/workflows/macos-app.yml'
+      - '.github/actions/wasm-toolchain/**'
 
 concurrency:
   group: macos-app-${{ github.ref }}
@@ -25,6 +26,10 @@ concurrency:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build:
@@ -48,8 +53,10 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
-      - name: Install Binaryen
-        run: brew install binaryen
+      - name: Install the pinned Binaryen
+        uses: ./.github/actions/wasm-toolchain
+        with:
+          wasm-pack-cache: 'false'
 
       - name: Build shared desktop editors
         run: apps/native-viewer/macos/build-editor.sh
@@ -252,7 +259,7 @@ jobs:
           fi
           identity=$(security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" \
             | awk -v team="($TEAM_ID)" \
-              '/Developer ID Application/ && index($0, team) { print $2; exit }')
+              '/Developer ID Application/ && index($0, team) && identity == "" { identity = $2 } END { print identity }')
           if [ -z "$identity" ]; then
             echo "::error::no Developer ID Application identity for team $TEAM_ID" >&2
             exit 1

@@ -22,8 +22,10 @@ fn main() {
 
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.len() != 3 {
-        return Err("usage: docx-native-bench input.docx page.png fonts/manifest.json".into());
+    if args.len() != 3 && args.len() != 4 {
+        return Err(
+            "usage: docx-native-bench input.docx page.png fonts/manifest.json [chains.json]".into(),
+        );
     }
     let bytes = fs::read(&args[0])?;
     let parsed = docx_parse::parse_docx_s9_wire(&bytes, docx_parse::S9ParseOptions::default())?;
@@ -35,16 +37,25 @@ fn run() -> Result<()> {
     whole_numbers_as_integers(&mut request);
     let requirements: Value =
         serde_json::from_str(&engine.layout_font_requirements_json(&request.to_string())?)?;
-    let fonts = Fonts::load(Path::new(&args[2]), &requirements)?;
-    request["measurement"] = json!({
-        "fontChains": fonts.ids,
-        "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
-        "compat": {
-            "noLeading": package["settings"]["compatibilityFlags"]["noLeading"].as_bool().unwrap_or(false),
-            "doNotExpandShiftReturn": package["settings"]["compatibilityFlags"]["doNotExpandShiftReturn"].as_bool().unwrap_or(false)
-        },
-        "authoritativeShaping": true
-    });
+    let fonts = match args.get(3) {
+        Some(chains) => Fonts::replay(Path::new(chains), &requirements)?,
+        None => Fonts::load(Path::new(&args[2]), &requirements)?,
+    };
+    request["measurement"] = if fonts.measurement.is_object() {
+        let mut measurement = fonts.measurement.clone();
+        measurement["fontChains"] = json!(fonts.ids);
+        measurement
+    } else {
+        json!({
+            "fontChains": fonts.ids,
+            "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+            "compat": {
+                "noLeading": package["settings"]["compatibilityFlags"]["noLeading"].as_bool().unwrap_or(false),
+                "doNotExpandShiftReturn": package["settings"]["compatibilityFlags"]["doNotExpandShiftReturn"].as_bool().unwrap_or(false)
+            },
+            "authoritativeShaping": true
+        })
+    };
     let layout: Value = serde_json::from_str(
         &engine.layout_document_with_regions_retained_json(&request.to_string())?,
     )?;
@@ -80,7 +91,12 @@ fn run() -> Result<()> {
             "schema_version": 1, "status": "ok", "pages": pages, "notes_converged": notes_converged, "page": 1, "dpi": 96,
             "width": width, "height": height, "skipped_images": rendered.skipped_images,
             "source_sha256": format!("{:x}", Sha256::digest(&bytes)),
-            "png_sha256": format!("{:x}", Sha256::digest(&rendered.bytes))
+            "png_sha256": format!("{:x}", Sha256::digest(&rendered.bytes)),
+            "font_path": if args.len() == 4 { "product-registry" } else { "bench-manifest" },
+            "faces": fonts.faces,
+            "font_faces": fonts.ids.iter().map(|(key, chain)| {
+                (key.clone(), chain.iter().map(|id| fonts.faces[*id as usize].clone()).collect::<Vec<_>>())
+            }).collect::<BTreeMap<_, _>>()
         })
     );
     Ok(())
@@ -208,6 +224,8 @@ struct Fonts {
     store: FontStore,
     chains: FontChains,
     ids: BTreeMap<String, Vec<u32>>,
+    faces: Vec<String>,
+    measurement: Value,
 }
 
 impl Fonts {
@@ -221,6 +239,8 @@ impl Fonts {
             store: FontStore::new(),
             chains: FontChains::new(),
             ids: BTreeMap::new(),
+            faces: Vec::new(),
+            measurement: Value::Null,
         };
         docx_layout::clear_measure_fonts();
         let mut loaded = BTreeMap::<String, u32>::new();
@@ -323,6 +343,77 @@ impl Fonts {
         Ok(registry)
     }
 
+    fn replay(path: &Path, requirements: &Value) -> Result<Self> {
+        let recorded: Value = serde_json::from_slice(&fs::read(path)?)?;
+        let root = path.parent().ok_or("font chains file has no parent")?;
+        let mut registry = Self {
+            store: FontStore::new(),
+            chains: FontChains::new(),
+            ids: BTreeMap::new(),
+            faces: Vec::new(),
+            measurement: Value::Null,
+        };
+        docx_layout::clear_measure_fonts();
+        if !recorded["measurement"].is_object() {
+            return Err("font chains file has no measurement".into());
+        }
+        registry.measurement = recorded["measurement"].clone();
+        let faces = recorded["faces"]
+            .as_array()
+            .ok_or("font chains file has no faces")?;
+        let mut loaded = BTreeMap::new();
+        for (index, face) in faces.iter().enumerate() {
+            let id = match face["substituteOf"].as_u64() {
+                Some(base) if base < index as u64 => registry.substitute(
+                    base as u32,
+                    face["family"]
+                        .as_str()
+                        .ok_or("substitute face has no family")?,
+                    face["bold"].as_bool().unwrap_or(false),
+                    face["italic"].as_bool().unwrap_or(false),
+                )?,
+                Some(_) => return Err("substitute face precedes its base".into()),
+                None => registry.register(root, face, &mut loaded)?,
+            };
+            if id as usize != index {
+                return Err(format!("font {index} registered as {id}").into());
+            }
+        }
+        let recorded_chains = recorded["fontChains"]
+            .as_object()
+            .ok_or("font chains file has no fontChains")?;
+        for (key, chain) in recorded_chains {
+            let chain = chain
+                .as_array()
+                .ok_or("font chain is not a list")?
+                .iter()
+                .map(|id| {
+                    id.as_u64()
+                        .filter(|id| (*id as usize) < faces.len())
+                        .map(|id| id as u32)
+                        .ok_or("font chain names an unregistered font")
+                })
+                .collect::<std::result::Result<Vec<u32>, _>>()?;
+            if chain.is_empty() {
+                return Err(format!("font chain for {key} is empty").into());
+            }
+            registry.chains.insert(
+                key.clone(),
+                chain.iter().copied().map(FontId::from_u32).collect(),
+            );
+            registry.ids.insert(key.clone(), chain);
+        }
+        for requirement in requirements.as_array().ok_or("invalid font requirements")? {
+            let key = requirement["key"]
+                .as_str()
+                .ok_or("font requirement has no key")?;
+            if !registry.ids.contains_key(key) {
+                return Err(format!("no recorded font chain for {key}").into());
+            }
+        }
+        Ok(registry)
+    }
+
     fn register(
         &mut self,
         root: &Path,
@@ -346,11 +437,30 @@ impl Fonts {
         if raster != engine {
             return Err("font registry IDs diverged".into());
         }
+        if engine as usize != self.faces.len() {
+            return Err("font registry IDs out of order".into());
+        }
+        self.faces.push(format!("{:x}", Sha256::digest(&bytes)));
         loaded.insert(file.to_owned(), engine);
         Ok(engine)
     }
 
     fn substitute(&mut self, base: u32, family: &str, bold: bool, italic: bool) -> Result<u32> {
+        let id = self.register_substitute(base, family, bold, italic)?;
+        if id as usize == self.faces.len() {
+            let face = format!("{}~{family}", self.faces[base as usize]);
+            self.faces.push(face);
+        }
+        Ok(id)
+    }
+
+    fn register_substitute(
+        &mut self,
+        base: u32,
+        family: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Result<u32> {
         #[cfg(feature = "substitute-widths")]
         {
             let raster = self
