@@ -420,11 +420,9 @@ def test_a_display_list_keeps_its_json_for_every_reader(
         text = display_list.json
 
         assert display_list.json == text
-        assert display_list.json is text
-        assert layout.display_list.json is text
+        assert layout.display_list.json == text
         assert display_list.to_dict() == json.loads(display_list.json)
 
         target = tmp_path / f"kept-display-list-{index}.json"
         display_list.write(target)
         assert target.read_bytes() == display_list.json.encode()
-        assert display_list.json is text

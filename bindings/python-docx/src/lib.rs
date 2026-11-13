@@ -2,8 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyIndexError, PyKeyError, PyTypeError, PyValueError};
@@ -782,6 +783,7 @@ fn offset_repr(offset: Option<u32>) -> String {
 #[derive(Clone)]
 pub struct PyDisplayList {
     inner: DisplayList,
+    payload: OnceLock<String>,
     #[pyo3(get)]
     contract_version: Option<u32>,
 }
@@ -791,12 +793,16 @@ impl PyDisplayList {
         Self {
             contract_version: inner.contract_version,
             inner,
+            payload: OnceLock::new(),
         }
     }
 
-    fn payload(&self, py: Python<'_>) -> PyResult<String> {
-        py.detach(|| serde_json::to_string(&self.inner))
-            .map_err(|error| LayoutError::new_err(error.to_string()))
+    fn payload(&self, py: Python<'_>) -> Result<&str, serde_json::Error> {
+        if let Some(text) = self.payload.get() {
+            return Ok(text);
+        }
+        let text = py.detach(|| serde_json::to_string(&self.inner))?;
+        Ok(self.payload.get_or_init(|| text))
     }
 }
 
@@ -811,8 +817,8 @@ impl PyDisplayList {
     }
 
     #[getter]
-    fn json(&self, py: Python<'_>) -> PyResult<String> {
-        self.payload(py)
+    fn json(&self, py: Python<'_>) -> PyResult<&str> {
+        self.payload(py).map_err(|error| LayoutError::new_err(error.to_string()))
     }
 
     #[getter]
@@ -825,17 +831,16 @@ impl PyDisplayList {
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let payload = self.payload(py)?;
+        let payload = self.json(py)?;
         py.import("json")?.call_method1("loads", (payload,))
     }
 
     fn write(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
-        py.detach(|| -> io::Result<()> {
-            let mut file = io::BufWriter::new(fs::File::create(&path)?);
-            serde_json::to_writer(&mut file, &self.inner)?;
-            file.flush()
-        })
-        .map_err(|error| map_io_error(&error, &path))
+        let payload = self
+            .payload(py)
+            .map_err(|error| map_io_error(&io::Error::from(error), &path))?;
+        py.detach(|| fs::write(&path, payload.as_bytes()))
+            .map_err(|error| map_io_error(&error, &path))
     }
 
     fn __len__(&self) -> usize {
