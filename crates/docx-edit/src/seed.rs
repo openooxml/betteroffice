@@ -10234,6 +10234,26 @@ mod tests {
             .collect()
     }
 
+    /// Every entry of each body paragraph mark.
+    fn mark_entries(doc: &EditingDoc) -> Vec<HashMap<String, Any>> {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .filter_map(|op| match op.insert {
+                Out::YMap(mark) if crate::is_pilcrow(&mark, &txn) => Some(
+                    YrsMap::iter(&mark, &txn)
+                        .map(|(key, value)| match value {
+                            Out::Any(value) => (key.to_owned(), value),
+                            _ => panic!("{key}: the mark holds a shared type"),
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn seeded_bytes_match_with_and_without_shared_embed_values() {
         let styles = format!(
@@ -10271,6 +10291,45 @@ mod tests {
             assert_eq!(value, &unshared[0].1);
             assert!(!Arc::ptr_eq(value, &unshared[0].1));
         }
+        let lowered = lower_docx(parse_docx_for_edit(&custom).unwrap(), None).unwrap();
+        let expected: Vec<HashMap<String, Any>> = lowered
+            .context
+            .plans
+            .iter()
+            .filter(|plan| plan.story_id == "body")
+            .flat_map(|plan| &plan.units)
+            .filter_map(|unit| match &unit.content {
+                UnitContent::Embed { kind, payload } if kind == crate::PILCROW_KIND => Some(
+                    payload
+                        .iter()
+                        .map(|(key, value)| {
+                            (key.clone(), any_from_value(value.clone()).unwrap())
+                        })
+                        .chain([(crate::KIND_KEY.to_owned(), Any::from(crate::PILCROW_KIND))])
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let pinned = [
+            (crate::KIND_KEY, Any::from(crate::PILCROW_KIND)),
+            ("pStyle", Any::from("Shared")),
+            ("alignment", Any::from("center")),
+            ("spaceBefore", Any::Number(120.0)),
+            ("spaceAfter", Any::Number(240.0)),
+            (
+                "defaultTextFormatting",
+                Any::Map(Arc::new(HashMap::from([("bold".to_owned(), Any::Bool(true))]))),
+            ),
+        ];
+        assert_eq!(expected.len(), 3);
+        for mark in &expected {
+            for (key, value) in &pinned {
+                assert_eq!(mark.get(*key), Some(value), "{key}");
+            }
+        }
+        assert_eq!(mark_entries(&shared_doc), expected);
+        assert_eq!(mark_entries(&unshared_doc), expected);
     }
 
     #[test]

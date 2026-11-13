@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use docx_edit::{EditingDoc, seed_from_docx};
@@ -192,6 +193,31 @@ fn mark_entry<'a>(mark: &'a [MarkEntry], key: &str) -> Option<&'a MarkEntry> {
     mark.iter().find(|(_, name, _)| name == key)
 }
 
+fn mark_keys(mark: &[MarkEntry]) -> BTreeSet<&str> {
+    mark.iter().map(|(_, name, _)| name.as_str()).collect()
+}
+
+/// Keys every `repeated_paragraphs` mark carries.
+const STYLED_MARK_KEYS: [&str; 10] = [
+    "_kind",
+    "paraId",
+    "sourceParaId",
+    "pStyle",
+    "alignment",
+    "spaceBefore",
+    "spaceAfter",
+    "hangingIndent",
+    "defaultTextFormatting",
+    "_originalFormatting",
+];
+
+const EQUAL_MARK_VALUES: [&str; 4] = [
+    "_kind",
+    "pStyle",
+    "defaultTextFormatting",
+    "_originalFormatting",
+];
+
 /// Map iteration borrows each key from the stored item, so key allocations are observable too.
 #[test]
 fn equally_styled_paragraph_marks_share_their_payload_keys_and_values() {
@@ -205,41 +231,35 @@ fn equally_styled_paragraph_marks_share_their_payload_keys_and_values() {
         .collect();
     assert_eq!(styled.len(), 3, "the paragraph marks: {marks:?}");
     let (first, rest) = styled.split_first().unwrap();
-    let mut strings = 0;
-    let mut maps = 0;
+    let first_keys = mark_keys(first);
+    for key in STYLED_MARK_KEYS {
+        assert!(first_keys.contains(&key), "the mark lacks {key}: {first:?}");
+    }
     for other in rest {
-        for key in ["pStyle", "defaultTextFormatting", "_originalFormatting"] {
-            let (Some((left_key, _, left)), Some((right_key, _, right))) =
-                (mark_entry(first, key), mark_entry(other, key))
-            else {
-                continue;
-            };
-            assert_eq!(left, right, "{key}: the marks' values differ");
+        assert_eq!(mark_keys(other), first_keys, "the marks carry different keys");
+        for key in EQUAL_MARK_VALUES {
+            assert_eq!(
+                mark_entry(first, key).map(|(_, _, value)| value),
+                mark_entry(other, key).map(|(_, _, value)| value),
+                "{key}: the marks' values differ"
+            );
+        }
+        for (left_key, key, left) in first.iter() {
+            let (right_key, _, right) = mark_entry(other, key).unwrap();
             assert_eq!(
                 left_key, right_key,
                 "{key}: equal payload keys are separate allocations"
             );
-            match (left, right) {
-                (Any::String(left), Any::String(right)) => {
-                    strings += 1;
-                    assert!(
-                        Arc::ptr_eq(left, right),
-                        "{key}: equal string values are separate allocations"
-                    );
-                }
-                (Any::Map(left), Any::Map(right)) => {
-                    maps += 1;
-                    assert!(
-                        Arc::ptr_eq(left, right),
-                        "{key}: equal map values are separate allocations"
-                    );
-                }
-                _ => {}
+            if left != right {
+                continue;
             }
+            let shared = match (left, right) {
+                (Any::String(left), Any::String(right)) => Arc::ptr_eq(left, right),
+                (Any::Map(left), Any::Map(right)) => Arc::ptr_eq(left, right),
+                (Any::Array(left), Any::Array(right)) => Arc::ptr_eq(left, right),
+                _ => true,
+            };
+            assert!(shared, "{key}: equal payload values are separate allocations");
         }
     }
-    assert!(
-        strings > 0 && maps > 0,
-        "the marks share no string or no map payload value: {first:?}"
-    );
 }
