@@ -9651,6 +9651,7 @@ describe('workbook worker editor header interactions', () => {
       fireEvent.mouseUp(window, { clientX: 240, clientY: 130, button: 0 });
       await act(async () => {});
       expect(host.sent.filter((command) => command.kind === 'moveChart')).toEqual([]);
+      await act(async () => { for (const command of host.sent) host.ack(command); });
       expect(await host.commands().execute('save', null))
         .not.toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
     });
@@ -9674,6 +9675,7 @@ describe('workbook worker editor header interactions', () => {
           fireEvent.click(view.getByTestId('xlsx-grid-corner'));
         }
       });
+      await act(async () => { for (const command of host.sent) host.ack(command); });
       expect(await host.commands().execute('save', null))
         .not.toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
       // the chart is selected again, so a still-live resize would preview and commit on it.
@@ -10197,7 +10199,7 @@ describe('workbook worker editor header interactions', () => {
   for (const showSheetHeaders of [false, true]) {
     it(`frames a selected legacy chart with ${showSheetHeaders ? 'an edge outline' : 'a border'}`, async () => {
       const host = harness();
-      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
         rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
       const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
         showSheetHeaders={showSheetHeaders} />);
