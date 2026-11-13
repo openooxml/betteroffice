@@ -423,7 +423,10 @@ fn keeps_the_declaration_of_a_w_alias_an_attribute_value_of_the_form_field_data_
         let tag = &data[..data.find('>').unwrap()];
         assert!(tag.contains(&format!(r#"xmlns:q="{w}""#)), "{xml}");
         assert!(tag.contains(r#"xsi:type="q:CT_FFData""#), "{xml}");
-        assert!(data.starts_with(&format!(r#"{tag}><w:name w:val="T"/></w:ffData>"#)), "{xml}");
+        assert!(
+            data.starts_with(&format!(r#"{tag}><w:name w:val="T"/></w:ffData>"#)),
+            "{xml}"
+        );
     }
 }
 

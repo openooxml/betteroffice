@@ -1765,7 +1765,9 @@ fn normalize_form_field_data(element: &mut XmlElement, ancestors: &[XmlElement])
 fn value_prefix(value: &str) -> Option<&str> {
     let (prefix, _) = value.split_once(':')?;
     let qualified = !prefix.is_empty()
-        && prefix.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        && prefix
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'));
     qualified.then_some(prefix)
 }
 
