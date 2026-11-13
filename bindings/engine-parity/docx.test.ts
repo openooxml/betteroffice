@@ -1810,9 +1810,14 @@ const rows: Row<Docx>[] = [
   }),
   defineRow({
     method: 'EditSession.proposal_revision_ranges_json',
-    setup: ({ session: s }: Docx) => trackedInsertion(s),
-    call: ({ session: s }, revisionId) => {
-      const ranges = s.proposal_revision_ranges_json(JSON.stringify([revisionId]));
+    setup: ({ fresh }: Docx) => {
+      const f = fresh();
+      f.open_docx(compareOriginal, true, GENERATION);
+      const inserted = f.insert_text('body', paraId(f, 'The quick'), 0, 'Tracked ', 'Parity', DATE);
+      return { f, revisionId: (JSON.parse(inserted) as { revisionId: string }).revisionId };
+    },
+    call: (_, { f, revisionId }) => {
+      const ranges = f.proposal_revision_ranges_json(JSON.stringify([revisionId]));
       const parsed = JSON.parse(ranges) as unknown;
       if (!Array.isArray(parsed) || !parsed.some((range: { revisionId?: unknown }) => range.revisionId === revisionId)) {
         throw new Error(`the tracked insertion has no range: ${ranges}`);
