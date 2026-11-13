@@ -49,9 +49,6 @@ use crate::{
     DocumentModel, DocumentStructure, Error, LayoutResult, OpenOptions, Result, SaveOptions,
 };
 
-const SAVE_SEED_MAX_PARAGRAPHS: u32 = 4096;
-const SAVE_SEED_MAX_INFLATED_BYTES: u32 = 16 * 1024 * 1024;
-
 pub struct Document {
     /// Inflated package parts retained from open for `save` to reuse.
     pub(crate) original_parts: Vec<(String, Vec<u8>)>,
@@ -549,7 +546,6 @@ impl Document {
         if seeded.is_err() {
             return Ok(None);
         }
-        session.prime_save_seed_states(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES);
         let identities = session.paragraph_identities();
         let body_part = body_part(&identities);
         let Some(seeded) = session_paragraphs(&session, &body_part) else {
