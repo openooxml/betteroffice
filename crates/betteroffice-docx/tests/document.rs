@@ -1617,6 +1617,28 @@ fn an_index_past_the_last_paragraph_is_refused() {
 }
 
 #[test]
+fn a_suggesting_edit_by_id_is_refused() {
+    let mut document = Document::open(&word_docx(|_| {})).unwrap();
+    let before = document.save().unwrap();
+    let context =
+        betteroffice_docx::EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z").suggesting();
+    let result = document.replace_paragraph_text_with(W14_ID, "first edited", 1, &context);
+    assert!(matches!(result, Err(betteroffice_docx::Error::SuggestingEditUnsupported)));
+    assert_eq!(document.save().unwrap(), before);
+}
+
+#[test]
+fn a_suggesting_edit_by_index_is_refused() {
+    let mut document = Document::open(&unidentified_docx()).unwrap();
+    let before = document.save().unwrap();
+    let context =
+        betteroffice_docx::EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z").suggesting();
+    let result = document.replace_paragraph_text_at_with(1, "Rewritten middle", 1, &context);
+    assert!(matches!(result, Err(betteroffice_docx::Error::SuggestingEditUnsupported)));
+    assert_eq!(document.save().unwrap(), before);
+}
+
+#[test]
 fn edits_by_index_and_by_id_share_one_save() {
     let paragraphs = [
         word_paragraph("0A000001", "Identified first"),

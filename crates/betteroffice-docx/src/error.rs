@@ -1,5 +1,8 @@
 use std::fmt;
 
+const SUGGESTING_EDIT_UNSUPPORTED: &str =
+    "suggesting (tracked-change) edits are not supported by this call";
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -20,6 +23,8 @@ pub enum Error {
         len: usize,
     },
     UnsupportedParagraphEdit(String),
+    /// The edit context is in suggesting mode, which the paragraph text edits cannot save.
+    SuggestingEditUnsupported,
     Font(String),
     Image(String),
     ResourceLimit(String),
@@ -63,6 +68,7 @@ impl fmt::Display for Error {
                     "paragraph {id:?} is not a plain single-run paragraph"
                 )
             }
+            Self::SuggestingEditUnsupported => formatter.write_str(SUGGESTING_EDIT_UNSUPPORTED),
             Self::Font(error) => formatter.write_str(error),
             Self::Image(error) => formatter.write_str(error),
             Self::ResourceLimit(error) => formatter.write_str(error),
@@ -100,6 +106,7 @@ impl std::error::Error for Error {
             | Self::AmbiguousParagraph(_)
             | Self::ParagraphIndexOutOfRange { .. }
             | Self::UnsupportedParagraphEdit(_)
+            | Self::SuggestingEditUnsupported
             | Self::Font(_)
             | Self::Image(_)
             | Self::ResourceLimit(_)
