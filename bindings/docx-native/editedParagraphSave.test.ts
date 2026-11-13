@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import * as wasmYrs from '../../packages/docx/src/yrs';
+import { leadingBlockCount } from '../../packages/docx/src/yrs/sectionBreak';
 import * as nativeYrs from '@betteroffice/docx-native/yrs';
 
 type Yrs = typeof wasmYrs;
@@ -137,7 +138,9 @@ async function typeBesideMarkedField(yrs: Yrs, inCell: boolean): Promise<{ reaso
     const target = inCell
       ? hits.find((entry) => entry.story !== 'body') ?? hits[0]
       : hits.filter((entry) => entry.story === 'body').at(-1);
-    session.insertText({ ...target!, offset: TYPED_AT }, 'x');
+    const index = session.paragraphSpans(target!.story).findIndex((span) => span.paraId === target!.paraId);
+    const leading = leadingBlockCount(session.storySegmentUnits(target!.story, [index])[0] ?? []);
+    session.insertText({ ...target!, offset: leading + TYPED_AT }, 'x');
     const plan = session.paragraphSavePlan();
     const parts = [...(plan.splicedParts ?? []), ...(plan.sectionSplicedParts ?? [])];
     const reasons = parts.flatMap((part) => (part.legacyParagraphs ?? []).map((legacy) => `${legacy.code}: ${legacy.detail}`));
@@ -164,6 +167,31 @@ function keptBesideField(source: string, saved: string | undefined): string[] {
   return failures;
 }
 
+const tagsOf = (xml: string, name: string) =>
+  (xml.match(new RegExp(`<${name}\\b[^>]*>`, 'g')) ?? []).map((tag) => [/w:id="([^"]*)"/, /w:name="([^"]*)"/].map((key) => tag.match(key)?.[1] ?? '').join(':')).sort();
+const fieldCharsOf = (xml: string) => [...xml.matchAll(/<w:fldChar\b[^>]*w:fldCharType="(\w+)"/g)].map((match) => match[1]);
+const instructionsOf = (xml: string) => [...xml.matchAll(/<w:instrText\b[^>]*>([^<]*)<\/w:instrText>/g)].map((match) => match[1]);
+
+function keptContent(source: string, saved: string | undefined): string[] {
+  if (saved === undefined) return ['edited paragraph missing from saved word/document.xml'];
+  const failures: string[] = [];
+  const text = textOf(source);
+  const expected = `${text.slice(0, TYPED_AT)}x${text.slice(TYPED_AT)}`;
+  if (textOf(saved) !== expected) failures.push(`text: expected ${JSON.stringify(expected)}, saved ${JSON.stringify(textOf(saved))}`);
+  const reads: [string, (xml: string) => (string | undefined)[]][] = [
+    ['bookmarkStart', (xml) => tagsOf(xml, 'w:bookmarkStart')],
+    ['bookmarkEnd', (xml) => tagsOf(xml, 'w:bookmarkEnd')],
+    ['field characters', fieldCharsOf],
+    ['instrText', instructionsOf],
+  ];
+  for (const [label, read] of reads) {
+    const [before, after] = [read(source), read(saved)];
+    if (JSON.stringify(after) !== JSON.stringify(before)) failures.push(`${label}: source ${JSON.stringify(before)}, saved ${JSON.stringify(after)}`);
+  }
+  if (failures.length > 0) failures.push(`saved ${saved}`);
+  return failures;
+}
+
 for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown as Yrs]] as const) {
   test(`${engine}: typing beside a field in a nested table cell with bookmarks keeps the cell`, async () => {
     const { reasons, patches, xml } = await typeBesideMarkedField(yrs, true);
@@ -172,8 +200,7 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
   });
 
   test(`${engine}: typing beside a field in a body paragraph with bookmarks keeps the paragraph`, async () => {
-    const { reasons, patches, xml } = await typeBesideMarkedField(yrs, false);
-    expect({ reasons: reasons.map((reason) => reason.startsWith('UNSUPPORTED_STRUCTURE: field:') ? 'field' : reason), patches }).toEqual({ reasons: ['field'], patches: 0 });
-    expect(keptBesideField(`<w:p w14:paraId="${BODY_ID}">${MARKED}</w:p>`, savedParagraph(xml, BODY_ID))).toEqual([]);
+    const { xml } = await typeBesideMarkedField(yrs, false);
+    expect(keptContent(`<w:p w14:paraId="${BODY_ID}">${MARKED}</w:p>`, savedParagraph(xml, BODY_ID))).toEqual([]);
   });
 }
