@@ -41,6 +41,11 @@ fn series(name: &str, values: &[Option<&str>]) -> ChartDataSeries {
 
 /// The fixture with the first series' cache replaced by `cache`.
 fn with_north_cache(cache: &str) -> Vec<u8> {
+    with_replaced(&[(NORTH_CACHE, cache)])
+}
+
+/// The fixture with each `(from, to)` pair replaced in its first chart.
+fn with_replaced(replacements: &[(&str, &str)]) -> Vec<u8> {
     let parts = ooxml_opc::unzip_parts(FIXTURE)
         .unwrap()
         .into_iter()
@@ -48,12 +53,30 @@ fn with_north_cache(cache: &str) -> Vec<u8> {
             if path != "ppt/charts/chart1.xml" {
                 return (path, body);
             }
-            let xml = String::from_utf8(body).unwrap();
-            assert_eq!(xml.matches(NORTH_CACHE).count(), 1);
-            (path, xml.replace(NORTH_CACHE, cache).into_bytes())
+            let mut xml = String::from_utf8(body).unwrap();
+            for &(from, to) in replacements {
+                assert_eq!(xml.matches(from).count(), 1);
+                xml = xml.replace(from, to);
+            }
+            (path, xml.into_bytes())
         })
         .collect::<Vec<_>>();
     ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn texts(primitive: &Primitive) -> Vec<String> {
+    let Primitive::Chart { primitives, .. } = primitive else {
+        unreachable!()
+    };
+    primitives
+        .iter()
+        .filter_map(|part| match part {
+            Primitive::TextBox { lines, .. } => Some(lines),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|line| line.runs.iter().map(|run| run.text.clone()))
+        .collect()
 }
 
 /// The fixture with every series removed from its first chart.
@@ -137,6 +160,23 @@ fn the_data_serializes_beside_the_summary_and_an_old_frame_still_reads() {
         unreachable!()
     };
     assert!(data.is_none());
+}
+
+#[test]
+fn a_linked_label_without_a_cached_format_keeps_its_own_code() {
+    let bytes = with_replaced(&[
+        (
+            NORTH_CACHE,
+            r#"<c:numCache><c:ptCount val="3"/><c:pt idx="0"><c:v>0.123</c:v></c:pt><c:pt idx="1"><c:v>0.8</c:v></c:pt><c:pt idx="2"><c:v>0.5</c:v></c:pt></c:numCache>"#,
+        ),
+        (
+            r#"<c:dLbls><c:showLegendKey val="0"/><c:showVal val="0"/>"#,
+            r#"<c:dLbls><c:numFmt formatCode="0.00%" sourceLinked="1"/><c:showLegendKey val="0"/><c:showVal val="1"/>"#,
+        ),
+    ]);
+    let texts = texts(&chart(&bytes, 4205));
+    assert!(texts.contains(&"12.30%".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"80.00%".to_owned()), "{texts:?}");
 }
 
 #[test]
