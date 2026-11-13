@@ -263,7 +263,7 @@ impl Document {
         self.authored_ids.retain(|_, (fresh, _)| fresh != para_id);
         let mirrored = match (&mut self.session_baseline, replacement.source_ordinal) {
             (Some(baseline), Some(ordinal)) if context.suggesting.is_none() => baseline
-                .replace_paragraph(para_id, &replacement)
+                .replace_text(para_id, &edited)
                 .then(|| SessionEdit {
                     para_id: para_id.to_owned(),
                     ordinal,
@@ -529,7 +529,7 @@ impl Document {
             return Ok(None);
         }
         match session_paragraphs(&session, &body_part) {
-            Some(replayed) if self.session_agrees(&seeded, &replayed) => {}
+            Some(replayed) if self.session_agrees(baseline, &seeded, &replayed) => {}
             _ => return Ok(None),
         }
         let mut plan = session_paragraph_ids(session.paragraph_save_plan());
@@ -567,7 +567,12 @@ impl Document {
     }
 
     /// Whether each changed body paragraph saves from the session as the model holds it.
-    fn session_agrees(&self, seeded: &SessionParagraphs, replayed: &SessionParagraphs) -> bool {
+    fn session_agrees(
+        &self,
+        baseline: &SavedFields,
+        seeded: &SessionParagraphs,
+        replayed: &SessionParagraphs,
+    ) -> bool {
         if seeded.count != replayed.count || seeded.body.len() != replayed.body.len() {
             return false;
         }
@@ -587,10 +592,14 @@ impl Document {
         if !edited.iter().all(|at| seeded.body.contains_key(at)) {
             return false;
         }
+        let session = baseline.paragraphs_by_ordinal();
         seeded.body.iter().all(|(ordinal, before)| {
             let Some(after) = replayed.body.get(ordinal) else {
                 return false;
             };
+            if !same_properties(model.get(ordinal).copied(), session.get(ordinal).copied()) {
+                return false;
+            }
             if after == before && !edited.contains(ordinal) {
                 return true;
             }
@@ -680,13 +689,28 @@ impl SavedFields {
             && self.numbering == model.numbering
     }
 
-    fn replace_paragraph(&mut self, para_id: &str, replacement: &Paragraph) -> bool {
+    /// Replaces only the text of the paragraph with `para_id`, as the logged edit did.
+    fn replace_text(&mut self, para_id: &str, text: &str) -> bool {
         let Some(paragraph) = find_paragraph_mut(&mut self.body.content, para_id) else {
             return false;
         };
-        *paragraph = replacement.clone();
-        replace_section_paragraphs(&mut self.body, para_id, replacement);
+        let Some(template) = plain_run_template(paragraph) else {
+            return false;
+        };
+        replace_plain_run(paragraph, text.to_owned(), template);
+        let replacement = paragraph.clone();
+        replace_section_paragraphs(&mut self.body, para_id, &replacement);
         true
+    }
+
+    /// The body paragraphs by source ordinal.
+    fn paragraphs_by_ordinal(&self) -> BTreeMap<u32, &Paragraph> {
+        let mut paragraphs = Vec::new();
+        collect_paragraphs(&self.body.content, &mut paragraphs);
+        paragraphs
+            .into_iter()
+            .filter_map(|paragraph| paragraph.source_ordinal.map(|ordinal| (ordinal, paragraph)))
+            .collect()
     }
 }
 
@@ -769,6 +793,16 @@ impl SessionParagraph {
                 .all(|run| run.attributes == first.attributes),
             None => self.runs.iter().all(|run| run.attributes.is_empty()),
         }
+    }
+}
+
+/// Whether both hold the same paragraph properties and the same runs, run properties included.
+fn same_properties(model: Option<&Paragraph>, session: Option<&Paragraph>) -> bool {
+    match (model, session) {
+        (Some(model), Some(session)) => {
+            model.formatting == session.formatting && model.content == session.content
+        }
+        (model, session) => model.is_none() && session.is_none(),
     }
 }
 
