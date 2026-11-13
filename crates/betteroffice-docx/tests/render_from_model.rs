@@ -51,11 +51,30 @@ fn open(bytes: &[u8]) -> Document {
     with_fonts(Document::open(bytes).unwrap())
 }
 
-fn raised_limits() -> ParseLimits {
-    let limits = ParseLimits::default();
+fn paragraph_limits(max_paragraphs: usize) -> ParseLimits {
     ParseLimits {
-        max_paragraphs: limits.max_paragraphs * 4,
-        ..limits
+        max_paragraphs,
+        ..ParseLimits::default()
+    }
+}
+
+#[cfg(feature = "render-path-counter")]
+fn model_renders() -> usize {
+    Document::model_renders()
+}
+
+#[cfg(not(feature = "render-path-counter"))]
+fn model_renders() -> usize {
+    0
+}
+
+fn assert_render_path(before: usize, from_model: bool, label: &str) {
+    if cfg!(feature = "render-path-counter") {
+        assert_eq!(
+            model_renders() - before,
+            usize::from(from_model),
+            "{label}: render path"
+        );
     }
 }
 
@@ -86,15 +105,11 @@ fn sampled(count: usize) -> Vec<usize> {
 fn assert_renders_as_saved(document: &Document, label: &str, from_model: bool) -> usize {
     let saved = saved_pages(document);
     for page in sampled(saved.len()) {
-        let before = Document::model_renders();
+        let before = model_renders();
         let rendered = document
             .render_png(PngTarget { page }, &RenderOptions::default())
             .unwrap_or_else(|error| panic!("{label} page {page}: {error}"));
-        assert_eq!(
-            Document::model_renders() - before,
-            usize::from(from_model),
-            "{label} page {page}: render path"
-        );
+        assert_render_path(before, from_model, &format!("{label} page {page}"));
         assert!(
             rendered == saved[page],
             "{label} page {page}: the PNG differs from the saved render"
@@ -142,12 +157,33 @@ fn center_the_first_paragraph(document: &mut Document) {
 }
 
 fn mark_formatted_empty_paragraph_docx() -> Vec<u8> {
-    let namespaces = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
-    let body = concat!(
+    docx_with_body(concat!(
         r#"<w:p w14:paraId="0000000A" w14:textId="77777777"><w:r><w:t xml:space="preserve">Alpha </w:t></w:r><w:proofErr w:type="spellStart"/><w:r><w:t>bravvo</w:t></w:r><w:proofErr w:type="spellEnd"/></w:p>"#,
         r#"<w:p w14:paraId="0000000E" w14:textId="77777777"><w:pPr><w:rPr><w:b/></w:rPr></w:pPr></w:p>"#,
         r#"<w:p w14:paraId="0000000C" w14:textId="77777777"><w:r><w:t>Delta</w:t></w:r></w:p>"#,
-    );
+    ))
+}
+
+/// One page per paragraph, each after the first behind a page break.
+fn one_page_per_paragraph_docx(pages: usize) -> Vec<u8> {
+    let body: String = (0..pages)
+        .map(|page| {
+            let page_break = if page == 0 {
+                ""
+            } else {
+                r#"<w:r><w:br w:type="page"/></w:r>"#
+            };
+            format!(
+                r#"<w:p w14:paraId="{:08X}" w14:textId="77777777">{page_break}<w:r><w:t>Page {page}</w:t></w:r></w:p>"#,
+                page + 1
+            )
+        })
+        .collect();
+    docx_with_body(&body)
+}
+
+fn docx_with_body(body: &str) -> Vec<u8> {
+    let namespaces = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
     let document = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {namespaces}><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>"#
     );
@@ -215,15 +251,50 @@ fn a_model_change_renders_through_the_save() {
     }
 }
 
-#[test]
-fn raised_parse_limits_render_from_the_model_as_saved() {
-    for (name, bytes) in fixtures() {
-        let mut document =
-            with_fonts(Document::open_with_limits(&bytes, &raised_limits()).unwrap());
-        assert_renders_as_saved(&document, &format!("{name} raised limits"), true);
-        assert!(edit_a_body_paragraph(&mut document));
-        assert_renders_as_saved(&document, &format!("{name} raised limits edited"), true);
+/// The page count, once every page renders from the model and the next is out of range.
+fn assert_every_page_renders_from_the_model(document: &Document, label: &str) -> usize {
+    let mut page = 0;
+    loop {
+        let before = model_renders();
+        match document.render_png(PngTarget { page }, &RenderOptions::default()) {
+            Ok(_) => page += 1,
+            Err(error) => {
+                assert_eq!(
+                    error.to_string(),
+                    format!("page ordinal {page} is out of range"),
+                    "{label} page {page}"
+                );
+                assert_render_path(before, true, &format!("{label} page {page}"));
+                return page;
+            }
+        }
+        assert_render_path(before, true, &format!("{label} page {}", page - 1));
+        assert!(page <= PAGE_CAP, "{label}: more than {PAGE_CAP} pages");
     }
+}
+
+#[test]
+fn a_document_opened_under_raised_limits_renders() {
+    let pages = 3;
+    let bytes = one_page_per_paragraph_docx(pages);
+    let Err(error) = Document::open_with_limits(&bytes, &paragraph_limits(pages - 1)) else {
+        panic!("a {pages}-paragraph document opened under a {}-paragraph budget", pages - 1);
+    };
+    assert!(
+        error.to_string().contains("paragraph"),
+        "unexpected error: {error}"
+    );
+    let mut document =
+        with_fonts(Document::open_with_limits(&bytes, &paragraph_limits(pages * 2)).unwrap());
+    assert_eq!(
+        assert_every_page_renders_from_the_model(&document, "raised limits"),
+        pages
+    );
+    assert!(edit_a_body_paragraph(&mut document));
+    assert_eq!(
+        assert_every_page_renders_from_the_model(&document, "raised limits edited"),
+        pages
+    );
 }
 
 #[test]
@@ -238,9 +309,9 @@ fn an_out_of_range_page_fails_as_the_saved_render_does() {
         for page in [count, count + 1, usize::MAX] {
             let target = PngTarget { page };
             let options = RenderOptions::default();
-            let before = Document::model_renders();
+            let before = model_renders();
             let fast = document.render_png(target, &options).unwrap_err();
-            assert_eq!(Document::model_renders() - before, 1, "page {page}");
+            assert_render_path(before, true, &format!("page {page}"));
             let saved = document.render_png_saved(target, &options).unwrap_err();
             assert_eq!(format!("{fast:?}"), format!("{saved:?}"), "page {page}");
             assert_eq!(
