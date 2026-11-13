@@ -26,7 +26,8 @@
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
-    "refused": "Not replaced: {message}"
+    "refused": "Not replaced: {message}",
+    "skippedValues": "{count} valeurs correspondantes ne sont pas du texte et n’ont pas été modifiées : {cells}"
   },
   "_lang": "fr",
   "toolbar": {

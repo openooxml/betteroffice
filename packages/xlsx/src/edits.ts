@@ -185,6 +185,10 @@ export interface XlsxReplaceStats {
   skippedFormulas: number;
   /** Matches on merged followers, array fills or locked cells of a protected sheet. */
   skippedLocked: number;
+  /** Non-text values whose display text matched in `values` mode; they are untouched. */
+  skippedValues?: number;
+  /** A1 references of the first skipped values, at most 10,000. */
+  skippedCells?: string[];
 }
 
 export interface XlsxEditReceipt {
@@ -259,6 +263,8 @@ export interface XlsxSheetEntry {
   /** Null means known absent or empty; omitted means source facts are unknown. */
   headerFooter?: XlsxSheetHeaderFooter | null;
   visibility?: XlsxSheetVisibility;
+  /** The source part's sheet type; `worksheet` for sheets without a source. */
+  kind?: 'worksheet' | 'chartsheet' | 'dialogsheet' | 'macrosheet' | 'other';
   sheetId: string;
   name: string;
   /**

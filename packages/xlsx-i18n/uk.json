@@ -26,7 +26,8 @@
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
-    "refused": "Not replaced: {message}"
+    "refused": "Not replaced: {message}",
+    "skippedValues": "Збіжні значення, які не є текстом, не змінено ({count}): {cells}"
   },
   "_lang": "uk",
   "toolbar": {

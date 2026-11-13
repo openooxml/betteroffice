@@ -105,6 +105,30 @@ test('shows engine refusals without applying', async () => {
   expect(applied).toBe(0);
 });
 
+test('names the values a replace leaves unchanged', async () => {
+  const skippedCells = ['A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8'];
+  const { getByRole, findByText } = view({
+    version: () => 'v1',
+    find: () => ({ ok: true, version: 'v1', matches: [], truncated: false }),
+    validate: () => preview({
+      previews: [{
+        stepIndex: 0, target: { sheetId: target.sheetId, range: target.range }, wouldChange: true,
+        changedCellCount: 1,
+        replace: {
+          matched: 8, replaced: 1, skippedFormulas: 0, skippedLocked: 0,
+          skippedValues: skippedCells.length, skippedCells,
+        },
+      }],
+    }),
+    apply: () => { throw new Error('must not apply'); },
+  });
+
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, '1');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, '2');
+  fireEvent.click(getByRole('button', { name: 'Preview' }));
+  await findByText(/7 matching values are not text and were left unchanged: A2, A3, A4, A5, A6, …/);
+});
+
 test('finds one match at a time and replaces only the current cell', async () => {
   const cells = [
     { sheetId: target.sheetId, row: 0, col: 0, a1: 'A1' },

@@ -57,7 +57,9 @@ import { ROW_GUTTER_WIDTH } from '../plugins/rowDecorations';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost, type XlsxPluginHostBinding } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
-import { ReplaceDialog, type ReplaceDialogApi, type ReplaceDialogTarget } from '../components/ReplaceDialog';
+import {
+  ReplaceDialog, type ReplaceDialogApi, type ReplaceDialogTarget, withSheetCatalog,
+} from '../components/ReplaceDialog';
 import { cellInViewport, deriveLimits, extendScrollExtent, nearestCellScroll, positionAtPoint } from '../viewer/sessionGeometry';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { XlsxAsyncExportBridge } from './createAsyncEditorApi';
@@ -364,6 +366,14 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
           name: sheet.name,
         })),
       });
+      const call = run?.session.call;
+      if (call) {
+        void Promise.resolve(call.readCells({ ranges: [] })).then((catalog) => {
+          setReplaceTarget((current) => current?.sheets && current.sheetId === selected.sheetId
+            ? { ...current, sheets: withSheetCatalog(current.sheets, catalog) }
+            : current);
+        }, () => {});
+      }
     }
     setReplaceOpen(true);
   };

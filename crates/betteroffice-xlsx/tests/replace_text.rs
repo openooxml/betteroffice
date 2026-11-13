@@ -322,6 +322,7 @@ fn values_mode_reports_formula_results_without_rewriting_them() {
             replaced: 0,
             skipped_formulas: 1,
             skipped_locked: 0,
+            ..ReplaceStats::default()
         })
     );
 
@@ -336,6 +337,7 @@ fn values_mode_reports_formula_results_without_rewriting_them() {
             replaced: 0,
             skipped_formulas: 1,
             skipped_locked: 0,
+            ..ReplaceStats::default()
         })
     );
     assert_eq!(formula(&workbook, "C1").as_deref(), Some("\"alpha\""));
@@ -362,6 +364,7 @@ fn formulas_mode_replaces_formula_source_and_recalculates() {
             replaced: 1,
             skipped_formulas: 0,
             skipped_locked: 0,
+            ..ReplaceStats::default()
         })
     );
     assert_eq!(formula(&workbook, "K1").as_deref(), Some("M1+1"));

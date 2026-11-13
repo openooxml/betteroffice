@@ -90,7 +90,9 @@ import {
   RemoteSelections,
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
-import { ReplaceDialog, type ReplaceDialogApi, type ReplaceDialogTarget } from './components/ReplaceDialog';
+import {
+  ReplaceDialog, type ReplaceDialogApi, type ReplaceDialogTarget, withSheetCatalog,
+} from './components/ReplaceDialog';
 import { cellInViewport, coversWholeTrack, deriveLimits, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
 import { cellEditorColors } from './viewer/cellEditorColors';
 import type {
@@ -1435,10 +1437,10 @@ export function XlsxEditorContent({
         end: { row: range.bottom, col: range.right },
       },
       label: from === to ? from : `${from}:${to}`,
-      sheets: sheetInfo.sheetIds.map((id, index) => ({
+      sheets: withSheetCatalog(sheetInfo.sheetIds.map((id, index) => ({
         sheetId: id,
         name: sheetInfo.sheetNames[index] ?? id,
-      })),
+      })), handle.readCells({ ranges: [] })),
     });
     setReplaceOpen(true);
   }, [sheetInfo, activeSheet]);

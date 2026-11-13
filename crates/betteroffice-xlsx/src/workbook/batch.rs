@@ -347,7 +347,7 @@ pub(super) fn refusal(version: DocumentVersion, failure: EditFailure) -> EditRef
 }
 
 /// What one `replaceText` step searched and changed. Present only for that operation.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplaceStats {
     /// Cells whose searched text matched `query`, including cells that could not be rewritten.
@@ -358,6 +358,12 @@ pub struct ReplaceStats {
     pub skipped_formulas: u32,
     /// Matches on merged followers, array fills or locked cells of a protected sheet.
     pub skipped_locked: u32,
+    /// Non-text values whose display text matched in `values` mode; they are untouched.
+    #[serde(default)]
+    pub skipped_values: u32,
+    /// A1 references of the first skipped values, at most 10,000.
+    #[serde(default)]
+    pub skipped_cells: Vec<String>,
 }
 
 /// What one step did, in request order.
@@ -1025,7 +1031,12 @@ impl Workbook {
                 let sheet_ref = &self.model.sheets[resolved.sheet.0 as usize];
                 let mut states = Vec::new();
                 let mut stats = ReplaceStats::default();
-                for (cell, stored) in sheet_ref.cells_in_range(resolved.range) {
+                let cells = self
+                    .is_worksheet(resolved.sheet)
+                    .then(|| sheet_ref.cells_in_range(resolved.range))
+                    .into_iter()
+                    .flatten();
+                for (cell, stored) in cells {
                     *visits = visits.saturating_add(1);
                     if *visits > MAX_CELL_VISITS {
                         return Err(at(
@@ -1094,6 +1105,20 @@ impl Workbook {
                         continue;
                     }
                     let CellValue::Text { value } = &stored.value else {
+                        if *look_in == ReplaceLookIn::Values
+                            && text_matches(
+                                &display_text(&self.model.styles, self.model.date_system, stored),
+                                query,
+                                *entire_cell,
+                                *match_case,
+                            )
+                        {
+                            stats.matched += 1;
+                            stats.skipped_values += 1;
+                            if stats.skipped_cells.len() < MAX_DIAGNOSTIC_CELLS {
+                                stats.skipped_cells.push(cell.to_a1());
+                            }
+                        }
                         continue;
                     };
                     let Some(next) =
@@ -1117,6 +1142,19 @@ impl Workbook {
                     if write_lock(sheet_ref, CellRange::new(cell, cell)).is_some() {
                         stats.skipped_locked += 1;
                         continue;
+                    }
+                    if self
+                        .cell_text_runs(resolved.sheet, cell)
+                        .is_some_and(|runs| !runs.is_empty())
+                    {
+                        return Err(at(
+                            EditFailureCode::Unsupported,
+                            format!(
+                                "{}!{} holds rich text that a replace would flatten",
+                                sheet_ref.name,
+                                cell.to_a1()
+                            ),
+                        ));
                     }
                     *units = units.saturating_add(utf16_units(&next));
                     if *units > MAX_TEXT_UNITS {
@@ -1397,7 +1435,7 @@ impl Workbook {
                     target: planned.target.clone(),
                     would_change: !cells.is_empty(),
                     changed_cell_count: cells.len() as u32,
-                    replace: planned.replace,
+                    replace: planned.replace.clone(),
                 })
                 .collect(),
         }))
@@ -1440,7 +1478,7 @@ impl Workbook {
                     .iter()
                     .map(|cell| cell_target(&keys, planned.resolved.sheet, *cell))
                     .collect(),
-                replace: planned.replace,
+                replace: planned.replace.clone(),
             })
             .collect();
         let Some(mut prepared) = staged else {

@@ -26,7 +26,8 @@
     "working": "Checking…",
     "noMatches": "No matches.",
     "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
-    "refused": "Not replaced: {message}"
+    "refused": "Not replaced: {message}",
+    "skippedValues": "텍스트가 아닌 일치 값 {count}개는 변경되지 않았습니다: {cells}"
   },
   "_lang": "ko",
   "toolbar": {

@@ -26,7 +26,8 @@
     "working": "正在检查…",
     "noMatches": "没有匹配项。",
     "summary": "匹配 {matched} 个，替换 {replaced} 个，跳过 {formulas} 个公式结果和 {locked} 个锁定单元格。",
-    "refused": "未替换：{message}"
+    "refused": "未替换：{message}",
+    "skippedValues": "{count} 个匹配的值不是文本，未更改：{cells}"
   },
   "_lang": "zh-CN",
   "toolbar": {

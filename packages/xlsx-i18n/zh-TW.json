@@ -26,7 +26,8 @@
     "working": "正在檢查…",
     "noMatches": "沒有符合項目。",
     "summary": "符合 {matched} 個，取代 {replaced} 個，略過 {formulas} 個公式結果和 {locked} 個鎖定儲存格。",
-    "refused": "未取代：{message}"
+    "refused": "未取代：{message}",
+    "skippedValues": "{count} 個相符的值不是文字，未變更：{cells}"
   },
   "_lang": "zh-TW",
   "toolbar": {

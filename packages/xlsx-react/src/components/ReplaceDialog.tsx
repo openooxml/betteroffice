@@ -13,7 +13,9 @@ import type {
   XlsxFindRequest,
   XlsxFindResult,
   XlsxRangeAddress,
+  XlsxReadResult,
   XlsxReplaceStats,
+  XlsxSheetEntry,
   XlsxValidationResult,
 } from '@betteroffice/xlsx';
 import { useTranslation } from '../i18n';
@@ -23,6 +25,28 @@ import { toolbarTheme } from '../../../../shared/react-toolbar/theme';
 export interface ReplaceDialogSheet {
   sheetId: string;
   name: string;
+  /** Hidden sheets are left out of a workbook search. */
+  hidden?: boolean;
+  /** Only worksheets are searched across the workbook; omitted means a worksheet. */
+  kind?: XlsxSheetEntry['kind'];
+}
+
+/** `sheets` with visibility and kind from a sheet catalog read; unchanged when the read refused. */
+export function withSheetCatalog(
+  sheets: readonly ReplaceDialogSheet[],
+  catalog: XlsxReadResult,
+): ReplaceDialogSheet[] {
+  if (!catalog.ok) return [...sheets];
+  return sheets.map((sheet) => {
+    const entry = catalog.sheets.find((candidate) => candidate.sheetId === sheet.sheetId);
+    return entry
+      ? {
+        ...sheet,
+        hidden: entry.visibility === 'hidden' || entry.visibility === 'veryHidden',
+        kind: entry.kind,
+      }
+      : sheet;
+  });
 }
 
 /** The range a replace dialog works on; the caller resolves the sheet and selection. */
@@ -84,16 +108,23 @@ function scopeTargets(
   if (scope === 'sheet') {
     return [{ sheetId: target.sheetId, range: WHOLE_SHEET_RANGE }];
   }
-  const sheets = target.sheets?.length
+  const sheets: readonly ReplaceDialogSheet[] = target.sheets?.length
     ? target.sheets
     : [{ sheetId: target.sheetId, name: target.label }];
-  return sheets.map((sheet) => ({ sheetId: sheet.sheetId, range: WHOLE_SHEET_RANGE }));
+  return sheets
+    .filter((sheet) => !sheet.hidden && (sheet.kind ?? 'worksheet') === 'worksheet')
+    .map((sheet) => ({ sheetId: sheet.sheetId, range: WHOLE_SHEET_RANGE }));
 }
 
-function sumReplaceStats(previews: readonly XlsxEditPreview[]): XlsxReplaceStats | null {
+function sumReplaceStats(
+  previews: readonly XlsxEditPreview[],
+  sheets: readonly ReplaceDialogSheet[] = [],
+): XlsxReplaceStats | null {
   const total: XlsxReplaceStats = {
     matched: 0, replaced: 0, skippedFormulas: 0, skippedLocked: 0,
   };
+  let skippedValues = 0;
+  const skippedCells: string[] = [];
   let found = false;
   for (const preview of previews) {
     if (!preview.replace) continue;
@@ -102,8 +133,22 @@ function sumReplaceStats(previews: readonly XlsxEditPreview[]): XlsxReplaceStats
     total.replaced += preview.replace.replaced;
     total.skippedFormulas += preview.replace.skippedFormulas;
     total.skippedLocked += preview.replace.skippedLocked;
+    skippedValues += preview.replace.skippedValues ?? 0;
+    const sheetName = previews.length > 1
+      ? sheets.find((sheet) => sheet.sheetId === preview.target.sheetId)?.name
+      : undefined;
+    for (const cell of preview.replace.skippedCells ?? []) {
+      skippedCells.push(sheetName ? `${sheetName}!${cell}` : cell);
+    }
   }
-  return found ? total : null;
+  return found ? { ...total, skippedValues, skippedCells } : null;
+}
+
+const SKIPPED_CELLS_SHOWN = 5;
+
+function skippedCellList(stats: XlsxReplaceStats): string {
+  const shown = (stats.skippedCells ?? []).slice(0, SKIPPED_CELLS_SHOWN).join(', ');
+  return (stats.skippedValues ?? 0) > SKIPPED_CELLS_SHOWN ? `${shown}, …` : shown;
 }
 
 function refusalMessage(result: { failure: { message: string } }): string {
@@ -118,7 +163,7 @@ function searchKey(
   entireCell: boolean,
   matchCase: boolean,
 ): string {
-  const sheetIds = target.sheets?.map((sheet) => sheet.sheetId).join(',') ?? target.sheetId;
+  const sheetIds = scopeTargets(target, scope).map((range) => range.sheetId).join(',');
   return [
     target.sheetId, target.label, sheetIds, scope, query, lookIn, String(entireCell), String(matchCase),
   ].join('\u0000');
@@ -217,7 +262,7 @@ export function ReplaceDialog({
   const stats = phase.kind === 'preview' || phase.kind === 'applied' ? phase.stats : null;
   const activeSheetName = target?.sheets?.find((sheet) => sheet.sheetId === target.sheetId)?.name
     ?? target?.label ?? '';
-  const workbookSheetCount = target?.sheets?.length ?? 1;
+  const workbookSheetCount = target ? scopeTargets(target, 'workbook').length : 1;
 
   const findMatches = async (query: string): Promise<FindCache | null> => {
     if (!target) return null;
@@ -351,6 +396,11 @@ export function ReplaceDialog({
         lookIn,
         matchCase,
       }));
+      if (steps.length === 0) {
+        setMatch({ index: -1, total: 0 });
+        setPhase({ kind: 'idle' });
+        return;
+      }
       const request: XlsxEditRequest = { expectVersion: version, steps };
       const validation = await Promise.resolve(api.validate(request));
       if (!validation.ok) {
@@ -362,7 +412,7 @@ export function ReplaceDialog({
         stepIndex: 0, target: steps[0].target, wouldChange: false,
         changedCellCount: 0, replace: undefined,
       };
-      const stats = sumReplaceStats(previews);
+      const stats = sumReplaceStats(previews, target.sheets);
       const wouldChange = validation.wouldApply && previews.some((entry) => entry.wouldChange);
       if (!wouldChange) {
         setPhase({ kind: 'preview', preview, stats });
@@ -555,12 +605,17 @@ export function ReplaceDialog({
           {phase.kind !== 'busy' && match?.total === 0 && t('replaceDialog.noMatches')}
           {match && match.total > 0 &&
             t('replaceDialog.matchPosition', { index: match.index + 1, total: match.total })}
-          {phase.kind === 'preview' && !phase.preview.wouldChange && !match &&
+          {phase.kind === 'preview' && !phase.preview.wouldChange && !match && !stats?.matched &&
             t('replaceDialog.noMatches')}
           {stats?.matched
             ? ` ${t('replaceDialog.summary', {
               matched: stats.matched, replaced: stats.replaced,
               formulas: stats.skippedFormulas, locked: stats.skippedLocked,
+            })}`
+            : null}
+          {stats?.skippedValues
+            ? ` ${t('replaceDialog.skippedValues', {
+              count: stats.skippedValues, cells: skippedCellList(stats),
             })}`
             : null}
         </div>

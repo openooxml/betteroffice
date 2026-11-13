@@ -170,6 +170,8 @@ class ReplaceStats(TypedDict):
     replaced: int
     skippedFormulas: int
     skippedLocked: int
+    skippedValues: int
+    skippedCells: list[str]
 
 
 class _OptionalReplace(TypedDict, total=False):

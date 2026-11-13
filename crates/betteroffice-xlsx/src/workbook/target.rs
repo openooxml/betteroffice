@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use xlsx_model::workbook::ColumnDefaults;
 use xlsx_model::{CellRange, CellRef, CellValue, MAX_COLS, MAX_ROWS, Sheet, SheetId};
-use xlsx_parse::{DefinedFunctionNames, FormulaNames, display_formula};
+use xlsx_parse::{DefinedFunctionNames, FormulaNames, SourceSheetKind, display_formula};
 use xlsx_render::display_text;
 
 use super::Workbook;
@@ -11,7 +11,7 @@ use super::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditOperation, EditRefusal,
     MAX_DIAGNOSTIC_CELLS, ReplaceLookIn, failure, refusal, text_matches,
 };
-use crate::{CellAddress, Result, XlsxSheetVisibility};
+use crate::{CellAddress, Result, XlsxSheetKind, XlsxSheetVisibility};
 
 /// Most cells one read may return.
 const MAX_READ_CELLS: u64 = 100_000;
@@ -81,6 +81,9 @@ pub struct SheetEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_footer: Option<Option<xlsx_parse::SheetHeaderFooter>>,
     pub visibility: XlsxSheetVisibility,
+    /// The source part's sheet type; `worksheet` for sheets without a source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<XlsxSheetKind>,
     pub sheet_id: String,
     pub name: String,
     /// False for non-worksheets, which batches refuse to write, and protected worksheets, which
@@ -313,6 +316,19 @@ fn sheet_header_footer(
     }
 }
 
+fn sheet_kind(
+    origin: Option<usize>,
+    facts: Option<&xlsx_parse::PackageFactsView<'_>>,
+) -> XlsxSheetKind {
+    match origin.zip(facts).and_then(|(origin, facts)| facts.source_sheet_kind(origin)) {
+        None | Some(SourceSheetKind::Worksheet) => XlsxSheetKind::Worksheet,
+        Some(SourceSheetKind::Chartsheet) => XlsxSheetKind::Chartsheet,
+        Some(SourceSheetKind::Dialogsheet) => XlsxSheetKind::Dialogsheet,
+        Some(SourceSheetKind::Macrosheet) => XlsxSheetKind::Macrosheet,
+        Some(SourceSheetKind::Other) => XlsxSheetKind::Other,
+    }
+}
+
 impl Workbook {
     /// Sheet ids in sheet order: the collaborative sheet keys, or `sheet:{index}` standalone.
     pub(super) fn sheet_keys(&self) -> Vec<String> {
@@ -387,6 +403,27 @@ impl Workbook {
         })
     }
 
+    pub(super) fn is_worksheet(&self, sheet: SheetId) -> bool {
+        !matches!(self.sheet_lock(sheet), Some(SheetLock::NotWorksheet))
+    }
+
+    /// Whether a search over every sheet covers `sheet`: a worksheet that is not hidden.
+    fn searched_by_default(&self, index: usize) -> bool {
+        let facts = self.source_package.as_ref().map(|slot| slot.facts());
+        let visibility = crate::structured::sheet_visibility(
+            self.preserved.origins.get(index).copied().flatten(),
+            facts
+                .as_ref()
+                .map(|facts| move |origin| facts.source_sheet_visibility(origin)),
+            self.preserved.created.get(index).copied().unwrap_or(false),
+        );
+        self.is_worksheet(SheetId(index as u32))
+            && !matches!(
+                visibility,
+                XlsxSheetVisibility::Hidden | XlsxSheetVisibility::VeryHidden
+            )
+    }
+
     /// `at` when a protected sheet's cell style leaves it locked. `None` on an unprotected
     /// sheet or an unlocked cell.
     pub(super) fn content_locked_cell(&self, sheet: SheetId, at: CellRef) -> Option<CellRef> {
@@ -413,18 +450,14 @@ impl Workbook {
         allow_protected: bool,
     ) -> Option<(EditFailureCode, String)> {
         let format_cells = match self.sheet_lock(target.sheet)? {
+            // A replace checks the cells it rewrites and finds none on a non-worksheet.
+            _ if matches!(operation, EditOperation::ReplaceText { .. }) => return None,
             SheetLock::NotWorksheet => return self.sheet_write_refusal(target.sheet),
             SheetLock::Protected { .. } if allow_protected => return None,
             SheetLock::Protected { format_cells } => format_cells,
         };
         match operation {
-            // A replace checks the cells it actually rewrites, not its whole range.
-            EditOperation::ReplaceText { .. } => {
-                if let Some(SheetLock::NotWorksheet) = self.sheet_lock(target.sheet) {
-                    return self.sheet_write_refusal(target.sheet);
-                }
-                None
-            }
+            EditOperation::ReplaceText { .. } => None,
             EditOperation::SetCellInputs { .. }
             | EditOperation::SetCellValues { .. }
             | EditOperation::SetFormulas { .. } => {
@@ -539,6 +572,10 @@ impl Workbook {
                         .map(|facts| move |origin| facts.source_sheet_visibility(origin)),
                     self.preserved.created.get(index).copied().unwrap_or(false),
                 ),
+                kind: Some(sheet_kind(
+                    self.preserved.origins.get(index).copied().flatten(),
+                    facts.as_ref(),
+                )),
                 editable: self.sheet_write_refusal(SheetId(index as u32)).is_none(),
             })
             .collect();
@@ -624,7 +661,9 @@ impl Workbook {
             vec![(resolved.sheet, Some(resolved.range))]
         } else {
             let sheets = match &request.sheet_ids {
-                None => (0..self.model.sheets.len()).collect::<Vec<_>>(),
+                None => (0..self.model.sheets.len())
+                    .filter(|&index| self.searched_by_default(index))
+                    .collect::<Vec<_>>(),
                 Some(ids) => {
                     let mut sheets = Vec::with_capacity(ids.len());
                     for id in ids {
