@@ -1120,6 +1120,12 @@ fn workbook_with_hidden_and_chartsheet() -> Workbook {
 }
 
 fn whole_sheet_within(sheet: &str, within: &str) -> Value {
+    let mut step = whole_sheet_step(sheet);
+    step["within"] = json!(within);
+    step
+}
+
+fn whole_sheet_step(sheet: &str) -> Value {
     json!({
         "op": "replaceText",
         "target": {
@@ -1132,7 +1138,6 @@ fn whole_sheet_within(sheet: &str, within: &str) -> Value {
         },
         "query": "alpha",
         "replacement": "omega",
-        "within": within,
     })
 }
 
@@ -1143,6 +1148,22 @@ fn apply_steps(workbook: &mut Workbook, steps: Vec<Value>) -> Option<EditOutcome
     }))
     .ok()?;
     Some(workbook.apply_edits(&request).unwrap())
+}
+
+#[test]
+fn replace_on_an_explicit_chartsheet_target_is_refused() {
+    let mut workbook = workbook_with_hidden_and_chartsheet();
+    let before = workbook.version();
+    let outcome = apply_steps(
+        &mut workbook,
+        vec![whole_sheet_step("sheet:0"), whole_sheet_step("sheet:2")],
+    )
+    .expect("the request parses");
+    let refusal = outcome.expect_err("a chartsheet target is not a worksheet");
+    assert_eq!(refusal.failure.code, betteroffice_xlsx::EditFailureCode::Unsupported);
+    assert_eq!(refusal.failure.step_index, Some(1));
+    assert_eq!(workbook.version(), before);
+    assert_eq!(stored_on(&workbook, SheetId(0), "A1"), text("alpha"));
 }
 
 #[test]
