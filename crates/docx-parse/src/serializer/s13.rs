@@ -454,7 +454,6 @@ fn write_docx_s13_parts_with_warnings(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
-    context.reserve_form_data_tokens(&request)?;
     context.set_document_source(
         package
             .original_bytes(&package.document_path)

@@ -16,7 +16,7 @@ use crate::paragraph_identity::W14_NAMESPACE;
 use crate::section::SectionProperties;
 use crate::xml::ParseError;
 
-use super::context::SerializerContext;
+use super::context::{DeferredFormData, SerializerContext};
 use super::foundation::{BorderSide, write_border};
 use super::raw::{
     validate_form_field_data, validate_math_subtree, validate_raw_subtree,
@@ -611,7 +611,10 @@ fn serialize_complex_field(
     if let Some(raw) = field.raw_form_data_xml.as_deref() {
         output.push('>');
         match validate_form_field_data(raw) {
-            Ok(()) => output.push_str(raw),
+            Ok(()) => {
+                context.note_form_data(raw);
+                output.push_str(raw);
+            }
             Err(error) => {
                 let name = form_field_name(field, raw);
                 let detail = error.to_string();
@@ -741,14 +744,43 @@ pub(crate) fn form_data_error(field: &str, detail: &str) -> ParseError {
 /// Fails when `xml` still holds a token written in place of form field data.
 pub(crate) fn reject_form_data_tokens(
     xml: &str,
-    deferred: &[(String, String, String)],
+    deferred: &DeferredFormData,
 ) -> Result<(), ParseError> {
-    match deferred
-        .iter()
-        .find(|(token, _, _)| xml.contains(token.as_str()))
-    {
+    if deferred.tokens.is_empty() {
+        return Ok(());
+    }
+    let outside = deferred
+        .in_written_data
+        .then(|| comments_outside_form_data(xml))
+        .flatten();
+    let left = deferred.tokens.iter().find(|(token, _, _)| match &outside {
+        Some(comments) => comments.contains(token.as_str()),
+        None => xml.contains(token.as_str()),
+    });
+    match left {
         Some((_, field, detail)) => Err(form_data_error(field, detail)),
         None => Ok(()),
+    }
+}
+
+/// Every comment of `xml` outside all `w:ffData`, where tokens sit and written data never does.
+fn comments_outside_form_data(xml: &str) -> Option<std::collections::HashSet<String>> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut comments = std::collections::HashSet::new();
+    let mut depth = 0usize;
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(element) if element.name().as_ref() == b"w:ffData" => depth += 1,
+            Event::End(element) if depth > 0 && element.name().as_ref() == b"w:ffData" => {
+                depth -= 1;
+            }
+            Event::Comment(text) if depth == 0 => {
+                comments.insert(format!("<!--{}-->", std::str::from_utf8(&text).ok()?));
+            }
+            Event::Eof => return Some(comments),
+            _ => {}
+        }
     }
 }
 

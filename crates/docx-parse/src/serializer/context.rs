@@ -67,49 +67,17 @@ pub struct SerializerContext {
     splice: Option<SpliceRecorder>,
     document_root: Option<String>,
     form_data_token: Option<String>,
-    form_data_reserved: usize,
+    form_data_written_token: bool,
     deferred_form_data: Vec<(String, String, String)>,
 }
 
 const FORM_DATA_TOKEN: &str = "<!--bo-ffdata ";
 
-/// The longest run of `_` written right after [`FORM_DATA_TOKEN`], if it was written at all.
-#[derive(Default)]
-struct FormDataTokenScan {
-    matched: usize,
-    run: Option<usize>,
-    longest: Option<usize>,
-}
-
-impl std::io::Write for FormDataTokenScan {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        for &byte in bytes {
-            if let Some(run) = self.run {
-                if byte == b'_' {
-                    self.run = Some(run + 1);
-                    self.longest = self.longest.max(self.run);
-                    continue;
-                }
-                self.run = None;
-            }
-            let token = FORM_DATA_TOKEN.as_bytes();
-            if token.get(self.matched) == Some(&byte) {
-                self.matched += 1;
-            } else {
-                self.matched = usize::from(byte == token[0]);
-            }
-            if self.matched == FORM_DATA_TOKEN.len() {
-                self.matched = 0;
-                self.run = Some(0);
-                self.longest = self.longest.max(self.run);
-            }
-        }
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+/// The tokens written in place of form field data, by field name and reason.
+pub(crate) struct DeferredFormData {
+    pub(crate) tokens: Vec<(String, String, String)>,
+    /// Whether written form field data holds token text, so only position tells tokens apart.
+    pub(crate) in_written_data: bool,
 }
 
 /// The XML written for each model paragraph a spliced part addresses by `sourceOrdinal`.
@@ -160,31 +128,29 @@ impl SerializerContext {
             splice: None,
             document_root: None,
             form_data_token: None,
-            form_data_reserved: 0,
+            form_data_written_token: false,
             deferred_form_data: Vec::new(),
         })
     }
 
-    /// Keeps form field data tokens out of every string the save request holds.
-    pub(crate) fn reserve_form_data_tokens(
-        &mut self,
-        request: &impl serde::Serialize,
-    ) -> Result<(), ParseError> {
-        let mut scan = FormDataTokenScan::default();
-        serde_json::to_writer(&mut scan, request)
-            .map_err(|error| ParseError::Canonical(error.to_string()))?;
-        self.form_data_reserved = scan.longest.map_or(0, |run| run + 1);
-        Ok(())
-    }
-
     /// Writes an unreplayable `w:ffData` as a token absent from `source` instead of failing.
     pub(crate) fn begin_form_data_tokens(&mut self, source: &str) {
-        let mut prefix = format!("{FORM_DATA_TOKEN}{}", "_".repeat(self.form_data_reserved));
+        let mut prefix = FORM_DATA_TOKEN.to_owned();
         while source.contains(&prefix) {
             prefix.push('_');
         }
         self.form_data_token = Some(prefix);
+        self.form_data_written_token = false;
         self.deferred_form_data.clear();
+    }
+
+    /// Records whether written form field data holds the token text itself.
+    pub(crate) fn note_form_data(&mut self, raw: &str) {
+        if let Some(prefix) = self.form_data_token.as_deref()
+            && raw.contains(prefix)
+        {
+            self.form_data_written_token = true;
+        }
     }
 
     pub(crate) fn defer_form_data(&mut self, field: &str, detail: &str) -> Option<String> {
@@ -195,9 +161,12 @@ impl SerializerContext {
         Some(token)
     }
 
-    pub(crate) fn end_form_data_tokens(&mut self) -> Vec<(String, String, String)> {
+    pub(crate) fn end_form_data_tokens(&mut self) -> DeferredFormData {
         self.form_data_token = None;
-        std::mem::take(&mut self.deferred_form_data)
+        DeferredFormData {
+            tokens: std::mem::take(&mut self.deferred_form_data),
+            in_written_data: std::mem::take(&mut self.form_data_written_token),
+        }
     }
 
     pub(crate) fn set_document_source(&mut self, source: Option<&str>) {
