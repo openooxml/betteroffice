@@ -160,6 +160,11 @@ const editedCollab = (engine: XlsxEngine) => {
   editCell(doc, 1, 1, '12');
   return doc;
 };
+const ADOPTED = '0123456789abcdef0123456789abcdef-7';
+const otherEngine = (engine: XlsxEngine) => (engine === wasmEngine ? nativeEngine : wasmEngine);
+const hydratedReads = (doc: Doc) => [doc.sheetInfoJson(), doc.readCellsJson(json({ ranges: [at('A1:C5')] })), doc.documentVersion()];
+const hydrationNonce = (doc: Doc) => (JSON.parse(doc.peerHydrationJson()) as { workbook: { version_nonce: string } }).workbook.version_nonce;
+const fontFixture = (name: string) => new Uint8Array(readFileSync(new URL(`../../crates/betteroffice-fonts/tests/fixtures/${name}`, import.meta.url)));
 const drainAll = (doc: Doc) => {
   const events: Uint8Array[] = [];
   for (let event = doc.drainUpdateEvent(); event.byteLength > 0; event = doc.drainUpdateEvent()) events.push(event);
@@ -251,6 +256,36 @@ const rows: Row<Xlsx>[] = [
   { method: 'XlsxDocument.readCellsJson', call: ({ doc }) => doc.readCellsJson(json({ ranges: [at('A1:C5'), at('A1', 'sheet:1')] })) },
   { method: 'XlsxDocument.listDefinedNamesJson', call: ({ doc }) => doc.listDefinedNamesJson('{}') },
   { method: 'XlsxDocument.documentVersion', call: ({ doc }) => doc.documentVersion() },
+  { method: 'XlsxDocument.peerHydrationJson', call: ({ doc }) => doc.peerHydrationJson() },
+  defineRow({
+    method: 'XlsxDocument.openWithPeerHydrationJson',
+    setup: ({ doc }: Xlsx) => doc.peerHydrationJson(),
+    call: ({ engine }, hydration) => scoped(engine.XlsxDocument.openWithPeerHydrationJson(fixture, hydration), hydratedReads),
+  }),
+  {
+    method: 'XlsxDocument.openWithPeerHydrationJson',
+    name: 'XlsxDocument.openWithPeerHydrationJson (hydration from the other engine)',
+    call: ({ engine }) => {
+      const hydration = scoped(otherEngine(engine).XlsxDocument.openWithCalculationJson(fixture, CONTEXT), (d) => d.peerHydrationJson());
+      return scoped(engine.XlsxDocument.openWithPeerHydrationJson(fixture, hydration), (d) => withoutNonce(d, hydratedReads(d)));
+    },
+  },
+  {
+    method: 'XlsxDocument.adoptPeerVersion',
+    mutates: true,
+    call: ({ doc }) => {
+      doc.adoptPeerVersion(ADOPTED);
+      const version = doc.documentVersion();
+      return { version, utf8: new TextEncoder().encode(version) };
+    },
+  },
+  defineRow({
+    method: 'XlsxDocument.adoptPeerVersion',
+    name: 'XlsxDocument.adoptPeerVersion refuses an edited workbook',
+    throws: { name: 'string', reason: 'peer version adoption needs an unedited workbook' },
+    setup: ({ doc }: Xlsx) => editCell(doc, 1, 1, '12'),
+    call: ({ doc }) => doc.adoptPeerVersion(ADOPTED),
+  }),
   { method: 'XlsxDocument.editCellJson', mutates: true, call: ({ doc }) => editCell(doc, 1, 1, '12') },
   { method: 'XlsxDocument.editCellJson', name: 'XlsxDocument.editCellJson (formula)', mutates: true, call: ({ doc }) => editCell(doc, 3, 2, '=SUM(B2:B3)*2') },
   {
@@ -350,6 +385,11 @@ const rows: Row<Xlsx>[] = [
     method: 'XlsxDocument.chartAtPointJson',
     call: ({ doc }) => [[350, 80], [10, 10]].map(([x, y]) => doc.chartAtPointJson(json({ viewport: JSON.parse(VIEWPORT), x, y }))),
   },
+  {
+    method: 'XlsxDocument.resizeChartJson',
+    mutates: true,
+    call: ({ doc }) => doc.resizeChartJson(json({ sheet: 0, chart: 'xl/drawings/drawing1.xml#0', left: 0, top: 0, right: 40, bottom: 30 })),
+  },
   { method: 'XlsxDocument.cellRectJson', call: ({ doc }) => doc.cellRectJson(json({ sheet: 0, row: 4, col: 1 })) },
   { method: 'XlsxDocument.cellPositionJson', call: ({ doc }) => doc.cellPositionJson(json({ sheet: 0, row: 4, col: 0 })) },
   {
@@ -366,6 +406,8 @@ const rows: Row<Xlsx>[] = [
   },
   { method: 'displayListCellLimit', call: ({ engine }) => engine.displayListCellLimit() },
   { method: 'font_preflight', call: ({ engine }) => engine.font_preflight(fixture) },
+  { method: 'decodeFontFace', call: ({ engine }) => engine.decodeFontFace(fontFixture('Synthetic-Regular.sfnt.zst'), 'zstd') },
+  { method: 'decodeFontFace', name: 'decodeFontFace (uncompressed bytes)', call: ({ engine }) => engine.decodeFontFace(fontFixture('Synthetic-Regular.ttf'), 'zstd') },
 ];
 
 const GOLDEN = 'scripts/parity/xlsx.ts drives it on both engines against parity/xlsx/expected.json';
@@ -396,11 +438,8 @@ const exclusions: Exclusion[] = [
 const knownDifferences: KnownDifference[] = [];
 
 const notYetCovered: string[] = [
-  'XlsxDocument.adoptPeerVersion', 'XlsxDocument.beginPeerSnapshot',
-  'XlsxDocument.endPeerSnapshot', 'XlsxDocument.nextPeerSnapshotChunk', 'XlsxDocument.openWithPeerHydrationJson', 'XlsxDocument.peerHydrationJson',
-  'XlsxDocument.recoveryCheckpoint', 'XlsxDocument.resizeChartJson',
+  'XlsxDocument.beginPeerSnapshot', 'XlsxDocument.endPeerSnapshot', 'XlsxDocument.nextPeerSnapshotChunk', 'XlsxDocument.recoveryCheckpoint',
   'XlsxSnapshotBuilder.advance', 'XlsxSnapshotBuilder.finish', 'XlsxSnapshotBuilder.push',
-  'decodeFontFace',
 ];
 
 const NO_RASTERIZER = 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/xlsx/src/wasm/enginePng.ts';
@@ -432,7 +471,15 @@ describe('xlsx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(12);
+    expect(notYetCovered.length).toBe(7);
+  });
+
+  test('the hydration version nonce differs between two openings on each engine', () => {
+    for (const [side, engine] of [['wasm', wasmEngine], ['native', nativeEngine]] as const) {
+      const nonces = [0, 1].map(() => scoped(engine.XlsxDocument.openWithCalculationJson(fixture, CONTEXT), hydrationNonce));
+      console.log(`HYDRATION-NONCE-PROBE ${side} ${JSON.stringify(nonces)}`);
+      expect(nonces[0]).not.toBe(nonces[1]);
+    }
   });
 
   for (const row of rows) {
