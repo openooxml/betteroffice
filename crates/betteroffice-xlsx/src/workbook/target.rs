@@ -8,7 +8,7 @@ use xlsx_render::display_text;
 
 use super::batch::{
     DocumentVersion, EditFailure, EditFailureCode, EditOperation, EditRefusal,
-    MAX_DIAGNOSTIC_CELLS, ReplaceLookIn, failure, refusal, text_matches,
+    MAX_DIAGNOSTIC_CELLS, ReplaceLookIn, ReplaceWithin, failure, refusal, text_matches,
 };
 use super::{Workbook, entered_text};
 use crate::{CellAddress, Result, XlsxSheetKind, XlsxSheetVisibility};
@@ -456,10 +456,15 @@ impl Workbook {
         target: Resolved,
         allow_protected: bool,
     ) -> Option<(EditFailureCode, String)> {
+        let workbook_wide = matches!(
+            operation,
+            EditOperation::ReplaceText { within, .. } if *within == ReplaceWithin::Workbook
+        );
         let format_cells = match self.sheet_lock(target.sheet)? {
-            // A replace checks the cells it rewrites and finds none on a non-worksheet.
-            _ if matches!(operation, EditOperation::ReplaceText { .. }) => return None,
+            SheetLock::NotWorksheet if workbook_wide => return None,
             SheetLock::NotWorksheet => return self.sheet_write_refusal(target.sheet),
+            // A replace checks the cells it rewrites.
+            _ if matches!(operation, EditOperation::ReplaceText { .. }) => return None,
             SheetLock::Protected { .. } if allow_protected => return None,
             SheetLock::Protected { format_cells } => format_cells,
         };

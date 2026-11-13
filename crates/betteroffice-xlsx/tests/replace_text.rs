@@ -1205,23 +1205,9 @@ fn find_over_all_sheets_skips_hidden_sheets_and_chartsheets() {
 }
 
 #[test]
-fn replace_over_a_sheet_list_with_a_chartsheet_does_not_refuse_the_batch() {
+fn workbook_replace_with_a_chartsheet_does_not_refuse_the_batch() {
     let mut workbook = workbook_with_hidden_and_chartsheet();
-    let whole = |sheet: &str| {
-        json!({
-            "op": "replaceText",
-            "target": {
-                "sheetId": sheet,
-                "range": {
-                    "kind": "rowCol",
-                    "start": { "row": 0, "col": 0 },
-                    "end": { "row": 1048575, "col": 16383 },
-                },
-            },
-            "query": "alpha",
-            "replacement": "omega",
-        })
-    };
+    let whole = |sheet: &str| whole_sheet_within(sheet, "workbook");
     let request: EditRequest = serde_json::from_value(json!({
         "expectVersion": workbook.version(),
         "steps": [whole("sheet:0"), whole("sheet:2")],
