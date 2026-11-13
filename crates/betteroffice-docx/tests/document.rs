@@ -1100,8 +1100,18 @@ fn an_unedited_save_keeps_every_part_and_every_authored_paragraph_id() {
     }
 }
 
+/// A suggestion withdrawn by a plain edit: an unchanged model the save takes through the full write.
+fn suggest_and_withdraw(document: &mut Document) {
+    let context =
+        betteroffice_docx::EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z").suggesting();
+    document
+        .replace_paragraph_text_with(W14_ID, "first", 1, &context)
+        .unwrap();
+    document.replace_paragraph_text(W14_ID, "first").unwrap();
+}
+
 #[test]
-fn repeated_ids_stay_addressable_across_save_and_reopen_cycles() {
+fn a_full_write_keeps_repeated_ids_addressable_across_save_and_reopen_cycles() {
     let input = word_docx(|_| {});
     let ids = paragraph_ids(&Document::open(&input).unwrap());
     assert_eq!(
@@ -1109,9 +1119,12 @@ fn repeated_ids_stay_addressable_across_save_and_reopen_cycles() {
         6
     );
 
-    let first = Document::open(&input).unwrap().save().unwrap();
-    let reopened = Document::open(&first).unwrap();
+    let mut opened = Document::open(&input).unwrap();
+    suggest_and_withdraw(&mut opened);
+    let first = opened.save().unwrap();
+    let mut reopened = Document::open(&first).unwrap();
     assert_eq!(paragraph_ids(&reopened), ids);
+    suggest_and_withdraw(&mut reopened);
     assert_eq!(reopened.save().unwrap(), first);
 
     let mut cycled = input;
@@ -1119,9 +1132,11 @@ fn repeated_ids_stay_addressable_across_save_and_reopen_cycles() {
         let mut document = Document::open(&cycled).unwrap();
         assert_eq!(paragraph_ids(&document), ids);
         document.replace_paragraph_text(&ids[index], text).unwrap();
+        suggest_and_withdraw(&mut document);
         cycled = document.save().unwrap();
     }
-    let reopened = Document::open(&cycled).unwrap();
+    let mut reopened = Document::open(&cycled).unwrap();
+    suggest_and_withdraw(&mut reopened);
     assert_eq!(
         identified_texts(&reopened),
         [
@@ -1138,6 +1153,64 @@ fn repeated_ids_stay_addressable_across_save_and_reopen_cycles() {
     assert_eq!(
         written_ids(&package_part(&cycled, "word/document.xml")),
         ids
+    );
+}
+
+#[test]
+fn an_edit_keeps_repeated_ids_addressable_across_save_and_reopen_cycles() {
+    let input = word_docx(|_| {});
+    let ids = paragraph_ids(&Document::open(&input).unwrap());
+    assert_eq!(
+        ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        6
+    );
+    let addressable = |document: &Document| {
+        for id in &ids {
+            assert_eq!(document.paragraph(id).unwrap().para_id.as_ref(), Some(id));
+        }
+    };
+
+    let first = Document::open(&input).unwrap().save().unwrap();
+    let reopened = Document::open(&first).unwrap();
+    assert_eq!(paragraph_ids(&reopened), ids);
+    addressable(&reopened);
+
+    let mut cycled = input.clone();
+    for (index, text) in [(2, "nested edit"), (4, "control edit"), (1, "second edit")] {
+        let mut document = Document::open(&cycled).unwrap();
+        assert_eq!(paragraph_ids(&document), ids);
+        addressable(&document);
+        document.replace_paragraph_text(&ids[index], text).unwrap();
+        cycled = document.save().unwrap();
+    }
+    let reopened = Document::open(&cycled).unwrap();
+    assert_eq!(paragraph_ids(&reopened), ids);
+    addressable(&reopened);
+    assert_eq!(
+        identified_texts(&reopened),
+        [
+            (W14_ID, "first"),
+            (ids[1].as_str(), "second edit"),
+            (ids[2].as_str(), "nested edit"),
+            ("0B000002", ""),
+            (ids[4].as_str(), "control edit"),
+            ("0B000003", "third"),
+        ]
+        .map(|(id, text)| (id.to_owned(), text.to_owned()))
+    );
+
+    let xml = package_part(&cycled, "word/document.xml");
+    assert_eq!(decoded_ids(&xml), ids);
+    for untouched in [
+        word_paragraph(W14_ID, "first"),
+        word_paragraph("0B000002", ""),
+        word_paragraph("0B00000&#x33;", "third"),
+    ] {
+        assert!(xml.contains(&untouched), "{untouched}\n{xml}");
+    }
+    assert_eq!(
+        package_part(&cycled, "word/header1.xml"),
+        package_part(&input, "word/header1.xml")
     );
 }
 
