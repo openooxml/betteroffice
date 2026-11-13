@@ -634,6 +634,22 @@ function pendingUpdate(docx: Docx): Uint8Array {
   return first!;
 }
 
+function alphaTarget(session: Session): string {
+  return JSON.stringify({ kind: 'search', text: 'alpha', within: { kind: 'paragraph', story: 'body', paraId: paraId(session, 'Second body') }, view: 'accepted' });
+}
+
+interface ListedComment { id: unknown; author: unknown; done: unknown }
+
+function listedComment(session: Session, id: string): ListedComment | undefined {
+  return (JSON.parse(session.list_comments()) as ListedComment[]).find((comment) => String(comment.id) === id);
+}
+
+function seededCommentId(session: Session): string {
+  const [comment] = JSON.parse(session.list_comments()) as ListedComment[];
+  if (comment?.author !== 'Parity') throw new Error('the fixture comment is not seeded');
+  return String(comment.id);
+}
+
 const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
 
 const rows: Row<Docx>[] = [
@@ -1749,6 +1765,99 @@ const rows: Row<Docx>[] = [
       return { plain: s.canvasSkippedEffects(0, new Uint32Array()), effects };
     },
   }),
+  defineRow({
+    method: 'EditSession.settle_revisions_json',
+    mutates: true,
+    setup: ({ session: s }: Docx) => trackedInsertion(s),
+    call: ({ session: s }, revisionId) => {
+      const result = s.settle_revisions_json(JSON.stringify({ accept: [revisionId] }));
+      if (!(JSON.parse(result) as { revisionIds?: string[] }).revisionIds?.includes(revisionId)) throw new Error(`the tracked insertion was not settled: ${result}`);
+      return { result, version: s.version(), after: s.list_revisions() };
+    },
+  }),
+  {
+    method: 'EditSession.settle_revisions_json',
+    name: 'EditSession.settle_revisions_json (not JSON)',
+    throws: { name: 'string', reason: 'a request that is not JSON is refused' },
+    call: ({ session: s }) => s.settle_revisions_json('{'),
+  },
+  defineRow({
+    method: 'EditSession.revision_stamps_json',
+    setup: ({ session: s }: Docx) => trackedInsertion(s),
+    call: ({ session: s }, revisionId) => {
+      const stamps = s.revision_stamps_json(JSON.stringify([revisionId]));
+      if (!(JSON.parse(stamps) as Record<string, unknown[] | undefined>)[revisionId]?.length) throw new Error(`the tracked insertion has no stamp: ${stamps}`);
+      return stamps;
+    },
+  }),
+  {
+    method: 'EditSession.revision_stamps_json',
+    name: 'EditSession.revision_stamps_json (not JSON)',
+    throws: { name: 'string', reason: 'revision ids that are not JSON are refused' },
+    call: ({ session: s }) => s.revision_stamps_json('{'),
+  },
+  defineRow({
+    method: 'EditSession.revision_ids_at',
+    setup: ({ session: s }: Docx) => {
+      const id = paraId(s, 'First body');
+      return { id, revisionId: trackedInsertion(s) };
+    },
+    call: ({ session: s }, { id, revisionId }) => {
+      const ids = s.revision_ids_at('body', id, 3);
+      if (!(JSON.parse(ids) as string[]).includes(revisionId)) throw new Error(`the tracked insertion does not hold the caret: ${ids}`);
+      return ids;
+    },
+  }),
+  defineRow({
+    method: 'EditSession.proposal_revision_ranges_json',
+    setup: ({ session: s }: Docx) => trackedInsertion(s),
+    call: ({ session: s }, revisionId) => {
+      const ranges = s.proposal_revision_ranges_json(JSON.stringify([revisionId]));
+      const parsed = JSON.parse(ranges) as unknown;
+      if (!Array.isArray(parsed) || !parsed.some((range: { revisionId?: unknown }) => range.revisionId === revisionId)) {
+        throw new Error(`the tracked insertion has no range: ${ranges}`);
+      }
+      return ranges;
+    },
+  }),
+  {
+    method: 'EditSession.comment_text_target_json',
+    mutates: true,
+    call: ({ session: s }) => {
+      const result = s.comment_text_target_json(alphaTarget(s), JSON.stringify({ id: '7', author: 'Parity', date: DATE, body: 'Targeted' }));
+      if (!listedComment(s, '7')) throw new Error(`the target was not commented: ${result}`);
+      return { result, after: s.list_comments() };
+    },
+  },
+  {
+    method: 'EditSession.format_text_target_json',
+    mutates: true,
+    call: ({ session: s }) => {
+      const result = s.format_text_target_json(alphaTarget(s), JSON.stringify({ bold: true }));
+      if ((JSON.parse(result) as { ok: boolean }).ok !== true) throw new Error(`the target was not formatted: ${result}`);
+      return { result, after: s.story_segments('body') };
+    },
+  },
+  defineRow({
+    method: 'EditSession.seed_comment_metadata_json',
+    mutates: true,
+    setup: ({ session: s }: Docx) => seededCommentId(s),
+    call: ({ session: s }, commentId) => {
+      const result = s.seed_comment_metadata_json(commentId, JSON.stringify({ done: true }));
+      if (listedComment(s, commentId)?.done !== true) throw new Error('the seeded comment was not marked done');
+      return { result, after: s.list_comments() };
+    },
+  }),
+  {
+    method: 'EditSession.seed_comment_metadata_json',
+    name: 'EditSession.seed_comment_metadata_json (unknown comment)',
+    mutates: true,
+    call: ({ session: s }) => {
+      const result = s.seed_comment_metadata_json('9', JSON.stringify({ author: 'Parity', date: DATE }));
+      if (!listedComment(s, '9')) throw new Error('seeding an unknown comment created none');
+      return { result, after: s.list_comments() };
+    },
+  },
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
@@ -1782,13 +1891,13 @@ const notYetCovered: string[] = [
   'EditSession.bootstrap_peer',
   'EditSession.clear_cell_selection',
   'EditSession.clear_measure_fonts', 'EditSession.clear_update_event_observation',
-  'EditSession.comment_text_target_json', 'EditSession.decode_font',
+  'EditSession.decode_font',
   'EditSession.direct_batches_applied', 'EditSession.display_hit_test_regions_json', 'EditSession.display_range_rects_batch', 'EditSession.display_range_rects_json',
   'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json', 'EditSession.display_vertical_move_json',
   'EditSession.echo_glyph_set_json', 'EditSession.encode_diff_chunks',
   'EditSession.encode_peer_metadata', 'EditSession.encode_sticky_position',
   'EditSession.encoded_selection', 'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json',
-  'EditSession.format_text_target_json', 'EditSession.geometry_position_outline_json',
+  'EditSession.geometry_position_outline_json',
   'EditSession.header_footer_aliases_json',
   'EditSession.layout_document_with_regions_after_edit', 'EditSession.layout_document_with_regions_exact_prefix_retained',
   'EditSession.layout_document_with_regions_prefix_retained_json',
@@ -1799,17 +1908,17 @@ const notYetCovered: string[] = [
   'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.outline_glyph_json',
   'EditSession.paragraph_id_count', 'EditSession.paragraph_unit',
   'EditSession.patch_style_languages_xml', 'EditSession.prime_save_seed_states_slice',
-  'EditSession.proposal_revision_ranges_json', 'EditSession.rebuild_media_sources',
+  'EditSession.rebuild_media_sources',
   'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.reset_frame_base',
   'EditSession.resident_caret_snapshot_json', 'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
   'EditSession.resolve_encoded_selection', 'EditSession.resolve_paragraph_anchor', 'EditSession.resolve_sticky_position', 'EditSession.resume_region_layout',
-  'EditSession.retained_headers_footers_json', 'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json', 'EditSession.revision_ids_at',
-  'EditSession.revision_stamps_json', 'EditSession.run_inheritance', 'EditSession.seed_comment_metadata_json',
+  'EditSession.retained_headers_footers_json', 'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json',
+  'EditSession.run_inheritance',
   'EditSession.seed_opaque_sequences', 'EditSession.select_story', 'EditSession.selection',
   'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages',
   'EditSession.set_header_footer_aliases',
   'EditSession.set_local_lowering', 'EditSession.set_media_tokens', 'EditSession.set_partial_document',
-  'EditSession.set_windowed_incremental_builds', 'EditSession.settle_revisions_json',
+  'EditSession.set_windowed_incremental_builds',
   'EditSession.start_update_event_observation',
   'EditSession.story_segment_unit_digests', 'EditSession.story_segment_units', 'EditSession.style_languages_json',
   'EditSession.unavailable_tables_from',
@@ -1852,7 +1961,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(114);
+    expect(notYetCovered.length).toBe(107);
   });
 
   for (const row of rows) {
