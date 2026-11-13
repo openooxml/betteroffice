@@ -14,7 +14,7 @@ import {
 } from '@betteroffice/xlsx/worker';
 import type {
   CapturedFormat, CellAddr, CellEdit, CellInputEdit, CellRange, Direction, DisplayList, EditResult, Proposal, Rect,
-  Selection, WorkbookFrame, WorkbookHandle, WorkbookSheetView, XlsxEditResult,
+  Selection, WorkbookFrame, WorkbookHandle, WorkbookSheetView, XlsxCellAddress, XlsxEditResult,
 } from '@betteroffice/xlsx';
 import type { WorkbookReplayOp } from '@betteroffice/xlsx/worker';
 import { useDefaultFonts } from '../useDefaultFonts';
@@ -37,6 +37,9 @@ import { EditorToolbar } from '../components/EditorToolbar';
 import { FillHandle, fillHandleAnchor } from '../components/FillHandle';
 import { EditorChromeContext } from '../components/EditorToolbarContext';
 import type { BorderStyle } from '../components/Toolbar';
+import {
+  ReplaceDialog, type ReplaceDialogApi, type ReplaceDialogSheet, type ReplaceDialogTarget, withSheetCatalog,
+} from '../components/ReplaceDialog';
 import { FormulaBarContext, type FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import { ToolbarCommandButton } from '../components/toolbar/ToolbarCommand';
 import { useTranslation } from '../i18n';
@@ -160,6 +163,9 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const [proposals, setProposals, proposalsRef] = useSyncedState<Proposal[]>([]);
   const [proposalsPanelOpen, setProposalsPanelOpen, panelRef] = useSyncedState(false);
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [replaceTarget, setReplaceTarget] = useState<ReplaceDialogTarget | null>(null);
+  const replaceReveal = useRef<(cell: XlsxCellAddress) => void>(() => {});
   const mutationRef = useRef(0);
   const navigationRef = useRef(0);
   const [selectionNavigation] = useState(createSelectionDataNavigation);
@@ -1316,6 +1322,69 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
     }, { kind: 'input', target: { sheet, target: destinationA1 } }).catch(reportInputError);
   }, [acceptInput, apply, coordinator, operationPeer, reportInputError]);
+  replaceReveal.current = (cell) => {
+    const sheet = runRef.current?.peer?.sheetInfo().sheetIds.indexOf(cell.sheetId) ?? -1;
+    if (sheet >= 0) navigate(sheet, selectionAt({ row: cell.row, col: cell.col }));
+  };
+  const openReplaceDialog = () => {
+    const peer = runRef.current?.peer;
+    const selected = selectionRef.current;
+    const info = peer?.sheetInfo();
+    const sheetId = info?.sheetIds[activeRef.current];
+    if (!peer || !info || !sheetId || !selected) {
+      setReplaceTarget(null);
+      setReplaceOpen(true);
+      return;
+    }
+    const range = normalizeRange(selected);
+    const from = address({ row: range.top, col: range.left });
+    const to = address({ row: range.bottom, col: range.right });
+    const sheets = info.sheetIds.map((id, index) => ({ sheetId: id, name: info.sheetNames[index] ?? id }));
+    let catalog: ReplaceDialogSheet[] = sheets;
+    try { catalog = withSheetCatalog(sheets, peer.readCells({ ranges: [] })); } catch {}
+    setReplaceTarget({
+      sheetId,
+      range: { kind: 'rowCol', start: { row: range.top, col: range.left }, end: { row: range.bottom, col: range.right } },
+      label: from === to ? from : `${from}:${to}`,
+      activeCell: { row: selected.anchor.row, col: selected.anchor.col },
+      sheets: catalog,
+    });
+    setReplaceOpen(true);
+  };
+  const replaceApi = useMemo<ReplaceDialogApi>(() => {
+    const peer = () => {
+      const current = runRef.current;
+      if (!current?.ready || !current.peer) throw new Error('The editor is not ready.');
+      return current.peer;
+    };
+    return {
+      version: () => peer().version(),
+      find: (request) => peer().findText(request),
+      validate: (request) => peer().validateEdits(request),
+      reveal: (cell) => replaceReveal.current(cell),
+      apply: (request) => {
+        const op: WorkbookReplayOp = { method: 'applyEdits', args: [structuredClone(request)] };
+        return coordinator.runAfterPendingInput(async (_, markApplied) => {
+          await boundary();
+          const current = runRef.current;
+          const editor = current?.recovering ? operationPeer.current : current?.editPeer;
+          if (!current?.current || current.retiring || current.failure || !editor || !acceptInput()) {
+            throw new Error('The editor is not ready.');
+          }
+          markApplied.check();
+          const operations = workbookEditPeerOperations(editor);
+          const result = (current.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as XlsxEditResult;
+          if (!result.ok) {
+            markApplied.refuse(new WorkerInputRefusal(result.failure.message), true);
+            return result;
+          }
+          markApplied();
+          apply(result);
+          return result;
+        }, { kind: 'command', input: op });
+      },
+    };
+  }, [acceptInput, apply, boundary, coordinator, operationPeer]);
   const onMouseDown = (event: MouseEvent) => {
     if (fromPlugin(event) || runRef.current?.failure || editorInputRef.current?.contains(event.target as Node)) return;
     const { cell, chart } = point(event);
@@ -1639,7 +1708,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     coordinator, preview: () => preview(), recovering: () => runRef.current?.recovering ?? false,
     i18n: () => propsRef.current.i18n, translate: t, apply, fail: (error) => run?.fail(error),
     setZoom: (scale) => { setZoom(scale); sourceRef.current?.schedule(); },
-    setProposalsPanelOpen, setCapturedFormat: (format, source) => {
+    setProposalsPanelOpen, setReplaceOpen: (open) => { if (open) openReplaceDialog(); else setReplaceOpen(false); },
+    setCapturedFormat: (format, source) => {
       setCapturedFormat(format); paintFormatSource.current = source;
     },
     setBorderStyle: (style) => { borderStyleRef.current = style; },
@@ -1833,6 +1903,8 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
           <div ref={dockAreaRef} data-testid="xlsx-workspace" style={{ position: 'relative', display: 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
             {renderDock('left')}
             <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
+              <ReplaceDialog open={replaceOpen} target={replaceTarget} api={replaceApi} readOnly={props.readOnly}
+                onClose={() => setReplaceOpen(false)} />
               {isProposalsAvailable() && proposalsPanelOpen && <ProposalsPanel proposals={proposals} staleFor={staleFor}
                 style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
               {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
