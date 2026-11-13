@@ -157,6 +157,8 @@ export interface ComplexField {
     fldLock?: boolean;
     /** Field is dirty */
     dirty?: boolean;
+    /** The begin `w:fldChar`'s `<w:ffData>` serialized verbatim, replayed unchanged on save. */
+    rawFormDataXml?: string;
     /** Rich recursive code projection. Undefined = use `fieldCode`. */
     structuredCode?: StructuredFieldContent;
     /** Rich recursive cached result. Undefined = use `fieldResult`. */

@@ -1698,7 +1698,9 @@ fn namespace_declaration<'a>(
 ) -> Option<(&'a str, &'a str)> {
     match name.strip_prefix("xmlns") {
         Some("") => Some(("", value.as_str())),
-        Some(rest) => rest.strip_prefix(':').map(|prefix| (prefix, value.as_str())),
+        Some(rest) => rest
+            .strip_prefix(':')
+            .map(|prefix| (prefix, value.as_str())),
         None => None,
     }
 }

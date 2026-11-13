@@ -168,9 +168,8 @@ fn two_paragraphs(namespaces: &str, data: &str) -> (Vec<u8>, String, String) {
         r#"{field}<w:p w14:paraId="73000004">{}</w:p>"#,
         text("Other")
     );
-    let document = format!(
-        "<w:document {NS} {namespaces}><w:body>{body}<w:sectPr/></w:body></w:document>"
-    );
+    let document =
+        format!("<w:document {NS} {namespaces}><w:body>{body}<w:sectPr/></w:body></w:document>");
     (package(document.clone()), document, field)
 }
 
