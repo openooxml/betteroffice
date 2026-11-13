@@ -146,7 +146,13 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
         .child_elements()
         .filter(|child| matches!(child.local_name(), "catAx" | "dateAx" | "valAx" | "serAx"))
         .take(MAX_AXES)
-        .map(parse_axis)
+        .map(|element| {
+            let mut axis = parse_axis(element);
+            if let Some(code) = linked_value_format(element, &axis, &plot_groups) {
+                axis.number_format = Some(code);
+            }
+            axis
+        })
         .collect::<Vec<_>>();
     let axes = parse_axes(plot_area, series.first());
     let title = first_deep(chart_space, "title", 0);
@@ -683,9 +689,17 @@ fn label_switches<E: ChartXml>(labels: &E) -> ChartDataLabels {
         number_format: child(labels, "numFmt")
             .and_then(|value| value.attribute(None, "formatCode"))
             .map(decode_xstring),
+        source_linked: child(labels, "numFmt")
+            .is_some_and(source_linked)
+            .then_some(true),
         text: parse_text_properties(child(labels, "txPr")),
         points: None,
     }
+}
+
+/// Whether a `c:numFmt` defers to the format of the cells it plots.
+fn source_linked<E: ChartXml>(format: &E) -> bool {
+    matches!(format.attribute(None, "sourceLinked"), Some("1" | "true"))
 }
 
 /// The title's style: the first run of its `c:rich` over its `c:txPr`, because
@@ -760,6 +774,30 @@ fn parse_legend<E: ChartXml>(chart_space: &E) -> Option<ChartLegend> {
             .is_some_and(|overlay| !matches!(val_attr(Some(overlay)), Some("0" | "false"))),
         text: parse_text_properties(child(legend, "txPr")),
     })
+}
+
+/// The format a source-linked value axis reads: the one its first series'
+/// values were cached with. A percent-stacked axis plots shares and the x axis
+/// of an x-y group plots `c:xVal`, so both keep the code they were saved with.
+fn linked_value_format<E: ChartXml>(
+    element: &E,
+    axis: &ChartAxis,
+    groups: &[ChartPlotGroup],
+) -> Option<String> {
+    if element.local_name() != "valAx" || !child(element, "numFmt").is_some_and(source_linked) {
+        return None;
+    }
+    let id = axis.id.as_deref()?;
+    let group = groups
+        .iter()
+        .find(|group| group.axis_ids.iter().any(|axis_id| axis_id == id))?;
+    if group.grouping.as_deref() == Some("percentStacked")
+        || (matches!(group.chart_type.as_deref(), Some("scatter" | "bubble"))
+            && group.axis_ids.first().map(String::as_str) == Some(id))
+    {
+        return None;
+    }
+    group.series.first()?.value_format.clone()
 }
 
 fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
