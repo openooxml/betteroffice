@@ -95,6 +95,9 @@ function unversioned(result: object) {
   return rest;
 }
 
+const generatedVersions = <T>(value: T): T =>
+  JSON.parse(JSON.stringify(value).replace(/"[0-9a-f]{32}-(\d+)"/g, '"<version>-$1"'));
+
 function cellsOf(result: object) {
   const { matches } = result as { matches?: { cell: { sheetId: string; a1: string } }[] };
   return matches?.map((match) => `${match.cell.sheetId}!${match.cell.a1}`) ?? result;
@@ -224,29 +227,48 @@ describe('xlsx native/wasm package parity', () => {
     expect(cellsOf(found)).toEqual(['sheet:0!A2']);
   });
 
+  const replaceTarget = (a1: string) => ({ sheetId: 'sheet:0', range: { kind: 'a1' as const, a1 } });
+  const applyReplace = (workbook: WorkbookHandle) => workbook.applyEdits({
+    expectVersion: workbook.version(),
+    steps: [
+      { op: 'replaceText', target: replaceTarget('A3:A3'), query: '1', replacement: '2' },
+      { op: 'replaceText', target: replaceTarget('B1:B1'), query: 'A3', replacement: '(', lookIn: 'formulas' },
+    ],
+  });
+
   test('replaceText edits entered text and refuses a formula break on both engines', async () => {
-    const result = await compare((workbook) => {
-      const target = (a1: string) => ({ sheetId: 'sheet:0', range: { kind: 'a1' as const, a1 } });
-      const applied = workbook.applyEdits({
-        expectVersion: workbook.version(),
-        steps: [
-          { op: 'replaceText', target: target('A3:A3'), query: '1', replacement: '2' },
-          { op: 'replaceText', target: target('B1:B1'), query: 'A3', replacement: '(', lookIn: 'formulas' },
-        ],
-      });
-      return {
-        applied: unversioned(applied),
-        edited: unversioned(workbook.findText({ text: '223', entireCell: true, sheetIds: ['sheet:0'] })),
-        kept: unversioned(workbook.findText({ text: 'A3+1', lookIn: 'formulas', sheetIds: ['sheet:0'] })),
-      };
-    }, await findFixture());
+    const result = await compare((workbook) => ({
+      applied: generatedVersions(unversioned(applyReplace(workbook))),
+      edited: unversioned(workbook.findText({ text: '223', entireCell: true, sheetIds: ['sheet:0'] })),
+      kept: unversioned(workbook.findText({ text: 'A3+1', lookIn: 'formulas', sheetIds: ['sheet:0'] })),
+    }), await findFixture());
     if (!('receipts' in result.applied)) throw new Error('Expected applied edits');
+    expect(result.applied).toMatchObject({ baseVersion: '<version>-0' });
     const receipts = result.applied.receipts as { replace?: { refused?: number; refusedCells?: { cell: string }[] } }[];
     expect(receipts[1]?.replace?.refusedCells?.map((refused) => refused.cell)).toEqual(['B1']);
     expect(receipts[1]?.replace?.refused).toBe(1);
     expect(receipts[0]?.replace?.refused).toBe(0);
     expect(cellsOf(result.edited)).toEqual(['sheet:0!A3']);
     expect(cellsOf(result.kept)).toEqual(['sheet:0!B1']);
+  });
+
+  test('replaceText base versions differ between two loads of the same workbook on each engine', async () => {
+    const bytes = await findFixture();
+    const baseVersions = (engine: Xlsx) => [0, 1].map(() => {
+      const workbook = engine.openWorkbook(bytes, { calculation });
+      try {
+        const applied = applyReplace(workbook) as unknown as { baseVersion?: unknown };
+        expect(applied.baseVersion).toMatch(/^[0-9a-f]{32}-0$/);
+        return String(applied.baseVersion);
+      } finally {
+        workbook.dispose();
+      }
+    });
+    const [a, b] = baseVersions(native);
+    const [c, d] = baseVersions(wasm);
+    console.log(`BASEVERSION-PROBE native ${a} ${b} wasm ${c} ${d}`);
+    expect(a).not.toBe(b);
+    expect(c).not.toBe(d);
   });
 
   test('deleting and inserting sheets around tables, with undo and redo, matches on both engines', async () => {
