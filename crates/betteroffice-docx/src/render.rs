@@ -1,5 +1,6 @@
 //! Server-side rasterization of a display list.
 
+#[cfg(feature = "render-path-counter")]
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
@@ -14,6 +15,7 @@ use serde_json::{Number, Value, json};
 
 use crate::{Document, DocumentModel, Error, Result};
 
+#[cfg(feature = "render-path-counter")]
 std::thread_local! {
     static MODEL_RENDERS: Cell<usize> = const { Cell::new(0) };
 }
@@ -155,6 +157,7 @@ impl Document {
             return self.render_png_saved(target, options);
         }
         validate_scale(options)?;
+        #[cfg(feature = "render-path-counter")]
         MODEL_RENDERS.with(|renders| renders.set(renders.get() + 1));
         let package = layout_package(self.model())?;
         let engine = docx_edit::EngineSession::new(1);
@@ -169,6 +172,7 @@ impl Document {
     }
 
     /// [`Document::render_png`] through a save and a parse of the saved bytes, in every state.
+    // Test hook; not part of the stable API.
     #[doc(hidden)]
     pub fn render_png_saved(
         &self,
@@ -193,6 +197,8 @@ impl Document {
     }
 
     /// How many [`Document::render_png`] calls on this thread laid out from the model.
+    // Test hook; not part of the stable API.
+    #[cfg(feature = "render-path-counter")]
     #[doc(hidden)]
     pub fn model_renders() -> usize {
         MODEL_RENDERS.with(Cell::get)

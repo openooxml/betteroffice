@@ -11953,6 +11953,8 @@ impl EngineSession {
     }
 
     /// The retained region layout's display list with only `page` built, shaped with `font_chains`.
+    // Used by betteroffice-docx; not part of the stable API.
+    #[doc(hidden)]
     pub fn retained_page_display_list(
         &self,
         font_chains: &BTreeMap<String, Vec<u32>>,

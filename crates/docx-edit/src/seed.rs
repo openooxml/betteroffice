@@ -7456,6 +7456,8 @@ pub fn seed_from_docx_with_generation(
 }
 
 /// [`seed_from_docx`] from a parsed package of `bytes` with its images inline, and the parts `bytes` inflate to.
+// Used by betteroffice-docx; not part of the stable API.
+#[doc(hidden)]
 pub fn seed_from_parsed_docx(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,

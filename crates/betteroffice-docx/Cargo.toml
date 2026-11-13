@@ -18,6 +18,7 @@ fonts-latin = ["fonts", "betteroffice-fonts/fonts-latin"]
 fonts-intl = ["fonts", "betteroffice-fonts/fonts-intl"]
 fonts-cjk = ["fonts", "betteroffice-fonts/fonts-cjk"]
 raster = ["dep:docx-raster", "dep:ooxml-text", "dep:serde_json", "docx-edit/base-latin", "docx-layout/base-latin"]
+render-path-counter = ["raster"]
 
 [dependencies]
 betteroffice-fonts = { workspace = true }
