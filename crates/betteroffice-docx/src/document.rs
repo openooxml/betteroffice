@@ -301,10 +301,10 @@ impl Document {
             .and_then(|formatting| formatting.alignment.as_deref())
             .unwrap_or("left");
         let editor = EditingDoc::new(client_id);
-        match locator {
-            Locator::Id(para_id) => editor
+        match edited_id.as_deref() {
+            Some(para_id) => editor
                 .create_story_with_paragraph_id("body", para_id, &current, style, alignment)?,
-            Locator::Ordinal(_) => editor.create_story("body", &current, style, alignment)?,
+            None => editor.create_story("body", &current, style, alignment)?,
         };
         let receipt = editor.replace_range(
             context,
