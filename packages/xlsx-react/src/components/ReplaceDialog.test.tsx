@@ -1,7 +1,9 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
 import { fireEvent } from '@testing-library/react';
-import type { XlsxEditRequest, XlsxFindRequest, XlsxValidationResult } from '@betteroffice/xlsx';
+import type {
+  XlsxEditRequest, XlsxFindRequest, XlsxFindResult, XlsxValidationResult,
+} from '@betteroffice/xlsx';
 import { LocaleProvider } from '../i18n';
 import { ReplaceDialog, type ReplaceDialogApi } from './ReplaceDialog';
 
@@ -445,6 +447,45 @@ test('finds afresh when the workbook version moves between presses', async () =>
   fireEvent.click(getByRole('button', { name: 'Find next' }));
   await findByText('1 of 2');
   expect(finds).toBe(2);
+});
+
+test('drops a find result when the options change while it is in flight', async () => {
+  const finds: XlsxFindRequest[] = [];
+  const revealed: string[] = [];
+  const pending: ((result: XlsxFindResult) => void)[] = [];
+  const { getByRole, queryByText, findByText } = view({
+    version: () => 'v1',
+    find: (request) => {
+      finds.push(request);
+      return new Promise<XlsxFindResult>((resolve) => { pending.push(resolve); });
+    },
+    reveal: (cell) => { revealed.push(cell.a1); },
+    validate: () => preview(),
+    apply: () => { throw new Error('must not apply'); },
+  });
+  const settle = async (index: number, result: XlsxFindResult) => {
+    await act(async () => {
+      pending[index](result);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+  const match = { cell: { sheetId: target.sheetId, row: 1, col: 1, a1: 'B2' }, text: 'Alpha' };
+
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await waitFor(() => expect(pending.length).toBe(1));
+  fireEvent.click(getByRole('checkbox', { name: 'Match case' }));
+  await settle(0, { ok: true, version: 'v1', truncated: false, matches: [match] });
+
+  expect(revealed).toEqual([]);
+  expect(queryByText('1 of 1')).toBeNull();
+
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await waitFor(() => expect(pending.length).toBe(2));
+  await settle(1, { ok: true, version: 'v1', truncated: false, matches: [] });
+  await findByText(/No matches/);
+  expect(finds[1]).toMatchObject({ text: 'alpha', matchCase: true });
+  expect(revealed).toEqual([]);
 });
 
 test('sends matchCase when Match case is ticked', async () => {
