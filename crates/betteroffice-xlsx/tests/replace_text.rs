@@ -1184,6 +1184,41 @@ fn replace_on_an_explicit_chartsheet_target_is_refused() {
 }
 
 #[test]
+fn replace_without_within_searches_an_explicit_hidden_sheet() {
+    let mut workbook = workbook_with_hidden_and_chartsheet();
+    let steps = ["sheet:0", "sheet:1", "sheet:3"].map(whole_sheet_step).to_vec();
+    let request = serde_json::from_value::<EditRequest>(json!({
+        "expectVersion": workbook.version(),
+        "steps": steps.clone(),
+    }))
+    .unwrap();
+    let defaulted = serde_json::from_value::<EditRequest>(json!({
+        "expectVersion": workbook.version(),
+        "steps": ["sheet:0", "sheet:1", "sheet:3"]
+            .map(|sheet| whole_sheet_within(sheet, "sheet")),
+    }))
+    .unwrap();
+    assert_eq!(request, defaulted);
+    assert!(
+        serde_json::to_value(&request.steps[0]).unwrap()["within"].is_null(),
+        "the default is not written back"
+    );
+    let outcome = apply_steps(&mut workbook, steps);
+    let Some(Ok(applied)) = &outcome else {
+        panic!("a replace without within applies: {outcome:?}");
+    };
+    assert_eq!(stored_on(&workbook, SheetId(0), "A1"), text("omega"));
+    assert_eq!(stored_on(&workbook, SheetId(1), "A1"), text("omega"));
+    assert_eq!(stored_on(&workbook, SheetId(3), "A1"), text("omega"));
+    let matched = applied
+        .receipts
+        .iter()
+        .map(|receipt| receipt.replace.as_ref().map_or(0, |stats| stats.matched))
+        .collect::<Vec<_>>();
+    assert_eq!(matched, [1, 1, 1]);
+}
+
+#[test]
 fn workbook_replace_skips_hidden_and_very_hidden_sheets() {
     let mut workbook = workbook_with_hidden_and_chartsheet();
     let steps = ["sheet:0", "sheet:1", "sheet:2", "sheet:3"]
