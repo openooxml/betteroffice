@@ -31,6 +31,31 @@ pub(crate) const CONTENT_FRAGMENT_PREFIX: &str = concat!(
     "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
 );
 
+/// Binds exactly the story-root prefixes, so no wrapper binding outside them can leak into the fragment.
+const STORY_ROOT_FRAGMENT_PREFIX: &str = concat!(
+    "<s11:root xmlns:s11=\"urn:openooxml:serializer-fragment\" ",
+    "xmlns:wpc=\"http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas\" ",
+    "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" ",
+    "xmlns:o=\"urn:schemas-microsoft-com:office:office\" ",
+    "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
+    "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\" ",
+    "xmlns:v=\"urn:schemas-microsoft-com:vml\" ",
+    "xmlns:wp14=\"http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing\" ",
+    "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" ",
+    "xmlns:w10=\"urn:schemas-microsoft-com:office:word\" ",
+    "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" ",
+    "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" ",
+    "xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\" ",
+    "xmlns:w16se=\"http://schemas.microsoft.com/office/word/2015/wordml/symex\" ",
+    "xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\" ",
+    "xmlns:w16=\"http://schemas.microsoft.com/office/word/2018/wordml\" ",
+    "xmlns:w16cex=\"http://schemas.microsoft.com/office/word/2018/wordml/cex\" ",
+    "xmlns:w16sdtdh=\"http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash\" ",
+    "xmlns:wne=\"http://schemas.microsoft.com/office/word/2006/wordml\" ",
+    "xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" ",
+    "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
+);
+
 /// A replayed foreign fragment must still be exactly one well-formed
 /// element; the resolver-free reader accepts its authored prefixes as-is.
 pub(crate) fn validate_replayed_fragment(xml: &str) -> Result<(), ParseError> {
@@ -61,14 +86,14 @@ pub(crate) fn validate_raw_subtree(
     expected_prefix: &str,
     expected_local_name: &str,
 ) -> Result<(), ParseError> {
-    with_raw_subtree(xml, |_, child| {
+    with_raw_subtree(xml, CONTENT_FRAGMENT_PREFIX, |_, child| {
         require_name(child, expected_prefix, expected_local_name)
     })
 }
 
 /// Also requires each prefix to be declared in the fragment or by every story root.
 pub(crate) fn validate_form_field_data(xml: &str) -> Result<(), ParseError> {
-    with_raw_subtree(xml, |root, child| {
+    with_raw_subtree(xml, STORY_ROOT_FRAGMENT_PREFIX, |root, child| {
         require_name(child, "w", "ffData")?;
         let mut scope: Vec<&str> = root
             .attributes
@@ -106,9 +131,10 @@ fn require_bound_prefixes<'a>(
 
 fn with_raw_subtree(
     xml: &str,
+    wrapper: &str,
     check: impl for<'e> FnOnce(&'e XmlElement, &'e XmlElement) -> Result<(), ParseError>,
 ) -> Result<(), ParseError> {
-    let source = format!("{CONTENT_FRAGMENT_PREFIX}{xml}</s11:root>");
+    let source = format!("{wrapper}{xml}</s11:root>");
     let limits = ParseLimits::default();
     let document = parse_xml_strict(
         source.as_bytes(),
