@@ -430,30 +430,56 @@ fn keeps_the_declaration_of_a_w_alias_an_attribute_value_of_the_form_field_data_
     }
 }
 
-#[test]
-fn saves_model_form_field_data_holding_the_placeholder_text_of_a_field_kept_as_source() {
+const COMMENTED_DATA: &str = r#"<w:ffData><w:name w:val="Check1"/><!--bo-ffdata 0--></w:ffData>"#;
+
+fn text_and_checkbox_fields() -> (String, String) {
     let first = format!(
-        "<w:p>{}{}</w:p>",
+        r#"<w:p w14:paraId="73000005">{}{}</w:p>"#,
         text("Label "),
         form_field(TEXT_DATA, "FORMTEXT", &text("Ada")),
     );
     let second = format!(
-        "<w:p>{}{}</w:p>",
+        r#"<w:p w14:paraId="73000006">{}{}</w:p>"#,
         text("Agree "),
         form_field(CHECK_DATA, "FORMCHECKBOX", ""),
     );
-    let document =
-        format!("<w:document {NS}><w:body>{first}{second}<w:sectPr/></w:body></w:document>");
-    let sha256 = format!("{:x}", Sha256::digest(document.as_bytes()));
-    let commented = r#"<w:ffData><w:name w:val="Check1"/><!--bo-ffdata 0--></w:ffData>"#;
+    let w14 = r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
+    let document = format!(
+        "<w:document {NS} {w14}><w:body>{first}{second}<w:sectPr/></w:body></w:document>"
+    );
+    (document, first)
+}
+
+fn foreign_then_commented(request: &mut Value) {
+    let paragraphs = request["document"]["content"].as_array_mut().unwrap();
+    assert_eq!(paragraphs.len(), 2);
+    assert_eq!(replace_raw_form_data(&mut paragraphs[0], FOREIGN_DATA), 1);
+    assert_eq!(replace_raw_form_data(&mut paragraphs[1], COMMENTED_DATA), 1);
+}
+
+#[test]
+fn saves_model_form_field_data_holding_the_placeholder_text_of_a_field_kept_as_source() {
+    let (document, first) = text_and_checkbox_fields();
     let xml = save_request(&package(document), |request| {
+        foreign_then_commented(request);
+        request["selective"] = json!({"changedParaIds": ["73000006"]});
+    })
+    .unwrap();
+    assert_eq!(xml.matches(first.as_str()).count(), 1, "{xml}");
+    let begin = format!(r#"<w:fldChar w:fldCharType="begin">{COMMENTED_DATA}</w:fldChar>"#);
+    assert_eq!(xml.matches(begin.as_str()).count(), 1, "{xml}");
+}
+
+#[test]
+fn a_changed_field_paragraph_sends_splices_to_the_whole_part_write_validating_every_form_field() {
+    let (document, _) = text_and_checkbox_fields();
+    let sha256 = format!("{:x}", Sha256::digest(document.as_bytes()));
+    let error = save_request(&package(document), |request| {
+        foreign_then_commented(request);
         let paragraphs = request["document"]["content"].as_array_mut().unwrap();
-        assert_eq!(paragraphs.len(), 2);
         for (ordinal, paragraph) in paragraphs.iter_mut().enumerate() {
             paragraph["sourceOrdinal"] = json!(ordinal);
         }
-        assert_eq!(replace_raw_form_data(&mut paragraphs[0], FOREIGN_DATA), 1);
-        assert_eq!(replace_raw_form_data(&mut paragraphs[1], commented), 1);
         request["paragraphIds"] = json!({"splicedParts": [{
             "part": "word/document.xml",
             "sha256": sha256,
@@ -461,8 +487,6 @@ fn saves_model_form_field_data_holding_the_placeholder_text_of_a_field_kept_as_s
             "changed": [1],
         }]});
     })
-    .unwrap();
-    assert_eq!(xml.matches(first.as_str()).count(), 1, "{xml}");
-    let begin = format!(r#"<w:fldChar w:fldCharType="begin">{commented}</w:fldChar>"#);
-    assert_eq!(xml.matches(begin.as_str()).count(), 1, "{xml}");
+    .unwrap_err();
+    assert!(error.contains("\"Ext1\""), "{error}");
 }
