@@ -424,10 +424,27 @@ function typedUndoSteps(session: Session, gap: number) {
 }
 
 // A seeded open is what marks a replica seeded, which priming requires.
-function seededReplica(fresh: () => Session): Session {
+function seededReplica({ fresh, saveFrom }: Docx): Session {
   const f = fresh();
   f.seed_from_docx(fixture, GENERATION);
+  saveFrom(f);
   return f;
+}
+
+function replicaReads(replica: Session) {
+  return { segments: replica.story_segments('body'), stories: replica.list_stories_json(), layout: layout(replica).layout };
+}
+
+function refusedThenKept(session: Session, refuse: () => unknown, rebuild: (epoch: number) => Uint8Array) {
+  const kept = frameEpoch(session);
+  let refusal: unknown;
+  try {
+    refuse();
+  } catch (error) {
+    refusal = error;
+  }
+  if (refusal === undefined) throw new Error('the frame call was not refused');
+  return { refusal: String(refusal), kept, after: frameEpoch(session), again: rebuild(kept) };
 }
 
 function primeSlices(session: Session) {
@@ -754,13 +771,14 @@ const rows: Row<Docx>[] = [
   { method: 'sanitizeOoxml', call: ({ engine }) => new ZipReturn(engine.sanitizeOoxml(fixture, 'docx')) },
   { method: 'paragraphPatchWriterVersion', call: ({ engine }) => engine.paragraphPatchWriterVersion() },
   { method: 'skippedEffectKinds', call: ({ engine }) => engine.skippedEffectKinds() },
+  // No EditSession save exists, so the save goes through a host and the replica's own reads are compared too.
   {
     method: 'EditSession.open_docx',
     mutates: true,
     call: ({ fresh, saveFrom }) => {
       const f = fresh();
       saveFrom(f);
-      return { result: f.open_docx(fixture, true, GENERATION), after: f.paragraphs('body') };
+      return { result: f.open_docx(fixture, true, GENERATION), after: f.paragraphs('body'), reads: replicaReads(f) };
     },
   },
   {
@@ -769,13 +787,14 @@ const rows: Row<Docx>[] = [
     throws: { name: 'string', reason: 'bytes that are not a readable DOCX are refused' },
     call: ({ fresh }) => fresh().open_docx(NOT_DOCX, true, GENERATION),
   },
+  // No EditSession save exists, so the save goes through a host and the replica's own reads are compared too.
   {
     method: 'EditSession.seed_from_docx',
     mutates: true,
     call: ({ fresh, saveFrom }) => {
       const f = fresh();
       saveFrom(f);
-      return { result: f.seed_from_docx(fixture, GENERATION), after: f.paragraphs('body') };
+      return { result: f.seed_from_docx(fixture, GENERATION), after: f.paragraphs('body'), reads: replicaReads(f) };
     },
   },
   {
@@ -784,6 +803,7 @@ const rows: Row<Docx>[] = [
     throws: { name: 'string', reason: 'bytes that are not a readable DOCX are refused' },
     call: ({ fresh }) => fresh().seed_from_docx(NOT_DOCX, GENERATION),
   },
+  // No EditSession save exists, so the save goes through a host and the replica's own reads are compared too.
   defineRow({
     method: 'EditSession.load_json',
     mutates: true,
@@ -795,7 +815,7 @@ const rows: Row<Docx>[] = [
     },
     call: (_, f) => {
       const result = f.load_json(JSON.stringify([{ storyId: 'body', paragraphs: [{ text: 'Loaded' }, { text: 'Centred', alignment: 'center' }] }]));
-      return { result, after: f.paragraphs('body') };
+      return { result, after: f.paragraphs('body'), reads: replicaReads(f) };
     },
   }),
   {
@@ -846,7 +866,8 @@ const rows: Row<Docx>[] = [
   }),
   defineRow({
     method: 'EditSession.prime_save_seed_states',
-    setup: ({ fresh }: Docx) => seededReplica(fresh),
+    mutates: true,
+    setup: (docx: Docx) => seededReplica(docx),
     call: (_, f) => {
       const primed = [f.prime_save_seed_states(100_000, 64 * 1024 * 1024), f.prime_save_seed_states(100_000, 64 * 1024 * 1024)];
       if (!primed[0]) throw new Error('a seeded replica within budget declined priming');
@@ -856,7 +877,8 @@ const rows: Row<Docx>[] = [
   defineRow({
     method: 'EditSession.prime_save_seed_states',
     name: 'EditSession.prime_save_seed_states (over budget)',
-    setup: ({ fresh }: Docx) => seededReplica(fresh),
+    mutates: true,
+    setup: (docx: Docx) => seededReplica(docx),
     call: (_, f) => [f.prime_save_seed_states(1, 1), f.prime_save_seed_states(100_000, 1)],
   }),
   {
@@ -866,7 +888,8 @@ const rows: Row<Docx>[] = [
   },
   defineRow({
     method: 'EditSession.prime_last_slice_cost',
-    setup: ({ fresh }: Docx) => seededReplica(fresh),
+    mutates: true,
+    setup: (docx: Docx) => seededReplica(docx),
     call: (_, f) => primeSlices(f),
   }),
   {
@@ -1132,6 +1155,7 @@ const rows: Row<Docx>[] = [
     },
     call: ({ session: s }, revision) => s.stories_changed_since(revision),
   }),
+  // No EditSession save exists, so the save goes through a host and the replica's own reads are compared too.
   defineRow({
     method: 'EditSession.create_story',
     mutates: true,
@@ -1141,7 +1165,7 @@ const rows: Row<Docx>[] = [
       saveFrom(f);
       return f;
     },
-    call: (_, f) => ({ result: f.create_story('body', 'Created', 'Heading1', 'center'), after: f.paragraphs('body') }),
+    call: (_, f) => ({ result: f.create_story('body', 'Created', 'Heading1', 'center'), after: f.paragraphs('body'), reads: replicaReads(f) }),
   }),
   {
     method: 'EditSession.create_story',
@@ -1176,6 +1200,38 @@ const rows: Row<Docx>[] = [
     call: ({ session: s }) => s.build_display_pages_frame(Uint32Array.from([0]), -1),
   }),
   defineRow({
+    method: 'EditSession.build_display_pages_frame',
+    name: 'EditSession.build_display_pages_frame (fractional epoch)',
+    throws: { name: 'string', reason: 'an expected frame epoch that is not a non-negative safe integer is refused' },
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }, epoch) => s.build_display_pages_frame(Uint32Array.from([0]), epoch + 0.5),
+  }),
+  defineRow({
+    method: 'EditSession.build_display_pages_frame',
+    name: 'EditSession.build_display_pages_frame (kept after a refused epoch)',
+    setup: ({ session: s }: Docx) => {
+      const { fontChains } = layout(s);
+      s.set_display_window(1, 2);
+      s.build_display_list_frame(frameExtras(fontChains), 0);
+    },
+    call: ({ session: s }) => refusedThenKept(
+      s,
+      () => s.build_display_pages_frame(Uint32Array.from([0]), -1),
+      (kept) => s.build_display_pages_frame(Uint32Array.from([0]), kept),
+    ),
+  }),
+  defineRow({
+    method: 'EditSession.build_display_pages_frame',
+    name: 'EditSession.build_display_pages_frame (epoch one past the current)',
+    setup: ({ session: s }: Docx) => {
+      const { fontChains } = layout(s);
+      s.set_display_window(1, 2);
+      s.build_display_list_frame(frameExtras(fontChains), 0);
+      return frameEpoch(s);
+    },
+    call: ({ session: s }, epoch) => ({ frame: s.build_display_pages_frame(Uint32Array.from([0]), epoch + 1), kept: frameEpoch(s) }),
+  }),
+  defineRow({
     method: 'EditSession.build_display_list_frame',
     setup: ({ session: s }: Docx) => layout(s).fontChains,
     call: ({ session: s }, fontChains) => {
@@ -1191,6 +1247,66 @@ const rows: Row<Docx>[] = [
     setup: ({ session: s }: Docx) => layout(s).fontChains,
     call: ({ session: s }, fontChains) => s.build_display_list_frame(frameExtras(fontChains), -1),
   }),
+  defineRow({
+    method: 'EditSession.build_display_list_frame',
+    name: 'EditSession.build_display_list_frame (fractional epoch)',
+    throws: { name: 'string', reason: 'an expected frame epoch that is not a non-negative safe integer is refused' },
+    setup: ({ session: s }: Docx) => layout(s).fontChains,
+    call: ({ session: s }, fontChains) => s.build_display_list_frame(frameExtras(fontChains), 0.5),
+  }),
+  defineRow({
+    method: 'EditSession.build_display_list_frame',
+    name: 'EditSession.build_display_list_frame (kept after a refused epoch)',
+    setup: ({ session: s }: Docx) => {
+      const { fontChains } = layout(s);
+      s.build_display_list_frame(frameExtras(fontChains), 0);
+      return fontChains;
+    },
+    call: ({ session: s }, fontChains) => refusedThenKept(
+      s,
+      () => s.build_display_list_frame(frameExtras(fontChains), -1),
+      (kept) => s.build_display_list_frame(frameExtras(fontChains), kept),
+    ),
+  }),
+  defineRow({
+    method: 'EditSession.build_display_list_frame',
+    name: 'EditSession.build_display_list_frame (kept after unparseable input)',
+    setup: ({ session: s }: Docx) => {
+      const { fontChains } = layout(s);
+      s.build_display_list_frame(frameExtras(fontChains), 0);
+      return fontChains;
+    },
+    call: ({ session: s }, fontChains) => refusedThenKept(
+      s,
+      () => s.build_display_list_frame('{', frameEpoch(s)),
+      (kept) => s.build_display_list_frame(frameExtras(fontChains), kept),
+    ),
+  }),
+  defineRow({
+    method: 'EditSession.build_display_list_frame',
+    name: 'EditSession.build_display_list_frame (epoch one past the current)',
+    setup: ({ session: s }: Docx) => {
+      const { fontChains } = layout(s);
+      s.build_display_list_frame(frameExtras(fontChains), 0);
+      return fontChains;
+    },
+    call: ({ session: s }, fontChains) => {
+      const epoch = frameEpoch(s);
+      return { frame: s.build_display_list_frame(frameExtras(fontChains), epoch + 1), kept: frameEpoch(s) };
+    },
+  }),
+  {
+    method: 'EditSession.build_display_list_json',
+    name: 'EditSession.build_display_list_json (unparseable)',
+    throws: { name: 'string', reason: 'input that is not JSON is refused' },
+    call: ({ session: s }) => s.build_display_list_json('{'),
+  },
+  {
+    method: 'EditSession.layout_document_with_regions_json',
+    name: 'EditSession.layout_document_with_regions_json (unparseable)',
+    throws: { name: 'string', reason: 'input that is not JSON is refused' },
+    call: ({ session: s }) => s.layout_document_with_regions_json('{'),
+  },
   defineRow({
     method: 'EditSession.build_display_list_frame',
     name: 'EditSession.build_display_list_frame (unparseable)',
