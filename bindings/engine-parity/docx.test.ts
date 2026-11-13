@@ -39,6 +39,7 @@ interface Docx {
   fresh(): Session;
   /** Saves `replica` instead, through a host opened unseeded on `source`. */
   saveFrom(replica: Session, source?: Uint8Array): void;
+  saved(replica: Session, source: Uint8Array): Promise<Uint8Array>;
 }
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -112,6 +113,8 @@ const nativeEngine = createRequire(import.meta.url)('../docx-native/index.js') a
 let fixture: Uint8Array;
 let fixtureEntries: Record<string, Uint8Array>;
 let twinCommentFixture: Uint8Array;
+let compareOriginal: Uint8Array;
+let compareRevised: Uint8Array;
 
 const SECOND_RUN = '<w:r><w:t xml:space="preserve">Second body paragraph, alpha again.</w:t></w:r>';
 
@@ -134,12 +137,26 @@ function twinCommentParts(): Record<string, string> {
   };
 }
 
+const SEEDED_FOOTNOTE = '<w:footnote w:id="1"><w:p w14:paraId="40000001"><w:r><w:t>Parity footnote</w:t></w:r></w:p></w:footnote>';
+
+function compareParts(text: string): Record<string, string> {
+  return {
+    'word/document.xml': `<w:document ${ROOT}><w:body><w:p w14:paraId="60000001"><w:r><w:t>Compared heading</w:t></w:r></w:p>` +
+      `<w:p w14:paraId="60000002"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>` +
+      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>',
+    'word/comments.xml': `<w:comments ${ROOT}/>`,
+    'word/footnotes.xml': patched('word/footnotes.xml', SEEDED_FOOTNOTE, ''),
+  };
+}
+
 beforeAll(async () => {
   await initWasm({ module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)) });
   await initPreflight({ module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/preflight/docx_preflight_bg.wasm', import.meta.url)) });
   fixture = await buildFixture();
   fixtureEntries = Object.fromEntries((await zipEntries(fixture)).parts);
   twinCommentFixture = await buildFixture(twinCommentParts());
+  compareOriginal = await buildFixture(compareParts('The quick fox jumps.'));
+  compareRevised = await buildFixture(compareParts('The quick brown fox jumps.'));
 });
 
 // version() is "{nonce:016x}-{epoch}"; mint_nonce in crates/docx-edit/src/batch.rs mixes host entropy and the clock.
@@ -162,6 +179,16 @@ function engineFor(engine: DocxEngine, yrs: Yrs) {
       host.destroy();
     };
     let replicaSave: { replica: Session; source: Uint8Array } | null = null;
+    const saved = async (replica: Session, source: Uint8Array) => {
+      const replicaHost = await yrs.createYrsSession({ clientId: HOST_CLIENT });
+      try {
+        replicaHost.openDocx(source, false, { generation: GENERATION });
+        replicaHost.applyUpdate(replica.encode_state());
+        return (await yrs.saveYrsDocx(replicaHost, { updateModifiedDate: false })).bytes;
+      } finally {
+        replicaHost.destroy();
+      }
+    };
     try {
       host.seedFromDocx(fixture, { generation: GENERATION });
       const session = open(EDITOR_CLIENT);
@@ -176,19 +203,11 @@ function engineFor(engine: DocxEngine, yrs: Yrs) {
           saveFrom: (replica, source = fixture) => {
             replicaSave = { replica, source };
           },
+          saved,
         },
         generated: () => sessions.map(versionNonce),
         save: async () => {
-          if (replicaSave) {
-            const replicaHost = await yrs.createYrsSession({ clientId: HOST_CLIENT });
-            try {
-              replicaHost.openDocx(replicaSave.source, false, { generation: GENERATION });
-              replicaHost.applyUpdate(replicaSave.replica.encode_state());
-              return (await yrs.saveYrsDocx(replicaHost, { updateModifiedDate: false })).bytes;
-            } finally {
-              replicaHost.destroy();
-            }
-          }
+          if (replicaSave) return saved(replicaSave.replica, replicaSave.source);
           host.applyUpdate(session.encode_state());
           return (await yrs.saveYrsDocx(host, { updateModifiedDate: false })).bytes;
         },
@@ -475,6 +494,78 @@ function saveRequest(engine: DocxEngine): string {
     document: { content, finalSectionProperties },
     options: { updateModifiedDate: false },
   });
+}
+
+const DETERMINISM = { seed: '0'.repeat(64), now: '2000-01-01T00:00:00.000Z' };
+
+interface WireBlock { type: string; content?: { type: string }[] }
+
+interface WirePackage {
+  document: { content: WireBlock[]; finalSectionProperties?: unknown; comments?: unknown[] };
+  headerEntries?: [string, unknown][];
+  footnotes?: unknown[];
+}
+
+function wirePackage(engine: DocxEngine) {
+  const { document, headerEntries, footnotes } = (JSON.parse(engine.parse_docx_s9(fixture, '')) as { document: { package: WirePackage } }).document.package;
+  const paragraphs = document.content.filter((block) => block.type === 'paragraph');
+  const table = document.content.find((block) => block.type === 'table');
+  const run = paragraphs[0]?.content?.find((item) => item.type === 'run');
+  const header = headerEntries?.[0]?.[1];
+  if (!paragraphs[1] || !table || !run || !header || !footnotes?.length || !document.comments?.length || !document.finalSectionProperties) {
+    throw new Error('the fixture wire lacks a paragraph, run, table, header, footnote, comment or final section');
+  }
+  return { document, paragraph: paragraphs[1], table, run, header, footnotes, comments: document.comments };
+}
+
+function serialized(serialize: (request: string) => string, requests: Record<string, unknown>[]): string[] {
+  return requests.map((request) => serialize(JSON.stringify({ ...request, determinism: DETERMINISM })));
+}
+
+function structuredContent(engine: DocxEngine): string {
+  const json = engine.export_docx_structured_json(fixture, EXPORT);
+  const outcome = JSON.parse(json) as { ok: boolean; content?: unknown };
+  if (!outcome.ok) throw new Error(`the structured export refused: ${json}`);
+  return JSON.stringify(outcome.content);
+}
+
+function laidOut(session: Session): string {
+  const { input } = layoutInput(session);
+  session.layout_document_with_regions_json(input);
+  return input;
+}
+
+function pagedExport(session: Session, request: string): string {
+  const json = session.export_structured_with_pages_json(EXPORT, request);
+  if (!(JSON.parse(json) as { ok: boolean }).ok) throw new Error(`the paged export refused: ${json}`);
+  return json;
+}
+
+function pageTexts(session: Session): string {
+  const json = session.page_texts_json(Uint32Array.from([0]));
+  const pages = JSON.parse(json) as { paragraphs: unknown[] }[];
+  if (!pages[0]?.paragraphs.length) throw new Error(`the first page shows no text: ${json}`);
+  return json;
+}
+
+function savedPairs(session: Session): [string, string][] {
+  const { paragraphs } = JSON.parse(session.paragraph_identities()) as {
+    paragraphs: { session: { paraId: string } | null; ooxmlParaId: string | null }[];
+  };
+  const held = paragraphs.flatMap(({ session: anchor, ooxmlParaId }): [string, string][] =>
+    anchor && ooxmlParaId ? [[anchor.paraId, ooxmlParaId]] : []);
+  const [first, second] = held;
+  if (!first || !second) throw new Error('fewer than two session paragraphs carry a Word paragraph ID');
+  return [...held, [first[0], second[1]]];
+}
+
+const COMPARE_OPTIONS = JSON.stringify({ author: 'Parity', date: DATE });
+
+function comparedInto(session: Session): string {
+  const json = session.compare_docx_json(compareOriginal, compareRevised, COMPARE_OPTIONS);
+  const outcome = JSON.parse(json) as { ok: boolean; noop?: boolean };
+  if (!outcome.ok || outcome.noop !== false) throw new Error(`the comparison left nothing to save: ${json}`);
+  return json;
 }
 
 const PARSES = ['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
@@ -1358,6 +1449,103 @@ const rows: Row<Docx>[] = [
     throws: { name: 'string', reason: 'input that is not JSON is refused' },
     call: ({ engine }) => engine.build_display_list_json('{'),
   },
+  {
+    method: 'serialize_docx_s10',
+    call: ({ engine }) => {
+      const { document, table } = wirePackage(engine);
+      return serialized((request) => engine.serialize_docx_s10(request), [
+        { family: 'section', properties: document.finalSectionProperties },
+        { family: 'tableGrid', table },
+      ]);
+    },
+  },
+  {
+    method: 'serialize_docx_s11',
+    call: ({ engine }) => {
+      const { paragraph, run, table } = wirePackage(engine);
+      return serialized((request) => engine.serialize_docx_s11(request), [
+        { family: 'paragraph', paragraph },
+        { family: 'run', run },
+        { family: 'table', table },
+      ]);
+    },
+  },
+  {
+    method: 'serialize_docx_s12',
+    call: ({ engine }) => {
+      const { document, header, footnotes, comments } = wirePackage(engine);
+      return serialized((request) => engine.serialize_docx_s12(request), [
+        { family: 'document', body: { content: document.content, finalSectionProperties: document.finalSectionProperties } },
+        { family: 'headerFooter', story: header },
+        { family: 'footnotes', notes: footnotes },
+        { family: 'comments', comments },
+      ]);
+    },
+  },
+  { method: 'render_docx_markdown_json', call: ({ engine }) => engine.render_docx_markdown_json(structuredContent(engine), '{}') },
+  defineRow({
+    method: 'render_docx_markdown_with_pages_json',
+    setup: ({ session: s }: Docx) => JSON.stringify((JSON.parse(pagedExport(s, laidOut(s))) as { content: unknown }).content),
+    call: ({ engine }, content) => engine.render_docx_markdown_with_pages_json(content, JSON.stringify({ pageMarkers: true })),
+  }),
+  defineRow({
+    method: 'EditSession.export_structured_with_pages_json',
+    setup: ({ session: s }: Docx) => laidOut(s),
+    call: ({ session: s }, request) => pagedExport(s, request),
+  }),
+  defineRow({
+    method: 'EditSession.page_texts_json',
+    setup: ({ session: s }: Docx) => layout(s),
+    call: ({ session: s }) => pageTexts(s),
+  }),
+  { method: 'EditSession.written_paragraph_ids', call: ({ session: s }) => s.written_paragraph_ids(fixture) },
+  {
+    method: 'EditSession.record_saved_paragraph_ids',
+    mutates: true,
+    call: ({ session: s }) => {
+      const stale = s.record_saved_paragraph_ids(JSON.stringify(savedPairs(s)));
+      if ((JSON.parse(stale) as unknown[]).length === 0) throw new Error('the pair holding another paragraph ID was not stale');
+      return { stale, after: s.paragraph_identities() };
+    },
+  },
+  {
+    method: 'EditSession.compare_docx_json',
+    call: ({ fresh }) => {
+      const f = fresh();
+      const result = comparedInto(f);
+      return { result, version: f.version(), paragraphs: f.paragraphs('body'), revisions: f.list_revisions() };
+    },
+  },
+  defineRow({
+    method: 'EditSession.finish_compared_docx_json',
+    setup: async ({ fresh, saved }: Docx) => {
+      const f = fresh();
+      comparedInto(f);
+      return { f, bytes: await saved(f, compareOriginal) };
+    },
+    call: (_, { f, bytes }) => ({ result: f.finish_compared_docx_json(bytes), version: f.version() }),
+  }),
+  {
+    method: 'EditSession.finish_compared_docx_json',
+    name: 'EditSession.finish_compared_docx_json (no comparison pending)',
+    throws: { name: 'string', reason: 'saved bytes are refused while no comparison awaits them' },
+    call: ({ session: s }) => s.finish_compared_docx_json(fixture),
+  },
+  defineRow({
+    method: 'EditSession.fail_compared_docx_json',
+    setup: ({ fresh }: Docx) => {
+      const f = fresh();
+      comparedInto(f);
+      return f;
+    },
+    call: (_, f) => ({ result: f.fail_compared_docx_json('the compared document could not be written'), version: f.version() }),
+  }),
+  {
+    method: 'EditSession.fail_compared_docx_json',
+    name: 'EditSession.fail_compared_docx_json (no comparison pending)',
+    throws: { name: 'string', reason: 'a save failure is refused while no comparison awaits its saved bytes' },
+    call: ({ session: s }) => s.fail_compared_docx_json('the compared document could not be written'),
+  },
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
@@ -1387,14 +1575,14 @@ const notYetCovered: string[] = [
   'EditSession.bootstrap_peer',
   'EditSession.canvasSkippedEffects', 'EditSession.clear_cell_selection',
   'EditSession.clear_measure_fonts', 'EditSession.clear_update_event_observation', 'EditSession.clear_update_observer',
-  'EditSession.comment_text_target_json', 'EditSession.compare_docx_json', 'EditSession.decode_font',
+  'EditSession.comment_text_target_json', 'EditSession.decode_font',
   'EditSession.delete_story',
   'EditSession.direct_batches_applied', 'EditSession.display_hit_test_regions_json', 'EditSession.display_range_rects_batch', 'EditSession.display_range_rects_json',
   'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json', 'EditSession.display_vertical_move_json', 'EditSession.drain_update_event',
   'EditSession.echo_glyph_set_json', 'EditSession.edit_text_resident', 'EditSession.encode_diff_chunks',
   'EditSession.encode_peer_metadata', 'EditSession.encode_sticky_position',
-  'EditSession.encoded_selection', 'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json', 'EditSession.export_structured_with_pages_json',
-  'EditSession.fail_compared_docx_json', 'EditSession.finish_compared_docx_json', 'EditSession.format_text_target_json', 'EditSession.geometry_position_outline_json',
+  'EditSession.encoded_selection', 'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json',
+  'EditSession.format_text_target_json', 'EditSession.geometry_position_outline_json',
   'EditSession.has_pending_update', 'EditSession.header_footer_aliases_json',
   'EditSession.insert_watermark',
   'EditSession.layout_document_with_regions_after_edit', 'EditSession.layout_document_with_regions_exact_prefix_retained',
@@ -1404,9 +1592,9 @@ const notYetCovered: string[] = [
   'EditSession.measure_paragraph_json', 'EditSession.media_data_url',
   'EditSession.media_sources_json', 'EditSession.media_type', 'EditSession.move_embed',
   'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.outline_glyph_json',
-  'EditSession.page_texts_json', 'EditSession.paragraph_id_count', 'EditSession.paragraph_unit',
+  'EditSession.paragraph_id_count', 'EditSession.paragraph_unit',
   'EditSession.patch_style_languages_xml', 'EditSession.prime_save_seed_states_slice',
-  'EditSession.proposal_revision_ranges_json', 'EditSession.rebuild_media_sources', 'EditSession.record_saved_paragraph_ids',
+  'EditSession.proposal_revision_ranges_json', 'EditSession.rebuild_media_sources',
   'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.repeat_content_control_at', 'EditSession.reset_frame_base',
   'EditSession.resident_caret_snapshot_json', 'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
   'EditSession.resolve_encoded_selection', 'EditSession.resolve_paragraph_anchor', 'EditSession.resolve_sticky_position', 'EditSession.resume_region_layout',
@@ -1422,7 +1610,7 @@ const notYetCovered: string[] = [
   'EditSession.start_update_event_observation',
   'EditSession.story_segment_unit_digests', 'EditSession.story_segment_units', 'EditSession.style_languages_json', 'EditSession.take_base_latin_miss',
   'EditSession.unavailable_tables_from',
-  'EditSession.update_measure_font_outlines', 'EditSession.written_paragraph_ids', 'EditSession.yrs_blocks_for_story',
+  'EditSession.update_measure_font_outlines', 'EditSession.yrs_blocks_for_story',
   'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.page_sizes', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.page_count',
   'RetainedLayoutMeta.partial', 'RetainedLayoutMeta.provisional',
   'RunInheritance.attributes', 'RunInheritance.paragraph_formatting', 'RunInheritance.table_attributes',
@@ -1430,7 +1618,6 @@ const notYetCovered: string[] = [
   'hit_test_regions_by_handle', 'hit_test_regions_json', 'measure_paragraph_json', 'open_display_list',
   'outline_glyph_json', 'parse_relationships_xml', 'range_rects_by_handle', 'range_rects_on_pages_by_handle', 'range_rects_on_pages_json',
   'range_rects_region_by_handle', 'range_rects_region_json', 'register_measure_font', 'register_substitute_measure_font',
-  'render_docx_markdown_json', 'render_docx_markdown_with_pages_json', 'serialize_docx_s10', 'serialize_docx_s11', 'serialize_docx_s12',
   'update_display_list', 'vertical_move_by_handle', 'vertical_move_json',
 ];
 
@@ -1462,7 +1649,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(143);
+    expect(notYetCovered.length).toBe(131);
   });
 
   for (const row of rows) {
