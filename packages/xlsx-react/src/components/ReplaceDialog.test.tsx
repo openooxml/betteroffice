@@ -767,7 +767,7 @@ test('a find answered after the target changed selects nothing and Replace never
   expect(stale.revealed).toEqual([]);
   expect(queryByText('1 of 1')).toBeNull();
   await stale.replaceSelectsWithoutEditing(getByRole);
-  expect(stale.finds[1]).toMatchObject({ text: 'alpha', range: moved.range });
+  expect(stale.finds[1]).toMatchObject({ text: 'alpha', range: { sheetId: moved.sheetId, range: moved.range } });
 
   fireEvent.click(getByRole('button', { name: 'Replace all' }));
   await waitFor(() => expect(stale.applied.length).toBe(1));
