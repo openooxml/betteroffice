@@ -201,7 +201,8 @@ fn equally_styled_paragraph_marks_share_their_payload_keys_and_values() {
     let styled: Vec<&Vec<MarkEntry>> = marks
         .iter()
         .filter(|mark| {
-            mark_entry(mark, "pStyle").is_some_and(|(_, _, value)| *value == Any::from("Shared"))
+            mark_entry(mark, "pStyle")
+                .is_some_and(|(_, _, value)| *value == Any::from("Shared"))
         })
         .collect();
     assert_eq!(styled.len(), 3, "the paragraph marks: {marks:?}");
@@ -216,7 +217,10 @@ fn equally_styled_paragraph_marks_share_their_payload_keys_and_values() {
                 continue;
             };
             assert_eq!(left, right, "{key}: the marks' values differ");
-            assert_eq!(left_key, right_key, "{key}: equal payload keys are separate allocations");
+            assert_eq!(
+                left_key, right_key,
+                "{key}: equal payload keys are separate allocations"
+            );
             match (left, right) {
                 (Any::String(left), Any::String(right)) => {
                     strings += 1;

@@ -1451,9 +1451,9 @@ pub(crate) fn any_from_value(value: Value) -> Result<Any, String> {
     }
 }
 
-/// One seed's attribute keys and values, so equal ones share an allocation.
+/// One seed's attribute and embed keys and values, so equal ones share an allocation.
 #[derive(Default)]
-struct SeedAttrs {
+pub(crate) struct SeedAttrs {
     strings: HashSet<Arc<str>>,
     composites: HashMap<String, Any>,
     #[cfg(test)]
@@ -1467,12 +1467,12 @@ thread_local! {
 
 impl SeedAttrs {
     #[cfg(not(test))]
-    fn for_seed() -> Self {
+    pub(crate) fn for_seed() -> Self {
         Self::default()
     }
 
     #[cfg(test)]
-    fn for_seed() -> Self {
+    pub(crate) fn for_seed() -> Self {
         Self {
             unshared: UNSHARED_SEED_ATTRS.with(std::cell::Cell::get),
             ..Self::default()
@@ -1489,7 +1489,7 @@ impl SeedAttrs {
         self.unshared
     }
 
-    fn text(&mut self, value: String) -> Arc<str> {
+    pub(crate) fn text(&mut self, value: String) -> Arc<str> {
         if self.unshared() {
             return Arc::from(value);
         }
@@ -1528,6 +1528,14 @@ impl SeedAttrs {
             .collect::<Result<Vec<_>, String>>()?;
         entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         Ok(entries.into_iter().collect())
+    }
+
+    /// An embed's payload; its keys are shared when the embed is written.
+    fn payload(&mut self, values: JsonObject) -> Result<Vec<(String, Any)>, String> {
+        values
+            .into_iter()
+            .map(|(key, value)| Ok((key, self.value(value)?)))
+            .collect()
     }
 }
 
@@ -6572,7 +6580,7 @@ fn units_to_raw_ops(
                 ops.push(RawOp::InsertEmbed {
                     index,
                     kind,
-                    payload: payload(values)?,
+                    payload: shared.payload(values)?,
                     attrs: shared.attrs(unit.attrs)?,
                 });
                 index += 1;
@@ -10203,6 +10211,66 @@ mod tests {
         let unshared_third = font_family(&unshared, "Third");
         assert_eq!(unshared_first, unshared_third);
         assert!(!Arc::ptr_eq(&unshared_first, &unshared_third));
+    }
+
+    /// The body paragraph marks' `key` entries: the stored key's address and its map value.
+    fn mark_maps(doc: &EditingDoc, key: &str) -> Vec<(usize, Arc<HashMap<String, Any>>)> {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .filter_map(|op| match op.insert {
+                Out::YMap(mark) if crate::is_pilcrow(&mark, &txn) => {
+                    let entry = YrsMap::iter(&mark, &txn)
+                        .find(|(name, _)| *name == key)
+                        .map(|(name, value)| (name.as_ptr() as usize, value));
+                    match entry {
+                        Some((address, Out::Any(Any::Map(value)))) => Some((address, value)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn seeded_bytes_match_with_and_without_shared_embed_values() {
+        let styles = format!(
+            r#"<w:styles {}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Shared"><w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:b/></w:rPr></w:style></w:styles>"#,
+            fixture::namespaces()
+        );
+        let body = ["00000001", "00000002", "00000003"]
+            .map(|id| {
+                fixture::para(
+                    id,
+                    r#"<w:pPr><w:pStyle w:val="Shared"/><w:spacing w:before="120" w:after="240"/></w:pPr><w:r><w:t>Styled</w:t></w:r>"#,
+                )
+            })
+            .concat();
+        let custom = fixture::Package::new(&body).styles(&styles).bytes();
+        for bytes in [custom.clone(), fixture::principal_docx()] {
+            assert_eq!(
+                seed_bytes(&bytes, true, Some(GENERATION)),
+                seed_bytes(&bytes, false, Some(GENERATION)),
+                "sharing embed payload allocations changed the seeded bytes"
+            );
+        }
+        let shared_doc = seeded_sharing(&custom, true, Some(GENERATION));
+        let shared = mark_maps(&shared_doc, "_originalFormatting");
+        assert_eq!(shared.len(), 3);
+        for (address, value) in &shared[1..] {
+            assert_eq!(*address, shared[0].0);
+            assert!(Arc::ptr_eq(value, &shared[0].1));
+        }
+        let unshared_doc = seeded_sharing(&custom, false, Some(GENERATION));
+        let unshared = mark_maps(&unshared_doc, "_originalFormatting");
+        assert_eq!(unshared.len(), 3);
+        for (address, value) in &unshared[1..] {
+            assert_ne!(*address, unshared[0].0);
+            assert_eq!(value, &unshared[0].1);
+            assert!(!Arc::ptr_eq(value, &unshared[0].1));
+        }
     }
 
     #[test]
