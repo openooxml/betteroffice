@@ -12,8 +12,7 @@ const NS: &str = concat!(
 
 const FORMATTED: &str = r#"<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/><w:color w:val="C00000"/><w:highlight w:val="yellow"/></w:rPr>"#;
 
-const NORMAL_STYLE: &str =
-    r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#;
+const NORMAL_STYLE: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#;
 
 const SHARED_PARAGRAPH_STYLE: &str = concat!(
     r#"<w:style w:type="paragraph" w:styleId="Shared"><w:basedOn w:val="Normal"/>"#,
@@ -201,8 +200,7 @@ fn equally_styled_paragraph_marks_share_their_payload_keys_and_values() {
     let styled: Vec<&Vec<MarkEntry>> = marks
         .iter()
         .filter(|mark| {
-            mark_entry(mark, "pStyle")
-                .is_some_and(|(_, _, value)| *value == Any::from("Shared"))
+            mark_entry(mark, "pStyle").is_some_and(|(_, _, value)| *value == Any::from("Shared"))
         })
         .collect();
     assert_eq!(styled.len(), 3, "the paragraph marks: {marks:?}");
