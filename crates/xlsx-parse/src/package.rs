@@ -559,6 +559,16 @@ impl PreservedPackage {
         self.rich_shared_strings.contains(&index)
     }
 
+    /// Plain text of every source shared string that carried formatted runs.
+    pub fn rich_shared_string_texts(&self) -> impl Iterator<Item = &str> {
+        self.rich_shared_strings.iter().filter_map(|&index| {
+            self.original_workbook
+                .shared_strings
+                .get(index)
+                .map(String::as_str)
+        })
+    }
+
     /// Whether a source sheet enables `sheetProtection`. A declaration that cannot be read
     /// counts as enabled.
     #[doc(hidden)]

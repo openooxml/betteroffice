@@ -85,12 +85,20 @@ impl Workbook {
                 self.model.shared_strings.get(index) == Some(value)
                     && package.shared_string_is_rich(index)
             }
-            None => package
-                .source_cell_facts(source_sheet)
-                .is_none_or(|facts| match source_cell {
+            None => {
+                let Some(facts) = package.source_cell_facts(source_sheet) else {
+                    return true;
+                };
+                match source_cell {
                     Some(at) => facts.rich_inline.get(&(at.row, at.col)) == Some(value),
-                    None => facts.rich_inline.values().any(|rich| rich == value),
-                }),
+                    None => {
+                        facts.rich_inline.values().any(|rich| rich == value)
+                            || package
+                                .rich_shared_string_texts()
+                                .any(|rich| rich == value.as_str())
+                    }
+                }
+            }
         }
     }
 
