@@ -63,12 +63,22 @@ pub struct Document {
     /// What a save writes when the model holds only the session edits; `None` once it cannot.
     session_baseline: Option<SavedFields>,
     session_edits: Vec<SessionEdit>,
+    dirty: Dirty,
     #[cfg(any(feature = "fonts", feature = "raster"))]
     pub(crate) fonts: Mutex<crate::font::FontRegistry>,
     #[cfg(feature = "fonts")]
     pub(crate) font_manager: FontManager,
     #[cfg(feature = "raster")]
     pub(crate) images: crate::render::ImageRegistry,
+}
+
+/// What changed since open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dirty {
+    Clean,
+    LoggedEdits,
+    /// Set by any `model_mut` borrow.
+    ModelChanged,
 }
 
 impl Document {
@@ -118,6 +128,7 @@ impl Document {
             seed: format!("{:x}", Sha256::digest(bytes)),
             session_baseline: Some(SavedFields::of(&model)),
             session_edits: Vec::new(),
+            dirty: Dirty::Clean,
             model,
             opened_ids: authored_ids.clone(),
             authored_ids,
@@ -146,6 +157,7 @@ impl Document {
     /// The model, for any change. Paragraphs that repeat an earlier
     /// paragraph's ID then save with the fresh IDs they read with.
     pub fn model_mut(&mut self) -> &mut DocumentModel {
+        self.dirty = Dirty::ModelChanged;
         self.authored_ids.clear();
         &mut self.model
     }
@@ -260,6 +272,9 @@ impl Document {
         replace_plain_run(paragraph, edited.clone(), template);
         let replacement = paragraph.clone();
         replace_section_paragraphs(&mut self.model.body, para_id, &replacement);
+        if self.dirty == Dirty::Clean {
+            self.dirty = Dirty::LoggedEdits;
+        }
         self.authored_ids.retain(|_, (fresh, _)| fresh != para_id);
         let mirrored = match (&mut self.session_baseline, replacement.source_ordinal) {
             (Some(baseline), Some(ordinal)) if context.suggesting.is_none() => baseline
@@ -473,11 +488,19 @@ impl Document {
     }
 
     pub fn save_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
+        let determinism = SerializerDeterminism {
+            seed: self.seed.clone(),
+            now: options.now,
+        };
+        if self.dirty == Dirty::Clean
+            && !options.update_modified_date
+            && options.modified_by.is_none()
+        {
+            determinism.validate()?;
+            return Ok(self.source.clone());
+        }
         let request = S13SaveRequest {
-            determinism: SerializerDeterminism {
-                seed: self.seed.clone(),
-                now: options.now,
-            },
+            determinism,
             document: self.with_authored_ids(self.model.body.clone()),
             header_entries: self.model.headers.clone(),
             footer_entries: self.model.footers.clone(),
