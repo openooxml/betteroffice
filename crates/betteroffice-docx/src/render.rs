@@ -1,14 +1,22 @@
 //! Server-side rasterization of a display list.
 
+use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 
 use docx_layout::display_list::DisplayList;
+use docx_parse::notes::Note;
+use docx_parse::s9::S9SectionWire;
 use docx_raster::{
     ImageCache, ImageMap, ImageScope, RenderResources, RenderedPage, scoped_image_key,
 };
-use serde_json::Number;
+use serde_json::{Number, Value, json};
 
-use crate::{Document, Error, Result};
+use crate::{Document, DocumentModel, Error, Result};
+
+std::thread_local! {
+    static MODEL_RENDERS: Cell<usize> = const { Cell::new(0) };
+}
 
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 256;
@@ -89,11 +97,85 @@ fn page_pixels(number: &Number, scale: f32) -> Option<u32> {
     Some(value.ceil().min(f64::from(u32::MAX)) as u32)
 }
 
+fn validate_scale(options: &RenderOptions) -> Result<()> {
+    if !options.scale.is_finite() || options.scale <= 0.0 {
+        return Err(Error::Render("scale must be finite and positive".into()));
+    }
+    Ok(())
+}
+
+fn json_error(error: serde_json::Error) -> Error {
+    Error::Render(error.to_string())
+}
+
+/// The package fields a region layout request reads, serialized as in the parsed package.
+fn layout_package(model: &DocumentModel) -> Result<Value> {
+    let notes = |notes: &[Note]| -> Vec<Value> {
+        notes
+            .iter()
+            .map(|note| json!({"id": note.id, "noteType": note.note_type}))
+            .collect()
+    };
+    let mut document = serde_json::Map::new();
+    if let Some(sections) = &model.body.sections {
+        let sections: Vec<S9SectionWire> = sections
+            .iter()
+            .map(|section| S9SectionWire {
+                id: section.id.clone(),
+                properties: section.properties.clone(),
+                content_start: 0,
+                content_end: 0,
+            })
+            .collect();
+        let sections = serde_json::to_value(sections).map_err(json_error)?;
+        document.insert("sections".to_owned(), sections);
+    }
+    if let Some(properties) = &model.body.final_section_properties {
+        let properties = serde_json::to_value(properties).map_err(json_error)?;
+        document.insert("finalSectionProperties".to_owned(), properties);
+    }
+    let theme = serde_json::to_value(&model.theme).map_err(json_error)?;
+    let settings = serde_json::to_value(&model.settings).map_err(json_error)?;
+    let mut package = json!({
+        "document": document,
+        "theme": theme,
+        "settings": settings,
+        "footnotes": notes(&model.footnotes),
+        "endnotes": notes(&model.endnotes),
+    });
+    if let Some(styles) = &model.styles {
+        package["styles"] = serde_json::to_value(styles).map_err(json_error)?;
+    }
+    Ok(package)
+}
+
 impl Document {
     pub fn render_png(&self, target: PngTarget, options: &RenderOptions) -> Result<RenderedPage> {
-        if !options.scale.is_finite() || options.scale <= 0.0 {
-            return Err(Error::Render("scale must be finite and positive".into()));
+        if !self.renders_from_model() {
+            return self.render_png_saved(target, options);
         }
+        validate_scale(options)?;
+        MODEL_RENDERS.with(|renders| renders.set(renders.get() + 1));
+        let package = layout_package(self.model())?;
+        let engine = docx_edit::EngineSession::new(1);
+        docx_edit::seed_from_parsed_docx(
+            engine.doc(),
+            self.envelope(),
+            self.original_parts.clone(),
+            self.source_bytes(),
+        )
+        .map_err(Error::Render)?;
+        self.render_seeded(&engine, &package, target, options.scale, true)
+    }
+
+    /// [`Document::render_png`] through a save and a parse of the saved bytes, in every state.
+    #[doc(hidden)]
+    pub fn render_png_saved(
+        &self,
+        target: PngTarget,
+        options: &RenderOptions,
+    ) -> Result<RenderedPage> {
+        validate_scale(options)?;
         let bytes = self.save()?;
         let package = docx_parse::parse_docx_s9_wire(
             &bytes,
@@ -106,10 +188,26 @@ impl Document {
         .package;
         let engine = docx_edit::EngineSession::new(1);
         docx_edit::seed_from_docx(engine.doc(), &bytes).map_err(Error::Render)?;
-        let package =
-            serde_json::to_value(package).map_err(|error| Error::Render(error.to_string()))?;
-        let mut request = docx_edit::layout_request::region_layout_request(&package, 24.0);
-        request["measurement"] = docx_edit::layout_request::measurement(&package);
+        let package = serde_json::to_value(package).map_err(json_error)?;
+        self.render_seeded(&engine, &package, target, options.scale, false)
+    }
+
+    /// How many [`Document::render_png`] calls on this thread laid out from the model.
+    #[doc(hidden)]
+    pub fn model_renders() -> usize {
+        MODEL_RENDERS.with(Cell::get)
+    }
+
+    fn render_seeded(
+        &self,
+        engine: &docx_edit::EngineSession,
+        package: &Value,
+        target: PngTarget,
+        scale: f32,
+        one_page: bool,
+    ) -> Result<RenderedPage> {
+        let mut request = docx_edit::layout_request::region_layout_request(package, 24.0);
+        request["measurement"] = docx_edit::layout_request::measurement(package);
         let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
         #[cfg(feature = "fonts")]
         {
@@ -136,23 +234,30 @@ impl Document {
                 .collect();
             fonts.resolve(&self.font_manager, &requirements)?;
         }
-        let chains: std::collections::BTreeMap<_, Vec<_>> = fonts
+        let chains: BTreeMap<String, Vec<u32>> = fonts
             .chains
             .iter()
             .map(|(key, ids)| (key.clone(), ids.iter().map(|id| id.to_u32()).collect()))
             .collect();
-        request["measurement"]["fontChains"] = serde_json::json!(chains);
+        request["measurement"]["fontChains"] = json!(chains);
         let display_list = docx_layout::with_measure_font_store(&mut fonts.store, || {
+            if one_page {
+                engine
+                    .layout_document_with_regions_retained(&request.to_string())
+                    .map_err(Error::Render)?;
+                return engine
+                    .retained_page_display_list(&chains, target.page)
+                    .map_err(Error::Render);
+            }
             let output = engine
                 .layout_document_with_regions_json(&request.to_string())
                 .map_err(Error::Render)?;
-            let mut output: serde_json::Value =
-                serde_json::from_str(&output).map_err(|error| Error::Render(error.to_string()))?;
-            output["fontChains"] = serde_json::json!(chains);
+            let mut output: Value = serde_json::from_str(&output).map_err(json_error)?;
+            output["fontChains"] = json!(chains);
             docx_layout::build_display_list_value(&output.to_string()).map_err(Error::Render)
         })?;
         drop(fonts);
-        self.render_display_list_scaled(&display_list, target.page, options.scale)
+        self.render_display_list_scaled(&display_list, target.page, scale)
     }
 
     /// Supplies bytes for one relationship id the display list left

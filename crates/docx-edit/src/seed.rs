@@ -7455,6 +7455,25 @@ pub fn seed_from_docx_with_generation(
     Ok(())
 }
 
+/// [`seed_from_docx`] from a parsed package of `bytes` with its images inline, and the parts `bytes` inflate to.
+pub fn seed_from_parsed_docx(
+    document: &EditingDoc,
+    envelope: docx_parse::S9WireEnvelope,
+    parts: Vec<(String, Vec<u8>)>,
+    bytes: &[u8],
+) -> Result<(), String> {
+    seed_parsed_docx(
+        document,
+        envelope,
+        parts,
+        PackageBytes::from(bytes),
+        package_digest(bytes),
+        SeedMedia::AsParsed,
+    )?;
+    document.begin_opening(None);
+    Ok(())
+}
+
 /// Seeds every story of a DOCX without starting an opening.
 /// Seeds `bytes` with only the body's first `blocks` blocks, parsed and
 /// lowered, and the other stories they or the pages need, to paint the first

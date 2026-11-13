@@ -11952,6 +11952,36 @@ impl EngineSession {
         self.display.borrow().list.as_ref().map(read)
     }
 
+    /// The retained region layout's display list with only `page` built, shaped with `font_chains`.
+    pub fn retained_page_display_list(
+        &self,
+        font_chains: &BTreeMap<String, Vec<u32>>,
+        page: usize,
+    ) -> Result<DisplayList, String> {
+        let pagination = self.pagination.borrow();
+        let input = pagination
+            .input
+            .as_ref()
+            .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+        let layout = pagination
+            .layout
+            .as_ref()
+            .ok_or_else(|| "resident layout is not built".to_owned())?;
+        let regions = self.regions.borrow();
+        let extras = serde_json::json!({
+            "headersFooters": regions.as_ref().and_then(|state| state.headers_footers.as_ref()),
+            "fontChains": font_chains,
+        });
+        docx_layout::build_resident_display_list_partial_observed(
+            input,
+            layout,
+            &extras.to_string(),
+            &|index| index == page,
+            &mut || {},
+        )
+        .map(|(_, list)| list)
+    }
+
     pub fn resident_caret_snapshot(
         &self,
         paragraph: Option<(&str, u32)>,

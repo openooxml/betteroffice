@@ -166,6 +166,17 @@ impl Document {
         self.model
     }
 
+    /// Whether a save writes the model as it opened or as the logged edits left it.
+    #[cfg(feature = "raster")]
+    pub(crate) fn renders_from_model(&self) -> bool {
+        self.dirty != Dirty::ModelChanged
+    }
+
+    #[cfg(feature = "raster")]
+    pub(crate) fn source_bytes(&self) -> &[u8] {
+        &self.source
+    }
+
     pub fn body(&self) -> &DocumentBody {
         &self.model.body
     }
@@ -345,7 +356,7 @@ impl Document {
     }
 
     /// The current model as the parsed package seeding reads.
-    fn envelope(&self) -> S9WireEnvelope {
+    pub(crate) fn envelope(&self) -> S9WireEnvelope {
         let model = self.model.clone();
         S9WireEnvelope {
             wire_version: 1,
