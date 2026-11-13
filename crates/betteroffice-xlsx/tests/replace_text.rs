@@ -130,6 +130,19 @@ fn style(workbook: &Workbook, a1: &str) -> Option<u32> {
         .and_then(|cell| cell.style)
 }
 
+fn refused_cells(stats: &ReplaceStats) -> Vec<(String, String)> {
+    let wire = serde_json::to_value(stats).unwrap();
+    wire["refusedCells"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|refused| {
+            let field = |key: &str| refused[key].as_str().unwrap_or_default().to_owned();
+            (field("cell"), field("reason"))
+        })
+        .collect()
+}
+
 fn formula(workbook: &Workbook, a1: &str) -> Option<String> {
     workbook
         .sheet(SheetId(0))
@@ -420,9 +433,10 @@ fn invalid_formula_replacements_refuse_only_that_cell() {
     let stats = outcome.receipts[0].replace.clone().unwrap();
     assert_eq!(stats.matched, 1);
     assert_eq!(stats.replaced, 0);
-    assert_eq!(stats.refused_cells.len(), 1);
-    assert_eq!(stats.refused_cells[0].cell, "K1");
-    assert!(stats.refused_cells[0].reason.contains("K1"), "{}", stats.refused_cells[0].reason);
+    let refused = refused_cells(&stats);
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].0, "K1");
+    assert!(refused[0].1.contains("K1"), "{}", refused[0].1);
     assert_eq!(workbook.version(), before);
     assert_eq!(formula(&workbook, "K1").as_deref(), Some("L1+1"));
     assert_eq!(stored(&workbook, "K1"), CellValue::Number { value: 6.0 });
@@ -667,13 +681,10 @@ fn replace_refuses_rich_text_cells_and_keeps_their_runs() {
     let stats = outcome.receipts[0].replace.clone().unwrap();
     assert_eq!(stats.matched, 2);
     assert_eq!(stats.replaced, 1);
-    assert_eq!(stats.refused_cells.len(), 1);
-    assert_eq!(stats.refused_cells[0].cell, "A1");
-    assert!(
-        stats.refused_cells[0].reason.contains("Sheet1!A1"),
-        "{}",
-        stats.refused_cells[0].reason
-    );
+    let refused = refused_cells(&stats);
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].0, "A1");
+    assert!(refused[0].1.contains("Sheet1!A1"), "{}", refused[0].1);
     let wire = serde_json::to_value(&outcome).unwrap();
     assert_eq!(wire["receipts"][0]["replace"]["refusedCells"][0]["cell"], "A1");
     assert_eq!(stored(&workbook, "A1"), text("alpha beta"));
@@ -807,13 +818,10 @@ fn a_replacement_that_breaks_a_formula_is_refused_and_the_rest_applies() {
     let stats = stats_of(&outcome);
     assert_eq!(stats.matched, 3);
     assert_eq!(stats.replaced, 1);
-    let refused = stats
-        .refused_cells
-        .iter()
-        .map(|refused| refused.cell.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(refused, ["B1", "G1"]);
-    assert!(stats.refused_cells[0].reason.contains("B1"), "{}", stats.refused_cells[0].reason);
+    let refused = refused_cells(&stats);
+    let cells = refused.iter().map(|(cell, _)| cell.as_str()).collect::<Vec<_>>();
+    assert_eq!(cells, ["B1", "G1"]);
+    assert!(refused[0].1.contains("B1"), "{}", refused[0].1);
     assert_eq!(formula(&workbook, "B1").as_deref(), Some("A1+10"));
     assert_eq!(stored(&workbook, "B1"), CellValue::Number { value: 133.0 });
     assert_eq!(formula(&workbook, "G1").as_deref(), Some("A1+1"));
