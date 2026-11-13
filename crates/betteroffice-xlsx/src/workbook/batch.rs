@@ -192,6 +192,8 @@ pub enum EditOperation {
         entire_cell: bool,
         #[serde(default)]
         look_in: ReplaceLookIn,
+        #[serde(default)]
+        match_case: bool,
     },
 }
 

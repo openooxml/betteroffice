@@ -509,3 +509,129 @@ fn find_text_scopes_to_a_range_and_searches_formula_source() {
         "replaceable formulas skip numeric cells"
     );
 }
+
+fn display_workbook() -> Workbook {
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs.push(Xf::default());
+    model.styles.cell_xfs.push(Xf {
+        num_fmt_id: Some(4),
+        ..Xf::default()
+    });
+    model.styles.cell_xfs.push(Xf {
+        num_fmt_id: Some(14),
+        ..Xf::default()
+    });
+    let mut data = Sheet::new("Data");
+    put(&mut data, "A1", CellValue::Number { value: 1234.5 }, None, Some(1));
+    put(&mut data, "A2", CellValue::Number { value: 43831.0 }, None, Some(2));
+    put(&mut data, "A3", CellValue::Bool { value: true }, None, None);
+    put(&mut data, "A4", CellValue::Number { value: 2469.0 }, Some("A1*2"), Some(1));
+    put(&mut data, "A5", text("xABCx"), None, None);
+    put(&mut data, "A6", text("xabcx"), None, None);
+    model.sheets.push(data);
+    let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+}
+
+fn found(workbook: &Workbook, request: Value) -> Vec<String> {
+    workbook
+        .find_text(&serde_json::from_value(request).unwrap())
+        .unwrap()
+        .unwrap()
+        .matches
+        .into_iter()
+        .map(|found| found.cell.a1)
+        .collect()
+}
+
+#[test]
+fn find_values_matches_the_displayed_text_of_every_cell_kind() {
+    let workbook = display_workbook();
+    let scope = json!({ "sheetId": SHEET, "range": { "kind": "a1", "a1": "A1:A6" } });
+
+    assert_eq!(
+        found(&workbook, json!({ "text": "1,234.50", "range": scope, "lookIn": "values" })),
+        ["A1"],
+        "a formatted number is found by its displayed text"
+    );
+    assert_eq!(
+        found(&workbook, json!({ "text": "1/1/20", "range": scope, "lookIn": "values" })),
+        ["A2"],
+        "a date serial is found by its displayed date"
+    );
+    assert_eq!(
+        found(&workbook, json!({ "text": "TRUE", "range": scope, "lookIn": "values" })),
+        ["A3"],
+        "a boolean is found by its displayed text"
+    );
+    assert_eq!(
+        found(&workbook, json!({ "text": "2,469.00", "range": scope, "lookIn": "values" })),
+        ["A4"],
+        "a formula's numeric result is found by its displayed text"
+    );
+    assert_eq!(
+        found(&workbook, json!({ "text": "A1*2", "range": scope, "lookIn": "formulas" })),
+        ["A4"],
+        "formulas mode still searches formula source"
+    );
+    assert!(
+        found(&workbook, json!({ "text": "A1*2", "range": scope, "lookIn": "values" })).is_empty()
+    );
+}
+
+#[test]
+fn find_ignores_case_by_default_and_matches_exactly_under_match_case() {
+    let workbook = display_workbook();
+    let scope = json!({ "sheetId": SHEET, "range": { "kind": "a1", "a1": "A5:A6" } });
+
+    assert_eq!(found(&workbook, json!({ "text": "abc", "range": scope })), ["A5", "A6"]);
+    assert_eq!(
+        found(&workbook, json!({ "text": "abc", "range": scope, "lookIn": "values" })),
+        ["A5", "A6"]
+    );
+    assert_eq!(
+        found(
+            &workbook,
+            json!({ "text": "ABC", "range": scope, "lookIn": "values", "entireCell": false })
+        ),
+        ["A5", "A6"]
+    );
+    assert_eq!(
+        found(&workbook, json!({ "text": "abc", "range": scope, "matchCase": true })),
+        ["A6"]
+    );
+    assert_eq!(
+        found(
+            &workbook,
+            json!({ "text": "abc", "range": scope, "lookIn": "values", "matchCase": true })
+        ),
+        ["A6"]
+    );
+}
+
+fn replace_case(a1: &str, query: &str, replacement: &str, match_case: bool) -> Value {
+    json!({
+        "op": "replaceText",
+        "target": { "sheetId": SHEET, "range": { "kind": "a1", "a1": a1 } },
+        "query": query,
+        "replacement": replacement,
+        "matchCase": match_case,
+    })
+}
+
+#[test]
+fn replace_ignores_case_by_default_and_matches_exactly_under_match_case() {
+    let mut workbook = display_workbook();
+    let outcome = apply(&mut workbook, replace("A5:A6", "abc", "z", false))
+        .expect("the batch applies");
+    assert_eq!(outcome.receipts[0].changed_cells.len(), 2);
+    assert_eq!(stored(&workbook, "A5"), text("xzx"));
+    assert_eq!(stored(&workbook, "A6"), text("xzx"));
+
+    let mut workbook = display_workbook();
+    let outcome = apply(&mut workbook, replace_case("A5:A6", "abc", "z", true))
+        .expect("the batch applies");
+    assert_eq!(outcome.receipts[0].changed_cells.len(), 1);
+    assert_eq!(stored(&workbook, "A5"), text("xABCx"));
+    assert_eq!(stored(&workbook, "A6"), text("xzx"));
+}

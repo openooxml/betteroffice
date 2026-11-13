@@ -163,6 +163,8 @@ pub struct FindRequest {
     /// Match only cells whose whole searched text equals `text`.
     #[serde(default)]
     pub entire_cell: bool,
+    #[serde(default)]
+    pub match_case: bool,
     /// Defaults to 100; at most 10,000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
