@@ -113,6 +113,8 @@ export interface SheetGridHeaderHandlers {
    * select instead of doing nothing.
    */
   onHeaderDragSelect?(axis: 'col' | 'row', index: number): void;
+  /** Pointer down anywhere on the header chrome (label, resize edge, corner), any button. */
+  onHeaderPress?(): void;
 }
 
 /** The track a pointer at `offset` inside the band lands in, `null` outside it. */
@@ -644,6 +646,7 @@ export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selec
 
   const bandPointerDown = useCallback(
     (axis: 'col' | 'row', tracks: HeaderTrack[], event: ReactPointerEvent<HTMLDivElement>) => {
+      headerHandlers?.onHeaderPress?.();
       if (event.button !== 0) return;
       const band = event.currentTarget;
       const box = band.getBoundingClientRect();
@@ -941,7 +944,8 @@ export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selec
   };
 
   const bandEvents = (axis: 'col' | 'row', tracks: HeaderTrack[]) =>
-    headerHandlers?.onHeaderResize || headerHandlers?.onHeaderReorder || headerHandlers?.onHeaderDragSelect
+    headerHandlers?.onHeaderResize || headerHandlers?.onHeaderReorder || headerHandlers?.onHeaderDragSelect ||
+      headerHandlers?.onHeaderPress
       ? {
           onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => bandPointerDown(axis, tracks, event),
           onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => bandPointerMove(axis, tracks, event),
@@ -980,7 +984,7 @@ export function SheetGrid({ frame, zoom, leadingInset = 0, headerHandlers, selec
       title={headerHandlers?.onSelectAll ? selectAllLabel : undefined}
       aria-label={headerHandlers?.onSelectAll ? selectAllLabel : undefined}
       onPointerDown={headerHandlers?.onSelectAll
-        ? (event) => { event.stopPropagation(); }
+        ? (event) => { event.stopPropagation(); headerHandlers.onHeaderPress?.(); }
         : undefined}
       onMouseDown={headerHandlers?.onSelectAll
         ? (event) => { event.stopPropagation(); }

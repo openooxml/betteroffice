@@ -1935,13 +1935,13 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     setRawSelection({ anchor, focus, range: track });
   };
   const endChartGesture = () => { chartDrag.current = null; cancelChartResize(); setChartPreview(null); };
+  const dropChart = () => { endChartGesture(); setSelectedChart(null); };
   const onHeaderMouseDown = (axis: 'col' | 'row', index: number, event: MouseEvent) => {
     if (event.button !== 0 || fromPlugin(event) || runRef.current?.failure) return;
     if (editingRef.current !== null) commitDraft('cell');
     else if (coordinator.draft?.source === 'formula') commitDraft('formula');
     flushNudgeRef.current();
-    endChartGesture();
-    setSelectedChart(null);
+    dropChart();
     selectHeader(axis, index, event.shiftKey);
     clickStart.current = null;
     focus();
@@ -1956,8 +1956,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (editingRef.current !== null) commitDraft('cell');
     else if (coordinator.draft?.source === 'formula') commitDraft('formula');
     flushNudgeRef.current();
-    endChartGesture();
-    setSelectedChart(null);
+    dropChart();
     setRawSelection({
       anchor: { row: 0, col: 0 },
       focus: { row: 0, col: 0 },
@@ -1986,7 +1985,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   // keyed on the session for the same reason the peerless editor is: the first
   // render has no session, and a `[]` memo would pin handlers bound to it.
   const headerHandlers = useMemo<SheetGridHeaderHandlers>(() => ({
-    onHeaderMouseDown, onHeaderResize, onSelectAll,
+    onHeaderMouseDown, onHeaderResize, onSelectAll, onHeaderPress: dropChart,
     // a drag from an unselected header extends from the anchor the press set;
     // the press already committed the draft and took focus.
     onHeaderDragSelect: (axis, index) => {
@@ -2010,6 +2009,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         ? request.target.closest<HTMLElement>('[data-col], [data-row]') : null;
       const index = Number(axis === 'col' ? track?.dataset.col : track?.dataset.row);
       if (!track || !Number.isInteger(index)) return null;
+      dropChart();
       // select the pressed track so the visible selection matches the menu's target.
       selectHeader(axis, index, false);
       const sheet = activeRef.current;

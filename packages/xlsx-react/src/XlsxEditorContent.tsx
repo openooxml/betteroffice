@@ -2282,7 +2282,15 @@ export function XlsxEditorContent({
     [applyHeaderOps]
   );
 
+  const dropChart = useCallback(() => {
+    chartDragRef.current = null;
+    cancelChartResize();
+    setChartPreview(null);
+    setSelectedChart(null);
+  }, [cancelChartResize, setSelectedChart]);
+
   const headerHandlers = useMemo<SheetGridHeaderHandlers>(() => ({
+    onHeaderPress: dropChart,
     onHeaderMouseDown: (axis, index, event) => {
       if (fromPlugin(event)) return;
       if (readOnlyRef.current) return;
@@ -2301,7 +2309,7 @@ export function XlsxEditorContent({
     },
     onHeaderResize: resizeHeaderTrack,
     onSelectAll: selectAll,
-  }), [selectHeaderTrack, resizeHeaderTrack, selectAll, focusContainer]);
+  }), [dropChart, selectHeaderTrack, resizeHeaderTrack, selectAll, focusContainer]);
 
   const headerMenu = useContextMenu({
     // the bands are siblings of the scroller, so their contextmenu never

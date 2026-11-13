@@ -1798,6 +1798,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     command({ kind: 'select', payload: { selection: rangeTarget(sheet, next) } });
   };
   const endChartGesture = () => { chartDrag.current = null; cancelChartResize(); setChartPreview(null); };
+  const dropChart = () => { endChartGesture(); setSelectedChart(null); };
   /**
    * The corner above the row numbers selects the whole sheet, the same raw
    * path as a header press: the range is the sheet's own extent, not the
@@ -1806,7 +1807,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const onSelectAll = () => {
     if (!run?.ready || run.failure) return;
     draftController.commit('cell'); draftController.commit('formula'); flushNudge();
-    endChartGesture();
+    dropChart();
     const sheet = activeRef.current;
     const next: Selection = {
       anchor: { row: 0, col: 0 },
@@ -1822,7 +1823,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       draftController.cellInput?.contains(event.target as Node) ||
       draftController.isComposing('cell') || draftController.isComposing('formula')) return;
     draftController.commit('cell'); draftController.commit('formula'); flushNudge();
-    endChartGesture(); setSelectedChart(null);
+    dropChart();
     selectHeader(axis, index, event.shiftKey);
     focus();
   };
@@ -1845,7 +1846,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   // keyed on the session: the first render has run === null, and a `[]` memo
   // would freeze that closure so the `!run?.ready` guard never passed again.
   const headerHandlers = useMemo<SheetGridHeaderHandlers>(
-    () => ({ onHeaderMouseDown, onHeaderResize, onSelectAll,
+    () => ({ onHeaderMouseDown, onHeaderResize, onSelectAll, onHeaderPress: dropChart,
       // a drag from an unselected header extends from the anchor the press set;
       // the press already committed the drafts and took focus.
       onHeaderDragSelect: (axis, index) => {
@@ -1870,6 +1871,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         ? request.target.closest<HTMLElement>('[data-col], [data-row]') : null;
       const index = Number(axis === 'columnHeader' ? track?.dataset.col : track?.dataset.row);
       if (!track || !Number.isInteger(index)) return null;
+      dropChart();
       selectHeader(axis === 'columnHeader' ? 'col' : 'row', index, false);
       // freezing reads the frame the bands painted, so the split matches what
       // the user sees rather than a request the editor has not drawn yet; the
