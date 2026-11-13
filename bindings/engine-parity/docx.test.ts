@@ -115,6 +115,8 @@ let fixtureEntries: Record<string, Uint8Array>;
 let twinCommentFixture: Uint8Array;
 let compareOriginal: Uint8Array;
 let compareRevised: Uint8Array;
+let repeatingFixture: Uint8Array;
+let effectFixture: Uint8Array;
 
 const SECOND_RUN = '<w:r><w:t xml:space="preserve">Second body paragraph, alpha again.</w:t></w:r>';
 
@@ -149,6 +151,23 @@ function compareParts(text: string): Record<string, string> {
   };
 }
 
+const W15 = 'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"';
+const FINAL_PARAGRAPH = '<w:p w14:paraId="10000007">';
+const REPEATING_SECTION = `<w:sdt><w:sdtPr><w:id w:val="11"/><w15:repeatingSection ${W15}/></w:sdtPr><w:sdtContent>` +
+  `<w:sdt><w:sdtPr><w:id w:val="12"/><w15:repeatingSectionItem ${W15}/></w:sdtPr><w:sdtContent>` +
+  '<w:p w14:paraId="10000008"><w:r><w:t>Repeated item</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt>';
+
+function repeatingParts(): Record<string, string> {
+  return { 'word/document.xml': patched('word/document.xml', FINAL_PARAGRAPH, `${REPEATING_SECTION}${FINAL_PARAGRAPH}`) };
+}
+
+const FINAL_RUN = '<w:r><w:t>Final paragraph.</w:t></w:r>';
+
+// A legacy animated text effect, which the canvas backend never draws.
+function effectParts(): Record<string, string> {
+  return { 'word/document.xml': patched('word/document.xml', FINAL_RUN, '<w:r><w:rPr><w:effect w:val="shimmer"/></w:rPr><w:t>Final paragraph.</w:t></w:r>') };
+}
+
 beforeAll(async () => {
   await initWasm({ module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)) });
   await initPreflight({ module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/preflight/docx_preflight_bg.wasm', import.meta.url)) });
@@ -157,6 +176,8 @@ beforeAll(async () => {
   twinCommentFixture = await buildFixture(twinCommentParts());
   compareOriginal = await buildFixture(compareParts('The quick fox jumps.'));
   compareRevised = await buildFixture(compareParts('The quick brown fox jumps.'));
+  repeatingFixture = await buildFixture(repeatingParts());
+  effectFixture = await buildFixture(effectParts());
 });
 
 // version() is "{nonce:016x}-{epoch}"; mint_nonce in crates/docx-edit/src/batch.rs mixes host entropy and the clock.
@@ -568,7 +589,40 @@ function comparedInto(session: Session): string {
   return json;
 }
 
-const PARSES = ['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
+interface ControlTarget { control: { ooxmlId: string | null; controlType: string }; at: { story: string; index: number } }
+
+function controlTarget(session: Session, matches: (control: ControlTarget['control']) => boolean): ControlTarget['at'] {
+  const target = (JSON.parse(session.content_control_targets_json()) as ControlTarget[]).find(({ control }) => matches(control));
+  if (!target) throw new Error('no content control target matches');
+  return target.at;
+}
+
+function inlineControlAt(session: Session, ordinal: number): { paraId: string; offset: number } {
+  const id = paraId(session, 'Controls');
+  const control = units(session).filter((unit) => unit.paraId === id && unit.segment.kind === 'embed' && unit.segment.embedKind === 'sdt')[ordinal];
+  if (!control) throw new Error(`the controls paragraph has no inline control ${ordinal}`);
+  return { paraId: control.paraId, offset: control.offset };
+}
+
+const WATERMARK = JSON.stringify({ kind: 'text', text: 'DRAFT', font: 'Liberation Sans', color: 'C0C0C0', semitransparent: true, layout: 'diagonal' });
+
+function drainEvents(session: Session): Uint8Array[] {
+  const events: Uint8Array[] = [];
+  for (let event = session.drain_update_event(); event.length > 0 && events.length < 100; event = session.drain_update_event()) events.push(event);
+  return events;
+}
+
+// Observes a local edit, then applies a remote update whose predecessor has not arrived; returns the predecessor.
+function pendingUpdate(docx: Docx): Uint8Array {
+  const { session: s } = docx;
+  s.start_update_event_observation();
+  const [first, later] = remoteChunks(docx);
+  s.insert_text('body', paraId(s, 'First body'), textAt(s, 'First body', 0), 'Local ');
+  s.apply_update(later!);
+  return first!;
+}
+
+const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
 
 const rows: Row<Docx>[] = [
   { method: 'EditSession.open_docx_preview', call: ({ fresh }) => fresh().open_docx_preview(fixture, 4) },
@@ -1546,9 +1600,147 @@ const rows: Row<Docx>[] = [
     throws: { name: 'string', reason: 'a save failure is refused while no comparison awaits its saved bytes' },
     call: ({ session: s }) => s.fail_compared_docx_json('the compared document could not be written'),
   },
+  // No EditSession save exists, so the save goes through a host and the replica's own reads are compared too.
+  defineRow({
+    method: 'EditSession.delete_story',
+    mutates: true,
+    setup: ({ fresh, saveFrom }: Docx) => {
+      const f = fresh();
+      f.begin_opening(GENERATION);
+      f.create_story('fn:1', 'Parity footnote', 'Normal', 'left');
+      f.create_story('body', 'Created', 'Heading1', 'center');
+      f.create_story('fn:2', 'Deleted footnote', 'Normal', 'left');
+      saveFrom(f);
+      return f;
+    },
+    call: (_, f) => ({ result: f.delete_story('fn:2'), reads: replicaReads(f) }),
+  }),
+  { method: 'EditSession.insert_watermark', mutates: true, call: ({ session: s }) => s.insert_watermark('body', paraId(s, 'Final'), 0, WATERMARK) },
+  {
+    method: 'EditSession.move_embed',
+    mutates: true,
+    call: ({ session: s }) => {
+      const at = imageAt(s);
+      return { receipt: s.move_embed('body', at.paraId, at.offset, 'body', paraId(s, 'Final'), 0), after: s.story_segments('body') };
+    },
+  },
+  { method: 'EditSession.set_image_geometry', mutates: true, call: ({ session: s }) => s.set_image_geometry('rIdImage', GEOMETRY) },
+  defineRow({
+    method: 'EditSession.set_content_control_value_at',
+    mutates: true,
+    setup: ({ session: s }: Docx) => inlineControlAt(s, 1),
+    call: ({ session: s }, at) => {
+      const result = s.set_content_control_value_at('body', at.paraId, at.offset, JSON.stringify({ kind: 'checkbox', checked: true }));
+      return { result, after: s.list_content_controls_json('{}') };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.set_content_control_value_index',
+    mutates: true,
+    setup: ({ session: s }: Docx) => controlTarget(s, (control) => control.ooxmlId === '8'),
+    call: ({ session: s }, at) => {
+      const result = s.set_content_control_value_index(at.story, at.index, JSON.stringify('Ada Lovelace'));
+      return { result, after: s.list_content_controls_json('{}') };
+    },
+  }),
+  // No EditSession save exists, so the save goes through a host and the replica's own reads are compared too.
+  defineRow({
+    method: 'EditSession.repeat_content_control_at',
+    mutates: true,
+    setup: ({ fresh, saveFrom }: Docx) => {
+      const f = fresh();
+      f.open_docx(repeatingFixture, true, GENERATION);
+      saveFrom(f, repeatingFixture);
+      return { f, at: controlTarget(f, (control) => control.controlType === 'repeatingSectionItem') };
+    },
+    call: (_, { f, at }) => {
+      const result = f.repeat_content_control_at(at.story, at.index, false);
+      if (!result) throw new Error('the repeating item was not repeated');
+      return { result, targets: f.content_control_targets_json(), reads: replicaReads(f) };
+    },
+  }),
+  {
+    method: 'EditSession.set_document_property',
+    mutates: true,
+    call: ({ session: s }) => ({ result: s.set_document_property('metadata', JSON.stringify({ category: 'Parity' })), after: s.document_properties_json() }),
+  },
+  {
+    method: 'EditSession.set_document_property',
+    name: 'EditSession.set_document_property (unknown key)',
+    throws: { name: 'string', reason: 'only the metadata property is accepted' },
+    call: ({ session: s }) => s.set_document_property('title', JSON.stringify({ category: 'Parity' })),
+  },
+  {
+    method: 'EditSession.set_document_property',
+    name: 'EditSession.set_document_property (not an object)',
+    throws: { name: 'string', reason: 'document metadata that is not a JSON object is refused' },
+    call: ({ session: s }) => s.set_document_property('metadata', JSON.stringify(['Parity'])),
+  },
+  {
+    method: 'EditSession.set_style_language',
+    mutates: true,
+    call: ({ session: s }) => ({ result: s.set_style_language('Normal', JSON.stringify({ lang: 'de-DE' })), after: s.style_languages_json() }),
+  },
+  defineRow({
+    method: 'EditSession.edit_text_resident',
+    mutates: true,
+    setup: ({ session: s }: Docx) => layout(s),
+    call: ({ session: s }) => {
+      const id = paraId(s, 'Second body');
+      const at = textAt(s, 'Second body', 0);
+      return { receipt: s.edit_text_resident('body', id, at, id, at, 'Resident '), after: s.paragraphs('body') };
+    },
+  }),
+  {
+    method: 'EditSession.set_part_metadata',
+    mutates: true,
+    call: ({ session: s }) => {
+      const current = JSON.parse(s.part_metadata_json()) as { body?: Record<string, unknown> };
+      const result = s.set_part_metadata(JSON.stringify({ ...current, body: { ...current.body, parity: true } }), '[]');
+      return { result, after: s.part_metadata_json() };
+    },
+  },
+  defineRow({
+    method: 'EditSession.drain_update_event',
+    setup: (docx: Docx) => pendingUpdate(docx),
+    call: ({ session: s }, first) => {
+      const local = drainEvents(s);
+      if (local.length === 0) throw new Error('the observed local edit queued no update event');
+      s.apply_update(first);
+      return { local, resolved: drainEvents(s), drained: s.drain_update_event() };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.has_pending_update',
+    setup: (docx: Docx) => pendingUpdate(docx),
+    call: ({ session: s }, first) => {
+      const pending = s.has_pending_update();
+      if (!pending) throw new Error('an update missing its predecessor is not pending');
+      const events = drainEvents(s);
+      if (events.length === 0) throw new Error('the observed local edit queued no update event');
+      s.apply_update(first);
+      return { pending, events, resolved: s.has_pending_update(), after: s.paragraphs('body') };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.canvasSkippedEffects',
+    setup: ({ session: s, fresh }: Docx) => {
+      residentFrame(s);
+      const f = fresh();
+      f.open_docx(effectFixture, true, GENERATION);
+      residentFrame(f);
+      return f;
+    },
+    call: ({ session: s }, f) => {
+      const effects = f.canvasSkippedEffects(0, new Uint32Array());
+      if (effects === 0) throw new Error('the text effect page reports no skipped effect');
+      return { plain: s.canvasSkippedEffects(0, new Uint32Array()), effects };
+    },
+  }),
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
+const OBSERVER = 'a JS callback crosses the napi and wasm-bindgen boundaries differently; what the observer delivers is compared through the drain_update_event and has_pending_update rows';
 const exclusions: Exclusion[] = [
   { method: 'set_wasm_heap_limit', reason: HEAP },
   { method: 'set_wasm_heap_counting', reason: HEAP },
@@ -1564,6 +1756,9 @@ const exclusions: Exclusion[] = [
   { method: 'EditSession.free', reason: 'releases the object; the harness frees every session itself' },
   { method: 'RetainedLayoutMeta.free', reason: 'releases the object; nothing to compare' },
   { method: 'RunInheritance.free', reason: 'releases the object; nothing to compare' },
+  { method: 'EditSession.set_update_observer', reason: OBSERVER },
+  { method: 'EditSession.clear_update_observer', reason: OBSERVER },
+  { method: 'EditSession.take_base_latin_miss', reason: 'a read-and-reset font-cache flag, not a document result' },
 ];
 
 const knownDifferences: KnownDifference[] = [];
@@ -1573,42 +1768,38 @@ const notYetCovered: string[] = [
   'EditSession.apply_seed_raw_ops',
   'EditSession.apply_update_with_inference', 'EditSession.begin_region_layout', 'EditSession.begin_shared_reads',
   'EditSession.bootstrap_peer',
-  'EditSession.canvasSkippedEffects', 'EditSession.clear_cell_selection',
-  'EditSession.clear_measure_fonts', 'EditSession.clear_update_event_observation', 'EditSession.clear_update_observer',
+  'EditSession.clear_cell_selection',
+  'EditSession.clear_measure_fonts', 'EditSession.clear_update_event_observation',
   'EditSession.comment_text_target_json', 'EditSession.decode_font',
-  'EditSession.delete_story',
   'EditSession.direct_batches_applied', 'EditSession.display_hit_test_regions_json', 'EditSession.display_range_rects_batch', 'EditSession.display_range_rects_json',
-  'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json', 'EditSession.display_vertical_move_json', 'EditSession.drain_update_event',
-  'EditSession.echo_glyph_set_json', 'EditSession.edit_text_resident', 'EditSession.encode_diff_chunks',
+  'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json', 'EditSession.display_vertical_move_json',
+  'EditSession.echo_glyph_set_json', 'EditSession.encode_diff_chunks',
   'EditSession.encode_peer_metadata', 'EditSession.encode_sticky_position',
   'EditSession.encoded_selection', 'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json',
   'EditSession.format_text_target_json', 'EditSession.geometry_position_outline_json',
-  'EditSession.has_pending_update', 'EditSession.header_footer_aliases_json',
-  'EditSession.insert_watermark',
+  'EditSession.header_footer_aliases_json',
   'EditSession.layout_document_with_regions_after_edit', 'EditSession.layout_document_with_regions_exact_prefix_retained',
   'EditSession.layout_document_with_regions_prefix_retained_json',
   'EditSession.layout_document_with_regions_retained_json', 'EditSession.layout_document_with_regions_retained_meta',
   'EditSession.load', 'EditSession.load_media_sources', 'EditSession.load_note_separators',
   'EditSession.measure_paragraph_json', 'EditSession.media_data_url',
-  'EditSession.media_sources_json', 'EditSession.media_type', 'EditSession.move_embed',
+  'EditSession.media_sources_json', 'EditSession.media_type',
   'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.outline_glyph_json',
   'EditSession.paragraph_id_count', 'EditSession.paragraph_unit',
   'EditSession.patch_style_languages_xml', 'EditSession.prime_save_seed_states_slice',
   'EditSession.proposal_revision_ranges_json', 'EditSession.rebuild_media_sources',
-  'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.repeat_content_control_at', 'EditSession.reset_frame_base',
+  'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.reset_frame_base',
   'EditSession.resident_caret_snapshot_json', 'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
   'EditSession.resolve_encoded_selection', 'EditSession.resolve_paragraph_anchor', 'EditSession.resolve_sticky_position', 'EditSession.resume_region_layout',
   'EditSession.retained_headers_footers_json', 'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json', 'EditSession.revision_ids_at',
   'EditSession.revision_stamps_json', 'EditSession.run_inheritance', 'EditSession.seed_comment_metadata_json',
   'EditSession.seed_opaque_sequences', 'EditSession.select_story', 'EditSession.selection',
-  'EditSession.set_content_control_value_at', 'EditSession.set_content_control_value_index',
-  'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages', 'EditSession.set_document_property',
-  'EditSession.set_header_footer_aliases', 'EditSession.set_image_geometry',
-  'EditSession.set_local_lowering', 'EditSession.set_media_tokens', 'EditSession.set_part_metadata', 'EditSession.set_partial_document',
-  'EditSession.set_style_language',
-  'EditSession.set_update_observer', 'EditSession.set_windowed_incremental_builds', 'EditSession.settle_revisions_json',
+  'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages',
+  'EditSession.set_header_footer_aliases',
+  'EditSession.set_local_lowering', 'EditSession.set_media_tokens', 'EditSession.set_partial_document',
+  'EditSession.set_windowed_incremental_builds', 'EditSession.settle_revisions_json',
   'EditSession.start_update_event_observation',
-  'EditSession.story_segment_unit_digests', 'EditSession.story_segment_units', 'EditSession.style_languages_json', 'EditSession.take_base_latin_miss',
+  'EditSession.story_segment_unit_digests', 'EditSession.story_segment_units', 'EditSession.style_languages_json',
   'EditSession.unavailable_tables_from',
   'EditSession.update_measure_font_outlines', 'EditSession.yrs_blocks_for_story',
   'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.page_sizes', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.page_count',
@@ -1649,7 +1840,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(131);
+    expect(notYetCovered.length).toBe(114);
   });
 
   for (const row of rows) {
