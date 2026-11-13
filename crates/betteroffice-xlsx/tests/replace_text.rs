@@ -98,9 +98,10 @@ fn fixture() -> Vec<u8> {
         .iter_mut()
         .find(|(name, _)| name == "xl/worksheets/sheet2.xml")
         .unwrap();
-    let xml = String::from_utf8(sheet.1.clone())
-        .unwrap()
-        .replace("</sheetData>", r#"</sheetData><sheetProtection sheet="1"/>"#);
+    let xml = String::from_utf8(sheet.1.clone()).unwrap().replace(
+        "</sheetData>",
+        r#"</sheetData><sheetProtection sheet="1"/>"#,
+    );
     sheet.1 = xml.into_bytes();
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
@@ -113,13 +114,7 @@ fn replace(a1: &str, query: &str, replacement: &str, entire: bool) -> Value {
     replace_in(a1, query, replacement, entire, "values")
 }
 
-fn replace_in(
-    a1: &str,
-    query: &str,
-    replacement: &str,
-    entire: bool,
-    look_in: &str,
-) -> Value {
+fn replace_in(a1: &str, query: &str, replacement: &str, entire: bool, look_in: &str) -> Value {
     json!({
         "op": "replaceText",
         "target": { "sheetId": SHEET, "range": { "kind": "a1", "a1": a1 } },
