@@ -1686,3 +1686,24 @@ fn an_edit_by_index_mints_no_paragraph_id() {
     );
     assert_eq!(document.paragraphs()[1].para_id, None);
 }
+
+#[test]
+fn an_edit_by_index_of_a_paragraph_with_an_id_reports_that_id() {
+    let source = sample_docx();
+    let mut by_index = Document::open(&source).unwrap();
+    let index = by_index
+        .paragraphs()
+        .iter()
+        .position(|paragraph| paragraph.para_id.as_deref() == Some("33333333"))
+        .unwrap();
+    let mut by_id = Document::open(&source).unwrap();
+
+    let receipt = by_index
+        .replace_paragraph_text_at(index, "Rewritten by index")
+        .unwrap();
+    let expected = by_id
+        .replace_paragraph_text("33333333", "Rewritten by index")
+        .unwrap();
+    assert_eq!(receipt, expected);
+    assert_eq!(by_index.save().unwrap(), by_id.save().unwrap());
+}
