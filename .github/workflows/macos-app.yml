@@ -27,6 +27,10 @@ concurrency:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     name: Build
@@ -255,7 +259,7 @@ jobs:
           fi
           identity=$(security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" \
             | awk -v team="($TEAM_ID)" \
-              '/Developer ID Application/ && index($0, team) { print $2; exit }')
+              '/Developer ID Application/ && index($0, team) && identity == "" { identity = $2 } END { print identity }')
           if [ -z "$identity" ]; then
             echo "::error::no Developer ID Application identity for team $TEAM_ID" >&2
             exit 1

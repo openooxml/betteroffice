@@ -16,6 +16,10 @@ permissions:
   pull-requests: read
   statuses: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   cla:
     runs-on: ubuntu-latest
