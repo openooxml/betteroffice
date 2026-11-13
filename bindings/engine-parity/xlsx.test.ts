@@ -8,6 +8,7 @@ import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
 import {
   coverageProblems,
   defineRow,
+  generatedTokens,
   oneEngineExports,
   oneEngineProblems,
   printParityCounts,
@@ -152,6 +153,18 @@ const editRequest = (doc: Doc) => json({
   expectVersion: doc.documentVersion(),
   steps: [{ op: 'setFormulas', target: at('D2'), formulas: [['C2+B3']] }, { op: 'setCellInputs', target: at('A4'), inputs: [['Plums']] }],
 });
+const withoutNonce = (doc: Doc, values: unknown[]) => values.map((value) => generatedTokens(value, [versionNonce(doc)]));
+const collab = (engine: XlsxEngine, client = CLIENT) => engine.XlsxDocument.openCollaborative(fixture, client);
+const editedCollab = (engine: XlsxEngine) => {
+  const doc = collab(engine);
+  editCell(doc, 1, 1, '12');
+  return doc;
+};
+const drainAll = (doc: Doc) => {
+  const events: Uint8Array[] = [];
+  for (let event = doc.drainUpdateEvent(); event.byteLength > 0; event = doc.drainUpdateEvent()) events.push(event);
+  return events;
+};
 
 const rows: Row<Xlsx>[] = [
   { method: 'XlsxDocument.open', call: ({ engine }) => scoped(engine.XlsxDocument.open(fixture), (d) => [d.sheetInfoJson(), d.saveWarningsJson()]) },
@@ -181,6 +194,53 @@ const rows: Row<Xlsx>[] = [
     call: ({ engine }) => engine.XlsxDocument.openRecoveryCheckpoint(new Uint8Array(), 0),
   },
   { method: 'XlsxDocument.clientId', call: ({ engine }) => scoped(engine.XlsxDocument.openCollaborative(fixture, CLIENT), (d) => d.clientId) },
+  { method: 'XlsxDocument.encodeStateVector', call: ({ engine }) => scoped(editedCollab(engine), (d) => d.encodeStateVector()) },
+  { method: 'XlsxDocument.encodeStateAsUpdate', call: ({ engine }) => scoped(editedCollab(engine), (d) => d.encodeStateAsUpdate()) },
+  {
+    method: 'XlsxDocument.encodeDiff',
+    call: ({ engine }) => scoped(editedCollab(engine), (d) => d.encodeDiff(scoped(collab(engine, CLIENT + 1), (peer) => peer.encodeStateVector()))),
+  },
+  {
+    method: 'XlsxDocument.applyUpdateJson',
+    call: ({ engine }) => scoped(editedCollab(engine), (d) => {
+      const update = scoped(collab(engine, CLIENT + 1), (peer) => {
+        editCell(peer, 2, 1, '8');
+        return peer.encodeDiff(d.encodeStateVector());
+      });
+      return withoutNonce(d, [d.applyUpdateJson(update), d.sheetInfoJson(), d.readCellsJson(json({ ranges: [at('A1:C5')] }))]);
+    }),
+  },
+  {
+    method: 'XlsxDocument.applyUpdateJson',
+    name: 'XlsxDocument.applyUpdateJson refuses a standalone document',
+    throws: { name: 'string', reason: 'a standalone workbook takes no collaboration updates' },
+    call: ({ engine, doc }) => doc.applyUpdateJson(scoped(editedCollab(engine), (d) => d.encodeStateAsUpdate())),
+  },
+  {
+    method: 'XlsxDocument.startUpdateObservation',
+    call: ({ engine }) => scoped(collab(engine), (d) => {
+      d.startUpdateObservation();
+      editCell(d, 1, 1, '12');
+      return drainAll(d);
+    }),
+  },
+  {
+    method: 'XlsxDocument.drainUpdateEvent',
+    call: ({ engine }) => scoped(collab(engine), (d) => {
+      d.startUpdateObservation();
+      editCell(d, 1, 1, '12');
+      return [d.drainUpdateEvent(), d.drainUpdateEvent()];
+    }),
+  },
+  {
+    method: 'XlsxDocument.clearUpdateObservation',
+    call: ({ engine }) => scoped(collab(engine), (d) => {
+      d.startUpdateObservation();
+      editCell(d, 1, 1, '12');
+      d.clearUpdateObservation();
+      return d.drainUpdateEvent();
+    }),
+  },
   { method: 'XlsxDocument.version', call: ({ engine }) => engine.XlsxDocument.version() },
   { method: 'XlsxDocument.saveBytes', call: ({ doc }) => new ZipReturn(doc.saveBytes()) },
   { method: 'XlsxDocument.saveWarningsJson', call: ({ doc }) => doc.saveWarningsJson() },
@@ -336,10 +396,9 @@ const exclusions: Exclusion[] = [
 const knownDifferences: KnownDifference[] = [];
 
 const notYetCovered: string[] = [
-  'XlsxDocument.adoptPeerVersion', 'XlsxDocument.applyUpdateJson', 'XlsxDocument.beginPeerSnapshot', 'XlsxDocument.clearUpdateObservation',
-  'XlsxDocument.drainUpdateEvent', 'XlsxDocument.encodeDiff', 'XlsxDocument.encodeStateAsUpdate', 'XlsxDocument.encodeStateVector',
+  'XlsxDocument.adoptPeerVersion', 'XlsxDocument.beginPeerSnapshot',
   'XlsxDocument.endPeerSnapshot', 'XlsxDocument.nextPeerSnapshotChunk', 'XlsxDocument.openWithPeerHydrationJson', 'XlsxDocument.peerHydrationJson',
-  'XlsxDocument.recoveryCheckpoint', 'XlsxDocument.resizeChartJson', 'XlsxDocument.startUpdateObservation',
+  'XlsxDocument.recoveryCheckpoint', 'XlsxDocument.resizeChartJson',
   'XlsxSnapshotBuilder.advance', 'XlsxSnapshotBuilder.finish', 'XlsxSnapshotBuilder.push',
   'decodeFontFace',
 ];
@@ -373,7 +432,7 @@ describe('xlsx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(19);
+    expect(notYetCovered.length).toBe(12);
   });
 
   for (const row of rows) {
