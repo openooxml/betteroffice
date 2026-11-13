@@ -227,6 +227,8 @@ impl Splicer<'_> {
         let mut used = HashSet::new();
         collect_used(element, &mut used);
         if used.iter().all(|prefix| declared.contains(prefix)) {
+            #[cfg(feature = "test-counters")]
+            crate::test_counters::bump(|work| work.fragment_elements += element_count(element));
             Some(serialize_xml_fragment(element))
         } else {
             None
@@ -250,7 +252,11 @@ fn align(
         .iter()
         .map(|element| drawing_object_id(element))
         .collect();
-    let equal = |i: usize, j: usize| before_hashes[i] == after_hashes[j] && before[i] == after[j];
+    let equal = |i: usize, j: usize| {
+        #[cfg(feature = "test-counters")]
+        crate::test_counters::bump(|work| work.equal_calls += 1);
+        before_hashes[i] == after_hashes[j] && before[i] == after[j]
+    };
     let can_match = |i: usize, j: usize| {
         before[i].name == after[j].name
             && match (before_ids[i], after_ids[j]) {
@@ -270,6 +276,8 @@ fn align(
     }
     let middle_n = n - prefix - suffix;
     let middle_m = m - prefix - suffix;
+    #[cfg(feature = "test-counters")]
+    crate::test_counters::bump(|work| work.dp_cells += middle_n.saturating_mul(middle_m));
     if middle_n
         .checked_mul(middle_m)
         .is_none_or(|size| size > 1_000_000)
@@ -380,6 +388,8 @@ fn structural_hash(element: &XmlElement) -> u64 {
         }
     }
     fn hash_element(hash: &mut u64, element: &XmlElement) {
+        #[cfg(feature = "test-counters")]
+        crate::test_counters::bump(|work| work.hashed_nodes += 1);
         mix(hash, element.name.as_bytes());
         mix(hash, &(element.attributes.len() as u64).to_le_bytes());
         for (key, value) in &element.attributes {
@@ -403,6 +413,11 @@ fn structural_hash(element: &XmlElement) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     hash_element(&mut hash, element);
     hash
+}
+
+#[cfg(feature = "test-counters")]
+fn element_count(element: &XmlElement) -> usize {
+    1 + element.child_elements().map(element_count).sum::<usize>()
 }
 
 fn collect_declared(element: &XmlElement, declared: &mut HashSet<String>) {

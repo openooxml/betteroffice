@@ -16,6 +16,9 @@ mod package;
 mod relationships;
 mod slide_splice;
 mod table_style;
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub mod test_counters;
 mod theme;
 mod write;
 mod xml;
