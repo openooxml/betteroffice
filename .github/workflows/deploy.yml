@@ -11,6 +11,10 @@ concurrency:
   group: deploy
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   deploy:
     name: Deploy ${{ matrix.app }}

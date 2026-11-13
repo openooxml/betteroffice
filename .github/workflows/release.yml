@@ -11,6 +11,10 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   release:
     if: github.ref == 'refs/heads/main'
@@ -50,8 +54,8 @@ jobs:
       - name: Detect pending changesets
         id: pending
         run: |
-          count=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md' | wc -l | tr -d ' ')
-          echo "publishing=$([ "$count" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          changesets=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md')
+          echo "publishing=$([ -z "$changesets" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
         with:

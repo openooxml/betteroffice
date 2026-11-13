@@ -229,7 +229,18 @@
     "sheetActivated": "{name}, lembar {index} dari {count}",
     "cellInputLabel": "Edit sel {address}",
     "gridRoleDescription": "lembar kerja",
-    "fillHandleLabel": "Gagang isi"
+    "fillHandleLabel": "Gagang isi",
+    "chartResizeNw": "Ubah ukuran bagan dari sudut kiri atas",
+    "chartResizeN": "Ubah ukuran bagan dari tepi atas",
+    "chartResizeNe": "Ubah ukuran bagan dari sudut kanan atas",
+    "chartResizeE": "Ubah ukuran bagan dari tepi kanan",
+    "chartResizeSe": "Ubah ukuran bagan dari sudut kanan bawah",
+    "chartResizeS": "Ubah ukuran bagan dari tepi bawah",
+    "chartResizeSw": "Ubah ukuran bagan dari sudut kiri bawah",
+    "chartResizeW": "Ubah ukuran bagan dari tepi kiri",
+    "chartResizeHintBoth": "{label} (tombol panah; tahan Shift untuk 10 px)",
+    "chartResizeHintHorizontal": "{label} (panah kiri dan kanan; tahan Shift untuk 10 px)",
+    "chartResizeHintVertical": "{label} (panah atas dan bawah; tahan Shift untuk 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
