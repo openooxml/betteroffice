@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use serde_json::json;
@@ -204,7 +204,9 @@ pub(super) struct Lowered {
     pub markers: Vec<u32>,
     pub len: u32,
     pub ppr: Option<usize>,
+    pub field_text_runs: BTreeSet<usize>,
     fields: Vec<bool>,
+    seeded_field: bool,
 }
 
 pub(super) fn lower(
@@ -270,7 +272,9 @@ pub(super) fn lower(
         markers: Vec::new(),
         len: 0,
         ppr,
+        field_text_runs: BTreeSet::new(),
         fields: Vec::new(),
+        seeded_field: false,
     };
     visit(source, 0, 0, &super::flatten(units), &mut result)?;
     if !result.fields.is_empty() {
@@ -348,7 +352,25 @@ fn lower_run(
         }
         if node.word("fldChar") {
             match node.attr(source, "w:fldCharType").as_deref() {
-                Some("begin") => result.fields.push(false),
+                Some("begin") => {
+                    if let Some(unit) = units
+                        .get(result.cells.len())
+                        .filter(|unit| result.fields.is_empty() && complex_field_atom(unit))
+                    {
+                        result.cells.push(Cell {
+                            from: result.len,
+                            to: result.len + 1,
+                            run,
+                            node: child,
+                            raw: node.span.clone(),
+                            unit: unit.clone(),
+                            retained: true,
+                        });
+                        result.len += 1;
+                        result.seeded_field = true;
+                    }
+                    result.fields.push(false);
+                }
                 Some("separate") => {
                     let mode = result
                         .fields
@@ -361,6 +383,9 @@ fn lower_run(
                         .fields
                         .pop()
                         .ok_or_else(|| Failure::structure("field: unmatched end"))?;
+                    if result.fields.is_empty() {
+                        result.seeded_field = false;
+                    }
                 }
                 _ => return Err(Failure::structure("field: invalid field character")),
             }
@@ -374,6 +399,12 @@ fn lower_run(
         }
         if result.fields.contains(&false) {
             return Err(Failure::structure("field: unsupported field code content"));
+        }
+        if result.seeded_field {
+            if node.word("t") {
+                result.field_text_runs.insert(run);
+            }
+            continue;
         }
         if drawing(node) {
             // The part digest binds retained atoms to bytes that the patch never rewrites.
@@ -507,6 +538,18 @@ fn lower_run(
     Ok(())
 }
 
+fn complex_field_atom(unit: &UnitV1) -> bool {
+    let UnitV1::Atom {
+        atom_kind, payload, ..
+    } = unit
+    else {
+        return false;
+    };
+    atom_kind == "field"
+        && payload.get("modelKind").and_then(serde_json::Value::as_str) == Some("field")
+        && payload.get("fieldKind").and_then(serde_json::Value::as_str) == Some("complex")
+}
+
 fn push_atom(result: &mut Lowered, run: usize, node: usize, kind: &str, payload: Attrs) {
     result.cells.push(Cell {
         from: result.len,
@@ -530,7 +573,7 @@ pub(super) fn decode(text: &str) -> Result<String, Failure> {
         .map_err(|_| Failure::structure("invalid XML entity"))
 }
 
-fn decoded_scalars(
+pub(super) fn decoded_scalars(
     source: &str,
     span: Range<usize>,
 ) -> Result<Vec<(String, Range<usize>)>, Failure> {
