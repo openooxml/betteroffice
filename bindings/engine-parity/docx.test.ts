@@ -251,6 +251,107 @@ function displayList(session: Session): string {
   return session.build_display_list_json(JSON.stringify({ ...JSON.parse(json), fontChains }));
 }
 
+interface Unit { paraId: string; offset: number; segment: YrsStorySegment }
+
+// Paragraph-local offsets as the session counts them, leading block embeds included.
+function units(session: Session): Unit[] {
+  const found: Unit[] = [];
+  let pending: Omit<Unit, 'paraId'>[] = [];
+  let offset = 0;
+  for (const segment of JSON.parse(session.story_segments('body')) as YrsStorySegment[]) {
+    if (segment.kind === 'pilcrow') {
+      found.push(...pending.map((unit) => ({ ...unit, paraId: segment.paraId })));
+      pending = [];
+      offset = 0;
+    } else {
+      pending.push({ offset, segment });
+      offset += segment.kind === 'text' ? segment.text.length : 1;
+    }
+  }
+  return found;
+}
+
+function textAt(session: Session, prefix: string, index: number): number {
+  const id = paraId(session, prefix);
+  const first = units(session).find((unit) => unit.paraId === id && unit.segment.kind === 'text');
+  if (!first) throw new Error(`no text in the paragraph starting with ${prefix}`);
+  return first.offset + index;
+}
+
+function textSpan(session: Session, prefix: string, from: number, to: number): [string, string, number, string, number] {
+  const id = paraId(session, prefix);
+  return ['body', id, textAt(session, prefix, from), id, textAt(session, prefix, to)];
+}
+
+function imageAt(session: Session): { paraId: string; offset: number; src: unknown } {
+  const image = units(session).find(({ segment }) => segment.kind === 'embed' && segment.embedKind === 'image');
+  if (image?.segment.kind !== 'embed') throw new Error('the fixture image is not seeded');
+  return { paraId: image.paraId, offset: image.offset, src: image.segment.payload.src };
+}
+
+const frameExtras = (fontChains: Record<string, number[]>) => JSON.stringify({ fontChains });
+
+function frameEpoch(session: Session): number {
+  return (JSON.parse(session.resident_caret_snapshot_json()) as { frameEpoch: number }).frameEpoch;
+}
+
+function residentFrame(session: Session): number {
+  session.build_display_list_frame(frameExtras(layout(session).fontChains), 0);
+  return frameEpoch(session);
+}
+
+function caretIn(session: Session, prefix: string, index: number): void {
+  const id = paraId(session, prefix);
+  const at = textAt(session, prefix, index);
+  session.set_selection('body', id, at, id, at);
+}
+
+function workerLayoutInput(session: Session) {
+  const { input, fontChains } = layoutInput(session);
+  const request = JSON.parse(input) as { renderEnv: unknown; measurement: unknown };
+  const workerOwned = { bodyStory: 'body', renderEnv: request.renderEnv, measurement: request.measurement };
+  return { input: JSON.stringify({ ...request, measured: [], retainOnly: true, workerOwned }), fontChains };
+}
+
+function peerEdit(peer: Session, prefix: string, text: string): void {
+  peer.insert_text('body', paraId(peer, prefix), textAt(peer, prefix, 0), text);
+}
+
+function remoteUpdate({ session, fresh }: Docx): Uint8Array {
+  const peer = fresh();
+  peer.apply_update(session.encode_state());
+  peerEdit(peer, 'Second body', 'Remote ');
+  return peer.encode_diff(session.encode_state_vector());
+}
+
+function remoteChunks({ session, fresh }: Docx): Uint8Array[] {
+  const peer = fresh();
+  peer.apply_update(session.encode_state());
+  peerEdit(peer, 'Second body', 'Remote ');
+  const first = peer.encode_diff(session.encode_state_vector());
+  const middle = peer.encode_state_vector();
+  peerEdit(peer, 'Final', 'Later ');
+  return [first, peer.encode_diff(middle)];
+}
+
+function timedEdits(session: Session, gap: () => unknown) {
+  const id = paraId(session, 'Second body');
+  const at = textAt(session, 'Second body', 0);
+  session.track_undo();
+  session.select_story('body');
+  session.set_undo_input_time(5_000, 5_000);
+  session.insert_text('body', id, at, 'a');
+  const result = gap();
+  session.insert_text('body', id, at + 1, 'b');
+  return { result, undone: session.undo(), after: session.paragraphs('body') };
+}
+
+const HYPERLINK = JSON.stringify({ href: 'https://example.com/', tooltip: null, rId: null });
+const GEOMETRY = JSON.stringify({ widthEmu: 190500, heightEmu: 95250, other: { width: 20, height: 10 } });
+const MODULE_OPTIONS = { pageSize: { w: 816, h: 1056 }, margins: { top: 96, right: 96, bottom: 96, left: 96 }, pageGap: 20 };
+const NOT_DOCX = Uint8Array.from([1, 2, 3]);
+const MALFORMED_UPDATE = Uint8Array.from([255]);
+
 function saveRequest(engine: DocxEngine): string {
   const envelope = JSON.parse(engine.parse_docx_s9(fixture, '')) as {
     document: { package: { document: { content: unknown; finalSectionProperties?: unknown } } };
@@ -557,6 +658,338 @@ const rows: Row<Docx>[] = [
   { method: 'sanitizeOoxml', call: ({ engine }) => new ZipReturn(engine.sanitizeOoxml(fixture, 'docx')) },
   { method: 'paragraphPatchWriterVersion', call: ({ engine }) => engine.paragraphPatchWriterVersion() },
   { method: 'skippedEffectKinds', call: ({ engine }) => engine.skippedEffectKinds() },
+  {
+    method: 'EditSession.open_docx',
+    call: ({ fresh }) => {
+      const f = fresh();
+      return { result: f.open_docx(fixture, true, GENERATION), after: f.paragraphs('body') };
+    },
+  },
+  {
+    method: 'EditSession.open_docx',
+    name: 'EditSession.open_docx (not a docx)',
+    throws: { name: 'string', reason: 'bytes that are not a readable DOCX are refused' },
+    call: ({ fresh }) => fresh().open_docx(NOT_DOCX, true, GENERATION),
+  },
+  {
+    method: 'EditSession.seed_from_docx',
+    call: ({ fresh }) => {
+      const f = fresh();
+      return { result: f.seed_from_docx(fixture, GENERATION), after: f.paragraphs('body') };
+    },
+  },
+  {
+    method: 'EditSession.seed_from_docx',
+    name: 'EditSession.seed_from_docx (not a docx)',
+    throws: { name: 'string', reason: 'bytes that are not a readable DOCX are refused' },
+    call: ({ fresh }) => fresh().seed_from_docx(NOT_DOCX, GENERATION),
+  },
+  {
+    method: 'EditSession.load_json',
+    call: ({ session: s }) => {
+      const result = s.load_json(JSON.stringify([{ storyId: 'parity-loaded', paragraphs: [{ text: 'Loaded' }, { text: 'Centred', alignment: 'center' }] }]));
+      return { result, after: s.paragraphs('parity-loaded') };
+    },
+  },
+  {
+    method: 'EditSession.load_json',
+    name: 'EditSession.load_json (existing story)',
+    throws: { name: 'string', reason: 'a story id that already exists is refused' },
+    call: ({ session: s }) => s.load_json(JSON.stringify([{ storyId: 'body', paragraphs: [{ text: 'Again' }] }])),
+  },
+  { method: 'EditSession.encode_state', call: ({ session: s }) => s.encode_state() },
+  { method: 'EditSession.encode_state_vector', call: ({ session: s }) => s.encode_state_vector() },
+  defineRow({
+    method: 'EditSession.encode_diff',
+    setup: ({ fresh }: Docx) => fresh().encode_state_vector(),
+    call: ({ session: s }, vector) => s.encode_diff(vector),
+  }),
+  {
+    method: 'EditSession.encode_diff',
+    name: 'EditSession.encode_diff (malformed state vector)',
+    throws: { name: 'string', reason: 'a state vector that does not decode is refused' },
+    call: ({ session: s }) => s.encode_diff(MALFORMED_UPDATE),
+  },
+  defineRow({
+    method: 'EditSession.paragraph_save_plan',
+    setup: ({ session: s }: Docx) => s.split_paragraph('body', paraId(s, 'Second body'), textAt(s, 'Second body', 6)),
+    call: ({ session: s }) => s.paragraph_save_plan(),
+  }),
+  defineRow({
+    method: 'EditSession.persist_paragraph_ids',
+    mutates: true,
+    setup: ({ session: s }: Docx) => s.split_paragraph('body', paraId(s, 'Second body'), textAt(s, 'Second body', 6)),
+    call: ({ session: s }) => s.persist_paragraph_ids(),
+  }),
+  {
+    method: 'EditSession.prime_save_seed_states',
+    call: ({ session: s }) => [s.prime_save_seed_states(1, 1), s.prime_save_seed_states(100_000, 64 * 1024 * 1024)],
+  },
+  defineRow({
+    method: 'EditSession.apply_update',
+    mutates: true,
+    setup: (docx: Docx) => remoteUpdate(docx),
+    call: ({ session: s }, update) => s.apply_update(update),
+  }),
+  {
+    method: 'EditSession.apply_update',
+    name: 'EditSession.apply_update (malformed update)',
+    throws: { name: 'string', reason: 'an update that does not decode is refused' },
+    call: ({ session: s }) => s.apply_update(MALFORMED_UPDATE),
+  },
+  defineRow({
+    method: 'EditSession.apply_update_chunks',
+    mutates: true,
+    setup: (docx: Docx) => remoteChunks(docx),
+    call: ({ session: s }, updates) => s.apply_update_chunks(updates),
+  }),
+  {
+    method: 'EditSession.apply_update_chunks',
+    name: 'EditSession.apply_update_chunks (malformed chunk)',
+    throws: { name: 'string', reason: 'a chunk that does not decode is refused before any applies' },
+    call: ({ session: s }) => s.apply_update_chunks([MALFORMED_UPDATE]),
+  },
+  defineRow({
+    method: 'EditSession.apply_local_update',
+    mutates: true,
+    setup: (docx: Docx) => {
+      docx.session.track_undo();
+      docx.session.select_story('body');
+      return remoteUpdate(docx);
+    },
+    call: ({ session: s }, update) => ({ result: s.apply_local_update(update), after: s.can_undo() }),
+  }),
+  {
+    method: 'EditSession.apply_raw_ops',
+    mutates: true,
+    call: ({ session: s }) => s.apply_raw_ops('body', JSON.stringify([{ op: 'insert', index: 0, text: 'Raw ' }, { op: 'format', index: 0, len: 3, attrs: { bold: true } }])),
+  },
+  {
+    method: 'EditSession.apply_raw_ops',
+    name: 'EditSession.apply_raw_ops (unknown op)',
+    throws: { name: 'string', reason: 'an unknown op is refused and the story is left untouched' },
+    call: ({ session: s }) => s.apply_raw_ops('body', JSON.stringify([{ op: 'bogus', index: 0 }])),
+  },
+  {
+    method: 'EditSession.set_selection',
+    call: ({ session: s }) => ({ result: s.set_selection(...textSpan(s, 'Second body', 0, 6)), after: s.selection() }),
+  },
+  {
+    method: 'EditSession.set_selection',
+    name: 'EditSession.set_selection (bad offset)',
+    throws: { name: 'string', reason: 'an offset past the paragraph end does not resolve' },
+    call: ({ session: s }) => {
+      const id = paraId(s, 'Second body');
+      return s.set_selection('body', id, 9_999, id, 9_999);
+    },
+  },
+  defineRow({
+    method: 'EditSession.apply_input',
+    mutates: true,
+    setup: ({ session: s }: Docx) => {
+      const epoch = residentFrame(s);
+      caretIn(s, 'Second body', 6);
+      return epoch;
+    },
+    call: ({ session: s }, epoch) => ({ frame: s.apply_input('X', epoch), after: s.selection() }),
+  }),
+  defineRow({
+    method: 'EditSession.apply_input',
+    name: 'EditSession.apply_input (no selection)',
+    throws: { name: 'string', reason: 'typing needs a resident selection' },
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }, epoch) => s.apply_input('X', epoch),
+  }),
+  defineRow({
+    method: 'EditSession.apply_input',
+    name: 'EditSession.apply_input (range selection)',
+    throws: { name: 'string', reason: 'typing needs a collapsed selection' },
+    setup: ({ session: s }: Docx) => {
+      const epoch = residentFrame(s);
+      s.set_selection(...textSpan(s, 'Second body', 0, 6));
+      return epoch;
+    },
+    call: ({ session: s }, epoch) => s.apply_input('X', epoch),
+  }),
+  defineRow({
+    method: 'EditSession.apply_delete',
+    mutates: true,
+    setup: ({ session: s }: Docx) => {
+      const epoch = residentFrame(s);
+      caretIn(s, 'Second body', 6);
+      return epoch;
+    },
+    call: ({ session: s }, epoch) => ({ frame: s.apply_delete('backward', epoch, 1), after: s.selection() }),
+  }),
+  defineRow({
+    method: 'EditSession.apply_delete',
+    name: 'EditSession.apply_delete (unknown direction)',
+    throws: { name: 'string', reason: 'a direction other than backward or forward is refused' },
+    setup: ({ session: s }: Docx) => {
+      const epoch = residentFrame(s);
+      caretIn(s, 'Second body', 6);
+      return epoch;
+    },
+    call: ({ session: s }, epoch) => s.apply_delete('sideways', epoch, 1),
+  }),
+  {
+    method: 'EditSession.set_hyperlink',
+    mutates: true,
+    call: ({ session: s }) => s.set_hyperlink(...textSpan(s, 'Second body', 0, 6), HYPERLINK),
+  },
+  defineRow({
+    method: 'EditSession.set_hyperlink',
+    name: 'EditSession.set_hyperlink (unlink)',
+    mutates: true,
+    setup: ({ session: s }: Docx) => s.set_hyperlink(...textSpan(s, 'Second body', 0, 6), HYPERLINK),
+    call: ({ session: s }) => s.set_hyperlink(...textSpan(s, 'Second body', 0, 6), 'null'),
+  }),
+  {
+    method: 'EditSession.set_hyperlink',
+    name: 'EditSession.set_hyperlink (not an object)',
+    throws: { name: 'string', reason: 'hyperlink JSON that is neither an object nor null is refused' },
+    call: ({ session: s }) => s.set_hyperlink(...textSpan(s, 'Second body', 0, 6), '"https://example.com/"'),
+  },
+  {
+    method: 'EditSession.set_image_geometry_at',
+    mutates: true,
+    call: ({ session: s }) => {
+      const at = imageAt(s);
+      return s.set_image_geometry_at('body', at.paraId, at.offset, GEOMETRY);
+    },
+  },
+  {
+    method: 'EditSession.set_image_geometry_at',
+    name: 'EditSession.set_image_geometry_at (no image)',
+    throws: { name: 'string', reason: 'a position that holds no image is refused' },
+    call: ({ session: s }) => s.set_image_geometry_at('body', imageAt(s).paraId, textAt(s, 'Picture', 0), GEOMETRY),
+  },
+  {
+    method: 'EditSession.set_undo_input_time',
+    mutates: true,
+    call: ({ session: s }) => timedEdits(s, () => s.set_undo_input_time(5_100, 5_100)),
+  },
+  {
+    method: 'EditSession.clear_undo_input_time',
+    mutates: true,
+    call: ({ session: s }) => timedEdits(s, () => {
+      const result = s.clear_undo_input_time();
+      // Each engine's own clock decides grouping after a clear, so a boundary fixes it.
+      s.add_undo_boundary();
+      return result;
+    }),
+  },
+  {
+    method: 'EditSession.set_cell_selection',
+    call: ({ session: s }) => ({ result: s.set_cell_selection(cellRange([0, 0], [1, 1])), after: s.cell_selection() }),
+  },
+  {
+    method: 'EditSession.set_cell_selection',
+    name: 'EditSession.set_cell_selection (missing cell)',
+    throws: { name: 'string', reason: 'a cell that does not resolve is refused' },
+    call: ({ session: s }) => s.set_cell_selection(cellRange([0, 0], [5, 0])),
+  },
+  defineRow({
+    method: 'EditSession.cell_selection',
+    setup: ({ session: s }: Docx) => s.set_cell_selection(cellRange([0, 1], [1, 0])),
+    call: ({ session: s }) => s.cell_selection(),
+  }),
+  defineRow({
+    method: 'EditSession.cell_selection',
+    name: 'EditSession.cell_selection (deleted table)',
+    throws: { name: 'string', reason: 'a selection whose table was deleted no longer resolves' },
+    setup: ({ session: s }: Docx) => {
+      s.set_cell_selection(cellRange([0, 0], [1, 1]));
+      s.delete_table(TABLE_LOC);
+    },
+    call: ({ session: s }) => s.cell_selection(),
+  }),
+  { method: 'EditSession.selection_context', call: ({ session: s }) => s.selection_context(...textSpan(s, 'First body', 0, 5)) },
+  {
+    method: 'EditSession.selection_context',
+    name: 'EditSession.selection_context (unknown paragraph)',
+    throws: { name: 'string', reason: 'a paragraph id the story does not hold is refused' },
+    call: ({ session: s }) => s.selection_context('body', '7FFFFFFF', 0, '7FFFFFFF', 1),
+  },
+  defineRow({
+    method: 'EditSession.media_bytes',
+    setup: ({ fresh }: Docx) => {
+      const f = fresh();
+      f.set_media_tokens(true);
+      f.open_docx(fixture, true, GENERATION);
+      const { src } = imageAt(f);
+      if (typeof src !== 'string' || !src.startsWith('media:')) throw new Error('the seeded image carries no media token');
+      return { f, src };
+    },
+    call: (_, { f, src }) => [f.media_bytes(src), f.media_bytes('media:missing')],
+  }),
+  defineRow({
+    method: 'EditSession.stories_changed_since',
+    setup: ({ session: s }: Docx) => {
+      const { revision } = JSON.parse(s.stories_changed_since(Number.MAX_SAFE_INTEGER)) as { revision: number };
+      s.insert_text('body', paraId(s, 'Second body'), textAt(s, 'Second body', 0), 'Changed ');
+      return revision;
+    },
+    call: ({ session: s }, revision) => s.stories_changed_since(revision),
+  }),
+  {
+    method: 'EditSession.create_story',
+    call: ({ session: s }) => ({ result: s.create_story('parity-story', 'Created', 'Heading1', 'center'), after: s.paragraphs('parity-story') }),
+  },
+  {
+    method: 'EditSession.create_story',
+    name: 'EditSession.create_story (existing story)',
+    throws: { name: 'string', reason: 'a story id that already exists is refused' },
+    call: ({ session: s }) => s.create_story('body', 'Again', 'Normal', 'left'),
+  },
+  defineRow({
+    method: 'EditSession.set_display_window',
+    setup: ({ session: s }: Docx) => layout(s).fontChains,
+    call: ({ session: s }, fontChains) => ({ result: s.set_display_window(1, 2), after: s.build_display_list_frame(frameExtras(fontChains), 0) }),
+  }),
+  defineRow({
+    method: 'EditSession.build_display_pages_frame',
+    setup: ({ session: s }: Docx) => {
+      const { fontChains } = layout(s);
+      s.set_display_window(1, 2);
+      s.build_display_list_frame(frameExtras(fontChains), 0);
+      return frameEpoch(s);
+    },
+    call: ({ session: s }, epoch) => s.build_display_pages_frame(Uint32Array.from([0]), epoch),
+  }),
+  defineRow({
+    method: 'EditSession.build_display_list_frame',
+    setup: ({ session: s }: Docx) => layout(s).fontChains,
+    call: ({ session: s }, fontChains) => s.build_display_list_frame(frameExtras(fontChains), 0),
+  }),
+  defineRow({
+    method: 'EditSession.layout_document_with_regions_retained',
+    setup: ({ session: s }: Docx) => layoutInput(s).input,
+    call: ({ session: s }, input) => ({ result: s.layout_document_with_regions_retained(input), after: s.retained_layout_json() }),
+  }),
+  defineRow({
+    method: 'EditSession.layout_document_json',
+    setup: ({ session: s }: Docx) => workerLayoutInput(s),
+    call: ({ session: s }, { input, fontChains }) => ({ result: s.layout_document_json(input), after: s.build_display_list_frame(frameExtras(fontChains), 0) }),
+  }),
+  {
+    method: 'EditSession.layout_document_json',
+    name: 'EditSession.layout_document_json (unparseable)',
+    throws: { name: 'string', reason: 'input that is not JSON is refused' },
+    call: ({ session: s }) => s.layout_document_json('{'),
+  },
+  { method: 'layout_document_json', call: ({ engine }) => engine.layout_document_json(JSON.stringify({ measured: [], options: MODULE_OPTIONS })) },
+  {
+    method: 'layout_document_json',
+    name: 'layout_document_json (unparseable)',
+    throws: { name: 'string', reason: 'input that is not JSON is refused' },
+    call: ({ engine }) => engine.layout_document_json('{'),
+  },
+  defineRow({
+    method: 'build_display_list_json',
+    setup: ({ engine }: Docx) => JSON.parse(engine.layout_document_json(JSON.stringify({ measured: [], options: MODULE_OPTIONS }))) as unknown,
+    call: ({ engine }, layout) => engine.build_display_list_json(JSON.stringify({ measured: [], options: MODULE_OPTIONS, layout })),
+  }),
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
@@ -580,55 +1013,53 @@ const exclusions: Exclusion[] = [
 const knownDifferences: KnownDifference[] = [];
 
 const notYetCovered: string[] = [
-  'EditSession.apply_delete', 'EditSession.apply_host_update', 'EditSession.apply_input',
-  'EditSession.apply_local_update', 'EditSession.apply_raw_ops', 'EditSession.apply_seed_raw_ops', 'EditSession.apply_update_chunks',
-  'EditSession.apply_update', 'EditSession.apply_update_with_inference', 'EditSession.begin_region_layout', 'EditSession.begin_shared_reads',
-  'EditSession.bootstrap_peer', 'EditSession.build_display_list_frame', 'EditSession.build_display_pages_frame',
-  'EditSession.canvasSkippedEffects', 'EditSession.cell_selection', 'EditSession.clear_cell_selection',
-  'EditSession.clear_measure_fonts', 'EditSession.clear_undo_input_time', 'EditSession.clear_update_event_observation', 'EditSession.clear_update_observer',
-  'EditSession.comment_text_target_json', 'EditSession.compare_docx_json', 'EditSession.create_story', 'EditSession.decode_font',
+  'EditSession.apply_host_update',
+  'EditSession.apply_seed_raw_ops',
+  'EditSession.apply_update_with_inference', 'EditSession.begin_region_layout', 'EditSession.begin_shared_reads',
+  'EditSession.bootstrap_peer',
+  'EditSession.canvasSkippedEffects', 'EditSession.clear_cell_selection',
+  'EditSession.clear_measure_fonts', 'EditSession.clear_update_event_observation', 'EditSession.clear_update_observer',
+  'EditSession.comment_text_target_json', 'EditSession.compare_docx_json', 'EditSession.decode_font',
   'EditSession.delete_story',
   'EditSession.direct_batches_applied', 'EditSession.display_hit_test_regions_json', 'EditSession.display_range_rects_batch', 'EditSession.display_range_rects_json',
   'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json', 'EditSession.display_vertical_move_json', 'EditSession.drain_update_event',
-  'EditSession.echo_glyph_set_json', 'EditSession.edit_text_resident', 'EditSession.encode_diff_chunks', 'EditSession.encode_diff',
-  'EditSession.encode_peer_metadata', 'EditSession.encode_state', 'EditSession.encode_state_vector', 'EditSession.encode_sticky_position',
+  'EditSession.echo_glyph_set_json', 'EditSession.edit_text_resident', 'EditSession.encode_diff_chunks',
+  'EditSession.encode_peer_metadata', 'EditSession.encode_sticky_position',
   'EditSession.encoded_selection', 'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json', 'EditSession.export_structured_with_pages_json',
   'EditSession.fail_compared_docx_json', 'EditSession.finish_compared_docx_json', 'EditSession.format_text_target_json', 'EditSession.geometry_position_outline_json',
   'EditSession.has_pending_update', 'EditSession.header_footer_aliases_json',
-  'EditSession.insert_watermark', 'EditSession.layout_document_json',
+  'EditSession.insert_watermark',
   'EditSession.layout_document_with_regions_after_edit', 'EditSession.layout_document_with_regions_exact_prefix_retained',
-  'EditSession.layout_document_with_regions_prefix_retained_json', 'EditSession.layout_document_with_regions_retained',
+  'EditSession.layout_document_with_regions_prefix_retained_json',
   'EditSession.layout_document_with_regions_retained_json', 'EditSession.layout_document_with_regions_retained_meta',
-  'EditSession.load', 'EditSession.load_json', 'EditSession.load_media_sources', 'EditSession.load_note_separators',
-  'EditSession.measure_paragraph_json', 'EditSession.media_bytes', 'EditSession.media_data_url',
+  'EditSession.load', 'EditSession.load_media_sources', 'EditSession.load_note_separators',
+  'EditSession.measure_paragraph_json', 'EditSession.media_data_url',
   'EditSession.media_sources_json', 'EditSession.media_type', 'EditSession.move_embed',
-  'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.open_docx', 'EditSession.outline_glyph_json',
-  'EditSession.page_texts_json', 'EditSession.paragraph_id_count', 'EditSession.paragraph_save_plan', 'EditSession.paragraph_unit',
-  'EditSession.patch_style_languages_xml', 'EditSession.persist_paragraph_ids', 'EditSession.prime_save_seed_states', 'EditSession.prime_save_seed_states_slice',
+  'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.outline_glyph_json',
+  'EditSession.page_texts_json', 'EditSession.paragraph_id_count', 'EditSession.paragraph_unit',
+  'EditSession.patch_style_languages_xml', 'EditSession.prime_save_seed_states_slice',
   'EditSession.proposal_revision_ranges_json', 'EditSession.rebuild_media_sources', 'EditSession.record_saved_paragraph_ids',
   'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.repeat_content_control_at', 'EditSession.reset_frame_base',
   'EditSession.resident_caret_snapshot_json', 'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
   'EditSession.resolve_encoded_selection', 'EditSession.resolve_paragraph_anchor', 'EditSession.resolve_sticky_position', 'EditSession.resume_region_layout',
   'EditSession.retained_headers_footers_json', 'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json', 'EditSession.revision_ids_at',
-  'EditSession.revision_stamps_json', 'EditSession.run_inheritance', 'EditSession.seed_comment_metadata_json', 'EditSession.seed_from_docx',
-  'EditSession.seed_opaque_sequences', 'EditSession.select_story', 'EditSession.selection_context', 'EditSession.selection',
-  'EditSession.set_cell_selection',
+  'EditSession.revision_stamps_json', 'EditSession.run_inheritance', 'EditSession.seed_comment_metadata_json',
+  'EditSession.seed_opaque_sequences', 'EditSession.select_story', 'EditSession.selection',
   'EditSession.set_content_control_value_at', 'EditSession.set_content_control_value_index',
-  'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages', 'EditSession.set_display_window', 'EditSession.set_document_property',
-  'EditSession.set_header_footer_aliases', 'EditSession.set_hyperlink', 'EditSession.set_image_geometry_at', 'EditSession.set_image_geometry',
+  'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages', 'EditSession.set_document_property',
+  'EditSession.set_header_footer_aliases', 'EditSession.set_image_geometry',
   'EditSession.set_local_lowering', 'EditSession.set_media_tokens', 'EditSession.set_part_metadata', 'EditSession.set_partial_document',
-  'EditSession.set_selection', 'EditSession.set_style_language',
-  'EditSession.set_undo_input_time',
+  'EditSession.set_style_language',
   'EditSession.set_update_observer', 'EditSession.set_windowed_incremental_builds', 'EditSession.settle_revisions_json',
-  'EditSession.start_update_event_observation', 'EditSession.stories_changed_since',
+  'EditSession.start_update_event_observation',
   'EditSession.story_segment_unit_digests', 'EditSession.story_segment_units', 'EditSession.style_languages_json', 'EditSession.take_base_latin_miss',
   'EditSession.unavailable_tables_from',
   'EditSession.update_measure_font_outlines', 'EditSession.written_paragraph_ids', 'EditSession.yrs_blocks_for_story',
   'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.page_sizes', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.page_count',
   'RetainedLayoutMeta.partial', 'RetainedLayoutMeta.provisional',
   'RunInheritance.attributes', 'RunInheritance.paragraph_formatting', 'RunInheritance.table_attributes',
-  'build_display_list_json', 'clear_measure_fonts', 'close_display_list', 'decodeFontFace', 'decodeTiffPng',
-  'hit_test_regions_by_handle', 'hit_test_regions_json', 'layout_document_json', 'measure_paragraph_json', 'open_display_list',
+  'clear_measure_fonts', 'close_display_list', 'decodeFontFace', 'decodeTiffPng',
+  'hit_test_regions_by_handle', 'hit_test_regions_json', 'measure_paragraph_json', 'open_display_list',
   'outline_glyph_json', 'parse_relationships_xml', 'range_rects_by_handle', 'range_rects_on_pages_by_handle', 'range_rects_on_pages_json',
   'range_rects_region_by_handle', 'range_rects_region_json', 'register_measure_font', 'register_substitute_measure_font',
   'render_docx_markdown_json', 'render_docx_markdown_with_pages_json', 'serialize_docx_s10', 'serialize_docx_s11', 'serialize_docx_s12',
@@ -663,7 +1094,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(176);
+    expect(notYetCovered.length).toBe(143);
   });
 
   for (const row of rows) {
