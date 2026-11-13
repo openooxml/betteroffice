@@ -650,6 +650,85 @@ function seededCommentId(session: Session): string {
   return String(comment.id);
 }
 
+function exchange(left: Session, right: Session): void {
+  const fromLeft = left.encode_state();
+  const fromRight = right.encode_state();
+  right.apply_update(fromLeft);
+  left.apply_update(fromRight);
+}
+
+// Two collaborators each change the table and undo in crossing order, which deletes every payload entry.
+function crossedTableUndos({ session: s, fresh }: Docx): void {
+  const f = fresh();
+  f.apply_update(s.encode_state());
+  s.track_undo();
+  f.track_undo();
+  s.insert_row(cellLoc(0, 0), true);
+  exchange(s, f);
+  f.set_column_width(cellLoc(0, 0), 2000);
+  if (!s.undo()) throw new Error('the inserted row was not undone');
+  exchange(s, f);
+  if (!f.undo()) throw new Error('the column width was not undone');
+  exchange(s, f);
+}
+
+const GRID_STYLE = {
+  type: 'table',
+  styleId: 'Grid',
+  pPr: { spaceAfter: 0, lineSpacing: 240 },
+  tblPr: { borders: { top: { style: 'single', size: 4 } }, cellMargins: { left: { value: 108, type: 'dxa' } } },
+  tblStylePr: [{ type: 'firstRow', pPr: { spaceBefore: 40 } }],
+};
+
+interface WireTable {
+  formatting?: Record<string, unknown>;
+  columnWidths?: number[];
+  rows: { formatting?: unknown; cells: { formatting?: unknown }[] }[];
+}
+
+// The fixture's styles plus a table style, and the fixture table set in that style, as the facade passes them.
+function gridStyled(engine: DocxEngine): { styles: string; table: string } {
+  const { styles, document } = (JSON.parse(engine.parse_docx_s9(fixture, '')) as {
+    document: { package: { styles?: { styles?: unknown[] }; document: { content: { type: string }[] } } };
+  }).document.package;
+  const table = document.content.find((block) => block.type === 'table') as WireTable | undefined;
+  if (!styles?.styles?.length || !table) throw new Error('the fixture wire lacks styles or a table');
+  return {
+    styles: JSON.stringify({ ...styles, styles: [...styles.styles, GRID_STYLE] }),
+    table: JSON.stringify({
+      formatting: { ...table.formatting, styleId: 'Grid', look: { firstRow: true } },
+      columnWidths: table.columnWidths,
+      rows: table.rows.map((row) => ({ formatting: row.formatting, cells: row.cells.map((cell) => ({ formatting: cell.formatting })) })),
+    }),
+  };
+}
+
+interface CellInheritance { attributes: { borders?: unknown }; paragraphFormatting: unknown; runFormatting: unknown }
+
+function gridCell(tableAttributes: string): CellInheritance {
+  const cell = (JSON.parse(tableAttributes) as { rows: CellInheritance[][] }).rows[0]?.[0];
+  if (!cell?.attributes.borders || !cell.paragraphFormatting) throw new Error(`the table style reached no cell: ${tableAttributes}`);
+  return cell;
+}
+
+function gridInheritance({ session: s, engine }: Docx) {
+  const { styles, table } = gridStyled(engine);
+  const inheritance = s.run_inheritance(styles);
+  return { inheritance, table, cell: gridCell(inheritance.table_attributes(table)) };
+}
+
+function tokenizedImage(fresh: () => Session): { f: Session; src: string } {
+  const f = fresh();
+  f.set_media_tokens(true);
+  f.open_docx(fixture, true, GENERATION);
+  const { src } = imageAt(f);
+  if (typeof src !== 'string' || !src.startsWith('media:')) throw new Error('the seeded image carries no media token');
+  return { f, src };
+}
+
+const HEADER_ALIASES = JSON.stringify([{ isHeader: true, partPath: 'word/header1.xml', relationshipIds: ['rIdHeader', 'rIdHeaderAlias'] }]);
+const HEX_DIGEST = /^[0-9a-f]{16}$/;
+
 const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
 
 const rows: Row<Docx>[] = [
@@ -1312,14 +1391,7 @@ const rows: Row<Docx>[] = [
   },
   defineRow({
     method: 'EditSession.media_bytes',
-    setup: ({ fresh }: Docx) => {
-      const f = fresh();
-      f.set_media_tokens(true);
-      f.open_docx(fixture, true, GENERATION);
-      const { src } = imageAt(f);
-      if (typeof src !== 'string' || !src.startsWith('media:')) throw new Error('the seeded image carries no media token');
-      return { f, src };
-    },
+    setup: ({ fresh }: Docx) => tokenizedImage(fresh),
     call: (_, { f, src }) => [f.media_bytes(src), f.media_bytes('media:missing')],
   }),
   defineRow({
@@ -1863,6 +1935,183 @@ const rows: Row<Docx>[] = [
       return { result, after: s.list_comments() };
     },
   },
+  defineRow({
+    method: 'EditSession.unavailable_tables_from',
+    setup: (docx: Docx) => crossedTableUndos(docx),
+    call: ({ session: s }) => {
+      const tables = s.unavailable_tables_from(JSON.stringify(['body', 'hf:rIdHeader']));
+      const found = JSON.parse(tables) as { story: string; tableIndex: number }[] | null;
+      if (!found?.some((table) => table.story === 'body' && table.tableIndex === 0)) throw new Error(`the emptied table is not listed: ${tables}`);
+      return tables;
+    },
+  }),
+  {
+    method: 'EditSession.unavailable_tables_from',
+    name: 'EditSession.unavailable_tables_from (not JSON)',
+    throws: { name: 'string', reason: 'roots that are not a JSON array of story ids are refused' },
+    call: ({ session: s }) => s.unavailable_tables_from('{'),
+  },
+  defineRow({
+    method: 'EditSession.clear_cell_selection',
+    setup: ({ session: s }: Docx) => s.set_cell_selection(cellRange([0, 0], [1, 1])),
+    call: ({ session: s }) => {
+      const before = s.cell_selection();
+      const cleared = s.clear_cell_selection();
+      if (cleared === undefined) throw new Error('clearing a cell selection returned no caret');
+      return { before, cleared, after: s.cell_selection(), again: s.clear_cell_selection() };
+    },
+  }),
+  // The handle's class differs between engines, so the row compares what its methods read.
+  defineRow({
+    method: 'EditSession.run_inheritance',
+    setup: ({ engine }: Docx) => gridStyled(engine),
+    call: ({ session: s }, { styles, table }) => {
+      const inheritance = s.run_inheritance(styles);
+      try {
+        const attributes = inheritance.attributes('Heading1', null, null);
+        if (Object.keys(JSON.parse(attributes) as object).length === 0) throw new Error('a Heading1 run inherits nothing');
+        const tableAttributes = inheritance.table_attributes(table);
+        gridCell(tableAttributes);
+        return { attributes, paragraph: inheritance.paragraph_formatting('Heading1', 'null'), tableAttributes };
+      } finally {
+        inheritance.free();
+      }
+    },
+  }),
+  {
+    method: 'EditSession.run_inheritance',
+    name: 'EditSession.run_inheritance (not JSON)',
+    throws: { name: 'string', reason: 'style definitions that are not JSON are refused' },
+    call: ({ session: s }) => s.run_inheritance('{'),
+  },
+  defineRow({
+    method: 'RunInheritance.attributes',
+    setup: (docx: Docx) => gridInheritance(docx),
+    call: (_, { inheritance, cell }) => {
+      try {
+        const heading = inheritance.attributes('Heading1', null, null);
+        if (Object.keys(JSON.parse(heading) as object).length === 0) throw new Error('a Heading1 run inherits nothing');
+        return [heading, inheritance.attributes(null, null, null), inheritance.attributes('Heading1', null, JSON.stringify(cell.runFormatting ?? {}))];
+      } finally {
+        inheritance.free();
+      }
+    },
+  }),
+  defineRow({
+    method: 'RunInheritance.attributes',
+    name: 'RunInheritance.attributes (table run not JSON)',
+    throws: { name: 'string', reason: 'table run formatting that is not JSON is refused' },
+    setup: ({ session: s }: Docx) => s.run_inheritance('null'),
+    call: (_, inheritance) => {
+      try {
+        return inheritance.attributes(null, null, '{');
+      } finally {
+        inheritance.free();
+      }
+    },
+  }),
+  defineRow({
+    method: 'RunInheritance.paragraph_formatting',
+    setup: (docx: Docx) => gridInheritance(docx),
+    call: (_, { inheritance, cell }) => {
+      try {
+        const inCell = inheritance.paragraph_formatting(null, JSON.stringify(cell.paragraphFormatting));
+        if (JSON.parse(inCell) === null) throw new Error('a first-row cell paragraph inherits nothing');
+        return [inCell, inheritance.paragraph_formatting('Heading1', JSON.stringify(cell.paragraphFormatting)), inheritance.paragraph_formatting(null, 'null')];
+      } finally {
+        inheritance.free();
+      }
+    },
+  }),
+  defineRow({
+    method: 'RunInheritance.paragraph_formatting',
+    name: 'RunInheritance.paragraph_formatting (not JSON)',
+    throws: { name: 'string', reason: 'table paragraph formatting that is not JSON is refused' },
+    setup: ({ session: s }: Docx) => s.run_inheritance('null'),
+    call: (_, inheritance) => {
+      try {
+        return inheritance.paragraph_formatting(null, '{');
+      } finally {
+        inheritance.free();
+      }
+    },
+  }),
+  defineRow({
+    method: 'RunInheritance.table_attributes',
+    setup: (docx: Docx) => gridInheritance(docx),
+    call: (_, { inheritance, table }) => {
+      try {
+        const attributes = inheritance.table_attributes(table);
+        gridCell(attributes);
+        return attributes;
+      } finally {
+        inheritance.free();
+      }
+    },
+  }),
+  defineRow({
+    method: 'RunInheritance.table_attributes',
+    name: 'RunInheritance.table_attributes (not JSON)',
+    throws: { name: 'string', reason: 'a table that is not JSON is refused' },
+    setup: ({ session: s }: Docx) => s.run_inheritance('null'),
+    call: (_, inheritance) => {
+      try {
+        return inheritance.table_attributes('{');
+      } finally {
+        inheritance.free();
+      }
+    },
+  }),
+  defineRow({
+    method: 'EditSession.style_languages_json',
+    setup: ({ session: s }: Docx) => {
+      s.set_style_language('Normal', JSON.stringify({ lang: 'de-DE' }));
+      s.set_style_language('Heading1', JSON.stringify({ eastAsia: 'ja-JP' }));
+    },
+    call: ({ session: s }) => {
+      const languages = s.style_languages_json();
+      if ((JSON.parse(languages) as Record<string, { lang?: string }>).Normal?.lang !== 'de-DE') throw new Error(`the Normal language is not listed: ${languages}`);
+      return languages;
+    },
+  }),
+  defineRow({
+    method: 'EditSession.header_footer_aliases_json',
+    setup: ({ session: s }: Docx) => s.set_header_footer_aliases(HEADER_ALIASES),
+    call: ({ session: s }) => {
+      const aliases = s.header_footer_aliases_json();
+      if ((JSON.parse(aliases) as Record<string, string>).rIdHeaderAlias !== 'rIdHeader') throw new Error(`the header alias is not active: ${aliases}`);
+      return aliases;
+    },
+  }),
+  // The key is drawn per opening and keys every digest, so the row compares their form, the part indices and a reload.
+  {
+    method: 'EditSession.media_sources_json',
+    call: ({ fresh }) => {
+      const f = fresh();
+      const unseeded = f.media_sources_json();
+      f.open_docx(fixture, true, GENERATION);
+      const json = f.media_sources_json();
+      const { key, parts } = JSON.parse(json) as { key: string[]; parts: [string, number][] };
+      if (parts.length === 0) throw new Error(`the seeded image left no media source: ${json}`);
+      const reader = fresh();
+      reader.load_media_sources(json);
+      return {
+        unseeded,
+        key: key.map((half) => HEX_DIGEST.test(half)),
+        parts: parts.map(([digest, index]) => [HEX_DIGEST.test(digest), index]),
+        reloaded: reader.media_sources_json() === json,
+      };
+    },
+  },
+  defineRow({
+    method: 'EditSession.media_type',
+    setup: ({ fresh }: Docx) => tokenizedImage(fresh),
+    call: (_, { f, src }) => {
+      const type = f.media_type(src);
+      if (!type?.startsWith('image/')) throw new Error(`the seeded image has no media type: ${String(type)}`);
+      return [type, f.media_type('media:missing')];
+    },
+  }),
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
@@ -1894,7 +2143,6 @@ const notYetCovered: string[] = [
   'EditSession.apply_seed_raw_ops',
   'EditSession.apply_update_with_inference', 'EditSession.begin_region_layout', 'EditSession.begin_shared_reads',
   'EditSession.bootstrap_peer',
-  'EditSession.clear_cell_selection',
   'EditSession.clear_measure_fonts', 'EditSession.clear_update_event_observation',
   'EditSession.decode_font',
   'EditSession.direct_batches_applied', 'EditSession.display_hit_test_regions_json', 'EditSession.display_range_rects_batch', 'EditSession.display_range_rects_json',
@@ -1903,13 +2151,11 @@ const notYetCovered: string[] = [
   'EditSession.encode_peer_metadata', 'EditSession.encode_sticky_position',
   'EditSession.encoded_selection', 'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json',
   'EditSession.geometry_position_outline_json',
-  'EditSession.header_footer_aliases_json',
   'EditSession.layout_document_with_regions_after_edit', 'EditSession.layout_document_with_regions_exact_prefix_retained',
   'EditSession.layout_document_with_regions_prefix_retained_json',
   'EditSession.layout_document_with_regions_retained_json', 'EditSession.layout_document_with_regions_retained_meta',
   'EditSession.load', 'EditSession.load_media_sources', 'EditSession.load_note_separators',
   'EditSession.measure_paragraph_json', 'EditSession.media_data_url',
-  'EditSession.media_sources_json', 'EditSession.media_type',
   'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.outline_glyph_json',
   'EditSession.paragraph_id_count', 'EditSession.paragraph_unit',
   'EditSession.patch_style_languages_xml', 'EditSession.prime_save_seed_states_slice',
@@ -1918,19 +2164,16 @@ const notYetCovered: string[] = [
   'EditSession.resident_caret_snapshot_json', 'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
   'EditSession.resolve_encoded_selection', 'EditSession.resolve_paragraph_anchor', 'EditSession.resolve_sticky_position', 'EditSession.resume_region_layout',
   'EditSession.retained_headers_footers_json', 'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json',
-  'EditSession.run_inheritance',
   'EditSession.seed_opaque_sequences', 'EditSession.select_story', 'EditSession.selection',
   'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages',
   'EditSession.set_header_footer_aliases',
   'EditSession.set_local_lowering', 'EditSession.set_media_tokens', 'EditSession.set_partial_document',
   'EditSession.set_windowed_incremental_builds',
   'EditSession.start_update_event_observation',
-  'EditSession.story_segment_unit_digests', 'EditSession.story_segment_units', 'EditSession.style_languages_json',
-  'EditSession.unavailable_tables_from',
+  'EditSession.story_segment_unit_digests', 'EditSession.story_segment_units',
   'EditSession.update_measure_font_outlines', 'EditSession.yrs_blocks_for_story',
   'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.page_sizes', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.page_count',
   'RetainedLayoutMeta.partial', 'RetainedLayoutMeta.provisional',
-  'RunInheritance.attributes', 'RunInheritance.paragraph_formatting', 'RunInheritance.table_attributes',
   'clear_measure_fonts', 'close_display_list', 'decodeFontFace', 'decodeTiffPng',
   'hit_test_regions_by_handle', 'hit_test_regions_json', 'measure_paragraph_json', 'open_display_list',
   'outline_glyph_json', 'parse_relationships_xml', 'range_rects_by_handle', 'range_rects_on_pages_by_handle', 'range_rects_on_pages_json',
@@ -1966,7 +2209,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(107);
+    expect(notYetCovered.length).toBe(97);
   });
 
   for (const row of rows) {
