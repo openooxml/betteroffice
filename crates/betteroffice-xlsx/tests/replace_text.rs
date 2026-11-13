@@ -1192,10 +1192,11 @@ fn replace_without_within_searches_an_explicit_hidden_sheet() {
         "steps": steps.clone(),
     }))
     .unwrap();
+    let explicit = ["sheet:0", "sheet:1", "sheet:3"]
+        .map(|sheet| whole_sheet_within(sheet, "sheet"));
     let defaulted = serde_json::from_value::<EditRequest>(json!({
         "expectVersion": workbook.version(),
-        "steps": ["sheet:0", "sheet:1", "sheet:3"]
-            .map(|sheet| whole_sheet_within(sheet, "sheet")),
+        "steps": explicit,
     }))
     .unwrap();
     assert_eq!(request, defaulted);
