@@ -654,6 +654,10 @@ fn replace_ignores_case_by_default_and_matches_exactly_under_match_case() {
 }
 
 fn rich_workbook() -> Workbook {
+    Workbook::open(&rich_source()).unwrap()
+}
+
+fn rich_source() -> Vec<u8> {
     let model = WorkbookModel {
         sheets: vec![Sheet::new("Sheet1")],
         ..WorkbookModel::default()
@@ -664,7 +668,25 @@ fn rich_workbook() -> Workbook {
         .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
         .unwrap();
     sheet.1 = br#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><r><rPr><rFont val="Arial"/><b/></rPr><t>alpha</t></r><r><rPr><rFont val="Courier New"/><i/></rPr><t xml:space="preserve"> beta</t></r></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>alpha</t></is></c></row></sheetData></worksheet>"#.to_vec();
-    Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn replace_refuses_rich_text_cells_in_a_collaborative_session() {
+    let mut workbook = Workbook::open_collaborative(&rich_source(), 303).unwrap();
+    assert_eq!(workbook.cell_text_runs(SheetId(0), cell("A1")), None);
+
+    let outcome = apply(&mut workbook, replace("A1:A2", "alpha", "omega", false))
+        .expect("the rich text cell is refused and the rest applies");
+    let stats = outcome.receipts[0].replace.clone().unwrap();
+    assert_eq!(stats.matched, 2);
+    assert_eq!(stats.replaced, 1);
+    let refused = refused_cells(&stats);
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0].0, "A1");
+    assert!(refused[0].1.contains("Sheet1!A1"), "{}", refused[0].1);
+    assert_eq!(stored(&workbook, "A1"), text("alpha beta"));
+    assert_eq!(stored(&workbook, "A2"), text("omega"));
 }
 
 #[test]
