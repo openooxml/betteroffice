@@ -27,7 +27,7 @@ const UNWRITABLE = /"Ext1".*found ns0:ffData/;
 const EXT_PARAGRAPH = `<w:p w14:paraId="73000003">${text('Label ')}${field(formBegin(EXT_DATA), 'FORMTEXT', text('Ada'))}</w:p>`;
 const RUN_BOUND_DATA = '<w:ffData><w:name w:val="T"/><ext:foo/></w:ffData>';
 const RUN_BOUND_PARAGRAPH = `<w:p w14:paraId="73000005">${text('Mark ')}${field(`<w:fldChar w:fldCharType="begin">${RUN_BOUND_DATA}</w:fldChar>`, 'FORMTEXT', text('Ada')).replace('<w:r>', '<w:r xmlns:ext="urn:x">')}</w:p>`;
-const OTHER_PARAGRAPH =`<w:p w14:paraId="73000004">${text('Other')}</w:p>`;
+const OTHER_PARAGRAPH = `<w:p w14:paraId="73000004">${text('Other')}</w:p>`;
 
 async function docx(body: string, namespaces = ''): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -119,12 +119,6 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     });
   }
 
-  test(`${engine}: saves with the same document when the edit is in another paragraph, that paragraph byte-identical (product save)`, async () => {
-    const xml = await typedInExtended(yrs, 'Other', 'product save');
-    expect(count(xml, EXT_PARAGRAPH)).toBe(1);
-    expect(xml).toContain('Otherx');
-  });
-
   test(`${engine}: saves with the same document when the edit is in another paragraph, that paragraph byte-identical (selective save)`, async () => {
     const session = await yrs.createYrsSession();
     try {
@@ -147,7 +141,9 @@ for (const [engine, yrs] of [['wasm', wasmYrs], ['native', nativeYrs as unknown 
     }
   });
 
-  test(`${engine}: refuses to save, naming the field and the reason, when a whole rewrite would drop form field data it cannot write`, async () => {
-    await expect(typedInExtended(yrs, 'Other', 'whole model rewrite')).rejects.toThrow(UNWRITABLE);
-  });
+  for (const route of Object.keys(ROUTES)) {
+    test(`${engine}: refuses to save, naming the field and the reason, when a part it cannot splice holds form field data it cannot write (${route})`, async () => {
+      await expect(typedInExtended(yrs, 'Other', route)).rejects.toThrow(UNWRITABLE);
+    });
+  }
 }
