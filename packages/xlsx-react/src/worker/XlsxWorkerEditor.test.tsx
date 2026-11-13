@@ -9571,6 +9571,70 @@ describe('workbook worker editor header interactions', () => {
     expect(applyOps).not.toHaveBeenCalled();
   });
 
+  it('drops a dragged legacy chart and disarms its move when a column header is pressed', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = await mountLegacy();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseMove(view.getByTestId('xlsx-scroll'), { clientX: 150, clientY: 140, buttons: 1 });
+    expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(30px, 20px)');
+    fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+    fireEvent.mouseUp(window, { clientX: 150, clientY: 140, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+  });
+
+  it('drops a resizing legacy chart when the select-all corner is pressed', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = await mountLegacy();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+    expect(view.getByTestId('xlsx-chart-selection').style.width).toBe('230px');
+    fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 330, clientY: 220, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.resizeChart).not.toHaveBeenCalled();
+    expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+  });
+
+  for (const target of ['a column header', 'the select-all corner']) {
+    it(`drops a resizing peerless chart when ${target} is pressed`, async () => {
+      const host = peerlessHarness();
+      host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: true,
+        rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
+      const view = await host.mount(undefined, false, { showSheetHeaders: true });
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+      await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+      fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+        .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+      expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+      await act(async () => {
+        if (target === 'a column header') {
+          fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+        } else {
+          fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+        }
+      });
+      await waitFor(() => expect(view.queryByTestId('xlsx-chart-selection')).toBeNull());
+      expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+      fireEvent.pointerUp(window, { pointerId: 1, clientX: 404, clientY: 202, button: 0 });
+      await act(async () => {});
+      expect(host.sent.filter((command) => command.kind === 'resizeChart')).toEqual([]);
+    });
+  }
+
   it('anchors a shifted column header on the pressed track, not on a merged cell', async () => {
     const host = harness();
     widen(host.sessionMethods.frame);

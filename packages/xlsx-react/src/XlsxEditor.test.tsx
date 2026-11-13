@@ -1790,6 +1790,104 @@ describe('XlsxEditor chart objects', () => {
   });
 });
 
+describe('XlsxEditor chart objects with sheet headers', () => {
+  const headerGrid = (view: Awaited<ReturnType<typeof mountEditor>>) =>
+    view.surface.closest('[data-testid="xlsx-grid"]')!;
+  const headerFill = (view: Awaited<ReturnType<typeof mountEditor>>, axis: 'col' | 'row', index: number) =>
+    headerGrid(view).querySelector<HTMLElement>(
+      `[data-testid="${axis === 'col' ? 'xlsx-column-headers' : 'xlsx-row-headers'}"] [data-${axis}="${index}"]`
+    )!.style.backgroundColor;
+  const presses: [string, (view: Awaited<ReturnType<typeof mountEditor>>) => void][] = [
+    ['a column header', (view) => {
+      fireEvent.mouseDown(headerGrid(view).querySelector('[data-testid="xlsx-column-headers"] [data-col="0"]')!);
+    }],
+    ['the select-all corner', (view) => {
+      fireEvent.click(headerGrid(view).querySelector('[data-testid="xlsx-grid-corner"]')!);
+    }],
+  ];
+
+  for (const [target, press] of presses) {
+    it(`drops the chart selection and its resize gesture when ${target} is pressed`, async () => {
+      const [chart] = charted.charts;
+      const view = await mountEditor(charted, undefined, true);
+      await selectChart(view, chart);
+      expect(view.handles()).toHaveLength(8);
+      const resize = spyOn(view.workbook(), 'resizeChart');
+      const undoDepth = view.workbook().historyState().undoDepth;
+      const width = parseFloat(view.outline()!.style.width);
+
+      fireEvent.pointerDown(view.handle('se')!, { button: 0, pointerId: 11, clientX: 200, clientY: 200 });
+      fireEvent.pointerMove(window, { pointerId: 11, clientX: 220, clientY: 210 });
+      expect(parseFloat(view.outline()!.style.width)).toBeCloseTo(width + 20);
+
+      press(view);
+      await waitFor(() => expect(view.outline()).toBeNull());
+      expect(view.handles()).toHaveLength(0);
+
+      // selecting the chart again must not revive the abandoned gesture.
+      await selectChart(view, chart);
+      expect(parseFloat(view.outline()!.style.width)).toBeCloseTo(width);
+      fireEvent.pointerMove(window, { pointerId: 11, clientX: 260, clientY: 240 });
+      expect(parseFloat(view.outline()!.style.width)).toBeCloseTo(width);
+      fireEvent.pointerUp(window, { pointerId: 11, button: 0, clientX: 260, clientY: 240 });
+
+      expect(resize).not.toHaveBeenCalled();
+      expect(view.workbook().historyState().undoDepth).toBe(undoDepth);
+      expect(view.handles()).toHaveLength(8);
+    });
+
+    it(`drops the chart selection and disarms its move when ${target} is pressed`, async () => {
+      const [chart] = charted.charts;
+      const view = await mountEditor(charted, undefined, true);
+      const start = chartCenter(chart);
+      const move = spyOn(view.workbook(), 'moveChart');
+
+      fireEvent.mouseDown(view.surface, start);
+      await waitFor(() => view.outline()!);
+      fireEvent.mouseMove(view.surface, { clientX: start.clientX + 40, clientY: start.clientY + 24, buttons: 1 });
+      expect(view.outline()!.style.left).toBe(`${chart.rect.x + 40}px`);
+
+      press(view);
+      await waitFor(() => expect(view.outline()).toBeNull());
+      expect(view.handles()).toHaveLength(0);
+
+      await act(async () => {
+        fireEvent.mouseUp(window, { clientX: start.clientX + 40, clientY: start.clientY + 24 });
+      });
+      await settle();
+
+      expect(move).not.toHaveBeenCalled();
+      expect(view.canUndo()).toBe(false);
+    });
+  }
+
+  it('hides the cell marquee and fill handle under a selected chart while the bands keep the range', async () => {
+    const [chart] = charted.charts;
+    const view = await mountEditor(charted, undefined, true);
+    view.click({ row: 1, col: 1 });
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'ArrowDown', shiftKey: true });
+    });
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'ArrowRight', shiftKey: true });
+    });
+    await waitFor(() => expect(headerFill(view, 'col', 2)).toBe('#eceff1'), MOUNTED);
+    expect(view.selectionBox()).not.toBeNull();
+    expect(view.view.queryByTestId('xlsx-fill-handle')).not.toBeNull();
+
+    await selectChart(view, chart);
+
+    expect(view.selectionBox()).toBeNull();
+    expect(view.view.queryAllByTestId('xlsx-selection-fill')).toEqual([]);
+    expect(view.view.queryByTestId('xlsx-fill-handle')).toBeNull();
+    expect(view.view.queryByTestId('xlsx-active-cell')).toBeNull();
+    expect([0, 1, 2, 3].map((index) => headerFill(view, 'col', index)))
+      .toEqual(['', '#eceff1', '#eceff1', '']);
+    expect([0, 1, 2, 3].map((index) => headerFill(view, 'row', index)))
+      .toEqual(['', '#eceff1', '#eceff1', '']);
+  });
+});
+
 describe('XlsxEditor host integration', () => {
   it('keeps viewing mode navigable without exposing user mutations', async () => {
     let api: XlsxEditorApi | undefined;
