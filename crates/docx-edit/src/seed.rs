@@ -9304,6 +9304,37 @@ mod tests {
     }
 
     #[test]
+    fn absent_column_band_size_applies_no_vertical_banding() {
+        let style = json!({
+            "type": "table", "styleId": "Columns",
+            "tblStylePr": [shading_part("band1Vert", "D3DFEE")]
+        });
+        let cells = styled_cells(style, json!({ "noHBand": true }), 1, 3);
+        let fills: Vec<Value> = cells[0]
+            .iter()
+            .map(|cell| cell["backgroundColor"].clone())
+            .collect();
+        assert_eq!(fills, vec![Value::Null; 3]);
+    }
+
+    #[test]
+    fn whole_table_part_paragraph_formatting_does_not_reach_cells() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Spaced",
+                "tblStylePr": [{ "type": "wholeTable", "pPr": { "spaceAfter": 777 } }]
+            }]
+        });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Spaced", "look": { "noHBand": true, "noVBand": true } },
+            "rows": [{ "cells": [{ "type": "tableCell", "content": [] }] }]
+        });
+        let baseline = RunInheritance::new(Some(&definitions)).table_attrs(&table);
+        assert!(baseline["rows"][0][0]["paragraphFormatting"]["spaceAfter"].is_null());
+    }
+
+    #[test]
     fn style_level_cell_borders_do_not_reach_cells() {
         let line = json!({ "style": "single", "size": 8, "color": { "rgb": "0000FF" } });
         let style = json!({

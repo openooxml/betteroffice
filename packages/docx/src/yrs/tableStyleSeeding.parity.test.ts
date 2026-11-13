@@ -493,6 +493,38 @@ it('keeps wholeTable part shading off the cells in both seeders', async () => {
   }
 });
 
+it('applies no vertical banding without a column band size in both seeders', async () => {
+  const styles = `<w:style w:type="table" w:styleId="Columns">${shadingPart('band1Vert', 'D3DFEE')}</w:style>`;
+  const look =
+    '<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="0"/>';
+  const seeded = await seedBoth(styledTable('Columns', look, [['', '', '']], 3), styles);
+  for (const engine of ['projected', 'native']) {
+    expect(seeded[engine]![0]![0]!.map((cell) => cell.backgroundColor)).toEqual([null, null, null]);
+  }
+});
+
+it('keeps wholeTable part paragraph spacing off the cells in both seeders', async () => {
+  const styles =
+    '<w:style w:type="table" w:styleId="Spaced"><w:tblStylePr w:type="wholeTable">' +
+    '<w:pPr><w:spacing w:after="777"/></w:pPr></w:tblStylePr></w:style>';
+  const bytes = documentFixture(styledTable('Spaced', flagsOff, [['', '']], 2), styles);
+  const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+  const projected = await createYrsSession({ clientId: 74222 });
+  const native = await createYrsSession({ clientId: 74222 });
+  try {
+    documentToYrs(projected, parsed);
+    native.seedFromDocx(bytes);
+    for (const session of [projected, native]) {
+      for (const story of ['body:t0:r0c0', 'body:t0:r0c1']) {
+        expect(session.paragraphs(story)[0]!.properties.spaceAfter).not.toBe(777);
+      }
+    }
+  } finally {
+    projected.destroy();
+    native.destroy();
+  }
+});
+
 it('keeps style-level tcBorders off the cells in both seeders', async () => {
   const line = (side: string) => `<w:${side} w:val="single" w:sz="8" w:space="0" w:color="0000FF"/>`;
   const styles =
