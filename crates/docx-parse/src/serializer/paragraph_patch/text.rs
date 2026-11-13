@@ -370,6 +370,14 @@ pub(super) fn write(
             changed_runs.insert(cell.run);
         }
     }
+    if changed_runs
+        .iter()
+        .any(|run| lowered.field_text_runs.contains(run))
+    {
+        return Err(Failure::structure(
+            "field: edit changes a run holding field result text",
+        ));
+    }
     let mut result_units = Vec::new();
     for (at, cell) in lowered.cells.iter().enumerate() {
         #[cfg(test)]
@@ -1217,6 +1225,18 @@ mod tests {
         edits: &[(u32, u32, &str, Value)],
         run_edits: Vec<RunEditV1>,
     ) -> String {
+        match try_replace_with_run_edits(source, seed, edits, run_edits) {
+            Ok(written) => written,
+            Err(_) => panic!("writing failed"),
+        }
+    }
+
+    fn try_replace_with_run_edits(
+        source: &str,
+        seed: Vec<UnitV1>,
+        edits: &[(u32, u32, &str, Value)],
+        run_edits: Vec<RunEditV1>,
+    ) -> Result<String, (PatchErrorCode, String)> {
         let patch = ParagraphPatchV1 {
             ordinal: 0,
             session_key: "source:0".to_owned(),
@@ -1258,10 +1278,36 @@ mod tests {
         for (cell, unit) in lowered.cells.iter_mut().zip(flatten(&seed)) {
             cell.unit = unit;
         }
-        match write(source, &lowered, &patch) {
-            Ok(written) => written.0,
-            Err(_) => panic!("writing failed"),
-        }
+        write(source, &lowered, &patch)
+            .map(|written| written.0)
+            .map_err(|failure| (failure.code, failure.detail))
+    }
+
+    #[test]
+    fn writer_declines_an_edit_to_a_run_holding_field_result_text() {
+        let source = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>12</w:t><w:fldChar w:fldCharType=\"end\"/><w:t>abc</w:t></w:r></w:p>";
+        let payload = json!({
+            "fieldType": "PAGE", "instruction": "PAGE", "displayText": "12",
+            "fieldKind": "complex", "modelKind": "field"
+        });
+        let field = UnitV1::Atom {
+            atom_kind: "field".to_owned(),
+            payload: serde_json::from_value(payload).unwrap(),
+            attrs: Attrs::new(),
+        };
+        let result = try_replace_with_run_edits(
+            source,
+            vec![field, text("abc", json!({}))],
+            &[(1, 2, "A", json!({}))],
+            Vec::new(),
+        );
+        assert_eq!(
+            result,
+            Err((
+                PatchErrorCode::UnsupportedStructure,
+                "field: edit changes a run holding field result text".to_owned()
+            ))
+        );
     }
 
     #[test]

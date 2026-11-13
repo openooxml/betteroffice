@@ -278,6 +278,10 @@ pub struct ChartDataLabels {
     pub position: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number_format: Option<String>,
+    /// `c:numFmt/@sourceLinked`: the label reads the format its values were
+    /// cached with, and `number_format` only when they cached none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_linked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<ChartTextProperties>,
     /// Per-point `c:dLbl` overrides; never nested further.

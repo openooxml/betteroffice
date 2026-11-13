@@ -300,7 +300,7 @@ export function compareArity(wasm: Map<string, number>, native: Map<string, numb
 
 /** Merges the declarations of several modules; a name declared twice must be declared alike. */
 export function mergeDeclarations(parts: readonly [string, Surface][]): { surface: Surface; problems: string[] } {
-  const surface: Surface = { classes: new Map(), functions: new Map() };
+  const surface: Surface = { classes: new Map(), functions: new Map(), consts: new Set() };
   const problems: string[] = [];
   const origin = new Map<string, string>();
   const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);

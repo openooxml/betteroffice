@@ -244,6 +244,7 @@ fn patch_inner(
     }
     let verified = lower::lower(&output, context, &units, properties::language_only(patch))?;
     drawing::bind(&output, &verified, &units)?;
+    verify::visible_text(source, &lowered, &patch.text_edits, &output, &verified)?;
     verify::markers(
         &output,
         &verified,

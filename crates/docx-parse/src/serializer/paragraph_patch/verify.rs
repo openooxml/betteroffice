@@ -1,8 +1,10 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde_json::{Value, json};
 
-use crate::paragraph_patch::{Attrs, PatchErrorCode, UnitV1};
+use crate::paragraph_patch::{Attrs, PatchErrorCode, TextEditV1, UnitV1};
 
-use super::lower::{Lowered, WORD};
+use super::lower::{Cell, Lowered, WORD, decoded_scalars};
 use super::{Failure, flatten, unit_attrs};
 
 fn mismatch(key: &str) -> Failure {
@@ -403,4 +405,145 @@ fn paragraph(direct: &Value, attrs: &Attrs) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+
+fn visible(source: &str, lowered: &Lowered) -> Result<Vec<(String, Option<u32>)>, Failure> {
+    let runs: BTreeSet<_> = lowered.runs.iter().map(|run| run.node).collect();
+    let mut cells: BTreeMap<usize, Vec<&Cell>> = BTreeMap::new();
+    for cell in &lowered.cells {
+        if matches!(cell.unit, UnitV1::Text { .. }) {
+            cells.entry(cell.node).or_default().push(cell);
+        }
+    }
+    let mut result = Vec::new();
+    for (at, node) in lowered.xml.nodes.iter().enumerate() {
+        if let Some(cells) = cells.get(&at) {
+            for cell in cells {
+                if let UnitV1::Text { text, .. } = &cell.unit {
+                    result.push((text.clone(), Some(cell.from)));
+                }
+            }
+        } else if node.word("t")
+            && !node.empty
+            && node.parent.is_some_and(|run| runs.contains(&run))
+        {
+            for (text, _) in decoded_scalars(source, node.open.end..node.close.start)? {
+                result.push((text, None));
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn inserted(edit: &TextEditV1) -> String {
+    edit.insert
+        .iter()
+        .map(|insert| insert.text.as_str())
+        .collect()
+}
+
+pub(super) fn visible_text(
+    source: &str,
+    lowered: &Lowered,
+    edits: &[TextEditV1],
+    output: &str,
+    written: &Lowered,
+) -> Result<(), Failure> {
+    let mut edits: Vec<_> = edits.iter().collect();
+    edits.sort_by_key(|edit| edit.from);
+    let mut next = 0;
+    let mut expected = String::new();
+    for (text, offset) in visible(source, lowered)? {
+        if let Some(offset) = offset {
+            while let Some(edit) = edits.get(next).filter(|edit| edit.from <= offset) {
+                expected.push_str(&inserted(edit));
+                next += 1;
+            }
+            if edits
+                .iter()
+                .any(|edit| edit.from <= offset && offset < edit.to)
+            {
+                continue;
+            }
+        }
+        expected.push_str(&text);
+    }
+    for edit in &edits[next..] {
+        expected.push_str(&inserted(edit));
+    }
+    let actual: String = visible(output, written)?
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    if actual != expected {
+        return Err(Failure::structure("visible text differs outside the edit"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::PatchContext;
+    use super::super::lower::lower;
+    use super::*;
+    use crate::paragraph_patch::{DonorV1, InsertedTextV1};
+
+    fn paragraph(text: &str, result: &str) -> String {
+        format!(
+            "<w:p><w:r><w:t>{text}</w:t></w:r><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>{result}</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>"
+        )
+    }
+
+    fn units(text: &str) -> Vec<UnitV1> {
+        let field = json!({
+            "fieldType": "PAGE", "instruction": "PAGE", "displayText": "12",
+            "fieldKind": "complex", "modelKind": "field"
+        });
+        vec![
+            UnitV1::Text {
+                text: text.to_owned(),
+                attrs: Attrs::new(),
+            },
+            UnitV1::Atom {
+                atom_kind: "field".to_owned(),
+                payload: serde_json::from_value(field).unwrap(),
+                attrs: Attrs::new(),
+            },
+        ]
+    }
+
+    fn check_typing_x(patched: &str) -> Result<(), Failure> {
+        let context = PatchContext::word_document();
+        let source = paragraph("abc", "12");
+        let edit = TextEditV1 {
+            from: 1,
+            to: 1,
+            insert: vec![InsertedTextV1 {
+                text: "X".to_owned(),
+                attrs: Attrs::new(),
+                inherit: Attrs::new(),
+            }],
+            donor: DonorV1::At { at: 1 },
+        };
+        let (Ok(lowered), Ok(written)) = (
+            lower(&source, &context, &units("abc"), false),
+            lower(patched, &context, &units("aXbc"), false),
+        ) else {
+            panic!("lowering failed");
+        };
+        visible_text(&source, &lowered, &[edit], patched, &written)
+    }
+
+    #[test]
+    fn a_patch_keeping_the_field_result_text_is_accepted() {
+        assert!(check_typing_x(&paragraph("aXbc", "12")).is_ok());
+    }
+
+    #[test]
+    fn a_patch_dropping_a_field_result_character_is_declined() {
+        let Err(failure) = check_typing_x(&paragraph("aXbc", "1")) else {
+            panic!("dropped result text was accepted");
+        };
+        assert_eq!(failure.code, PatchErrorCode::UnsupportedStructure);
+    }
 }

@@ -143,26 +143,31 @@ async function observeBoth<T>(row: Row<T>, makeWasm: MakeEngine<T>, makeNative: 
   return { wasm, native };
 }
 
-async function expectDocxPackage(name: string, side: string, saved: Outcome): Promise<Uint8Array> {
+async function expectPackage(name: string, side: string, saved: Outcome, mainPart: string): Promise<Uint8Array> {
   if ('error' in saved) throw new Error(`${name}: ${side} save threw ${saved.error.name}: ${saved.error.message}`);
   const bytes = saved.value;
   if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) throw new Error(`${name}: ${side} save returned no bytes`);
   const zip = await JSZip.loadAsync(bytes, { checkCRC32: true }).catch((error: unknown) => {
     throw new Error(`${name}: ${side} save is not a valid zip: ${String(error)}`);
   });
-  if (!zip.file('word/document.xml')) throw new Error(`${name}: ${side} save has no word/document.xml`);
+  if (!zip.file(mainPart)) throw new Error(`${name}: ${side} save has no ${mainPart}`);
   return bytes;
 }
 
 /** Runs one row on a fresh wasm and a fresh native session and requires equal outcomes and saves. */
-export async function runRow<T>(row: Row<T>, makeWasm: MakeEngine<T>, makeNative: MakeEngine<T>): Promise<void> {
+export async function runRow<T>(
+  row: Row<T>,
+  makeWasm: MakeEngine<T>,
+  makeNative: MakeEngine<T>,
+  mainPart = 'word/document.xml',
+): Promise<void> {
   const { wasm, native } = await observeBoth(row, makeWasm, makeNative);
   const name = rowName(row);
   expect(native.outcome, name).toStrictEqual(wasm.outcome);
   expectDeclaredOutcome(row, wasm.outcome as Outcome);
   if (!row.mutates) return;
-  const nativeBytes = await expectDocxPackage(name, 'native', native.saved!);
-  const wasmBytes = await expectDocxPackage(name, 'wasm', wasm.saved!);
+  const nativeBytes = await expectPackage(name, 'native', native.saved!, mainPart);
+  const wasmBytes = await expectPackage(name, 'wasm', wasm.saved!, mainPart);
   await expectSavedPartsEqual(nativeBytes, wasmBytes);
 }
 
@@ -176,7 +181,12 @@ async function differs(check: () => unknown): Promise<boolean> {
 }
 
 /** A known difference holds only while both engines run the row and their outcomes or saves still differ. */
-export async function runKnownDifference<T>(row: Row<T>, makeWasm: MakeEngine<T>, makeNative: MakeEngine<T>): Promise<void> {
+export async function runKnownDifference<T>(
+  row: Row<T>,
+  makeWasm: MakeEngine<T>,
+  makeNative: MakeEngine<T>,
+  mainPart = 'word/document.xml',
+): Promise<void> {
   const name = rowName(row);
   const observed = await observeBoth(row, makeWasm, makeNative).catch((error: unknown) => {
     throw new Error(`${error instanceof Error ? error.message : String(error)}; a known difference needs both engines to run the row, so fix the setup or remove the knownDifferences entry`);
@@ -186,7 +196,11 @@ export async function runKnownDifference<T>(row: Row<T>, makeWasm: MakeEngine<T>
   if (row.mutates) {
     const [left, right] = [native.saved!, wasm.saved!];
     const savedDiffer = 'value' in left && 'value' in right
-      ? await differs(() => expectSavedPartsEqual(left.value as Uint8Array, right.value as Uint8Array))
+      ? await (async () => {
+        const nativeBytes = await expectPackage(name, 'native', left, mainPart);
+        const wasmBytes = await expectPackage(name, 'wasm', right, mainPart);
+        return differs(() => expectSavedPartsEqual(nativeBytes, wasmBytes));
+      })()
       : await differs(() => expect(left).toStrictEqual(right));
     if (savedDiffer) return;
   }
@@ -219,15 +233,83 @@ export function surfaceMethods(wasm: readonly Surface[], native: Surface): strin
   return [...new Set(wasm.flatMap(names))].filter((name) => nativeNames.has(name)).sort();
 }
 
-export function coverageProblems(
-  surface: readonly string[],
-  plan: {
-    rows: readonly RowExpectation[];
-    exclusions: readonly Exclusion[];
-    notYetCovered: readonly string[];
-    knownDifferences: readonly KnownDifference[];
-  },
-): string[] {
+export type EngineSide = 'native' | 'wasm';
+
+export interface OneEngineExport {
+  name: string;
+  side: EngineSide;
+}
+
+export interface OneEngineOnly extends OneEngineExport {
+  reason: 'BY_DESIGN' | 'PARKED' | 'GAP' | 'BUILD_METADATA' | 'PACKAGING';
+  note: string;
+}
+
+function exportNames(surfaces: readonly Surface[]) {
+  const classes = new Map<string, Set<string>>();
+  for (const surface of surfaces) {
+    for (const [owner, members] of surface.classes) {
+      const names = classes.get(owner) ?? new Set<string>();
+      for (const member of members.keys()) names.add(member);
+      classes.set(owner, names);
+    }
+  }
+  return { classes, bare: new Set(surfaces.flatMap((surface) => [...surface.functions.keys(), ...surface.consts])) };
+}
+
+/** Exports declared on one engine only: a whole class by its name, otherwise `Class.member`, functions and consts. */
+export function oneEngineExports(wasm: readonly Surface[], native: Surface): OneEngineExport[] {
+  const sides = { wasm: exportNames(wasm), native: exportNames([native]) };
+  const only = (side: EngineSide, other: EngineSide): OneEngineExport[] => [
+    ...[...sides[side].classes].flatMap(([owner, members]) => {
+      const shared = sides[other].classes.get(owner);
+      return shared ? [...members].filter((member) => !shared.has(member)).map((member) => `${owner}.${member}`) : [owner];
+    }),
+    ...[...sides[side].bare].filter((name) => !sides[other].bare.has(name)),
+  ].map((name) => ({ name, side }));
+  return [...only('wasm', 'native'), ...only('native', 'wasm')].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function oneEngineProblems(actual: readonly OneEngineExport[], listed: readonly OneEngineOnly[]): string[] {
+  const problems: string[] = [];
+  const key = (entry: OneEngineExport) => `${entry.side}:${entry.name}`;
+  const actualKeys = new Set(actual.map(key));
+  const listedKeys = new Set<string>();
+  for (const entry of listed) {
+    if (listedKeys.has(key(entry))) problems.push(`${entry.name}: listed twice in oneEngineOnly`);
+    listedKeys.add(key(entry));
+    if (!actualKeys.has(key(entry))) problems.push(`${entry.name}: listed as ${entry.side} only but is not one-engine-only`);
+    if (entry.note.trim() === '') problems.push(`${entry.name}: oneEngineOnly needs a note`);
+  }
+  for (const entry of actual) {
+    if (!listedKeys.has(key(entry))) problems.push(`${entry.name}: only on ${entry.side} but not in oneEngineOnly`);
+  }
+  return problems;
+}
+
+export interface CoveragePlan {
+  rows: readonly RowExpectation[];
+  exclusions: readonly Exclusion[];
+  notYetCovered: readonly string[];
+  knownDifferences: readonly KnownDifference[];
+  oneEngineOnly: readonly OneEngineOnly[];
+}
+
+export function printParityCounts(format: string, surface: readonly string[], plan: CoveragePlan): void {
+  console.log([
+    `PARITY-COUNTS ${format}`,
+    `surface=${surface.length}`,
+    `rows=${plan.rows.length}`,
+    `methodsCovered=${new Set(plan.rows.map((row) => row.method)).size}`,
+    `excluded=${plan.exclusions.length}`,
+    `notYetCovered=${plan.notYetCovered.length}`,
+    `errorRows=${plan.rows.filter((row) => row.throws).length}`,
+    `knownDifferences=${plan.knownDifferences.length}`,
+    `oneEngineOnly=${plan.oneEngineOnly.length}`,
+  ].join(' '));
+}
+
+export function coverageProblems(surface: readonly string[], plan: CoveragePlan): string[] {
   const problems: string[] = [];
   const declared = new Set(surface);
   const rowMethods = [...new Set(plan.rows.map((row) => row.method))];
