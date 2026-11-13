@@ -3,7 +3,7 @@ import { afterAll, afterEach, expect, test } from 'bun:test';
 import { fireEvent } from '@testing-library/react';
 import type { XlsxEditRequest, XlsxFindRequest, XlsxValidationResult } from '@betteroffice/xlsx';
 import { LocaleProvider } from '../i18n';
-import { ReplaceDialog } from './ReplaceDialog';
+import { ReplaceDialog, type ReplaceDialogApi } from './ReplaceDialog';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -172,21 +172,141 @@ test('finds one match at a time and replaces only the current cell', async () =>
   type(replaceInput, 'beta');
 
   fireEvent.keyDown(findInput, { key: 'Enter' });
-  await findByText('1 of 2');
-  fireEvent.click(getByRole('button', { name: 'Find next' }));
   await findByText('2 of 2');
-  fireEvent.click(getByRole('button', { name: 'Find previous' }));
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
   await findByText('1 of 2');
+  fireEvent.click(getByRole('button', { name: 'Find previous' }));
+  await findByText('2 of 2');
 
   fireEvent.keyDown(replaceInput, { key: 'Enter' });
-  await findByText(/2 of 2/);
+  await findByText(/1 of 2/);
 
-  expect(revealed).toEqual(['A1', 'B2', 'A1', 'B2']);
+  expect(revealed).toEqual(['B2', 'A1', 'B2', 'A1']);
   expect(applied).toBe(1);
   expect(requests[0].steps[0]).toMatchObject({
     op: 'replaceText', query: 'alpha', replacement: 'beta',
-    target: { sheetId: target.sheetId, range: { start: { row: 0, col: 0 }, end: { row: 0, col: 0 } } },
+    target: { sheetId: target.sheetId, range: { start: { row: 1, col: 1 }, end: { row: 1, col: 1 } } },
   });
+});
+
+test('find next starts after the active cell and find previous before it', async () => {
+  const cells = [
+    { sheetId: target.sheetId, row: 0, col: 0, a1: 'A1' },
+    { sheetId: target.sheetId, row: 4, col: 2, a1: 'C5' },
+    { sheetId: target.sheetId, row: 8, col: 0, a1: 'A9' },
+  ];
+  const revealed: string[] = [];
+  const api: ReplaceDialogApi = {
+    version: () => 'v1',
+    find: () => ({
+      ok: true, version: 'v1', truncated: false,
+      matches: cells.map((cell) => ({ cell, text: 'alpha' })),
+    }),
+    reveal: (cell) => { revealed.push(cell.a1); },
+    validate: () => preview(),
+    apply: () => { throw new Error('must not apply'); },
+  };
+  const activeTarget = { ...target, activeCell: { row: 4, col: 1 } };
+
+  const forward = render(<LocaleProvider>
+    <ReplaceDialog open target={activeTarget} api={api} onClose={() => {}} />
+  </LocaleProvider>);
+  type(forward.getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  fireEvent.click(forward.getByRole('button', { name: 'Find next' }));
+  await forward.findByText('2 of 3');
+  forward.unmount();
+
+  const backward = render(<LocaleProvider>
+    <ReplaceDialog open target={activeTarget} api={api} onClose={() => {}} />
+  </LocaleProvider>);
+  type(backward.getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  fireEvent.click(backward.getByRole('button', { name: 'Find previous' }));
+  await backward.findByText('1 of 3');
+
+  expect(revealed).toEqual(['C5', 'A1']);
+});
+
+test('says the match count is truncated at the find limit', async () => {
+  const { getByRole, findByText, queryByText } = view({
+    version: () => 'v1',
+    find: () => ({
+      ok: true, version: 'v1', truncated: true,
+      matches: Array.from({ length: 10_000 }, (_, row) => ({
+        cell: { sheetId: target.sheetId, row, col: 0, a1: `A${row + 1}` }, text: 'alpha',
+      })),
+    }),
+    validate: () => preview(),
+    apply: () => { throw new Error('must not apply'); },
+  });
+
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await findByText('2 of more than 10,000');
+  expect(queryByText(/2 of 10,?000$/)).toBeNull();
+});
+
+test('finds afresh after replace all', async () => {
+  let finds = 0;
+  const { getByRole, findByText } = view({
+    version: () => 'v1',
+    find: () => {
+      finds += 1;
+      return {
+        ok: true, version: 'v1', truncated: false,
+        matches: [{ cell: { sheetId: target.sheetId, row: 1, col: 1, a1: 'B2' }, text: 'alpha' }],
+      };
+    },
+    validate: () => preview(),
+    apply: (request) => ({
+      ok: true, applied: true, baseVersion: 'v1', version: 'v2', source: 'host',
+      receipts: [{ stepIndex: 0, changed: true, target: request.steps[0].target,
+        changedCells: [], replace: { matched: 3, replaced: 2, skippedFormulas: 1, skippedLocked: 0 } }],
+      changedSheets: [], calculation: { changed: [], cycleCells: [], limitedCells: [], truncated: false },
+    }),
+  });
+
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  type(getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, 'beta');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await findByText('1 of 1');
+  fireEvent.click(getByRole('button', { name: 'Replace all' }));
+  await findByText(/Matched 3, replaced 2/);
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await findByText('1 of 1');
+
+  expect(finds).toBe(2);
+});
+
+test('finds afresh when the workbook version moves between presses', async () => {
+  let version = 'v1';
+  let finds = 0;
+  const { getByRole, findByText } = view({
+    version: () => version,
+    find: () => {
+      finds += 1;
+      return {
+        ok: true, version, truncated: false,
+        matches: [
+          { cell: { sheetId: target.sheetId, row: 1, col: 1, a1: 'B2' }, text: 'alpha' },
+          { cell: { sheetId: target.sheetId, row: 2, col: 2, a1: 'C3' }, text: 'alpha' },
+        ],
+      };
+    },
+    validate: () => preview(),
+    apply: () => { throw new Error('must not apply'); },
+  });
+
+  type(getByRole('textbox', { name: 'Find' }) as HTMLInputElement, 'alpha');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await findByText('1 of 2');
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await findByText('2 of 2');
+  expect(finds).toBe(1);
+
+  version = 'v2';
+  fireEvent.click(getByRole('button', { name: 'Find next' }));
+  await findByText('1 of 2');
+  expect(finds).toBe(2);
 });
 
 test('sends matchCase when Match case is ticked', async () => {
