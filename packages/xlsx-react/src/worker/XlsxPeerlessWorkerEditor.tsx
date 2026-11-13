@@ -361,6 +361,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         sheetId: selected.sheetId,
         range: selected.range,
         label: from === to ? from : `${from}:${to}`,
+        activeCell: selected.activeCell,
         sheets: (run?.session.editState.sheets ?? run?.session.state.sheets)?.map((sheet) => ({
           sheetId: sheet.id,
           name: sheet.name,

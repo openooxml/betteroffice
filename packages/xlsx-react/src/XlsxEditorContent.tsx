@@ -1437,6 +1437,7 @@ export function XlsxEditorContent({
         end: { row: range.bottom, col: range.right },
       },
       label: from === to ? from : `${from}:${to}`,
+      activeCell: { row: selected.anchor.row, col: selected.anchor.col },
       sheets: withSheetCatalog(sheetInfo.sheetIds.map((id, index) => ({
         sheetId: id,
         name: sheetInfo.sheetNames[index] ?? id,

@@ -7,6 +7,7 @@
     "findNext": "Find next",
     "replace": "Replace",
     "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{index} з понад {total}",
     "lookIn": "Look in",
     "values": "Values",
     "formulas": "Formulas",

@@ -7,6 +7,7 @@
     "findNext": "Find next",
     "replace": "Replace",
     "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{total} 件以上中 {index} 件目",
     "lookIn": "Look in",
     "values": "Values",
     "formulas": "Formulas",

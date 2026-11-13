@@ -7,6 +7,7 @@
     "findNext": "Find next",
     "replace": "Replace",
     "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{total}개 이상 중 {index}번째",
     "lookIn": "Look in",
     "values": "Values",
     "formulas": "Formulas",

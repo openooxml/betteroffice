@@ -7,6 +7,7 @@
     "findNext": "查找下一个",
     "replace": "替换",
     "matchPosition": "第 {index} 个，共 {total} 个",
+    "matchPositionTruncated": "第 {index} 个，共超过 {total} 个",
     "lookIn": "查找范围",
     "values": "值",
     "formulas": "公式",

@@ -19,6 +19,7 @@ import type {
   XlsxValidationResult,
 } from '@betteroffice/xlsx';
 import { useTranslation } from '../i18n';
+import { resolvedLocale } from '../i18n/LocaleContext';
 import { toolbarTheme } from '../../../../shared/react-toolbar/theme';
 
 /** One sheet the dialog may search when the scope is the whole workbook. */
@@ -59,6 +60,8 @@ export interface ReplaceDialogTarget {
   defaultScope?: 'selection' | 'sheet' | 'workbook';
   /** Every sheet in order; lets the dialog offer this sheet or all sheets. */
   sheets?: readonly ReplaceDialogSheet[];
+  /** The grid's active cell on `sheetId`; Find next starts after it. Defaults to the range start. */
+  activeCell?: { row: number; col: number };
 }
 
 /** The engine calls the dialog needs; both editors provide them over their session. */
@@ -82,8 +85,16 @@ type ReplaceScope = 'selection' | 'sheet' | 'workbook';
 
 interface FindCache {
   key: string;
+  /** Sorted by sheet order, then row, then column. */
   matches: XlsxFindMatch[];
-  index: number;
+  sheetOrder: string[];
+  truncated: boolean;
+}
+
+interface CellPosition {
+  sheetId: string;
+  row: number;
+  col: number;
 }
 
 const DIALOG_WIDTH = 420;
@@ -162,11 +173,40 @@ function searchKey(
   lookIn: 'values' | 'formulas',
   entireCell: boolean,
   matchCase: boolean,
+  version: string,
 ): string {
   const sheetIds = scopeTargets(target, scope).map((range) => range.sheetId).join(',');
   return [
     target.sheetId, target.label, sheetIds, scope, query, lookIn, String(entireCell), String(matchCase),
+    version,
   ].join('\u0000');
+}
+
+function activeCellOf(target: ReplaceDialogTarget): CellPosition {
+  const cell = target.activeCell
+    ?? (target.range.kind === 'rowCol' ? target.range.start : { row: 0, col: 0 });
+  return { sheetId: target.sheetId, row: cell.row, col: cell.col };
+}
+
+function compareCells(sheetOrder: readonly string[], a: CellPosition, b: CellPosition): number {
+  const rank = (sheetId: string) => {
+    const index = sheetOrder.indexOf(sheetId);
+    return index < 0 ? sheetOrder.length : index;
+  };
+  return rank(a.sheetId) - rank(b.sheetId) || a.row - b.row || a.col - b.col;
+}
+
+/** The first match after `from` (or the last before it), wrapping around the workbook. */
+function stepFrom(found: FindCache, from: CellPosition, direction: 1 | -1): number {
+  const { matches, sheetOrder } = found;
+  if (direction > 0) {
+    const index = matches.findIndex((entry) => compareCells(sheetOrder, entry.cell, from) > 0);
+    return index < 0 ? 0 : index;
+  }
+  for (let index = matches.length - 1; index >= 0; index -= 1) {
+    if (compareCells(sheetOrder, matches[index].cell, from) < 0) return index;
+  }
+  return matches.length - 1;
 }
 
 /** A single active cell means "search everything"; an explicit multi-cell selection means itself. */
@@ -201,17 +241,18 @@ export function ReplaceDialog({
   onClose(): void;
   onApplied?(result: XlsxEditResult): void;
 }) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const [lookIn, setLookIn] = useState<'values' | 'formulas'>('values');
   const [scope, setScope] = useState<ReplaceScope>('selection');
   const [entireCell, setEntireCell] = useState(false);
   const [matchCase, setMatchCase] = useState(false);
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
-  const [match, setMatch] = useState<{ index: number; total: number } | null>(null);
+  const [match, setMatch] = useState<{ index: number; total: number; truncated: boolean } | null>(null);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const dragOrigin = useRef<{ x: number; y: number; baseX: number; baseY: number } | null>(null);
   const cache = useRef<FindCache | null>(null);
+  const cursor = useRef<CellPosition | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
   const titleId = useId();
@@ -225,6 +266,7 @@ export function ReplaceDialog({
   useLayoutEffect(() => {
     if (!open) return;
     cache.current = null;
+    cursor.current = null;
     setMatch(null);
     setPhase({ kind: 'idle' });
     setScope(defaultScopeFor(target));
@@ -266,7 +308,8 @@ export function ReplaceDialog({
 
   const findMatches = async (query: string): Promise<FindCache | null> => {
     if (!target) return null;
-    const key = searchKey(target, scope, query, lookIn, entireCell, matchCase);
+    const version = await Promise.resolve(api.version());
+    const key = searchKey(target, scope, query, lookIn, entireCell, matchCase, version);
     if (cache.current?.key === key) return cache.current;
     const ranges = scopeTargets(target, scope);
     const result = await Promise.resolve(api.find(scope === 'workbook'
@@ -290,8 +333,17 @@ export function ReplaceDialog({
       setPhase({ kind: 'refused', message: refusalMessage(result) });
       return null;
     }
-    cache.current = { key, matches: result.matches, index: -1 };
+    const sheetOrder = ranges.map((range) => range.sheetId);
+    const matches = [...result.matches]
+      .sort((a, b) => compareCells(sheetOrder, a.cell, b.cell));
+    cache.current = { key, matches, sheetOrder, truncated: result.truncated };
     return cache.current;
+  };
+
+  const selectMatch = async (found: FindCache, index: number) => {
+    cursor.current = found.matches[index].cell;
+    setMatch({ index, total: found.matches.length, truncated: found.truncated });
+    await Promise.resolve(api.reveal?.(found.matches[index].cell));
   };
 
   const stepMatch = async (direction: 1 | -1) => {
@@ -301,19 +353,13 @@ export function ReplaceDialog({
     try {
       const found = await findMatches(query);
       if (!found) return;
-      const total = found.matches.length;
-      if (total === 0) {
-        setMatch({ index: -1, total: 0 });
+      if (found.matches.length === 0) {
+        setMatch({ index: -1, total: 0, truncated: false });
         setPhase({ kind: 'idle' });
         return;
       }
-      const index = found.index < 0
-        ? direction > 0 ? 0 : total - 1
-        : (found.index + direction + total) % total;
-      found.index = index;
-      setMatch({ index, total });
       setPhase({ kind: 'idle' });
-      await Promise.resolve(api.reveal?.(found.matches[index].cell));
+      await selectMatch(found, stepFrom(found, cursor.current ?? activeCellOf(target), direction));
     } catch (error) {
       setPhase({ kind: 'refused', message: error instanceof Error ? error.message : String(error) });
     }
@@ -327,14 +373,15 @@ export function ReplaceDialog({
     try {
       const found = await findMatches(query);
       if (!found) return;
-      const total = found.matches.length;
-      if (total === 0) {
-        setMatch({ index: -1, total: 0 });
+      if (found.matches.length === 0) {
+        setMatch({ index: -1, total: 0, truncated: false });
         setPhase({ kind: 'idle' });
         return;
       }
-      if (found.index < 0) found.index = 0;
-      const cell = found.matches[found.index].cell;
+      const from = cursor.current ?? activeCellOf(target);
+      const current = found.matches.findIndex((entry) => compareCells(found.sheetOrder, entry.cell, from) === 0);
+      const index = current < 0 ? stepFrom(found, from, 1) : current;
+      const cell = found.matches[index].cell;
       const at = { row: cell.row, col: cell.col };
       const version = await Promise.resolve(api.version());
       const request: XlsxEditRequest = {
@@ -356,12 +403,11 @@ export function ReplaceDialog({
       }
       const preview = validation.previews[0];
       if (!validation.wouldApply || !preview?.wouldChange) {
-        setMatch({ index: found.index, total });
         setPhase({ kind: 'preview', preview: preview ?? {
           stepIndex: 0, target: request.steps[0].target, wouldChange: false,
           changedCellCount: 0, replace: undefined,
         }, stats: preview?.replace ?? null });
-        await Promise.resolve(api.reveal?.(cell));
+        await selectMatch(found, index);
         return;
       }
       const result = await Promise.resolve(api.apply(request));
@@ -371,10 +417,15 @@ export function ReplaceDialog({
       }
       setPhase({ kind: 'applied', preview, stats: preview.replace ?? null });
       onApplied?.(result);
-      const next = (found.index + 1) % total;
-      found.index = next;
-      setMatch({ index: next, total });
-      await Promise.resolve(api.reveal?.(found.matches[next].cell));
+      cache.current = null;
+      cursor.current = cell;
+      const fresh = await findMatches(query);
+      if (!fresh) return;
+      if (fresh.matches.length === 0) {
+        setMatch({ index: -1, total: 0, truncated: false });
+        return;
+      }
+      await selectMatch(fresh, stepFrom(fresh, cell, 1));
     } catch (error) {
       setPhase({ kind: 'refused', message: error instanceof Error ? error.message : String(error) });
     }
@@ -397,7 +448,7 @@ export function ReplaceDialog({
         matchCase,
       }));
       if (steps.length === 0) {
-        setMatch({ index: -1, total: 0 });
+        setMatch({ index: -1, total: 0, truncated: false });
         setPhase({ kind: 'idle' });
         return;
       }
@@ -429,6 +480,7 @@ export function ReplaceDialog({
       }
       setPhase({ kind: 'applied', preview, stats });
       setMatch(null);
+      cache.current = null;
       onApplied?.(result);
     } catch (error) {
       setPhase({ kind: 'refused', message: error instanceof Error ? error.message : String(error) });
@@ -603,8 +655,10 @@ export function ReplaceDialog({
           {phase.kind === 'refused' && <span style={{ color: '#b3261e' }}>{t('replaceDialog.refused', { message: phase.message })}</span>}
           {phase.kind === 'busy' && t('replaceDialog.working')}
           {phase.kind !== 'busy' && match?.total === 0 && t('replaceDialog.noMatches')}
-          {match && match.total > 0 &&
-            t('replaceDialog.matchPosition', { index: match.index + 1, total: match.total })}
+          {match && match.total > 0 && t(
+            match.truncated ? 'replaceDialog.matchPositionTruncated' : 'replaceDialog.matchPosition',
+            { index: match.index + 1, total: new Intl.NumberFormat(resolvedLocale(lang)).format(match.total) },
+          )}
           {phase.kind === 'preview' && !phase.preview.wouldChange && !match && !stats?.matched &&
             t('replaceDialog.noMatches')}
           {stats?.matched
