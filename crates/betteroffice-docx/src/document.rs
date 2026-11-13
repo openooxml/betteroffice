@@ -247,7 +247,7 @@ impl Document {
         self.replace_located_text(Locator::Id(para_id), para_id, text, client_id, context)
     }
 
-    /// Replaces the paragraph text at `index` in [`Self::paragraphs`]; the receipt may lack an ID.
+    /// Replaces paragraph `index`'s text in [`Self::paragraphs`]; an ID-less one's key is no ID.
     pub fn replace_paragraph_text_at(&mut self, index: usize, text: &str) -> Result<Receipt> {
         let context = EditCtx::local("betteroffice-docx", DEFAULT_SERIALIZATION_TIME);
         self.replace_paragraph_text_at_with(index, text, 1, &context)
