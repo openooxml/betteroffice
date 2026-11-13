@@ -444,9 +444,8 @@ fn text_and_checkbox_fields() -> (String, String) {
         form_field(CHECK_DATA, "FORMCHECKBOX", ""),
     );
     let w14 = r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
-    let document = format!(
-        "<w:document {NS} {w14}><w:body>{first}{second}<w:sectPr/></w:body></w:document>"
-    );
+    let document =
+        format!("<w:document {NS} {w14}><w:body>{first}{second}<w:sectPr/></w:body></w:document>");
     (document, first)
 }
 
