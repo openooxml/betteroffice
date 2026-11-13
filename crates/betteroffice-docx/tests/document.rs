@@ -1533,7 +1533,10 @@ fn assert_only_paragraphs_changed(source: &str, saved: &str, edits: &[(&str, &st
         saved_rest = &saved_rest[end..];
         source_rest = &source_rest[at + paragraph.len()..];
     }
-    assert_eq!(saved_rest, source_rest, "the bytes after the last edited paragraph changed");
+    assert_eq!(
+        saved_rest, source_rest,
+        "the bytes after the last edited paragraph changed"
+    );
 }
 
 fn assert_other_parts_kept(source: &[u8], saved: &[u8]) {
@@ -1563,9 +1566,16 @@ fn assert_index_edit_keeps_other_bytes(index: usize, text: &str) {
     let saved = document.save().unwrap();
 
     let reopened = Document::open(&saved).unwrap();
-    assert_eq!(get_paragraph_text(reopened.paragraphs()[index]), text, "paragraph {index}");
+    assert_eq!(
+        get_paragraph_text(reopened.paragraphs()[index]),
+        text,
+        "paragraph {index}"
+    );
     let saved_main = package_part(&saved, "word/document.xml");
-    assert!(!saved_main.contains("w14:paraId"), "the save wrote a paragraph ID: {saved_main}");
+    assert!(
+        !saved_main.contains("w14:paraId"),
+        "the save wrote a paragraph ID: {saved_main}"
+    );
     assert_only_paragraphs_changed(
         &package_part(&source, "word/document.xml"),
         &saved_main,
@@ -1594,7 +1604,9 @@ fn an_index_past_the_last_paragraph_is_refused() {
     let mut document = Document::open(&unidentified_docx()).unwrap();
     let len = document.paragraphs().len();
     assert_eq!(len, 5);
-    let error = document.replace_paragraph_text_at(len, "nowhere").unwrap_err();
+    let error = document
+        .replace_paragraph_text_at(len, "nowhere")
+        .unwrap_err();
     assert!(
         matches!(
             error,
@@ -1624,7 +1636,10 @@ fn edits_by_index_and_by_id_share_one_save() {
     let saved = document.save().unwrap();
 
     let reopened = Document::open(&saved).unwrap();
-    assert_eq!(get_paragraph_text(reopened.paragraphs()[1]), "Middle by index");
+    assert_eq!(
+        get_paragraph_text(reopened.paragraphs()[1]),
+        "Middle by index"
+    );
     assert_eq!(
         reopened.paragraph("0A000002").map(get_paragraph_text),
         Some("Last by id".to_owned())
@@ -1652,11 +1667,22 @@ fn an_edit_by_index_mints_no_paragraph_id() {
     let r = document.replace_paragraph_text_at(1, "Rewritten middle");
     assert!(r.is_ok(), "{r:?}");
     let receipt = r.unwrap();
-    assert!(receipt.new_para_ids.is_empty(), "{:?}", receipt.new_para_ids);
-    assert!(receipt.revision_ids.is_empty(), "{:?}", receipt.revision_ids);
+    assert!(
+        receipt.new_para_ids.is_empty(),
+        "{:?}",
+        receipt.new_para_ids
+    );
+    assert!(
+        receipt.revision_ids.is_empty(),
+        "{:?}",
+        receipt.revision_ids
+    );
     let range = receipt.range.expect("the receipt has a range");
     assert_eq!(range.start.story, "body");
     assert_eq!(range.start.offset, 0);
-    assert_eq!(range.end.offset, "Rewritten middle".encode_utf16().count() as u32);
+    assert_eq!(
+        range.end.offset,
+        "Rewritten middle".encode_utf16().count() as u32
+    );
     assert_eq!(document.paragraphs()[1].para_id, None);
 }

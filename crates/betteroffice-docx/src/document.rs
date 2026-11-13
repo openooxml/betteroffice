@@ -302,9 +302,8 @@ impl Document {
             .unwrap_or("left");
         let editor = EditingDoc::new(client_id);
         match locator {
-            Locator::Id(para_id) => {
-                editor.create_story_with_paragraph_id("body", para_id, &current, style, alignment)?
-            }
+            Locator::Id(para_id) => editor
+                .create_story_with_paragraph_id("body", para_id, &current, style, alignment)?,
             Locator::Ordinal(_) => editor.create_story("body", &current, style, alignment)?,
         };
         let receipt = editor.replace_range(
@@ -324,7 +323,8 @@ impl Document {
         if self.dirty == Dirty::Clean {
             self.dirty = Dirty::LoggedEdits;
         }
-        self.authored_ids.retain(|_, (fresh, _)| edited_id.as_ref() != Some(&*fresh));
+        self.authored_ids
+            .retain(|_, (fresh, _)| edited_id.as_ref() != Some(&*fresh));
         let mirrored = match (&mut self.session_baseline, replacement.source_ordinal) {
             (Some(baseline), Some(ordinal)) if context.suggesting.is_none() => baseline
                 .replace_text(locator, &edited)
