@@ -484,7 +484,7 @@ fn parse_field_char(element: &XmlElement) -> RunContent {
         form_data: parse_field_form_data(element),
         raw_form_data_xml: element
             .child_elements()
-            .find(|child| child.form_field_data)
+            .find(|child| child.name == "w:ffData")
             .map(XmlElement::to_raw_inline_xml),
     }
 }

@@ -34,7 +34,6 @@ fn empty(name: String) -> XmlElement {
         bookmark_xml: None,
         bookmark_replay_xml: None,
         matches_local_names: false,
-        form_field_data: false,
     }
 }
 
