@@ -273,6 +273,51 @@ fn caret_anchor_resolves_to_none_once_its_table_row_is_deleted() {
 }
 
 #[test]
+fn an_anchor_taken_before_a_row_insert_resolves_to_none() {
+    let session = DeckSession::open(TABLE, 84095).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = snapshot.slides[0].id.clone();
+    let shape = snapshot.slides[0].shapes[0].id.clone();
+    let context = EditCtx::local("test");
+    session.add_undo_barrier();
+    let anchor = session.anchor_caret(&table_cell(&session, 0, 0), 0).unwrap();
+    session
+        .insert_table_row(
+            &context,
+            &slide,
+            &shape,
+            0,
+            TableInsertPosition::After,
+            &["XY".to_owned()],
+        )
+        .unwrap();
+    assert_eq!(session.resolve_caret_anchor(&anchor), None);
+}
+
+#[test]
+fn an_anchor_in_another_row_taken_before_a_row_delete_resolves_to_none() {
+    let session = DeckSession::open(TABLE, 84096).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = snapshot.slides[0].id.clone();
+    let shape = snapshot.slides[0].shapes[0].id.clone();
+    let context = EditCtx::local("test");
+    session
+        .insert_table_row(
+            &context,
+            &slide,
+            &shape,
+            0,
+            TableInsertPosition::After,
+            &["XY".to_owned()],
+        )
+        .unwrap();
+    session.add_undo_barrier();
+    let anchor = session.anchor_caret(&table_cell(&session, 0, 0), 0).unwrap();
+    session.delete_table_row(&context, &slide, &shape, 1).unwrap();
+    assert_eq!(session.resolve_caret_anchor(&anchor), None);
+}
+
+#[test]
 fn caret_anchors_on_a_duplicated_slide_and_its_original_after_the_duplicate_is_deleted() {
     let (session, story) = session_with_text("ABC");
     let (slide, _) = story_home(&session, &story);
