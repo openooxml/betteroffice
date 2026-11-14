@@ -603,6 +603,14 @@ impl DepGraph {
             .collect()
     }
 
+    /// forgets every cell marked unevaluated, as a build starts.
+    pub fn clear_unevaluated(&self) {
+        self.unevaluated
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+    }
+
     /// marks cells unevaluated, for a graph built over values earlier recalcs
     /// left so.
     pub fn assume_unevaluated(&self, cells: impl IntoIterator<Item = UnevaluatedCell>) {

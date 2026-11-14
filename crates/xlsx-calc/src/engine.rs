@@ -198,6 +198,28 @@ pub fn rebuild_and_recalc_all_after(
     (graph, result)
 }
 
+/// [`rebuild_and_recalc_all_after`] over `graph`, still current for `wb`, without rebuilding it.
+pub fn recalc_all_kept(
+    wb: &mut Workbook,
+    graph: &mut DepGraph,
+    now_serial: Option<f64>,
+    rand_seed: Option<u32>,
+) -> RecalcResult {
+    graph.clear_unevaluated();
+    graph.computed_with_currency_of(wb);
+    graph.refresh_spills(wb);
+    let recompute: HashSet<Key> = graph.formula_cells().map(|(s, c)| key(s, c)).collect();
+    let context = RecalcContext {
+        now_serial,
+        rand_seed,
+    };
+    let result = run_recalc(wb, graph, recompute, context, None);
+    xlsx_model::progress::pulse();
+    graph.refresh_spills(wb);
+    xlsx_model::progress::pulse();
+    result
+}
+
 /// [`rebuild_and_recalc_all_after`] leaving `previous` intact and recording no evaluations.
 #[doc(hidden)]
 pub fn rebuild_and_recalc_all_beside(
