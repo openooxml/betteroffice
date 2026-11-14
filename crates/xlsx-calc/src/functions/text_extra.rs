@@ -85,7 +85,8 @@ pub(crate) fn valuetotext(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// ARRAYTOTEXT(array, [format]): every value of an array as text. format 0
 /// joins them row by row with `, `; format 1 writes an array constant,
-/// `{a,b;c,d}`, with text quoted.
+/// `{a,b;c,d}`, with text quoted. numbers keep 15 significant digits, and an
+/// error the argument computes, rather than reads from a cell, is the result.
 pub(crate) fn arraytotext(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() || args.len() > 2 {
         return err(ErrorValue::Value);
@@ -94,7 +95,13 @@ pub(crate) fn arraytotext(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(strict) => strict,
         Err(e) => return err(e),
     };
-    let array = evaluate_array(&args[0], ctx).into_array();
+    let value = evaluate_array(&args[0], ctx);
+    if let crate::array::Value::Scalar(CellValue::Error { value }) = value
+        && as_area(&args[0], ctx).is_none()
+    {
+        return err(value);
+    }
+    let array = value.into_array();
     let (rows, cols) = (array.rows(), array.cols());
     let cells = array.cells();
     let mut out = String::new();
