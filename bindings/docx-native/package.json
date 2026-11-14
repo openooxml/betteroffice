@@ -305,7 +305,7 @@
     "@betteroffice/fonts-latin": "workspace:^0"
   },
   "devDependencies": {
-    "@types/node": "^26.0.0",
+    "@types/node": "^26.6.6",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3"
   }
