@@ -329,6 +329,7 @@ impl DeckSession {
     pub fn resolve_caret_anchor(&self, anchor: &CaretAnchor) -> Option<u32> {
         let txn = self.doc.transact();
         let story = story_ref(&txn, &anchor.story_id).ok()?;
+        crate::proposal_diff::story_owner(&txn, &anchor.story_id).ok()??;
         let offset = anchor.position.get_offset(&txn)?;
         let expected = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&story));
         if offset.branch != expected {

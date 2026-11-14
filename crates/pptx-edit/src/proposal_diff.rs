@@ -479,7 +479,7 @@ fn scoped_stale_targets<T: ReadTxn>(
 
 /// The first (slide_id, shape_id) owning `story_id`, walking each slide's
 /// shape tree in document order like `find_story_shape` over a snapshot.
-fn story_owner<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<Option<(String, String)>> {
+pub(crate) fn story_owner<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<Option<(String, String)>> {
     let slides = required_map(txn, SLIDES)?;
     let shapes = required_map(txn, SHAPES)?;
     for slide_id in live_slide_ids(txn)? {
