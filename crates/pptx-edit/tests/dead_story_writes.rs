@@ -293,6 +293,36 @@ fn every_write_to_a_retired_cell_id_is_refused_as_a_missing_shape_once_its_slide
 }
 
 #[test]
+fn every_write_to_a_cell_of_a_live_table_on_no_slide_is_refused_as_a_missing_story() {
+    let local = unmerged_table_session(84213);
+    let peer = unmerged_table_session(84214);
+    let snapshot = local.snapshot().unwrap();
+    let slide = snapshot.slides[0].id.clone();
+    let shape = snapshot.slides[0].shapes[0].id.clone();
+    let cell = table_cell(&local, 1, 1);
+    local.add_undo_barrier();
+    remove(&local, &slide, &shape, Removal::Shape);
+    local.add_undo_barrier();
+    assert!(matches!(local.story(&cell), Err(EditError::ShapeNotFound(_))));
+    sync(&local, &peer);
+    peer.delete_slide(&EditCtx::local("test"), &slide).unwrap();
+    sync(&peer, &local);
+    assert!(local.undo());
+    let deck = local.snapshot().unwrap();
+    assert!(!deck.slides.iter().any(|next| next.id == slide));
+    assert!(
+        !deck
+            .slides
+            .iter()
+            .flat_map(|next| &next.shapes)
+            .any(|placed| placed.id == shape)
+    );
+    assert!(local.story(&cell).is_ok());
+    assert_eq!(live_text(&local, &cell), None);
+    assert_every_write_refused(&local, &cell, Refusal::MissingStory);
+}
+
+#[test]
 fn insert_text_lands_once_its_slide_deletion_is_undone() {
     let (session, story) = session_with_text("ABC");
     let (slide, _) = story_home(&session, &story);
