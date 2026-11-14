@@ -343,6 +343,14 @@ export function ReplaceDialog({
     setMatch(null);
   };
 
+  const isCurrent = (started: number, key: string, mode: 'values' | 'formulas', version: string) => {
+    const now = current.current;
+    return generation.current === started && now.open && now.target !== null
+      && searchKey(
+        now.target, now.scope, inputRef.current?.value ?? '', mode, now.entireCell, now.matchCase, version,
+      ) === key;
+  };
+
   const findMatches = async (
     query: string,
     mode: 'values' | 'formulas' = lookIn,
@@ -351,6 +359,10 @@ export function ReplaceDialog({
     const started = generation.current;
     const version = await Promise.resolve(api.version());
     const key = searchKey(target, scope, query, mode, entireCell, matchCase, version);
+    if (!isCurrent(started, key, mode, version)) {
+      setPhase({ kind: 'idle' });
+      return null;
+    }
     if (cache.current?.key === key) return cache.current;
     const ranges = scopeTargets(target, scope);
     const result = await Promise.resolve(api.find(scope === 'workbook'
@@ -370,14 +382,7 @@ export function ReplaceDialog({
         limit: FIND_LIMIT,
       }));
     const nowVersion = await Promise.resolve(api.version());
-    const now = current.current;
-    if (
-      generation.current !== started
-      || !now.open || !now.target
-      || searchKey(
-        now.target, now.scope, inputRef.current?.value ?? '', mode, now.entireCell, now.matchCase, nowVersion,
-      ) !== key
-    ) {
+    if (!isCurrent(started, key, mode, nowVersion)) {
       setPhase({ kind: 'idle' });
       return null;
     }
@@ -421,6 +426,7 @@ export function ReplaceDialog({
     const query = inputRef.current?.value ?? '';
     const replacement = replaceRef.current?.value ?? '';
     if (!target || query.length === 0 || busy || readOnly) return;
+    const started = generation.current;
     setPhase({ kind: 'busy' });
     try {
       const found = await findMatches(query, REPLACE_LOOK_IN);
@@ -440,6 +446,10 @@ export function ReplaceDialog({
       const cell = found.matches[index].cell;
       const at = { row: cell.row, col: cell.col };
       const version = await Promise.resolve(api.version());
+      if (!isCurrent(started, found.key, REPLACE_LOOK_IN, version)) {
+        setPhase({ kind: 'idle' });
+        return;
+      }
       const request: XlsxEditRequest = {
         expectVersion: version,
         steps: [{
@@ -453,6 +463,10 @@ export function ReplaceDialog({
         }],
       };
       const validation = await Promise.resolve(api.validate(request));
+      if (!isCurrent(started, found.key, REPLACE_LOOK_IN, version)) {
+        setPhase({ kind: 'idle' });
+        return;
+      }
       if (!validation.ok) {
         setPhase({ kind: 'refused', message: refusalMessage(validation) });
         return;
@@ -491,9 +505,15 @@ export function ReplaceDialog({
     const query = inputRef.current?.value ?? '';
     const replacement = replaceRef.current?.value ?? '';
     if (!target || query.length === 0 || busy || readOnly) return;
+    const started = generation.current;
     setPhase({ kind: 'busy' });
     try {
       const version = await Promise.resolve(api.version());
+      const key = searchKey(target, scope, query, REPLACE_LOOK_IN, entireCell, matchCase, version);
+      if (!isCurrent(started, key, REPLACE_LOOK_IN, version)) {
+        setPhase({ kind: 'idle' });
+        return;
+      }
       const steps: XlsxEditStep[] = scopeTargets(target, scope).map((range) => ({
         op: 'replaceText',
         target: range,
@@ -511,6 +531,10 @@ export function ReplaceDialog({
       }
       const request: XlsxEditRequest = { expectVersion: version, steps };
       const validation = await Promise.resolve(api.validate(request));
+      if (!isCurrent(started, key, REPLACE_LOOK_IN, version)) {
+        setPhase({ kind: 'idle' });
+        return;
+      }
       if (!validation.ok) {
         setPhase({ kind: 'refused', message: refusalMessage(validation) });
         return;
