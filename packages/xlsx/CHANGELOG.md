@@ -1,5 +1,147 @@
 # @betteroffice/xlsx
 
+## 0.6.0
+
+### Minor Changes
+
+- 3773773: Attached agent proposals use the shared engine; standalone behavior is unchanged. Adds opt-in DOCX `editPeer`, `proposeAsync`, `rejectAsync`, `discardAsync`, `keepRevisions`, `replaceText.at`, typed `TrackedRevisionConflictError`, `AcceptDateUnsupportedError` and `ProposalDecidedInEditorError`, and XLSX `getProposalStatus`, `onProposalChange` and `isProposalStale`.
+- c548eea: Uses a binary workbook recovery checkpoint codec. Checkpoints from earlier engine versions or codecs are refused, and restoring a checkpoint requires the same engine version and codec.
+- a9897ef: DOCX PNG export tells onDiagnostic, once per page, which kinds of effect the engine does not draw (`effects-skipped`). The shared PNG diagnostic type gains that code, so a host with an exhaustive switch on the code gets a new case.
+- ad45f86: Adds opt-in `decodeFontFace` for packed fonts. Format package roots return a promise of `font` and optional `payload` ArrayBuffers; native bindings return byte arrays synchronously. Invalid options and decode errors reject or throw without retrying another decoder.
+- f1e7906: Adds experimental `fontPreflight` and `preloadPreflightWasm` for the active slide and the opening sheet, without opening the editing engine. DOCX `fontPreflight` answers now follow the engine for notes, the main part, numbering, theme script fonts, style defaults and table columns.
+- 9ac1ffe: Adds `configureFontCdn` to load missing font packs from a configured CDN. Installed packs take priority, and CDN loading remains off by default.
+- 702b174: The calculation engine now evaluates RATE, IRR, MIRR, XNPV, XIRR, IPMT, PPMT, CUMIPMT, CUMPRINC, ISPMT, DB, DDB, VDB, SLN, SYD, EFFECT, NOMINAL, PDURATION, RRI, FVSCHEDULE, DOLLARDE, DOLLARFR and CELL. RATE follows Excel's own iteration, so results match Excel's saved values.
+- dac1245: The calculation engine now evaluates GAMMA, GAMMALN and the gamma, beta, normal, lognormal, chi-square, t and F distribution functions with their inverses and compatibility names, ERF and ERFC, PHI, GAUSS, CHISQ.TEST, T.TEST, F.TEST and the CONFIDENCE functions.
+- 317d85c: The calculation engine now evaluates Excel's database functions DAVERAGE, DCOUNT, DCOUNTA, DGET, DMAX, DMIN, DPRODUCT, DSTDEV, DSTDEVP, DSUM, DVAR and DVARP, including OR rows, repeated columns, wildcards and computed criteria.
+- f92d560: The calculation engine now evaluates the binomial, negative binomial, hypergeometric, Poisson, exponential and Weibull distribution functions, FISHER, STANDARDIZE, PERMUT, PEARSON, STEYX, SKEW.P, the A-variance functions, the exclusive percentile and rank functions, MODE.MULT, PROB, Z.TEST, GROWTH and LOGEST.
+- c06b68d: The calculation engine now evaluates Excel's engineering functions: base conversions (BIN2DEC through OCT2HEX), the BIT functions, DELTA, GESTEP, COMPLEX, every IM complex-number function and the four Bessel functions. Complex results are written as Excel writes them.
+- 74407d2: The calculation engine now evaluates more information and text functions: ERROR.TYPE, INFO, ISFORMULA, ISNONTEXT, ISOMITTED, ISREF, SHEET, SHEETS, TYPE, UNICHAR, UNICODE, DOLLAR, VALUETOTEXT, ARRAYTOTEXT, ASC, JIS, DBCS, BAHTTEXT, PHONETIC, ENCODEURL and the byte-count text functions such as LENB.
+- e5bb91a: The calculation engine now evaluates 33 more math and trig functions, including the hyperbolic and reciprocal trig functions, ROMAN, ARABIC, BASE, DECIMAL, CEILING.MATH, FLOOR.MATH, MDETERM, MINVERSE, MUNIT, RANDARRAY, the SUMX2 family, PERCENTOF and DAYS360.
+- 2dbf721: The calculation engine now evaluates Excel's securities functions: the COUP functions, ACCRINT, ACCRINTM, PRICE, YIELD and their discount and at-maturity variants, DISC, INTRATE, RECEIVED, DURATION, MDURATION, the TBILL functions, the odd-period functions and AMORDEGRC and AMORLINC.
+- 3adc24b: Breaking: workbook `renderPng(viewport)` and `renderRangePng(options)` become `await renderPng({ sheet, viewport } | { sheet, range }, { scale, maxWidth, maxHeight })`, painted with the editor's painter on a canvas. It rejects with `PngExportError` rather than substitute a font.
+- 57a2246: Selecting a chart now shows eight resize handles. Dragging one resizes a grid-anchored, two-cell chart and commits the new size in a single undo step. Pinned and one-cell charts remain non-resizable.
+- 1346f3c: The xlsx editor loads metric-compatible bundled fonts for workbook families from `@betteroffice/fonts` and repaints when they arrive. On by default; `defaultFonts={false}` opts out. Worker sessions expose `call.decodeFontFace`.
+- c365dd4: Selected ranges can show an opt-in fill handle (`fillHandle` prop); dragging it copies the block down or right, adjusting relative formulas, as one undo step. Fills refuse arrays, merges, tables, chart anchors, hyperlinks, partially covering conditional formats, and sheets with comments or data validations.
+- 1a02fb8: Find and replace text in a sheet or across the workbook. Matches compare displayed values, Match case makes them case sensitive, and replacing edits the entered text as typed, so `123` becomes `223` and a replacement that would break a formula is refused.
+- 7815a8f: Add opt-in column and row header bands via `showSheetHeaders` (off by default): select whole rows or columns, resize, select all, and freeze or unfreeze panes or insert and delete from a header menu. Hiding, unhiding and moving rows or columns are refused for now.
+- 82fd297: Adds opt-in `allowHostProposals` for read-only proposal review and `proposeChanges` on legacy editor APIs. Adds proposal `getAnchorGeometry` queries and `proposal-change` events, plus optional `allowHostProposals` on session `setReadOnly` commands.
+- 83d0750: Listed spreadsheet proposals now name their moved cells in `staleTargets` (`stale_targets` in Python), so hosts can warn before accepting. Python also gains `list_proposals()`, an alias of `proposals()`.
+- 9ff8a3f: Typing into a locked cell on a protected sheet now reports `sheet-protected` ("This cell is on a protected sheet.") instead of a failed save; unlocked cells there can be edited. `XlsxCommandFailureCode` and `XlsxCommandAdmissionCode` gain `sheet-protected`, so exhaustive switches need a case.
+- d83fa7a: Renaming a sheet also rewrites data-validation, extension conditional-format and sparkline formulas that reference it, as Excel does; a rename they cannot follow is refused. Adds save-warning code `unrewritable-formula`.
+- 1a02fb8: `replaceText` takes `within: 'workbook'`, which skips hidden, very hidden and non-worksheet sheets; an explicit chartsheet target is refused. Replace stats add `refused`, counting every refused cell, including any past the 10,000 listed.
+- 2c28650: After a recalculation, saved files carry the recalculated values: the new `WorkbookHandle.recalculate()`, or opening a file that asks for a full calculation on load. Formulas the engine cannot evaluate keep the result the file stored. Without either, saved values stay byte for byte.
+- 0852138: Adds `saveWithWarnings()` (`save_with_warnings()` in Python): the saved bytes plus `{ code, part, element?, sheet?, message }` for each part a save kept as the file wrote it. Plain `save()` reports them as Node or Python warnings; ordinary saves carry none.
+- f0ec30f: Tables stay on their own sheets when a sheet is inserted or deleted, so structured references keep reading the right cells; deleting a sheet drops its tables and turns references to them into `#REF!`. Undo restores them via a new internal `setTables` op.
+- acf6184: Cell fonts with `<u val="single"/>`, `double` or accounting underlines now read as underlined, and double kinds paint two lines. Accounting underlines draw as plain single or double for now. Text commands add `underlineStyle`, captured fonts add `underline_style`; Rust `Font.underline` is now a `RunUnderline`.
+- c1525f7: Formulas using functions that cannot be computed offline (CUBE functions, WEBSERVICE, RTD, STOCKHISTORY, IMAGE, add-in calls and similar), and formulas reading them, keep the value Excel saved, even inside IFERROR, and the calculation report lists them as `unevaluatedCells` in JS and `unevaluated` in Python.
+
+### Patch Changes
+
+- 8875bfa: Chart data labels and value axes linked to their source cells use the cached format of the values, so a `"$"#,##0` series labels $3,750; without a cached format they keep their own code. Linked pie percentages show a plain percentage.
+- d17d538: A remote collaboration update or pipe frame is no longer refused as stale when local edits moved the document on while it was in flight, so peers stay in sync and no typed character is lost.
+- 57f4975: Arabic text set in Simplified Arabic or Traditional Arabic now falls back to the bundled Naskh face, closer to those fonts' style and width.
+- 56c2c6c: Native docx page PNGs draw SVG, EMF and WMF pictures. A picture the renderer still cannot draw rejects `renderPng` with the new `picture-unavailable` code instead of leaving it blank.
+- b8395eb: `fontPackDiagnostics()` names installed font add-ons that cannot be used (another release, missing files, unreadable manifest). Native packages also warn once per pack with code `BETTEROFFICE_FONT_PACK`. Exports keep substituting those faces.
+- 23825ed: Hyperlink cells are real links in the XLSX screen-reader grid. Following one takes the same path as a click: safe web and mail targets open in a new tab, places in the workbook are selected. `A11yCell.href` is new.
+- b0d5d34: The native xlsx engine has the same 4 GiB memory budget per thread as the WebAssembly engine. A call past the budget fails the worker session with the typed out-of-memory error, and a failed workbook handle refuses later calls except dispose().
+- 681b02e: A Rust panic in a native engine now fails its session as a trap, as on WebAssembly, instead of aborting the process. The engine object that panicked refuses every later call except free.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- 6378188: Worker sessions now run on Node.js >= 20.16 / 22.3 through `worker_threads`, keeping the process alive until disposed. DOCX worker editing needs `OffscreenCanvas` and fails with a clear error without it (Node.js, Bun, Deno); open, read and save still work.
+- 5945e66: Adds selection-cause helpers to `@betteroffice/docx/yrs` (`yrsSelectionCause`, `withYrsSelectionCause`, `subscribeYrsSelection`) and an optional remote `cause` on command results; XLSX and PPTX gain matching internal fields.
+- 7cf70f8: Worker entries no longer import the module that constructs their own worker, so Next.js (Turbopack) production builds of apps that use `./worker` finish instead of hanging.
+- 55c25ba: Worker files and main-thread entries import no private `#` specifiers, so worker sessions open from a CDN or with an import map, without a bundler. On Node.js, a worker thread that fails to start now fails the session instead of throwing synchronously.
+- fd25d97: Text in the Symbol font now draws the Greek letters, arrows and math signs Office shows for it, in documents, slides and cells alike. Wingdings and Webdings run text uses the same shared slot table as bullets. Saved text is unchanged.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+- f77d138: Date functions in workbooks that use the 1904 date system now return 1904 serials: `DATE(2026,11,1)` is 44865, as in Excel. `nowSerial` is always a 1900-system serial, so TODAY(), NOW() and typed dates without a year match the calendar in 1904 workbooks too.
+- f25a90c: Calculation matches Excel at numeric limits: numbers become text with 15 significant digits (`""&(0.1+0.2)` is "0.3"), formula literals keep 15 digits within Excel's range, subnormal results are 0, and MOD, MULTINOMIAL, BESSELK, the TBILL, T and F functions follow Excel's limits.
+- 3dd06dd: Browser `renderPng` without `fonts` paints with the bundled faces native uses, so canvas and native PNGs match; a face that cannot load rejects with `font-unavailable`. Native chart text in a family list (`Calibri, sans-serif`) now resolves its first family.
+- 3d520f0: Canvas PNG exports without `fonts` now draw text in Korean, Japanese, Chinese, Arabic and other scripts through the same bundled fallback faces as the native engine, in its order, from installed font packages only. Sheets with Latin text only load nothing more.
+- 7e850af: Cell text on the canvas paints at its face's own width. Linux Chromium rounded every glyph advance to a whole pixel, so digits ran up to 8% wider than the workbook's layout.
+- b73727f: Inserting or deleting rows or columns inside a range a chart plots through a numeric cache whose points carry their own number format now rebuilds the cache, with each point's format taken from its cell, instead of being refused.
+- 43f6296: A workbook whose chart reference holds a character XML cannot carry now opens, and its chart is kept as authored. An edit that would have to rewrite such a reference is refused up front, so saving never fails.
+- fec61ca: Row and column edits that reshape a range a chart plots through an unrebuildable cache, or that would split a chart part two sheets share, are now refused up front instead of failing the next save. Cell edits under a shifted range now save.
+- e05c8d9: A chart that reads another workbook, carries literal series text, holds a lost `Sheet!#REF!` area or an extension range no longer blocks deleting or editing sheets it does not plot. Refusals in an untrusted package name a chart or pivot part.
+- b5d9f51: Collaborators can add and remove conditional formats and set or clear auto filters, with undo. The schema is unchanged, but older peers refuse a room once a rule or filter is edited, so collaborating peers must update together.
+- 34b0f7c: In a collaborative session, charts can be moved after merging cells or adding a hyperlink. The move used to fail with "remote update changes the frozen workbook structure".
+- 7183550: Undoing a freeze pane that won a concurrent edit no longer fails: every peer shows the source file's pane and redo brings the winner back. Peers on older versions refuse that undo's update, so update them together.
+- 8017c8a: Collaborators can set and delete defined names, with undo. The schema is unchanged, but older peers refuse a room once a name is edited, so collaborating peers must update together. Over-limit name tables save, report `overLimit`, but won't reopen here.
+- 9ce4911: Collaborators can add sheets at the end of a workbook and merge cells in the editor. Sheets added at once under one name read `Name (2)`. Collaborating peers must update together: older peers refuse the new schema.
+- bb3e6b7: Lookup tables that list the nth match of a key with `SMALL(IF(...))` array formulas over large data sheets now calculate every row instead of stopping with #NUM! partway through.
+- 00744bc: On screen, XLSX columns without their own width now use the sheet's `defaultColWidth`, or its `baseColWidth` when that is absent, instead of always 64px.
+- d6787c5: Opening an XLSX workbook defers its collaboration state until an edit, encode, snapshot or recovery checkpoint needs it, so reading, rendering, recalculating and saving a large workbook take about 70% less memory. New `try_client_id` and `try_encode_state_*` methods return errors instead of panicking.
+- fbfa843: Editing a standalone XLSX workbook no longer builds its collaboration state: edits are logged and replayed only when something needs that state. A first edit on a large workbook no longer waits seconds, and an editing session keeps its open-time memory. `Stylesheet` gains `same_state`.
+- 4b01734: Editing many defined names in one `applyOps` call now takes time and memory linear in the number of names. Re-committing all 66,000 names of a large workbook used to exhaust memory.
+- 3a4bf3e: Deleting a sheet turns references to it into `#REF!` in formulas, defined names, conditional formats and data validations, as Excel saves them; 3-D spans narrow. Chart spans no longer change when a sheet inside them goes. Undo restores the text.
+- 4300eb0: Pictures and shapes stored inside an alternate-content wrapper now follow XLSX row and column edits too, every branch alike. A wrapper whose branches sit on different cells or hold anything but one anchor still refuses the edit.
+- 763916f: Number format codes in styles and chart caches are read and written as `ST_Xstring`, as Excel does: its `_x000a_` line break reads as a line break, any format set through the API saves as valid XML, and a literal `_xHHHH_` round-trips.
+- 5d3376b: Committing a shown formula unchanged keeps it a formula when it references another workbook (`[1]Sheet1!A1`) or was stored with a leading `=`, which now shows one `=` and calculates. Typing into a Text-formatted cell still enters text, as in Excel.
+- 14b82ff: Shown and returned formula text drops Excel's storage prefixes (`_xlfn.`, `_xlws.`, `_xlpm.`, `_xleta.`): the formula bar, `readCells`, structured export, defined names, conditional formats, agent reads and Python `formula()` give `=SEQUENCE(2,2)`. Saved files keep the prefixes; re-committing a shown formula leaves the cell unchanged.
+- 9d433be: Formulas written in BetterOffice that use newer Excel functions (XLOOKUP, IFS, LET, LAMBDA, FILTER and others) are saved with the `_xlfn.` prefixes Excel expects, so Excel no longer opens them as #NAME?. Unedited formulas keep their exact text.
+- f001b4e: An XLSX column insert no longer refuses when column formatting reaches the last column: formatting pushed past the edge is dropped, as Excel does; content there still refuses. A column inserted inside a uniform width or hidden run takes that run's width. Last-row heights likewise.
+- 66d3f7d: Inserting or deleting XLSX rows or columns now moves pictures and shapes with their cells on save, as charts already move. An edit that would leave one where a save cannot place it, such as an object wholly inside deleted rows, is refused.
+- 711c41a: Opens workbooks faster while preserving compatibility with existing collaboration states and snapshots.
+- 5797065: Loads collaboration support and presence UI only when collaboration is configured. Default editor opens download less JavaScript, while collaborative sessions retain synchronization and presence behavior.
+- 9fa3613: Reduces the default worker editor download by loading PNG rendering on the first PNG export. PNG export remains available without changing editor or session APIs.
+- 2b444de: The lean spreadsheet engine core used by the editor's worker no longer carries the peer snapshot code that only full-core edit peers use, making each editor open's WebAssembly download smaller. Recovery, collaboration and exports are unchanged.
+- 45959a2: Smaller WebAssembly cores. Behaviour change: after `initWasm(input, { png: false })`, the standalone `renderXlsxMarkdown` now rejects, as PNG export already does there. Sessions, `exportMarkdown` and the default init are unchanged.
+- 6821205: Spreadsheet editor sessions no longer download and start a second, full copy of the spreadsheet engine when they decode their first font, saving about 2.9 MB of compressed download per open.
+- 6d5edbc: Adds opt-in `initWasm(input, { png: false })` and worker session `png: false` to load a smaller WASM binary without PNG export. PNG export remains enabled by default and on the native backend.
+- 7b5ec3f: Sheet, defined and font names are read and written as `ST_Xstring`, as Excel does: an escape Excel wrote reads decoded, and any name set through the API, including control characters, saves as valid XML and reads back unchanged.
+- db2fca1: `renderPng` now paints with the faces passed in `fonts`, as the wasm engine does, and rejects with `font-unavailable` when a supplied face cannot be used. The option was previously ignored.
+- 0036740: `renderPng` with a bad range now rejects with the same `Error` and `bad range: ...` message on native as on wasm, not a plain string. A1 ranges are read in either case on every engine, as Excel does: `a1:b2` is `A1:B2`.
+- ecedd9f: Conditional format rules and groups holding a nested element of the same name are now read whole, ending only at their own closing tag, so a later save no longer writes them truncated. Content after the nested closing tag is now read.
+- 9b6e233: Number formats now round displayed digits as Excel does, from the value at 15 significant digits: `0.00` shows 1.005 as 1.01 and `0.00%` shows 0.00035 as 0.04%, and fraction parts follow, in cells and in `TEXT`.
+- f955a24: Number formats with commas after the decimal digits, such as `0.0,,"M"` and `#,##0.0,"K"`, now divide by 1,000 per comma in cell display and `TEXT()`, as Excel does. A comma after a literal or percent sign no longer scales.
+- 9d85035: Smaller WebAssembly core and faster `applyOps`. Operations whose `type` key is not first take a slower fallback, so put `type` first. Malformed operation JSON may report different errors. Apps sending their own operation JSON across package versions should send operations as this package serializes them.
+- 421a628: Adds `headerFooter` facts to plugin `readCells` sheet entries: printable left, center and right sections and the active first, odd and even variants; null when a sheet has none. Workbook snapshots written by this version do not decode in 0.5.1.
+- a9f5adc: XLSX text with no font of its own, including display-only hyperlink text, now names the workbook's Normal font (or Calibri) on screen and in PNG export, so canvas no longer falls back to a system sans-serif.
+- 057f74a: Formula results and chart and rotated text geometry are now computed bit for bit the same on WebAssembly and the native engine. WebAssembly results are unchanged.
+- abeaece: Workbooks saved with Excel's "Set precision as displayed" now round formula results to their displayed precision, as Excel does. Sessions of such workbooks saved by this version cannot be opened by older versions.
+- 9ff8a3f: Protected cell entries now report `sheet-protected` with a localized message by default. Unlocked cells on protected sheets remain editable.
+- ac02839: Spreadsheet sessions release their copy of the original file once crash recovery holds a checkpoint, saving memory equal to the file size. An unreadable checkpoint now fails recovery with a clear `checkpoint-unreadable` error.
+- 4b9381b: A refused structural edit, such as a row insert a chart cannot follow, now shows why in the editor banner and says the workbook is unchanged, instead of "The cell entry before this could not be saved." Command results report it as `edit-unsupported`.
+- a3630d1: Renaming a sheet rewrites the conditional-format formulas that reference it, as Excel does. Rules from the file keep everything else they hold, undo restores them, and rules added in the session no longer block the rename.
+- 8d59669: Pending proposals now survive structural edits and undo/redo by default. Targets and formulas rebase; optional `ProposalCell.stale` reports drift, and optional `Proposal.forceBlocked` hides force with a translated reason when deleted targets or unrewritable formulas prevent acceptance.
+- 0422127: `ROUND` now matches Excel on values that sit at a decimal tie or carry more than 15 significant digits: `ROUND(1.005,2)` is 1.01 and `ROUND(1000000000000000+0.75,0)` is 1000000000000000.
+- 00744bc: On-screen XLSX columns now match Excel's widths: stored widths no longer gain extra padding, and widths count in the workbook's Normal font digit instead of always Calibri's.
+- b5f3ca2: Smaller WebAssembly core: sorts that run once on open, save or metadata writes share one implementation.
+- 6dfe1b3: Renaming a sheet to a name holding a character XML cannot carry is refused as an invalid step when a formula, defined name or hyperlink references the sheet, instead of writing invalid XML; unreferenced sheets still take any name.
+- e519913: Sheets whose first sheet view sets `showGridLines="0"` render on screen without gridlines and keep the setting on save. Print gridlines still follow the `gridlines` argument. Rust `SheetFormat` gains `hide_gridlines`.
+- 9d9de00: Sorting a range and copying formats now keep each cell's own style, so default cells no longer pick up a look-alike style with extra settings and sorts no longer add new styles to the workbook.
+- e200f5e: Speeds up style patches and number format changes on bounded ranges in standalone workbooks. Enabled by default, with the same saved files, updates and undo behavior.
+- df287ec: `SUBTOTAL` and `AGGREGATE` now skip other subtotals inside their ranges, so grand totals over grouped data no longer count the group subtotals twice.
+- 8001b2f: `TEXT` now formats text that reads as a number or date, as Excel does, so `TEXT` over a cell holding "November 2025" with a date format gives the formatted date.
+- 5ee5cd3: Formulas calling a function the engine does not know keep the value Excel saved, even inside IFERROR, and are listed as unevaluated with the function name. GAMMA, GAMMALN and FACT are exact at integers.
+- 3c4f665: `renderPng` without a canvas now rejects with `PngExportError` code `canvas-unavailable`; use `@betteroffice/xlsx-native` there. The vendored wasm module no longer declares `XlsxDocument.renderPng` or `renderRangePng`.
+- 14251f8: Line breaks stored as CR LF or a lone CR read as one line feed, as in Excel, so table references to multi-line column names calculate instead of returning #REF!. Saves keep carriage returns in cell text, formulas and hyperlink tooltips.
+- 916cbe2: Cell text decodes Excel's `_xHHHH_` escapes, so `_x000D_` reads as a carriage return, and saves write control characters the way Excel does. Opened formulas keep control characters; new ones store them as `CHAR(n)`, and chart caches over such cells save.
+- f2df1e8: Collaboration updates with invalid UTF-8 text or oversized length prefixes are refused with an error instead of being applied. The macOS app now builds the same yrs as every other target.
+- Updated dependencies [f99e53a]
+- Updated dependencies [de8f092]
+- Updated dependencies [1a82d79]
+- Updated dependencies [3609ce4]
+- Updated dependencies [5999962]
+- Updated dependencies [57f4975]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [39ae19a]
+- Updated dependencies [b8395eb]
+- Updated dependencies [53502c6]
+- Updated dependencies [ec04baa]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [21a60e5]
+- Updated dependencies [19c20c3]
+- Updated dependencies [df33f6a]
+- Updated dependencies [37199d9]
+- Updated dependencies [842d624]
+- Updated dependencies [e65df1c]
+- Updated dependencies [18b3628]
+- Updated dependencies [dc78510]
+- Updated dependencies [9ac1ffe]
+- Updated dependencies [ad45f86]
+- Updated dependencies [e6d5c52]
+  - @betteroffice/fonts@0.5.0
+
 ## 0.5.1
 
 ### Patch Changes

@@ -1,5 +1,126 @@
 # @betteroffice/pptx
 
+## 0.6.0
+
+### Minor Changes
+
+- a9897ef: DOCX PNG export tells onDiagnostic, once per page, which kinds of effect the engine does not draw (`effects-skipped`). The shared PNG diagnostic type gains that code, so a host with an exhaustive switch on the code gets a new case.
+- ad45f86: Adds opt-in `decodeFontFace` for packed fonts. Format package roots return a promise of `font` and optional `payload` ArrayBuffers; native bindings return byte arrays synchronously. Invalid options and decode errors reject or throw without retrying another decoder.
+- a45ba76: Breaking: `slideToPng` becomes the handle's `renderPng`, which decodes images and paints with registered faces itself.
+
+  ```ts
+  await slideToPng(handle.layoutSlide(i), { scale: 2, resolveImage }); // before
+  await handle.renderPng({ slide: i }, { scale: 2 }); // after
+  ```
+
+- e65df1c: Editors given `fonts` now load bundled faces for the other families a deck uses, including light members such as Calibri Light, so their text keeps its metrics. Supplied families keep the app's faces. Pass `defaultFonts={false}` to fetch no default fonts.
+- 3e7d0f6: Adds opt-in `setStoryParagraphs` proposals for paragraph rewrites with bullets, alignment, styled runs and `@ref` story targets. Review previews show inserted and deleted text and mark shapes changed by paragraph properties.
+- 0979b79: Adds `title`, `description` and `decorative` to pptx read shapes, from shape alternative text at every depth. Sessions seeded before this change read them as absent until reseeded.
+- c10ba8c: Adds opt-in `addTextBox`, `addShape`, `addPicture`, and `removeShape` proposals with local shape and story refs, insertion outlines, deletion strikes, and an 8 MB decoded media total limit. Exports `decodeBrowserPresentationImage` for browser image decoding without WASM.
+- 3313017: Adds opt-in `setSlideLayout` and `setSlideBackground` proposals with `@ref` slide targets. Review previews show layout artwork and inherited picture backgrounds, with translated labels for both changes.
+- c664499: Adds opt-in slide structure proposals with local refs, `proposalSlideStrip`, and `layoutProposalDiffSlideById`. The editor previews inserted, deleted, and moved slides before acceptance, and `office_propose` accepts slide structure edits for PPTX.
+- bd6c8b5: Adds `strike` formatting and the `strikethrough` editor command and toolbar button. Single and double strikethrough render by default, preserving inherited formatting and explicit overrides; deck schema moves to 2.4, so older peers refuse documents migrated by this version.
+- 34b5676: Adds opt-in `insertTableRow`, `deleteTableRow`, `insertTableColumn`, and `deleteTableColumn` proposals, including Python proposal dictionaries. Review previews show table structure changes with translated labels, and acceptance applies the proposal as one undo step.
+- 3e30099: Adds opt-in `reorderShape` proposals for moving shapes to the front, back, forward or backward, including Python dictionaries and agent tools. Review previews show the new stacking order with translated labels, and acceptance applies the proposal as one undo step.
+- f1e7906: Adds experimental `fontPreflight` and `preloadPreflightWasm` for the active slide and the opening sheet, without opening the editing engine. DOCX `fontPreflight` answers now follow the engine for notes, the main part, numbering, theme script fonts, style defaults and table columns.
+- 9ac1ffe: Adds `configureFontCdn` to load missing font packs from a configured CDN. Installed packs take priority, and CDN loading remains off by default.
+
+### Patch Changes
+
+- 8875bfa: Chart data labels and value axes linked to their source cells use the cached format of the values, so a `"$"#,##0` series labels $3,750; without a cached format they keep their own code. Linked pie percentages show a plain percentage.
+- d17d538: A remote collaboration update or pipe frame is no longer refused as stale when local edits moved the document on while it was in flight, so peers stay in sync and no typed character is lost.
+- fa2717d: Every engine now reads decimal numbers back exactly. Drawing groups whose scaled child coordinates have long decimals stay intact on save.
+- 5999962: MS Mincho, MS Gothic, their proportional variants, and MS UI Gothic now use Office glyph widths by default, including Japanese names and decomposed voiced kana. CJK substitute outlines keep their original size during canvas painting.
+- 57f4975: Arabic text set in Simplified Arabic or Traditional Arabic now falls back to the bundled Naskh face, closer to those fonts' style and width.
+- 56c2c6c: Native docx page PNGs draw SVG, EMF and WMF pictures. A picture the renderer still cannot draw rejects `renderPng` with the new `picture-unavailable` code instead of leaving it blank.
+- f44c229: Non-breaking hyphens draw and measure with the font's hyphen glyph when the font has no dedicated one, instead of a missing-glyph box. They still never break a line.
+- b8395eb: `fontPackDiagnostics()` names installed font add-ons that cannot be used (another release, missing files, unreadable manifest). Native packages also warn once per pack with code `BETTEROFFICE_FONT_PACK`. Exports keep substituting those faces.
+- 53502c6: Large bundled font faces decode outside the PPTX worker's engine, and registering a font in WebAssembly copies its bytes once, which lowers worker memory for CJK presentations.
+- 78ad2e2: The editor no longer downloads the metafile converter unless the presentation has EMF or WMF pictures.
+- 13a0dc0: EMF and WMF pictures that draw the same bitmap several times, or whose EMF+ drawing falls back to the GDI one, no longer exceed the bitmap budget: equal bitmaps are decoded and counted once, and a set-aside pass's bitmaps are released first.
+- 681b02e: A Rust panic in a native engine now fails its session as a trap, as on WebAssembly, instead of aborting the process. The engine object that panicked refuses every later call except free.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- 6378188: Worker sessions now run on Node.js >= 20.16 / 22.3 through `worker_threads`, keeping the process alive until disposed. DOCX worker editing needs `OffscreenCanvas` and fails with a clear error without it (Node.js, Bun, Deno); open, read and save still work.
+- 842d624: Office fonts we draw with a substitute, such as Aptos, Arial Narrow, Cambria and Verdana, now measure at the real font's glyph widths and line heights, so text breaks like Word and PowerPoint. Legacy names such as Tms Rmn and Helv also resolve.
+- 5945e66: Adds selection-cause helpers to `@betteroffice/docx/yrs` (`yrsSelectionCause`, `withYrsSelectionCause`, `subscribeYrsSelection`) and an optional remote `cause` on command results; XLSX and PPTX gain matching internal fields.
+- 3418edd: `renderPng` in the browser lays slides out with the bundled faces the native engine uses, so line breaks and row heights match native. On both engines, a needed face that cannot load now rejects with `PngExportError` (`font-unavailable`) naming the face.
+- cade718: Kanji in Japanese decks now load and paint with Noto Sans JP instead of also fetching Noto Sans SC: Han text takes its CJK face from the run, paragraph mark or style language (Korean, Traditional and Simplified Chinese likewise).
+- 53151fd: The PowerPoint editor starts downloading the CJK coverage font the first slide needs while its WebAssembly engine is still loading, instead of after the deck is parsed, so Japanese, Korean and Chinese decks show sooner on slow connections. The first frame is unchanged.
+- b6f8ae7: Adds context menus for text, objects, tables, and slide thumbnails in the default worker editor, enabled by default. Adds `cut`, `copy`, `paste`, `deleteObject`, `deleteSlide`, `duplicateSlide`, `tableInsert`, and `tableDelete` commands and worker support for `duplicateSlide`.
+- 1398cff: With browser coverage fallback enabled, emoji with emoji presentation stay on the browser font instead of a registered coverage font, and a text presentation selector lets a coverage font draw the character.
+- fe7a975: Unconfigured editors now load bundled fonts per family before the first paint. App fonts still take precedence, and uncovered characters retain browser font fallback.
+- 2bc7678: Default fonts that load after the first paint's five-second wait now register and re-layout the deck instead of being dropped for the session. Failed loads retry up to three times, after two and eight seconds.
+- 24179a4: Bold and italic runs in families whose bundled face has only a regular style, such as Chinese, Japanese and Korean fonts, are now drawn bold and slanted instead of upright regular. Lighter members such as Calibri Light keep their own weight.
+- ccbdbf5: The PowerPoint editor no longer sends a second copy of every default font's bytes to the main thread with its updates; only the browser font install receives them, so the page holds each default face once.
+- 84578e1: Disposing a PowerPoint worker editor while an edit, read or thumbnail call is still pending no longer reports an unhandled promise rejection; the call still rejects for any caller that awaits it.
+- a5a8ddb: The PowerPoint editor's worker loads a smaller WebAssembly core (`pptx_wasm_lean_bg.wasm`, about 108 KB less gzip) without the one-shot `compileSlideJson` and `renderPptxMarkdownJson`. Self-hosted builds must serve both `.wasm` files. Public APIs keep the full core.
+- 0530412: The same font bytes registered under several family names are now held once and no longer count against the 256-face limit. Opening a deck with more than 256 distinct faces now fails with `PptxResourceLimitError` instead of a closed worker connection.
+- e664196: The PowerPoint engine is about 3 KB smaller compressed: the slide layout cache compares slide floats with a direct walk instead of a generic serializer. Layout and cache behaviour are unchanged.
+- 40f8868: Metafile pictures with labels, bitmaps or complex paint now draw through a lazy SVG replay in editors and native PNG exports, keeping the original media when saving. Adds `metafileSvg` and `metafileImageBytes` for hosts resolving display bytes.
+- 7daa244: Adds an optional `data` to chart display-list primitives with categories and each series' values as its data labels format them. Screen reader slide mirrors read a chart as a figure holding its values as a table; charts without data keep their summary.
+- 3072028: Screen reader slide mirrors describe a chart with no cached values as having no data.
+- d675bea: Adds paragraph `links` to slide display lists. Screen reader slide mirrors expose safe external links and slide navigation as keyboard accessible links by default.
+- 96a3fb3: Adds paragraph `languages` to slide display lists. Screen readers use authored text languages by default, including mixed-language paragraphs and titles, while paragraphs with one language remain a single text node.
+- f73c684: Adds an optional `grid` to table display-list primitives with rows, columns, spans and header cells. Screen reader slide mirrors read tables as rows of header and data cells; older engines keep the flat reading.
+- 7f6277c: Native pptx slide PNGs reject with `picture-unavailable` when a picture cannot be drawn, as native docx pages do, instead of leaving it out. A picture frame with no image still renders.
+- 4cfcf6e: Lower PowerPoint editor memory when opening large decks: temporary copies of the deck state made while opening are released before the next one is built, so the engine's memory peak stays lower for the whole session.
+- fd20aa2: The worker editor starts downloading its engine on the page while the worker starts and streams it to the worker, which still compiles it, so the download no longer waits for worker startup.
+- 1676610: Pictures whose fill sits inside alternate content, as Mac PowerPoint saves a PDF picture with a PNG fallback, now draw the branch the renderer supports instead of being left out.
+- 01a0e1f: Plugin reads include `headerFooter` with visible slide footer, slide number and date text, plus stored settings in `layout.headerFooter`. These facts are included by default and optional for older engines.
+- c45b6ff: Slide shape geometry, rotations, shadows and EMF/WMF pictures are now computed bit for bit the same on WebAssembly and the native engine. WebAssembly results are unchanged.
+- 0f2f9d9: `preparePresentationFontDecoder` accepts `{ defaultFonts, activeSlideIndex }` and starts fetching the opening slide's CJK coverage faces on the prepared worker.
+- 18b3628: New `experimentalSlicedFonts` editor option, off by default: in Chromium and Firefox it loads only the Chinese, Japanese or Korean outlines a slide needs. In `@betteroffice/fonts`, `ensureText` and `prefetch` also load the characters shaping composes text into.
+- eb1ac5d: Crash recovery in the PowerPoint editor now works on picture-heavy decks: it reopens the original file and replays the edits instead of loading an open-time state export that could exceed the 64 MiB update limit, and opening no longer spends time exporting that state.
+- d4667b6: Lower PowerPoint editor memory on large decks: crash recovery keeps one copy of the opening state and the edits since then, instead of re-encoding and copying the whole presentation at every automatic checkpoint.
+- 93a46d6: When a presentation is recovered after a worker failure, edits made just before the failure whose outcome is unknown are reported through onError and in the recovery result instead of being left out silently.
+- 8b61ea4: The PowerPoint engine can list the font faces a slide or deck asks for before layout, so hosts can load exactly those fonts before the first paint. Rendering is unchanged.
+- 6329841: Arabic and Hebrew lines no longer break into scattered letters in the editor when a word's second letter starts with dots or a vowel point, as with Noto Naskh Arabic, Noto Sans Arabic and Noto Sans Hebrew.
+- dfd1833: Agent presentation exports no longer depend on a prior slide preview: edited autofit text is always shrunk to fit on save. `PresentationHandle.save` accepts `{ fonts, fallbackFonts }` to fit with those faces. Saving edited autofit text no longer scans a slide's shapes quadratically.
+- 906e337: Saving an edited slide keeps the original XML of every shape and element the edit did not change, including attribute order, namespace declarations, comments and processing instructions, instead of rewriting the whole slide.
+- 60336bd: Screen readers can now read the current slide in the presentation editor: its text in whole words, alt text for pictures and shapes, and table text. Slide changes and shape selection are announced, and slide thumbnails are named.
+- 1398cff: Default fonts now load CJK script coverage for unmapped families and mixed text when the CJK packs are available; other scripts keep the browser font. `requestedFontFacesJson` adds optional `scripts` per face, and presentations with only coverage fonts render successfully.
+- 01a0e1f: Slide number fields on a slide render the slide's current number, counted from the presentation's first slide number, instead of the text cached in the file. Rendered and read slide numbers now agree after slides move.
+- ec768e6: Slide thumbnails in the PowerPoint editor decode pictures at thumbnail size instead of full resolution, lowering memory on picture-heavy decks.
+- 7f372fa: Clicking a slide thumbnail in the PowerPoint editor shows the slide one frame sooner. The worker starts painting it when the pointer is pressed, and the click shows that picture if the deck and view are unchanged.
+- dc78510: A family with no bundled face now takes PowerPoint's substitute by name, as the agents package already does, in default font sessions. It no longer depends on which face registered first, which could also change saved autofit.
+- 4f03ee2: Text drawn with a substitute face stretches each piece up to 1.45 times (was 1.33), closing more gaps in wide letters such as Century Gothic and Arial Rounded headings. Word fitting of other text is unchanged.
+- 4310ba5: Text drawn with a substitute face (Aptos, Verdana, Century Gothic) no longer gaps inside words: each piece the layout places is stretched to its span, alike on canvas and native. Display-list runs shaped without kerning carry `kerning: false`, and both engines draw them unkerned.
+- 66a0623: Moves active slide painting into the editor worker by default. Slides opened before the worker is ready paint on the main thread, and the main painter remains the fallback for unsupported environments and images.
+- 76515fc: Reduces PowerPoint editor memory use on picture-heavy decks.
+- 47edf38: Slide text stored with CR LF or a lone CR reads as one line break, as in PowerPoint, so an edited paragraph no longer saves a stray carriage return and the text can be written back unchanged.
+- 7cf70f8: Worker entries no longer import the module that constructs their own worker, so Next.js (Turbopack) production builds of apps that use `./worker` finish instead of hanging.
+- 55c25ba: Worker files and main-thread entries import no private `#` specifiers, so worker sessions open from a CDN or with an import map, without a bundler. On Node.js, a worker thread that fails to start now fails the session instead of throwing synchronously.
+- fd25d97: Text in the Symbol font now draws the Greek letters, arrows and math signs Office shows for it, in documents, slides and cells alike. Wingdings and Webdings run text uses the same shared slot table as bullets. Saved text is unchanged.
+- 1175683: TIFF pictures whose decoded size their dimensions don't bound, such as JPEG-compressed ones, are no longer decoded, keeping memory use predictable. Adds `tiff_bounded_pixels`. DOCX opens charge a per-document TIFF pixel budget. VSDX rendering skips TIFF pictures.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+- 763916f: Number format codes in styles and chart caches are read and written as `ST_Xstring`, as Excel does: its `_x000a_` line break reads as a line break, any format set through the API saves as valid XML, and a literal `_xHHHH_` round-trips.
+- f2df1e8: Collaboration updates with invalid UTF-8 text or oversized length prefixes are refused with an error instead of being applied. The macOS app now builds the same yrs as every other target.
+- Updated dependencies [f99e53a]
+- Updated dependencies [de8f092]
+- Updated dependencies [1a82d79]
+- Updated dependencies [3609ce4]
+- Updated dependencies [5999962]
+- Updated dependencies [57f4975]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [39ae19a]
+- Updated dependencies [b8395eb]
+- Updated dependencies [53502c6]
+- Updated dependencies [ec04baa]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [21a60e5]
+- Updated dependencies [19c20c3]
+- Updated dependencies [df33f6a]
+- Updated dependencies [37199d9]
+- Updated dependencies [842d624]
+- Updated dependencies [e65df1c]
+- Updated dependencies [18b3628]
+- Updated dependencies [dc78510]
+- Updated dependencies [9ac1ffe]
+- Updated dependencies [ad45f86]
+- Updated dependencies [e6d5c52]
+  - @betteroffice/fonts@0.5.0
+
 ## 0.5.1
 
 ### Patch Changes

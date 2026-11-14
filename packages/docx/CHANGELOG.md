@@ -1,5 +1,221 @@
 # @betteroffice/docx
 
+## 0.6.0
+
+### Minor Changes
+
+- 1d8ac98: Attached DOCX previews and async decisions honor editor ownership and expire touched references. Adds opt-in `expectPreviewVersion` guards and default `revision`, `stateVersion`, `decisionState` and `withdrawn` metadata for engine decision history.
+- 3773773: Attached agent proposals use the shared engine; standalone behavior is unchanged. Adds opt-in DOCX `editPeer`, `proposeAsync`, `rejectAsync`, `discardAsync`, `keepRevisions`, `replaceText.at`, typed `TrackedRevisionConflictError`, `AcceptDateUnsupportedError` and `ProposalDecidedInEditorError`, and XLSX `getProposalStatus`, `onProposalChange` and `isProposalStale`.
+- fedbb82: Clear Formatting in the DOCX editor returns text to what its paragraph and table styles give, so headings stay bold. `formatText` clear `'all'` no longer changes a run's text direction. Paragraph patches gain an optional `inheritance` field.
+- cc2dc6c: Reads now include `drawing` (`wp:docPr` properties, placement and type) on drawing atoms by default, as do structured image and unsupported inlines. Plugins request a drawing's frame rects with the new `drawing` geometry target. Sessions seeded earlier read `drawing` as absent until reseeded.
+- 78f28c5: `applyEdits` text steps and new paragraphs accept `runs` with bold, italic, underline, strike, colour, highlight, size, font and superscript/subscript marks instead of plain `text`. Rust `EditOperation` and `ParagraphInput` gain a `runs` field.
+- db2e1a9: `TextMeasureFontRegistry` accepts `standInTail`, so explicit stand-ins always append the last-resort face. With no font setup, the editor draws fonts it lacks, such as Aptos, with a bundled stand-in, so lines no longer break mid-word. The console warns once per font until the fonts are reconfigured.
+- 02bd5be: DOCX uses installed font packs by default for characters they cover. Uncovered scripts and unavailable CJK families retain browser and Google Fonts fallbacks unless disabled; configured fonts and document embeds still take precedence.
+- 2a1d763: Adds the `formatText` edit step (`set`, `clear` back to the styles, `onUnsupported`). The agents `format_text` tool gains strike, superscript/subscript, colour, highlight, size and font.
+- 57fa9d7: Screen reader page mirrors read a visible list bullet as a localised word, never its stored character. `DocAttrs` gains `listMarkerBullet` and `MirrorLabels` gains `bullet`; without either, a bullet stays hidden.
+- b1a4b01: Screen reader page mirrors read list numbers and labels such as "3.2" or "Appendix 1", which were hidden. Bullets stay hidden.
+- 590615b: The native DOCX engine can report its editing heap per thread. Counting is off by default; `startHeapCounting()` from `@betteroffice/docx/yrs` turns it on. Pressure events on native need a host memory budget.
+- c0e297a: The engine reads the text a laid-out page shows, built or not: `page_texts_json` returns each page's paragraphs, cut where the page cuts them, with heading levels, and the table rows the page places.
+- a9897ef: DOCX PNG export tells onDiagnostic, once per page, which kinds of effect the engine does not draw (`effects-skipped`). The shared PNG diagnostic type gains that code, so a host with an exhaustive switch on the code gets a new case.
+- 62605af: DOCX PNG export draws a placeholder for a picture it cannot draw instead of rejecting the page or leaving it blank; `onDiagnostic` reports each one and why. `strictPictures: true` keeps rejecting. Agent previews warn.
+- 914dabc: DOCX PNG export names a picture whose part is missing by its relationship id, in `onDiagnostic` and in the `strictPictures` rejection, instead of leaving it unnamed. Display-list pictures carry it as `relationshipId`.
+- f78484e: Background save seed priming runs the committed scan in resumable slices. Each slice's byte budget follows the rate at which the last slice charged cost, growing at most twofold per slice; slices that charge nothing keep it. Saved bytes are unchanged.
+- d60b8e4: The worker editor opens bundled CJK faces from their skeleton and core and fetches outline chunks for the glyphs each page draws before painting it, so a first CJK frame downloads a fraction of the face; print waits for pending outlines.
+- e20cdb3: `YrsSession.renderPng({ page }, options?)` draws a page as PNG bytes with the editor's layout and painter, or natively with `@betteroffice/docx-native`. It rejects with `PngExportError` rather than paint a substitute font.
+- ae6e7e1: Fixes collaborative documents that stopped laying out after an undo removed a table cell another collaborator's table still showed. That cell now reads as empty and refuses edits until the undo is redone or its row is deleted.
+- 6d8fb19: A table that crossing undos left unlayoutable is now skipped instead of breaking layout; table commands and saves refuse with a coded error until redo restores it or it is deleted. Both engines add `unavailable_tables_from`.
+- c1509ed: Focus or a selection handed from a not yet built page now lands on the same paragraph in the page's full accessibility mirror once the page is built, and a page mirror rebuilt after an edit keeps focus and a selection that were inside it.
+- ad45f86: Adds opt-in `decodeFontFace` for packed fonts. Format package roots return a promise of `font` and optional `payload` ArrayBuffers; native bindings return byte arrays synchronously. Invalid options and decode errors reject or throw without retrying another decoder.
+- 5945e66: Adds selection-cause helpers to `@betteroffice/docx/yrs` (`yrsSelectionCause`, `withYrsSelectionCause`, `subscribeYrsSelection`) and an optional remote `cause` on command results; XLSX and PPTX gain matching internal fields.
+
+### Patch Changes
+
+- 21d4394: `docx_edit` can now replace every occurrence of literal text inside an existing Word comment with `replace_comment_text`, keeping its author, anchor, formatting and thread state.
+- 5421e9e: `docx_edit` adds `delete_comment`, which removes a comment or a root comment's whole thread, including its range markers, reference and companion entries.
+- 5ec048d: Rendering a DOCX page to PNG in Node now builds only that page, using far less memory, so long documents that failed on either engine render.
+- 1f2c008: Applying a paragraph style to a numbered paragraph now keeps its direct list numbering and direct formatting, and a paragraph numbered only by its old style stops being numbered, instead of refusing the change.
+- 1282f77: Adds opt-in `set_language` edits for DOCX paragraphs, grep matches, styles and document defaults. Latin, East Asian and complex-script proofing language slots can be set or cleared independently while preserving other formatting.
+- 01681e5: Agent document operations now report the original failure when cleaning up after it also fails, instead of the cleanup error.
+- f99e53a: DOCX text that no loaded font covers falls back to bundled BetterOffice Base Latin faces, loaded on demand from `@betteroffice/fonts`. Native raster builds embed the faces. Private-use bullet aliases apply only to Symbol and Wingdings families.
+- 8875bfa: Chart data labels and value axes linked to their source cells use the cached format of the values, so a `"$"#,##0` series labels $3,750; without a cached format they keep their own code. Linked pie percentages show a plain percentage.
+- b2ccc11: The docx editing engine downloads about 390 KB less (gzip): its heap accounting no longer inlines into every allocation.
+- 9590d1e: Paragraph-relative shapes now move with an anchor paragraph whose first line overflows to the next page, instead of staying behind on the previous page.
+- 232fe11: Text set in Simplified Arabic or Traditional Arabic now uses the line height Word uses for those fonts, so Arabic documents break pages closer to where Word breaks them.
+- c3d6f21: Autofit tables with no table width keep their cells' stated widths when those widths and the column grid both exceed the text width, as Word does, instead of squeezing the columns and wrapping text that fits.
+- 42fd2b6: New blank documents carry Word's Normal Table style, so tables inserted in them get Word's 0.19 cm left and right cell margins in the editor, Word and LibreOffice alike.
+- c0ae1af: Formatting a paragraph mark inside a block content control, such as a form field, no longer rewrites the rest of the document on save: tracked changes, proofing marks, drawings and fields elsewhere are kept as they were.
+- f831537: Body margins now ignore header and footer distances when no reference applies to the page.
+- e1a414e: Documents whose XML parts start with a byte order mark and have bookmarks between paragraphs now save. Before, saving them failed with a malformed XML error.
+- 1a82d79: Without `fontProvider` or configured fonts, PNG export uses the complete bundled fonts on both engines, native included: an installed Latin or international face that cannot load rejects with `font-unavailable`. Aborting while fonts load rejects at once. `fontProvider` keeps the old behaviour. Fonts adds `isMissingFontAddon`.
+- a67d95a: Typing in a table cell no longer rebuilds the whole document's table layout to find the cell. The editor keeps it until the document's structure changes, which saves work per keystroke in large tables.
+- c2b9ac7: Tables inserted or pasted in the editor lay out with the cell margins of the document's table styles, as Word shows them once saved, so text wraps on screen where Word wraps it. Opened tables are unchanged.
+- 062502a: DOCX character spacing now applies after every character, including the last character of a word or run, as Word does. Spaced text measures, wraps and paints with the same advances, and carets, selections and hit tests follow the painted glyphs.
+- fb7f6da: Suggesting mode now tracks character formatting and hyperlink edits through optional `suggesting` authors on `toggleMark`, `formatRange`, `clearFormatting` and `setHyperlink`. Character formatting over fields or inline content controls is refused with `SuggestedFormattingOverContainerError`; commands return `unsupported-suggesting`.
+- 455254f: Native DOCX rendering no longer fails on pages with charts or comma-separated font names. Chart text naming a theme font now uses the document theme's font in every engine.
+- a13d67a: Han text loads the CJK face its East Asian language names, so a Japanese document no longer fetches the Simplified Chinese face too.
+- 4592a3a: Accepted DOCX text replacements now coalesce adjacent changed runs with identical written properties by default. Untouched run splits, markers, fields and tracked revisions are preserved.
+- 802a67c: A continuous section that changes its left or right margins now uses them from the page where it starts, as Word does, so its text, tables and floating objects no longer overflow or sit at the old position.
+- 0372f1d: Reads now include `drawings` on inline content-control atoms by default, including text boxes and revision views. Drawing geometry targets accept an optional `index` to address a drawing inside a control, including footer controls.
+- dc75d14: Copying, cutting and pasting text inside the docx editor keeps its character formatting and links, also into table cells and between documents, where formatting pastes as direct formatting. Rich text targets get the formatting too.
+- 05e884f: Typing feedback no longer rebuilds the body text on every key: the caret's paragraph is read on its own, which makes typing in large documents faster.
+- 46c17cb: Documents whose styles declare empty document defaults lay out their unstyled paragraphs and table cells without paragraph spacing, as Word does, instead of with Word's 8 pt after and 1.08 line spacing.
+- c13d981: A document whose last paragraph holds only a page break now starts its endnotes under the last line of text, as Word does, instead of on a new page.
+- 33fcb87: Endnotes now follow the last body text, as in Word, and continue onto new pages under a continuation separator. Before, long endnotes pushed body text onto extra pages and were painted over it.
+- a9b74ab: Preserves bookmarks inside complex field results when saving, including fields that span paragraphs in the document body or table cells.
+- cc7f362: Opening a Word document no longer downloads the save engine up front. The editor prepares saving as soon as you edit or reach for Save, so the first save stays fast and read-only opens download less.
+- 3609ce4: Opening a document no longer copies a whole bundled font just to check which characters it covers, which lowers peak memory while opening CJK documents.
+- 0a4285c: Adds opt-in `fontPreflight`, returning DOCX font faces, script keys, and scan completeness without the editing engine. Its standalone module loads only when called or explicitly loaded with `preloadPreflightWasm`.
+- c3c5294: Picture watermarks that Word also places in a footer are kept when the document is saved.
+- c2281b5: Formatting a selection that spans a table, such as select all then bold, now formats the text in its cells. Paragraphs a save would lose content from stay unchanged, and edits and saves report which and why.
+- fa2717d: Every engine now reads decimal numbers back exactly. Drawing groups whose scaled child coordinates have long decimals stay intact on save.
+- 8e4260c: A DOCX table row marked hidden keeps its height when any paragraph mark in it is visible, as Word does, even if the paragraphs are empty. Only rows whose paragraph marks and runs are all hidden are left out.
+- fc50a58: DOCX table rows marked hidden (`w:trPr/w:hidden`) whose content is all hidden no longer paint borders or shading or take height unless hidden text is shown. Marked rows with visible content still render. A fully hidden table takes no space; cells keep their document row numbers.
+- 80fbccd: Automatic paragraph spacing now uses 14 pt like Word instead of 14 px, is not added above the first paragraph of the document, and is dropped between items of the same list.
+- 51390c5: Inline charts and text boxes now sit side by side on a line like inline pictures, as in Word, instead of each taking a block of its own, so landscape pages with two charts no longer spill onto a second page.
+- b756b5f: Runs whose character scale is 0, which Word draws at full width, now draw at full width instead of disappearing on canvas and failing the page natively. Other values outside 1 to 600 are ignored or held to 600.
+- e3b2ddb: Justified paragraphs in documents saved in Word 2010 or earlier compatibility modes no longer squeeze extra words onto a line, so line and page breaks match Word.
+- b17eab1: Justified paragraphs break more like Word. A word that fits only by compressing the spaces now stays on the line only when its overflow is at most half the stretch the line needs without it. Otherwise it moves to the next line.
+- 773c633: Keeps bookmarks in table cells, content controls, headers, footers, notes, comments and text boxes on save, including after blocks are deleted, merged or moved.
+- 8efeef9: Keeps bookmarks inside field codes, such as the one Word writes for each legacy form field, and fields nested inside another field's code, on save.
+- 51a1bbf: Keeps drawing groups and canvases on save in headers, footers and rewritten paragraphs. A group that matches its source apart from its frame and text-box text is written back from the source with those changes; any other edit writes it from the model as before.
+- 30134ef: Keeps bookmarks that sit between table rows or between cells on save, including after rows or columns are inserted or deleted in an editing session.
+- bf8880c: Keeps bookmarks inside the paragraphs of text boxes on save, including the copies Word stores for older versions.
+- f777004: Keeps a text box on its own run on save when bookmarks, comment ranges or other markers come before it in the paragraph; such a text box was dropped or moved to another run.
+- f31b62e: Keeps text boxes inside tracked insertions, deletions, hyperlinks and simple fields on save, with their text and revision marks.
+- f88d5cd: A multi-line paragraph kept with the next one now splits across pages like Word when it does not also keep its lines together, instead of moving whole and leaving a gap at the page bottom.
+- 002ac93: An open session now repaginates like a freshly opened one after edits next to a page break or to a continuous section's margins. `PageFlowGeometry` can no longer be built with a struct literal outside docx-layout.
+- 5ea8ee1: DOCX list markers paint from the same font as native rendering when fonts are loaded, instead of a system font on canvas, and stay hidden from screen readers.
+- afcb67e: A DOCX list level override that sets no start value now keeps the start of the level it overrides, so its first label reads "A." or "3." instead of nothing or "0.".
+- 10fbc38: DOCX numbered list levels without a start value now count from zero, as Word does, and a zero counter prints "0." instead of nothing.
+- fa27c3c: DOCX lines measured with authoritative shaping now carry the glyphs measurement shaped them with, as `glyphRuns`, packed into one string per line. Rendering does not use them yet.
+- 45aceb4: A document with the same picture stored in more than one part now reports the same media part for it on every open, so collaborating replicas agree on its source.
+- 464d5c6: Screen reader page mirrors read a chart as a figure holding its values as a table, series as column headers and categories as row headers, formatted like its data labels. A chart without cached values says it has no data.
+- 2aa581d: Screen reader page mirrors read a table header cell with nothing to read as a plain cell, not an unnamed column header.
+- 59d467a: The accessible page text reads a line break inside a paragraph as a new line and a tab as a tab, so the words on either side no longer run together for screen readers.
+- b0072d1: Screen readers hear each DOCX text run in its script's language: Latin text uses the run's Latin language, not its East Asian one, so English in documents with a Chinese or Japanese East Asian default is no longer announced as Chinese or Japanese.
+- 140c8fa: Screen reader page mirrors read the first column of a table with "Repeat as header row" rows and first-column formatting as row headers, and data cells name their row header. Column headers are unchanged.
+- 736fcba: Screen reader page mirrors read a picture without alternative text as "Picture", and no longer expose a shape without a name as an unnamed image. A shape's text still reads.
+- a09a352: Screen readers now read words in the canvas editors' page text instead of spelling them letter by letter: each line's shaped clusters, links included, form one run in the accessibility mirror.
+- 8c6a8a7: Odd and even page sections round explicit page numbering restarts up to the requested parity, avoiding extra blank pages when the authored restart has the opposite parity. Enabled by default.
+- 5999962: MS Mincho, MS Gothic, their proportional variants, and MS UI Gothic now use Office glyph widths by default, including Japanese names and decomposed voiced kana. CJK substitute outlines keep their original size during canvas painting.
+- 29dc450: Text with Word's classic shadow draws it instead of an empty Word 2010 shadow, a Word 2010 shadow no longer adds a classic one and keeps its own settings, and a content control's data binding is no longer replaced by its Word 2013 copy.
+- 57f4975: Arabic text set in Simplified Arabic or Traditional Arabic now falls back to the bundled Naskh face, closer to those fonts' style and width.
+- 533fb57: The native DOCX engine now enforces the worker heap limit: a call past it fails with the same out-of-memory error as wasm, and its object refuses later calls. A limit turns heap counting on; without a limit or `startHeapCounting()`, counting costs nothing.
+- 56c2c6c: Native docx page PNGs draw SVG, EMF and WMF pictures. A picture the renderer still cannot draw rejects `renderPng` with the new `picture-unavailable` code instead of leaving it blank.
+- f44c229: Non-breaking hyphens draw and measure with the font's hyphen glyph when the font has no dedicated one, instead of a missing-glyph box. They still never break a line.
+- ce686a8: Footnote and endnote reference marks in the document view now print the note's number, in its format and from its starting value, as the note area shows it, instead of its internal id, also while the per-revision accept/reject preview hides or shows a reference.
+- b312d8c: Widens autofit table cells with `noWrap` when room permits and wraps text at the resolved cell width when constrained. Rows retain paragraph spacing, line height, and cell margins by default.
+- 58f213a: Paragraph offset docs now count leading block embeds: in a paragraph that follows one table, offset 0 is before the table and the text starts at offset 1; each further leading table or block content control adds one.
+- 3936cdb: The DOCX editor loads one engine wasm module instead of also fetching the layout module on the main thread and in its worker. Standalone font measurement now works beside an open editing session instead of throwing.
+- fa08d5d: Word documents no longer form ligatures such as fi unless the document asks for them, matching Word; contextual alternates follow the document too. The caret and selection land between a ligature's letters, and selecting a field result covers all of it.
+- 4dc30ef: A page break that follows only a floating picture or shape now starts the next page with the text after it, as in Word, instead of leaving that text behind on an extra page.
+- 61f3ae2: In documents saved by Word 2013 or later, a paragraph that starts its own page (Page break before, or a page break at its start) no longer keeps its space before at the top of the new page, matching Word.
+- 5a6445d: A line that fits on the page in Word stays on the page instead of moving to the next one because of the spacing below it.
+- 45954df: Worker-editor pages now sit on whole device pixels and match their canvas size exactly, so page text is shown 1:1 instead of slightly resampled at 100% zoom on every display scale.
+- ed0a3ce: DOCX Arabic, Syriac and Devanagari now paint the glyphs measurement shaped, so words join on screen, including words split across runs that differ only outside the complex-script font.
+- 0cc6839: Fixes painted text and list marker positions for paragraphs with negative inherited indents.
+- a159be8: The docx parser and writer are compiled for size instead of speed, which makes the docx engines smaller to download; edit, layout and text shaping stay compiled for speed.
+- 934104f: A table pasted from another document lays out with this document's Word compatibility mode, as Word shows it once saved, instead of the source document's, so it no longer shifts left by its cell margin.
+- 22fc562: Clearing or changing character spacing, scaling, kerning or raised text, and clearing a theme font, no longer rebuilds the paragraph on save, so its hyperlinks, smart tags and drawings are kept as they were.
+- 7796969: Typing next to a field whose begin, code, result and end all sit in one paragraph no longer rebuilds that paragraph on save, so its other content is kept as it was.
+- 4761a87: Shape geometry, rotations, image transforms and drawing arcs in documents are now computed bit for bit the same on WebAssembly and on native targets, ready for the native engine. WebAssembly results are unchanged.
+- c2f553d: The caret now moves with prepainted text while you type, at its real height, and settles when layout arrives. Moving or blinking the caret no longer causes a page layout.
+- 48c6d3c: Opening a Word document downloads about 4 MB less by using a smaller module for caret and selection queries.
+- 6b80d49: Reads no longer refuse documents with tracked paragraph splits and merges. They show pending paragraph-mark revisions as accepted in the accepted view or as rejected in the original view, keeping the following paragraph's id when paragraphs join.
+- c98f495: `renderPng` with no `fontProvider` gives fonts the bundled set doesn't carry the last-resort face in the browser, as the native engine does, instead of estimated metrics.
+- 7ad595e: `renderPng` with no `fontProvider` keeps measured metrics for symbols no face covers, so such a paragraph no longer wraps on estimated widths.
+- 17c7d6e: PNG export from a session bootstrapped from another, such as an agent preview, draws EMF and WMF pictures as the seeded session does, instead of dropping their text and bitmaps on the native engine.
+- 4b0842b: Restyling a paragraph now updates inherited field result formatting immediately while preserving explicit field result formatting.
+- f30d46e: `set_paragraph_style` keeps borders, spacing and other properties inherited from the new style when saving an unnumbered paragraph, so later style changes continue to apply.
+- bb1207f: Right aligned tab stops written as `right` in the document now keep the text after them on the same line, so table of contents page numbers no longer wrap onto a second line.
+- 875e0d6: A table row now stays with the next row only when its first cell is set to keep with next, as in Word, so tables fill the page instead of moving whole to the next one.
+- 5e26101: Text without its own font size now uses its style's size instead of the paragraph mark's, and table of contents entries no longer grow taller from their tab, page number or link style size, matching Word's line heights.
+- 94093ba: `parse_docx_s4` no longer fails on an unreadable relationships part other than the document's own. It reports a warning and leaves that part's references unresolved.
+- 9ab2b61: Fonts named "Sans Serif", such as Microsoft Sans Serif, now fall back to a sans face (Arial widths in Word documents) instead of Times New Roman, so text using them measures and wraps like Word.
+- 524652d: A page or column break that an edit moves to the start of the next paragraph is now saved there instead of being dropped, in paragraphs that start with a plain run.
+- cfdeb9e: Saving a document after an edit that changes many paragraphs, such as clearing formatting over the whole body, is much faster on large documents. Saved files are unchanged.
+- 7599ffb: Speeds up repeated DOCX saves.
+- 60aeefa: Speeds up the first save after editing a large document.
+- fc50302: Speeds up DOCX saving without changing saved document bytes.
+- c3a8e27: The idle save preparation after a document opens runs in short slices that yield to typing and page requests, instead of one long step right after the first page appears.
+- 734d754: Editing a document that ends with a page break no longer rewrites the whole body on save, so untouched paragraphs keep their tracked changes, proofing marks and other formatting.
+- cda31aa: Saving a document records paragraph ids in linear time instead of comparing every saved id with every live paragraph. At 5 MiB this step drops from about 2.7 s to 63 ms on native and 4.9 s to 0.2 s on wasm; output is unchanged.
+- c8e95a2: Tab and Shift+Tab move between table cells from inside a block content control, table commands work there, and Tab into a cell that starts with a control lands in it, instead of inserting a tab or losing focus.
+- 0499bb2: Documents with a table cell whose only content is a block content control now open in the worker editor instead of failing with a load error.
+- bb08976: Fixes section page sizes, margins and columns for section breaks inside block content controls.
+- 8c6a8a7: Odd page and even page section breaks into a section that restarts its page numbering now decide parity from the restarted number, as Word does, so no extra blank page is added when the restarted number already has the right parity.
+- a711586: When a DOCX is first loaded for editing, equal attribute keys and values share one allocation. Memory retained after open drops by 1 to 6% on large real documents (10% on a text-heavy synthetic 5 MiB file). Peak memory and saved bytes are unchanged.
+- 84b271b: Opening a DOCX keeps equal embed keys and values in one shared allocation: retained memory after open falls 7.8 to 12.0% on the two largest public test documents and 29.2 to 30.5% on a 5 MiB synthetic document, native and wasm. Saved bytes are unchanged.
+- 670abd0: Smaller DOCX engine download: rarely used sorts share one implementation, cutting about 42 KB (brotli) from the editing engine module.
+- 946f6f5: Picture fills in SmartArt now resolve against the diagram drawing's own relationships, so they draw instead of failing the page natively and falling back to a solid fill on canvas.
+- 308f7b3: Preserves SmartArt during agent and editor saves, including resized diagrams and large source payloads. `Shape.drawingXml` or `Shape.drawingRunXml` stores the source once; `Shape.drawingModel` tracks frame edits. Enabled by default.
+- ec58a7d: Typing in documents with very many table cells is faster: a story change check no longer rescans every story when nothing has changed.
+- 514e876: Story checksums use constant memory, so long documents no longer exhaust the WebAssembly engine's memory and stop the editor. Checksum values are unchanged.
+- bbac3e7: Fixes collaborative table editing where splitting a cell again after a collaborator removed the previous split cell made the new cell invisible, and where redoing a shared table deletion left nested cells visible.
+- ceb5208: Table rows that start or end with skipped grid columns now place their cells in the right columns, as Word does, instead of shifting them to the left.
+- d0fb8c1: Table column borders and the table's right edge can be dragged to resize columns again in the default worker editor. Handles follow the borders at any zoom, and a drag is one undo step.
+- e2acb8e: Table rows that turn the repeated header or the no-split setting off explicitly now keep that setting through a save instead of losing it.
+- 3056f24: Table row borders can be dragged to set a row's height in both docx editors. The height saves as an at-least `w:trHeight`, and a drag is one undo step. Adds `set_row_height` to the engine.
+- c74b2b8: The docx editing engine is smaller to download.
+- c2e450c: Text boxes take the document's default East Asian language, so Japanese and Korean text boxes draw with their own CJK face. A font used by several CJK scripts puts the document's own script first.
+- c87ef90: Text boxes apply all package paragraph and character styles by default, including inherited fonts, colors, languages and spacing. Shared state preserves these styles across peers and payload edits without changing saved payloads. `font_preflight` includes styled text-box faces and inherited language scripts.
+- 0bee43d: Text runs drawn without shaping carry the script faces their paragraph needs (`scripts`), so the native renderer requests the Japanese, Korean or Traditional Chinese face the browser path already chooses.
+- 7774f6c: Run fonts that name both a font and a theme font now use the theme font, as Word does, while saving keeps the authored font attributes.
+- 59914af: Opening a document whose table of contents uses a sized hyperlink style no longer re-reads and fingerprints the whole document before the first page is laid out.
+- 689a679: DOCX toolbar icon buttons no longer inherit the browser's default `2px outset` border or ButtonFace fill in hosts that do not load Tailwind preflight. Explicit `border` and `bg-*` utilities still win.
+- 6091ab3: The editor now loads the fallback font for Chinese, Japanese, Korean, Arabic or Hebrew text typed or pasted into a document that had none, instead of drawing empty boxes until the document is reopened.
+- 8b78827: The worker-only editor now gives pages it has not built yet a plain text mirror, so screen readers and find in page reach the whole document. New `unbuiltPageMirror` option: `'text'` (default) or `'off'`.
+- d1fff89: DOCX saves keep untouched paragraphs unchanged after more agent and editor edits: inserts next to tables, content controls, bookmarks and comment ranges, and cell merges in plain tables. Text edits keep a direct automatic text color and the original runs.
+- f8c262a: DOCX saves keep untouched paragraphs in more documents: Word 2007 files, documents with a default namespace on the root, table of contents page fields next to an edited label, text boxes beside edited text, and grouped text boxes.
+- dab515e: Collaboration update listeners now run after each engine call returns instead of inside the document transaction, so a listener can read or edit the session, and a listener that throws no longer stops the others from receiving the update.
+- f428dee: Reading only the document version no longer builds the whole body text, which speeds up fast typing in table cells of very large documents.
+- 981a867: Generated keys and nonces on the wasm build use the platform's random generator when the host provides one, and the full 64-bit range either way, as the native build does.
+- b8395eb: `fontPackDiagnostics()` names installed font add-ons that cannot be used (another release, missing files, unreadable manifest). Native packages also warn once per pack with code `BETTEROFFICE_FONT_PACK`. Exports keep substituting those faces.
+- 53502c6: Large bundled font faces decode outside the PPTX worker's engine, and registering a font in WebAssembly copies its bytes once, which lowers worker memory for CJK presentations.
+- 21a60e5: The DOCX editor keeps one copy of each bundled font instead of several, which lowers memory while opening and editing documents, most for CJK documents.
+- 37199d9: Ships the same Latin and RTL faces in a smaller compressed install by default. Existing providers decode faces on demand, and DOCX reuses each face across fallback registrations.
+- 23825ed: Screen-reader links in DOCX only expose safe targets, whatever their source. Following one from the keyboard or a screen reader opens it in a new tab without an opener, and an internal link moves the caret to its bookmark.
+- 681b02e: A Rust panic in a native engine now fails its session as a trap, as on WebAssembly, instead of aborting the process. The engine object that panicked refuses every later call except free.
+- 6378188: Worker sessions now run on Node.js >= 20.16 / 22.3 through `worker_threads`, keeping the process alive until disposed. DOCX worker editing needs `OffscreenCanvas` and fails with a clear error without it (Node.js, Bun, Deno); open, read and save still work.
+- 842d624: Office fonts we draw with a substitute, such as Aptos, Arial Narrow, Cambria and Verdana, now measure at the real font's glyph widths and line heights, so text breaks like Word and PowerPoint. Legacy names such as Tms Rmn and Helv also resolve.
+- 351f13c: DOCX PNG export rejects with `canvas-unavailable` in runtimes whose canvas has no 2D context, such as Deno, instead of failing while drawing, as XLSX and PPTX export already do.
+- f1e7906: Adds experimental `fontPreflight` and `preloadPreflightWasm` for the active slide and the opening sheet, without opening the editing engine. DOCX `fontPreflight` answers now follow the engine for notes, the main part, numbering, theme script fonts, style defaults and table columns.
+- 7cf70f8: Worker entries no longer import the module that constructs their own worker, so Next.js (Turbopack) production builds of apps that use `./worker` finish instead of hanging.
+- 55c25ba: Worker files and main-thread entries import no private `#` specifiers, so worker sessions open from a CDN or with an import map, without a bundler. On Node.js, a worker thread that fails to start now fails the session instead of throwing synchronously.
+- fd25d97: Text in the Symbol font now draws the Greek letters, arrows and math signs Office shows for it, in documents, slides and cells alike. Wingdings and Webdings run text uses the same shared slot table as bullets. Saved text is unchanged.
+- 974d3ab: The first picture bullet in a document's numbering now takes up its space at the start of the first paragraph, as in Word, including when that paragraph is in a table.
+- 1175683: TIFF pictures whose decoded size their dimensions don't bound, such as JPEG-compressed ones, are no longer decoded, keeping memory use predictable. Adds `tiff_bounded_pixels`. DOCX opens charge a per-document TIFF pixel budget. VSDX rendering skips TIFF pictures.
+- 6478dec: The first save after editing is faster by warming the save path in the background when the editor is idle.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+- 763916f: Number format codes in styles and chart caches are read and written as `ST_Xstring`, as Excel does: its `_x000a_` line break reads as a line break, any format set through the API saves as valid XML, and a literal `_xHHHH_` round-trips.
+- f2df1e8: Collaboration updates with invalid UTF-8 text or oversized length prefixes are refused with an error instead of being applied. The macOS app now builds the same yrs as every other target.
+- 6d79fc5: Undo tracking no longer slows with the number of stories, so large deletions and clears in documents with many table cells stay fast. Published Rust crates get this once yrs ships it.
+- Updated dependencies [f99e53a]
+- Updated dependencies [de8f092]
+- Updated dependencies [1a82d79]
+- Updated dependencies [3609ce4]
+- Updated dependencies [5999962]
+- Updated dependencies [57f4975]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [39ae19a]
+- Updated dependencies [b8395eb]
+- Updated dependencies [53502c6]
+- Updated dependencies [ec04baa]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [21a60e5]
+- Updated dependencies [19c20c3]
+- Updated dependencies [df33f6a]
+- Updated dependencies [37199d9]
+- Updated dependencies [842d624]
+- Updated dependencies [e65df1c]
+- Updated dependencies [18b3628]
+- Updated dependencies [dc78510]
+- Updated dependencies [9ac1ffe]
+- Updated dependencies [ad45f86]
+- Updated dependencies [e6d5c52]
+  - @betteroffice/fonts@0.5.0
+
 ## 0.5.1
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/pptx-native-win32-x64-msvc",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "cpu": [
     "x64"
   ],
