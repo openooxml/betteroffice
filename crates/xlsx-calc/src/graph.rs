@@ -212,10 +212,13 @@ impl DepGraph {
     /// [`Self::build`], moving in the asts `previous` holds for `wb`'s formulas.
     pub(crate) fn build_reusing(wb: &Workbook, previous: &DepGraph) -> Self {
         let mut pool = std::mem::take(&mut *previous.asts.lock().expect("parse cache poisoned"));
+        if pool.is_empty() {
+            return Self::build(wb);
+        }
         let mut asts = HashMap::new();
-        for (_, cell) in wb.sheets.iter().flat_map(|sheet| sheet.iter_cells()) {
-            let source = cell.formula.as_deref().map(formula_source);
-            if let Some((source, ast)) = source.and_then(|source| pool.remove_entry(source)) {
+        let cells = wb.sheets.iter().flat_map(|sheet| sheet.iter_cells());
+        for formula in cells.filter_map(|(_, cell)| cell.formula.as_deref()) {
+            if let Some((source, ast)) = pool.remove_entry(formula_source(formula)) {
                 asts.insert(source, ast);
             }
         }
