@@ -12,6 +12,8 @@ mod format_calculation_tests;
 mod format_facets_tests;
 mod formula_entry;
 mod geometry;
+#[cfg(test)]
+mod graph_reuse_tests;
 mod preserved_fragments;
 mod proposals;
 pub(crate) mod reads;
@@ -465,6 +467,21 @@ fn on_used_edge(bounds: Option<CellRange>, at: CellRef) -> bool {
     })
 }
 
+/// How full recalculations came by their dependency graph.
+#[derive(Default)]
+struct GraphReuse {
+    keeps: u64,
+    rebuilds: u64,
+}
+
+/// A full recalculation of a copy of the model over a graph built afresh.
+#[cfg(test)]
+struct FreshRecalculation {
+    model: WorkbookModel,
+    graph: DepGraph,
+    result: RecalcResult,
+}
+
 pub struct Workbook {
     #[cfg(feature = "fonts")]
     pub(crate) font_manager: betteroffice_fonts::FontManager,
@@ -489,6 +506,7 @@ pub struct Workbook {
     active_sheet: SheetId,
     undo: UndoStack,
     graph: Option<DepGraph>,
+    graph_reuse: GraphReuse,
     rand_seed: Option<u32>,
     proposals: ProposalSet,
     last_calculation: CalculationResult,
@@ -627,6 +645,12 @@ fn eager_authority() -> bool {
 #[cfg(not(test))]
 fn eager_authority() -> bool {
     false
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Marks the graph current after formula edits too, which it is not.
+    pub(crate) static RESTAMP_FORMULA_EDITS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn missing_authority() -> Error {
@@ -1060,6 +1084,7 @@ impl Workbook {
             active_sheet,
             undo: UndoStack::new(),
             graph,
+            graph_reuse: GraphReuse::default(),
             rand_seed: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
@@ -4266,6 +4291,7 @@ impl Workbook {
         self.bump_model_epoch();
         self.recalculated_since_open = true;
         self.calculations_since_open = self.calculations_since_open.saturating_add(1);
+        self.graph_reuse.rebuilds += 1;
         let (graph, result) = rebuild_and_recalc_all_after(
             &mut self.model,
             self.graph.as_ref(),
@@ -4278,6 +4304,61 @@ impl Workbook {
         self.last_calculation = result.clone();
         xlsx_model::progress::pulse();
         result
+    }
+
+    /// Full recalculations that kept the dependency graph, and those that rebuilt it.
+    #[doc(hidden)]
+    pub fn graph_reuse_counts(&self) -> (u64, u64) {
+        (self.graph_reuse.keeps, self.graph_reuse.rebuilds)
+    }
+
+    /// [`Workbook::recalculate_all`], returning how it differs from one over a fresh graph.
+    #[cfg(test)]
+    pub(crate) fn recalculate_all_beside_fresh(
+        &mut self,
+        options: CalculationOptions,
+    ) -> Option<String> {
+        let fresh = self.fresh_full_recalculation(options);
+        let result = self.recalculate_all(options);
+        self.fresh_difference(&fresh, &result, options)
+    }
+
+    #[cfg(test)]
+    fn fresh_full_recalculation(&self, options: CalculationOptions) -> FreshRecalculation {
+        let mut model = self.model.clone();
+        let (graph, result) = xlsx_calc::engine::rebuild_and_recalc_all_beside(
+            &mut model,
+            self.graph.as_ref(),
+            options.now_serial,
+            self.rand_seed,
+        );
+        FreshRecalculation {
+            model,
+            graph,
+            result,
+        }
+    }
+
+    /// Values and result lists count only when no clock or random draw tells the runs apart.
+    #[cfg(test)]
+    fn fresh_difference(
+        &self,
+        fresh: &FreshRecalculation,
+        result: &CalculationResult,
+        options: CalculationOptions,
+    ) -> Option<String> {
+        let graph = self.graph.as_ref()?;
+        let values = (options.now_serial.is_some() && self.rand_seed.is_some())
+            || graph.volatile_cells().next().is_none();
+        xlsx_calc::engine::full_recalculation_difference(
+            (&self.model, graph),
+            (&fresh.model, &fresh.graph),
+            values,
+        )
+        .or_else(|| {
+            (values && calculation_result(&fresh.result) != *result)
+                .then(|| "the result lists differ".to_owned())
+        })
     }
 
     /// Derives what a recalculation would leave unevaluated, for a session
@@ -6924,6 +7005,7 @@ impl Workbook {
             active_sheet,
             undo: UndoStack::new(),
             graph,
+            graph_reuse: GraphReuse::default(),
             rand_seed: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),

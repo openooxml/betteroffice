@@ -754,6 +754,48 @@ impl DepGraph {
         self.volatile.iter().map(|k| (k.sheet, k.cell()))
     }
 
+    /// the first part differing from `other`, parse cache and unevaluated list aside.
+    #[doc(hidden)]
+    pub fn structural_difference(&self, other: &Self) -> Option<&'static str> {
+        let nodes = self.deps.len() != other.deps.len()
+            || self.deps.iter().any(|(key, entry)| {
+                other
+                    .deps
+                    .get(key)
+                    .is_none_or(|found| found.edges != entry.edges || *found.ast != *entry.ast)
+            });
+        let answers = *self.answered.lock().unwrap_or_else(|err| err.into_inner())
+            != *other.answered.lock().unwrap_or_else(|err| err.into_inner());
+        let currency = *self
+            .currency_coercion
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            != *other
+                .currency_coercion
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+        [
+            ("sheet names", self.names != other.names),
+            (
+                "defined names",
+                self.defined_names != other.defined_names
+                    || self.defined_name_indices != other.defined_name_indices,
+            ),
+            ("tables", self.tables != other.tables),
+            ("nodes", nodes),
+            ("reverse edges", self.by_sheet != other.by_sheet),
+            ("volatile cells", self.volatile != other.volatile),
+            (
+                "spills",
+                self.spills != other.spills || self.spills_by_sheet != other.spills_by_sheet,
+            ),
+            ("answers", answers),
+            ("currency evidence", currency),
+        ]
+        .into_iter()
+        .find_map(|(part, differs)| differs.then_some(part))
+    }
+
     /// parsed asts shared with `engine::run_recalc` evaluation.
     pub(crate) fn asts(&self) -> &ParseCache {
         &self.asts
