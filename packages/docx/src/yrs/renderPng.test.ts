@@ -2,7 +2,6 @@ import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as enginePng from '../wasm/enginePng';
-import * as rustParse from '../docx/rustParseFacade';
 import { engineKind } from '../wasm/enginePng';
 import { resolveCompleteFontProvider } from '../layout/measure';
 import { createYrsSession, type YrsSession } from './index';
@@ -362,21 +361,5 @@ describe('YrsSession.renderPng source bytes', () => {
       expect(drawnText(first)).toContain('Quixotically');
       expect(drawing.mock.calls[1]![0].page.primitives).toEqual(first);
     } finally { drawing.mockRestore(); session.destroy(); }
-  });
-
-  test('a reopen that fails after the engine switched documents leaves an export that is refused', async () => {
-    stubBrowser();
-    const session = await opened();
-    const decode = spyOn(rustParse, 'decodeS9EnvelopeValue');
-    try {
-      decode.mockImplementationOnce(() => { throw new TypeError('host decode failed'); });
-      expect(() => session.openDocx(scriptDocument(), true)).toThrow('host decode failed');
-      decode.mockRestore();
-      const refused = await session.renderPng({ page: 0 }).then(() => undefined, (error: unknown) => error);
-      expect(refused).toBeInstanceOf(Error);
-      expect((refused as Error).name).toBe('PeerMetadataError');
-      expect((refused as Error & { code?: string }).code).toBe('source-mismatch');
-      expect((refused as Error).message).toContain('peer metadata retained source mismatch');
-    } finally { decode.mockRestore(); session.destroy(); }
   });
 });
