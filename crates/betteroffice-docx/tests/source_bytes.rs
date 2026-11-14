@@ -325,10 +325,16 @@ fn an_orphan_merge_continuation_keeps_a_planned_paragraph_and_conflicts_on_an_un
     );
     let planned = splice_save(&source, &[0, 1, 2, 3, 4, 5]);
     assert!(planned.contains("New text"), "{planned}");
-    assert!(planned.contains(&table), "planned orphan paragraph lost the table bytes");
+    assert!(
+        planned.contains(&table),
+        "planned orphan paragraph lost the table bytes"
+    );
     let unplanned = splice_save(&source, &[0, 2, 3, 4, 5]);
     assert!(unplanned.contains("New text"), "{unplanned}");
-    assert!(!unplanned.contains(&table), "unplanned orphan paragraph kept the splice");
+    assert!(
+        !unplanned.contains(&table),
+        "unplanned orphan paragraph kept the splice"
+    );
 }
 
 #[test]

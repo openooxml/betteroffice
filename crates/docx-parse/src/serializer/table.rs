@@ -976,10 +976,8 @@ mod tests {
                     .map(|_| {
                         probed += 1;
                         let mut context = context();
-                        context.begin_splice(
-                            (1..=count).filter(|ordinal| *ordinal != probed),
-                            None,
-                        );
+                        context
+                            .begin_splice((1..=count).filter(|ordinal| *ordinal != probed), None);
                         serialize_table(&table, &mut context).unwrap();
                         !context.end_splice().unwrap().conflict
                     })
@@ -1002,10 +1000,7 @@ mod tests {
     #[test]
     fn an_orphan_merge_continuation_in_the_first_row_conflicts() {
         assert_eq!(
-            exempt_cells(&[
-                &[(1, Some("continue")), (1, None)],
-                &[(1, None), (1, None)],
-            ]),
+            exempt_cells(&[&[(1, Some("continue")), (1, None)], &[(1, None), (1, None)],]),
             [[false, false], [false, false]]
         );
     }
@@ -1013,10 +1008,7 @@ mod tests {
     #[test]
     fn a_merge_continuation_under_an_unmerged_cell_conflicts() {
         assert_eq!(
-            exempt_cells(&[
-                &[(1, None), (1, None)],
-                &[(1, Some("continue")), (1, None)],
-            ]),
+            exempt_cells(&[&[(1, None), (1, None)], &[(1, Some("continue")), (1, None)],]),
             [[false, false], [false, false]]
         );
     }
@@ -1102,8 +1094,14 @@ mod tests {
         context.begin_splice([1, 7], None);
         serialize_table_row(&row, &mut context).unwrap();
         let recorded = context.end_splice().unwrap();
-        assert!(!recorded.conflict, "orphan continuation cell set the splice conflict");
-        assert!(recorded.written.contains_key(&7), "planned paragraph not recorded");
+        assert!(
+            !recorded.conflict,
+            "orphan continuation cell set the splice conflict"
+        );
+        assert!(
+            recorded.written.contains_key(&7),
+            "planned paragraph not recorded"
+        );
         assert!(recorded.written.contains_key(&1));
         assert_eq!(recorded.order, [Some(7), Some(1)]);
     }

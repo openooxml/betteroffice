@@ -8404,17 +8404,11 @@ mod tests {
                 &[&[false, false], &[true, false]],
             ),
             (
-                &[
-                    &[(1, Some("continue")), (1, None)],
-                    &[(1, None), (1, None)],
-                ],
+                &[&[(1, Some("continue")), (1, None)], &[(1, None), (1, None)]],
                 &[&[false, false], &[false, false]],
             ),
             (
-                &[
-                    &[(1, None), (1, None)],
-                    &[(1, Some("continue")), (1, None)],
-                ],
+                &[&[(1, None), (1, None)], &[(1, Some("continue")), (1, None)]],
                 &[&[false, false], &[false, false]],
             ),
             (
