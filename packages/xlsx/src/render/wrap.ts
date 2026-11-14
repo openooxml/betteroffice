@@ -122,3 +122,13 @@ export function wrappedLineY(y: number, index: number, count: number, wrap: Text
   const step = wrap.valign === 'top' ? index : wrap.valign === 'center' ? index - last / 2 : index - last;
   return y + wrap.lineHeight * step;
 }
+
+/**
+ * How many of `count` wrapped lines Excel paints in a box `height` px tall:
+ * those that fit whole, at least one; they are then aligned as the full text.
+ */
+export function wrappedLinesFitting(count: number, wrap: TextWrap, fontSizePx: number, height: number): number {
+  const room = (height + 1 - fontSizePx) / wrap.lineHeight;
+  const fitting = Number.isFinite(room) && room >= 0 ? Math.floor(room) + 1 : 1;
+  return Math.min(count, Math.max(fitting, 1));
+}

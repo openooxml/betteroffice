@@ -428,6 +428,32 @@ describe('Canvas2D text', () => {
     expect(fills).toEqual([{ text: 'Header', x: 0, y: 4 }]);
   });
 
+  it('wraps 90-degree text into side-by-side lines', () => {
+    const fills: { text: string; x: number; y: number }[] = [];
+    const translates: number[][] = [];
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {}, rotate() {},
+      translate(x: number, y: number) { translates.push([x, y]); },
+      measureText(text: string) {
+        return { width: text.length * 10, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText(text: string, x: number, y: number) { fills.push({ text, x, y }); },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 60, height: 100,
+      commands: [{ op: 'text', x: 30, y: 50, text: 'Product Description', fontSize: 11, color: '#000000',
+        align: 'center', clip: { x: 0, y: 0, w: 60, h: 100 },
+        rotationDeg: 90, rotationBox: { x: 0, y: 0, w: 60, h: 100 }, rotationValign: 'center',
+        wrap: { width: 120, lineHeight: 20, valign: 'center' },
+      } as unknown as TextCmd],
+    }, 1);
+    expect(fills).toEqual([{ text: 'Product', x: 0, y: -6 }, { text: 'Description', x: 0, y: 14 }]);
+    expect(translates[0][0]).toBeCloseTo(30);
+    expect(translates[0][1]).toBeCloseTo(50);
+  });
+
   it('positions vertical line boxes independently of glyph ink', () => {
     for (const [align, expectedX] of [['left', 10], ['center', 15], ['right', 20]] as const) {
       for (const [valign, expectedY] of [['top', 20], ['center', 140], ['bottom', 260]] as const) {

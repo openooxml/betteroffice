@@ -135,6 +135,24 @@ pub fn wrapped_line_y(y: f32, index: usize, count: usize, wrap: &TextWrap) -> f3
         }
 }
 
+/// how many of `count` wrapped lines excel paints in a box `height` px tall:
+/// those that fit whole, at least one; they are then aligned as the full text.
+pub fn wrapped_lines_fitting(
+    count: usize,
+    wrap: &TextWrap,
+    font_size_pt: f32,
+    height: f32,
+) -> usize {
+    let font = font_size_pt * crate::geometry::PX_PER_PT as f32;
+    let room = (height + 1.0 - font) / wrap.line_height;
+    let fitting = if room.is_finite() && room >= 0.0 {
+        room.floor() as usize + 1
+    } else {
+        1
+    };
+    count.min(fitting.max(1))
+}
+
 /// lines a wrapped cell takes in a text box `width` px wide, measured with
 /// [`estimate_text_width`]: what row autofit counts without a font engine.
 pub fn estimated_line_count(text: &str, width: f32, size_pt: f64) -> usize {

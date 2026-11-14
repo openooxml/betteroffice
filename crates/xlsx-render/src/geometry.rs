@@ -185,16 +185,33 @@ impl RowFit {
     }
 }
 
-/// the baseline step of wrapped `size_pt` text: one fitted row of it, on
-/// the print grid when `print_dpi` is set.
-pub(crate) fn line_pitch_pt(size_pt: f64, print_dpi: Option<f64>) -> f64 {
-    print_dpi
-        .map_or(RowFit::Screen, |dpi| RowFit::Print { dpi })
-        .natural(size_pt)
+/// the baseline step of wrapped `size_pt` text: on screen the face's own line
+/// height where it is known, otherwise one fitted row of it; on the print grid
+/// when `print_dpi` is set.
+pub(crate) fn line_pitch_pt(size_pt: f64, family: Option<&str>, print_dpi: Option<f64>) -> f64 {
+    match (print_dpi, family.and_then(line_height_em)) {
+        (None, Some(em)) => size_pt * em,
+        (dpi, _) => dpi
+            .map_or(RowFit::Screen, |dpi| RowFit::Print { dpi })
+            .natural(size_pt),
+    }
+}
+
+/// `(usWinAscent + usWinDescent) / unitsPerEm` of common faces whose wrapped
+/// lines excel spaces at the face's line height; calibri keeps the fitted row.
+fn line_height_em(family: &str) -> Option<f64> {
+    Some(match family.trim().to_ascii_lowercase().as_str() {
+        "arial" | "helvetica" | "liberation sans" | "arimo" => 1.1172,
+        "times new roman" | "liberation serif" | "tinos" => 1.1074,
+        "courier new" | "liberation mono" | "cousine" => 1.1328,
+        "verdana" | "tahoma" => 1.2070,
+        "georgia" => 1.1362,
+        _ => return None,
+    })
 }
 
 /// floors to whole points, absorbing the float error a ratio leaves just under
-/// an exact integer (90.0 x 14/15 evaluates to 62.999...).
+/// an exact integer (13.75 x 14/13.75 evaluates to 13.999...).
 fn floor_pt(pt: f64) -> f64 {
     (pt + 1e-9).floor()
 }
@@ -302,8 +319,9 @@ fn digit_advance_em(family: Option<&str>) -> f64 {
 const CALIBRI_DIGIT_EM: f64 = 1038.0 / 2048.0;
 
 /// the factor excel applies to every stored `ht` when `defaultRowHeight` is a
-/// cached hint it recomputes; `None` keeps stored heights. gated on calibri
-/// because [`autofit_row_height_pt`] is a calibri measurement.
+/// cached hint it recomputes, within a point of the fitted height; `None`
+/// keeps stored heights. gated on calibri because [`autofit_row_height_pt`] is
+/// a calibri measurement.
 fn stored_height_scale(sheet: &Sheet, normal: NormalFace<'_>, fit: RowFit) -> Option<f64> {
     if sheet.format.custom_height {
         return None;
@@ -319,7 +337,11 @@ fn stored_height_scale(sheet: &Sheet, normal: NormalFace<'_>, fit: RowFit) -> Op
         return None;
     }
     let fitted = fit.natural(normal.size_pt);
-    (fitted.is_finite() && fitted > 0.0 && fitted != declared).then_some(fitted / declared)
+    (fitted.is_finite()
+        && fitted > 0.0
+        && fitted != declared
+        && (declared - fitted).abs() <= 1.0 + 1e-9)
+        .then_some(fitted / declared)
 }
 
 /// the height a cell's font contributes to row autofit, if any: a declared
@@ -1627,10 +1649,35 @@ mod tests {
             size_pt: Some(11.0),
             ..Font::default()
         });
-        let mut sheet = sheet_with(&[], &[(0, 90.0)]);
-        sheet.format.default_row_height_pt = Some(20.0);
+        let mut sheet = sheet_with(&[], &[(0, 13.75)]);
+        sheet.format.default_row_height_pt = Some(13.75);
         let grid = GridGeometry::new(&sheet, &styles);
-        assert!((grid.row_y(1) - row_pt_to_px(63.0)).abs() < 0.001);
+        assert!((grid.row_y(1) - row_pt_to_px(14.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn wrapped_lines_step_by_the_face_line_height() {
+        assert!((line_pitch_pt(36.0, Some("Arial"), None) - 36.0 * 1.1172).abs() < 1e-9);
+        assert_eq!(
+            line_pitch_pt(36.0, Some("Calibri"), None),
+            autofit_row_height_pt(36.0)
+        );
+        assert_eq!(line_pitch_pt(36.0, None, None), autofit_row_height_pt(36.0));
+    }
+
+    #[test]
+    fn stored_heights_stand_against_an_authored_default() {
+        let mut styles = Stylesheet::default();
+        styles.fonts.push(Font {
+            name: Some("Calibri".into()),
+            size_pt: Some(11.0),
+            ..Font::default()
+        });
+        let mut sheet = sheet_with(&[], &[(0, 15.0), (1, 63.75)]);
+        sheet.format.default_row_height_pt = Some(19.0);
+        let grid = GridGeometry::new(&sheet, &styles);
+        assert!((grid.row_y(1) - row_pt_to_px(15.0)).abs() < 0.001);
+        assert!((grid.row_y(2) - grid.row_y(1) - row_pt_to_px(63.75)).abs() < 0.001);
     }
 
     #[test]

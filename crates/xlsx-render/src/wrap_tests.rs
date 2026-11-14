@@ -301,3 +301,21 @@ fn an_unsized_row_grows_to_the_formatted_text_it_wraps() {
     assert_eq!(cmds[0]["text"], "alpha beta gamma delta x", "{cmds:?}");
     assert!(cmds[0]["wrap"].is_object(), "{cmds:?}");
 }
+
+#[test]
+fn only_the_wrapped_lines_that_fit_paint() {
+    let wrap = TextWrap {
+        width: 100.0,
+        line_height: 13.4,
+        valign: TextValign::Center,
+    };
+    assert_eq!(wrap::wrapped_lines_fitting(3, &wrap, 9.0, 20.0), 1);
+    assert_eq!(wrap::wrapped_lines_fitting(3, &wrap, 9.0, 4.0), 1);
+    assert_eq!(wrap::wrapped_lines_fitting(3, &wrap, 9.0, 26.0), 2);
+    assert_eq!(wrap::wrapped_lines_fitting(2, &wrap, 9.0, 200.0), 2);
+    let title = TextWrap {
+        line_height: 53.6,
+        ..wrap
+    };
+    assert_eq!(wrap::wrapped_lines_fitting(2, &title, 36.0, 107.3), 2);
+}

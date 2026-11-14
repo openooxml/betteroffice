@@ -20,7 +20,7 @@ import type {
 import { fontSizePx, fontString } from './fontString';
 import { PATTERN_MASKS } from './patterns';
 import { paintNumberFormat } from './number-format';
-import { wrapLines, wrappedLineY } from './wrap';
+import { wrapLines, wrappedLinesFitting, wrappedLineY } from './wrap';
 
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
 const STACKED_ASCENT_RATIO = 0.8;
@@ -265,8 +265,11 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     const align = cmd.align ?? 'left';
     ctx.textAlign = ALIGN_TO_TEXT_ALIGN[align];
     const lines = wrapLines(cmd.text, wrap.width, (run) => ctx.measureText(run).width);
-    lines.forEach((line, index) => {
-      paintRun(ctx, { ...cmd, y: wrappedLineY(cmd.y, index, lines.length, wrap) }, line, cmd.x, align);
+    const count = cmd.clip
+      ? wrappedLinesFitting(lines.length, wrap, fontSizePx(cmd), cmd.clip.h)
+      : lines.length;
+    lines.slice(0, count).forEach((line, index) => {
+      paintRun(ctx, { ...cmd, y: wrappedLineY(cmd.y, index, count, wrap) }, line, cmd.x, align);
     });
   } else {
     const align = cmd.align ?? 'left';
@@ -330,12 +333,17 @@ function paintRotatedText(ctx: CanvasRenderingContext2D, cmd: TextCmd, deg: numb
       width = Math.max(0, maxX - minX);
     }
   }
+  const lines = cmd.wrap && !cmd.numberFormat
+    ? wrapLines(cmd.text, cmd.wrap.width, (run) => ctx.measureText(run).width)
+    : [cmd.text];
+  if (lines.length > 1) width = Math.max(...lines.map((line) => ctx.measureText(line).width));
   const metrics = ctx.measureText(cmd.text);
   const ascent = (deg === 90 ? metrics.fontBoundingBoxAscent : undefined)
     ?? (metrics.actualBoundingBoxAscent || fontSize * 0.8);
   const descent = (deg === 90 ? metrics.fontBoundingBoxDescent : undefined)
     ?? (metrics.actualBoundingBoxDescent || fontSize * 0.2);
-  const lineHeight = ascent + descent;
+  const pitch = cmd.wrap?.lineHeight ?? ascent + descent;
+  const lineHeight = ascent + descent + pitch * (lines.length - 1);
   const angle = (-deg * Math.PI) / 180;
   const cos = Math.cos(angle);
   const sin = Math.sin(angle);
@@ -356,19 +364,22 @@ function paintRotatedText(ctx: CanvasRenderingContext2D, cmd: TextCmd, deg: numb
     ctx.fillStyle = cmd.color;
   }
   ctx.textBaseline = 'alphabetic';
-  const baseline = (ascent - descent) / 2;
-  if (cmd.numberFormat) {
-    ctx.textAlign = 'left';
-    for (const segment of segments) ctx.fillText(segment.text, -width / 2 + segment.offset, baseline);
-  } else {
-    ctx.textAlign = 'center';
-    ctx.fillText(cmd.text, 0, baseline);
-  }
   const thickness = Math.max(fontSize * 0.05, 0.5);
-  ctx.fillStyle = cmd.color;
-  if (cmd.underline) fillUnderline(ctx, cmd, -width / 2, baseline + fontSize * 0.1, width, thickness);
-  else if (cmd.dashedUnderline) ctx.fillRect(-width / 2, baseline + fontSize * 0.1, width, thickness);
-  if (cmd.strike) ctx.fillRect(-width / 2, baseline - fontSize * 0.26, width, thickness);
+  lines.forEach((line, index) => {
+    const baseline = ascent - lineHeight / 2 + pitch * index;
+    const lineWidth = lines.length > 1 ? ctx.measureText(line).width : width;
+    ctx.fillStyle = cmd.color;
+    if (cmd.numberFormat) {
+      ctx.textAlign = 'left';
+      for (const segment of segments) ctx.fillText(segment.text, -width / 2 + segment.offset, baseline);
+    } else {
+      ctx.textAlign = 'center';
+      ctx.fillText(line, 0, baseline);
+    }
+    if (cmd.underline) fillUnderline(ctx, cmd, -lineWidth / 2, baseline + fontSize * 0.1, lineWidth, thickness);
+    else if (cmd.dashedUnderline) ctx.fillRect(-lineWidth / 2, baseline + fontSize * 0.1, lineWidth, thickness);
+    if (cmd.strike) ctx.fillRect(-lineWidth / 2, baseline - fontSize * 0.26, lineWidth, thickness);
+  });
   ctx.restore();
 }
 
