@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "検索と置換",
+    "find": "検索",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "置換",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{total} 件以上中 {index} 件目",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "大文字と小文字を区別する",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "「検索対象」は検索にのみ適用されます。置換は各セルの入力内容を入力し直したものとして編集し、数式を再計算します。",
+    "preview": "Preview",
+    "replaceAll": "すべて置換",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "一致した日付、TRUE/FALSE、エラー値 {count} 件は変更されませんでした: {cells}"
+  },
   "_lang": "ja",
   "toolbar": {
     "actionsLabel": "スプレッドシートの操作",
@@ -103,6 +134,7 @@
     "redo": "やり直し"
   },
   "commands": {
+    "findReplace": "検索と置換",
     "fontSizeStep": "フォント サイズの変更",
     "numberFormat": "表示形式",
     "decimalPlaces": "小数点以下の桁数の変更",

@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "Bul ve Değiştir",
+    "find": "Bul",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "Değiştir",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{total} sonuçtan fazlası içinde {index}.",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "Büyük/küçük harf eşleştir",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "“Bakılacak yer” yalnızca Bul için geçerlidir. Değiştir, her hücrenin içeriğini yazılmış gibi düzenler ve formülleri yeniden hesaplar.",
+    "preview": "Preview",
+    "replaceAll": "Tümünü Değiştir",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "Eşleşen {count} tarih, TRUE/FALSE veya hata değeri değiştirilmedi: {cells}"
+  },
   "_lang": "tr",
   "toolbar": {
     "actionsLabel": "E-tablo eylemleri",
@@ -103,6 +134,7 @@
     "redo": "Yinele"
   },
   "commands": {
+    "findReplace": "Bul ve Değiştir",
     "fontSizeStep": "Yazı tipi boyutunu değiştir",
     "numberFormat": "Sayı Biçimi",
     "decimalPlaces": "Ondalık basamaklarını değiştir",

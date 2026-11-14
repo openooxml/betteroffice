@@ -4817,6 +4817,22 @@ describe('workbook worker editor', () => {
     await act(async () => hydration.resolve(host.peer));
   });
 
+  it('opens the replace dialog from the legacy worker find and replace command', async () => {
+    harness();
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(ready) => { api = ready; }} />);
+    await opened();
+    await advance();
+    expect(view.queryByRole('dialog')).toBeNull();
+    let result!: Awaited<ReturnType<XlsxWorkerEditorApi['commands']['execute']>>;
+    await act(async () => { result = await api.commands.execute('findReplace', null); });
+    expect(result).toMatchObject({ ok: true });
+    const dialog = await waitFor(() => view.getByRole('dialog'));
+    expect(dialog.textContent).toContain('Replace with');
+    expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+  });
+
   for (const decision of [true, false, undefined] as const) {
     it(`coalesces host save requests returning ${String(decision)} after flushing worker input`, async () => {
       const host = harness();

@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "Найти и заменить",
+    "find": "Найти",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "Заменить",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{index} из более чем {total}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "Учитывать регистр",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "«Область поиска» действует только для поиска. Замена изменяет содержимое каждой ячейки так, будто оно введено вручную, и пересчитывает формулы.",
+    "preview": "Preview",
+    "replaceAll": "Заменить все",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "Совпавшие даты, значения TRUE/FALSE или ошибки не изменены ({count}): {cells}"
+  },
   "_lang": "ru",
   "toolbar": {
     "actionsLabel": "Действия с электронной таблицей",
@@ -103,6 +134,7 @@
     "redo": "Вернуть"
   },
   "commands": {
+    "findReplace": "Найти и заменить",
     "fontSizeStep": "Изменить размер шрифта",
     "numberFormat": "Числовой формат",
     "decimalPlaces": "Изменить разрядность",
