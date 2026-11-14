@@ -351,6 +351,7 @@ jobs:
           cargo clippy -p betteroffice-docx-edit --all-targets --features wasm -- -D warnings
           cargo clippy -p betteroffice-docx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
+          cargo clippy -p betteroffice-xlsx-ops -p betteroffice-xlsx --all-targets --features unstable-track-moves,unstable-track-visibility -- -D warnings
           cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-fonts --all-targets --features build -- -D warnings
           cargo clippy -p betteroffice-fonts --all-targets --features manager -- -D warnings
@@ -432,6 +433,7 @@ jobs:
           cargo test -p betteroffice-docx-parse --features tiff,metafile
           cargo test -p betteroffice-docx --all-features
           cargo test -p betteroffice-pptx --all-features
+          cargo test -p betteroffice-xlsx-ops -p betteroffice-xlsx --features unstable-track-moves,unstable-track-visibility
           cargo test -p betteroffice-pptx-edit --features test-counters --test attach_scaling
           cargo test -p betteroffice-pptx-parse --features test-counters --test splice_scaling
           cargo test -p betteroffice-vsdx-edit --features wasm
