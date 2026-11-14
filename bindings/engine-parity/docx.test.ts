@@ -1000,6 +1000,26 @@ function paragraphAnchors(session: Session): Anchor[] {
   ];
 }
 
+const PAGE_WINDOWS: [number, number][] = [[0, 0], [0, 9], [1, 0], [Number.NaN, 0]];
+const REGIONS: [string, string][] = [['body', ''], ['header', ''], ['header', 'rIdHeader'], ['footnote', '1']];
+const GLYPH_A = 36;
+
+function pagedRects(query: (from: number, to: number, firstPage: number, lastPage: number) => string): string[] {
+  return PAGE_WINDOWS.flatMap(([first, last]) => RANGES.map(([from, to]) => query(from, to, first, last)));
+}
+
+function regionRects(query: (region: string, partId: string, from: number, to: number) => string): string[] {
+  return REGIONS.flatMap(([region, partId]) => RANGES.map(([from, to]) => query(region, partId, from, to)));
+}
+
+function retainedMetaOf(session: Session, request = regionRequest()) {
+  return retainedMeta(session.layout_document_with_regions_retained_meta(layoutInput(session, request).input));
+}
+
+function residentLoc(session: Session, prefix: string, index: number) {
+  return { story: 'body', paraId: paraId(session, prefix), offset: textAt(session, prefix, index) };
+}
+
 const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
 
 const rows: Row<Docx>[] = [
@@ -3039,6 +3059,224 @@ const rows: Row<Docx>[] = [
       return { bare, framed, caret, range: s.resident_caret_snapshot_json() };
     },
   },
+  defineRow({
+    method: 'EditSession.apply_update_with_inference',
+    mutates: true,
+    setup: (docx: Docx) => trackedRemote(docx, remoteUpdate),
+    call: ({ session: s }, update) => notUndoable(s, () => s.apply_update_with_inference(update)),
+  }),
+  defineRow({
+    method: 'EditSession.encode_diff_chunks',
+    setup: ({ fresh }: Docx) => fresh().encode_state_vector(),
+    call: ({ session: s }, vector) => ({ whole: s.encode_diff_chunks(vector, 1 << 20), bounded: s.encode_diff_chunks(vector, 64) }),
+  }),
+  defineRow({
+    method: 'EditSession.direct_batches_applied',
+    setup: ({ session: s }: Docx) => s.set_direct_batches(true),
+    call: ({ session: s }) => {
+      const initial = s.direct_batches_applied();
+      const edit = s.apply_edits_json(editRequest(s));
+      return { initial, edit, applied: s.direct_batches_applied() };
+    },
+  }),
+  { method: 'EditSession.decode_font', call: ({ session: s }) => s.decode_font(fontBytes) },
+  defineRow({
+    method: 'EditSession.echo_glyph_set_json',
+    setup: ({ session: s }: Docx) => s.register_measure_font(fontBytes),
+    call: ({ session: s }, font) => ({ kerned: s.echo_glyph_set_json(font, 12, true, 'Parity AV'), plain: s.echo_glyph_set_json(font, 12, false, 'Parity AV') }),
+  }),
+  defineRow({
+    method: 'EditSession.outline_glyph_json',
+    setup: ({ session: s }: Docx) => s.register_measure_font(fontBytes),
+    call: ({ session: s }, font) => s.outline_glyph_json(font, GLYPH_A),
+  }),
+  defineRow({
+    method: 'EditSession.register_substitute_measure_font',
+    setup: ({ session: s }: Docx) => s.register_measure_font(fontBytes),
+    call: ({ session: s }, font) => ({
+      font,
+      known: s.register_substitute_measure_font(font, 'Calibri'),
+      unknown: s.register_substitute_measure_font(font, 'Parity Unknown'),
+    }),
+  }),
+  defineRow({
+    method: 'EditSession.measure_paragraph_json',
+    setup: ({ session: s }: Docx) => s.register_measure_font(fontBytes),
+    call: ({ session: s }, font) => ({ plain: s.measure_paragraph_json(measureInput(font, false)), authoritative: s.measure_paragraph_json(measureInput(font, true)) }),
+  }),
+  defineRow({
+    method: 'EditSession.begin_region_layout',
+    setup: ({ session: s }: Docx) => layoutInput(s).input,
+    call: ({ session: s }, input) => s.begin_region_layout(input),
+  }),
+  defineRow({
+    method: 'EditSession.resume_region_layout',
+    setup: ({ session: s }: Docx) => s.begin_region_layout(layoutInput(s).input),
+    call: ({ session: s }, begun) => {
+      if ((JSON.parse(begun) as { layoutJson?: string }).layoutJson !== undefined) throw new Error('the region layout finished before any resume');
+      const steps: string[] = [];
+      let done = false;
+      while (!done && steps.length < 100) {
+        const step = s.resume_region_layout(2);
+        steps.push(step);
+        done = (JSON.parse(step) as { layoutJson?: string }).layoutJson !== undefined;
+      }
+      return { begun, steps };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.layout_document_with_regions_prefix_retained_json',
+    setup: ({ session: s }: Docx) => {
+      breakBeforeFinal(s);
+      return layoutInput(s).input;
+    },
+    call: ({ session: s }, input) => s.layout_document_with_regions_prefix_retained_json(input, 1),
+  }),
+  defineRow({
+    method: 'EditSession.layout_document_with_regions_exact_prefix_retained',
+    setup: ({ session: s }: Docx) => {
+      breakBeforeFinal(s);
+      return layoutInput(s).input;
+    },
+    call: ({ session: s }, input) => s.layout_document_with_regions_exact_prefix_retained(input, 1),
+  }),
+  defineRow({
+    method: 'EditSession.retained_layout_json',
+    setup: ({ session: s }: Docx) => s.layout_document_with_regions_retained(layoutInput(s).input),
+    call: ({ session: s }) => s.retained_layout_json(),
+  }),
+  defineRow({
+    method: 'EditSession.retained_kernel_inputs_json',
+    setup: ({ session: s }: Docx) => s.layout_document_with_regions_retained(layoutInput(s).input),
+    call: ({ session: s }) => s.retained_kernel_inputs_json(),
+  }),
+  { method: 'RetainedLayoutMeta.layout_shell_json', call: ({ session: s }) => retainedMetaOf(s).layout_shell_json },
+  { method: 'RetainedLayoutMeta.provisional', call: ({ session: s }) => retainedMetaOf(s).provisional },
+  {
+    method: 'RetainedLayoutMeta.notes_converged',
+    call: ({ session: s, fresh }) => {
+      const noteFree = fresh();
+      noteFree.open_docx(compareOriginal, true, GENERATION);
+      return { noteBearing: retainedMetaOf(s).notes_converged, noteFree: retainedMetaOf(noteFree, { ...regionRequest(), notes: { contents: [] } }).notes_converged };
+    },
+  },
+  defineRow({
+    method: 'EditSession.release_display_pages_frame',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }, epoch) => {
+      const frame = s.release_display_pages_frame(Uint32Array.from([0]), epoch);
+      if (frame.length === 0) throw new Error('the release of a built page was superseded');
+      return { frame, kept: frameEpoch(s) };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.resident_deleted_units',
+    setup: ({ session: s }: Docx) => {
+      const epoch = residentFrame(s);
+      caretIn(s, 'Second body', 6);
+      return epoch;
+    },
+    call: ({ session: s }, epoch) => {
+      const before = s.resident_deleted_units();
+      const frame = s.apply_delete('backward', epoch, 3);
+      return { before, frame, after: s.resident_deleted_units() };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.display_range_rects_on_pages_json',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }) => pagedRects((from, to, first, last) => s.display_range_rects_on_pages_json(from, to, first, last)),
+  }),
+  defineRow({
+    method: 'EditSession.display_range_rects_region_json',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }) => regionRects((region, partId, from, to) => s.display_range_rects_region_json(region, partId, from, to)),
+  }),
+  defineRow({
+    method: 'EditSession.display_range_rects_batch',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }) => REGIONS.map(([region, partId]) => s.display_range_rects_batch(region, partId, Float64Array.from(RANGES.flat()))),
+  }),
+  { method: 'EditSession.geometry_position_outline_json', call: ({ session: s }) => s.geometry_position_outline_json('body') },
+  defineRow({
+    method: 'EditSession.resident_geometry_json',
+    // The request storyGeometry sends in packages/docx/src/yrs/residentEngineSession.ts.
+    setup: ({ session: s }: Docx) => [
+      JSON.stringify({ ranges: [[0, 400]], selection: [residentLoc(s, 'Second body', 0), residentLoc(s, 'Second body', 6)] }),
+      JSON.stringify({ ranges: [[0, 40], [60, 120]] }),
+    ],
+    call: ({ session: s }, requests) => requests.map((request) => s.resident_geometry_json('body', request)),
+  }),
+  {
+    method: 'EditSession.resident_section_revision',
+    call: ({ session: s }) => {
+      const initial = s.resident_section_revision();
+      breakBeforeFinal(s);
+      return { initial, afterBreak: s.resident_section_revision() };
+    },
+  },
+  { method: 'EditSession.story_segment_unit_digests', call: ({ session: s }) => s.story_segment_unit_digests('body') },
+  { method: 'EditSession.yrs_blocks_for_story', call: ({ session: s }) => s.yrs_blocks_for_story('body', '{}') },
+  defineRow({
+    method: 'EditSession.patch_style_languages_xml',
+    setup: ({ session: s }: Docx) => s.set_style_language('Normal', JSON.stringify({ lang: 'de-DE' })),
+    call: ({ session: s }) => s.patch_style_languages_xml(new TextDecoder().decode(fixtureEntries['word/styles.xml'])),
+  }),
+  defineRow({
+    method: 'hit_test_regions_by_handle',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (_, handle) => HIT_POINTS.map(([page, x, y]) => engine.hit_test_regions_by_handle(handle, page, x, y))),
+  }),
+  defineRow({
+    method: 'vertical_move_by_handle',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (_, handle) => MOVES.map(([position, direction, goalX]) => engine.vertical_move_by_handle(handle, position, direction, goalX))),
+  }),
+  defineRow({
+    method: 'range_rects_on_pages_json',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (display) => pagedRects((from, to, first, last) => engine.range_rects_on_pages_json(display, from, to, first, last))),
+  }),
+  defineRow({
+    method: 'range_rects_on_pages_by_handle',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (_, handle) => pagedRects((from, to, first, last) => engine.range_rects_on_pages_by_handle(handle, from, to, first, last))),
+  }),
+  defineRow({
+    method: 'range_rects_region_json',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (display) => regionRects((region, partId, from, to) => engine.range_rects_region_json(display, region, partId, from, to))),
+  }),
+  defineRow({
+    method: 'range_rects_region_by_handle',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (_, handle) => regionRects((region, partId, from, to) => engine.range_rects_region_by_handle(handle, region, partId, from, to))),
+  }),
+  {
+    method: 'register_measure_font',
+    call: ({ engine }) => {
+      engine.clear_measure_fonts();
+      return [engine.register_measure_font(fontBytes), engine.register_measure_font(fontBytes)];
+    },
+  },
+  defineRow({
+    method: 'register_substitute_measure_font',
+    setup: ({ engine }: Docx) => moduleFont(engine),
+    call: ({ engine }, font) => ({
+      font,
+      known: engine.register_substitute_measure_font(font, 'Calibri'),
+      unknown: engine.register_substitute_measure_font(font, 'Parity Unknown'),
+    }),
+  }),
+  defineRow({
+    method: 'outline_glyph_json',
+    setup: ({ engine }: Docx) => moduleFont(engine),
+    call: ({ engine }, font) => engine.outline_glyph_json(font, GLYPH_A),
+  }),
+  {
+    method: 'parse_relationships_xml',
+    call: ({ engine }) => engine.parse_relationships_xml(fixtureEntries['word/_rels/document.xml.rels']!, 'word/_rels/document.xml.rels'),
+  },
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
@@ -3068,39 +3306,21 @@ const knownDifferences: KnownDifference[] = [];
 const notYetCovered: string[] = [
   'EditSession.apply_host_update',
   'EditSession.apply_seed_raw_ops',
-  'EditSession.apply_update_with_inference', 'EditSession.begin_region_layout', 'EditSession.begin_shared_reads',
+  'EditSession.begin_shared_reads',
   'EditSession.bootstrap_peer',
   'EditSession.clear_measure_fonts', 'EditSession.clear_update_event_observation',
-  'EditSession.decode_font',
-  'EditSession.direct_batches_applied', 'EditSession.display_range_rects_batch',
-  'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json',
-  'EditSession.echo_glyph_set_json', 'EditSession.encode_diff_chunks',
   'EditSession.encode_peer_metadata',
   'EditSession.end_shared_reads',
-  'EditSession.geometry_position_outline_json',
-  'EditSession.layout_document_with_regions_exact_prefix_retained',
-  'EditSession.layout_document_with_regions_prefix_retained_json',
-  'EditSession.measure_paragraph_json',
-  'EditSession.outline_glyph_json',
-  'EditSession.patch_style_languages_xml',
-  'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.reset_frame_base',
-  'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
-  'EditSession.resume_region_layout',
-  'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json',
+  'EditSession.reset_frame_base',
   'EditSession.seed_opaque_sequences',
   'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages',
   'EditSession.set_header_footer_aliases',
   'EditSession.set_local_lowering',
   'EditSession.set_windowed_incremental_builds',
   'EditSession.start_update_event_observation',
-  'EditSession.story_segment_unit_digests',
-  'EditSession.update_measure_font_outlines', 'EditSession.yrs_blocks_for_story',
-  'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.provisional',
+  'EditSession.update_measure_font_outlines',
   'clear_measure_fonts', 'close_display_list', 'decodeFontFace', 'decodeTiffPng',
-  'hit_test_regions_by_handle',
-  'outline_glyph_json', 'parse_relationships_xml', 'range_rects_on_pages_by_handle', 'range_rects_on_pages_json',
-  'range_rects_region_by_handle', 'range_rects_region_json', 'register_measure_font', 'register_substitute_measure_font',
-  'update_display_list', 'vertical_move_by_handle',
+  'update_display_list',
 ];
 
 const NO_RASTERIZER = 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/docx/src/wasm/enginePng.ts';
@@ -3131,7 +3351,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(60);
+    expect(notYetCovered.length).toBe(22);
   });
 
   for (const row of rows) {
