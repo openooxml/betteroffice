@@ -22,6 +22,25 @@ fn grouped_session() -> DeckSession {
     DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 84093).unwrap()
 }
 
+fn unmerged_table_session(client_id: u64) -> DeckSession {
+    let mut parts = ooxml_opc::unzip_parts(TABLE).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "ppt/slides/slide1.xml")
+        .unwrap();
+    let mut xml = String::from_utf8(bytes.clone()).unwrap();
+    for attribute in [
+        "gridSpan=\"2\"",
+        "rowSpan=\"2\"",
+        "hMerge=\"1\"",
+        "vMerge=\"1\"",
+    ] {
+        xml = xml.replace(attribute, "");
+    }
+    *bytes = xml.into_bytes();
+    DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), client_id).unwrap()
+}
+
 fn table_cell(session: &DeckSession, row: usize, column: usize) -> String {
     let snapshot = session.snapshot().unwrap();
     let table = &snapshot.slides[0].shapes[0];
@@ -261,7 +280,7 @@ fn caret_anchor_in_a_group_child_survives_another_slide_deletion() {
 
 #[test]
 fn caret_anchor_resolves_to_none_once_its_table_row_is_deleted() {
-    let session = DeckSession::open(TABLE, 84094).unwrap();
+    let session = unmerged_table_session(84094);
     let snapshot = session.snapshot().unwrap();
     let slide = snapshot.slides[0].id.clone();
     let shape = snapshot.slides[0].shapes[0].id.clone();
@@ -288,7 +307,7 @@ fn caret_anchor_resolves_to_none_once_its_table_row_is_deleted() {
 
 #[test]
 fn an_anchor_taken_before_a_row_insert_resolves_to_none() {
-    let session = DeckSession::open(TABLE, 84095).unwrap();
+    let session = unmerged_table_session(84095);
     let snapshot = session.snapshot().unwrap();
     let slide = snapshot.slides[0].id.clone();
     let shape = snapshot.slides[0].shapes[0].id.clone();
@@ -312,7 +331,7 @@ fn an_anchor_taken_before_a_row_insert_resolves_to_none() {
 
 #[test]
 fn an_anchor_in_another_row_taken_before_a_row_delete_resolves_to_none() {
-    let session = DeckSession::open(TABLE, 84096).unwrap();
+    let session = unmerged_table_session(84096);
     let snapshot = session.snapshot().unwrap();
     let slide = snapshot.slides[0].id.clone();
     let shape = snapshot.slides[0].shapes[0].id.clone();
