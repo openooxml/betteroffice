@@ -49,6 +49,9 @@ enum Edit {
     MoveHeadPastEnd,
     #[cfg(feature = "unstable-track-moves")]
     MoveGroupPastEnd,
+    /// The member block, this far past the ref end, or before its start when negative.
+    #[cfg(feature = "unstable-track-moves")]
+    MoveMembers(i32),
 }
 
 /// One structural edit in 1-based lines along the edited axis.
@@ -249,6 +252,8 @@ impl Edit {
             Edit::MoveHeadPastEnd => "move-head-past-end",
             #[cfg(feature = "unstable-track-moves")]
             Edit::MoveGroupPastEnd => "move-group-past-end",
+            #[cfg(feature = "unstable-track-moves")]
+            Edit::MoveMembers(_) => "move-members",
         }
     }
 }
@@ -469,6 +474,25 @@ impl Track {
                 count: self.end - self.start + 1,
                 before: self.end + 3,
             }),
+            #[cfg(feature = "unstable-track-moves")]
+            Edit::MoveMembers(offset) => {
+                let first = current.iter().copied().min().ok_or("no member left")?;
+                let last = current.iter().copied().max().ok_or("no member left")?;
+                let shift = offset.unsigned_abs();
+                let before = if offset > 0 {
+                    Some(self.end + shift)
+                } else {
+                    self.start.checked_sub(shift).filter(|&b| b >= 1)
+                };
+                match before {
+                    Some(before) => Ok(Step::Move {
+                        at: first,
+                        count: last - first + 1,
+                        before,
+                    }),
+                    None => Err("the destination would lie before line 1"),
+                }
+            }
         }
     }
 
@@ -483,6 +507,8 @@ impl Track {
                         *p = before - count + (*p - at);
                     } else if *p >= at + count && *p < before {
                         *p -= count;
+                    } else if *p >= before && *p < at {
+                        *p += count;
                     }
                 }
                 let current = self.current();
@@ -930,6 +956,50 @@ fn shared_group_moved_past_its_ref_reopens_with_model_formulas() {
         } => panic!("cell={cell} model={model} reopened={reopened}"),
     }
     assert!(audit.violations.is_empty(), "INVARIANT violations");
+}
+
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn shared_formula_members_moved_around_their_ref_reopen_with_model_formulas() {
+    let mut audit = Audit::default();
+    let mut total = Tally::default();
+    for span in [Span::Tail1, Span::Tail2] {
+        let mut tally = Tally::default();
+        let mut red = BTreeSet::new();
+        for config in configs(span) {
+            let track = Track::new(config.0, config.2, span);
+            let reach = i32::try_from(track.end - track.start + 3).unwrap_or(0);
+            for offset in (1..=reach).flat_map(|k| [k, -k]) {
+                let sweep = Edit::MoveMembers(offset);
+                let mut runs = vec![vec![sweep]];
+                for extra in EDITS {
+                    runs.push(vec![sweep, extra]);
+                    runs.push(vec![extra, sweep]);
+                }
+                for edits in runs {
+                    let (case, outcome) = run_case(config, &edits, &mut audit);
+                    if matches!(outcome, Outcome::Fail { .. }) {
+                        red.insert(offset);
+                    }
+                    tally.record(&case, outcome);
+                }
+            }
+        }
+        let reds: Vec<String> = red.iter().map(i32::to_string).collect();
+        let reds = reds.join(",");
+        println!(
+            "\nSWEEP tail={} cases={} failed={} skipped={}",
+            span.name(),
+            tally.cases,
+            tally.failed,
+            tally.skipped
+        );
+        println!("\nSWEEP tail={} red_offsets={reds}", span.name());
+        total.add(&tally);
+    }
+    audit.report();
+    assert_eq!(total.failed, 0, "SWEEP failures");
+    assert_eq!(audit.violations.len(), 0, "INVARIANT violations");
 }
 
 #[test]
