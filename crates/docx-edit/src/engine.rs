@@ -11952,14 +11952,15 @@ impl EngineSession {
         self.display.borrow().list.as_ref().map(read)
     }
 
-    /// The retained region layout's display list with only `page` built, shaped with `font_chains`.
+    /// The retained region layout's display list with only `page` built, shaped with `font_chains`,
+    /// and what the conversion left unpainted because it could not be read.
     // Used by betteroffice-docx; not part of the stable API.
     #[doc(hidden)]
     pub fn retained_page_display_list(
         &self,
         font_chains: &BTreeMap<String, Vec<u32>>,
         page: usize,
-    ) -> Result<DisplayList, String> {
+    ) -> Result<(DisplayList, Vec<docx_layout::display_list::UnreadableDisplayInput>), String> {
         let pagination = self.pagination.borrow();
         let input = pagination
             .input
@@ -11981,7 +11982,7 @@ impl EngineSession {
             &|index| index == page,
             &mut || {},
         )
-        .map(|(_, list)| list)
+        .map(|(resident, list)| (list, resident.unreadable().to_vec()))
     }
 
     pub fn resident_caret_snapshot(

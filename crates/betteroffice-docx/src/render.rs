@@ -156,9 +156,21 @@ impl Document {
         if !self.renders_from_model() {
             return self.render_png_saved(target, options);
         }
-        validate_scale(options)?;
+        let Some(rendered) = self.render_png_from_model(target, options).transpose() else {
+            return self.render_png_saved(target, options);
+        };
         #[cfg(feature = "render-path-counter")]
         MODEL_RENDERS.with(|renders| renders.set(renders.get() + 1));
+        rendered
+    }
+
+    /// The page laid out from the model, or `None` when its conversion left content unpainted.
+    fn render_png_from_model(
+        &self,
+        target: PngTarget,
+        options: &RenderOptions,
+    ) -> Result<Option<RenderedPage>> {
+        validate_scale(options)?;
         let package = layout_package(self.model())?;
         let engine = docx_edit::EngineSession::new(1);
         docx_edit::seed_from_parsed_docx(
@@ -168,7 +180,19 @@ impl Document {
             self.source_bytes(),
         )
         .map_err(Error::Render)?;
-        self.render_seeded(&engine, &package, target, options.scale, true)
+        let (display_list, unreadable) =
+            self.seeded_display_list(&engine, &package, |request, chains| {
+                engine
+                    .layout_document_with_regions_retained(request)
+                    .map_err(Error::Render)?;
+                engine
+                    .retained_page_display_list(chains, target.page)
+                    .map_err(Error::Render)
+            })?;
+        if !unreadable.is_empty() {
+            return Ok(None);
+        }
+        self.render_display_list_scaled(&display_list, target.page, options.scale).map(Some)
     }
 
     /// [`Document::render_png`] through a save and a parse of the saved bytes, in every state.
@@ -193,7 +217,15 @@ impl Document {
         let engine = docx_edit::EngineSession::new(1);
         docx_edit::seed_from_docx(engine.doc(), &bytes).map_err(Error::Render)?;
         let package = serde_json::to_value(package).map_err(json_error)?;
-        self.render_seeded(&engine, &package, target, options.scale, false)
+        let display_list = self.seeded_display_list(&engine, &package, |request, chains| {
+            let output = engine
+                .layout_document_with_regions_json(request)
+                .map_err(Error::Render)?;
+            let mut output: Value = serde_json::from_str(&output).map_err(json_error)?;
+            output["fontChains"] = json!(chains);
+            docx_layout::build_display_list_value(&output.to_string()).map_err(Error::Render)
+        })?;
+        self.render_display_list_scaled(&display_list, target.page, options.scale)
     }
 
     /// How many [`Document::render_png`] calls on this thread laid out from the model.
@@ -204,14 +236,12 @@ impl Document {
         MODEL_RENDERS.with(Cell::get)
     }
 
-    fn render_seeded(
+    fn seeded_display_list<T>(
         &self,
         engine: &docx_edit::EngineSession,
         package: &Value,
-        target: PngTarget,
-        scale: f32,
-        one_page: bool,
-    ) -> Result<RenderedPage> {
+        layout: impl FnOnce(&str, &BTreeMap<String, Vec<u32>>) -> Result<T>,
+    ) -> Result<T> {
         let mut request = docx_edit::layout_request::region_layout_request(package, 24.0);
         request["measurement"] = docx_edit::layout_request::measurement(package);
         let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
@@ -246,24 +276,11 @@ impl Document {
             .map(|(key, ids)| (key.clone(), ids.iter().map(|id| id.to_u32()).collect()))
             .collect();
         request["measurement"]["fontChains"] = json!(chains);
-        let display_list = docx_layout::with_measure_font_store(&mut fonts.store, || {
-            if one_page {
-                engine
-                    .layout_document_with_regions_retained(&request.to_string())
-                    .map_err(Error::Render)?;
-                return engine
-                    .retained_page_display_list(&chains, target.page)
-                    .map_err(Error::Render);
-            }
-            let output = engine
-                .layout_document_with_regions_json(&request.to_string())
-                .map_err(Error::Render)?;
-            let mut output: Value = serde_json::from_str(&output).map_err(json_error)?;
-            output["fontChains"] = json!(chains);
-            docx_layout::build_display_list_value(&output.to_string()).map_err(Error::Render)
-        })?;
+        let request = request.to_string();
+        let display_list =
+            docx_layout::with_measure_font_store(&mut fonts.store, || layout(request.as_str(), &chains));
         drop(fonts);
-        self.render_display_list_scaled(&display_list, target.page, scale)
+        display_list
     }
 
     /// Supplies bytes for one relationship id the display list left
