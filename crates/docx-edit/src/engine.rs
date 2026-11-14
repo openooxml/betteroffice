@@ -5701,6 +5701,14 @@ impl EngineSession {
                 &self.doc.yrs_doc().transact(),
                 env,
             )?;
+            let segments = self.doc.segment_index("body").ok()?;
+            let paragraphs = self.doc.paragraph_index("body").ok()?;
+            let unit = segments
+                .segment_units()?
+                .get(paragraphs.para_slot(&paragraph)? as usize)?;
+            if !lowered.local.seed_matches_after_edit(unit) {
+                return None;
+            }
         }
         let replaced = slot..slot.checked_add(1)?;
         let old_block = Rc::clone(lowered.blocks.shared().get(slot)?);
