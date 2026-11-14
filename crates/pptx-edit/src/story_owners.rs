@@ -8,8 +8,7 @@ use crate::deck::{
 };
 use crate::{EditResult, SLIDE_ORDER};
 
-/// The slide and the shape ids from a top-level shape down to the owner of a story, as last
-/// found by `find_path`.
+/// Slide id and shape ids from a top-level shape down to the shape that owns a story.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct OwnerPath {
     slide_id: String,
@@ -23,8 +22,7 @@ impl OwnerPath {
     }
 }
 
-/// Per-session memo of story owners; an entry answers only after `path_holds` re-checks it
-/// against the current document, so remote updates, undo and redo need no invalidation.
+/// Per-session memo of story owners; each answer is re-checked against the current document.
 #[derive(Default)]
 pub(crate) struct StoryOwners {
     paths: RefCell<HashMap<String, OwnerPath>>,
@@ -124,8 +122,7 @@ fn array_lists<T: ReadTxn>(map: &MapRef, txn: &T, key: &str, id: &str) -> bool {
     }
 }
 
-/// The first path to a live owner of `story_id`, in the order `story_owner` walks the deck,
-/// skipping any slide, shape or subtree that cannot be read instead of failing on it.
+/// First path to a live owner of `story_id`, skipping anything that cannot be read.
 pub(crate) fn find_path<T: ReadTxn>(txn: &T, story_id: &str) -> Option<OwnerPath> {
     for slide_id in live_slide_ids(txn).ok()? {
         let Some(top) = slide_ref(txn, &slide_id)
