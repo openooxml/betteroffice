@@ -825,10 +825,11 @@ fn autofit_column_widths(
         .as_deref()
         .or(table_block.column_widths.as_deref())
         .map_or(0.0, |grid| grid.iter().sum());
-    let limit = if explicit_width_px.is_some() {
-        budget
-    } else {
-        budget.max(stated.min(grid_total))
+    let absolute = resolved_table_width_type(table_block, content_width) != Some("pct");
+    let limit = match explicit_width_px {
+        Some(width) if absolute => budget.max(width),
+        Some(_) => budget,
+        None => budget.max(stated.min(grid_total)),
     };
     let target = limit.min(
         min_total.max(explicit_width_px.unwrap_or(if max_total > 0.0 {
