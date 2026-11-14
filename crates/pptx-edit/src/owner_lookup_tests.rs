@@ -11,8 +11,7 @@ use crate::deck::{
 use crate::proposal_diff::story_owner;
 use crate::story_owners::{LookupCounts, find_path};
 use crate::{
-    DeckSession, EditCtx, EditError, SHAPES, ShapeDraft, ShapeRect, TableInsertPosition,
-    TextStyle,
+    DeckSession, EditCtx, EditError, SHAPES, ShapeDraft, ShapeRect, TableInsertPosition, TextStyle,
 };
 
 const TABLE_DECK: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/table-basic.pptx");
