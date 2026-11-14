@@ -28,6 +28,7 @@ import {
   type EngineHandle,
   type Exclusion,
   type KnownDifference,
+  type MaskedPath,
   type MediaSourcesWire,
   type OneEngineOnly,
   type Row,
@@ -216,6 +217,15 @@ function versionNonce(session: Session): string {
   const version = session.version();
   return version.slice(0, version.lastIndexOf('-'));
 }
+
+const sessionVersion = (path: string): MaskedPath => ({
+  path,
+  shape: (value) => {
+    const match = typeof value === 'string' ? /^<generated \d+>(-(?:0|[1-9][0-9]*))$/.exec(value) : null;
+    if (!match) throw new Error(`${JSON.stringify(value)} is not a session nonce followed by -{epoch}`);
+    return match[1];
+  },
+});
 
 function engineFor(engine: DocxEngine, yrs: Yrs) {
   return async (): Promise<EngineHandle<Docx>> => {
@@ -1171,8 +1181,17 @@ const rows: Row<Docx>[] = [
     setup: ({ session: s }: Docx) => trackedInsertion(s),
     call: ({ session: s }) => s.list_revisions(),
   }),
-  { method: 'EditSession.apply_edits_json', mutates: true, call: ({ session: s }) => s.apply_edits_json(editRequest(s)) },
-  { method: 'EditSession.validate_edits_json', call: ({ session: s }) => s.validate_edits_json(editRequest(s)) },
+  {
+    method: 'EditSession.apply_edits_json',
+    mutates: true,
+    masked: [sessionVersion('baseVersion'), sessionVersion('version')],
+    call: ({ session: s }) => JSON.parse(s.apply_edits_json(editRequest(s))) as unknown,
+  },
+  {
+    method: 'EditSession.validate_edits_json',
+    masked: [sessionVersion('baseVersion')],
+    call: ({ session: s }) => JSON.parse(s.validate_edits_json(editRequest(s))) as unknown,
+  },
   { method: 'EditSession.read_paragraphs_json', call: ({ session: s }) => s.read_paragraphs_json(JSON.stringify({ story: 'body', view: 'accepted' })) },
   { method: 'EditSession.read_stories_json', call: ({ session: s }) => s.read_stories_json(JSON.stringify({ view: 'accepted' })) },
   { method: 'EditSession.paragraphs', call: ({ session: s }) => s.paragraphs('body') },
@@ -3093,11 +3112,12 @@ const rows: Row<Docx>[] = [
   }),
   defineRow({
     method: 'EditSession.direct_batches_applied',
+    masked: [sessionVersion('edit.baseVersion'), sessionVersion('edit.version')],
     setup: ({ session: s }: Docx) => s.set_direct_batches(true),
     call: ({ session: s }) => {
       const initial = s.direct_batches_applied();
       const request = JSON.parse(editRequest(s)) as Record<string, unknown>;
-      const edit = s.apply_edits_json(JSON.stringify({ ...request, history: 'none' }));
+      const edit = JSON.parse(s.apply_edits_json(JSON.stringify({ ...request, history: 'none' }))) as unknown;
       const applied = s.direct_batches_applied();
       if (applied === initial) throw new Error('the edit took the replica path, so the count did not move');
       return { initial, edit, applied };
@@ -3371,11 +3391,12 @@ const rows: Row<Docx>[] = [
   }),
   {
     method: 'EditSession.set_direct_batches',
+    masked: [sessionVersion('edit.baseVersion'), sessionVersion('edit.version')],
     call: ({ session: s }) => {
       const initial = s.direct_batches_applied();
       const result = s.set_direct_batches(true);
       const request = JSON.parse(editRequest(s)) as Record<string, unknown>;
-      const edit = s.apply_edits_json(JSON.stringify({ ...request, history: 'none' }));
+      const edit = JSON.parse(s.apply_edits_json(JSON.stringify({ ...request, history: 'none' }))) as unknown;
       const applied = s.direct_batches_applied();
       if (applied === initial) throw new Error('the edit took the replica path, so the count does not show the setting');
       return { initial, result, edit, applied };
@@ -3454,14 +3475,15 @@ const exclusions: Exclusion[] = [
 const knownDifferences: KnownDifference[] = [];
 
 const notYetCovered: string[] = [
-  'EditSession.begin_shared_reads',
+  'EditSession.begin_shared_reads', // no effect observable through the public surface on these fixtures
   'EditSession.encode_peer_metadata',
-  'EditSession.end_shared_reads',
-  'EditSession.set_display_retain_built_pages',
-  'EditSession.set_local_lowering',
-  'EditSession.set_windowed_incremental_builds',
+  'EditSession.end_shared_reads', // no effect observable through the public surface on these fixtures
+  'EditSession.set_display_retain_built_pages', // no effect observable through the public surface on these fixtures
+  'EditSession.set_local_lowering', // no effect observable through the public surface on these fixtures
+  'EditSession.set_windowed_incremental_builds', // no effect observable through the public surface on these fixtures
   'EditSession.update_measure_font_outlines',
-  'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.provisional',
+  'RetainedLayoutMeta.notes_converged', // the current fixtures only ever yield one constant value
+  'RetainedLayoutMeta.provisional', // the current fixtures only ever yield one constant value
   'decodeFontFace', 'decodeTiffPng',
 ];
 
