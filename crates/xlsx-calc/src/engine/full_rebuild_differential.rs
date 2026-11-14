@@ -484,7 +484,8 @@ fn assert_same_rebuild(reused: &Rebuilt, fresh: &Rebuilt, label: &str) {
     }));
     assert!(graphs.is_ok(), "{label}: graphs differ");
     assert_eq!(
-        evaluation_order(&reused.graph), evaluation_order(&fresh.graph),
+        evaluation_order(&reused.graph),
+        evaluation_order(&fresh.graph),
         "{label}"
     );
     assert_eq!(reused.result.changed, fresh.result.changed, "{label}");
@@ -514,12 +515,8 @@ fn a_full_rebuild_over_the_previous_graph_matches_a_fresh_build_after_each_edit(
             let label = format!("seed {seed}, {edit:?}");
             let mut model = generated(seed);
             let mut before = model.render(&HashMap::new());
-            let (mut previous, _) = rebuild_and_recalc_all_after(
-                &mut before,
-                None,
-                Some(NOW_SERIAL),
-                Some(RAND_SEED),
-            );
+            let (mut previous, _) =
+                rebuild_and_recalc_all_after(&mut before, None, Some(NOW_SERIAL), Some(RAND_SEED));
             let values = model.values(&before);
             model.apply(edit);
             let edited = model.render(&values);
