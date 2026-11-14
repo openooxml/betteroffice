@@ -8,7 +8,7 @@ import { extractEmbeddedFontFaces } from '../utils';
 import { renderPng as renderEnginePng } from '../wasm/enginePng';
 import { faceLoadFailure, recordProviderFaceLoads, untilAborted } from '../wasm/enginePngFonts';
 import { createYrsSession, type YrsSession } from './index';
-import { sessionMediaSources } from './sessionInternals';
+import { sessionMediaSources, sessionSourcePackage } from './sessionInternals';
 
 const IDLE_RELEASE_MS = 30_000;
 
@@ -92,7 +92,7 @@ export function createPngExporter(session: YrsSession) {
     const version = session.version();
     if (held && held.version === version && held.fonts === fonts && held.fontProvider === fontProvider) return held;
     release();
-    const source = session.materializeDocx()?.originalBuffer;
+    const source = sessionSourcePackage(session)?.buffer ?? session.materializeDocx()?.originalBuffer;
     if (!source) throw new Error('renderPng needs a session opened from DOCX bytes');
     const entry: Held = {
       version, fonts, fontProvider, users: 0, stale: false,
