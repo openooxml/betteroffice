@@ -1926,6 +1926,23 @@ const rows: Row<Docx>[] = [
       return { receipt, result, after: s.paragraphs('body'), layout: s.retained_layout_json(), headersFooters: s.retained_headers_footers_json() };
     },
   }),
+  defineRow({
+    method: 'EditSession.layout_document_with_regions_after_edit',
+    name: 'EditSession.layout_document_with_regions_after_edit (note-bearing document, fallback)',
+    mutates: true,
+    setup: ({ session: s }: Docx) => {
+      const { input } = layoutInput(s);
+      s.layout_document_with_regions_retained(input);
+      return input;
+    },
+    call: ({ session: s }, input) => {
+      const id = paraId(s, 'Second body');
+      const at = textAt(s, 'Second body', 0);
+      const receipt = s.edit_text_resident('body', id, at, id, at, 'Resident ');
+      const result = s.layout_document_with_regions_after_edit(input);
+      return { receipt, result, layout: s.retained_layout_json(), headersFooters: s.retained_headers_footers_json() };
+    },
+  }),
   {
     method: 'EditSession.layout_document_with_regions_after_edit',
     name: 'EditSession.layout_document_with_regions_after_edit (unparseable)',
