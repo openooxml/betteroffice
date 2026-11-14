@@ -68,8 +68,30 @@ fn fresh_generation() -> String {
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub(crate) fn entropy() -> [u64; 2] {
-    let draw = || (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
-    [draw() ^ ((js_sys::Date::now() as u64) << 11), draw()]
+    platform_random().unwrap_or_else(|| {
+        let draw = || (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
+        [draw() ^ ((js_sys::Date::now() as u64) << 11), draw()]
+    })
+}
+
+/// Full 64-bit words from `globalThis.crypto.getRandomValues`, or `None` when the host lacks it.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub(crate) fn platform_random<const N: usize>() -> Option<[u64; N]> {
+    use wasm_bindgen::JsCast;
+    let crypto = js_sys::Reflect::get(&js_sys::global(), &"crypto".into()).ok()?;
+    let fill = js_sys::Reflect::get(&crypto, &"getRandomValues".into())
+        .ok()?
+        .dyn_into::<js_sys::Function>()
+        .ok()?;
+    let buffer = js_sys::Uint8Array::new_with_length((N * 8) as u32);
+    let target: &wasm_bindgen::JsValue = buffer.as_ref();
+    fill.call1(&crypto, target).ok()?;
+    let bytes = buffer.to_vec();
+    Some(std::array::from_fn(|index| {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&bytes[index * 8..index * 8 + 8]);
+        u64::from_le_bytes(word)
+    }))
 }
 
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
