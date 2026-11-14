@@ -7,7 +7,9 @@ import initPreflight, { font_preflight as wasmFontPreflight } from '../../packag
 import * as wasmYrs from '../../packages/docx/src/yrs';
 import * as nativeYrs from '@betteroffice/docx-native/yrs';
 import { readTableFragment, type ClipboardTableReader } from '../../packages/docx/src/yrs/clipboardFragment';
+import { decodeEncodedSelection } from '../../packages/docx/src/yrs/encodedSelection';
 import type { YrsStorySegment } from '../../packages/docx/src/yrs/index';
+import { deobfuscateFont } from '../../packages/docx/src/utils/fontDeobfuscation';
 import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
 import {
   coverageProblems,
@@ -80,7 +82,7 @@ const BODY = [
   '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>',
 ].join('');
 
-async function buildFixture(overrides: Record<string, string> = {}): Promise<Uint8Array> {
+async function buildFixture(overrides: Record<string, string | Uint8Array> = {}): Promise<Uint8Array> {
   const zip = new JSZip();
   const date = new Date('2024-01-01T00:00:00Z');
   const parts: Record<string, string | Uint8Array> = {
@@ -117,6 +119,8 @@ let compareOriginal: Uint8Array;
 let compareRevised: Uint8Array;
 let repeatingFixture: Uint8Array;
 let effectFixture: Uint8Array;
+let embeddedFontFixture: Uint8Array;
+let pageTotalFixture: Uint8Array;
 
 const SECOND_RUN = '<w:r><w:t xml:space="preserve">Second body paragraph, alpha again.</w:t></w:r>';
 
@@ -168,6 +172,29 @@ function effectParts(): Record<string, string> {
   return { 'word/document.xml': patched('word/document.xml', FINAL_RUN, '<w:r><w:rPr><w:effect w:val="shimmer"/></w:rPr><w:t>Final paragraph.</w:t></w:r>') };
 }
 
+const PAGE_FIELD = '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>';
+
+function pageTotalParts(): Record<string, string> {
+  return { 'word/document.xml': patched('word/document.xml', PAGE_FIELD, `${PAGE_FIELD}<w:r><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple>`) };
+}
+
+const EMBEDDED_FAMILY = 'Embedded Sans';
+const FONT_KEY = '{00112233-4455-6677-8899-AABBCCDDEEFF}';
+const NORMAL_NAME = '<w:name w:val="Normal"/></w:style>';
+
+// Normal text set in a font the package embeds as an obfuscated face, the way Word writes word/fonts/*.odttf.
+function embeddedFontParts(): Record<string, string | Uint8Array> {
+  return {
+    '[Content_Types].xml': patched('[Content_Types].xml', '</Types>',
+      `<Default Extension="odttf" ContentType="application/vnd.openxmlformats-officedocument.obfuscatedFont"/><Override PartName="/word/fontTable.xml" ContentType="${OFFICE}.fontTable+xml"/></Types>`),
+    'word/_rels/document.xml.rels': patched('word/_rels/document.xml.rels', '</Relationships>', `<Relationship Id="rIdFontTable" Type="${REL}/fontTable" Target="fontTable.xml"/></Relationships>`),
+    'word/fontTable.xml': `<w:fonts ${ROOT}><w:font w:name="${EMBEDDED_FAMILY}"><w:embedRegular r:id="rIdFace" w:fontKey="${FONT_KEY}"/></w:font></w:fonts>`,
+    'word/_rels/fontTable.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFace" Type="${REL}/font" Target="fonts/font1.odttf"/></Relationships>`,
+    'word/fonts/font1.odttf': new Uint8Array(deobfuscateFont(fontBytes.slice().buffer, FONT_KEY)),
+    'word/styles.xml': patched('word/styles.xml', NORMAL_NAME, `<w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="${EMBEDDED_FAMILY}" w:hAnsi="${EMBEDDED_FAMILY}"/></w:rPr></w:style>`),
+  };
+}
+
 beforeAll(async () => {
   await initWasm({ module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)) });
   await initPreflight({ module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/preflight/docx_preflight_bg.wasm', import.meta.url)) });
@@ -178,6 +205,8 @@ beforeAll(async () => {
   compareRevised = await buildFixture(compareParts('The quick brown fox jumps.'));
   repeatingFixture = await buildFixture(repeatingParts());
   effectFixture = await buildFixture(effectParts());
+  embeddedFontFixture = await buildFixture(embeddedFontParts());
+  pageTotalFixture = await buildFixture(pageTotalParts());
 });
 
 // version() is "{nonce:016x}-{epoch}"; mint_nonce in crates/docx-edit/src/batch.rs mixes host entropy and the clock.
@@ -305,7 +334,11 @@ function seededImage(session: Session): string {
 
 function layoutRequest(session: Session) {
   const font = session.register_measure_font(fontBytes);
-  const request = {
+  return { font, request: regionRequest() };
+}
+
+function regionRequest() {
+  return {
     bodyStory: 'body',
     regions: { sections: [{
       sectionId: 'main',
@@ -315,11 +348,10 @@ function layoutRequest(session: Session) {
     measurement: { fontChains: {} as Record<string, number[]>, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
     renderEnv: {},
   };
-  return { font, request };
 }
 
-function layoutInput(session: Session) {
-  const { font, request } = layoutRequest(session);
+function layoutInput(session: Session, request: { measurement: { fontChains: Record<string, number[]> } } = regionRequest()) {
+  const font = session.register_measure_font(fontBytes);
   const fontChains = request.measurement.fontChains;
   for (const { key } of JSON.parse(session.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[]) fontChains[key] = [font];
   return { input: JSON.stringify(request), fontChains };
@@ -382,6 +414,16 @@ function frameEpoch(session: Session): number {
 function residentFrame(session: Session): number {
   session.build_display_list_frame(frameExtras(layout(session).fontChains), 0);
   return frameEpoch(session);
+}
+
+// A note-free document laid out through retained regions with a resident display frame, which the resident region relayout requires.
+function residentRegions(fresh: () => Session): { session: Session; input: string } {
+  const session = fresh();
+  session.open_docx(compareOriginal, true, GENERATION);
+  const { input, fontChains } = layoutInput(session, { ...regionRequest(), notes: { contents: [] } });
+  session.layout_document_with_regions_retained(input);
+  session.build_display_list_frame(frameExtras(fontChains), 0);
+  return { session, input };
 }
 
 function caretIn(session: Session, prefix: string, index: number): void {
@@ -750,21 +792,232 @@ const HEX_DIGEST = /^[0-9a-f]{16}$/;
 
 interface MediaSourcesWire { key: string[]; parts: [string, number][] }
 
-function mediaSourcesShape({ key, parts, ...rest }: MediaSourcesWire) {
+const engineName = (engine: DocxEngine) => (engine === wasmEngine ? 'wasm' : 'native');
+
+function measuredSources(engine: DocxEngine, sources: MediaSourcesWire, other: MediaSourcesWire) {
+  if (sources.key.length !== other.key.length || sources.parts.length !== other.parts.length) {
+    throw new Error(`two openings drew differently shaped media sources: ${JSON.stringify(sources)} then ${JSON.stringify(other)}`);
+  }
+  for (const [label, wire] of [['first', sources], ['second', other]] as const) {
+    for (const value of [...wire.key, ...wire.parts.map(([digest]) => digest)]) {
+      if (typeof value !== 'string' || !HEX_DIGEST.test(value)) throw new Error(`${engineName(engine)} ${label} opening drew ${JSON.stringify(value)}, not 16 lowercase hex digits: ${JSON.stringify(wire)}`);
+    }
+  }
+  const drawn = (value: string, again: string | undefined): string | { generated: 'hex64' } => (value !== again ? { generated: 'hex64' } : value);
+  const key = sources.key.map((half, index) => drawn(half, other.key[index]));
+  console.log(`MEDIA-KEY-PROBE ${engineName(engine)} ${sources.key.join(',')} ${other.key.join(',')} drawn=${key.map((half) => typeof half !== 'string').join(',')}`);
   return {
-    ...rest,
-    key: key.map((half) => HEX_DIGEST.test(half)),
-    parts: parts.map(([digest, ...entry]) => [HEX_DIGEST.test(digest), ...entry]),
+    ...sources,
+    key,
+    parts: sources.parts.map(([digest, ...entry], index) => [drawn(digest, other.parts[index]?.[0]), ...entry]),
   };
 }
-
-const engineName = (engine: DocxEngine) => (engine === wasmEngine ? 'wasm' : 'native');
 
 function imageSources(session: Session, input: string): string[] {
   const json = session.layout_document_with_regions_json(input);
   const sources = [...json.matchAll(/"src":"((?:data:image|media:)[^"]*)"/g)].map(([, src]) => src!);
   if (sources.length === 0) throw new Error('the layout carries no image source');
   return sources;
+}
+
+function tokenSources(session: Session): string[] {
+  const { input } = layoutInput(session);
+  const sources = imageSources(session, JSON.stringify({ ...JSON.parse(input), renderEnv: { mediaTokens: true } }));
+  if (!sources.every((src) => src.startsWith('media:'))) throw new Error(`the layout left images untokenized: ${JSON.stringify(sources)}`);
+  return sources;
+}
+
+interface EmbeddedFontWire {
+  embeddedFontParts: { path: string; base64: string }[];
+  fontTableRelationshipsXml?: string;
+  document: { package: { fontTable?: { fonts: { name: string; embedRegular?: { relId: string; fontKey?: string } }[] } } };
+}
+
+// The embedded face as the engine's own parse hands it out, de-obfuscated with its font key.
+function embeddedFace(engine: DocxEngine): Uint8Array {
+  const { embeddedFontParts, fontTableRelationshipsXml, document } = JSON.parse(engine.parse_docx_s9(embeddedFontFixture, '')) as EmbeddedFontWire;
+  const embed = document.package.fontTable?.fonts.find(({ name }) => name === EMBEDDED_FAMILY)?.embedRegular;
+  const target = embed && fontTableRelationshipsXml?.match(new RegExp(`Id="${embed.relId}"[^>]*Target="([^"]+)"`))?.[1];
+  const part = target && embeddedFontParts.find(({ path }) => path === `word/${target}`);
+  if (!embed?.fontKey || !part) throw new Error(`the parse hands out no embedded ${EMBEDDED_FAMILY} face`);
+  const face = new Uint8Array(deobfuscateFont(Uint8Array.from(Buffer.from(part.base64, 'base64')).buffer, embed.fontKey));
+  if (Buffer.compare(Buffer.from(face), Buffer.from(fontBytes)) !== 0) throw new Error('the embedded face does not de-obfuscate to the font it was built from');
+  return face;
+}
+
+function privateFontRequest(engine: DocxEngine, session: Session, chain: number[]) {
+  const request = regionRequest();
+  const { document } = JSON.parse(engine.parse_docx_s9(embeddedFontFixture, '')) as { document: { package: { document: { finalSectionProperties?: typeof request.regions.sections[0]['properties'] } } } };
+  const properties = document.package.document.finalSectionProperties;
+  if (!properties) throw new Error('the embedded font fixture parses without a final section');
+  request.regions.sections[0]!.properties = properties;
+  const requirements = JSON.parse(session.layout_font_requirements_json(JSON.stringify(request))) as { key: string; family: string }[];
+  if (!requirements.some(({ family }) => family.toLowerCase() === EMBEDDED_FAMILY.toLowerCase())) {
+    throw new Error(`the layout does not ask for the embedded font: ${JSON.stringify(requirements)}`);
+  }
+  for (const { key } of requirements) request.measurement.fontChains[key] = chain;
+  return { requirements, request: JSON.stringify(request) };
+}
+
+function embeddedFontSession(fresh: () => Session): Session {
+  const f = fresh();
+  f.open_docx(embeddedFontFixture, true, GENERATION);
+  return f;
+}
+
+function sliceAnswers(session: Session, paragraphs: number, inflated: number): number[] {
+  const answers: number[] = [];
+  let answer = 1;
+  for (let slice = 0; slice < 10_000 && answer === 1; slice += 1) {
+    answer = session.prime_save_seed_states_slice(paragraphs, inflated, 64);
+    answers.push(answer);
+  }
+  return answers;
+}
+
+function mediaReplica(fresh: () => Session, seeded: Session): Session {
+  const r = fresh();
+  r.open_docx(fixture, false, GENERATION);
+  r.apply_update(seeded.encode_state());
+  return r;
+}
+
+const MISSING_STORY = 'parity-missing';
+
+function stickyAt(session: Session, prefix: string, index: number): [string, string, number] {
+  return ['body', paraId(session, prefix), textAt(session, prefix, index)];
+}
+
+function paragraphEnd(session: Session, prefix: string): [string, string, number] {
+  const id = paraId(session, prefix);
+  const { start, end } = JSON.parse(session.locate_paragraph('body', id)) as { start: number; end: number };
+  return ['body', id, end - start];
+}
+
+function encodedSelection(session: Session) {
+  const cursor = decodeEncodedSelection(session.encoded_selection());
+  if (!cursor) throw new Error('the session has no encoded selection');
+  return cursor;
+}
+
+function otherEngineReplica(engine: DocxEngine, source: Session): Session {
+  const replica = new (engine === wasmEngine ? nativeEngine : wasmEngine).EditSession(FRESH_CLIENT);
+  try {
+    replica.open_docx(fixture, false, GENERATION);
+    replica.apply_update(source.encode_state());
+    return replica;
+  } catch (error) {
+    replica.free();
+    throw error;
+  }
+}
+
+function seededSeparators(fresh: () => Session): Uint8Array {
+  const f = fresh();
+  f.open_docx(fixture, true, GENERATION);
+  const state = f.note_separators_state();
+  if (state.length === 0) throw new Error('the seeded fixture carries no separator notes');
+  return state;
+}
+
+function retainedMeta(meta: wasmEdit.RetainedLayoutMeta) {
+  try {
+    return {
+      page_count: meta.page_count,
+      page_sizes: meta.page_sizes(),
+      partial: meta.partial,
+      provisional: meta.provisional,
+      notes_converged: meta.notes_converged,
+      layout_shell_json: meta.layout_shell_json(),
+    };
+  } finally {
+    meta.free();
+  }
+}
+
+function retainedPages(session: Session) {
+  const { page_count, page_sizes, layout_shell_json } = retainedMeta(session.layout_document_with_regions_retained_meta(layoutInput(session).input));
+  return { page_count, page_sizes, layout_shell_json };
+}
+
+function breakBeforeFinal(session: Session): void {
+  session.insert_page_break('body', paraId(session, 'Final'), 0);
+}
+
+interface OpenedDisplay { display: string; handle: number }
+
+function openedDisplay({ engine, session }: Docx): OpenedDisplay {
+  const display = displayList(session);
+  return { display, handle: engine.open_display_list(display) };
+}
+
+function onDisplay<T>(engine: DocxEngine, { display, handle }: OpenedDisplay, query: (display: string, handle: number) => T): T {
+  try {
+    return query(display, handle);
+  } finally {
+    engine.close_display_list(handle);
+  }
+}
+
+function reopenedHandle(engine: DocxEngine, display: string): number {
+  const again = engine.open_display_list(display);
+  engine.close_display_list(again);
+  return again;
+}
+
+const HIT_POINTS: [number, number, number][] = [[0, 100, 100], [0, 100, 55], [0, 400, 900], [9, 100, 100]];
+const RANGES: [number, number][] = [[1, 6], [1, 60]];
+const MOVES: [number, string, number][] = [[1, 'down', Number.NaN], [1, 'up', Number.NaN], [1, 'down', 200]];
+
+function handleAnswers(engine: DocxEngine, handle: number) {
+  return {
+    regions: HIT_POINTS.map(([page, x, y]) => engine.hit_test_regions_by_handle(handle, page, x, y)),
+    rects: RANGES.map(([from, to]) => engine.range_rects_by_handle(handle, from, to)),
+    moves: MOVES.map(([position, direction, goalX]) => engine.vertical_move_by_handle(handle, position, direction, goalX)),
+  };
+}
+
+function jsonAnswers(engine: DocxEngine, display: string) {
+  return {
+    regions: HIT_POINTS.map(([page, x, y]) => engine.hit_test_regions_json(display, page, x, y)),
+    rects: RANGES.map(([from, to]) => engine.range_rects_json(display, from, to)),
+    moves: MOVES.map(([position, direction, goalX]) => engine.vertical_move_json(display, position, direction, goalX)),
+  };
+}
+
+const MEASURED_BLOCK = { kind: 'paragraph', id: 1, runs: [{ kind: 'text', text: 'Parity measures one paragraph that wraps onto more than one line.' }] };
+
+function measureInput(font: number, authoritativeShaping: boolean): string {
+  return JSON.stringify({
+    block: MEASURED_BLOCK,
+    maxWidth: 160,
+    fontChains: { 'liberation sans|0|0': [font] },
+    defaults: { fontSize: 12, fontFamily: 'Liberation Sans' },
+    authoritativeShaping,
+  });
+}
+
+// The module font store outlives every session, so ids restart from a cleared store.
+function moduleFont(engine: DocxEngine): number {
+  engine.clear_measure_fonts();
+  return engine.register_measure_font(fontBytes);
+}
+
+type Anchor = Record<string, unknown>;
+
+function paragraphAnchors(session: Session): Anchor[] {
+  const { paragraphs } = JSON.parse(session.paragraph_identities()) as {
+    paragraphs: { session: Anchor | null; persisted: Anchor | null; source: Anchor | null }[];
+  };
+  const held = paragraphs.find((paragraph) => paragraph.session && paragraph.persisted);
+  if (!held?.session || !held.persisted) throw new Error('no paragraph carries both a session and a persisted anchor');
+  return [
+    held.session,
+    held.persisted,
+    ...(held.source ? [held.source] : []),
+    { ...held.session, sessionId: 'parity-foreign' },
+    { ...held.persisted, paraId: '7FFFFFFF' },
+  ];
 }
 
 const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
@@ -1201,6 +1454,27 @@ const rows: Row<Docx>[] = [
     },
   },
   defineRow({
+    method: 'EditSession.prime_save_seed_states_slice',
+    mutates: true,
+    setup: (docx: Docx) => seededReplica(docx),
+    call: (_, f) => {
+      const answers = sliceAnswers(f, 1_000, 64 * 1024 * 1024);
+      if (answers.at(-1) !== 0) throw new Error(`the seeded replica did not finish priming: ${JSON.stringify(answers)}`);
+      return { answers, again: f.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64), whole: f.prime_save_seed_states(1_000, 64 * 1024 * 1024) };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.prime_save_seed_states_slice',
+    name: 'EditSession.prime_save_seed_states_slice (over budget)',
+    mutates: true,
+    setup: (docx: Docx) => seededReplica(docx),
+    call: (_, f) => {
+      const declined = [sliceAnswers(f, 1, 1), sliceAnswers(f, 1_000, 1)];
+      if (declined.some((answers) => answers.at(-1) !== 2)) throw new Error(`an over-budget slice was not declined: ${JSON.stringify(declined)}`);
+      return { declined, within: sliceAnswers(f, 1_000, 64 * 1024 * 1024) };
+    },
+  }),
+  defineRow({
     method: 'EditSession.apply_update',
     mutates: true,
     setup: (docx: Docx) => trackedRemote(docx, remoteUpdate),
@@ -1611,6 +1885,226 @@ const rows: Row<Docx>[] = [
     name: 'EditSession.layout_document_with_regions_retained (unparseable)',
     throws: { name: 'string', reason: 'input that is not JSON is refused' },
     call: ({ session: s }) => s.layout_document_with_regions_retained('{'),
+  },
+  defineRow({
+    method: 'EditSession.layout_document_with_regions_retained_json',
+    setup: ({ session: s }: Docx) => layoutInput(s).input,
+    call: ({ session: s }, input) => s.layout_document_with_regions_retained_json(input),
+  }),
+  {
+    method: 'EditSession.layout_document_with_regions_retained_json',
+    name: 'EditSession.layout_document_with_regions_retained_json (unparseable)',
+    throws: { name: 'string', reason: 'input that is not JSON is refused' },
+    call: ({ session: s }) => s.layout_document_with_regions_retained_json('{'),
+  },
+  defineRow({
+    method: 'EditSession.layout_document_with_regions_retained_meta',
+    setup: ({ session: s }: Docx) => layoutInput(s).input,
+    call: ({ session: s }, input) => retainedMeta(s.layout_document_with_regions_retained_meta(input)),
+  }),
+  {
+    method: 'EditSession.layout_document_with_regions_retained_meta',
+    name: 'EditSession.layout_document_with_regions_retained_meta (unparseable)',
+    throws: { name: 'string', reason: 'input that is not JSON is refused' },
+    call: ({ session: s }) => s.layout_document_with_regions_retained_meta('{'),
+  },
+  defineRow({
+    method: 'EditSession.layout_document_with_regions_after_edit',
+    mutates: true,
+    setup: ({ fresh }: Docx) => {
+      const probe = residentRegions(fresh).session;
+      caretIn(probe, 'The quick', 0);
+      probe.apply_input('Resident ', frameEpoch(probe));
+      return residentRegions(fresh);
+    },
+    call: ({ saveFrom }, { session: s, input }) => {
+      saveFrom(s, compareOriginal);
+      const id = paraId(s, 'The quick');
+      const at = textAt(s, 'The quick', 0);
+      const receipt = s.edit_text_resident('body', id, at, id, at, 'Resident ');
+      const result = s.layout_document_with_regions_after_edit(input);
+      return { receipt, result, after: s.paragraphs('body'), layout: s.retained_layout_json(), headersFooters: s.retained_headers_footers_json() };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.layout_document_with_regions_after_edit',
+    name: 'EditSession.layout_document_with_regions_after_edit (note-bearing document, fallback)',
+    mutates: true,
+    setup: ({ session: s }: Docx) => {
+      const { input } = layoutInput(s);
+      s.layout_document_with_regions_retained(input);
+      return input;
+    },
+    call: ({ session: s }, input) => {
+      const id = paraId(s, 'Second body');
+      const at = textAt(s, 'Second body', 0);
+      const receipt = s.edit_text_resident('body', id, at, id, at, 'Resident ');
+      const result = s.layout_document_with_regions_after_edit(input);
+      return { receipt, result, layout: s.retained_layout_json(), headersFooters: s.retained_headers_footers_json() };
+    },
+  }),
+  {
+    method: 'EditSession.layout_document_with_regions_after_edit',
+    name: 'EditSession.layout_document_with_regions_after_edit (unparseable)',
+    throws: { name: 'string', reason: 'input that is not JSON is refused' },
+    call: ({ session: s }) => s.layout_document_with_regions_after_edit('{'),
+  },
+  {
+    method: 'RetainedLayoutMeta.page_count',
+    call: ({ session: s }) => {
+      breakBeforeFinal(s);
+      return retainedPages(s);
+    },
+  },
+  {
+    method: 'RetainedLayoutMeta.page_sizes',
+    call: ({ session: s }) => {
+      const onePage = retainedPages(s);
+      breakBeforeFinal(s);
+      return { onePage, twoPages: retainedPages(s) };
+    },
+  },
+  {
+    method: 'RetainedLayoutMeta.partial',
+    call: ({ session: s }) => {
+      const read = () => {
+        const { partial, page_count, page_sizes } = retainedMeta(s.layout_document_with_regions_retained_meta(layoutInput(s).input));
+        return { partial, page_count, page_sizes };
+      };
+      const whole = read();
+      const marked = s.set_partial_document(true);
+      const partial = read();
+      if (whole.partial !== false || partial.partial !== true) throw new Error(`the retained meta does not carry the partial flag as set: ${whole.partial} then ${partial.partial}`);
+      return { whole, marked, partial };
+    },
+  },
+  defineRow({
+    method: 'EditSession.retained_headers_footers_json',
+    setup: ({ session: s }: Docx) => {
+      const base = regionRequest();
+      const [section] = base.regions.sections;
+      const properties = { ...section.properties, headerDistance: 720, footerDistance: 720, headerReferences: [{ type: 'default', rId: 'rIdHeader' }] };
+      return layoutInput(s, { ...base, regions: { sections: [{ ...section, properties }] } }).input;
+    },
+    call: ({ session: s }, input) => {
+      const before = s.retained_headers_footers_json();
+      s.layout_document_with_regions_retained(input);
+      const after = s.retained_headers_footers_json();
+      if (after === undefined) throw new Error('the retained layout of a document with a header holds no headersFooters');
+      return { before, after };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.display_hit_test_regions_json',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }) => HIT_POINTS.map(([page, x, y]) => s.display_hit_test_regions_json(page, x, y)),
+  }),
+  {
+    method: 'EditSession.display_hit_test_regions_json',
+    name: 'EditSession.display_hit_test_regions_json (no resident display list)',
+    throws: { name: 'string', reason: 'a session with no resident display list is refused' },
+    call: ({ session: s }) => s.display_hit_test_regions_json(0, 100, 100),
+  },
+  defineRow({
+    method: 'EditSession.display_range_rects_json',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }) => RANGES.map(([from, to]) => s.display_range_rects_json(from, to)),
+  }),
+  {
+    method: 'EditSession.display_range_rects_json',
+    name: 'EditSession.display_range_rects_json (no resident display list)',
+    throws: { name: 'string', reason: 'a session with no resident display list is refused' },
+    call: ({ session: s }) => s.display_range_rects_json(1, 6),
+  },
+  defineRow({
+    method: 'EditSession.display_vertical_move_json',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }) => MOVES.map(([position, direction, goalX]) => s.display_vertical_move_json(position, direction, goalX)),
+  }),
+  defineRow({
+    method: 'EditSession.display_vertical_move_json',
+    name: 'EditSession.display_vertical_move_json (unknown direction)',
+    throws: { name: 'string', reason: 'a direction other than up or down is refused' },
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }) => s.display_vertical_move_json(1, 'sideways', 0),
+  }),
+  defineRow({
+    method: 'open_display_list',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (display, handle) => ({
+      handle,
+      reopened: reopenedHandle(engine, display),
+      byHandle: handleAnswers(engine, handle),
+      byJson: jsonAnswers(engine, display),
+    })),
+  }),
+  defineRow({
+    method: 'open_display_list',
+    name: 'open_display_list (display list built on the other engine)',
+    setup: ({ engine, session: s }: Docx) => {
+      const other = otherEngineReplica(engine, s);
+      try {
+        return displayList(other);
+      } finally {
+        other.free();
+      }
+    },
+    call: ({ engine }, display) => onDisplay(engine, { display, handle: engine.open_display_list(display) }, (_, handle) => ({
+      handle,
+      reopened: reopenedHandle(engine, display),
+      ...handleAnswers(engine, handle),
+    })),
+  }),
+  {
+    method: 'open_display_list',
+    name: 'open_display_list (unparseable)',
+    throws: { name: 'string', reason: 'a display list that is not JSON is refused' },
+    call: ({ engine }) => engine.open_display_list('{'),
+  },
+  defineRow({
+    method: 'hit_test_regions_json',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (display) => HIT_POINTS.map(([page, x, y]) => engine.hit_test_regions_json(display, page, x, y))),
+  }),
+  {
+    method: 'hit_test_regions_json',
+    name: 'hit_test_regions_json (unparseable)',
+    throws: { name: 'string', reason: 'a display list that is not JSON is refused' },
+    call: ({ engine }) => engine.hit_test_regions_json('{', 0, 100, 100),
+  },
+  defineRow({
+    method: 'range_rects_by_handle',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (_, handle) => RANGES.map(([from, to]) => engine.range_rects_by_handle(handle, from, to))),
+  }),
+  {
+    method: 'range_rects_by_handle',
+    name: 'range_rects_by_handle (unknown handle)',
+    throws: { name: 'string', reason: 'handle 0, which open_display_list never issues, is refused' },
+    call: ({ engine }) => engine.range_rects_by_handle(0, 1, 6),
+  },
+  defineRow({
+    method: 'vertical_move_json',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (display) => MOVES.map(([position, direction, goalX]) => engine.vertical_move_json(display, position, direction, goalX))),
+  }),
+  defineRow({
+    method: 'vertical_move_json',
+    name: 'vertical_move_json (unknown direction)',
+    throws: { name: 'string', reason: 'a direction other than up or down is refused' },
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (display) => engine.vertical_move_json(display, 1, 'sideways', 0)),
+  }),
+  defineRow({
+    method: 'measure_paragraph_json',
+    setup: ({ engine }: Docx) => moduleFont(engine),
+    call: ({ engine }, font) => ({ font, plain: engine.measure_paragraph_json(measureInput(font, false)), authoritative: engine.measure_paragraph_json(measureInput(font, true)) }),
+  }),
+  {
+    method: 'measure_paragraph_json',
+    name: 'measure_paragraph_json (unparseable)',
+    throws: { name: 'string', reason: 'measurement input that is not JSON is refused' },
+    call: ({ engine }) => engine.measure_paragraph_json('{'),
   },
   defineRow({
     method: 'EditSession.layout_document_json',
@@ -2169,16 +2663,17 @@ const rows: Row<Docx>[] = [
       const reopened = JSON.parse(again.media_sources_json()) as MediaSourcesWire;
       const [first, second] = [sources.parts[0]![0], reopened.parts[0]?.[0]];
       console.log(`MEDIA-DIGEST-PROBE ${engineName(engine)} ${first} ${String(second)} same=${first === second}`);
-      if (first === second) throw new Error(`two openings drew the same media digest ${first}`);
-      const shape = mediaSourcesShape(sources);
-      if (JSON.stringify(mediaSourcesShape(reopened)) !== JSON.stringify(shape)) throw new Error(`a second opening changed the media sources beyond their digests: ${json} then ${again.media_sources_json()}`);
+      if (second === undefined || first === second) throw new Error(`two openings drew the same media digest ${first} and ${String(second)}`);
+      const shape = measuredSources(engine, sources, reopened);
+      const reshape = measuredSources(engine, reopened, sources);
+      if (JSON.stringify(reshape) !== JSON.stringify(shape)) throw new Error(`a second opening changed the media sources beyond their drawn values: ${json} then ${again.media_sources_json()}`);
       const reader = fresh();
       reader.load_media_sources(json);
       if (reader.media_sources_json() !== json) throw new Error(`the loaded media sources read back as ${reader.media_sources_json()}, not ${json}`);
       return {
         unseeded,
         ...shape,
-        reopened: mediaSourcesShape(reopened),
+        reopened: reshape,
         reloaded: reader.media_sources_json() === json,
       };
     },
@@ -2228,6 +2723,342 @@ const rows: Row<Docx>[] = [
       return [type, f.media_type('media:missing')];
     },
   }),
+  defineRow({
+    method: 'EditSession.media_data_url',
+    setup: ({ fresh }: Docx) => tokenizedImage(fresh),
+    call: ({ fresh }, { f, src }) => {
+      const url = f.media_data_url(src);
+      if (url !== `data:image/png;base64,${Buffer.from(PNG).toString('base64')}`) throw new Error(`${src} stands for ${String(url)}, not the fixture PNG`);
+      const untokenized = fresh();
+      untokenized.open_docx(fixture, true, GENERATION);
+      if (imageAt(untokenized).src !== url) throw new Error(`an untokenized opening seeds ${String(imageAt(untokenized).src)}, not ${url}`);
+      return [url, f.media_data_url('media:missing'), f.media_data_url(url), fresh().media_data_url(src)];
+    },
+  }),
+  {
+    method: 'EditSession.set_media_tokens',
+    call: ({ fresh }) => {
+      const opened = (...settings: boolean[]) => {
+        const f = fresh();
+        const results = settings.map((enabled) => f.set_media_tokens(enabled));
+        f.open_docx(fixture, true, GENERATION);
+        return { results, image: seededImage(f) };
+      };
+      const [unset, on, off, toggled] = [opened(), opened(true), opened(false), opened(true, false)];
+      if (unset.image === on.image || !on.image.includes('"media:')) throw new Error(`enabling media tokens did not tokenize the seeded image: ${unset.image} then ${on.image}`);
+      return { unset, on, off, toggled };
+    },
+  },
+  {
+    method: 'EditSession.rebuild_media_sources',
+    call: ({ engine, fresh }) => {
+      const bare = fresh().rebuild_media_sources();
+      const seeded = fresh();
+      seeded.open_docx(fixture, true, GENERATION);
+      const kept = seeded.media_sources_json();
+      const seededRebuild = seeded.rebuild_media_sources();
+      if (seeded.media_sources_json() !== kept) throw new Error(`rebuilding a seeded replica changed its sources: ${kept} then ${seeded.media_sources_json()}`);
+      const replica = mediaReplica(fresh, seeded);
+      const before = replica.media_sources_json();
+      const rebuilt = replica.rebuild_media_sources();
+      const json = replica.media_sources_json();
+      const again = replica.rebuild_media_sources();
+      if (replica.media_sources_json() !== json) throw new Error(`a second rebuild changed the sources: ${json} then ${replica.media_sources_json()}`);
+      const other = mediaReplica(fresh, seeded);
+      other.rebuild_media_sources();
+      const sources = JSON.parse(json) as MediaSourcesWire;
+      const reopened = JSON.parse(other.media_sources_json()) as MediaSourcesWire;
+      const [first, second] = [sources.parts[0]?.[0], reopened.parts[0]?.[0]];
+      console.log(`MEDIA-REBUILD-PROBE ${engineName(engine)} ${String(first)} ${String(second)} same=${first === second}`);
+      if (first === undefined || second === undefined || first === second) throw new Error(`two rebuilds drew the same media digest ${String(first)} and ${String(second)}`);
+      return {
+        bare,
+        seededRebuild,
+        before,
+        rebuilt,
+        again,
+        ...measuredSources(engine, sources, reopened),
+        other: measuredSources(engine, reopened, sources),
+        tokens: tokenSources(replica),
+      };
+    },
+  },
+  {
+    method: 'EditSession.rebuild_media_sources',
+    name: 'EditSession.rebuild_media_sources (seeded on the other engine)',
+    call: ({ engine, fresh }) => {
+      const seeder = new (engine === wasmEngine ? nativeEngine : wasmEngine).EditSession(HOST_CLIENT);
+      try {
+        seeder.open_docx(fixture, true, GENERATION);
+        const reader = mediaReplica(fresh, seeder);
+        const rebuilt = reader.rebuild_media_sources();
+        const tokens = tokenSources(reader);
+        const media = tokens.map((token) => {
+          const [bytes, seeded] = [reader.media_bytes(token), seeder.media_bytes(token)];
+          if (!bytes || !seeded || Buffer.compare(Buffer.from(bytes), Buffer.from(seeded)) !== 0) throw new Error(`${token} resolves to other bytes than on the seeding engine`);
+          return { token, type: reader.media_type(token), url: reader.media_data_url(token), seededUrl: seeder.media_data_url(token), bytes };
+        });
+        return { rebuilt, tokens, media };
+      } finally {
+        seeder.free();
+      }
+    },
+  },
+  {
+    method: 'EditSession.export_snapshot_with_private_fonts_json',
+    call: ({ engine, fresh }) => {
+      const f = embeddedFontSession(fresh);
+      const face = embeddedFace(engine);
+      const embedded = privateFontRequest(engine, f, [0]);
+      const snapshot = f.export_snapshot_with_private_fonts_json(face, Uint32Array.from([face.length]), embedded.request, EXPORT);
+      if (!(JSON.parse(snapshot) as { ok: boolean }).ok) throw new Error(`the private font export refused: ${snapshot}`);
+      const unfonted = f.export_snapshot_with_private_fonts_json(new Uint8Array(0), new Uint32Array(0), privateFontRequest(engine, f, []).request, EXPORT);
+      return { requirements: embedded.requirements, snapshot, unfonted };
+    },
+  },
+  defineRow({
+    method: 'EditSession.export_snapshot_with_private_fonts_json',
+    name: 'EditSession.export_snapshot_with_private_fonts_json (lengths past the font bytes)',
+    throws: { name: 'string', reason: 'font lengths that run past the joined font bytes are refused' },
+    setup: ({ engine, fresh }: Docx) => {
+      const f = embeddedFontSession(fresh);
+      return { f, face: embeddedFace(engine), request: privateFontRequest(engine, f, [0]).request };
+    },
+    call: (_, { f, face, request }) => f.export_snapshot_with_private_fonts_json(face, Uint32Array.from([face.length + 1]), request, EXPORT),
+  }),
+  {
+    method: 'EditSession.load',
+    mutates: true,
+    call: ({ session: s, fresh, saveFrom }) => {
+      const f = fresh();
+      f.open_docx(fixture, false, GENERATION);
+      const result = f.load(s.encode_state());
+      saveFrom(f);
+      return { result, stories: f.list_stories_json(), segments: f.story_segments('body'), comments: f.list_comments() };
+    },
+  },
+  {
+    method: 'EditSession.load',
+    name: 'EditSession.load (malformed update)',
+    throws: { name: 'string', reason: 'an update that does not decode is refused' },
+    call: ({ fresh }) => fresh().load(MALFORMED_UPDATE),
+  },
+  {
+    method: 'EditSession.note_separators_state',
+    call: ({ session: s, fresh }) => ({ session: s.note_separators_state(), seeded: seededSeparators(fresh), bare: fresh().note_separators_state() }),
+  },
+  defineRow({
+    method: 'EditSession.load_note_separators',
+    setup: ({ fresh }: Docx) => seededSeparators(fresh),
+    call: ({ fresh }, state) => {
+      const r = fresh();
+      const before = r.note_separators_state();
+      const result = r.load_note_separators(state);
+      const loaded = r.note_separators_state();
+      const again = r.load_note_separators(state);
+      const cleared = r.load_note_separators(new Uint8Array(0));
+      return { before, result, loaded, again, cleared, after: r.note_separators_state() };
+    },
+  }),
+  {
+    method: 'EditSession.load_note_separators',
+    name: 'EditSession.load_note_separators (malformed state)',
+    throws: { name: 'string', reason: 'separator state that does not decode as an update is refused' },
+    call: ({ fresh }) => fresh().load_note_separators(MALFORMED_UPDATE),
+  },
+  {
+    method: 'EditSession.set_partial_document',
+    call: ({ fresh }) => {
+      const f = fresh();
+      f.open_docx(pageTotalFixture, true, GENERATION);
+      const read = () => ({ layout: layout(f).layout, texts: f.page_texts_json(Uint32Array.from([0])) });
+      const flagged = (json: string) => (JSON.parse(json) as { layout: { partial?: boolean } }).layout.partial;
+      const whole = read();
+      const marked = f.set_partial_document(true);
+      const partial = read();
+      const unmarked = f.set_partial_document(false);
+      const restored = read();
+      if (flagged(whole.layout) !== undefined || flagged(partial.layout) !== true) throw new Error('the layout does not carry the partial flag as set');
+      if (!/Page 1 of \d/.test(whole.texts) || /Page 1 of \d/.test(partial.texts) || !partial.texts.includes('Page 1 of ')) {
+        throw new Error(`NUMPAGES does not go blank while the document is partial: ${whole.texts} then ${partial.texts}`);
+      }
+      if (restored.texts !== whole.texts) throw new Error(`clearing the flag did not restore the page total: ${restored.texts}`);
+      return { whole, marked, partial, unmarked, restored };
+    },
+  },
+  {
+    method: 'EditSession.selection',
+    mutates: true,
+    call: ({ session: s }) => {
+      const before = s.selection();
+      s.set_selection(...textSpan(s, 'Second body', 0, 6));
+      const set = s.selection();
+      peerEdit(s, 'Second body', 'Moved ');
+      return { before, set, after: s.selection() };
+    },
+  },
+  {
+    method: 'EditSession.encoded_selection',
+    call: ({ session: s }) => {
+      const before = s.encoded_selection();
+      s.set_selection(...textSpan(s, 'Second body', 0, 6));
+      return { before, after: s.encoded_selection() };
+    },
+  },
+  defineRow({
+    method: 'EditSession.resolve_encoded_selection',
+    mutates: true,
+    setup: ({ session: s }: Docx) => {
+      s.set_selection(...textSpan(s, 'Second body', 0, 6));
+      return encodedSelection(s);
+    },
+    call: ({ session: s }, { story, anchor, head }) => {
+      const before = s.resolve_encoded_selection(story, anchor, head);
+      peerEdit(s, 'Second body', 'Moved ');
+      return { before, after: s.resolve_encoded_selection(story, anchor, head) };
+    },
+  }),
+  {
+    method: 'EditSession.resolve_encoded_selection',
+    name: 'EditSession.resolve_encoded_selection (malformed positions)',
+    throws: { name: 'string', reason: 'sticky positions that do not decode are refused' },
+    call: ({ session: s }) => s.resolve_encoded_selection('body', MALFORMED_UPDATE, MALFORMED_UPDATE),
+  },
+  {
+    method: 'EditSession.resolve_encoded_selection',
+    name: 'EditSession.resolve_encoded_selection (encoded on the other engine)',
+    call: ({ engine, session: s }) => {
+      const other = otherEngineReplica(engine, s);
+      try {
+        const range = textSpan(s, 'Second body', 0, 6);
+        s.set_selection(...range);
+        other.set_selection(...range);
+        const ours = encodedSelection(s);
+        const theirs = encodedSelection(other);
+        return {
+          ours,
+          theirs,
+          oursThere: other.resolve_encoded_selection(ours.story, ours.anchor, ours.head),
+          theirsHere: s.resolve_encoded_selection(theirs.story, theirs.anchor, theirs.head),
+        };
+      } finally {
+        other.free();
+      }
+    },
+  },
+  {
+    method: 'EditSession.encode_sticky_position',
+    call: ({ session: s }) => [s.encode_sticky_position(...stickyAt(s, 'Second body', 0)), s.encode_sticky_position(...stickyAt(s, 'Second body', 6))],
+  },
+  {
+    method: 'EditSession.encode_sticky_position',
+    name: 'EditSession.encode_sticky_position (unknown paragraph)',
+    throws: { name: 'string', reason: 'a paragraph id the story does not hold is refused' },
+    call: ({ session: s }) => s.encode_sticky_position('body', '7FFFFFFF', 0),
+  },
+  defineRow({
+    method: 'EditSession.resolve_sticky_position',
+    mutates: true,
+    setup: ({ session: s }: Docx) => s.encode_sticky_position(...stickyAt(s, 'Second body', 6)),
+    call: ({ session: s }, position) => {
+      const before = s.resolve_sticky_position('body', position);
+      peerEdit(s, 'Second body', 'Moved ');
+      return { before, after: s.resolve_sticky_position('body', position) };
+    },
+  }),
+  {
+    method: 'EditSession.resolve_sticky_position',
+    name: 'EditSession.resolve_sticky_position (malformed position)',
+    throws: { name: 'string', reason: 'a sticky position that does not decode is refused' },
+    call: ({ session: s }) => s.resolve_sticky_position('body', MALFORMED_UPDATE),
+  },
+  {
+    method: 'EditSession.resolve_sticky_position',
+    name: 'EditSession.resolve_sticky_position (encoded on the other engine)',
+    call: ({ engine, session: s }) => {
+      const other = otherEngineReplica(engine, s);
+      try {
+        const at = stickyAt(s, 'Second body', 6);
+        const ours = s.encode_sticky_position(...at);
+        const theirs = other.encode_sticky_position(...at);
+        return { ours, theirs, oursThere: other.resolve_sticky_position('body', ours), theirsHere: s.resolve_sticky_position('body', theirs) };
+      } finally {
+        other.free();
+      }
+    },
+  },
+  {
+    method: 'EditSession.resolve_paragraph_anchor',
+    call: ({ session: s }) => paragraphAnchors(s).map((anchor) => ({ anchor, resolved: s.resolve_paragraph_anchor(JSON.stringify(anchor)) })),
+  },
+  {
+    method: 'EditSession.resolve_paragraph_anchor',
+    name: 'EditSession.resolve_paragraph_anchor (unknown kind)',
+    throws: { name: 'string', reason: 'an anchor of an unknown kind is refused' },
+    call: ({ session: s }) => s.resolve_paragraph_anchor(JSON.stringify({ kind: 'bogus' })),
+  },
+  {
+    method: 'EditSession.select_story',
+    mutates: true,
+    call: ({ session: s }) => timedEdits(s, () => [s.select_story(MISSING_STORY), s.select_story('body')]),
+  },
+  {
+    method: 'EditSession.next_paragraph_style',
+    call: ({ session: s }) => ['Parity heading', 'First body'].map((prefix) => ({
+      end: s.next_paragraph_style(...paragraphEnd(s, prefix)),
+      start: s.next_paragraph_style('body', paraId(s, prefix), 0),
+    })),
+  },
+  {
+    method: 'EditSession.next_paragraph_style',
+    name: 'EditSession.next_paragraph_style (unknown paragraph)',
+    throws: { name: 'string', reason: 'a paragraph id the story does not hold is refused' },
+    call: ({ session: s }) => s.next_paragraph_style('body', '7FFFFFFF', 0),
+  },
+  {
+    method: 'EditSession.paragraph_unit',
+    call: ({ session: s }) => [...['Parity heading', 'First body', 'Final'].map((prefix) => paraId(s, prefix)), '7FFFFFFF'].map((id) => s.paragraph_unit('body', id)),
+  },
+  {
+    method: 'EditSession.paragraph_unit',
+    name: 'EditSession.paragraph_unit (unknown story)',
+    throws: { name: 'string', reason: 'a story the document does not hold is refused' },
+    call: ({ session: s }) => s.paragraph_unit(MISSING_STORY, paraId(s, 'First body')),
+  },
+  {
+    method: 'EditSession.paragraph_id_count',
+    call: ({ session: s }) => [...['Parity heading', 'First body', 'Final'].map((prefix) => paraId(s, prefix)), '7FFFFFFF'].map((id) => s.paragraph_id_count('body', id)),
+  },
+  {
+    method: 'EditSession.paragraph_id_count',
+    name: 'EditSession.paragraph_id_count (unknown story)',
+    throws: { name: 'string', reason: 'a story the document does not hold is refused' },
+    call: ({ session: s }) => s.paragraph_id_count(MISSING_STORY, paraId(s, 'First body')),
+  },
+  { method: 'EditSession.story_segment_units', call: ({ session: s }) => s.story_segment_units('body', Uint32Array.from([0, 1, 6])) },
+  {
+    method: 'EditSession.story_segment_units',
+    name: 'EditSession.story_segment_units (unit past the end)',
+    throws: { name: 'string', reason: 'a unit index past the last unit is refused' },
+    call: ({ session: s }) => s.story_segment_units('body', Uint32Array.from([9_999])),
+  },
+  {
+    method: 'EditSession.resident_caret_snapshot_json',
+    call: ({ session: s }) => {
+      const bare = s.resident_caret_snapshot_json();
+      residentFrame(s);
+      const framed = s.resident_caret_snapshot_json();
+      caretIn(s, 'Second body', 6);
+      const caret = s.resident_caret_snapshot_json();
+      const rect = (JSON.parse(caret) as { caretRect?: { pageIndex?: unknown; pageId?: unknown; x?: unknown; y?: unknown; height?: unknown } | null }).caretRect;
+      const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(value);
+      if (!rect || !Number.isSafeInteger(rect.pageIndex) || typeof rect.pageId !== 'string' || !finite(rect.x) || !finite(rect.y) || !finite(rect.height) || (rect.height as number) <= 0) {
+        throw new Error(`the collapsed caret has no valid rect: ${caret}`);
+      }
+      s.set_selection(...textSpan(s, 'Second body', 0, 6));
+      return { bare, framed, caret, range: s.resident_caret_snapshot_json() };
+    },
+  },
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
@@ -2261,40 +3092,35 @@ const notYetCovered: string[] = [
   'EditSession.bootstrap_peer',
   'EditSession.clear_measure_fonts', 'EditSession.clear_update_event_observation',
   'EditSession.decode_font',
-  'EditSession.direct_batches_applied', 'EditSession.display_hit_test_regions_json', 'EditSession.display_range_rects_batch', 'EditSession.display_range_rects_json',
-  'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json', 'EditSession.display_vertical_move_json',
+  'EditSession.direct_batches_applied', 'EditSession.display_range_rects_batch',
+  'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json',
   'EditSession.echo_glyph_set_json', 'EditSession.encode_diff_chunks',
-  'EditSession.encode_peer_metadata', 'EditSession.encode_sticky_position',
-  'EditSession.encoded_selection', 'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json',
+  'EditSession.encode_peer_metadata',
+  'EditSession.end_shared_reads',
   'EditSession.geometry_position_outline_json',
-  'EditSession.layout_document_with_regions_after_edit', 'EditSession.layout_document_with_regions_exact_prefix_retained',
+  'EditSession.layout_document_with_regions_exact_prefix_retained',
   'EditSession.layout_document_with_regions_prefix_retained_json',
-  'EditSession.layout_document_with_regions_retained_json', 'EditSession.layout_document_with_regions_retained_meta',
-  'EditSession.load', 'EditSession.load_note_separators',
-  'EditSession.measure_paragraph_json', 'EditSession.media_data_url',
-  'EditSession.next_paragraph_style', 'EditSession.note_separators_state', 'EditSession.outline_glyph_json',
-  'EditSession.paragraph_id_count', 'EditSession.paragraph_unit',
-  'EditSession.patch_style_languages_xml', 'EditSession.prime_save_seed_states_slice',
-  'EditSession.rebuild_media_sources',
+  'EditSession.measure_paragraph_json',
+  'EditSession.outline_glyph_json',
+  'EditSession.patch_style_languages_xml',
   'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.reset_frame_base',
-  'EditSession.resident_caret_snapshot_json', 'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
-  'EditSession.resolve_encoded_selection', 'EditSession.resolve_paragraph_anchor', 'EditSession.resolve_sticky_position', 'EditSession.resume_region_layout',
-  'EditSession.retained_headers_footers_json', 'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json',
-  'EditSession.seed_opaque_sequences', 'EditSession.select_story', 'EditSession.selection',
+  'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
+  'EditSession.resume_region_layout',
+  'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json',
+  'EditSession.seed_opaque_sequences',
   'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages',
   'EditSession.set_header_footer_aliases',
-  'EditSession.set_local_lowering', 'EditSession.set_media_tokens', 'EditSession.set_partial_document',
+  'EditSession.set_local_lowering',
   'EditSession.set_windowed_incremental_builds',
   'EditSession.start_update_event_observation',
-  'EditSession.story_segment_unit_digests', 'EditSession.story_segment_units',
+  'EditSession.story_segment_unit_digests',
   'EditSession.update_measure_font_outlines', 'EditSession.yrs_blocks_for_story',
-  'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.page_sizes', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.page_count',
-  'RetainedLayoutMeta.partial', 'RetainedLayoutMeta.provisional',
+  'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.provisional',
   'clear_measure_fonts', 'close_display_list', 'decodeFontFace', 'decodeTiffPng',
-  'hit_test_regions_by_handle', 'hit_test_regions_json', 'measure_paragraph_json', 'open_display_list',
-  'outline_glyph_json', 'parse_relationships_xml', 'range_rects_by_handle', 'range_rects_on_pages_by_handle', 'range_rects_on_pages_json',
+  'hit_test_regions_by_handle',
+  'outline_glyph_json', 'parse_relationships_xml', 'range_rects_on_pages_by_handle', 'range_rects_on_pages_json',
   'range_rects_region_by_handle', 'range_rects_region_json', 'register_measure_font', 'register_substitute_measure_font',
-  'update_display_list', 'vertical_move_by_handle', 'vertical_move_json',
+  'update_display_list', 'vertical_move_by_handle',
 ];
 
 const NO_RASTERIZER = 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/docx/src/wasm/enginePng.ts';
@@ -2325,7 +3151,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(96);
+    expect(notYetCovered.length).toBe(60);
   });
 
   for (const row of rows) {
