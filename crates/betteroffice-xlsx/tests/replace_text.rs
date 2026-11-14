@@ -308,6 +308,42 @@ fn refuses_empty_query_and_stale_version_without_changing_anything() {
 }
 
 #[test]
+fn a_replace_validated_before_a_peer_edit_writes_nothing() {
+    let options = CalculationOptions::default();
+    let mut workbook = Workbook::open_collaborative(&fixture(), 311).unwrap();
+    let mut peer = Workbook::open_collaborative(&fixture(), 312).unwrap();
+    let validated = workbook.version();
+    let request: EditRequest = serde_json::from_value(json!({
+        "expectVersion": validated,
+        "steps": [replace("A2:A2", "alpha", "omega", false)],
+    }))
+    .unwrap();
+    let validation = workbook.validate_edits(&request).unwrap().unwrap();
+    assert!(validation.would_apply);
+    assert_eq!(validation.previews[0].changed_cell_count, 1);
+
+    assert!(
+        peer.edit_cell(SheetId(0), cell("A2"), "alpha by peer", options)
+            .unwrap()
+            .applied
+    );
+    let update = peer
+        .encode_diff_v1(&workbook.encode_state_vector_v1())
+        .unwrap();
+    assert!(workbook.apply_update_v1(&update, options).unwrap().applied);
+    assert_ne!(workbook.version(), validated);
+    let after_peer = workbook.model().clone();
+
+    let refusal = workbook.apply_edits(&request).unwrap().unwrap_err();
+    assert_eq!(
+        refusal.failure.code,
+        betteroffice_xlsx::EditFailureCode::StaleVersion
+    );
+    assert_eq!(stored(&workbook, "A2"), text("alpha by peer"));
+    assert_eq!(workbook.model(), &after_peer);
+}
+
+#[test]
 fn protected_sheets_replace_only_unlocked_matches() {
     let mut workbook = workbook();
     let step = json!({
