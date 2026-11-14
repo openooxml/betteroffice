@@ -5534,7 +5534,10 @@ mod tests {
         assert_eq!(combine_draws(0.0, 0.0), 0);
         assert_eq!(combine_draws(0.5, 0.0), 1u64 << 63);
         assert_eq!(combine_draws(0.0, 0.5), 1u64 << 31);
-        assert_eq!(combine_draws(1.0 - f64::EPSILON, 1.0 - f64::EPSILON), u64::MAX);
+        assert_eq!(
+            combine_draws(1.0 - f64::EPSILON, 1.0 - f64::EPSILON),
+            u64::MAX
+        );
     }
 
     #[test]
