@@ -5,7 +5,7 @@ import type { EmbeddedFaceInput } from '../layout/measure/fontRegistry';
 import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngOptions, type DocxPngTarget } from '../layout/render/png';
 import { openPagedDisplay } from '../layout/render/rustDisplayList';
 import { extractEmbeddedFontFaces } from '../utils';
-import { renderPng as renderEnginePng } from '../wasm/enginePng';
+import { engineKind, renderPng as renderEnginePng } from '../wasm/enginePng';
 import { faceLoadFailure, recordProviderFaceLoads, untilAborted } from '../wasm/enginePngFonts';
 import { createYrsSession, type YrsSession } from './index';
 import { sessionMediaSources, sessionSourcePackage } from './sessionInternals';
@@ -92,7 +92,7 @@ export function createPngExporter(session: YrsSession) {
     const version = session.version();
     if (held && held.version === version && held.fonts === fonts && held.fontProvider === fontProvider) return held;
     release();
-    const source = sessionSourcePackage(session)?.buffer ?? session.materializeDocx()?.originalBuffer;
+    const source = (engineKind === 'native' ? sessionSourcePackage(session)?.buffer : undefined) ?? session.materializeDocx()?.originalBuffer;
     if (!source) throw new Error('renderPng needs a session opened from DOCX bytes');
     const entry: Held = {
       version, fonts, fontProvider, users: 0, stale: false,
