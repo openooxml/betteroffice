@@ -307,7 +307,7 @@ describe('YrsSession.renderPng source bytes', () => {
     });
   }
 
-  test('a compared session, whose source has no save keys, exports from its materialized document', async () => {
+  test('a compared session, whose source has no save keys, has its export refused after materializing it', async () => {
     stubBrowser();
     const session = await createYrsSession();
     try {
@@ -318,7 +318,11 @@ describe('YrsSession.renderPng source bytes', () => {
       ));
       expect(compared).toMatchObject({ ok: true });
       const materialize = spyOn(session, 'materializeDocx');
-      expect((await session.renderPng({ page: 0 })).byteLength).toBeGreaterThan(0);
+      const refused = await session.renderPng({ page: 0 }).then(() => undefined, (error: unknown) => error);
+      expect(refused).toBeInstanceOf(Error);
+      expect((refused as Error).name).toBe('PeerMetadataError');
+      expect((refused as Error & { code?: string }).code).toBe('missing-source');
+      expect((refused as Error).message).toContain('peer metadata requires an indexed source and media');
       expect(materialize).toHaveBeenCalledTimes(1);
     } finally { session.destroy(); }
   });
