@@ -66,6 +66,7 @@ debug = "line-tables-only"
 [profile.release]
 opt-level = "s"
 lto = true
+codegen-units = 1
 
 [profile.fonts-decoder]
 inherits = "release"
