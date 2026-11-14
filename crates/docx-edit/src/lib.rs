@@ -621,6 +621,31 @@ struct StoryRevisions {
     geometry: u64,
     sections: u64,
     stamped: HashMap<Arc<str>, u64>,
+    /// The revision that last changed each story by more than inserting plain
+    /// text: deleting, formatting, embedding, a tracked change or its entry.
+    /// Text inserted without revision marks leaves the story's paragraphs,
+    /// their properties and its tracked changes as they were.
+    marked: HashMap<Arc<str>, u64>,
+}
+
+/// Inserts plain text into a story's own text and nothing else: no deletion,
+/// formatting, embed or revision mark.
+fn inserts_plain_text(txn: &yrs::TransactionMut, event: &yrs::types::Event) -> bool {
+    let yrs::types::Event::Text(event) = event else {
+        return false;
+    };
+    event.path().len() == 1
+        && event.delta(txn).iter().all(|delta| match delta {
+            Delta::Retain(_, None) => true,
+            Delta::Inserted(Out::Any(Any::String(_)), attrs) => {
+                attrs.as_ref().is_none_or(|attrs| {
+                    !attrs
+                        .keys()
+                        .any(|key| matches!(key.as_ref(), INS | DEL | format::RPR_CHANGE))
+                })
+            }
+            _ => false,
+        })
 }
 
 impl StoryRevisions {
@@ -680,12 +705,16 @@ impl StoryRevisions {
             match event.path().front() {
                 Some(yrs::types::PathSegment::Key(story)) => {
                     self.stamped.insert(Arc::clone(story), self.current);
+                    if !inserts_plain_text(txn, event) {
+                        self.marked.insert(Arc::clone(story), self.current);
+                    }
                 }
                 Some(yrs::types::PathSegment::Index(_)) => {}
                 None => {
                     if let yrs::types::Event::Map(entries) = event {
                         for story in entries.keys(txn).keys() {
                             self.stamped.insert(Arc::clone(story), self.current);
+                            self.marked.insert(Arc::clone(story), self.current);
                         }
                     }
                 }
@@ -793,6 +822,7 @@ pub struct EditingDoc {
     save_story_cache_disabled: AtomicBool,
     sticky_positions: Mutex<sticky_positions::StickyPositions>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
+    revision_lists: Mutex<read_state::RevisionLists>,
     table_membership: Mutex<Option<TableMembership>>,
     resident_geometry: Mutex<HashMap<String, resident_geometry::ResidentGeometryIndex>>,
     shared_read_depth: AtomicU32,
@@ -907,6 +937,7 @@ impl EditingDoc {
             save_story_cache_disabled: AtomicBool::new(false),
             sticky_positions: Mutex::default(),
             chunk_snapshots: Mutex::default(),
+            revision_lists: Mutex::default(),
             table_membership: Mutex::default(),
             resident_geometry: Mutex::default(),
             shared_read_depth: AtomicU32::new(0),
@@ -1877,6 +1908,31 @@ impl EditingDoc {
             Err(EditError::CellHasNoStory(_)) => Ok(1),
             Err(error) => Err(error),
         }
+    }
+
+    /// The story revision of the last commit that changed `story_id` by more
+    /// than inserting plain text, if any did.
+    pub(crate) fn story_mark(&self, story_id: &str) -> Option<u64> {
+        self.story_revisions
+            .lock()
+            .unwrap()
+            .marked
+            .get(story_id)
+            .copied()
+    }
+
+    /// The stories changed by more than inserting plain text after `since`.
+    pub(crate) fn stories_marked_since(&self, since: u64) -> HashSet<String> {
+        let revisions = self.story_revisions.lock().unwrap();
+        if since >= revisions.current {
+            return HashSet::new();
+        }
+        revisions
+            .marked
+            .iter()
+            .filter(|(_, revision)| **revision > since)
+            .map(|(story, _)| story.to_string())
+            .collect()
     }
 
     /// The current story revision, and the stories that changed after `since`

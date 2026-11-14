@@ -1,6 +1,7 @@
 //! Aggregated read-state queries for host UI surfaces.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use yrs::{Any, Map, Out, ReadTxn, TextRef, Transact};
 
@@ -108,6 +109,30 @@ pub struct SelectionContextInfo {
     pub in_insertion: bool,
     /// Every aggregated text unit carries a pending `del` revision.
     pub in_deletion: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Stories [`EditingDoc::list_revisions`] read rather than reused.
+    static REVISION_LISTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The revisions [`EditingDoc::list_revisions`] last listed, which later calls
+/// keep for every story not stamped since.
+#[derive(Default)]
+pub(crate) struct RevisionLists {
+    /// The story revision of the last listing; `None` until a listing completes.
+    read_at: Option<u64>,
+    /// Each live story's revisions as of `read_at`, for the stories that list any.
+    listed: BTreeMap<String, Arc<[RevisionInfo]>>,
+}
+
+impl RevisionLists {
+    /// Drops every listing, so the next call reads every story.
+    pub(crate) fn forget(&mut self) {
+        self.read_at = None;
+        self.listed.clear();
+    }
 }
 
 /// One tracked-change revision entry from [`EditingDoc::list_revisions`].
@@ -400,27 +425,81 @@ impl EditingDoc {
     /// Enumerates every tracked-change revision in the document, across all
     /// stories in sorted story-id order (see [`RevisionInfo`]).
     pub fn list_revisions(&self) -> OpResult<Vec<RevisionInfo>> {
-        let story_ids: Vec<String> = {
+        let mut lists = self.revision_lists.lock().unwrap();
+        // The stories to read, named under one transaction: a story stamped after
+        // it is read again by the next call.
+        let (revision, stale) = {
             let txn = self.yrs_doc().transact();
             let Some(stories) = txn.get_map(crate::STORIES) else {
+                lists.forget();
                 return Ok(Vec::new());
             };
-            let mut ids: Vec<String> = crate::live_stories(&stories, &txn)
-                .map(|(id, _)| id.to_owned())
-                .collect();
-            ids.sort();
-            ids
+            match lists.read_at {
+                Some(read_at) => {
+                    let (revision, changed) = self.stories_changed_since(read_at);
+                    // Plain text typed into a story that lists nothing adds nothing.
+                    let marked = self.stories_marked_since(read_at);
+                    let changed: Vec<String> = changed
+                        .into_iter()
+                        .filter(|id| lists.listed.contains_key(id) || marked.contains(id))
+                        .collect();
+                    let removed = txn.get_map(crate::REMOVED_STORIES);
+                    let live = |id: &str| {
+                        stories.contains_key(&txn, id)
+                            && !removed
+                                .as_ref()
+                                .is_some_and(|removed| removed.contains_key(&txn, id))
+                    };
+                    for id in &changed {
+                        lists.listed.remove(id);
+                    }
+                    let stale: Vec<String> = changed.into_iter().filter(|id| live(id)).collect();
+                    (revision, stale)
+                }
+                None => {
+                    lists.listed.clear();
+                    let revision = self.story_revisions.lock().unwrap().current;
+                    let stale = crate::live_stories(&stories, &txn)
+                        .map(|(id, _)| id.to_owned())
+                        .collect();
+                    (revision, stale)
+                }
+            }
         };
+        for story_id in stale {
+            let listed = match self.story_revision_list(&story_id) {
+                Ok(listed) => listed,
+                Err(error) => {
+                    lists.forget();
+                    return Err(error);
+                }
+            };
+            if !listed.is_empty() {
+                lists.listed.insert(story_id, Arc::from(listed));
+            }
+        }
+        lists.read_at = Some(revision);
+        Ok(lists
+            .listed
+            .values()
+            .flat_map(|listed| listed.iter().cloned())
+            .collect())
+    }
+
+    /// [`Self::list_revisions`]' entries for one story.
+    fn story_revision_list(&self, story_id: &str) -> OpResult<Vec<RevisionInfo>> {
+        #[cfg(test)]
+        REVISION_LISTS_READ.with(|read| read.set(read.get() + 1));
         let mut result = Vec::new();
-        for story_id in story_ids {
-            let changes = self.story_changes(&story_id)?;
+        {
+            let changes = self.story_changes(story_id)?;
             if changes.is_empty() {
-                continue;
+                return Ok(result);
             }
             let txn = self.yrs_doc().transact();
-            let story = crate::story_ref(&txn, &story_id)?;
+            let story = crate::story_ref(&txn, story_id)?;
             let bounds = crate::op::para_bounds(&story, &txn);
-            let chunks = self.chunk_snapshot(&story_id, &story, &txn);
+            let chunks = self.chunk_snapshot(story_id, &story, &txn);
             let views = crate::queries::para_views(&txn, TextView::Raw, &chunks);
             let controls: Vec<_> = chunks
                 .iter()
@@ -497,7 +576,7 @@ impl EditingDoc {
                     full.chars().take(PREVIEW_MAX_CHARS).collect()
                 };
                 result.push(RevisionInfo {
-                    story: story_id.clone(),
+                    story: story_id.to_owned(),
                     change,
                     preview,
                 });
@@ -515,8 +594,8 @@ mod tests {
     use super::*;
     use crate::op::para_bounds;
     use crate::{
-        ChangeKind, ColorPatch, EditCtx, FontFamilyPatch, FormatPolicy, InlineFormatDelta, Patch,
-        Position, RawOp, SimpleFormat,
+        ChangeKind, ChangeTarget, ColorPatch, EditCtx, FontFamilyPatch, FormatPolicy,
+        InlineFormatDelta, Patch, Position, RawOp, SimpleFormat,
     };
 
     const DATE: &str = "2026-07-14T12:00:00Z";
@@ -828,6 +907,108 @@ mod tests {
             .insert_text(&local(), Position::new("body", 5), "!", FormatPolicy::Plain)
             .unwrap();
         assert!(plain.list_revisions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_revisions_rereads_only_changed_stories_and_lists_what_a_fresh_read_does() {
+        let doc = seed("alpha beta");
+        for story in ["body:t0:r0c0", "body:t0:r1c0", "notes"] {
+            doc.create_story(story, "cell text", "Normal", "left")
+                .unwrap();
+        }
+        let cell = |story: &str| {
+            Any::Map(Arc::new(HashMap::from([(
+                "story".into(),
+                Any::from(story),
+            )])))
+        };
+        let row = |story: &str| {
+            Any::Map(Arc::new(HashMap::from([(
+                "cells".into(),
+                Any::Array(Arc::from(vec![cell(story)])),
+            )])))
+        };
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 0,
+                kind: "table".into(),
+                payload: vec![(
+                    "rows".into(),
+                    Any::Array(Arc::from(vec![row("body:t0:r0c0"), row("body:t0:r1c0")])),
+                )],
+                attrs: yrs::types::Attrs::new(),
+            }],
+            &local(),
+        )
+        .unwrap();
+        let fresh = |doc: &EditingDoc| {
+            let mut cached = std::mem::take(&mut *doc.revision_lists.lock().unwrap());
+            let listed = doc.list_revisions().unwrap();
+            std::mem::swap(&mut cached, &mut *doc.revision_lists.lock().unwrap());
+            listed
+        };
+        let listed = |doc: &EditingDoc| {
+            REVISION_LISTS_READ.with(|read| read.set(0));
+            let listed = doc.list_revisions().unwrap();
+            let read = REVISION_LISTS_READ.with(|read| read.get());
+            assert_eq!(listed, fresh(doc));
+            doc.list_revisions().unwrap();
+            (listed, read)
+        };
+        let insert = |story: &str, at: u32, text: &str, ctx: &EditCtx| {
+            doc.insert_text(ctx, Position::new(story, at), text, FormatPolicy::Plain)
+                .unwrap()
+        };
+        let suggested = insert("body:t0:r0c0", 4, "INS", &suggesting("Alice"));
+        doc.delete_range(&suggesting("Bob"), StoryRange::new("body:t0:r1c0", 0, 4))
+            .unwrap();
+        assert_eq!(listed(&doc).0.len(), 2);
+
+        let (_, read) = listed(&doc);
+        assert_eq!(read, 0, "nothing changed, so every story is reused");
+
+        insert("body", 8, "x", &local());
+        let (revisions, read) = listed(&doc);
+        assert_eq!(
+            (revisions.len(), read),
+            (2, 0),
+            "plain text typed into the body, which lists nothing, adds nothing"
+        );
+        doc.delete_range(&local(), StoryRange::new("body", 8, 9))
+            .unwrap();
+        let (revisions, read) = listed(&doc);
+        assert_eq!(
+            (revisions.len(), read),
+            (2, 1),
+            "only the body is read again"
+        );
+        insert("body:t0:r1c0", 0, "y", &local());
+        let (_, read) = listed(&doc);
+        assert_eq!(read, 1, "a story that lists revisions is read again");
+
+        insert("body:t0:r0c0", 0, "more ", &suggesting("Alice"));
+        let (revisions, read) = listed(&doc);
+        assert_eq!(read, 1);
+        assert_eq!(revisions.len(), 3);
+        insert("body", 0, "Suggested ", &suggesting("Dan"));
+        let (revisions, read) = listed(&doc);
+        assert_eq!(read, 1, "a suggested insertion marks the body");
+        assert_eq!(revisions.len(), 4);
+
+        doc.accept_change(
+            &local(),
+            &ChangeTarget::Revision(suggested.revision_ids[0].clone()),
+        )
+        .unwrap();
+        assert_eq!(listed(&doc).0.len(), 3);
+
+        doc.delete_story("notes").unwrap();
+        doc.create_story("notes", "again", "Normal", "left")
+            .unwrap();
+        insert("notes", 0, "N", &suggesting("Carol"));
+        let (revisions, _) = listed(&doc);
+        assert!(revisions.iter().any(|revision| revision.story == "notes"));
     }
 
     #[test]

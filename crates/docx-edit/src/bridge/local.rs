@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::*;
@@ -20,6 +20,8 @@ pub(crate) struct LocalLowering {
     validation_epoch: u64,
     dependent: BTreeSet<String>,
     pub(crate) edit: Option<TextEdit>,
+    /// The body's top-level table embeds, by table block id.
+    pub(crate) table_embeds: HashMap<String, MapRef>,
     #[cfg(test)]
     pub(crate) materialized_text_units: u32,
     #[cfg(test)]
@@ -436,6 +438,20 @@ impl LocalLowering {
         self.blocked == replacement.blocked
             && (self.preview_blocked || !replacement.preview_blocked)
             && replacement.dependent.is_empty()
+    }
+
+    /// Moves the seeds of the paragraphs at or after `end` by `delta` display
+    /// positions, for a table ending at `end` whose cells grew by `delta`.
+    pub(crate) fn shift_after(&mut self, end: u64, delta: i64) {
+        self.edit = None;
+        if self.deferred {
+            return;
+        }
+        for seed in self.seeds.values_mut() {
+            if seed.pm_start >= end {
+                seed.pm_start = seed.pm_start.saturating_add_signed(delta);
+            }
+        }
     }
 
     pub(crate) fn refresh_seeds(&mut self, blocks: &[Rc<LayoutBlock>], map: &LoweringMap) {
