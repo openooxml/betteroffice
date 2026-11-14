@@ -11,7 +11,7 @@ import {
 } from '@betteroffice/xlsx';
 import type {
   CellAddr, CellInputEdit, CellRange, ChartResizeEdges, Proposal, Selection, WorkbookSheetView,
-  WorkbookSheetSummary, XlsxRangeTarget,
+  WorkbookSheetSummary, XlsxCellAddress, XlsxEditResult, XlsxRangeTarget, XlsxValidationResult,
 } from '@betteroffice/xlsx';
 import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
 import { editorExportFaces, useDefaultFonts } from '../useDefaultFonts';
@@ -58,6 +58,9 @@ import { ROW_GUTTER_WIDTH } from '../plugins/rowDecorations';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost, type XlsxPluginHostBinding } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
+import {
+  ReplaceDialog, type ReplaceDialogApi, type ReplaceDialogTarget, withSheetCatalog,
+} from '../components/ReplaceDialog';
 import { cellInViewport, deriveLimits, extendScrollExtent, nearestCellScroll, positionAtPoint } from '../viewer/sessionGeometry';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { XlsxAsyncExportBridge } from './createAsyncEditorApi';
@@ -250,6 +253,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const borderColor = useRef<string | undefined>(undefined);
   const [proposals, setProposals, proposalsRef] = useSyncedState<Proposal[]>([]);
   const [proposalsPanelOpen, setProposalsPanelOpen, panelRef] = useSyncedState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [replaceTarget, setReplaceTarget] = useState<ReplaceDialogTarget | null>(null);
+  const replaceReveal = useRef<(cell: XlsxCellAddress) => void>(() => {});
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
   const navigation = useRef(0);
   const [selectionNavigation] = useState(createSelectionDataNavigation);
@@ -380,6 +386,55 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     return selectionRef.current && sheets?.some((sheet) => sheet.index === activeRef.current)
       ? rangeTarget(activeRef.current, selectionRef.current) : undefined;
   };
+  const openReplaceDialog = () => {
+    const selected = selectedTarget();
+    if (!selected || selected.range.kind !== 'rowCol') {
+      setReplaceTarget(null);
+    } else {
+      const { start, end } = selected.range;
+      const from = address(start);
+      const to = address(end);
+      setReplaceTarget({
+        sheetId: selected.sheetId,
+        range: selected.range,
+        label: from === to ? from : `${from}:${to}`,
+        activeCell: selected.activeCell,
+        sheets: (run?.session.editState.sheets ?? run?.session.state.sheets)?.map((sheet) => ({
+          sheetId: sheet.id,
+          name: sheet.name,
+        })),
+      });
+      const call = run?.session.call;
+      if (call) {
+        void Promise.resolve(call.readCells({ ranges: [] })).then((catalog) => {
+          setReplaceTarget((current) => current?.sheets && current.sheetId === selected.sheetId
+            ? { ...current, sheets: withSheetCatalog(current.sheets, catalog) }
+            : current);
+        }, () => {});
+      }
+    }
+    setReplaceOpen(true);
+  };
+  const replaceApi = useMemo<ReplaceDialogApi>(() => ({
+    version: () => run?.session.call.version() ?? '',
+    find: (request) => {
+      const call = run?.session.call;
+      if (!call) throw new Error('The editor is not ready.');
+      return call.findText(request);
+    },
+    reveal: (cell) => replaceReveal.current(cell),
+    validate: (request): Promise<XlsxValidationResult> => {
+      const call = run?.session.call;
+      if (!call) throw new Error('The editor is not ready.');
+      return call.validateEdits(request);
+    },
+    apply: (request): Promise<XlsxEditResult> => coordinator.runAfterPendingInput(() =>
+      coordinator.command({ kind: 'applyEdits', payload: { args: [request] } }).result.then((status) => {
+        if (!status.result) throw new Error('The replacement was not applied.');
+        mutation.current += 1;
+        return status.result as XlsxEditResult;
+      })),
+  }), [run]);
   const hidden = () => selectionHidden(sourceRef.current?.painted?.displayList.grid);
   const navigationContext = () => {
     const owner = ownerRef.current;
@@ -1602,6 +1657,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   nameNavigation.current = (cell) => { navigate(activeRef.current, selectionAt(cell)); focus(); };
   sheetNavigation.current = (sheet) => { if (sheet === activeRef.current) navigate(sheet); };
+  replaceReveal.current = (cell) => {
+    const sheets = run?.session.editState.sheets ?? run?.session.state.sheets;
+    const sheet = sheets?.find((entry) => entry.id === cell.sheetId)?.index;
+    if (sheet !== undefined) navigate(sheet, selectionAt({ row: cell.row, col: cell.col }));
+  };
   const moveChart = (sheet: number, id: string, dx: number, dy: number, retained = false, generation = run?.generation) => {
     if (!run?.ready || !run.current || run.retiring || generation !== run.generation || run.failure ||
       !retained && !editable() || dx === 0 && dy === 0) return;
@@ -1672,6 +1732,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     setZoom: (scale) => setZoom(scale),
     setBorderStyle: (value) => { borderStyle.current = value; }, setBorderColor: (value) => { borderColor.current = value; },
     setProposalsPanelOpen: (open) => { setProposalsPanelOpen(open); if (open) requestProposals(true); },
+    setReplaceOpen: (open) => { if (open) openReplaceDialog(); else setReplaceOpen(false); },
     markStale: (id, cells) => setStaleFor(({ [id]: _removed, ...rest }) => cells ? { ...rest, [id]: cells } : rest),
     refreshProposals: () => requestProposals(), i18n: () => propsRef.current.i18n, translate: t,
     fail: (error) => run?.fail(error), afterPaint: () => coordinator.whenPresented().then(() => true, () => false),
@@ -2156,6 +2217,14 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         <div ref={dockAreaRef} data-testid="xlsx-workspace" style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
           {renderDock('left')}
           <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
+          <ReplaceDialog
+            open={replaceOpen}
+            target={replaceTarget}
+            api={replaceApi}
+            readOnly={Boolean(props.readOnly)}
+            onClose={() => setReplaceOpen(false)}
+            onApplied={() => commands.refresh()}
+          />
           {isProposalsAvailable() && proposalsPanelOpen && <ProposalsPanel proposals={proposals} staleFor={staleFor}
             style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
           {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}

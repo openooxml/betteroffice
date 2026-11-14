@@ -52,6 +52,7 @@ export interface XlsxCommandArgs {
   verticalAlignment: { value: VerticalAlignment };
   textWrapping: { value: TextWrapping };
   searchMenus: null;
+  findReplace: null;
   save: null;
   exportPng: null;
   print: null;
@@ -143,6 +144,7 @@ export interface XlsxCommandValues {
   verticalAlignment: VerticalAlignment | null;
   textWrapping: TextWrapping | null;
   searchMenus: null;
+  findReplace: null;
   save: null;
   exportPng: null;
   print: null;

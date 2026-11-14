@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "Tìm và Thay thế",
+    "find": "Tìm",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "Thay thế",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{index} trên hơn {total}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "Phân biệt chữ hoa/chữ thường",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "“Tìm trong” chỉ áp dụng cho Tìm. Thay thế sửa nội dung từng ô như khi gõ và tính lại công thức.",
+    "preview": "Preview",
+    "replaceAll": "Thay tất cả",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "{count} ngày, giá trị TRUE/FALSE hoặc giá trị lỗi khớp không được thay đổi: {cells}"
+  },
   "_lang": "vi",
   "toolbar": {
     "actionsLabel": "Hành động bảng tính",
@@ -103,6 +134,7 @@
     "redo": "Làm lại"
   },
   "commands": {
+    "findReplace": "Tìm và Thay thế",
     "fontSizeStep": "Thay đổi cỡ phông",
     "numberFormat": "Định dạng số",
     "decimalPlaces": "Thay đổi chữ số thập phân",

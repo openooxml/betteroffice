@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "Rechercher et remplacer",
+    "find": "Rechercher",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "Remplacer",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{index} sur plus de {total}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "Respecter la casse",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "« Rechercher dans » ne s’applique qu’à la recherche. Remplacer modifie le contenu de chaque cellule comme s’il était saisi et recalcule les formules.",
+    "preview": "Preview",
+    "replaceAll": "Tout remplacer",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "{count} dates, valeurs TRUE/FALSE ou valeurs d’erreur correspondantes n’ont pas été modifiées : {cells}"
+  },
   "_lang": "fr",
   "toolbar": {
     "actionsLabel": "Actions du classeur",
@@ -103,6 +134,7 @@
     "redo": "Rétablir"
   },
   "commands": {
+    "findReplace": "Rechercher et remplacer",
     "fontSizeStep": "Modifier la taille de police",
     "numberFormat": "Format de nombre",
     "decimalPlaces": "Modifier le nombre de décimales",

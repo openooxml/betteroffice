@@ -112,7 +112,24 @@ class PatchStyle(_Guarded):
     patch: dict
 
 
-EditStep = Union[SetCellInputs, SetFormulas, SetNumberFormat, PatchStyle]
+class ReplaceText(_Step, total=False):
+    """Literal replacement in each cell's entered text, entered again as if typed.
+
+    Case-insensitive unless ``matchCase``. ``lookIn`` defaults to ``values``, which skips
+    formula cells; ``formulas`` rewrites them too. Rich text cells and entries that would
+    not parse are refused one by one and listed in ``refusedCells``.
+    """
+
+    op: Literal["replaceText"]
+    query: str
+    replacement: str
+    entireCell: bool
+    lookIn: Literal["values", "formulas"]
+    matchCase: bool
+    within: Literal["sheet", "workbook"]
+
+
+EditStep = Union[SetCellInputs, SetFormulas, SetNumberFormat, PatchStyle, ReplaceText]
 
 
 class CalculationRequest(TypedDict, total=False):
@@ -149,14 +166,38 @@ class Refusal(TypedDict):
     failure: EditFailure
 
 
-class EditReceipt(TypedDict):
+class RefusedCell(TypedDict):
+    """One matched cell a replace left unchanged, and why."""
+
+    cell: str
+    reason: str
+
+
+class ReplaceStats(TypedDict):
+    """Counts for one ``replaceText`` step; omitted for other operations."""
+
+    matched: int
+    replaced: int
+    skippedFormulas: int
+    skippedLocked: int
+    skippedValues: int
+    skippedCells: list[str]
+    refusedCells: list[RefusedCell]
+    refused: int
+
+
+class _OptionalReplace(TypedDict, total=False):
+    replace: ReplaceStats
+
+
+class EditReceipt(_OptionalReplace):
     stepIndex: int
     changed: bool
     target: RangeTarget
     changedCells: List[CellAddress]
 
 
-class EditPreview(TypedDict):
+class EditPreview(_OptionalReplace):
     stepIndex: int
     target: RangeTarget
     wouldChange: bool
@@ -243,9 +284,17 @@ class _FindRequest(TypedDict):
 
 
 class FindRequest(_FindRequest, total=False):
-    """Exact, case-sensitive search over display text; ``limit`` defaults to 100."""
+    """Literal search, case-insensitive unless ``matchCase``; ``limit`` defaults to 100.
+
+    Omit ``lookIn`` or pass ``values`` to search display text of every stored cell;
+    ``formulas`` searches the entered text the formula bar shows.
+    """
 
     sheetIds: List[str]
+    range: RangeTarget
+    lookIn: Literal["values", "formulas"]
+    entireCell: bool
+    matchCase: bool
     limit: int
 
 

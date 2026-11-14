@@ -54,6 +54,7 @@ export const XLSX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
   verticalAlignment: descriptor('verticalAlignment', 'toolbar.verticalAlignment', true),
   textWrapping: descriptor('textWrapping', 'toolbar.textWrapping', true),
   searchMenus: descriptor('searchMenus', 'toolbar.searchMenus', false),
+  findReplace: descriptor('findReplace', 'commands.findReplace', false, [plain('Mod+H')]),
   save: descriptor('save', 'toolbar.save', false, [plain('Mod+S')]),
   exportPng: descriptor('exportPng', 'toolbar.exportPng', false),
   print: descriptor('print', 'toolbar.print', false),

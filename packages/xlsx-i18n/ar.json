@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "البحث والاستبدال",
+    "find": "بحث",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "استبدال",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{index} من أكثر من {total}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "مطابقة حالة الأحرف",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "يسري «البحث في» على البحث فقط. يعدّل الاستبدال محتوى كل خلية كما لو كُتب يدويًا ويعيد حساب الصيغ.",
+    "preview": "Preview",
+    "replaceAll": "استبدال الكل",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "لم تُغيَّر التواريخ أو قيم TRUE/FALSE أو قيم الخطأ المطابقة ({count}): {cells}"
+  },
   "_lang": "ar",
   "toolbar": {
     "actionsLabel": "إجراءات جدول البيانات",
@@ -103,6 +134,7 @@
     "redo": "إعادة"
   },
   "commands": {
+    "findReplace": "البحث والاستبدال",
     "fontSizeStep": "تغيير حجم الخط",
     "numberFormat": "تنسيق الأرقام",
     "decimalPlaces": "تغيير المنازل العشرية",

@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "Suchen und Ersetzen",
+    "find": "Suchen",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "Ersetzen",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{index} von mehr als {total}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "Groß-/Kleinschreibung beachten",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "„Suchen in“ gilt nur für die Suche. Ersetzen bearbeitet den Inhalt jeder Zelle wie eingetippt und berechnet Formeln neu.",
+    "preview": "Preview",
+    "replaceAll": "Alle ersetzen",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "{count} passende Datumswerte, TRUE/FALSE- oder Fehlerwerte wurden nicht geändert: {cells}"
+  },
   "_lang": "de",
   "toolbar": {
     "actionsLabel": "Tabellenaktionen",
@@ -103,6 +134,7 @@
     "redo": "Wiederholen"
   },
   "commands": {
+    "findReplace": "Suchen und Ersetzen",
     "fontSizeStep": "Schriftgrad ändern",
     "numberFormat": "Zahlenformat",
     "decimalPlaces": "Dezimalstellen ändern",

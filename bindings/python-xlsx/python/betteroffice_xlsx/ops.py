@@ -225,7 +225,11 @@ class _SetColWidthOp(TypedDict):
 
 
 class SetColWidthOp(_SetColWidthOp, total=False):
-    """A missing or ``None`` width resets the column to the default."""
+    """A missing or ``None`` width resets the column to the default.
+
+    The width is the stored column width in the format's character units,
+    padding included, not the number of characters shown.
+    """
 
     width: Optional[float]
 

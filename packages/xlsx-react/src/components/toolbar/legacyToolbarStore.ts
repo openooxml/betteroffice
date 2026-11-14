@@ -43,6 +43,7 @@ const HANDLERS: Record<XlsxCommandId, Handler | null> = {
   verticalAlignment: 'onFormat',
   textWrapping: 'onFormat',
   searchMenus: 'onSearchMenus',
+  findReplace: null,
   save: null,
   exportPng: null,
   print: 'onPrint',

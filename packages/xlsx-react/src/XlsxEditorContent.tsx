@@ -58,6 +58,8 @@ import type {
   XlsxEditRefusal,
   XlsxEditRequest,
   XlsxEditResult,
+  XlsxFindResult,
+  XlsxValidationResult,
 } from '@betteroffice/xlsx';
 import type { AwarenessPeer, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from './sheetLimits';
@@ -104,6 +106,9 @@ import {
   RemoteSelections,
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
+import {
+  ReplaceDialog, type ReplaceDialogApi, type ReplaceDialogTarget, withSheetCatalog,
+} from './components/ReplaceDialog';
 import { cellInViewport, coversWholeTrack, deriveLimits, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
 import { cellEditorColors } from './viewer/cellEditorColors';
 import type {
@@ -587,6 +592,8 @@ export function XlsxEditorContent({
   const [proposals, setProposals, proposalsRef] = useSyncedState<Proposal[]>([]);
   const [proposalsPanelOpen, setProposalsPanelOpen, proposalsPanelOpenRef] =
     useSyncedState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [replaceTarget, setReplaceTarget] = useState<ReplaceDialogTarget | null>(null);
   const [collaborationReplica, setCollaborationReplica] =
     useState<CollaborationReplica | null>(null);
   const [awarenessPeers, setAwarenessPeers] = useState<readonly AwarenessPeer[]>([]);
@@ -1424,6 +1431,81 @@ export function XlsxEditorContent({
     },
     [refreshProposals, cellClipboard, notifyDocumentChange]
   );
+
+  const applyReplaceResult = useCallback(
+    (result: XlsxEditResult) => {
+      const handle = handleRef.current;
+      if (!handle || !result.ok) return;
+      if (result.applied) {
+        cellClipboard.changed();
+        setRefusal(null);
+      }
+      mutationRef.current += 1;
+      setSheetInfo(handle.sheetInfo());
+      setRevision((r) => r + 1);
+      refreshProposals();
+      if (result.applied) {
+        notifyDocumentChange(handle);
+        onChangeRef.current?.();
+      }
+    },
+    [refreshProposals, cellClipboard, notifyDocumentChange]
+  );
+
+  const openReplaceDialog = useCallback(() => {
+    const handle = handleRef.current;
+    const sheetId = sheetInfo?.sheetIds[activeSheet];
+    const selected = selectionRef.current;
+    if (!handle || !sheetId || !selected) {
+      setReplaceTarget(null);
+      setReplaceOpen(true);
+      return;
+    }
+    const range = normalizeRange(selected);
+    const from = handle.cell(activeSheet, range.top, range.left).a1;
+    const to = handle.cell(activeSheet, range.bottom, range.right).a1;
+    setReplaceTarget({
+      sheetId,
+      range: {
+        kind: 'rowCol',
+        start: { row: range.top, col: range.left },
+        end: { row: range.bottom, col: range.right },
+      },
+      label: from === to ? from : `${from}:${to}`,
+      activeCell: { row: selected.anchor.row, col: selected.anchor.col },
+      sheets: withSheetCatalog(sheetInfo.sheetIds.map((id, index) => ({
+        sheetId: id,
+        name: sheetInfo.sheetNames[index] ?? id,
+      })), handle.readCells({ ranges: [] })),
+    });
+    setReplaceOpen(true);
+  }, [sheetInfo, activeSheet]);
+
+  const replaceApi = useMemo<ReplaceDialogApi>(() => ({
+    version: () => handleRef.current?.version() ?? '',
+    find: (request): XlsxFindResult => {
+      const handle = handleRef.current;
+      if (!handle) throw new Error('The editor is not ready.');
+      return handle.findText(request);
+    },
+    reveal: (cell) => {
+      const handle = handleRef.current;
+      if (!handle) return;
+      const sheet = handle.sheetInfo().sheetIds.indexOf(cell.sheetId);
+      if (sheet < 0) return;
+      selectCells(sheet, selectionAt({ row: cell.row, col: cell.col }));
+    },
+    validate: (request): XlsxValidationResult => {
+      const handle = handleRef.current;
+      if (!handle) throw new Error('The editor is not ready.');
+      return handle.validateEdits(request);
+    },
+    apply: (request): XlsxEditResult => {
+      const handle = handleRef.current;
+      if (!handle) throw new Error('The editor is not ready.');
+      return handle.applyEdits(request);
+    },
+  }), [selectCells]);
 
   // before a command runs, an arrow burst lands and a composition ends.
   inputHooksRef.current = {
@@ -2749,6 +2831,7 @@ export function XlsxEditorContent({
     fail: (cause) => setError(cause instanceof Error ? cause.message : String(cause)),
     setZoom,
     setProposalsPanelOpen,
+    setReplaceOpen: (open) => { if (open) openReplaceDialog(); else setReplaceOpen(false); },
     setCapturedFormat: (format, source) => {
       setCapturedFormat(format);
       paintSourceRef.current = source;
@@ -2918,6 +3001,14 @@ export function XlsxEditorContent({
       <div ref={dockAreaRef} data-testid="xlsx-workspace" style={workspaceStyles.workspace}>
         {renderDock('left')}
         <div style={workspaceStyles.center}>
+          <ReplaceDialog
+            open={replaceOpen}
+            target={replaceTarget}
+            api={replaceApi}
+            readOnly={readOnly}
+            onClose={() => setReplaceOpen(false)}
+            onApplied={applyReplaceResult}
+          />
           {proposalsAvailable && proposalsPanelOpen && (
             <ProposalsPanel
               proposals={proposals}
