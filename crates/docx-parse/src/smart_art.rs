@@ -12,8 +12,8 @@ use crate::relationships::{
 };
 use crate::scalars::ColorValue;
 use crate::shape::{
-    DrawingScene, DrawingSceneNode, Shape, ShapeOffset, ShapeTextBody, parse_drawing_scene_tree,
-    resolve_shape_fill_pictures,
+    DrawingScene, DrawingSceneNode, Shape, ShapeOffset, ShapeTextBody,
+    parse_drawing_scene_with_sources, resolve_shape_fill_pictures,
 };
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
@@ -247,11 +247,9 @@ pub fn parse_diagram_drawing_scene(
     } else {
         root.child_by_local_name("spTree").unwrap_or(root)
     };
-    let mut scene = parse_drawing_scene_tree(source);
-    let mut sources = IndexMap::new();
-    collect_shape_elements(source, &mut sources, 0);
+    let (mut scene, sources) = parse_drawing_scene_with_sources(source);
     let mut shapes = Vec::new();
-    collect_scene_shapes(scene.root.as_mut(), &mut shapes, &sources);
+    collect_scene_shapes(scene.root.as_mut(), &mut shapes, &mut sources.into_iter());
     Ok(DiagramDrawing {
         scene: Some(scene),
         shapes,
@@ -266,38 +264,16 @@ pub fn parse_diagram_drawing_shapes(
     Ok(parse_diagram_drawing_scene(xml, part, budget)?.shapes)
 }
 
-fn collect_shape_elements<'a>(
-    parent: &'a XmlElement,
-    shapes: &mut IndexMap<String, &'a XmlElement>,
-    depth: usize,
-) {
-    if depth > MAX_DIAGRAM_DEPTH || shapes.len() >= MAX_DIAGRAM_SHAPES {
-        return;
-    }
-    if matches!(parent.local_name(), "sp" | "cxnSp")
-        && let Some(id) =
-            find_descendant(parent, "cNvPr", 0).and_then(|element| element.attribute(None, "id"))
-    {
-        shapes.insert(id.to_owned(), parent);
-    }
-    for child in parent.child_elements() {
-        collect_shape_elements(child, shapes, depth + 1);
-        if shapes.len() >= MAX_DIAGRAM_SHAPES {
-            break;
-        }
-    }
-}
-
-fn collect_scene_shapes(
+fn collect_scene_shapes<'a>(
     node: Option<&mut DrawingSceneNode>,
     shapes: &mut Vec<Shape>,
-    sources: &IndexMap<String, &XmlElement>,
+    sources: &mut impl Iterator<Item = &'a XmlElement>,
 ) {
     let Some(node) = node else { return };
     if node.kind.as_deref() == Some("shape")
         && let Some(shape) = node.shape.as_deref_mut()
     {
-        if let Some(source) = shape.id.as_deref().and_then(|id| sources.get(id).copied()) {
+        if let Some(source) = sources.next() {
             if source.local_name() == "cxnSp" && find_descendant(source, "prstGeom", 0).is_none() {
                 shape.shape_type = "straightConnector1".to_owned();
                 shape.geometry_path =
@@ -1097,6 +1073,52 @@ mod tests {
             parsed.shapes[0].text_body.as_ref().unwrap().content.len(),
             1
         );
+    }
+
+    #[test]
+    fn cached_shapes_sharing_one_id_keep_their_own_text() {
+        let shape = |geometry: &str, text: &str| {
+            let body = if text.is_empty() {
+                String::new()
+            } else {
+                format!("<dsp:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></dsp:txBody>")
+            };
+            format!(
+                r#"<dsp:sp><dsp:nvSpPr><dsp:cNvPr id="0" name=""/></dsp:nvSpPr><dsp:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm><a:prstGeom prst="{geometry}"/></dsp:spPr>{body}</dsp:sp>"#
+            )
+        };
+        let xml = format!(
+            r#"<dsp:drawing xmlns:dsp="dsp" xmlns:a="a"><dsp:spTree><dsp:nvGrpSpPr><dsp:cNvPr id="0" name=""/></dsp:nvGrpSpPr>{}{}{}{}</dsp:spTree></dsp:drawing>"#,
+            shape("rightArrow", ""),
+            shape("roundRect", "One"),
+            shape("roundRect", "Two"),
+            shape("roundRect", "Three"),
+        );
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let parsed = parse_diagram_drawing_scene(xml.as_bytes(), "drawing", &mut budget).unwrap();
+        let text = |shape: &Shape| {
+            shape
+                .text_body
+                .as_ref()
+                .map(|body| body.content[0]["content"][0]["content"][0]["text"].clone())
+        };
+        let texts: Vec<_> = parsed.shapes.iter().map(text).collect();
+        assert_eq!(
+            texts,
+            [
+                None,
+                Some("One".into()),
+                Some("Two".into()),
+                Some("Three".into())
+            ]
+        );
+        let scene = parsed.scene.unwrap().root.unwrap().children.unwrap();
+        let scene_texts: Vec<_> = scene
+            .iter()
+            .map(|node| text(node.shape.as_ref().unwrap()))
+            .collect();
+        assert_eq!(scene_texts, texts);
     }
 
     #[test]

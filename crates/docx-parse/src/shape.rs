@@ -1187,19 +1187,29 @@ fn resolve_paint_picture(
 }
 
 pub fn parse_drawing_scene_tree(root: &XmlElement) -> DrawingScene {
+    parse_drawing_scene_with_sources(root).0
+}
+
+/// The scene, with each shape node's source element in scene pre-order.
+pub(crate) fn parse_drawing_scene_with_sources(
+    root: &XmlElement,
+) -> (DrawingScene, Vec<&XmlElement>) {
     let mut count = 0;
+    let mut sources = Vec::new();
     let parsed = if is_scene_shape(root.local_name())
         || is_scene_group(root.local_name())
         || root.local_name() == "wpc"
     {
-        parse_scene_node(root, Matrix::IDENTITY, &mut count, 0).map(|node| *node)
+        parse_scene_node(root, Matrix::IDENTITY, &mut count, 0, &mut sources).map(|node| *node)
     } else {
         let mut children = Vec::new();
         for child in root.child_elements() {
             if count >= MAX_SCENE_NODES {
                 break;
             }
-            if let Some(node) = parse_scene_node(child, Matrix::IDENTITY, &mut count, 0) {
+            if let Some(node) =
+                parse_scene_node(child, Matrix::IDENTITY, &mut count, 0, &mut sources)
+            {
                 children.push(*node);
             }
         }
@@ -1213,7 +1223,7 @@ pub fn parse_drawing_scene_tree(root: &XmlElement) -> DrawingScene {
             })
         }
     };
-    DrawingScene {
+    let scene = DrawingScene {
         version: Some(1.0),
         root: Some(parsed.unwrap_or_else(|| DrawingSceneNode {
             kind: Some("canvas".into()),
@@ -1221,14 +1231,16 @@ pub fn parse_drawing_scene_tree(root: &XmlElement) -> DrawingScene {
             ..DrawingSceneNode::default()
         })),
         ..DrawingScene::default()
-    }
+    };
+    (scene, sources)
 }
 
-fn parse_scene_node(
-    element: &XmlElement,
+fn parse_scene_node<'a>(
+    element: &'a XmlElement,
     parent: Matrix,
     count: &mut usize,
     depth: usize,
+    sources: &mut Vec<&'a XmlElement>,
 ) -> Option<Box<DrawingSceneNode>> {
     if depth > MAX_SCENE_DEPTH || *count >= MAX_SCENE_NODES {
         return None;
@@ -1270,6 +1282,7 @@ fn parse_scene_node(
         node.kind = Some("shape".into());
         node.shape = Some(shape);
         node.transform = Some(transform);
+        sources.push(element);
         return Some(node);
     }
     if is_scene_group(local) || local == "wpc" {
@@ -1320,7 +1333,7 @@ fn parse_scene_node(
                 if *count >= MAX_SCENE_NODES {
                     break;
                 }
-                if let Some(child) = parse_scene_node(child, matrix, count, depth + 1) {
+                if let Some(child) = parse_scene_node(child, matrix, count, depth + 1, sources) {
                     children.push(*child);
                 }
             }
