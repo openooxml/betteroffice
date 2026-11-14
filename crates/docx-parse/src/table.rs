@@ -6,7 +6,7 @@ use crate::block::BlockContent;
 use crate::borders::{Borders, parse_border_spec};
 use crate::formatting::{
     CellMargins, ConditionalFormatStyle, FloatingTableProperties, TableCellFormatting,
-    TableFormatting, TableLook, TableMeasurement, TableRowFormatting,
+    TableFormatting, TableLook, TableMeasurement, TableRowFormatting, boolean_child,
 };
 use crate::inline::{InlineNode, RunContent};
 use crate::paragraph::{ParagraphContent, RawAttribute, TrackedChangeInfo};
@@ -477,8 +477,8 @@ pub fn parse_document_table_row_properties(
             .filter(|value| matches!(*value, "auto" | "atLeast" | "exact"))
             .map(str::to_owned);
     }
-    formatting.header = true_child(element, "tblHeader");
-    formatting.cant_split = true_child(element, "cantSplit");
+    formatting.header = boolean_child(element, "tblHeader");
+    formatting.cant_split = boolean_child(element, "cantSplit");
     formatting.justification =
         child_attribute_in(element, "jc", "val", &["left", "center", "right"]);
     formatting.hidden = true_child(element, "hidden");
@@ -1137,6 +1137,26 @@ mod tests {
         let structural = parse_table_cell_structural_change(Some(&cell)).unwrap();
         assert_eq!(structural.v_merge.as_deref(), Some("rest"));
         assert_eq!(structural.v_merge_orig, None);
+    }
+
+    #[test]
+    fn row_header_and_cant_split_read_every_on_off_spelling() {
+        for (attribute, expected) in [
+            (r#" w:val="0""#, false),
+            (r#" w:val="false""#, false),
+            (r#" w:val="off""#, false),
+            (r#" w:val="1""#, true),
+            (r#" w:val="true""#, true),
+            (r#" w:val="on""#, true),
+            ("", true),
+        ] {
+            let row = root(&format!(
+                r#"<w:trPr xmlns:w="w"><w:cantSplit{attribute}/><w:tblHeader{attribute}/></w:trPr>"#
+            ));
+            let parsed = parse_document_table_row_properties(Some(&row)).unwrap_or_default();
+            assert_eq!(parsed.header, Some(expected), "{attribute}");
+            assert_eq!(parsed.cant_split, Some(expected), "{attribute}");
+        }
     }
 
     #[test]
