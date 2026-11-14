@@ -835,6 +835,56 @@ mod tests {
         );
     }
 
+    fn row_with_unplanned_cell_paragraph(merge: Option<&str>) -> TableRow {
+        let formatting = merge.map_or(serde_json::Value::Null, |merge| {
+            serde_json::json!({"vMerge": merge})
+        });
+        serde_json::from_value(serde_json::json!({
+            "type": "tableRow",
+            "cells": [
+                {"type": "tableCell", "formatting": formatting, "content": [
+                    {"type": "paragraph", "sourceOrdinal": 7, "content": []}
+                ]},
+                {"type": "tableCell", "content": [
+                    {"type": "paragraph", "sourceOrdinal": 1, "content": []}
+                ]}
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn splice_conflict(row: &TableRow) -> bool {
+        let mut context = context();
+        context.begin_splice([1], None);
+        serialize_table_row(row, &mut context).unwrap();
+        context.end_splice().unwrap().conflict
+    }
+
+    #[test]
+    fn an_unplanned_paragraph_in_a_merge_continuation_cell_keeps_the_splice() {
+        let row = row_with_unplanned_cell_paragraph(Some("continue"));
+        assert!(
+            !splice_conflict(&row),
+            "continuation cell paragraph set the splice conflict"
+        );
+    }
+
+    #[test]
+    fn an_unplanned_paragraph_outside_a_continuation_cell_still_conflicts() {
+        for merge in [None, Some("restart")] {
+            let row = row_with_unplanned_cell_paragraph(merge);
+            assert!(splice_conflict(&row), "no conflict for cell merge {merge:?}");
+        }
+        let paragraph: crate::paragraph::Paragraph = serde_json::from_value(
+            serde_json::json!({"type": "paragraph", "sourceOrdinal": 7, "content": []}),
+        )
+        .unwrap();
+        let mut context = context();
+        context.begin_splice([1], None);
+        super::super::paragraph::serialize_paragraph(&paragraph, &mut context).unwrap();
+        assert!(context.end_splice().unwrap().conflict);
+    }
+
     #[test]
     fn row_grid_offsets_and_their_widths_survive_serialization() {
         let formatting = TableRowFormatting {
