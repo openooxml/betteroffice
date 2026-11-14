@@ -7,6 +7,7 @@ mod fmath;
 pub mod geometry;
 pub mod hit;
 pub mod number_format;
+mod picture;
 pub mod region;
 pub mod wrap;
 
@@ -26,7 +27,8 @@ use xlsx_model::styles::{BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{
-    CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId, VAlign, Workbook,
+    CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId, SheetPicture,
+    VAlign, Workbook,
 };
 
 pub use chart::{
@@ -35,7 +37,7 @@ pub use chart::{
     resolve_chart_anchor,
 };
 pub use display_list::{
-    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
+    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, ImageCrop,
     PathStroke, Rect, TextValign, TextWrap, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
@@ -650,6 +652,7 @@ where
 }
 
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_display_list_with_geometry<F, R>(
     wb: &Workbook,
     sheet: SheetId,
@@ -657,6 +660,7 @@ pub fn build_display_list_with_geometry<F, R>(
     ghosts: &[GhostEdit],
     geometry: &GridGeometry,
     max_cells: Option<u64>,
+    pictures: &[SheetPicture],
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
@@ -668,6 +672,7 @@ where
         sheet,
         viewport,
         ghosts,
+        pictures,
         resolver,
         None,
         Some(geometry),
@@ -720,6 +725,7 @@ where
         sheet,
         viewport,
         ghosts,
+        &[],
         resolver,
         print,
         geometry.as_ref(),
@@ -733,6 +739,7 @@ fn build_frame_with_geometry<F, R>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
     mut resolver: F,
     print: Option<(&PrintMetrics, bool)>,
     geometry: Option<&GridGeometry>,
@@ -1251,6 +1258,8 @@ where
     }
 
     let mut charts = Vec::new();
+    let mut pictures =
+        picture::PictureLayer::new(pictures, geom, &paint_viewport, frozen_rows, frozen_cols);
     chart::render_charts(
         sheet_ref,
         geom,
@@ -1260,7 +1269,9 @@ where
         &mut commands,
         &mut charts,
         &mut resolver,
+        &mut |chart, commands| pictures.paint_below(chart, commands),
     )?;
+    pictures.paint_rest(&mut commands);
 
     if let Some(x) = cols.divider {
         commands.push(DrawCmd::Line {

@@ -35,7 +35,8 @@ macro_rules! open_timing {
 pub use addr::{CellRange, CellRef, ColId, MAX_COLS, MAX_ROWS, RowId, SheetId};
 pub use chart::{
     AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, ChartAnchor, ChartEdit, ChartMetadata,
-    ChartRef, ChartRefKind, ChartSeriesInfo, ChartSeriesName, SheetChart,
+    ChartRef, ChartRefKind, ChartSeriesInfo, ChartSeriesName, PictureCrop, SheetChart,
+    SheetPicture,
 };
 pub use date::DateSystem;
 pub use rich_text::{RichRun, RunBaseline, RunStyle, RunUnderline};

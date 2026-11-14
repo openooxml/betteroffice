@@ -511,10 +511,32 @@ export interface NumberFormatLayout {
     general?: number;
     overflow?: boolean;
 }
+/** Fractions of an image discarded from each edge; absent edges are `0`. */
+export interface ImageCrop {
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+}
+/**
+ * A worksheet picture: the image part `assetId` names, its `crop` discarded and
+ * the rest stretched over the rect. The host supplies the image, for example
+ * from `XlsxDocument.mediaBytes(assetId)`.
+ */
+export interface ImageCmd {
+    op: 'image';
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    assetId: string;
+    crop?: ImageCrop;
+    clip?: Rect;
+}
 /**
  * One draw command; discriminated on `op`.
  */
-export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd;
+export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd | ImageCmd;
 /**
  * Grid metadata for the frame: which sheet cells the visible tracks map to and
  * their viewport-local pixel boundaries. `rowOffsets[i]`/`colOffsets[i]` is the
@@ -1210,7 +1232,7 @@ export * from './workerSession';
 export { WorkbookPeerHydrationError } from './session/peerHydrationError';
 /** @experimental */
 export { WorkbookEditPeerFailedError } from './session/editPeer';
-export type { Rect, TextAlign, FillRectCmd, PatternFillCmd, PatternType, LineCmd, GeometryPathCommand, PathStroke, PathCmd, TextCmd, TextWrap, DrawCmd, DisplayList, GridMeta, HyperlinkRegion, ChartRegion, ChartA11yAttrs, } from './display-list/types';
+export type { Rect, TextAlign, FillRectCmd, PatternFillCmd, PatternType, LineCmd, GeometryPathCommand, PathStroke, PathCmd, TextCmd, TextWrap, ImageCmd, ImageCrop, DrawCmd, DisplayList, GridMeta, HyperlinkRegion, ChartRegion, ChartA11yAttrs, } from './display-list/types';
 export type { TrackOffsets, ViewportState, VisibleRange, VisibleCells } from './viewport/index';
 export { trackCount, totalExtent, visibleRange, visibleCells, clampScroll, uniformOffsets, } from './viewport/index';
 export type { CellAddr, Selection, CellRange, Direction, SelectionLimits, SelectionData, SelectionHidden, SelectionMerges, MoveOpts, KeyInput, SelectionAction, } from './selection/index';
@@ -1223,6 +1245,7 @@ export { toTsv, fromTsv } from './clipboard/index';
 export type { A11yStrings, A11yCell, A11yChart, A11yColumnHeader, A11yRow, A11yGrid, } from './a11y/index';
 export { buildA11yGrid } from './a11y/index';
 export { paintDisplayList } from './render/canvas2d';
+export type { PaintOptions, PictureSource } from './render/canvas2d';
 export { initWasm, decodeFontFace, isWasmAvailable, isPngExportAvailable, isProposalsAvailable, openWorkbook, wasmVersion, StaleProposalError, DisplayTooLargeError, getDisplayListCellLimit, exportXlsxMarkdown, exportXlsxStructured, renderXlsxMarkdown, } from './wasm/loader';
 /** @internal */
 export { translateFormulasOn } from './wasm/loader';
@@ -1246,6 +1269,14 @@ export type { FontPreflight, FontPreflightFace } from './wasm/preflight';
  * no allocation of app state and no reads back from the canvas.
  */
 import type { DisplayList } from '../display-list/types';
+export type PictureSource = ImageBitmap | HTMLImageElement | HTMLCanvasElement | OffscreenCanvas;
+export interface PaintOptions {
+    /**
+     * The decoded image for an `image` command's `assetId`. Without one, or when
+     * it returns nothing, the picture is skipped.
+     */
+    resolveImage?: (assetId: string) => PictureSource | null | undefined;
+}
 /**
  * Paint a display list into a 2D context. `dpr` maps device-independent list
  * coordinates onto the backing store, so callers size the canvas at
@@ -1254,7 +1285,7 @@ import type { DisplayList } from '../display-list/types';
 export declare function paintDisplayList(ctx: CanvasRenderingContext2D, dl: DisplayList, dpr: number, origin?: {
     x: number;
     y: number;
-}): void;
+}, options?: PaintOptions): void;
 
 // ---- saveWarnings.d.ts ----
 export type { SaveResult, SaveWarning, SaveWarningCode } from '../../../shared/office-session/saveWarnings';
@@ -3613,6 +3644,10 @@ export class XlsxDocument {
      * the pending proposals: `{"proposals":[...]}`.
      */
     listProposalsJson(): string;
+    /**
+     * the encoded bytes of the image an `image` draw command names.
+     */
+    mediaBytes(asset_id: string): Uint8Array;
     mergedRangesJson(args: string): string;
     /**
      * slide a chart by a pixel delta as one undo step.
@@ -3811,6 +3846,7 @@ export interface InitOutput {
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listDefinedNamesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -4323,6 +4359,11 @@ export interface WorkbookHandle extends CollaborationReplica {
      * mutation the canvas has not drawn yet will move the answer off the pixels.
      */
     chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null;
+    /**
+     * the encoded bytes (PNG, JPEG, GIF, ...) of the image an `image` draw
+     * command names by `assetId`. throws for a part no picture draws.
+     */
+    mediaBytes(assetId: string): Uint8Array;
     /**
      * slide the chart frame `chart` names — a {@link ChartRegion} id — by a
      * content-pixel delta, clamped to the grid, as one undo step. the new anchor

@@ -56,6 +56,7 @@ export const xlsxdocument_findTextJson: (a: number, b: number, c: number) => [nu
 export const xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_listDefinedNamesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
+export const xlsxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
