@@ -2478,6 +2478,14 @@ test('remote_update_chunks_apply_in_order_as_one_remote_command', async () => {
   }
 });
 
+async function settle(call: Promise<PresentationCommandAck>): Promise<{ resolved: PresentationCommandAck } | { rejected: string }> {
+  try {
+    return { resolved: await call };
+  } catch (error) {
+    return { rejected: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 test('a confirmed key into a story whose slide a collaborator deleted is refused as a bad target', async () => {
   await wasm.initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
   const { PptxDocument: Document } = await import('../wasm/engine');
@@ -2498,8 +2506,10 @@ test('a confirmed key into a story whose slide a collaborator deleted is refused
     const applied = await rpc.call.command(envelope(state, 1,
       { kind: 'applyRemoteUpdate', payload: { ...input, undoGroup: 'remote', bytes: [update.slice().buffer] } }));
     expect(applied.outcomes).toEqual([expect.objectContaining({ seq: 1, status: 'applied', committed: true })]);
-    const refused = await rpc.call.command(envelope(applied, 2, insert(selection(removed), 'x')));
-    expect(refused.outcomes).toEqual([{ seq: 2, status: 'refused', reason: 'bad-target', committed: false }]);
+    const settled = await settle(rpc.call.command(envelope(applied, 2, insert(selection(removed), 'x'))));
+    expect(settled).toEqual({ resolved: expect.objectContaining({
+      outcomes: [{ seq: 2, status: 'refused', reason: 'bad-target', committed: false }] }) });
+    const refused = (settled as { resolved: PresentationCommandAck }).resolved;
     expect(refused.editState.readOnly).toBe(false);
     const typed = await rpc.call.command(envelope(refused, 3, insert(selection(live), 'y')));
     expect(typed.outcomes).toEqual([{ seq: 3, status: 'applied', committed: true }]);
@@ -2516,8 +2526,10 @@ test('a confirmed key into a story whose slide left the deck outside the command
     const [live, removed] = (await session.read()).stories;
     if (!live || !removed) throw new Error('Missing stories');
     session.handle().deleteSlide(removed.slideId);
-    const refused = await session.rpc.call.command(envelope(session.state, 1, insert(selection(removed), 'x')));
-    expect(refused.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'bad-target', committed: false }]);
+    const settled = await settle(session.rpc.call.command(envelope(session.state, 1, insert(selection(removed), 'x'))));
+    expect(settled).toEqual({ resolved: expect.objectContaining({
+      outcomes: [{ seq: 1, status: 'refused', reason: 'bad-target', committed: false }] }) });
+    const refused = (settled as { resolved: PresentationCommandAck }).resolved;
     expect(refused.editState.readOnly).toBe(false);
     const typed = await session.rpc.call.command(envelope(refused, 2, insert(selection(live), 'y')));
     expect(typed.outcomes).toEqual([{ seq: 2, status: 'applied', committed: true }]);
@@ -2538,9 +2550,11 @@ test('a queued key after deleting its own slide is refused as a bad target', asy
     const deleted = await session.rpc.call.command(envelope(selected, 3,
       { kind: 'invoke', payload: { ...input, method: 'deleteSlide', args: [removed.slideId] } }));
     expect(deleted.outcomes[0]).toMatchObject({ seq: 3, status: 'applied', committed: true });
-    const queued = await session.rpc.call.command(envelope(deleted, 4,
-      { kind: 'insertText', payload: { ...input, at: { source: 'afterSeq', seq: 3 }, text: 'x' } }, undefined, 3));
-    expect(queued.outcomes).toEqual([{ seq: 4, status: 'refused', reason: 'bad-target', committed: false }]);
+    const settled = await settle(session.rpc.call.command(envelope(deleted, 4,
+      { kind: 'insertText', payload: { ...input, at: { source: 'afterSeq', seq: 3 }, text: 'x' } }, undefined, 3)));
+    expect(settled).toEqual({ resolved: expect.objectContaining({
+      outcomes: [{ seq: 4, status: 'refused', reason: 'bad-target', committed: false }] }) });
+    const queued = (settled as { resolved: PresentationCommandAck }).resolved;
     expect(queued.editState.readOnly).toBe(false);
     const typed = await session.rpc.call.command(envelope(queued, 5, insert(selection(live), 'y')));
     expect(typed.outcomes).toEqual([{ seq: 5, status: 'applied', committed: true }]);
@@ -2578,8 +2592,10 @@ for (const [name, intent] of deadStoryCommands) {
       const applied = await rpc.call.command(envelope(state, 1,
         { kind: 'applyRemoteUpdate', payload: { ...input, undoGroup: 'remote', bytes: [update.slice().buffer] } }));
       expect(applied.outcomes).toEqual([expect.objectContaining({ seq: 1, status: 'applied', committed: true })]);
-      const refused = await rpc.call.command(envelope(applied, 2, intent(removed)));
-      expect(refused.outcomes).toEqual([{ seq: 2, status: 'refused', reason: 'bad-target', committed: false }]);
+      const settled = await settle(rpc.call.command(envelope(applied, 2, intent(removed))));
+      expect(settled).toEqual({ resolved: expect.objectContaining({
+        outcomes: [{ seq: 2, status: 'refused', reason: 'bad-target', committed: false }] }) });
+      const refused = (settled as { resolved: PresentationCommandAck }).resolved;
       expect(refused.editState.readOnly).toBe(false);
       const typed = await rpc.call.command(envelope(refused, 3, insert(selection(live), 'y')));
       expect(typed.outcomes).toEqual([{ seq: 3, status: 'applied', committed: true }]);
@@ -2596,8 +2612,10 @@ for (const [name, intent] of deadStoryCommands) {
       const [live, removed] = (await session.read()).stories;
       if (!live || !removed) throw new Error('Missing stories');
       session.handle().deleteSlide(removed.slideId);
-      const refused = await session.rpc.call.command(envelope(session.state, 1, intent(removed)));
-      expect(refused.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'bad-target', committed: false }]);
+      const settled = await settle(session.rpc.call.command(envelope(session.state, 1, intent(removed))));
+      expect(settled).toEqual({ resolved: expect.objectContaining({
+        outcomes: [{ seq: 1, status: 'refused', reason: 'bad-target', committed: false }] }) });
+      const refused = (settled as { resolved: PresentationCommandAck }).resolved;
       expect(refused.editState.readOnly).toBe(false);
       const typed = await session.rpc.call.command(envelope(refused, 2, insert(selection(live), 'y')));
       expect(typed.outcomes).toEqual([{ seq: 2, status: 'applied', committed: true }]);
