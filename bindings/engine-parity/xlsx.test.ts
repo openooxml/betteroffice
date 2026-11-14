@@ -166,6 +166,7 @@ const ADOPTED = '0123456789abcdef0123456789abcdef-7';
 const otherEngine = (engine: XlsxEngine) => (engine === wasmEngine ? nativeEngine : wasmEngine);
 const hydratedReads = (doc: Doc) => [doc.sheetInfoJson(), doc.readCellsJson(json({ ranges: [at('A1:C5')] })), doc.documentVersion()];
 const hydrationNonce = (doc: Doc) => (JSON.parse(doc.peerHydrationJson()) as { workbook: { version_nonce: string } }).workbook.version_nonce;
+const hydratedState = (doc: Doc) => [...hydratedReads(doc), doc.peerHydrationJson()];
 const fontFixture = (name: string) => new Uint8Array(readFileSync(new URL(`../../crates/betteroffice-fonts/tests/fixtures/${name}`, import.meta.url)));
 const drainAll = (doc: Doc) => {
   const events: Uint8Array[] = [];
@@ -308,7 +309,7 @@ const rebuild = (engine: XlsxEngine, chunks: Uint8Array[]) => {
     const pushed = chunks.map((chunk) => builder.push(chunk));
     const advanced = advanceUntilReady(builder);
     consumed = true;
-    return { pushed, advanced, reads: scoped(builder.finish(), hydratedReads) };
+    return { pushed, advanced, reads: scoped(builder.finish(), hydratedState) };
   } finally {
     if (!consumed) builder.free();
   }
@@ -465,14 +466,14 @@ const rows: Row<Xlsx>[] = [
   defineRow({
     method: 'XlsxDocument.openWithPeerHydrationJson',
     setup: ({ doc }: Xlsx) => doc.peerHydrationJson(),
-    call: ({ engine }, hydration) => scoped(engine.XlsxDocument.openWithPeerHydrationJson(fixture, hydration), hydratedReads),
+    call: ({ engine }, hydration) => scoped(engine.XlsxDocument.openWithPeerHydrationJson(fixture, hydration), hydratedState),
   }),
   {
     method: 'XlsxDocument.openWithPeerHydrationJson',
     name: 'XlsxDocument.openWithPeerHydrationJson (hydration from the other engine)',
     call: ({ engine }) => {
-      const hydration = scoped(otherEngine(engine).XlsxDocument.openWithCalculationJson(fixture, CONTEXT), (d) => d.peerHydrationJson());
-      return scoped(engine.XlsxDocument.openWithPeerHydrationJson(fixture, hydration), (d) => withoutNonce(d, hydratedReads(d)));
+      const { hydration, nonce } = scoped(otherEngine(engine).XlsxDocument.openWithCalculationJson(fixture, CONTEXT), (d) => ({ hydration: d.peerHydrationJson(), nonce: hydrationNonce(d) }));
+      return scoped(engine.XlsxDocument.openWithPeerHydrationJson(fixture, hydration), (d) => hydratedState(d).map((value) => generatedTokens(value, [nonce])));
     },
   },
   {
