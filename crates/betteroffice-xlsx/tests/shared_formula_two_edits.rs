@@ -958,7 +958,10 @@ fn shared_formulas_keep_their_formula_after_structural_edits() {
         }
         println!(
             "\nGRID tail={} cases={} failed={} skipped={}",
-            span.name(), tally.cases, tally.failed, tally.skipped
+            span.name(),
+            tally.cases,
+            tally.failed,
+            tally.skipped
         );
         grid.add(&tally);
 
@@ -980,7 +983,10 @@ fn shared_formulas_keep_their_formula_after_structural_edits() {
         }
         println!(
             "\nTRIPLES tail={} cases={} failed={} skipped={}",
-            span.name(), tally.cases, tally.failed, tally.skipped
+            span.name(),
+            tally.cases,
+            tally.failed,
+            tally.skipped
         );
         triples.add(&tally);
     }
