@@ -792,14 +792,6 @@ const HEX_DIGEST = /^[0-9a-f]{16}$/;
 
 interface MediaSourcesWire { key: string[]; parts: [string, number][] }
 
-function mediaSourcesShape({ key, parts, ...rest }: MediaSourcesWire) {
-  return {
-    ...rest,
-    key: key.map((half) => HEX_DIGEST.test(half)),
-    parts: parts.map(([digest, ...entry]) => [HEX_DIGEST.test(digest), ...entry]),
-  };
-}
-
 const engineName = (engine: DocxEngine) => (engine === wasmEngine ? 'wasm' : 'native');
 
 function measuredSources(engine: DocxEngine, sources: MediaSourcesWire, other: MediaSourcesWire) {
@@ -2650,16 +2642,17 @@ const rows: Row<Docx>[] = [
       const reopened = JSON.parse(again.media_sources_json()) as MediaSourcesWire;
       const [first, second] = [sources.parts[0]![0], reopened.parts[0]?.[0]];
       console.log(`MEDIA-DIGEST-PROBE ${engineName(engine)} ${first} ${String(second)} same=${first === second}`);
-      if (first === second) throw new Error(`two openings drew the same media digest ${first}`);
-      const shape = mediaSourcesShape(sources);
-      if (JSON.stringify(mediaSourcesShape(reopened)) !== JSON.stringify(shape)) throw new Error(`a second opening changed the media sources beyond their digests: ${json} then ${again.media_sources_json()}`);
+      if (second === undefined || first === second) throw new Error(`two openings drew the same media digest ${first} and ${String(second)}`);
+      const shape = measuredSources(engine, sources, reopened);
+      const reshape = measuredSources(engine, reopened, sources);
+      if (JSON.stringify(reshape) !== JSON.stringify(shape)) throw new Error(`a second opening changed the media sources beyond their drawn values: ${json} then ${again.media_sources_json()}`);
       const reader = fresh();
       reader.load_media_sources(json);
       if (reader.media_sources_json() !== json) throw new Error(`the loaded media sources read back as ${reader.media_sources_json()}, not ${json}`);
       return {
         unseeded,
         ...shape,
-        reopened: mediaSourcesShape(reopened),
+        reopened: reshape,
         reloaded: reader.media_sources_json() === json,
       };
     },
