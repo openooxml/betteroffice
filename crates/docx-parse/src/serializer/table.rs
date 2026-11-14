@@ -845,9 +845,10 @@ mod tests {
     }
 
     fn row_with_unplanned_cell_paragraph(merge: Option<&str>) -> TableRow {
-        let formatting = merge.map_or(serde_json::Value::Null, |merge| {
-            serde_json::json!({"vMerge": merge})
-        });
+        let formatting = merge.map_or(
+            serde_json::Value::Null,
+            |merge| serde_json::json!({"vMerge": merge}),
+        );
         serde_json::from_value(serde_json::json!({
             "type": "tableRow",
             "cells": [
@@ -882,7 +883,10 @@ mod tests {
     fn an_unplanned_paragraph_outside_a_continuation_cell_still_conflicts() {
         for merge in [None, Some("restart")] {
             let row = row_with_unplanned_cell_paragraph(merge);
-            assert!(splice_conflict(&row), "no conflict for cell merge {merge:?}");
+            assert!(
+                splice_conflict(&row),
+                "no conflict for cell merge {merge:?}"
+            );
         }
         let paragraph: crate::paragraph::Paragraph = serde_json::from_value(
             serde_json::json!({"type": "paragraph", "sourceOrdinal": 7, "content": []}),

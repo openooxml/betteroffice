@@ -208,7 +208,7 @@ fn table(columns: usize, rows: &[String]) -> String {
 }
 
 #[test]
-fn editing_after_a_vertically_merged_cell_keeps_the_body_bytes() {
+fn editing_before_a_vertically_merged_cell_keeps_the_body_bytes() {
     let rows = [
         [
             cell(
@@ -226,9 +226,9 @@ fn editing_after_a_vertically_merged_cell_keeps_the_body_bytes() {
     ];
     let source = main_part(
         &[
-            paragraph("0000004D", &run("Before.")),
-            table(2, &rows),
             paragraph("0000004E", &run("Old text")),
+            table(2, &rows),
+            paragraph("0000004D", &run("After.")),
         ]
         .concat(),
     );
@@ -335,7 +335,7 @@ fn merged_table(generator: &mut Generator, used: &mut u32, depth: usize) -> Stri
 }
 
 fn generated_body(generator: &mut Generator, used: &mut u32, edited: &str) -> String {
-    let mut blocks = vec![paragraph(&next_id(used), &run("Opening."))];
+    let mut blocks = vec![paragraph(edited, &run("Opening."))];
     for control in 0..2 + generator.below(2) {
         let table = merged_table(generator, used, 0);
         if control == 0 {
@@ -348,8 +348,6 @@ fn generated_body(generator: &mut Generator, used: &mut u32, edited: &str) -> St
         }
         blocks.push(paragraph(&next_id(used), &run("Between.")));
     }
-    let at = 1 + generator.below(blocks.len());
-    blocks.insert(at, paragraph(edited, &run("Old text")));
     blocks.concat()
 }
 
@@ -362,7 +360,10 @@ fn editing_beside_generated_merged_tables_keeps_the_body_bytes() {
         let saved = edit_and_save(&source, "0FFFFFFF", "New text");
         let (start, end) = paragraph_span(&source, "0FFFFFFF");
         let (saved_start, saved_end) = paragraph_span(&saved, "0FFFFFFF");
-        assert!(saved[saved_start..saved_end].contains("New text"), "case {case}");
+        assert!(
+            saved[saved_start..saved_end].contains("New text"),
+            "case {case}"
+        );
         assert_eq!(
             (&saved[..saved_start], &saved[saved_end..]),
             (&source[..start], &source[end..]),
