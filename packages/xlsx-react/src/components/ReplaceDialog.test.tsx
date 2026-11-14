@@ -809,6 +809,141 @@ test('closing the dialog with a find in flight shows and selects no match on reo
   expect(queryByText('Checking…')).toBeNull();
 });
 
+type Gated = 'version' | 'validate';
+type Change = 'query' | 'target' | 'sheet' | 'scope' | 'close';
+
+const sheetTarget: ReplaceDialogTarget = {
+  ...target,
+  defaultScope: 'sheet',
+  sheets: [
+    { sheetId: 'sheet:0', name: 'Data' },
+    { sheetId: 'sheet:1', name: 'Summary' },
+  ],
+};
+
+function gated() {
+  const revealed: string[] = [];
+  const applied: XlsxEditRequest[] = [];
+  const skips: Record<Gated, number> = { version: -1, validate: -1 };
+  const pending: Record<Gated, (() => void)[]> = { version: [], validate: [] };
+  const answer = <T,>(call: Gated, value: T): T | Promise<T> => {
+    if (skips[call] < 0) return value;
+    if (skips[call] > 0) {
+      skips[call] -= 1;
+      return value;
+    }
+    skips[call] = -1;
+    return new Promise<T>((resolve) => { pending[call].push(() => resolve(value)); });
+  };
+  const api: ReplaceDialogApi = {
+    version: () => answer('version', 'v1'),
+    find: () => ({
+      ok: true, version: 'v1', truncated: false,
+      matches: [foundAt(1, 1, 'B2'), foundAt(2, 2, 'C3')],
+    }),
+    reveal: (cell) => { revealed.push(cell.a1); },
+    validate: () => answer('validate', preview()),
+    apply: (request) => { applied.push(request); return applySuccess(request); },
+  };
+  const hold = (call: Gated, skip = 0) => { skips[call] = skip; };
+  const paused = (call: Gated) => waitFor(() => expect(pending[call].length).toBe(1));
+  const resume = (call: Gated) => act(async () => {
+    pending[call][0]();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  return { api, revealed, applied, hold, paused, resume };
+}
+
+function gatedDialog(start: ReplaceDialogTarget = target) {
+  const gate = gated();
+  const ui = render(dialog(gate.api, start));
+  const findInput = ui.getByRole('textbox', { name: 'Find' }) as HTMLInputElement;
+  type(findInput, 'alpha');
+  type(ui.getByRole('textbox', { name: 'Replace with' }) as HTMLInputElement, 'beta');
+  const click = async (name: string) => {
+    const button = ui.getByRole('button', { name }) as HTMLButtonElement;
+    await waitFor(() => expect(button.disabled).toBe(false));
+    fireEvent.click(button);
+  };
+  const change = (kind: Change) => {
+    if (kind === 'query') {
+      type(findInput, 'gamma');
+    } else if (kind === 'target') {
+      ui.rerender(dialog(gate.api, {
+        ...start, label: 'B1:D10',
+        range: { kind: 'rowCol', start: { row: 0, col: 1 }, end: { row: 9, col: 3 } },
+      }));
+    } else if (kind === 'sheet') {
+      ui.rerender(dialog(gate.api, { ...start, sheetId: 'sheet:1' }));
+    } else if (kind === 'scope') {
+      const select = ui.getByRole('combobox', { name: 'Search in' }) as HTMLSelectElement;
+      fireEvent.change(select, { target: { value: select.value === 'workbook' ? 'sheet' : 'workbook' } });
+    } else {
+      ui.rerender(dialog(gate.api, start, false));
+    }
+  };
+  return { ...gate, click, change, queryByText: ui.queryByText };
+}
+
+for (const kind of ['query', 'close'] as const) {
+  test(`a cached find answered after a ${kind} change reveals no match`, async () => {
+    const run = gatedDialog();
+    await run.click('Find next');
+    await waitFor(() => expect(run.revealed).toEqual(['B2']));
+    run.hold('version');
+    await run.click('Find next');
+    await run.paused('version');
+    run.change(kind);
+    await run.resume('version');
+
+    expect(run.revealed).toEqual(['B2']);
+  });
+}
+
+for (const [kind, start] of [['scope', sheetTarget], ['sheet', sheetTarget], ['target', target]] as const) {
+  test(`a fresh find answered after a ${kind} change reveals no match`, async () => {
+    const run = gatedDialog(start);
+    run.hold('version');
+    await run.click('Find next');
+    await run.paused('version');
+    run.change(kind);
+    await run.resume('version');
+
+    expect(run.revealed).toEqual([]);
+    expect(run.queryByText('1 of 2')).toBeNull();
+  });
+}
+
+for (const [call, phase] of [['version', 'reads the version'], ['validate', 'validates']] as const) {
+  for (const kind of ['query', 'target', 'close'] as const) {
+    test(`Replace edits nothing when a ${kind} change lands while it ${phase}`, async () => {
+      const run = gatedDialog();
+      await run.click('Find next');
+      await waitFor(() => expect(run.revealed).toEqual(['B2']));
+      run.hold(call, call === 'version' ? 1 : 0);
+      await run.click('Replace');
+      await run.paused(call);
+      run.change(kind);
+      await run.resume(call);
+
+      expect(run.applied).toEqual([]);
+    });
+  }
+
+  for (const kind of ['query', 'scope', 'close'] as const) {
+    test(`Replace all edits nothing when a ${kind} change lands while it ${phase}`, async () => {
+      const run = gatedDialog();
+      run.hold(call);
+      await run.click('Replace all');
+      await run.paused(call);
+      run.change(kind);
+      await run.resume(call);
+
+      expect(run.applied).toEqual([]);
+    });
+  }
+}
+
 test('workbook replace all over one visible and 128 hidden sheets stays within the step limit', async () => {
   const validated: XlsxEditRequest[] = [];
   const applied: XlsxEditRequest[] = [];

@@ -3,6 +3,7 @@ use betteroffice_xlsx::{
     ReplaceStats, Sheet, SheetId, Workbook, WorkbookModel,
 };
 use serde_json::{Value, json};
+use std::time::Instant;
 use xlsx_model::{CellRange, Protection, Xf};
 
 const SHEET: &str = "sheet:0";
@@ -904,6 +905,93 @@ fn replace_refuses_plain_text_equal_to_a_rich_shared_string_after_a_remote_repla
     replay_a_peer_edit_from(&mut workbook, &source);
     assert_eq!(stored(&workbook, "C1"), text("alpha beta"));
     assert_rich_text_cell_refused(&mut workbook);
+}
+
+fn rich_runs(first: &str, second: &str) -> String {
+    format!(
+        r#"<r><rPr><rFont val="Arial"/><b/></rPr><t>{first}</t></r><r><rPr><rFont val="Courier New"/><i/></rPr><t xml:space="preserve">{second}</t></r>"#
+    )
+}
+
+fn two_rich_sheets_source(first: &str, second: &str, strings: Option<String>) -> Vec<u8> {
+    let model = WorkbookModel {
+        sheets: vec![Sheet::new("Sheet1"), Sheet::new("Sheet2")],
+        ..WorkbookModel::default()
+    };
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    for (path, xml) in [
+        ("xl/worksheets/sheet1.xml", first),
+        ("xl/worksheets/sheet2.xml", second),
+    ] {
+        let sheet = parts.iter_mut().find(|(name, _)| name == path).unwrap();
+        sheet.1 = format!("<worksheet><sheetData>{xml}</sheetData></worksheet>").into_bytes();
+    }
+    if let Some(strings) = strings {
+        let strings = format!("<sst>{strings}</sst>").into_bytes();
+        match parts
+            .iter_mut()
+            .find(|(path, _)| path == "xl/sharedStrings.xml")
+        {
+            Some(part) => part.1 = strings,
+            None => parts.push(("xl/sharedStrings.xml".into(), strings)),
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn replace_refuses_plain_text_equal_to_a_rich_inline_string_on_another_sheet_after_a_remote_replay() {
+    let rich = rich_runs("alpha", " beta");
+    let source = two_rich_sheets_source(
+        r#"<row r="1"><c r="A1" t="inlineStr"><is><t>alpha beta</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>alpha</t></is></c></row>"#,
+        &format!(r#"<row r="1"><c r="A1" t="inlineStr"><is>{rich}</is></c></row>"#),
+        None,
+    );
+    let mut workbook = Workbook::open_collaborative(&source, 310).unwrap();
+    replay_a_peer_edit_from(&mut workbook, &source);
+    assert_eq!(stored_on(&workbook, SheetId(1), "A1"), text("alpha beta"));
+    assert_rich_text_cell_refused(&mut workbook);
+    assert_eq!(stored_on(&workbook, SheetId(1), "A1"), text("alpha beta"));
+}
+
+#[test]
+#[ignore]
+fn replace_all_cost_10000_plain_cells_1000_rich_strings_after_a_remote_replay() {
+    let mut plain = String::new();
+    for row in 1..=10_000 {
+        plain.push_str(&format!(
+            r#"<row r="{row}"><c r="A{row}" t="inlineStr"><is><t>alpha {row}</t></is></c></row>"#
+        ));
+    }
+    let mut rich = String::new();
+    let mut strings = String::new();
+    for row in 1..=500 {
+        let inline = rich_runs(&format!("inline {row}"), " rich");
+        let index = row - 1;
+        rich.push_str(&format!(
+            r#"<row r="{row}"><c r="A{row}" t="inlineStr"><is>{inline}</is></c><c r="B{row}" t="s"><v>{index}</v></c></row>"#
+        ));
+        let shared = rich_runs(&format!("shared {row}"), " rich");
+        strings.push_str(&format!("<si>{shared}</si>"));
+    }
+    let source = two_rich_sheets_source(&plain, &rich, Some(strings));
+    let mut workbook = Workbook::open_collaborative(&source, 311).unwrap();
+    replay_a_peer_edit_from(&mut workbook, &source);
+
+    let started = Instant::now();
+    let outcome = apply(&mut workbook, whole_sheet_replace(SHEET, "alpha", "omega"))
+        .expect("replace all applies");
+    println!(
+        "COST replace_all 10000 cells 1000 rich: {} ms",
+        started.elapsed().as_millis()
+    );
+    let stats = outcome.receipts[0].replace.clone().unwrap();
+    assert!(stats.matched <= 10_000, "{}", stats.matched);
+    assert!(
+        stats.replaced > 0 && stats.replaced <= stats.matched,
+        "{}",
+        stats.replaced
+    );
 }
 
 fn number_workbook() -> Workbook {
