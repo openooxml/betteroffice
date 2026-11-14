@@ -350,8 +350,8 @@ function regionRequest() {
   };
 }
 
-function layoutInput(session: Session) {
-  const { font, request } = layoutRequest(session);
+function layoutInput(session: Session, request: { measurement: { fontChains: Record<string, number[]> } } = regionRequest()) {
+  const font = session.register_measure_font(fontBytes);
   const fontChains = request.measurement.fontChains;
   for (const { key } of JSON.parse(session.layout_font_requirements_json(JSON.stringify(request))) as { key: string }[]) fontChains[key] = [font];
   return { input: JSON.stringify(request), fontChains };
@@ -1934,7 +1934,10 @@ const rows: Row<Docx>[] = [
   },
   defineRow({
     method: 'EditSession.retained_headers_footers_json',
-    setup: ({ session: s }: Docx) => layoutInput(s).input,
+    setup: ({ session: s }: Docx) => {
+      const base = regionRequest();
+      return layoutInput(s, { ...base, regions: { sections: [{ ...base.regions.sections[0], headerFooterRefs: { headerDefault: 'rIdHeader' } }] } }).input;
+    },
     call: ({ session: s }, input) => {
       const before = s.retained_headers_footers_json();
       s.layout_document_with_regions_retained(input);
