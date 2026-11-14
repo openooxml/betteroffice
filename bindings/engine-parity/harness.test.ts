@@ -52,4 +52,14 @@ describe('throws row with a declared message', () => {
     await expect(runRow(row, fakeEngine, fakeEngine)).resolves.toBeUndefined();
     await expect(runRow(row, fakeEngine, fakeEngine)).resolves.toBeUndefined();
   });
+
+  test('fails when a sticky pattern matches only past the start of the message', async () => {
+    const row = throwingRow(/out of range/y, 'row index out of range: 7');
+    await expect(runRow(row, fakeEngine, fakeEngine)).rejects.toThrow();
+  });
+
+  test('passes when a sticky pattern matches at the start of the message', async () => {
+    const row = throwingRow(/row index/y, 'row index out of range: 7');
+    await expect(runRow(row, fakeEngine, fakeEngine)).resolves.toBeUndefined();
+  });
 });
