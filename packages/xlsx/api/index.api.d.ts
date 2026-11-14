@@ -529,12 +529,25 @@ export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd
 export interface GridMeta {
     startRow: number;
     startCol: number;
+    /** Leading tracks pinned by a frozen pane; absent when nothing is frozen. */
+    frozenRows?: number;
+    frozenCols?: number;
+    /** Viewport-pixel freeze line on each axis; absent when there is no split. */
+    dividerX?: number;
+    dividerY?: number;
     hiddenRowSpans?: [number, number][];
     hiddenColSpans?: [number, number][];
     rowIndices?: number[];
     colIndices?: number[];
     rowOffsets: number[];
     colOffsets: number[];
+    /**
+     * Full track sizes parallel to `rowOffsets`/`colOffsets`: the sheet-px extent
+     * of each visible track, independent of scroll and of a frozen pane clipping
+     * its leading edge. Absent on lists that predate the field.
+     */
+    rowSizes?: number[];
+    colSizes?: number[];
 }
 export interface HyperlinkRegion {
     top: number;
@@ -692,6 +705,28 @@ export type XlsxEditOperation = {
     op: 'patchStyle';
     target: XlsxRangeTarget;
     patch: RangeStylePatch;
+} | {
+    /**
+     * Literal replacement in each cell's entered text inside `target`, case-insensitive
+     * unless `matchCase`; the result is entered as if typed, as `setCellInputs` does.
+     *
+     * `values` reports formula cells as skipped; `formulas` rewrites them too. Dates,
+     * booleans, errors, merged-follower, array-filled and locked cells are skipped; a rich
+     * text cell or an entry that would not parse is refused alone while the rest applies.
+     * Limit exhaustion refuses the whole batch. It takes no `expect` guards.
+     */
+    op: 'replaceText';
+    target: XlsxRangeTarget;
+    query: string;
+    replacement: string;
+    /** Match only a cell whose whole searched text equals `query`. */
+    entireCell?: boolean;
+    /** Defaults to `values`. */
+    lookIn?: 'values' | 'formulas';
+    /** Match letter case exactly. */
+    matchCase?: boolean;
+    /** Defaults to `sheet`. `workbook` skips a hidden, very hidden or non-worksheet target. */
+    within?: 'sheet' | 'workbook';
 };
 export type XlsxEditStep = XlsxEditOperation & {
     expect?: {
@@ -721,12 +756,35 @@ export interface XlsxEditRequest {
 export type XlsxEditFailureCode = 'stale-version' | 'missing-target' | 'content-mismatch' | 'overlapping-steps' | 'locked-target' | 'read-only' | 'unsupported' | 'invalid-step' | 'limit-exceeded';
 export type XlsxEditFailure = OperationFailure<XlsxEditFailureCode, XlsxRangeTarget>;
 export type XlsxEditRefusal = OperationRefusal<XlsxEditFailure>;
+/** Counts for one `replaceText` step; omitted for other operations. */
+export interface XlsxReplaceStats {
+    /** Cells whose searched text matched, including cells that could not be rewritten. */
+    matched: number;
+    /** Cells whose stored input changed. */
+    replaced: number;
+    /** Formula results that matched in `values` mode; their formulas are untouched. */
+    skippedFormulas: number;
+    /** Matches on merged followers, array fills or locked cells of a protected sheet. */
+    skippedLocked: number;
+    /** Dates, booleans and errors whose displayed or entered text matched; they are untouched. */
+    skippedValues?: number;
+    /** A1 references of the first skipped values, at most 10,000. */
+    skippedCells?: string[];
+    /** Matched cells left unchanged because their new entry cannot be stored, at most 10,000. */
+    refusedCells?: {
+        cell: string;
+        reason: string;
+    }[];
+    /** Every refused cell, including those past the `refusedCells` cap. */
+    refused?: number;
+}
 export interface XlsxEditReceipt {
     stepIndex: number;
     changed: boolean;
     target: XlsxRangeTarget;
     /** Row-major. */
     changedCells: XlsxCellAddress[];
+    replace?: XlsxReplaceStats;
 }
 /** What one step would do; it cannot be committed later. */
 export interface XlsxEditPreview {
@@ -734,6 +792,7 @@ export interface XlsxEditPreview {
     target: XlsxRangeTarget;
     wouldChange: boolean;
     changedCellCount: number;
+    replace?: XlsxReplaceStats;
 }
 export interface XlsxEditCalculation {
     /** Dependents whose value moved. */
@@ -780,6 +839,8 @@ export interface XlsxSheetEntry {
     /** Null means known absent or empty; omitted means source facts are unknown. */
     headerFooter?: XlsxSheetHeaderFooter | null;
     visibility?: XlsxSheetVisibility;
+    /** The source part's sheet type; `worksheet` for sheets without a source. */
+    kind?: 'worksheet' | 'chartsheet' | 'dialogsheet' | 'macrosheet' | 'other';
     sheetId: string;
     name: string;
     /**
@@ -824,11 +885,22 @@ export type XlsxReadResult = {
     ranges: XlsxRangeRead[];
     calculation: XlsxReadCalculation;
 } | XlsxEditRefusal;
-/** An exact, case-sensitive substring search over display text. */
+/** A literal substring search over display text, case-insensitive unless `matchCase`. */
 export interface XlsxFindRequest {
     text: string;
     /** Defaults to every sheet. */
     sheetIds?: readonly string[];
+    /** Restricts the search to one rectangle. Takes precedence over `sheetIds`. */
+    range?: XlsxRangeTarget;
+    /**
+     * Omit or pass `values` to search the display text of every stored cell; `formulas`
+     * searches the entered text the formula bar shows, which is what `replaceText` edits.
+     */
+    lookIn?: 'values' | 'formulas';
+    /** Match only cells whose whole searched text equals `text`. */
+    entireCell?: boolean;
+    /** Match letter case exactly. */
+    matchCase?: boolean;
     /** Defaults to 100; at most 10,000. */
     limit?: number;
 }
@@ -1155,7 +1227,7 @@ export { initWasm, decodeFontFace, isWasmAvailable, isPngExportAvailable, isProp
 /** @internal */
 export { translateFormulasOn } from './wasm/loader';
 export type { WasmInitInput, WasmInitOptions, OpenWorkbookOptions, WorkbookCalculationContext, Viewport, PrintMetrics, SheetInfo, WorkbookHandle, XlsxTextMatch, XlsxTextSearchOptions, WorkbookUpdateInfo, WorkbookUpdateListener, WorkbookUpdateOrigin, CellEdit, CellPosition, CellInputEdit, EditResult, EditProfile, ProfiledEditResult, DisplayListProfile, ProfiledDisplayList, CalculationStatus, UnevaluatedCellStatus, BorderPatch, BorderPreset, BorderStyle, CapturedFormat, CapturedColor, CapturedFill, CapturedBorderStyle, CapturedBorderEdge, CapturedCellFormat, CellPoint, ConditionalFormatInfo, XlsxAutoFilterOp, ConditionalFormatOp, ConditionalFormatRuleInput, DifferentialFormatInput, HistoryState, HorizontalAlignment, MergedRange, WorkbookHyperlink, NumberFormat, NumberFormatMutation, Proposal, ProposalCell, ProposalEdit, RangeStylePatch, SelectionFormatting, StaleProposalTarget, StyleProperty, TextWrapping, VerticalAlignment, } from './wasm/loader';
-export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess, XlsxCellAddress, XlsxCellGuard, XlsxCellPosition, XlsxCellRead, XlsxCellValue, XlsxEditCalculation, XlsxEditFailure, XlsxEditFailureCode, XlsxEditHistory, XlsxEditOperation, XlsxEditPreview, XlsxEditReceipt, XlsxEditRefusal, XlsxEditRequest, XlsxEditResult, XlsxEditSource, XlsxEditStep, XlsxErrorValue, XlsxFindMatch, XlsxFindRequest, XlsxFindResult, XlsxRangeAddress, XlsxRangeRead, XlsxRangeTarget, XlsxReadCalculation, XlsxReadRequest, XlsxUnevaluatedCell, XlsxReadResult, XlsxSheetEntry, XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter, XlsxValidationResult, } from './edits';
+export type { EditSuccess, OperationFailure, OperationRefusal, ValidationSuccess, XlsxCellAddress, XlsxCellGuard, XlsxCellPosition, XlsxCellRead, XlsxCellValue, XlsxEditCalculation, XlsxEditFailure, XlsxEditFailureCode, XlsxEditHistory, XlsxEditOperation, XlsxEditPreview, XlsxEditReceipt, XlsxEditRefusal, XlsxEditRequest, XlsxEditResult, XlsxEditSource, XlsxEditStep, XlsxErrorValue, XlsxFindMatch, XlsxFindRequest, XlsxFindResult, XlsxRangeAddress, XlsxRangeRead, XlsxRangeTarget, XlsxReadCalculation, XlsxReadRequest, XlsxReplaceStats, XlsxUnevaluatedCell, XlsxReadResult, XlsxSheetEntry, XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter, XlsxValidationResult, } from './edits';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, XlsxAnchor, XlsxExportCell, XlsxExportDefinedName, XlsxExportDiagnostic, XlsxExportDiagnosticCode, XlsxExportFailure, XlsxExportFailureCode, XlsxExportHyperlink, XlsxExportMerge, XlsxExportObject, XlsxExportOptions, XlsxExportResult, XlsxExportScope, XlsxExportSheet, XlsxExportTable, XlsxExportValue, XlsxFormulaResult, XlsxMarkdownContent, XlsxMarkdownOptions, XlsxObjectKind, XlsxSheetIdentity, XlsxSheetVisibility, XlsxSourcePart, XlsxStructuredContent, } from './exports';
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
 export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName, ChartResizeEdges } from './charts';
@@ -4375,7 +4447,7 @@ export interface WorkbookHandle extends CollaborationReplica {
     listDefinedNames(request?: XlsxDefinedNamesRequest): XlsxDefinedNamesResult;
     /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
     readCells(request: XlsxReadRequest): XlsxReadResult;
-    /** Exact, case-sensitive search over display text, one match per cell. */
+    /** Literal search over display text, one match per cell; ignores case unless `matchCase`. */
     findText(request: XlsxFindRequest): XlsxFindResult;
     /** Resolves, stages and rehearses a batch like `applyEdits`, changing nothing. */
     validateEdits(request: XlsxEditRequest): XlsxValidationResult;

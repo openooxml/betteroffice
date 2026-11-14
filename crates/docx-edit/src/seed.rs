@@ -7446,8 +7446,9 @@ pub(crate) fn seed_parsed_docx(
 /// generation, so its session anchors are its own; see
 /// [`EditingDoc::begin_opening`].
 pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     seed_stories(document, bytes)?;
-    document.begin_opening(None);
+    begin_seeded_opening(document, None, fresh_seed);
     Ok(())
 }
 
@@ -7458,9 +7459,19 @@ pub fn seed_from_docx_with_generation(
     bytes: &[u8],
     generation: &str,
 ) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     seed_stories(document, bytes)?;
-    document.begin_opening(Some(generation));
+    begin_seeded_opening(document, Some(generation), fresh_seed);
     Ok(())
+}
+
+/// Starts the opening and, when the stories were seeded into an empty replica,
+/// records them as a fresh seed of the retained package.
+fn begin_seeded_opening(document: &EditingDoc, generation: Option<&str>, fresh_seed: bool) {
+    document.begin_opening(generation);
+    if fresh_seed {
+        document.mark_seeded();
+    }
 }
 
 /// [`seed_from_docx`] from a parsed package of `bytes` with its images inline, and the parts `bytes` inflate to.
@@ -7606,6 +7617,7 @@ fn retain_referenced_body_stories(plans: &mut Vec<StoryPlan>) {
 /// stories, tokens in layout.
 #[cfg(test)]
 pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     let source = PackageBytes::from(bytes);
     let digest = package_digest(&source);
     let (envelope, parts, media) = parse_docx_package_with_media(source.clone(), digest.clone())?;
@@ -7621,7 +7633,7 @@ pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Re
         },
     )?;
     document.install_media(media);
-    document.begin_opening(None);
+    begin_seeded_opening(document, None, fresh_seed);
     Ok(())
 }
 

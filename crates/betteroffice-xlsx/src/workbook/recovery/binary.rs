@@ -628,6 +628,80 @@ impl Codec for Op {
                 w.u8(37);
                 tables.write(w);
             }
+            // appended after 37 so snapshots written before moves existed keep
+            // their tags; a move is a structural op and is replayed like one
+            Self::MoveCols {
+                sheet,
+                col,
+                count,
+                before,
+            } => {
+                w.u8(38);
+                sheet.write(w);
+                col.write(w);
+                count.write(w);
+                before.write(w);
+            }
+            Self::MoveRows {
+                sheet,
+                row,
+                count,
+                before,
+            } => {
+                w.u8(39);
+                sheet.write(w);
+                row.write(w);
+                count.write(w);
+                before.write(w);
+            }
+            // appended after the moves for the same reason: a range hides or
+            // reveals tracks the same way the single-track op does
+            Self::SetColsVisibility {
+                sheet,
+                col,
+                count,
+                hidden,
+            } => {
+                w.u8(40);
+                sheet.write(w);
+                col.write(w);
+                count.write(w);
+                hidden.write(w);
+            }
+            Self::SetRowsVisibility {
+                sheet,
+                row,
+                count,
+                hidden,
+            } => {
+                w.u8(41);
+                sheet.write(w);
+                row.write(w);
+                count.write(w);
+                hidden.write(w);
+            }
+            Self::RestoreArrayFormula {
+                sheet,
+                anchor,
+                spill,
+            } => {
+                w.u8(42);
+                sheet.write(w);
+                anchor.write(w);
+                spill.write(w);
+            }
+            // appended after the restore: a clip is its own absolute edit of
+            // an array rectangle, emitted by a track move's inverse
+            Self::ClipArrayFormula {
+                sheet,
+                anchor,
+                spill,
+            } => {
+                w.u8(43);
+                sheet.write(w);
+                anchor.write(w);
+                spill.write(w);
+            }
         }
     }
 
@@ -808,7 +882,46 @@ impl Codec for Op {
             37 => Self::SetTables {
                 tables: Codec::read(r)?,
             },
+            38 => Self::MoveCols {
+                sheet: Codec::read(r)?,
+                col: Codec::read(r)?,
+                count: Codec::read(r)?,
+                before: Codec::read(r)?,
+            },
+            39 => Self::MoveRows {
+                sheet: Codec::read(r)?,
+                row: Codec::read(r)?,
+                count: Codec::read(r)?,
+                before: Codec::read(r)?,
+            },
+            40 => available(Self::SetColsVisibility {
+                sheet: Codec::read(r)?,
+                col: Codec::read(r)?,
+                count: Codec::read(r)?,
+                hidden: Codec::read(r)?,
+            })?,
+            41 => available(Self::SetRowsVisibility {
+                sheet: Codec::read(r)?,
+                row: Codec::read(r)?,
+                count: Codec::read(r)?,
+                hidden: Codec::read(r)?,
+            })?,
+            42 => Self::RestoreArrayFormula {
+                sheet: Codec::read(r)?,
+                anchor: Codec::read(r)?,
+                spill: Codec::read(r)?,
+            },
+            43 => Self::ClipArrayFormula {
+                sheet: Codec::read(r)?,
+                anchor: Codec::read(r)?,
+                spill: Codec::read(r)?,
+            },
             _ => return Err(SnapshotError::new("invalid recovery Op")),
         })
     }
+}
+
+fn available(op: Op) -> SnapshotResult<Op> {
+    xlsx_ops::ensure_op_available(&op).map_err(|error| SnapshotError::new(error.to_string()))?;
+    Ok(op)
 }

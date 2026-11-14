@@ -62,6 +62,7 @@ export interface XlsxEditorBridge {
   fail(error: unknown): void;
   setZoom(scale: number): void;
   setProposalsPanelOpen(open: boolean): void;
+  setReplaceOpen?(open: boolean): void;
   setCapturedFormat(format: CapturedFormat | null, source: string | null): void;
   setBorderStyle(style: BorderStyle): void;
   setBorderColor(color: string): void;
@@ -375,6 +376,9 @@ export function useXlsxCommandBinding(
             return done();
           });
         }
+        case 'findReplace':
+          current.setReplaceOpen?.(true);
+          return done(false);
         case 'zoom':
           if (env.zoom === bound.scale) return done(false);
           current.setZoom(bound.scale);

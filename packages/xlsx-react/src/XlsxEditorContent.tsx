@@ -4,6 +4,14 @@ import {
   anchorSelection, clearedCells, copiedRange, mergeAnchorCell, selectionDataRequest, selectionHidden, selectionMerges,
   workbookSelectionMerges,
 } from './selectionData';
+import {
+  marqueeBox,
+  marqueeFills,
+  MARQUEE_COLOR,
+  MARQUEE_WIDTH,
+  ACTIVE_CELL_WIDTH,
+  SELECTION_FILL,
+} from './selectionOutline';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SetStateAction } from 'react';
 import {
@@ -50,8 +58,11 @@ import type {
   XlsxEditRefusal,
   XlsxEditRequest,
   XlsxEditResult,
+  XlsxFindResult,
+  XlsxValidationResult,
 } from '@betteroffice/xlsx';
 import type { AwarenessPeer, CollaborationReplica } from '@betteroffice/xlsx/collaboration';
+import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from './sheetLimits';
 import { CellClipboard, clipboardMarker, parseCellClipboardText, readCellClipboard } from './clipboard';
 import { chartResizeRect, chartResizeSpace, type ChartDragPreview, type SelectedChart } from './worker/chartResize';
 import { ChartResizeHandles } from './worker/ChartResizeHandles';
@@ -70,6 +81,9 @@ import {
   type InputDraft,
 } from './commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from './commands/pluginEvents';
+import { xlsxContextMenuSections, type XlsxContextFreezeTarget } from './contextMenu/menus';
+import { useContextMenu } from '../../../shared/react-toolbar/ContextMenu';
+import type { OverflowMenuEntry } from '../../../shared/react-toolbar/MenuList';
 import { useCommandShortcuts } from './commands/useCommandShortcuts';
 import { useSaveRequest } from './commands/useSaveRequest';
 import { useXlsxCommandBinding, type XlsxEditorBridge } from './commands/useXlsxCommands';
@@ -92,6 +106,9 @@ import {
   RemoteSelections,
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
+import {
+  ReplaceDialog, type ReplaceDialogApi, type ReplaceDialogTarget, withSheetCatalog,
+} from './components/ReplaceDialog';
 import { cellInViewport, coversWholeTrack, deriveLimits, extendScrollExtent, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
 import { cellEditorColors } from './viewer/cellEditorColors';
 import type {
@@ -117,6 +134,12 @@ import { WorkbookFailure } from './components/WorkbookFailure';
 import type { XlsxEditorApi, XlsxInThreadEditorProps, XlsxPointPosition } from './XlsxEditor.types';
 import { XlsxSaveRefusedError } from './XlsxSaveRefusedError';
 import { A11yGridTable } from './components/A11yGridCell';
+import {
+  COLUMN_HEADER_HEIGHT, SheetGrid, columnWidthFromPx, rowHeightFromPx,
+} from './components/SheetGrid';
+import type { SheetGridHeaderHandlers } from './components/SheetGrid';
+
+/** The model's own extent, which a whole-track selection spans. */
 
 function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
   return {
@@ -428,6 +451,7 @@ export function XlsxEditorContent({
   onReady,
   className,
   readOnly = false,
+  showSheetHeaders = false,
   fillHandle = false,
   allowHostProposals = false,
   defaultFonts,
@@ -568,6 +592,8 @@ export function XlsxEditorContent({
   const [proposals, setProposals, proposalsRef] = useSyncedState<Proposal[]>([]);
   const [proposalsPanelOpen, setProposalsPanelOpen, proposalsPanelOpenRef] =
     useSyncedState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [replaceTarget, setReplaceTarget] = useState<ReplaceDialogTarget | null>(null);
   const [collaborationReplica, setCollaborationReplica] =
     useState<CollaborationReplica | null>(null);
   const [awarenessPeers, setAwarenessPeers] = useState<readonly AwarenessPeer[]>([]);
@@ -1406,6 +1432,81 @@ export function XlsxEditorContent({
     [refreshProposals, cellClipboard, notifyDocumentChange]
   );
 
+  const applyReplaceResult = useCallback(
+    (result: XlsxEditResult) => {
+      const handle = handleRef.current;
+      if (!handle || !result.ok) return;
+      if (result.applied) {
+        cellClipboard.changed();
+        setRefusal(null);
+      }
+      mutationRef.current += 1;
+      setSheetInfo(handle.sheetInfo());
+      setRevision((r) => r + 1);
+      refreshProposals();
+      if (result.applied) {
+        notifyDocumentChange(handle);
+        onChangeRef.current?.();
+      }
+    },
+    [refreshProposals, cellClipboard, notifyDocumentChange]
+  );
+
+  const openReplaceDialog = useCallback(() => {
+    const handle = handleRef.current;
+    const sheetId = sheetInfo?.sheetIds[activeSheet];
+    const selected = selectionRef.current;
+    if (!handle || !sheetId || !selected) {
+      setReplaceTarget(null);
+      setReplaceOpen(true);
+      return;
+    }
+    const range = normalizeRange(selected);
+    const from = handle.cell(activeSheet, range.top, range.left).a1;
+    const to = handle.cell(activeSheet, range.bottom, range.right).a1;
+    setReplaceTarget({
+      sheetId,
+      range: {
+        kind: 'rowCol',
+        start: { row: range.top, col: range.left },
+        end: { row: range.bottom, col: range.right },
+      },
+      label: from === to ? from : `${from}:${to}`,
+      activeCell: { row: selected.anchor.row, col: selected.anchor.col },
+      sheets: withSheetCatalog(sheetInfo.sheetIds.map((id, index) => ({
+        sheetId: id,
+        name: sheetInfo.sheetNames[index] ?? id,
+      })), handle.readCells({ ranges: [] })),
+    });
+    setReplaceOpen(true);
+  }, [sheetInfo, activeSheet]);
+
+  const replaceApi = useMemo<ReplaceDialogApi>(() => ({
+    version: () => handleRef.current?.version() ?? '',
+    find: (request): XlsxFindResult => {
+      const handle = handleRef.current;
+      if (!handle) throw new Error('The editor is not ready.');
+      return handle.findText(request);
+    },
+    reveal: (cell) => {
+      const handle = handleRef.current;
+      if (!handle) return;
+      const sheet = handle.sheetInfo().sheetIds.indexOf(cell.sheetId);
+      if (sheet < 0) return;
+      selectCells(sheet, selectionAt({ row: cell.row, col: cell.col }));
+    },
+    validate: (request): XlsxValidationResult => {
+      const handle = handleRef.current;
+      if (!handle) throw new Error('The editor is not ready.');
+      return handle.validateEdits(request);
+    },
+    apply: (request): XlsxEditResult => {
+      const handle = handleRef.current;
+      if (!handle) throw new Error('The editor is not ready.');
+      return handle.applyEdits(request);
+    },
+  }), [selectCells]);
+
   // before a command runs, an arrow burst lands and a composition ends.
   inputHooksRef.current = {
     seal() {
@@ -2173,6 +2274,199 @@ export function XlsxEditorContent({
     return false;
   }, [commitEditor, commitFormula, coordinator]);
 
+  /**
+   * A press on a header label selects that whole track; shift extends from the
+   * anchor's track. It writes the selection directly instead of going through
+   * `setSelection`: that helper snaps anchors into merged cells, which would
+   * move the anchor off the pressed header and widen a later shift-extend, and
+   * the track's first cell is already on screen, so nothing should scroll.
+   */
+  const selectHeaderTrack = useCallback(
+    (axis: 'col' | 'row', index: number, mode: 'replace' | 'extend') => {
+      if (!handleRef.current) return;
+      const current = mode === 'extend' ? selectionRef.current : null;
+      if (mode === 'extend' && !current) return;
+      const anchor = current?.anchor ?? (axis === 'col' ? { row: 0, col: index } : { row: index, col: 0 });
+      const track = axis === 'col'
+        ? { top: 0, left: Math.min(anchor.col, index), bottom: XLSX_MAX_ROWS - 1,
+            right: Math.max(anchor.col, index) }
+        : { top: Math.min(anchor.row, index), left: 0,
+            bottom: Math.max(anchor.row, index), right: XLSX_MAX_COLUMNS - 1 };
+      const next: Selection = {
+        anchor,
+        focus: axis === 'col' ? { row: 0, col: index } : { row: index, col: 0 },
+        range: track,
+      };
+      if (!settlePendingEditsRef.current()) return;
+      setRawSelection(next);
+      setSelectedChart(null);
+      setCapturedFormat(null);
+    },
+    [setRawSelection, setSelectedChart, setCapturedFormat]
+  );
+
+  /**
+   * The corner above the row numbers selects the whole sheet: an explicit
+   * range, so the selection is the sheet's own extent rather than the painted
+   * window's, and a raw write so no merge snap moves the anchor.
+   */
+  const selectAll = useCallback(() => {
+    if (readOnlyRef.current) return;
+    if (!settlePendingEditsRef.current()) return;
+    setRawSelection({
+      anchor: { row: 0, col: 0 },
+      focus: { row: 0, col: 0 },
+      range: { top: 0, left: 0, bottom: XLSX_MAX_ROWS - 1, right: XLSX_MAX_COLUMNS - 1 },
+    });
+    setSelectedChart(null);
+    setCapturedFormat(null);
+  }, [setRawSelection, setSelectedChart, setCapturedFormat]);
+
+  /**
+   * Structural insert/delete for a header track. The batch joins the input
+   * FIFO so it lands after every clipboard read and edit accepted before it;
+   * with nothing queued it applies in the same turn as a cell edit.
+   */
+  const applyHeaderOps = useCallback(
+    (ops: unknown[]): void => {
+      const handle = handleRef.current;
+      if (!handle || readOnlyRef.current || editing) return;
+      void coordinator.input(() => {
+        if (handleRef.current !== handle || readOnlyRef.current) return;
+        try {
+          const result = handle.applyOps(ops);
+          if (result.applied) applyResult(result);
+        } catch (error) {
+          setError(error instanceof Error ? error.message : String(error));
+        }
+      });
+    },
+    [applyResult, editing, coordinator]
+  );
+
+  /** A committed boundary drag: resize the whole selected run, or one track. */
+  const resizeHeaderTrack = useCallback(
+    (axis: 'col' | 'row', index: number, size: number, run?: { at: number; count: number }) => {
+      if (run && ((axis === 'row' && run.count >= XLSX_MAX_ROWS) || (axis === 'col' && run.count >= XLSX_MAX_COLUMNS))) return;
+      const sheet = activeSheetRef.current;
+      // the drag is measured in pixels; the engine stores characters and points.
+      if (run) {
+        // one batch keeps a whole-run drag a single undo step.
+        applyHeaderOps(Array.from({ length: run.count }, (_, offset) => axis === 'col'
+          ? { type: 'setColWidth', sheet, col: run.at + offset, width: columnWidthFromPx(size) }
+          : { type: 'setRowHeight', sheet, row: run.at + offset, height: rowHeightFromPx(size) }));
+        return;
+      }
+      applyHeaderOps(axis === 'col'
+        ? [{ type: 'setColWidth', sheet, col: index, width: columnWidthFromPx(size) }]
+        : [{ type: 'setRowHeight', sheet, row: index, height: rowHeightFromPx(size) }]);
+    },
+    [applyHeaderOps]
+  );
+
+  const dropChart = useCallback(() => {
+    chartDragRef.current = null;
+    cancelChartResize();
+    setChartPreview(null);
+    setSelectedChart(null);
+  }, [cancelChartResize, setSelectedChart]);
+
+  const headerHandlers = useMemo<SheetGridHeaderHandlers>(() => ({
+    onHeaderPress: dropChart,
+    onHeaderMouseDown: (axis, index, event) => {
+      if (fromPlugin(event)) return;
+      if (readOnlyRef.current) return;
+      if (!settlePendingEditsRef.current()) return;
+      selectHeaderTrack(axis, index, event.shiftKey ? 'extend' : 'replace');
+      // the key listener sits on the scroller, and the bands are its siblings,
+      // so a press here leaves focus wherever it was and the next arrow goes
+      // nowhere. `preventScroll` keeps the pressed track where it is.
+      focusContainer();
+    },
+    // a drag from an unselected header extends from the anchor the press set;
+    // the press already settled any draft, so nothing settles again here.
+    onHeaderDragSelect: (axis, index) => {
+      if (readOnlyRef.current) return;
+      selectHeaderTrack(axis, index, 'extend');
+    },
+    onHeaderResize: resizeHeaderTrack,
+    onSelectAll: selectAll,
+  }), [dropChart, selectHeaderTrack, resizeHeaderTrack, selectAll, focusContainer]);
+
+  const headerMenu = useContextMenu({
+    // the bands are siblings of the scroller, so their contextmenu never
+    // reaches a listener bound to scrollRef; the editor root sees both.
+    surface: rootRef,
+    subscribe: commandController.store.subscribe,
+    resolve: (request) => {
+      if (readOnlyRef.current || inPluginChrome(request.target)) return null;
+      const band = request.target instanceof Element
+        ? request.target.closest<HTMLElement>('[data-testid="xlsx-column-headers"], [data-testid="xlsx-row-headers"]')
+        : null;
+      if (!band) return null;
+      const axis = band.dataset.testid === 'xlsx-column-headers' ? 'col' : 'row';
+      const track = request.target instanceof Element
+        ? request.target.closest<HTMLElement>('[data-col], [data-row]') : null;
+      const index = Number(axis === 'col' ? track?.dataset.col : track?.dataset.row);
+      if (!track || !Number.isInteger(index)) return null;
+      // select the pressed track so the visible selection matches the menu's target.
+      selectHeaderTrack(axis, index, 'replace');
+      const sheet = activeSheetRef.current;
+      const disabled = !handleRef.current || readOnlyRef.current || editing !== null;
+      // the command store has no insert/delete row or column commands, so the
+      // entries go straight to the header op helper.
+      const structural = (op: Record<string, unknown>) => () => { applyHeaderOps([op]); };
+      const entries: OverflowMenuEntry[] = axis === 'col' ? [
+        { kind: 'item', id: 'insertColumnsLeft', label: t('commands.insertColumnsLeft'), disabled,
+          onSelect: structural({ type: 'insertCols', sheet, at: index, count: 1 }) },
+        { kind: 'item', id: 'insertColumnsRight', label: t('commands.insertColumnsRight'), disabled,
+          onSelect: structural({ type: 'insertCols', sheet, at: index + 1, count: 1 }) },
+        { kind: 'item', id: 'deleteColumns', label: t('commands.deleteColumns'), disabled,
+          onSelect: structural({ type: 'deleteCols', sheet, at: index, count: 1 }) },
+      ] : [
+        { kind: 'item', id: 'insertRowsAbove', label: t('commands.insertRowsAbove'), disabled,
+          onSelect: structural({ type: 'insertRows', sheet, at: index, count: 1 }) },
+        { kind: 'item', id: 'insertRowsBelow', label: t('commands.insertRowsBelow'), disabled,
+          onSelect: structural({ type: 'insertRows', sheet, at: index + 1, count: 1 }) },
+        { kind: 'item', id: 'deleteRows', label: t('commands.deleteRows'), disabled,
+          onSelect: structural({ type: 'deleteRows', sheet, at: index, count: 1 }) },
+      ];
+      // freezing reads the frame the bands painted, so the split matches what
+      // the user sees rather than a request the editor has not drawn yet.
+      const painted = paintedRef.current;
+      if (painted?.sheet === sheet) {
+        const grid = painted.frame.grid;
+        const freeze: XlsxContextFreezeTarget = {
+          rows: grid?.frozenRows ?? 0,
+          cols: grid?.frozenCols ?? 0,
+          index,
+          apply: (frozenRows: number, frozenCols: number) => {
+            // the menu can outlive a navigation; only the painted sheet is safe.
+            if (paintedRef.current?.sheet !== activeSheetRef.current) return;
+            applyHeaderOps([{ type: 'setFreezePane', sheet,
+              pane: frozenRows === 0 && frozenCols === 0 ? null
+                : { rows: frozenRows, cols: frozenCols, top_left: { row: frozenRows, col: frozenCols } } }]);
+          },
+        };
+        // menus.ts owns the view section: freezing to the pressed header and
+        // clearing the split.
+        const view = xlsxContextMenuSections(
+          axis === 'col' ? 'columnHeader' : 'rowHeader',
+          commandController.store,
+          t,
+          freeze
+        ).find((section) => section.id === 'view');
+        if (view) entries.push(...view.entries.map((entry) =>
+          entry.kind === 'item' ? { ...entry, disabled } : entry));
+      }
+      return {
+        label: t(axis === 'col' ? 'editor.columnHeaderMenuLabel' : 'editor.rowHeaderMenuLabel'),
+        testId: axis === 'col' ? 'xlsx-column-header-menu' : 'xlsx-row-header-menu',
+        entries: () => entries,
+      };
+    },
+  });
+
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (fromPlugin(e)) return;
@@ -2383,7 +2677,7 @@ export function XlsxEditorContent({
 
   const grid = frame?.grid;
   const renderedSelection = selection
-    ? expandRangeToMergedCells(normalizeRange(selection), visibleMergedRanges)
+    ? expandRangeToMergedCells(normalizeRange(selection), visibleMergedRanges, showSheetHeaders)
     : null;
   const renderedFocus = selection
     ? expandRangeToMergedCells(
@@ -2408,6 +2702,11 @@ export function XlsxEditorContent({
     selectionBottomRight ? scaledRect(selectionBottomRight, zoom) : null
   );
   const scaledFocusRect = focusRect ? scaledRect(focusRect, zoom) : null;
+  const selectionMarquee = scaledSelectionRect ? marqueeBox(scaledSelectionRect) : null;
+  const focusMarquee = scaledFocusRect ? marqueeBox(scaledFocusRect, ACTIVE_CELL_WIDTH) : null;
+  const selectionFills = showSheetHeaders && scaledSelectionRect
+    ? marqueeFills(scaledSelectionRect, scaledFocusRect)
+    : [];
   const scaledEditRect = editRect ? scaledRect(editRect, zoom) : null;
   const editColors = editRect ? cellEditorColors(frameRef.current, editRect) : null;
 
@@ -2532,6 +2831,7 @@ export function XlsxEditorContent({
     fail: (cause) => setError(cause instanceof Error ? cause.message : String(cause)),
     setZoom,
     setProposalsPanelOpen,
+    setReplaceOpen: (open) => { if (open) openReplaceDialog(); else setReplaceOpen(false); },
     setCapturedFormat: (format, source) => {
       setCapturedFormat(format);
       paintSourceRef.current = source;
@@ -2701,6 +3001,14 @@ export function XlsxEditorContent({
       <div ref={dockAreaRef} data-testid="xlsx-workspace" style={workspaceStyles.workspace}>
         {renderDock('left')}
         <div style={workspaceStyles.center}>
+          <ReplaceDialog
+            open={replaceOpen}
+            target={replaceTarget}
+            api={replaceApi}
+            readOnly={readOnly}
+            onClose={() => setReplaceOpen(false)}
+            onApplied={applyReplaceResult}
+          />
           {proposalsAvailable && proposalsPanelOpen && (
             <ProposalsPanel
               proposals={proposals}
@@ -2719,9 +3027,14 @@ export function XlsxEditorContent({
               index={pluginHost.rowGutter}
               painted={pluginHost.painted}
               zoom={zoom}
+              top={showSheetHeaders ? COLUMN_HEADER_HEIGHT : 0}
             />
           )}
 
+          <SheetGrid frame={frame} zoom={zoom} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0}
+            showSheetHeaders={showSheetHeaders}
+            headerHandlers={headerHandlers} selection={selection} sheet={activeSheet}
+            selectAllLabel={t('commands.selectAll')}>
           <div
             ref={scrollRef}
             data-testid="xlsx-scroll"
@@ -2738,7 +3051,7 @@ export function XlsxEditorContent({
               overflow: 'auto',
               minHeight: 0,
               outline: 'none',
-              ...(pluginHost.rowGutter ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}),
+              ...(pluginHost.rowGutter && !showSheetHeaders ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}),
             }}
           >
             <div
@@ -2780,20 +3093,49 @@ export function XlsxEditorContent({
                   pointerEvents: 'none',
                 }}
               >
-                {scaledSelectionRect && !selectedChart && (
-                  <div
-                    data-testid="xlsx-selection"
-                    style={{
-                      position: 'absolute',
-                      left: scaledSelectionRect.x,
-                      top: scaledSelectionRect.y,
-                      width: scaledSelectionRect.w,
-                      height: scaledSelectionRect.h,
-                      boxSizing: 'border-box',
-                      border: `1px solid ${BRAND}`,
-                      background: 'rgba(33, 115, 70, 0.12)',
-                    }}
-                  />
+                {/* with headers, the marquee's edges snap to the same pixel grid
+                    as the header bands: the range ring is one pixel inside each
+                    boundary, the active-cell ring two pixels across it, and the
+                    wash stops at the active cell. */}
+                {scaledSelectionRect && selectionMarquee && !selectedChart && (
+                  <>
+                    {selectionFills.map((fill, index) => (
+                      <div
+                        key={index}
+                        data-testid="xlsx-selection-fill"
+                        style={{
+                          position: 'absolute',
+                          left: fill.x,
+                          top: fill.y,
+                          width: fill.w,
+                          height: fill.h,
+                          background: SELECTION_FILL,
+                          pointerEvents: 'none',
+                        }}
+                      />
+                    ))}
+                    <div
+                      data-testid="xlsx-selection"
+                      style={showSheetHeaders ? {
+                        position: 'absolute',
+                        left: selectionMarquee.left,
+                        top: selectionMarquee.top,
+                        width: selectionMarquee.width,
+                        height: selectionMarquee.height,
+                        boxShadow: `inset 0 0 0 ${MARQUEE_WIDTH}px ${MARQUEE_COLOR}`,
+                        pointerEvents: 'none',
+                      } : {
+                        position: 'absolute',
+                        left: scaledSelectionRect.x,
+                        top: scaledSelectionRect.y,
+                        width: scaledSelectionRect.w,
+                        height: scaledSelectionRect.h,
+                        boxSizing: 'border-box',
+                        border: `1px solid ${BRAND}`,
+                        background: 'rgba(33, 115, 70, 0.12)',
+                      }}
+                    />
+                  </>
                 )}
                 {fillHandle && !readOnly && !editing && !coordinator.draft && !selectedChart &&
                   fillHandleRect && renderedSelection && !coversWholeTrack(renderedSelection, limits()) && (
@@ -2838,9 +3180,18 @@ export function XlsxEditorContent({
                     }}
                     onNudge={nudgeChartResize} />
                 )}
-                {scaledFocusRect && !selectedChart && !editing && (
+                {scaledFocusRect && focusMarquee && !selectedChart && !editing && (
                   <div
-                    style={{
+                    data-testid={showSheetHeaders ? 'xlsx-active-cell' : undefined}
+                    style={showSheetHeaders ? {
+                      position: 'absolute',
+                      left: focusMarquee.left,
+                      top: focusMarquee.top,
+                      width: focusMarquee.width,
+                      height: focusMarquee.height,
+                      boxShadow: `inset 0 0 0 ${ACTIVE_CELL_WIDTH}px ${MARQUEE_COLOR}`,
+                      pointerEvents: 'none',
+                    } : {
                       position: 'absolute',
                       left: scaledFocusRect.x,
                       top: scaledFocusRect.y,
@@ -2914,6 +3265,7 @@ export function XlsxEditorContent({
               </div>
             </div>
           </div>
+          </SheetGrid>
           {renderDock('bottom')}
         </div>
         {renderDock('right')}
@@ -2987,6 +3339,7 @@ export function XlsxEditorContent({
           })}
         </div>
       )}
+      {headerMenu.element}
     </div>
   );
 

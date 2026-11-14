@@ -1,3 +1,8 @@
+#[cfg(any(
+    feature = "unstable-track-moves",
+    feature = "unstable-track-visibility"
+))]
+use betteroffice_xlsx::MAX_COLS;
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
@@ -13127,6 +13132,148 @@ fn hidden_custom_sizes_survive_bounded_workbook_snapshots() {
     assert_eq!(restored.model().sheets[0].row_heights.get(&0), Some(&30.0));
 }
 
+#[cfg(feature = "unstable-track-visibility")]
+#[test]
+fn a_visibility_range_hides_its_span_and_refuses_a_span_past_the_sheet() {
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(5, 21.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    let before = workbook.model().clone();
+    workbook
+        .apply_ops(
+            vec![Op::SetColsVisibility {
+                sheet: SheetId(0),
+                col: 4,
+                count: 4,
+                hidden: true,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        workbook.model().sheets[0].hidden_col_widths.get(&5),
+        Some(&21.0)
+    );
+    assert!(workbook.model().sheets[0].col_hidden(4));
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model(), &before);
+
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(MAX_COLS - 1, 12.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    for op in [
+        Op::SetColsVisibility {
+            sheet: SheetId(0),
+            col: MAX_COLS - 2,
+            count: 8,
+            hidden: true,
+        },
+        Op::SetRowsVisibility {
+            sheet: SheetId(0),
+            row: MAX_ROWS - 2,
+            count: 8,
+            hidden: true,
+        },
+        Op::SetColsVisibility {
+            sheet: SheetId(0),
+            col: 3,
+            count: 0,
+            hidden: true,
+        },
+    ] {
+        assert!(
+            matches!(
+                workbook.apply_ops(vec![op.clone()], CalculationOptions::default()),
+                Err(Error::InvalidOperation(_))
+            ),
+            "{op:?} crosses the sheet limit or names no track"
+        );
+    }
+    assert_eq!(
+        workbook.model().sheets[0].col_widths.get(&(MAX_COLS - 1)),
+        Some(&12.0),
+        "a refused range leaves the widths alone"
+    );
+    assert!(!workbook.can_undo());
+}
+
+#[cfg(feature = "unstable-track-visibility")]
+#[test]
+fn a_visibility_range_syncs_its_whole_span_to_a_peer() {
+    let mut sheet = Sheet::new("Sized");
+    for col in 2..6 {
+        sheet.col_widths.insert(col, 10.0 + f64::from(col));
+    }
+    for row in 2..6 {
+        sheet.row_heights.insert(row, 20.0 + f64::from(row));
+    }
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut source = Workbook::open_collaborative(&bytes, 751).unwrap();
+    let mut peer = Workbook::open_collaborative(&bytes, 752).unwrap();
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&updates);
+    let _subscription = source
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    source
+        .apply_ops(
+            vec![
+                Op::SetColsVisibility {
+                    sheet: SheetId(0),
+                    col: 2,
+                    count: 4,
+                    hidden: true,
+                },
+                Op::SetRowsVisibility {
+                    sheet: SheetId(0),
+                    row: 2,
+                    count: 4,
+                    hidden: true,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for update in updates.lock().unwrap().drain(..) {
+        peer.apply_update_v1(&update, CalculationOptions::default())
+            .unwrap();
+    }
+    assert_eq!(
+        peer.model().sheets[0].col_widths,
+        source.model().sheets[0].col_widths
+    );
+    assert_eq!(
+        peer.model().sheets[0].row_heights,
+        source.model().sheets[0].row_heights
+    );
+    for col in 2..6 {
+        assert!(
+            peer.model().sheets[0].col_hidden(col),
+            "column {col} must hide for the peer"
+        );
+    }
+    for row in 2..6 {
+        assert!(
+            peer.model().sheets[0].row_hidden(row),
+            "row {row} must hide for the peer"
+        );
+    }
+}
+
 fn hidden_custom_sizes_source() -> Vec<u8> {
     let mut sheet = Sheet::new("Sized");
     sheet.col_widths.insert(0, 0.0);
@@ -13943,6 +14090,327 @@ fn png_targets_validate_sheets_and_scale_all_forms() {
             workbook.render_png(target, &RenderOptions::default()),
             Err(Error::SheetOutOfRange(_))
         ));
+    }
+}
+
+/// A row that holds an array formula and nothing else is a permitted move, but
+/// the recalculation that follows evaluates `SEQUENCE(ROW())` at its new row
+/// and grows the relocated rectangle past the moved run. Undo has to put that
+/// array back where it was rather than mirror the grown rectangle: the mirror
+/// no longer fits the run it would tear.
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn a_row_move_that_recalculation_grows_undoes_and_redoes() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            formula: Some("SEQUENCE(ROW())".into()),
+            ..Cell::default()
+        },
+    );
+    sheet.set_array_formula(cell("A1"), CellRange::new(cell("A1"), cell("A1")));
+    for (at, value) in [("A2", 2.0), ("A3", 3.0), ("A6", 6.0)] {
+        sheet.set_cell(
+            cell(at),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveRows {
+                sheet: SheetId(0),
+                row: 0,
+                count: 1,
+                before: 3,
+            }],
+            options,
+        )
+        .unwrap();
+    let moved = &workbook.model().sheets[0];
+    assert_eq!(
+        moved.array_formula(cell("A3")),
+        Some(CellRange::parse_a1("A3:A5").unwrap()),
+        "recalculation grows the relocated array"
+    );
+    assert_eq!(
+        moved.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 2.0 })
+    );
+
+    workbook
+        .undo(options)
+        .expect("undo must not be refused by the rectangle recalculation grew");
+    assert_eq!(
+        workbook.model(),
+        &base,
+        "undo restores the pre-move workbook, including the retired spill cells"
+    );
+
+    workbook.redo(options).unwrap();
+    let redone = &workbook.model().sheets[0];
+    assert_eq!(
+        redone.array_formula(cell("A3")),
+        Some(CellRange::parse_a1("A3:A5").unwrap())
+    );
+    assert_eq!(
+        redone.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 2.0 })
+    );
+}
+
+/// The mirror image: the moved run passes *over* the array, so the array sits
+/// in the tracks the move shifts rather than in the run itself. Recalculation
+/// grows the relocated rectangle after the move was recorded, and the inverse
+/// mirror's run does not carry the grown anchor. The inverse has to clip the
+/// rectangle back to the extent the move left before the mirror, or undo is
+/// refused as if a user had tried to tear the array.
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn a_row_move_stepping_over_a_grown_array_undoes_and_redoes() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            formula: Some("SEQUENCE(2*ROW()-1)".into()),
+            ..Cell::default()
+        },
+    );
+    sheet.set_array_formula(cell("A1"), CellRange::new(cell("A1"), cell("A1")));
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveRows {
+                sheet: SheetId(0),
+                row: 2,
+                count: 1,
+                before: 0,
+            }],
+            options,
+        )
+        .unwrap();
+    let moved = &workbook.model().sheets[0];
+    assert_eq!(
+        moved.array_formula(cell("A2")),
+        Some(CellRange::parse_a1("A2:A4").unwrap()),
+        "recalculation grows the array now in the stepped-over row"
+    );
+    assert_eq!(
+        moved.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 3.0 })
+    );
+
+    workbook
+        .undo(options)
+        .expect("undo must clip the grown rectangle before its mirror");
+    assert_eq!(
+        workbook.model(),
+        &base,
+        "undo restores the pre-move workbook and leaves no array at the old anchor"
+    );
+
+    workbook.redo(options).unwrap();
+    let redone = &workbook.model().sheets[0];
+    assert_eq!(
+        redone.array_formula(cell("A2")),
+        Some(CellRange::parse_a1("A2:A4").unwrap())
+    );
+    assert_eq!(
+        redone.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 3.0 })
+    );
+}
+
+/// A move may be submitted with `before` naming the gap after the last track
+/// (dropping past XFD, or the mirror of a move to the front). The apply layer
+/// reads that as the terminal insertion gap, so validation must too.
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn a_move_to_the_terminal_gap_applies_and_undoes() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    for (at, value) in [("A1", 1.0), ("B3", 2.0)] {
+        sheet.set_cell(
+            cell(at),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveRows {
+                sheet: SheetId(0),
+                row: 0,
+                count: 1,
+                before: MAX_ROWS,
+            }],
+            options,
+        )
+        .expect("the gap after the last row is a legal move destination");
+    assert_eq!(
+        workbook.model().sheets[0]
+            .cell(CellRef::new(MAX_ROWS - 1, 0))
+            .map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 1.0 }),
+        "the row lands last"
+    );
+    workbook.undo(options).unwrap();
+    assert_eq!(workbook.model(), &base, "the terminal move undoes");
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveCols {
+                sheet: SheetId(0),
+                col: 1,
+                count: 1,
+                before: MAX_COLS,
+            }],
+            options,
+        )
+        .expect("the gap after the last column is a legal move destination");
+    assert_eq!(
+        workbook.model().sheets[0]
+            .cell(CellRef::new(2, MAX_COLS - 1))
+            .map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 2.0 }),
+        "the column lands last"
+    );
+    workbook.undo(options).unwrap();
+    assert_eq!(workbook.model(), &base, "the terminal column move undoes");
+}
+
+#[cfg(not(feature = "unstable-track-moves"))]
+#[test]
+fn a_batch_holding_a_track_move_is_refused_whole() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+    let probe = Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("C1"),
+        cell: CellState {
+            value: CellValue::Number { value: 7.0 },
+            ..CellState::default()
+        },
+    };
+    for track_move in [
+        Op::MoveCols {
+            sheet: SheetId(0),
+            col: 0,
+            count: 1,
+            before: 2,
+        },
+        Op::MoveRows {
+            sheet: SheetId(0),
+            row: 0,
+            count: 1,
+            before: 2,
+        },
+    ] {
+        let ops = vec![probe.clone(), track_move];
+        for error in [
+            workbook.apply_ops(ops.clone(), options).unwrap_err(),
+            workbook
+                .apply_ops_profiled(ops, options, &mut || 0.0)
+                .unwrap_err(),
+        ] {
+            assert!(matches!(error, Error::Operation(_)));
+            assert_eq!(
+                error.to_string(),
+                "cannot move sheet 0 tracks: moving rows or columns is not supported yet"
+            );
+        }
+        assert_eq!(workbook.model(), &base);
+        assert!(!workbook.undo(options).unwrap().applied);
+    }
+}
+
+#[cfg(not(feature = "unstable-track-visibility"))]
+#[test]
+fn a_batch_holding_a_visibility_range_is_refused_whole() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+    let probe = Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("C1"),
+        cell: CellState {
+            value: CellValue::Number { value: 7.0 },
+            ..CellState::default()
+        },
+    };
+    for range in [
+        Op::SetColsVisibility {
+            sheet: SheetId(0),
+            col: 0,
+            count: 2,
+            hidden: true,
+        },
+        Op::SetRowsVisibility {
+            sheet: SheetId(0),
+            row: 0,
+            count: 2,
+            hidden: true,
+        },
+    ] {
+        let ops = vec![probe.clone(), range];
+        for error in [
+            workbook.apply_ops(ops.clone(), options).unwrap_err(),
+            workbook
+                .apply_ops_profiled(ops, options, &mut || 0.0)
+                .unwrap_err(),
+        ] {
+            assert!(matches!(error, Error::Operation(_)));
+            assert_eq!(
+                error.to_string(),
+                "cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet"
+            );
+        }
+        assert_eq!(workbook.model(), &base);
+        assert!(!workbook.undo(options).unwrap().applied);
     }
 }
 

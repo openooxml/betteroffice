@@ -192,6 +192,7 @@ export type {
   XlsxRangeTarget,
   XlsxReadCalculation,
   XlsxReadRequest,
+  XlsxReplaceStats,
   XlsxUnevaluatedCell,
   XlsxReadResult,
   XlsxSheetEntry,
