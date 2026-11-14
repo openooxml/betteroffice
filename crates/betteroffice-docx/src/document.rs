@@ -132,7 +132,7 @@ impl Document {
             session_edits: Vec::new(),
             dirty: Dirty::Clean,
             #[cfg(feature = "raster")]
-            default_limits: format!("{limits:?}") == format!("{:?}", ParseLimits::default()),
+            default_limits: *limits == ParseLimits::default(),
             model,
             opened_ids: authored_ids.clone(),
             authored_ids,
