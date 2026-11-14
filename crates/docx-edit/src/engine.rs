@@ -82,6 +82,20 @@ struct LoweredStory {
     preview: Option<Rc<crate::bridge::preview::PreviewUnits>>,
     preview_edit: Option<crate::bridge::preview::TextEdit>,
     preview_paragraph_edits: Vec<crate::bridge::preview::ParagraphEdit>,
+    /// The top-level table embeds this lowering read, by table block id.
+    table_embeds: HashMap<String, yrs::MapRef>,
+    /// The plain text edit of a body cell story since this lowering, which
+    /// re-lowering only that cell's table absorbs.
+    cell_edit: Option<CellTextEdit>,
+}
+
+/// A plain text edit of a body cell story: no paragraph or revision created.
+#[derive(Debug)]
+struct CellTextEdit {
+    story: String,
+    epochs: (u64, u64),
+    /// How many UTF-16 units the story grew by.
+    delta: i64,
 }
 
 impl LoweredStory {
@@ -116,6 +130,8 @@ struct RenderState {
     cache_misses: u64,
     preview_patches: u64,
     preview_fallbacks: u64,
+    /// Body lowerings a cell edit re-lowered only one table of.
+    table_patches: u64,
 }
 
 struct LoweredNoteSeparators {
@@ -368,6 +384,8 @@ thread_local! {
     static BODY_MEASUREMENT_WORK: RefCell<(Vec<usize>, u64)> = const { RefCell::new((Vec::new(), 0)) };
     static HEADER_FOOTER_MEASUREMENTS: Cell<usize> = const { Cell::new(0) };
     static REGION_FULL_PASSES: Cell<usize> = const { Cell::new(0) };
+    /// Table patches applied in place and by copy.
+    static TABLE_PATCHES: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     static SHIFT_SAFETY_WORK: Cell<usize> = const { Cell::new(0) };
     static CERTIFIED_FLOAT_WORK: RefCell<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())) };
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
@@ -2468,7 +2486,8 @@ pub struct EngineSession {
     /// Resident text edits re-lower only their paragraph when eligible.
     local_lowering: Cell<bool>,
     /// Body heading levels by paragraph id, for the document version they were read at.
-    page_text_headings: RefCell<Option<(crate::DocumentVersion, Rc<HashMap<String, u8>>)>>,
+    /// The body's headings, by the document version and body revision they were read at.
+    page_text_headings: RefCell<Option<(PageTextHeadingsRead, Rc<HashMap<String, u8>>)>>,
     #[cfg(test)]
     preview_refresh: Cell<bool>,
 }
@@ -2884,13 +2903,51 @@ fn measured_fingerprint(measured: &MeasuredBlock) -> Result<Fingerprint, String>
     .map_err(|error| format!("fingerprint measured block: {error}"))
 }
 
+/// What the body's headings were read from: they hold at a later read with
+/// the same document version, or with the same source and no change to the
+/// body since but plain text typed into it, which keeps every paragraph and
+/// its properties.
+struct PageTextHeadingsRead {
+    version: crate::DocumentVersion,
+    body: Option<u64>,
+    source: Option<Arc<crate::seed::SourceMetadata>>,
+}
+
+impl PageTextHeadingsRead {
+    fn holds_for(&self, later: &Self) -> bool {
+        let same_source = match (&self.source, &later.source) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (left, right) => left.is_none() && right.is_none(),
+        };
+        self.version == later.version
+            || (self.body.is_some() && self.body == later.body && same_source)
+    }
+}
+
 fn measurement_shift_safe(block: &LayoutBlock) -> bool {
     #[cfg(test)]
     SHIFT_SAFETY_WORK.with(|work| work.set(work.get() + 1));
+    block_shift_safe(block)
+}
+
+/// [`measurement_shift_safe`] without the work count: a table is safe when it
+/// floats in no frame, groups no controls and every block of its cells is.
+fn block_shift_safe(block: &LayoutBlock) -> bool {
     let position = |value: Option<f64>| {
         value.is_none_or(|value| value >= 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0)
     };
     match block {
+        LayoutBlock::Table(table) => {
+            position(table.pm_start)
+                && position(table.pm_end)
+                && table.sdt_groups.is_none()
+                && table.floating.is_none()
+                && table.rows.iter().all(|row| {
+                    row.cells
+                        .iter()
+                        .all(|cell| cell.blocks.iter().all(block_shift_safe))
+                })
+        }
         LayoutBlock::Paragraph(paragraph) => {
             paragraph.pm_start.is_some()
                 && position(paragraph.pm_start)
@@ -5622,6 +5679,31 @@ impl EngineSession {
                 });
             }
         }
+        if let Some(body) = render.stories.get_mut("body") {
+            let inserted = text.map_or(0, |text| i64::from(text.encode_utf16().count() as u32));
+            let removed = i64::from(range.end - range.start);
+            body.cell_edit = self
+                .doc
+                .story_len(&range.story)
+                .ok()
+                .map(|length| i64::from(length) - i64::from(preview_length))
+                .filter(|delta| {
+                    is_nested_body_story(&range.story)
+                        && lower_locally
+                        && self.local_lowering.get()
+                        && preview_plain
+                        && receipt.new_para_ids.is_empty()
+                        && receipt.revision_ids.is_empty()
+                        && body.doc_epoch == before
+                        && self.doc_epoch() == before.wrapping_add(1)
+                        && *delta == inserted - removed
+                })
+                .map(|delta| CellTextEdit {
+                    story: range.story.clone(),
+                    epochs: (before, self.doc_epoch()),
+                    delta,
+                });
+        }
         self.typing_epoch.set(Some(self.doc_epoch()));
         self.typing_preserves_seeds.set(
             preview_plain
@@ -5843,6 +5925,239 @@ impl EngineSession {
         Some(())
     }
 
+    /// Absorbs a plain text edit of a body cell story by lowering only the
+    /// top-level table holding the cell, splicing it into the resident body
+    /// lowering and moving everything after it. The result is a new lowering
+    /// as a full one would be, so measurement compares it with the old one.
+    fn patch_lowered_table(&self, epoch: u64, env: &RenderEnv) -> Option<()> {
+        let mut render = self.render.borrow_mut();
+        let generation = render.generation.wrapping_add(1);
+        let lowered = render.stories.get_mut("body")?;
+        let edit = lowered.cell_edit.take()?;
+        if edit.epochs != (lowered.doc_epoch, epoch)
+            || lowered.env != *env
+            || lowered.media != self.doc.media_sources()
+            || !lowered.local.matches_source(&self.doc)
+            || lowered
+                .preview
+                .as_ref()
+                .is_some_and(|units| units.has_records())
+        {
+            return None;
+        }
+        let map = &lowered.map;
+        let slot = map.stories.iter().position(|story| *story == edit.story)? as u32;
+        let paragraph = map
+            .paragraphs
+            .iter()
+            .position(|(story, _)| *story == slot)? as u32;
+        let pm = map
+            .paragraph_blocks
+            .iter()
+            .find(|(_, source)| *source == paragraph)?
+            .0 as f64;
+        let index = lowered.blocks.shared().iter().position(|block| {
+            matches!(block.as_ref(), LayoutBlock::Table(table)
+                if table.pm_start.is_some_and(|start| start <= pm)
+                    && table.pm_end.is_some_and(|end| pm < end))
+        })?;
+        let LayoutBlock::Table(old) = lowered.blocks.shared()[index].as_ref() else {
+            return None;
+        };
+        let BlockId::Str(id) = &old.id else {
+            return None;
+        };
+        let table = lowered.table_embeds.get(id)?;
+        let first_story = id.strip_prefix("body:table:")?;
+        let (start, end) = (old.pm_start? as u64, old.pm_end? as u64);
+        let stories = map.stories.iter().position(|story| story == first_story)?;
+        let paragraphs = map
+            .paragraphs
+            .iter()
+            .position(|(story, _)| *story as usize >= stories)?;
+        let ordinal = map
+            .tables
+            .iter()
+            .find(|(pm, story, _)| *pm == start && *story == 0)?
+            .2;
+        let inside = |block: &LayoutBlock| {
+            block
+                .pm_start()
+                .is_some_and(|pm| pm >= start as f64 && pm < end as f64)
+        };
+        if lowered.revealable_blocks.iter().any(inside)
+            || docx_layout::sequence_fields::reads_sequence_fields(std::slice::from_ref(
+                lowered.blocks.shared()[index].as_ref(),
+            ))
+        {
+            return None;
+        }
+        let relowered = crate::bridge::preview::relower_body_table(
+            &self.doc,
+            env,
+            table,
+            start,
+            ordinal,
+            stories as u32,
+            paragraphs as u32,
+            &lowered.local,
+        )?;
+        let delta = i64::try_from(relowered.end).ok()? - i64::try_from(end).ok()?;
+        let story_count = relowered.map.stories.len();
+        let paragraph_count = relowered.map.paragraphs.len();
+        if !matches!(&relowered.block, LayoutBlock::Table(table) if table.id == old.id)
+            || delta != edit.delta
+            || map.stories.get(stories..stories + story_count)? != relowered.map.stories
+            || map
+                .paragraphs
+                .get(paragraphs..paragraphs + paragraph_count)?
+                != relowered.map.paragraphs
+            || map
+                .paragraphs
+                .get(paragraphs + paragraph_count)
+                .is_some_and(|(story, _)| *story != 0 && (*story as usize) < stories + story_count)
+        {
+            return None;
+        }
+        self.certified_measurement_epoch.set(None);
+        let old_block = Rc::clone(&lowered.blocks.shared()[index]);
+        let block_count = lowered.blocks.len();
+        // Without note references the table numbers nothing, so the patch
+        // leaves every other block as it was but for the shift.
+        let notes = !collect_note_refs(std::slice::from_ref(&relowered.block)).is_empty()
+            || !collect_note_refs(std::slice::from_ref(old_block.as_ref())).is_empty();
+        // When pagination measured exactly this lowering, patch it in place
+        // and tell measurement which block changed, as the paragraph patch
+        // does; otherwise copy, so measurement compares it with the old one.
+        let in_place = {
+            let mut pagination = self.pagination.borrow_mut();
+            pagination.measurement_patch = None;
+            for certificate in pagination
+                .retain_matches
+                .iter_mut()
+                .skip(index.saturating_sub(1))
+            {
+                *certificate = None;
+            }
+            let origin = !notes
+                && pagination.measured_with.is_some()
+                && pagination
+                    .input
+                    .as_ref()
+                    .is_some_and(|input| input.measured.len() == block_count)
+                && pagination.doc_epoch == lowered.doc_epoch
+                && pagination.lowered_generation == Some(lowered.generation)
+                && pagination
+                    .lowered_from
+                    .as_ref()
+                    .is_some_and(|blocks| Rc::ptr_eq(blocks, &lowered.blocks));
+            // the lowering pagination holds is this one, so only it may share the blocks
+            let unshared =
+                Rc::strong_count(&lowered.blocks) == 2 && Rc::weak_count(&lowered.blocks) == 0;
+            if origin && unshared {
+                pagination.lowered_from = None;
+                pagination.lowered_generation = None;
+                pagination.input_lowering = None;
+            }
+            origin && unshared
+        };
+        #[cfg(test)]
+        TABLE_PATCHES.with(|patches| {
+            let (placed, copied) = patches.get();
+            patches.set(if in_place {
+                (placed + 1, copied)
+            } else {
+                (placed, copied + 1)
+            });
+        });
+        let blocks = if in_place {
+            Rc::get_mut(&mut lowered.blocks).expect("checked unique")
+        } else {
+            Rc::make_mut(&mut lowered.blocks)
+        }
+        .shared_mut();
+        blocks[index] = Rc::new(relowered.block);
+        if delta != 0 {
+            for block in &mut blocks[index + 1..] {
+                crate::bridge::local::shift_block(Rc::make_mut(block), delta);
+            }
+        }
+        if notes {
+            docx_layout::footnotes::number_note_references(
+                blocks.as_mut_slice(),
+                &env.note_numbering,
+            );
+        }
+        let map = Rc::make_mut(&mut lowered.map);
+        let range = |positions: &[u64]| {
+            (
+                positions.partition_point(|pm| *pm < start),
+                positions.partition_point(|pm| *pm < end),
+            )
+        };
+        let shift = |pm: &mut u64| *pm = pm.saturating_add_signed(delta);
+        let positions: Vec<u64> = map.spans.iter().map(|span| span.pm_start).collect();
+        let (from, to) = range(&positions);
+        for span in &mut map.spans[to..] {
+            shift(&mut span.pm_start);
+            shift(&mut span.pm_end);
+        }
+        map.spans.splice(from..to, relowered.map.spans);
+        let positions: Vec<u64> = map.paragraph_blocks.iter().map(|(pm, _)| *pm).collect();
+        let (from, to) = range(&positions);
+        for (pm, _) in &mut map.paragraph_blocks[to..] {
+            shift(pm);
+        }
+        map.paragraph_blocks
+            .splice(from..to, relowered.map.paragraph_blocks);
+        let positions: Vec<u64> = map.tables.iter().map(|(pm, ..)| *pm).collect();
+        let (from, to) = range(&positions);
+        for (pm, ..) in &mut map.tables[to..] {
+            shift(pm);
+        }
+        map.tables.splice(from..to, relowered.map.tables);
+        if delta != 0
+            && lowered
+                .revealable_blocks
+                .iter()
+                .any(|block| block.pm_start().is_some_and(|pm| pm >= end as f64))
+        {
+            for block in Rc::make_mut(&mut lowered.revealable_blocks) {
+                if block.pm_start().is_some_and(|pm| pm >= end as f64) {
+                    crate::bridge::local::shift_block(block, delta);
+                }
+            }
+        }
+        lowered.local.shift_after(end, delta);
+        let measurement_patch = in_place.then(|| MeasurementPatch {
+            base_generation: lowered.generation,
+            current_generation: generation,
+            epochs: edit.epochs,
+            block_count_before: block_count,
+            block_count_after: block_count,
+            replaced: index..index + 1,
+            old_blocks: vec![old_block],
+            // the body's own units did not move, so no paragraph patch extends this one
+            shift: crate::bridge::preview::ParagraphEdit {
+                raw: u32::MAX..u32::MAX,
+                pm: start..end,
+                delta,
+            },
+            shifted_version: lowered.blocks.version(),
+        });
+        lowered.generation = generation;
+        lowered.doc_epoch = epoch;
+        lowered.serialized_blocks = None;
+        lowered.preview_edit = None;
+        render.generation = generation;
+        render.table_patches = render.table_patches.wrapping_add(1);
+        drop(render);
+        if measurement_patch.is_some() {
+            *self.measurement_patch() = measurement_patch;
+        }
+        Some(())
+    }
+
     fn patch_preview_body(&self, epoch: u64, env: &RenderEnv) -> Option<()> {
         let mut render = self.render.borrow_mut();
         let lowered = render.stories.get_mut("body")?;
@@ -6049,6 +6364,7 @@ impl EngineSession {
                 return Ok(());
             }
         };
+        let table_embeds = std::mem::take(&mut local.table_embeds);
         if let Some(mut retained) = retained_local {
             if local.blocked {
                 retained.resume();
@@ -6076,6 +6392,8 @@ impl EngineSession {
                 preview: preview.map(Rc::new),
                 preview_edit: None,
                 preview_paragraph_edits: Vec::new(),
+                table_embeds,
+                cell_edit: None,
             },
         );
         Ok(())
@@ -6122,7 +6440,8 @@ impl EngineSession {
             render.cache_hits = render.cache_hits.wrapping_add(1);
         } else if story != "body"
             || (self.patch_preview_body(epoch, env).is_none()
-                && self.patch_lowered_body(epoch, env).is_none())
+                && self.patch_lowered_body(epoch, env).is_none()
+                && self.patch_lowered_table(epoch, env).is_none())
         {
             self.lower_story_into_cache(story, epoch, env)?;
         }
@@ -11077,7 +11396,11 @@ impl EngineSession {
         {
             return Ok(false);
         }
-        let misses = self.render.borrow().cache_misses;
+        let relowerings = || {
+            let render = self.render.borrow();
+            (render.cache_misses, render.table_patches)
+        };
+        let misses = relowerings();
         let outcome = self
             .with_shared_lowered_story_mapped(
                 story,
@@ -11088,9 +11411,10 @@ impl EngineSession {
                  -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
                     // A repeated final section takes this path only for an edit the local
                     // patch absorbed, or for a plain split of a top-level body paragraph,
-                    // which re-lowers the body.
+                    // which re-lowers the body. A cell edit's table patch counts as a
+                    // re-lowering.
                     if regions.sections.len() > 1
-                        && self.render.borrow().cache_misses != misses
+                        && relowerings() != misses
                         && self.split_epoch.get() != Some(self.doc_epoch())
                     {
                         return Ok(None);
@@ -11807,10 +12131,15 @@ impl EngineSession {
     }
 
     fn page_text_headings(&self) -> Result<Rc<HashMap<String, u8>>, String> {
-        let version = self.doc().version();
-        if let Some((read_at, headings)) = &*self.page_text_headings.borrow()
-            && *read_at == version
+        let read = PageTextHeadingsRead {
+            version: self.doc().version(),
+            body: self.doc().story_mark("body"),
+            source: self.doc().source_metadata(),
+        };
+        if let Some((read_at, headings)) = &mut *self.page_text_headings.borrow_mut()
+            && read_at.holds_for(&read)
         {
+            *read_at = read;
             return Ok(Rc::clone(headings));
         }
         let headings: Rc<HashMap<String, u8>> = Rc::new(
@@ -11821,7 +12150,7 @@ impl EngineSession {
                 .map(|(para_id, heading)| (para_id, heading.outline_level))
                 .collect(),
         );
-        *self.page_text_headings.borrow_mut() = Some((version, Rc::clone(&headings)));
+        *self.page_text_headings.borrow_mut() = Some((read, Rc::clone(&headings)));
         Ok(headings)
     }
 
@@ -23224,7 +23553,9 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
             if name == "table" {
                 step(&engine, &request, "body", (11, 11, Some("😀")), true);
-                step(&engine, &request, "body:t0:r0c1", (2, 2, Some("x")), false);
+                // the cell's table patch absorbs it, and the body after the table still patches
+                step(&engine, &request, "body:t0:r0c1", (2, 2, Some("x")), true);
+                step(&engine, &request, "body", (11, 11, Some("y")), true);
             } else if name == "contextual" {
                 step(&engine, &request, "body", (8, 8, Some("x")), true);
             }

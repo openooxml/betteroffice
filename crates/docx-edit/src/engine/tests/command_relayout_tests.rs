@@ -889,7 +889,12 @@ fn typed_edits_that_re_lower_the_body_keep_the_full_pass() {
                     "{label}"
                 );
             });
-            assert!(work.full_lowerings > 0, "{label}: {work:?}");
+            // a cell's table patch re-lowers the one table instead of the body
+            if story == "body" {
+                assert!(work.full_lowerings > 0, "{label}: {work:?}");
+            } else {
+                assert_eq!(work.full_lowerings, 0, "{label}: {work:?}");
+            }
             assert_eq!(
                 REGION_FULL_PASSES.with(Cell::get),
                 1,
@@ -1271,4 +1276,321 @@ fn edits_beside_a_shape_placed_by_page_side_lay_out_as_a_full_recompute_does() {
     host.assert_matches_cold("enter beside the shape");
     host.command("body", end - 25, end - 25, Some("x"));
     host.assert_matches_cold("typing beside the shape");
+}
+
+/// Body filler, plain, nested, list-holding, SEQ-holding and (with `floating`)
+/// floating tables, with list items and SEQ fields around them, seeded as a
+/// host opens it.
+fn cell_tables_engine(client_id: u64, floating: bool) -> (EngineSession, Vec<u8>) {
+    use super::lowering_fixture::{NS, Package, para, run};
+    let filler = |from: u32, count: u32| -> String {
+        (from..from + count)
+            .map(|index| {
+                para(
+                    &format!("{:08X}", 0xE00 + index),
+                    &run(&format!(
+                        "Filler paragraph {index} with enough words to wrap over two lines."
+                    )),
+                )
+            })
+            .collect()
+    };
+    let item = |id: u32, text: &str| {
+        format!(
+            r#"<w:p w14:paraId="{id:08X}"><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>{}</w:p>"#,
+            run(text)
+        )
+    };
+    let cell = |content: String| {
+        format!(r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{content}</w:tc>"#)
+    };
+    let table = |properties: &str, rows: &[[String; 2]]| {
+        let rows: String = rows
+            .iter()
+            .map(|[left, right]| {
+                format!("<w:tr>{}{}</w:tr>", cell(left.clone()), cell(right.clone()))
+            })
+            .collect();
+        format!(
+            r#"<w:tbl><w:tblPr>{properties}<w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid>{rows}</w:tbl>"#
+        )
+    };
+    let plain = table(
+        "",
+        &[
+            [
+                para("00000F01", &run("Plain cell")),
+                format!(
+                    "{}{}",
+                    para("00000F02", &run("A right cell long enough to wrap")),
+                    para("00000F03", &run("Its second paragraph"))
+                ),
+            ],
+            [
+                para("00000F04", &run("Lower left")),
+                para("00000F05", &run("Lower right")),
+            ],
+        ],
+    );
+    let inner = table(
+        "",
+        &[[
+            para("00000F11", &run("Inner cell")),
+            para("00000F12", &run("Inner right")),
+        ]],
+    );
+    let nested = table(
+        "",
+        &[[
+            format!("{inner}{}", para("00000F13", &run("After the inner table"))),
+            para("00000F14", &run("Outer right")),
+        ]],
+    );
+    let listed = table(
+        "",
+        &[[
+            item(0xF21, "A list item in a cell"),
+            para("00000F22", &run("Beside the list item")),
+        ]],
+    );
+    let seq = |text: &str| {
+        format!(
+            r#"{}<w:fldSimple w:instr=" SEQ Table \* ARABIC "><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+            run(text)
+        )
+    };
+    let numbered = table(
+        "",
+        &[[
+            para("00000F61", &seq("A numbered caption in a cell ")),
+            para("00000F62", &run("Beside the caption")),
+        ]],
+    );
+    let floated = table(
+        r#"<w:tblpPr w:leftFromText="180" w:rightFromText="180" w:vertAnchor="text" w:tblpY="1"/>"#,
+        &[[
+            para("00000F31", &run("Floating cell")),
+            para("00000F32", &run("Floating right")),
+        ]],
+    );
+    let body = format!(
+        "{}{}{}{}{plain}{}{nested}{}{listed}{}{numbered}{}{}{}{}",
+        para("00000F60", &seq("Table ")),
+        filler(0, 4),
+        item(0xF41, "First list item"),
+        item(0xF42, "Second list item"),
+        filler(4, 4),
+        filler(8, 4),
+        item(0xF43, "A list item after the table"),
+        para("00000F63", &seq("Table ")),
+        if floating { floated } else { String::new() },
+        para("00000F51", &run("A body paragraph after the tables")),
+        filler(12, 8),
+    );
+    let numbering = format!(
+        r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="360" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+    );
+    let bytes = Package::new(&body).numbering(&numbering).bytes();
+    (seeded_engine(client_id, &bytes), bytes)
+}
+
+/// The cell story holding the paragraph keyed `id`.
+fn cell_holding(engine: &EngineSession, id: &str) -> String {
+    use yrs::{ReadTxn, Transact};
+    let cells: Vec<String> = {
+        let txn = engine.doc().yrs_doc().transact();
+        let stories = txn.get_map(crate::STORIES).unwrap();
+        crate::live_stories(&stories, &txn)
+            .map(|(story, _)| story.to_string())
+            .filter(|story| story.starts_with("body:t"))
+            .collect()
+    };
+    cells
+        .into_iter()
+        .find(|story| {
+            engine
+                .doc()
+                .paragraph_index(story)
+                .is_ok_and(|index| index.para_span(id).is_some())
+        })
+        .unwrap()
+}
+
+#[test]
+fn cell_edits_re_lower_only_their_table_and_lay_out_as_a_full_recompute_does() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    for floating in [false, true] {
+        let client_id = 9740 + u64::from(floating);
+        let (engine, bytes) = cell_tables_engine(client_id, floating);
+        let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+        let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+        let mut undo = engine.doc().undo_manager();
+        TABLE_PATCHES.with(|patches| patches.set((0, 0)));
+        let cases = [
+            ("a plain cell", "00000F01", true),
+            ("a cell's second paragraph", "00000F03", true),
+            ("a nested table's cell", "00000F11", true),
+            ("a cell after a nested table", "00000F13", true),
+            ("a cell beside a list item", "00000F22", false),
+            ("a list item in a cell", "00000F21", false),
+            ("a cell beside a SEQ field", "00000F62", false),
+        ];
+        for (label, id, patched) in cases {
+            let story = cell_holding(&engine, id);
+            let at = engine
+                .doc()
+                .paragraph_index(&story)
+                .unwrap()
+                .para_span(id)
+                .unwrap()
+                .0
+                + 2;
+            let label = format!("{label}, floating {floating}");
+            for (key, text) in ["x", "한", "😀"].into_iter().enumerate() {
+                let label = format!("{label}: typing {text}");
+                let work = keystroke_work(&engine, || {
+                    assert!(host.command(&story, at, at, Some(text)), "{label}");
+                });
+                if patched {
+                    assert_eq!(work.full_lowerings, 0, "{label}: {work:?}");
+                } else if key == 0 {
+                    assert!(work.full_lowerings > 0, "{label}: {work:?}");
+                }
+                host.assert_matches_cold(&label);
+            }
+            let work = keystroke_work(&engine, || {
+                // the 한 typed after the x, before the emoji typed last
+                assert!(host.command(&story, at + 2, at + 3, None), "{label}");
+            });
+            if patched {
+                assert_eq!(work.full_lowerings, 0, "{label}: delete {work:?}");
+            }
+            host.assert_matches_cold(&format!("{label}: delete"));
+        }
+        let (placed, copied) = TABLE_PATCHES.with(Cell::get);
+        // only a full region pass, which floating tables take, records the lowering it measured
+        assert_eq!(
+            placed > 0,
+            floating,
+            "floating {floating}: in-place table patches {placed}"
+        );
+        assert_eq!(
+            placed + copied,
+            16,
+            "floating {floating}: every patched keystroke patches"
+        );
+        let after = paragraph_start(&engine, "00000F51") + 3;
+        host.command("body", after, after, Some("y"));
+        host.assert_matches_cold(&format!(
+            "typing in the body after the tables, floating {floating}"
+        ));
+        let story = cell_holding(&engine, "00000F05");
+        host.command(&story, 2, 2, Some("z"));
+        host.assert_matches_cold(&format!(
+            "a cell after typing in the body, floating {floating}"
+        ));
+        undo.add_undo_barrier();
+        assert!(undo.undo());
+        host.relayout(None);
+        host.assert_matches_cold(&format!("undo, floating {floating}"));
+        host.command(&story, 2, 2, Some("w"));
+        host.assert_matches_cold(&format!("a cell after undo, floating {floating}"));
+    }
+}
+
+/// The index of the top-level table whose cells hold the paragraph keyed `id`
+/// among the blocks pagination measured.
+fn measured_table_holding(engine: &EngineSession, id: &str) -> usize {
+    fn holds(block: &LayoutBlock, id: &str) -> bool {
+        match block {
+            LayoutBlock::Paragraph(paragraph) => format!("{:?}", paragraph.id).contains(id),
+            LayoutBlock::Table(table) => table.rows.iter().any(|row| {
+                row.cells
+                    .iter()
+                    .any(|cell| cell.blocks.iter().any(|block| holds(block, id)))
+            }),
+            _ => false,
+        }
+    }
+    let pagination = engine.pagination.borrow();
+    pagination
+        .input
+        .as_ref()
+        .unwrap()
+        .measured
+        .iter()
+        .position(|measured| {
+            matches!(measured.block, LayoutBlock::Table(_)) && holds(&measured.block, id)
+        })
+        .unwrap()
+}
+
+#[test]
+fn tables_after_a_typed_cell_shift_with_their_measurements_and_lay_out_as_a_full_recompute_does() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let (engine, bytes) = cell_tables_engine(9813, true);
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request).seeded(9813, bytes);
+    let later = ["00000F11", "00000F22"].map(|id| measured_table_holding(&engine, id));
+    let cell = cell_holding(&engine, "00000F01");
+    for (key, text) in [Some("x"), Some("한"), None].into_iter().enumerate() {
+        CERTIFIED_FLOAT_WORK.with(|work| *work.borrow_mut() = Default::default());
+        let (start, end) = match text {
+            Some(_) => (2, 2),
+            None => (2, 3),
+        };
+        let work = keystroke_work(&engine, || {
+            assert!(host.command(&cell, start, end, text), "key {key}");
+        });
+        assert_eq!(work.full_lowerings, 0, "key {key}");
+        let uncertified = CERTIFIED_FLOAT_WORK.with(|work| work.borrow().0.clone());
+        assert!(!uncertified.is_empty(), "key {key}: the edit is certified");
+        assert!(
+            later.iter().all(|index| !uncertified.contains(index)),
+            "key {key}: the later tables {later:?} keep their measurements, but {uncertified:?} were measured again"
+        );
+        host.assert_matches_cold(&format!("key {key}"));
+    }
+}
+
+#[test]
+fn page_text_headings_are_reused_until_the_body_changes() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let (engine, bytes) = cell_tables_engine(9812, false);
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request);
+    let pages: Vec<usize> = (0..page_count(&engine)).collect();
+    let fresh = |engine: &EngineSession| {
+        let cached = engine.page_text_headings.take();
+        let texts = engine.page_texts_json(&pages).unwrap();
+        engine.page_text_headings.replace(cached);
+        texts
+    };
+    engine.page_texts_json(&pages).unwrap();
+    let headings = engine.page_text_headings().unwrap();
+    let cell = cell_holding(&engine, "00000F01");
+    assert!(host.command(&cell, 1, 1, Some("x")));
+    assert_eq!(engine.page_texts_json(&pages).unwrap(), fresh(&engine));
+    assert!(
+        Rc::ptr_eq(&headings, &engine.page_text_headings().unwrap()),
+        "a cell edit keeps the body's headings"
+    );
+    host.command("body", 1, 1, Some("y"));
+    assert_eq!(engine.page_texts_json(&pages).unwrap(), fresh(&engine));
+    assert!(
+        Rc::ptr_eq(&headings, &engine.page_text_headings().unwrap()),
+        "plain text typed into the body keeps its paragraphs"
+    );
+    host.command("body", 1, 2, None);
+    assert_eq!(engine.page_texts_json(&pages).unwrap(), fresh(&engine));
+    assert!(
+        !Rc::ptr_eq(&headings, &engine.page_text_headings().unwrap()),
+        "a body delete reads them again"
+    );
 }

@@ -105,6 +105,8 @@ pub struct EditSessionCore {
     compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
     /// Seed images as `media:{n}` tokens rather than `data:` URLs.
     media_tokens: Cell<bool>,
+    /// The last content-control targets answer, while it still holds.
+    pub(crate) control_targets: RefCell<Option<controls::ControlTargets>>,
 }
 
 impl EditSessionCore {
@@ -128,6 +130,7 @@ impl EditSessionCore {
             resident_text_edit: RefCell::new(None),
             compared: RefCell::new(None),
             media_tokens: Cell::new(false),
+            control_targets: RefCell::new(None),
         };
         session.engine.doc().rotate_version(host.entropy());
         session

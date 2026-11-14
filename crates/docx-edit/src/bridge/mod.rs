@@ -1203,6 +1203,12 @@ fn walk_story_chunks<T: ReadTxn>(
                         local,
                     )?;
                     let rows_shown = !lowered.rows.is_empty();
+                    if story_id == "body"
+                        && active_stories.len() == 1
+                        && let BlockId::Str(id) = &lowered.id
+                    {
+                        local.table_embeds.insert(id.clone(), table.clone());
+                    }
                     if rows_shown && !hidden {
                         blocks.push(LayoutBlock::Table(lowered));
                     } else if rows_shown

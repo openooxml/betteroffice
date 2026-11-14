@@ -215,6 +215,12 @@ struct Gap {
     diagnostic: Diagnostic,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Calls of [`Inventory::build`].
+    pub(crate) static INVENTORY_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Every control of a document, listed or not, with its coverage gaps.
 pub(crate) struct Inventory {
     pub records: Vec<ControlRecord>,
@@ -226,6 +232,10 @@ pub(crate) struct Inventory {
     pub companions: HashMap<usize, Vec<usize>>,
     /// Controls whose part another story reads with different controls.
     pub divergent: HashSet<usize>,
+    /// The stories whose content the records read: those holding a control and
+    /// those inside one. Edits elsewhere that keep the story structure leave
+    /// every record as it is.
+    pub reads: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -418,6 +428,8 @@ struct Builder<'a, T: ReadTxn> {
     sources: HashMap<(&'a str, Option<usize>), Vec<usize>>,
     /// The source controls that hold other controls.
     parents: HashSet<usize>,
+    /// The stories walked inside a control.
+    nested: HashSet<String>,
 }
 
 impl<'a, T: ReadTxn> Builder<'a, T> {
@@ -622,6 +634,9 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
         let mut summary = StorySummary::default();
         if !self.walked.insert(story.to_owned()) {
             return Ok(summary);
+        }
+        if !ancestors.is_empty() {
+            self.nested.insert(story.to_owned());
         }
         let Some(text) = story_text(self.txn, story) else {
             return Ok(summary);
@@ -1020,6 +1035,8 @@ impl Inventory {
 
     /// Reads every control of `doc`'s committed state.
     pub(crate) fn build<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> Result<Self, ExportFailure> {
+        #[cfg(test)]
+        INVENTORY_BUILDS.with(|builds| builds.set(builds.get() + 1));
         let source = doc.source_metadata();
         let read = source.as_deref().map(crate::seed::SourceMetadata::read);
         let story_ids: Vec<String> = txn
@@ -1052,6 +1069,7 @@ impl Inventory {
             walked: HashSet::new(),
             sources,
             parents,
+            nested: HashSet::new(),
         };
         let mut gaps = Vec::new();
         let mut notes = Vec::new();
@@ -1292,6 +1310,8 @@ impl Inventory {
                 ));
             }
         }
+        let mut reads = builder.nested;
+        reads.extend(builder.records.iter().map(|record| record.story.clone()));
         Ok(Self {
             records: builder.records,
             gaps,
@@ -1299,6 +1319,7 @@ impl Inventory {
             unidentified,
             companions,
             divergent,
+            reads,
         })
     }
 
