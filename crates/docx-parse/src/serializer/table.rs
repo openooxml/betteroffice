@@ -870,12 +870,122 @@ mod tests {
         context.end_splice().unwrap().conflict
     }
 
+    type MergeRows<'a> = &'a [&'a [(u32, Option<&'a str>)]];
+
+    fn merge_table(rows: MergeRows<'_>) -> Table {
+        let mut ordinal = 0;
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|cells| {
+                let cells: Vec<_> = cells
+                    .iter()
+                    .map(|(span, merge)| {
+                        ordinal += 1;
+                        serde_json::json!({
+                            "type": "tableCell",
+                            "formatting": {"gridSpan": span, "vMerge": merge},
+                            "content": [
+                                {"type": "paragraph", "sourceOrdinal": ordinal, "content": []}
+                            ]
+                        })
+                    })
+                    .collect();
+                serde_json::json!({"type": "tableRow", "cells": cells})
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({"type": "table", "rows": rows})).unwrap()
+    }
+
+    /// For each cell, whether its paragraph left out of the plan keeps the splice.
+    fn exempt_cells(rows: MergeRows<'_>) -> Vec<Vec<bool>> {
+        let table = merge_table(rows);
+        let count: u32 = rows.iter().map(|cells| cells.len() as u32).sum();
+        let mut probed = 0;
+        rows.iter()
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(|_| {
+                        probed += 1;
+                        let mut context = context();
+                        context.begin_splice(
+                            (1..=count).filter(|ordinal| *ordinal != probed),
+                            None,
+                        );
+                        serialize_table(&table, &mut context).unwrap();
+                        !context.end_splice().unwrap().conflict
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     #[test]
-    fn an_unplanned_paragraph_in_a_merge_continuation_cell_keeps_the_splice() {
-        let row = row_with_unplanned_cell_paragraph(Some("continue"));
-        assert!(
-            !splice_conflict(&row),
-            "continuation cell paragraph set the splice conflict"
+    fn an_unplanned_paragraph_in_a_covered_merge_continuation_cell_keeps_the_splice() {
+        assert_eq!(
+            exempt_cells(&[
+                &[(1, Some("restart")), (1, None)],
+                &[(1, Some("continue")), (1, None)],
+            ]),
+            [[false, false], [true, false]]
+        );
+    }
+
+    #[test]
+    fn an_orphan_merge_continuation_in_the_first_row_conflicts() {
+        assert_eq!(
+            exempt_cells(&[
+                &[(1, Some("continue")), (1, None)],
+                &[(1, None), (1, None)],
+            ]),
+            [[false, false], [false, false]]
+        );
+    }
+
+    #[test]
+    fn a_merge_continuation_under_an_unmerged_cell_conflicts() {
+        assert_eq!(
+            exempt_cells(&[
+                &[(1, None), (1, None)],
+                &[(1, Some("continue")), (1, None)],
+            ]),
+            [[false, false], [false, false]]
+        );
+    }
+
+    #[test]
+    fn a_continuation_under_a_covered_continuation_keeps_the_splice() {
+        assert_eq!(
+            exempt_cells(&[
+                &[(1, Some("restart")), (1, None)],
+                &[(1, Some("continue")), (1, None)],
+                &[(1, Some("continue")), (1, None)],
+            ]),
+            [[false, false], [true, false], [true, false]]
+        );
+    }
+
+    #[test]
+    fn a_grid_span_shift_between_rows_decides_coverage_by_start_column() {
+        assert_eq!(
+            exempt_cells(&[
+                &[(1, None), (1, Some("restart")), (1, None)],
+                &[(2, None), (1, Some("continue"))],
+                &[(1, None), (1, Some("continue")), (1, None)],
+            ]),
+            vec![
+                vec![false, false, false],
+                vec![false, false],
+                vec![false, true, false],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_row_of_covered_merge_continuations_conflicts() {
+        assert_eq!(
+            exempt_cells(&[&[(2, Some("restart"))], &[(2, Some("continue"))]]),
+            [[false], [false]]
         );
     }
 
@@ -919,15 +1029,14 @@ mod tests {
 
     #[test]
     fn a_planned_paragraph_in_a_merge_continuation_cell_is_still_recorded() {
-        let row = row_with_cell(serde_json::json!({"vMerge": "continue"}), &[7, 8]);
+        let row = row_with_cell(serde_json::json!({"vMerge": "continue"}), &[7]);
         let mut context = context();
         context.begin_splice([1, 7], None);
         serialize_table_row(&row, &mut context).unwrap();
         let recorded = context.end_splice().unwrap();
-        assert!(!recorded.conflict, "continuation cell set the splice conflict");
+        assert!(!recorded.conflict, "orphan continuation cell set the splice conflict");
         assert!(recorded.written.contains_key(&7), "planned paragraph not recorded");
         assert!(recorded.written.contains_key(&1));
-        assert!(!recorded.written.contains_key(&8));
         assert_eq!(recorded.order, [Some(7), Some(1)]);
     }
 

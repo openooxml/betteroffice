@@ -8371,6 +8371,83 @@ mod tests {
     }
 
     #[test]
+    fn seeding_skips_the_merge_continuations_the_serializer_exempts() {
+        type Rows<'a> = &'a [&'a [(u32, Option<&'a str>)]];
+        let skipped = |rows: Rows<'_>| {
+            let table = json!({
+                "type": "table",
+                "rows": rows.iter().map(|cells| json!({
+                    "type": "tableRow",
+                    "cells": cells.iter().map(|(span, merge)| json!({
+                        "type": "tableCell",
+                        "formatting": {"gridSpan": span, "vMerge": merge},
+                        "content": []
+                    })).collect::<Vec<_>>()
+                })).collect::<Vec<_>>()
+            });
+            super::source_cells(&table)
+                .iter()
+                .zip(rows)
+                .map(|(kept, cells)| {
+                    (0..cells.len())
+                        .map(|index| !kept.contains(&index))
+                        .collect()
+                })
+                .collect::<Vec<Vec<bool>>>()
+        };
+        let cases: [(Rows<'_>, &[&[bool]]); 6] = [
+            (
+                &[
+                    &[(1, Some("restart")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                ],
+                &[&[false, false], &[true, false]],
+            ),
+            (
+                &[
+                    &[(1, Some("continue")), (1, None)],
+                    &[(1, None), (1, None)],
+                ],
+                &[&[false, false], &[false, false]],
+            ),
+            (
+                &[
+                    &[(1, None), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                ],
+                &[&[false, false], &[false, false]],
+            ),
+            (
+                &[
+                    &[(1, Some("restart")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                ],
+                &[&[false, false], &[true, false], &[true, false]],
+            ),
+            (
+                &[
+                    &[(1, None), (1, Some("restart")), (1, None)],
+                    &[(2, None), (1, Some("continue"))],
+                    &[(1, None), (1, Some("continue")), (1, None)],
+                ],
+                &[
+                    &[false, false, false],
+                    &[false, false],
+                    &[false, true, false],
+                ],
+            ),
+            (
+                &[&[(2, Some("restart"))], &[(2, Some("continue"))]],
+                &[&[false], &[false]],
+            ),
+        ];
+        for (rows, expected) in cases {
+            assert_eq!(skipped(rows), expected, "{rows:?}");
+        }
+    }
+
+    #[test]
     fn seeded_grid_percentages_follow_horizontal_and_vertical_spans() {
         let document = seed_body(&[json!({
             "type": "table", "columnWidths": [1500, 3000, 4500],

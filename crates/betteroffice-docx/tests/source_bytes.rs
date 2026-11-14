@@ -249,8 +249,55 @@ fn assert_edit_before_table_keeps_the_body_bytes(table: &str) {
     assert_bytes_kept_around(&source, &saved, "0000004E", "New text");
 }
 
+fn number_paragraphs(value: &mut serde_json::Value, next: &mut u32) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(serde_json::Value::as_str) == Some("paragraph") {
+                object.insert("sourceOrdinal".to_owned(), (*next).into());
+                *next += 1;
+            }
+            for child in object.values_mut() {
+                number_paragraphs(child, next);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                number_paragraphs(child, next);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Saves `source` with its first paragraph edited and only `planned` source paragraphs spliced.
+fn splice_save(source: &str, planned: &[u32]) -> String {
+    use sha2::{Digest, Sha256};
+    let package = docx(source);
+    let parsed =
+        docx_parse::parse_docx_s9_wire(&package, docx_parse::S9ParseOptions::default()).unwrap();
+    let mut document = serde_json::to_value(parsed.document.package).unwrap()["document"].clone();
+    document.as_object_mut().unwrap().remove("sections");
+    number_paragraphs(&mut document["content"], &mut 0);
+    document["content"][0]["content"] = serde_json::json!([
+        {"type": "run", "content": [{"type": "text", "text": "New text"}]}
+    ]);
+    let request: docx_parse::S13SaveRequest = serde_json::from_value(serde_json::json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": document,
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [{
+            "part": "word/document.xml",
+            "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+            "paragraphs": planned,
+            "changed": [0],
+        }]},
+    }))
+    .unwrap();
+    saved_main_part(&docx_parse::write_docx_s13(request, &package).unwrap())
+}
+
 #[test]
-fn editing_before_an_orphan_merge_continuation_keeps_its_paragraph_and_the_body_bytes() {
+fn an_orphan_merge_continuation_keeps_a_planned_paragraph_and_conflicts_on_an_unplanned_one() {
     let rows = [
         [
             cell("<w:vMerge/>", &paragraph("0000005A", &run("Orphan"))),
@@ -266,7 +313,22 @@ fn editing_before_an_orphan_merge_continuation_keeps_its_paragraph_and_the_body_
         ]
         .concat(),
     ];
-    assert_edit_before_table_keeps_the_body_bytes(&table(2, &rows));
+    let table = table(2, &rows);
+    assert_edit_before_table_keeps_the_body_bytes(&table);
+    let source = main_part(
+        &[
+            paragraph("0000004E", &run("Old text")),
+            table.clone(),
+            paragraph("0000004D", &run("After.")),
+        ]
+        .concat(),
+    );
+    let planned = splice_save(&source, &[0, 1, 2, 3, 4, 5]);
+    assert!(planned.contains("New text"), "{planned}");
+    assert!(planned.contains(&table), "planned orphan paragraph lost the table bytes");
+    let unplanned = splice_save(&source, &[0, 2, 3, 4, 5]);
+    assert!(unplanned.contains("New text"), "{unplanned}");
+    assert!(!unplanned.contains(&table), "unplanned orphan paragraph kept the splice");
 }
 
 #[test]
