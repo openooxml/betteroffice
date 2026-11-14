@@ -824,8 +824,12 @@ function embeddedFace(engine: DocxEngine): Uint8Array {
   return face;
 }
 
-function privateFontRequest(session: Session, chain: number[]) {
+function privateFontRequest(engine: DocxEngine, session: Session, chain: number[]) {
   const request = regionRequest();
+  const { document } = JSON.parse(engine.parse_docx_s9(embeddedFontFixture, '')) as { document: { package: { document: { finalSectionProperties?: typeof request.regions.sections[0]['properties'] } } } };
+  const properties = document.package.document.finalSectionProperties;
+  if (!properties) throw new Error('the embedded font fixture parses without a final section');
+  request.regions.sections[0]!.properties = properties;
   const requirements = JSON.parse(session.layout_font_requirements_json(JSON.stringify(request))) as { key: string; family: string }[];
   if (!requirements.some(({ family }) => family.toLowerCase() === EMBEDDED_FAMILY.toLowerCase())) {
     throw new Error(`the layout does not ask for the embedded font: ${JSON.stringify(requirements)}`);
@@ -2744,10 +2748,10 @@ const rows: Row<Docx>[] = [
     call: ({ engine, fresh }) => {
       const f = embeddedFontSession(fresh);
       const face = embeddedFace(engine);
-      const embedded = privateFontRequest(f, [0]);
+      const embedded = privateFontRequest(engine, f, [0]);
       const snapshot = f.export_snapshot_with_private_fonts_json(face, Uint32Array.from([face.length]), embedded.request, EXPORT);
       if (!(JSON.parse(snapshot) as { ok: boolean }).ok) throw new Error(`the private font export refused: ${snapshot}`);
-      const unfonted = f.export_snapshot_with_private_fonts_json(new Uint8Array(0), new Uint32Array(0), privateFontRequest(f, []).request, EXPORT);
+      const unfonted = f.export_snapshot_with_private_fonts_json(new Uint8Array(0), new Uint32Array(0), privateFontRequest(engine, f, []).request, EXPORT);
       return { requirements: embedded.requirements, snapshot, unfonted };
     },
   },
@@ -2757,7 +2761,7 @@ const rows: Row<Docx>[] = [
     throws: { name: 'string', reason: 'font lengths that run past the joined font bytes are refused' },
     setup: ({ engine, fresh }: Docx) => {
       const f = embeddedFontSession(fresh);
-      return { f, face: embeddedFace(engine), request: privateFontRequest(f, [0]).request };
+      return { f, face: embeddedFace(engine), request: privateFontRequest(engine, f, [0]).request };
     },
     call: (_, { f, face, request }) => f.export_snapshot_with_private_fonts_json(face, Uint32Array.from([face.length + 1]), request, EXPORT),
   }),
