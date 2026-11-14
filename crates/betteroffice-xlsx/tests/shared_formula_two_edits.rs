@@ -272,7 +272,11 @@ fn sheet_xml(shape: Shape, orient: Orient, master_at: MasterAt, span: Span) -> S
     let members = shape.members();
     let master = shape.master(master_at);
     let end = *members.last().unwrap_or(&START) + span.tail();
-    let reference = format!("{}:{}", orient.member(START - span.lead()), orient.member(end));
+    let reference = format!(
+        "{}:{}",
+        orient.member(START - span.lead()),
+        orient.member(end)
+    );
     let member_cell = |pos: u32| {
         let f = if pos == master {
             format!(
@@ -778,7 +782,10 @@ pub fn shared_formula_violations(xml: &str) -> Vec<String> {
         let shown = show_r(&r);
         let refs = masters.get(&si).map(Vec::as_slice).unwrap_or_default();
         let [reference] = refs else {
-            violations.push(format!("{shown} si={si}: {} masters with a ref", refs.len()));
+            violations.push(format!(
+                "{shown} si={si}: {} masters with a ref",
+                refs.len()
+            ));
             continue;
         };
         let Some(at) = r.as_deref().and_then(parse_a1) else {
@@ -951,10 +958,7 @@ fn shared_formulas_keep_their_formula_after_structural_edits() {
         }
         println!(
             "\nGRID tail={} cases={} failed={} skipped={}",
-            span.name(),
-            tally.cases,
-            tally.failed,
-            tally.skipped
+            span.name(), tally.cases, tally.failed, tally.skipped
         );
         grid.add(&tally);
 
@@ -976,10 +980,7 @@ fn shared_formulas_keep_their_formula_after_structural_edits() {
         }
         println!(
             "\nTRIPLES tail={} cases={} failed={} skipped={}",
-            span.name(),
-            tally.cases,
-            tally.failed,
-            tally.skipped
+            span.name(), tally.cases, tally.failed, tally.skipped
         );
         triples.add(&tally);
     }
