@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use pptx_edit::{DeckSession, EditCtx, EditError, ShapeDraft, ShapeRect, TextStyle};
-use yrs::{Any, Array, ArrayRef, Map, MapRef, Out, ReadTxn, Transact};
+use pptx_edit::{CaretAnchor, DeckSession, EditCtx, EditError, ShapeDraft, ShapeRect, TextStyle};
+use yrs::{Any, Array, ArrayRef, Map, MapRef, Out, ReadTxn, Transact, TransactionMut};
 
 const DEMO: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const GROUP_OPEN: &str = "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"900\" name=\"Group\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>";
@@ -335,7 +335,7 @@ fn a_story_two_groups_deep_resolves_until_its_outer_group_is_removed() {
 }
 
 #[test]
-fn a_resolved_story_outlives_unrelated_damage_that_a_fresh_session_reports() {
+fn a_live_story_in_a_deck_damaged_elsewhere_resolves_and_takes_writes_in_any_session() {
     let warm = DeckSession::open(DEMO, 84311).unwrap();
     let fresh = DeckSession::open(DEMO, 84312).unwrap();
     let slides = warm.snapshot().unwrap().slides;
@@ -353,17 +353,79 @@ fn a_resolved_story_outlives_unrelated_damage_that_a_fresh_session_reports() {
             string_list(&["missing-shape".to_owned()]),
         );
     }
-    assert_eq!(warm.resolve_caret_anchor(&anchor), Some(2));
-    assert_eq!(fresh.resolve_caret_anchor(&anchor), None);
-    let written = fresh.insert_text(
-        &EditCtx::local("test"),
-        &story,
-        0,
-        "X",
-        &TextStyle::default(),
-    );
-    assert!(
-        matches!(written, Err(EditError::InvalidState(_))),
-        "{written:?}"
-    );
+    let context = EditCtx::local("test");
+    for session in [&warm, &fresh] {
+        assert_eq!(session.resolve_caret_anchor(&anchor), Some(2));
+        session
+            .insert_text(&context, &story, 0, "X", &TextStyle::default())
+            .unwrap();
+        assert_eq!(session.resolve_caret_anchor(&anchor), Some(3));
+    }
+}
+
+#[test]
+fn a_story_tombstoned_inside_a_group_that_still_lists_it_is_dead() {
+    let warm = grouped_session(1, 84313);
+    let fresh = grouped_session(1, 84314);
+    let grouped = grouped_story(&warm);
+    let anchor = warm.anchor_caret(&grouped.story, 1).unwrap();
+    assert_eq!(warm.resolve_caret_anchor(&anchor), Some(1));
+    for session in [&warm, &fresh] {
+        let mut txn = session.yrs_doc().transact_mut();
+        shape_entry(&txn, &grouped.path[1]).remove(&mut txn, "id");
+    }
+    assert_refused(&[&warm, &fresh], &anchor, &grouped.story);
+}
+
+fn assert_refused(sessions: &[&DeckSession], anchor: &CaretAnchor, story: &str) {
+    let context = EditCtx::local("test");
+    for session in sessions {
+        assert_eq!(session.resolve_caret_anchor(anchor), None);
+        let written = session.insert_text(&context, story, 0, "X", &TextStyle::default());
+        assert!(
+            matches!(
+                written,
+                Err(EditError::StoryNotFound(_) | EditError::InvalidState(_))
+            ),
+            "{written:?}"
+        );
+    }
+}
+
+fn assert_own_path_damage_refused(client_id: u64, damage: fn(&mut TransactionMut<'_>, &Grouped)) {
+    let warm = grouped_session(1, client_id);
+    let fresh = grouped_session(1, client_id + 1);
+    let grouped = grouped_story(&warm);
+    let anchor = warm.anchor_caret(&grouped.story, 1).unwrap();
+    assert_eq!(warm.resolve_caret_anchor(&anchor), Some(1));
+    for session in [&warm, &fresh] {
+        damage(&mut session.yrs_doc().transact_mut(), &grouped);
+    }
+    assert_refused(&[&warm, &fresh], &anchor, &grouped.story);
+}
+
+fn break_group(txn: &mut TransactionMut<'_>, grouped: &Grouped) {
+    let group = shape_entry(&*txn, &grouped.path[0]);
+    group.insert(txn, "children", "unreadable");
+}
+
+fn break_slide(txn: &mut TransactionMut<'_>, grouped: &Grouped) {
+    let slide = txn
+        .get_map("pptx:slides")
+        .unwrap()
+        .get(&*txn, &grouped.slide)
+        .unwrap()
+        .cast::<MapRef>()
+        .unwrap();
+    slide.insert(txn, "shapes", "unreadable");
+}
+
+#[test]
+fn a_story_whose_own_group_cannot_be_read_is_refused_in_any_session() {
+    assert_own_path_damage_refused(84315, break_group);
+}
+
+#[test]
+fn a_story_whose_own_slide_cannot_be_read_is_refused_in_any_session() {
+    assert_own_path_damage_refused(84317, break_slide);
 }
