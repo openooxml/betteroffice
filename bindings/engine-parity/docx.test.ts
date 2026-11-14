@@ -1936,7 +1936,9 @@ const rows: Row<Docx>[] = [
     method: 'EditSession.retained_headers_footers_json',
     setup: ({ session: s }: Docx) => {
       const base = regionRequest();
-      return layoutInput(s, { ...base, regions: { sections: [{ ...base.regions.sections[0], headerFooterRefs: { headerDefault: 'rIdHeader' } }] } }).input;
+      const [section] = base.regions.sections;
+      const properties = { ...section.properties, headerDistance: 720, footerDistance: 720, headerReferences: [{ type: 'default', rId: 'rIdHeader' }] };
+      return layoutInput(s, { ...base, regions: { sections: [{ ...section, properties }] } }).input;
     },
     call: ({ session: s }, input) => {
       const before = s.retained_headers_footers_json();
