@@ -492,7 +492,8 @@ impl SheetPatch<'_> {
                 arrays.insert((cell.at.row, cell.at.col));
             }
         }
-        let mut groups: HashMap<u32, (bool, Option<CellRange>)> = HashMap::new();
+        let mut groups: HashMap<u32, (bool, Option<CellRange>, Option<(u32, u32)>)> =
+            HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
             let Some(formula) = &cell.formula else {
@@ -501,12 +502,19 @@ impl SheetPatch<'_> {
             let key = (cell.at.row, cell.at.col);
             match formula.group {
                 Some(group) => {
-                    let entry = groups.entry(group).or_insert((false, None));
+                    let entry = groups.entry(group).or_insert((false, None, None));
                     entry.0 |= self
                         .mapped(cell.at)
                         .is_none_or(|at| self.inverse(at) != Some(cell.at))
                         || (changed.contains(&key) && self.source_formula_changed_oracle(cell.at));
                     entry.0 |= arrays.contains(&key);
+                    if let Some(at) = self.mapped(cell.at) {
+                        let shift = (
+                            at.row.wrapping_sub(cell.at.row),
+                            at.col.wrapping_sub(cell.at.col),
+                        );
+                        entry.0 |= *entry.2.get_or_insert(shift) != shift;
+                    }
                     if !entry.0
                         && formula.reference.is_some()
                         && let Some(at) = self.mapped(cell.at)
@@ -530,7 +538,7 @@ impl SheetPatch<'_> {
         Ok(DirtyFormulas {
             groups: groups
                 .into_iter()
-                .filter(|(_, (dirty, master))| {
+                .filter(|(_, (dirty, master, _))| {
                     *dirty || !master.is_some_and(|reference| self.moves_uniformly(reference))
                 })
                 .map(|(group, _)| group)
