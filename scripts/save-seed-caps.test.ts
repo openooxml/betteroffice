@@ -9,9 +9,10 @@ const NAMES = ['SAVE_SEED_MAX_PARAGRAPHS', 'SAVE_SEED_MAX_INFLATED_BYTES'] as co
 function caps(path: string): string[] {
   const source = readFileSync(join(root, path), 'utf8');
   return NAMES.map((name) => {
-    const match = source.match(new RegExp(`^const ${name}(?::\\s*u32)?\\s*=\\s*([^;]+);`, 'm'));
-    expect(match, `${path}: ${name}`).not.toBeNull();
-    return match![1]!.replace(/\s+/g, '');
+    const pattern = new RegExp(`^const ${name}(?::\\s*u32)?\\s*=\\s*([^;]+);`, 'gm');
+    const matches = [...source.matchAll(pattern)];
+    expect(matches.length, `${path}: ${name}`).toBe(1);
+    return matches[0]![1]!.replace(/\s+/g, '');
   });
 }
 
