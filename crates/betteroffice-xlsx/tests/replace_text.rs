@@ -940,8 +940,8 @@ fn two_rich_sheets_source(first: &str, second: &str, strings: Option<String>) ->
 }
 
 #[test]
-fn replace_refuses_plain_text_equal_to_a_rich_inline_string_on_another_sheet_after_a_remote_replay(
-) {
+fn replace_refuses_plain_text_equal_to_a_rich_inline_string_on_another_sheet_after_a_remote_replay()
+{
     let rich = rich_runs("alpha", " beta");
     let source = two_rich_sheets_source(
         r#"<row r="1"><c r="A1" t="inlineStr"><is><t>alpha beta</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>alpha</t></is></c></row>"#,
