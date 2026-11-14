@@ -209,7 +209,7 @@ export async function runKnownDifference<T>(
 }
 
 function freshPattern(pattern: RegExp): RegExp {
-  return new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, ''));
+  return new RegExp(pattern.source, pattern.flags);
 }
 
 function matchesAnyMessage(message: string | RegExp | undefined): boolean {
