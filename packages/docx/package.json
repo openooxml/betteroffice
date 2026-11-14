@@ -254,7 +254,7 @@
     "@betteroffice/fonts": "workspace:^"
   },
   "devDependencies": {
-    "tsup": "^8.0.1",
+    "tsup": "^9.0.0",
     "typescript": "^6.0.3",
     "@types/bun": "^1.0.0",
     "@types/node": "^26.0.0"
