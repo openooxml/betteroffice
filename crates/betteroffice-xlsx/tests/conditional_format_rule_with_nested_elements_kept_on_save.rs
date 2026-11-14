@@ -58,9 +58,9 @@ fn nested_element(prefixed: bool, children: bool) -> String {
 fn nested_rule(placement: Placement, prefixed: bool, children: bool) -> String {
     let nested = nested_element(prefixed, children);
     let body = match placement {
-        Placement::Direct => format!(
-            r#"{nested}<extLst><ext uri="urn:tail"><x14:tail v="KEEPME"/></ext></extLst>"#
-        ),
+        Placement::Direct => {
+            format!(r#"{nested}<extLst><ext uri="urn:tail"><x14:tail v="KEEPME"/></ext></extLst>"#)
+        }
         Placement::Ext => format!(
             r#"<extLst><ext uri="urn:nested">{nested}<x14:tail v="KEEPME"/></ext></extLst>"#
         ),
@@ -361,7 +361,9 @@ fn run_case(source_rule: &str, edit: Edit) -> Vec<String> {
     }
     if !texts.contains(&source_rule) {
         let first = texts.first().map_or("none".to_owned(), |text| trim(text));
-        problems.push(format!("nested rule not saved as its source; first saved rule {first}"));
+        problems.push(format!(
+            "nested rule not saved as its source; first saved rule {first}"
+        ));
     }
     problems
 }
