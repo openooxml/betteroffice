@@ -318,6 +318,8 @@ fn step(
     local: &DeckSession,
     peer: &DeckSession,
     stories: &[String],
+    seed: u64,
+    round: u32,
 ) -> Outcome {
     let context = EditCtx::local("test");
     let slides = live_slide_ids(&local.doc.transact()).unwrap();
@@ -384,9 +386,16 @@ fn step(
             if let Some(story) = rng.pick(stories) {
                 let owned = walk_finds_owner(local, &story);
                 let written = local.insert_text(&context, &story, 0, "x", &TextStyle::default());
-                assert_eq!(written.is_ok(), owned, "write to {story}: {written:?}");
+                assert_eq!(
+                    written.is_ok(),
+                    owned,
+                    "write to {story}: {written:?} seed={seed} step={round}"
+                );
                 if !owned {
-                    assert!(matches!(written, Err(EditError::StoryNotFound(_))));
+                    assert!(
+                        matches!(written, Err(EditError::StoryNotFound(_))),
+                        "write to a story with no owner: {written:?} id={story} seed={seed} step={round}"
+                    );
                 }
             }
         }
@@ -464,7 +473,7 @@ fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
         let mut stories = Vec::new();
         discover(&local, &mut seen, &mut stories);
         for round in 0..200 {
-            let outcome = step(&mut rng, &local, &peer, &stories);
+            let outcome = step(&mut rng, &local, &peer, &stories, seed, round);
             if outcome.grew {
                 discover(&local, &mut seen, &mut stories);
             }
@@ -543,7 +552,7 @@ fn the_lookup_search_finds_the_strict_walk_owner_on_undamaged_generated_decks() 
         let mut stories = Vec::new();
         discover(&local, &mut seen, &mut stories);
         for round in 1..=200 {
-            let outcome = step(&mut rng, &local, &peer, &stories);
+            let outcome = step(&mut rng, &local, &peer, &stories, seed, round);
             if outcome.grew {
                 discover(&local, &mut seen, &mut stories);
             }
