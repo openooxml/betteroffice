@@ -64,6 +64,8 @@ pub struct Document {
     session_baseline: Option<SavedFields>,
     session_edits: Vec<SessionEdit>,
     dirty: Dirty,
+    #[cfg(feature = "raster")]
+    default_limits: bool,
     #[cfg(any(feature = "fonts", feature = "raster"))]
     pub(crate) fonts: Mutex<crate::font::FontRegistry>,
     #[cfg(feature = "fonts")]
@@ -129,6 +131,8 @@ impl Document {
             session_baseline: Some(SavedFields::of(&model)),
             session_edits: Vec::new(),
             dirty: Dirty::Clean,
+            #[cfg(feature = "raster")]
+            default_limits: format!("{limits:?}") == format!("{:?}", ParseLimits::default()),
             model,
             opened_ids: authored_ids.clone(),
             authored_ids,
@@ -166,10 +170,10 @@ impl Document {
         self.model
     }
 
-    /// Whether the model is unchanged since open.
+    /// Whether the model is unchanged since an open under the default limits.
     #[cfg(feature = "raster")]
     pub(crate) fn renders_from_model(&self) -> bool {
-        self.dirty == Dirty::Clean
+        self.dirty == Dirty::Clean && self.default_limits
     }
 
     #[cfg(feature = "raster")]
