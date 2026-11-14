@@ -186,3 +186,83 @@ describe('product save of generated documents for the crate', () => {
     }, 30_000);
   }
 });
+
+const REPORT_SMART_TAG = '<w:smartTag w:uri="urn:schemas-microsoft-com:office:smarttags" w:element="place"><w:r><w:t>Ancient</w:t></w:r></w:smartTag>';
+const REPORT_CELL = `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p w14:paraId="1C000002"><w:r><w:t xml:space="preserve">Near </w:t></w:r>${REPORT_SMART_TAG}</w:p></w:tc></w:tr></w:tbl>`;
+const PLAIN = CASES.find(({ name }) => name === 'plain')!;
+
+interface ReportCase {
+  name: string;
+  parts: Parts;
+  edit?: { paragraph: number; paraId: string };
+  text?: string;
+}
+
+const STRUCTURE_DROPPED_DOCUMENT = `${DECLARATION}\n<w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="${REL}" xmlns:w="${W}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14"><w:body>${[
+  `<w:p w14:paraId="0000000A" w14:textId="77777777"><w:r><w:t xml:space="preserve">Near </w:t></w:r>${REPORT_SMART_TAG}</w:p>`,
+  '<w:p w14:paraId="0000000B" w14:textId="77777777"><w:customXml w:uri="urn:pr1" w:element="tagged"><w:r><w:t>Tagged</w:t></w:r></w:customXml></w:p>',
+  '<w:p w14:paraId="0000000C" w14:textId="77777777"><w:bookmarkStart w:id="1" w:name="pr1mark"/><w:r><w:t>Marked</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>',
+  '<w:p w14:paraId="0000000D" w14:textId="77777777"><w:pPr><mc:AlternateContent><mc:Choice Requires="w14"><w:jc w:val="center"/></mc:Choice><mc:Fallback><w:jc w:val="left"/></mc:Fallback></mc:AlternateContent></w:pPr><w:r><w:t>aaaa</w:t></w:r></w:p>',
+  '<w:p><w:r><w:br w:type="page"/></w:r></w:p>',
+].join('')}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>`;
+
+const REPORT_CASES: ReportCase[] = [
+  { name: 'unedited', parts: PLAIN.parts },
+  { name: 'edited', parts: PLAIN.parts, edit: PLAIN.edit },
+  {
+    name: 'smart-tag-cell',
+    parts: bodyOnly([p('1C000001', 'First'), REPORT_CELL, p('1C000003', 'Last')].join('')),
+    edit: { paragraph: 2, paraId: '1C000003' },
+  },
+  {
+    name: 'structure-dropped',
+    parts: {
+      '[Content_Types].xml': `${DECLARATION}\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.wordprocessingml.document.main+xml"/></Types>`,
+      '_rels/.rels': `${DECLARATION}\n<Relationships xmlns="${PKG_REL}"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`,
+      'word/document.xml': STRUCTURE_DROPPED_DOCUMENT,
+    },
+    edit: { paragraph: 3, paraId: '0000000D' },
+    text: 'aaa',
+  },
+];
+
+/** The product save's report, and each session paragraph key's Word paragraph ID. */
+async function productReport(input: Uint8Array, edit?: { paraId: string; text: string }) {
+  const session = await createYrsSession({ clientId: 1 });
+  try {
+    session.seedFromDocx(input.slice(), { generation: createHash('sha256').update(input).digest('hex').slice(0, 32) });
+    const identities = session.paragraphIdentities().paragraphs;
+    if (edit) {
+      const identity = identities.find(
+        (entry) => entry.session?.story === 'body' && entry.ooxmlParaId?.toUpperCase() === edit.paraId,
+      );
+      if (!identity?.session) throw new Error(`no body paragraph saves with ${edit.paraId}`);
+      const key = identity.session.paraId;
+      const span = session.paragraphSpans('body').find((entry) => entry.paraId === key);
+      if (!span) throw new Error(`no span for ${edit.paraId}`);
+      session.replaceRange({ story: 'body', start: { paraId: key, offset: 0 }, end: { paraId: key, offset: span.length } }, edit.text);
+      expect(session.paragraphs('body').find((paragraph) => paragraph.paraId === key)?.text).toBe(edit.text);
+    }
+    const { keptUnchanged, structureDropped } = await saveYrsDocx(session, { updateModifiedDate: false });
+    const ids: Record<string, string> = {};
+    for (const entry of identities) if (entry.session && entry.ooxmlParaId) ids[entry.session.paraId] = entry.ooxmlParaId.toUpperCase();
+    return { report: { keptUnchanged, structureDropped }, ids };
+  } finally {
+    session.destroy();
+  }
+}
+
+describe('product save reports of generated documents for the crate', () => {
+  for (const { name, parts, edit, text = NEW_TEXT } of REPORT_CASES) {
+    test(name, async () => {
+      const dir = join(OUT, 'report', name);
+      mkdirSync(dir, { recursive: true });
+      const input = await pack(parts);
+      writeFileSync(join(dir, 'input.docx'), input);
+      writeFileSync(join(dir, 'edit.json'), JSON.stringify(edit ? { ...edit, text } : {}));
+      const { report, ids } = await productReport(input, edit && { paraId: edit.paraId, text });
+      writeFileSync(join(dir, 'report.json'), JSON.stringify(report));
+      writeFileSync(join(dir, 'ids.json'), JSON.stringify(ids));
+    }, 30_000);
+  }
+});
