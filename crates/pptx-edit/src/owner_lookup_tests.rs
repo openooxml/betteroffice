@@ -132,6 +132,19 @@ fn walk_finds_owner(session: &DeckSession, story: &str) -> bool {
     story_owner(&txn, story).ok().flatten().is_some()
 }
 
+fn ownerless_write_refusal(session: &DeckSession, story: &str) -> EditError {
+    let table = story
+        .strip_prefix("story:")
+        .and_then(|id| id.split_once(":table:"))
+        .map(|(shape, _)| shape);
+    match table {
+        Some(shape) if !placed_shapes(session).iter().any(|live| live.shape == shape) => {
+            EditError::ShapeNotFound(shape.to_owned())
+        }
+        _ => EditError::StoryNotFound(story.to_owned()),
+    }
+}
+
 fn order_of(txn: &TransactionMut<'_>, slide: &str) -> ArrayRef {
     slide_shape_order(&slide_ref(txn, slide).unwrap(), txn).unwrap()
 }
@@ -392,8 +405,14 @@ fn step(
                     "write to {story}: {written:?} seed={seed} step={round}"
                 );
                 if !owned {
+                    let refused = match ownerless_write_refusal(local, &story) {
+                        EditError::ShapeNotFound(_) => {
+                            matches!(written, Err(EditError::ShapeNotFound(_)))
+                        }
+                        _ => matches!(written, Err(EditError::StoryNotFound(_))),
+                    };
                     assert!(
-                        matches!(written, Err(EditError::StoryNotFound(_))),
+                        refused,
                         "write to a story with no owner: {written:?} id={story} seed={seed} step={round}"
                     );
                 }
