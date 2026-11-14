@@ -12,6 +12,7 @@ import type {
   YrsResolvedCommentAnchor,
   YrsRevisionInfo,
   YrsSelection,
+  YrsSelectionContext,
   YrsSelectionText,
   YrsSession,
   YrsStorySegment,
@@ -62,7 +63,7 @@ import type { ResidentControlTarget, ResidentControlPosition } from './residentC
 import { withPackageMetadata, type ResidentPackageMetadata } from './residentProperties';
 import { getDocumentWatermark } from '../docx/watermarkApi';
 import { resolvedFinalSectionProperties, updateFinalSectionProperties } from '../editor/finalSection';
-import { readSectionSnapshot, residentSectionPropertiesAt, sectionMarkKey, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
+import { nativeTabStops, readSectionSnapshot, residentSectionPropertiesAt, sectionMarkKey, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionParagraphs, type ResidentSectionSnapshot } from './residentSections';
 import { pageBreakTarget, splitSection } from './sectionBreak';
 
 /** @internal */
@@ -210,7 +211,8 @@ export type ResidentEngineSession = Pick<
   /** The `w:next` style a paragraph break at `at` gives the new paragraph, or null to keep the split's own. */
   nextParagraphStyle(at: YrsLoc): string | null;
   setPropertyDocument(document: Document): boolean;
-  sectionProperties(): ResidentSectionSnapshot;
+  /** Every section, with the tab stops of `paragraphs`, or of every paragraph when omitted. */
+  sectionProperties(paragraphs?: ResidentSectionParagraphs): ResidentSectionSnapshot;
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
   updateComment(id: string, patch: DocxCommentPatch): void;
   commentProjection(fresh?: boolean): ResidentCommentProjection | null;
@@ -414,8 +416,23 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     resident.setParagraphAttrs({ story: 'body', start: at, end: at }, { other: { sectPr, sectionBreakType: sectPr.sectionStart ?? null } });
     return session.version() !== version;
   };
-  const sectionProperties = (): ResidentSectionSnapshot => {
-    return readSectionSnapshot(resident, partDocument(), JSON.parse(session.section_margins_json()), seededSectionMarks, sectionsTouched);
+  let sectionSnapshot: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
+  const sectionProperties = (paragraphs?: ResidentSectionParagraphs): ResidentSectionSnapshot => {
+    const document = partDocument();
+    const margins = JSON.parse(session.section_margins_json()) as Record<string, DocxSectionMargins>;
+    if (!paragraphs) return readSectionSnapshot(resident, document, margins, seededSectionMarks, sectionsTouched);
+    const revision = JSON.stringify([session.resident_section_revision(), sectionsTouched, [...seededSectionMarks],
+      document.package.document.sections?.map(section => [section.id, section.properties]),
+      document.package.document.finalSectionProperties, margins]);
+    if (sectionSnapshot?.revision !== revision) sectionSnapshot = { revision,
+      sections: readSectionSnapshot(resident, document, margins, seededSectionMarks, sectionsTouched, []).sections };
+    return { version: resident.proposalEngine.version(), sections: sectionSnapshot.sections,
+      paragraphs: paragraphs.flatMap(({ story, paraId }) => {
+        if (!geometryReader.hasStory(story)) return [];
+        let context: YrsSelectionContext;
+        try { context = JSON.parse(session.selection_context(story, paraId, 0, paraId, 0)); } catch { return []; }
+        return context.paraId === paraId ? [{ story, paraId, tabs: nativeTabStops(context.paragraphProperties.tabs) }] : [];
+      }) };
   };
   session.set_local_lowering(true);
   const listeners = new Set<
@@ -704,7 +721,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       const document = withSectionNames(input, sectionNames.resident);
       const margins = JSON.parse(session.section_margins_json()) as Record<string, DocxSectionMargins>;
       let changed = false;
-      for (const section of sectionProperties().sections.slice(0, -1)) {
+      for (const section of sectionProperties([]).sections.slice(0, -1)) {
         const desired = document.package.document.sections?.find(entry => entry.id === section.section)?.properties;
         if (desired && JSON.stringify(section.properties) !== JSON.stringify(desired)) changed = setSectionMark(section.section, desired) || changed;
       }
@@ -1090,7 +1107,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       if (yieldSave) await yieldSave();
       let projectedHost = partsTouched || session.part_metadata_json() !== '{}'
         ? withPartMetadata(host ?? partDocument(), partMetadata(partDocument())) : host;
-      if (marginsTouched || sectionsTouched || session.section_margins_json() !== '{}') projectedHost = withSectionSnapshot(projectedHost ?? partDocument(), sectionProperties());
+      if (marginsTouched || sectionsTouched || session.section_margins_json() !== '{}') projectedHost = withSectionSnapshot(projectedHost ?? partDocument(), sectionProperties([]));
       return saveResidentDocument(
         session, clientId, source, hostJson, projectedHost, comments, record, projectionStories, stories, yieldSave
       );

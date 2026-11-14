@@ -589,7 +589,7 @@ export function preflightDocxCommand(
     if ('suggesting' in command.payload && command.payload.suggesting !== undefined) return refuse('unsupported-suggesting');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     if (command.kind === 'setSectionMargins') {
-      if (!engine.sectionProperties().sections.some(section => section.section === command.payload.section)) return refuse('unknown-section');
+      if (!engine.sectionProperties([]).sections.some(section => section.section === command.payload.section)) return refuse('unknown-section');
       return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
     }
   }

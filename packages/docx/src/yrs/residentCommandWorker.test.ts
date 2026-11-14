@@ -2838,6 +2838,28 @@ test('round two break sections preserve current and existing closing properties'
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('a section read limited to paragraphs matches the full read through typing and section edits', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:tabs><w:tab w:val="right" w:pos="4320"/></w:tabs><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  try {
+    const expectLimitedMatchesFull = async () => {
+      const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+      const wanted = engine.paragraphs('body').slice(0, 1).map(({ paraId }) => ({ story: 'body', paraId }));
+      const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [...wanted, { story: 'body', paraId: 'missing' }] })).value;
+      expect(limited).toEqual({ ...full, paragraphs: full.paragraphs.filter(({ paraId }) => paraId === wanted[0]!.paraId) });
+      return limited;
+    };
+    expect((await expectLimitedMatchesFull()).paragraphs[0]!.tabs).toEqual([expect.objectContaining({ alignment: 'right' })]);
+    expect((await client.edit(intent(1, 0, 'insertText', { text: '!' }))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(2);
+    expect((await client.edit(intent(2, 1, 'insertSectionBreak', { type: 'nextPage' }))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(3);
+    expect((await client.edit(intent(3, 2, 'insertSectionBreak', { type: 'nextPage' }))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(4);
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(3);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('a legacy section break lowers on the worker as a section split', async () => {
   const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgMar w:left="1800"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
   const remote = await createYrsSession({ clientId: 8311 });
