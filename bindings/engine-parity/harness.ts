@@ -360,3 +360,31 @@ export function coverageProblems(surface: readonly string[], plan: CoveragePlan)
   }
   return problems;
 }
+
+const HEX_DIGEST = /^[0-9a-f]{16}$/;
+// Four 64-bit halves all fall below 2^53 with odds of 2^-44, so a miss means a narrowed generator.
+const FULL_RANGE_FLOOR = 1n << 53n;
+
+export interface MediaSourcesWire { key: string[]; parts: [string, number][] }
+
+export function measuredSources(engine: EngineSide, sources: MediaSourcesWire, other: MediaSourcesWire) {
+  if (sources.key.length !== other.key.length || sources.parts.length !== other.parts.length) {
+    throw new Error(`two openings drew differently shaped media sources: ${JSON.stringify(sources)} then ${JSON.stringify(other)}`);
+  }
+  for (const [label, wire] of [['first', sources], ['second', other]] as const) {
+    for (const value of [...wire.key, ...wire.parts.map(([digest]) => digest)]) {
+      if (typeof value !== 'string' || !HEX_DIGEST.test(value)) throw new Error(`${engine} ${label} opening drew ${JSON.stringify(value)}, not 16 lowercase hex digits: ${JSON.stringify(wire)}`);
+    }
+  }
+  const drawn = (value: string, again: string | undefined): string | { generated: 'hex64' } => (value !== again ? { generated: 'hex64' } : value);
+  const key = sources.key.map((half, index) => drawn(half, other.key[index]));
+  console.log(`MEDIA-KEY-PROBE ${engine} ${sources.key.join(',')} ${other.key.join(',')} drawn=${key.map((half) => typeof half !== 'string').join(',')}`);
+  if (![...sources.key, ...other.key].some((half) => BigInt(`0x${half}`) >= FULL_RANGE_FLOOR)) {
+    throw new Error(`${engine} drew every media key half below 2^53, not from the full 64-bit range: ${sources.key.join(',')} ${other.key.join(',')}`);
+  }
+  return {
+    ...sources,
+    key,
+    parts: sources.parts.map(([digest, ...entry], index) => [drawn(digest, other.parts[index]?.[0]), ...entry]),
+  };
+}

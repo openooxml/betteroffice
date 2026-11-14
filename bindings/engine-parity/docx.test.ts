@@ -15,6 +15,7 @@ import {
   coverageProblems,
   defineRow,
   FramedZipReturn,
+  measuredSources,
   oneEngineExports,
   oneEngineProblems,
   printParityCounts,
@@ -27,6 +28,7 @@ import {
   type EngineHandle,
   type Exclusion,
   type KnownDifference,
+  type MediaSourcesWire,
   type OneEngineOnly,
   type Row,
 } from './harness';
@@ -788,35 +790,8 @@ function tokenizedImage(fresh: () => Session): { f: Session; src: string } {
 }
 
 const HEADER_ALIASES = JSON.stringify([{ isHeader: true, partPath: 'word/header1.xml', relationshipIds: ['rIdHeader', 'rIdHeaderAlias'] }]);
-const HEX_DIGEST = /^[0-9a-f]{16}$/;
-// Four 64-bit halves all fall below 2^53 with odds of 2^-44, so a miss means a narrowed generator.
-const FULL_RANGE_FLOOR = 1n << 53n;
-
-interface MediaSourcesWire { key: string[]; parts: [string, number][] }
 
 const engineName = (engine: DocxEngine) => (engine === wasmEngine ? 'wasm' : 'native');
-
-function measuredSources(engine: DocxEngine, sources: MediaSourcesWire, other: MediaSourcesWire) {
-  if (sources.key.length !== other.key.length || sources.parts.length !== other.parts.length) {
-    throw new Error(`two openings drew differently shaped media sources: ${JSON.stringify(sources)} then ${JSON.stringify(other)}`);
-  }
-  for (const [label, wire] of [['first', sources], ['second', other]] as const) {
-    for (const value of [...wire.key, ...wire.parts.map(([digest]) => digest)]) {
-      if (typeof value !== 'string' || !HEX_DIGEST.test(value)) throw new Error(`${engineName(engine)} ${label} opening drew ${JSON.stringify(value)}, not 16 lowercase hex digits: ${JSON.stringify(wire)}`);
-    }
-  }
-  const drawn = (value: string, again: string | undefined): string | { generated: 'hex64' } => (value !== again ? { generated: 'hex64' } : value);
-  const key = sources.key.map((half, index) => drawn(half, other.key[index]));
-  console.log(`MEDIA-KEY-PROBE ${engineName(engine)} ${sources.key.join(',')} ${other.key.join(',')} drawn=${key.map((half) => typeof half !== 'string').join(',')}`);
-  if (![...sources.key, ...other.key].some((half) => BigInt(`0x${half}`) >= FULL_RANGE_FLOOR)) {
-    throw new Error(`${engineName(engine)} drew every media key half below 2^53, not from the full 64-bit range: ${sources.key.join(',')} ${other.key.join(',')}`);
-  }
-  return {
-    ...sources,
-    key,
-    parts: sources.parts.map(([digest, ...entry], index) => [drawn(digest, other.parts[index]?.[0]), ...entry]),
-  };
-}
 
 function imageSources(session: Session, input: string): string[] {
   const json = session.layout_document_with_regions_json(input);
@@ -2669,8 +2644,8 @@ const rows: Row<Docx>[] = [
       const [first, second] = [sources.parts[0]![0], reopened.parts[0]?.[0]];
       console.log(`MEDIA-DIGEST-PROBE ${engineName(engine)} ${first} ${String(second)} same=${first === second}`);
       if (second === undefined || first === second) throw new Error(`two openings drew the same media digest ${first} and ${String(second)}`);
-      const shape = measuredSources(engine, sources, reopened);
-      const reshape = measuredSources(engine, reopened, sources);
+      const shape = measuredSources(engineName(engine), sources, reopened);
+      const reshape = measuredSources(engineName(engine), reopened, sources);
       if (JSON.stringify(reshape) !== JSON.stringify(shape)) throw new Error(`a second opening changed the media sources beyond their drawn values: ${json} then ${again.media_sources_json()}`);
       const reader = fresh();
       reader.load_media_sources(json);
@@ -2782,8 +2757,8 @@ const rows: Row<Docx>[] = [
         before,
         rebuilt,
         again,
-        ...measuredSources(engine, sources, reopened),
-        other: measuredSources(engine, reopened, sources),
+        ...measuredSources(engineName(engine), sources, reopened),
+        other: measuredSources(engineName(engine), reopened, sources),
         tokens: tokenSources(replica),
       };
     },
