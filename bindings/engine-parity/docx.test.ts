@@ -416,6 +416,16 @@ function residentFrame(session: Session): number {
   return frameEpoch(session);
 }
 
+// A note-free document laid out through retained regions with a resident display frame, which the resident region relayout requires.
+function residentRegions(fresh: () => Session): { session: Session; input: string } {
+  const session = fresh();
+  session.open_docx(compareOriginal, true, GENERATION);
+  const { input, fontChains } = layoutInput(session, { ...regionRequest(), notes: { contents: [] } });
+  session.layout_document_with_regions_retained(input);
+  session.build_display_list_frame(frameExtras(fontChains), 0);
+  return { session, input };
+}
+
 function caretIn(session: Session, prefix: string, index: number): void {
   const id = paraId(session, prefix);
   const at = textAt(session, prefix, index);
@@ -792,6 +802,20 @@ function mediaSourcesShape({ key, parts, ...rest }: MediaSourcesWire) {
 
 const engineName = (engine: DocxEngine) => (engine === wasmEngine ? 'wasm' : 'native');
 
+function measuredSources(engine: DocxEngine, sources: MediaSourcesWire, other: MediaSourcesWire) {
+  if (sources.key.length !== other.key.length || sources.parts.length !== other.parts.length) {
+    throw new Error(`two openings drew differently shaped media sources: ${JSON.stringify(sources)} then ${JSON.stringify(other)}`);
+  }
+  const drawn = (value: string, again: string | undefined) => (value !== again && HEX_DIGEST.test(value) && HEX_DIGEST.test(again ?? '') ? 'drawn' : value);
+  const key = sources.key.map((half, index) => drawn(half, other.key[index]));
+  console.log(`MEDIA-KEY-PROBE ${engineName(engine)} ${sources.key.join(',')} ${other.key.join(',')} drawn=${key.map((half) => half === 'drawn').join(',')}`);
+  return {
+    ...sources,
+    key,
+    parts: sources.parts.map(([digest, ...entry], index) => [drawn(digest, other.parts[index]?.[0]), ...entry]),
+  };
+}
+
 function imageSources(session: Session, input: string): string[] {
   const json = session.layout_document_with_regions_json(input);
   const sources = [...json.matchAll(/"src":"((?:data:image|media:)[^"]*)"/g)].map(([, src]) => src!);
@@ -936,6 +960,15 @@ function onDisplay<T>(engine: DocxEngine, { display, handle }: OpenedDisplay, qu
   } finally {
     engine.close_display_list(handle);
   }
+}
+
+function issuedHandle(engine: DocxEngine, display: string, handle: number): number | 'issued' {
+  const again = engine.open_display_list(display);
+  engine.close_display_list(again);
+  console.log(`DISPLAY-HANDLE-PROBE ${engineName(engine)} ${handle} ${again} same=${handle === again}`);
+  if (handle === again) return handle;
+  if (![handle, again].every((issued) => Number.isSafeInteger(issued) && issued > 0)) throw new Error(`open_display_list issued ${handle} and ${again}, not positive handles`);
+  return 'issued';
 }
 
 const HIT_POINTS: [number, number, number][] = [[0, 100, 100], [0, 100, 55], [0, 400, 900], [9, 100, 100]];
@@ -1884,17 +1917,19 @@ const rows: Row<Docx>[] = [
   defineRow({
     method: 'EditSession.layout_document_with_regions_after_edit',
     mutates: true,
-    setup: ({ session: s }: Docx) => {
-      const { input } = layoutInput(s);
-      s.layout_document_with_regions_retained(input);
-      return input;
+    setup: ({ fresh }: Docx) => {
+      const probe = residentRegions(fresh).session;
+      caretIn(probe, 'The quick', 0);
+      probe.apply_input('Resident ', frameEpoch(probe));
+      return residentRegions(fresh);
     },
-    call: ({ session: s }, input) => {
-      const id = paraId(s, 'Second body');
-      const at = textAt(s, 'Second body', 0);
+    call: ({ saveFrom }, { session: s, input }) => {
+      saveFrom(s, compareOriginal);
+      const id = paraId(s, 'The quick');
+      const at = textAt(s, 'The quick', 0);
       const receipt = s.edit_text_resident('body', id, at, id, at, 'Resident ');
       const result = s.layout_document_with_regions_after_edit(input);
-      return { receipt, result, layout: s.retained_layout_json(), headersFooters: s.retained_headers_footers_json() };
+      return { receipt, result, after: s.paragraphs('body'), layout: s.retained_layout_json(), headersFooters: s.retained_headers_footers_json() };
     },
   }),
   {
@@ -1985,7 +2020,11 @@ const rows: Row<Docx>[] = [
   defineRow({
     method: 'open_display_list',
     setup: openedDisplay,
-    call: ({ engine }, opened) => onDisplay(engine, opened, (display, handle) => ({ byHandle: handleAnswers(engine, handle), byJson: jsonAnswers(engine, display) })),
+    call: ({ engine }, opened) => onDisplay(engine, opened, (display, handle) => ({
+      handle: issuedHandle(engine, display, handle),
+      byHandle: handleAnswers(engine, handle),
+      byJson: jsonAnswers(engine, display),
+    })),
   }),
   defineRow({
     method: 'open_display_list',
@@ -1998,7 +2037,10 @@ const rows: Row<Docx>[] = [
         other.free();
       }
     },
-    call: ({ engine }, display) => onDisplay(engine, { display, handle: engine.open_display_list(display) }, (_, handle) => handleAnswers(engine, handle)),
+    call: ({ engine }, display) => onDisplay(engine, { display, handle: engine.open_display_list(display) }, (_, handle) => ({
+      handle: issuedHandle(engine, display, handle),
+      ...handleAnswers(engine, handle),
+    })),
   }),
   {
     method: 'open_display_list',
@@ -2684,12 +2726,12 @@ const rows: Row<Docx>[] = [
     call: ({ fresh }) => {
       const opened = (...settings: boolean[]) => {
         const f = fresh();
-        for (const enabled of settings) f.set_media_tokens(enabled);
+        const results = settings.map((enabled) => f.set_media_tokens(enabled));
         f.open_docx(fixture, true, GENERATION);
-        return seededImage(f);
+        return { results, image: seededImage(f) };
       };
       const [unset, on, off, toggled] = [opened(), opened(true), opened(false), opened(true, false)];
-      if (unset === on || !on.includes('"media:')) throw new Error(`enabling media tokens did not tokenize the seeded image: ${unset} then ${on}`);
+      if (unset.image === on.image || !on.image.includes('"media:')) throw new Error(`enabling media tokens did not tokenize the seeded image: ${unset.image} then ${on.image}`);
       return { unset, on, off, toggled };
     },
   },
@@ -2714,15 +2756,15 @@ const rows: Row<Docx>[] = [
       const reopened = JSON.parse(other.media_sources_json()) as MediaSourcesWire;
       const [first, second] = [sources.parts[0]?.[0], reopened.parts[0]?.[0]];
       console.log(`MEDIA-REBUILD-PROBE ${engineName(engine)} ${String(first)} ${String(second)} same=${first === second}`);
-      if (first === undefined || first === second) throw new Error(`two rebuilds drew the same media digest ${String(first)}`);
+      if (first === undefined || second === undefined || first === second) throw new Error(`two rebuilds drew the same media digest ${String(first)} and ${String(second)}`);
       return {
         bare,
         seededRebuild,
         before,
         rebuilt,
         again,
-        ...mediaSourcesShape(sources),
-        other: mediaSourcesShape(reopened),
+        ...measuredSources(engine, sources, reopened),
+        other: measuredSources(engine, reopened, sources),
         tokens: tokenSources(replica),
       };
     },
@@ -2944,10 +2986,7 @@ const rows: Row<Docx>[] = [
   {
     method: 'EditSession.select_story',
     mutates: true,
-    call: ({ session: s }) => timedEdits(s, () => {
-      s.select_story(MISSING_STORY);
-      return s.select_story('body');
-    }),
+    call: ({ session: s }) => timedEdits(s, () => [s.select_story(MISSING_STORY), s.select_story('body')]),
   },
   {
     method: 'EditSession.next_paragraph_style',
@@ -2997,7 +3036,11 @@ const rows: Row<Docx>[] = [
       const framed = s.resident_caret_snapshot_json();
       caretIn(s, 'Second body', 6);
       const caret = s.resident_caret_snapshot_json();
-      if ((JSON.parse(caret) as { caretRect: unknown }).caretRect === null) throw new Error(`the collapsed caret has no rect: ${caret}`);
+      const rect = (JSON.parse(caret) as { caretRect?: { pageIndex?: unknown; pageId?: unknown; x?: unknown; y?: unknown; height?: unknown } | null }).caretRect;
+      const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(value);
+      if (!rect || !Number.isSafeInteger(rect.pageIndex) || typeof rect.pageId !== 'string' || !finite(rect.x) || !finite(rect.y) || !finite(rect.height) || (rect.height as number) <= 0) {
+        throw new Error(`the collapsed caret has no valid rect: ${caret}`);
+      }
       s.set_selection(...textSpan(s, 'Second body', 0, 6));
       return { bare, framed, caret, range: s.resident_caret_snapshot_json() };
     },
