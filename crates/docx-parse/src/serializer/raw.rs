@@ -31,30 +31,8 @@ pub(crate) const CONTENT_FRAGMENT_PREFIX: &str = concat!(
     "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
 );
 
-/// A fragment wrapper binding exactly the story-root prefixes.
-const STORY_ROOT_FRAGMENT_PREFIX: &str = concat!(
-    "<s11:root xmlns:s11=\"urn:openooxml:serializer-fragment\" ",
-    "xmlns:wpc=\"http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas\" ",
-    "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" ",
-    "xmlns:o=\"urn:schemas-microsoft-com:office:office\" ",
-    "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ",
-    "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\" ",
-    "xmlns:v=\"urn:schemas-microsoft-com:vml\" ",
-    "xmlns:wp14=\"http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing\" ",
-    "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" ",
-    "xmlns:w10=\"urn:schemas-microsoft-com:office:word\" ",
-    "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" ",
-    "xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" ",
-    "xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\" ",
-    "xmlns:w16se=\"http://schemas.microsoft.com/office/word/2015/wordml/symex\" ",
-    "xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\" ",
-    "xmlns:w16=\"http://schemas.microsoft.com/office/word/2018/wordml\" ",
-    "xmlns:w16cex=\"http://schemas.microsoft.com/office/word/2018/wordml/cex\" ",
-    "xmlns:w16sdtdh=\"http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash\" ",
-    "xmlns:wne=\"http://schemas.microsoft.com/office/word/2006/wordml\" ",
-    "xmlns:wpg=\"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup\" ",
-    "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
-);
+/// A fragment wrapper declaring no prefix.
+const BARE_FRAGMENT_PREFIX: &str = "<s11:root>";
 
 /// A replayed foreign fragment must still be exactly one well-formed
 /// element; the resolver-free reader accepts its authored prefixes as-is.
@@ -93,40 +71,14 @@ pub(crate) fn validate_raw_subtree(
 
 /// Validates a kept `w:ffData` whose prefixes are each declared in it or by every story root.
 pub(crate) fn validate_form_field_data(xml: &str) -> Result<(), ParseError> {
-    with_raw_subtree(xml, STORY_ROOT_FRAGMENT_PREFIX, |root, child| {
-        require_name(child, "w", "ffData")?;
-        let mut scope: Vec<&str> = root
-            .attributes
-            .keys()
-            .filter_map(|name| name.strip_prefix("xmlns:"))
-            .filter(|prefix| super::parts::is_story_root_prefix(prefix))
-            .collect();
-        require_bound_prefixes(child, &mut scope)
-    })
-}
-
-fn require_bound_prefixes<'a>(
-    element: &'a XmlElement,
-    scope: &mut Vec<&'a str>,
-) -> Result<(), ParseError> {
-    let outer = scope.len();
-    scope.extend(
-        element
-            .attributes
-            .keys()
-            .filter_map(|name| name.strip_prefix("xmlns:")),
-    );
-    let names = std::iter::once(&element.name).chain(element.attributes.keys());
-    for (prefix, _) in names.filter_map(|name| name.split_once(':')) {
-        if !matches!(prefix, "xml" | "xmlns") && !scope.contains(&prefix) {
-            return Err(ParseError::Canonical(format!("unbound prefix {prefix}")));
-        }
+    with_raw_subtree(xml, BARE_FRAGMENT_PREFIX, |_, child| require_name(child, "w", "ffData"))?;
+    let used = super::splice::required_prefixes(xml).ok_or_else(|| {
+        ParseError::Canonical("validated XML fragment is not well-formed".to_owned())
+    })?;
+    match used.into_iter().find(|prefix| !super::parts::is_story_root_prefix(prefix)) {
+        Some(prefix) => Err(ParseError::Canonical(format!("unbound prefix {prefix}"))),
+        None => Ok(()),
     }
-    for child in element.child_elements() {
-        require_bound_prefixes(child, scope)?;
-    }
-    scope.truncate(outer);
-    Ok(())
 }
 
 fn with_raw_subtree(
