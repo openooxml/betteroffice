@@ -1,5 +1,26 @@
 # @betteroffice/docx-i18n
 
+## 0.6.0
+
+### Minor Changes
+
+- ba48e63: `DocxEditor` gains `shortcuts` and `onShortcutIssue`: hosts can remap or disable keyboard shortcuts in worker and non-worker modes, and menus, tooltips and the shortcuts dialog show the result.
+- 7b30d80: Adds `ar`, `es`, `it`, `ja`, `ko`, `nl`, `ru`, `uk`, `vi` and `zh-TW` (`zhTW`), and every shipped locale now translates every string with Office terminology and its language's plural forms.
+
+### Patch Changes
+
+- fb7f6da: Suggesting mode now tracks character formatting and hyperlink edits through optional `suggesting` authors on `toggleMark`, `formatRange`, `clearFormatting` and `setHyperlink`. Character formatting over fields or inline content controls is refused with `SuggestedFormattingOverContainerError`; commands return `unsupported-suggesting`.
+- b7fa550: Adds Clear formatting shortcuts by default: Ctrl+Space on Windows and Linux, and ⌘\ on macOS, with translated shortcut help in every locale. Shortcut bindings can now be restricted to a platform through the optional `platform` field.
+- afffd29: Adds a Layout menu by default with margin presets, orientation, paper sizes, and indentation controls in both DOCX editors. Preset dimensions follow `rulerUnit`, and labels are translated in every locale.
+- 57fa9d7: Screen reader page mirrors read a visible list bullet as a localised word, never its stored character. `DocAttrs` gains `listMarkerBullet` and `MirrorLabels` gains `bullet`; without either, a bullet stays hidden.
+- 736fcba: Screen reader page mirrors read a picture without alternative text as "Picture", and no longer expose a shape without a name as an unnamed image. A shape's text still reads.
+- 2a2f92b: The error page for a document that cannot open now says whether the file looks damaged or uses something the editor can't read yet, when the engine's message tells them apart.
+- 6708632: Adds the `paragraphSpacing` command and paragraph spacing controls in the line spacing menu for both editors. The menu and spacing dialog are available by default with translated labels.
+- 11ce6ac: Ruler margin and indent markers show a tooltip with their name and value in `rulerUnit` while hovered, focused or dragged, and tab stop titles follow `rulerUnit`.
+- 4fb3025: The `de`, `fr`, `he`, `hi`, `id`, `pl`, `pt-BR`, `tr` and `zh-CN` editor strings are now fully translated with Office terminology and correct plurals. Removes 185 unused locale keys.
+- 86b9ec4: Granted mutating built-ins now run from a trusted gesture in the plugin's own UI until that event's dispatch and queued microtasks finish; other plugins and later calls refuse with `unsupported-policy`. Plugin panels, overlays and sidebar cards sit in a `display: contents` wrapper.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+
 ## 0.5.1
 
 ## 0.5.0

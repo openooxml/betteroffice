@@ -1,5 +1,22 @@
 # @betteroffice/vsdx
 
+## 0.3.0
+
+### Minor Changes
+
+- ad45f86: Adds opt-in `decodeFontFace` for packed fonts. Format package roots return a promise of `font` and optional `payload` ArrayBuffers; native bindings return byte arrays synchronously. Invalid options and decode errors reject or throw without retrying another decoder.
+- f2b448d: Breaking: `exportPng(pageIndex, scale)` is now `await renderPng({ page: pageIndex }, { scale })`, painted through the canvas. It rejects with `PngExportError` rather than substitute a font, and without a canvas names `@betteroffice/vsdx-native`. `paintPage` now draws letter spacing and underline.
+
+### Patch Changes
+
+- fa2717d: Every engine now reads decimal numbers back exactly. Drawing groups whose scaled child coordinates have long decimals stay intact on save.
+- 53502c6: Large bundled font faces decode outside the PPTX worker's engine, and registering a font in WebAssembly copies its bytes once, which lowers worker memory for CJK presentations.
+- 78fc176: Vsdx placeholders now show their reason label, upright at label size, as the PNG rasterizer drew it. Before, the label was set in page units, far too large and off the box.
+- a9ef470: Vsdx placeholders are drawn as a thin dashed outline, in the editor and in exported PNGs, instead of a solid grey block.
+- 4468435: Vsdx text no longer collapses on Linux Chromium. The painter sets real-pixel font sizes with unrounded advances, so a registered face keeps its letters apart.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+- f2df1e8: Collaboration updates with invalid UTF-8 text or oversized length prefixes are refused with an error instead of being applied. The macOS app now builds the same yrs as every other target.
+
 ## 0.2.0
 
 ## 0.1.0

@@ -1,5 +1,25 @@
 # @betteroffice/vsdx-react
 
+## 0.3.0
+
+### Patch Changes
+
+- 1d5efb7: The editors keep a left-to-right layout on right-to-left host pages, so the spreadsheet grid paints and menus stay on screen in Arabic or Hebrew apps.
+- c1d5485: Context menus, table tools, the shortcut dialog, rulers, error screens, presence chips and other labels that were always English now follow the editor locale, and numbers, units and times in them use its formatting.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+- Updated dependencies [fa2717d]
+- Updated dependencies [ad45f86]
+- Updated dependencies [53502c6]
+- Updated dependencies [4fb3025]
+- Updated dependencies [f2b448d]
+- Updated dependencies [78fc176]
+- Updated dependencies [a9ef470]
+- Updated dependencies [4468435]
+- Updated dependencies [e6d5c52]
+- Updated dependencies [f2df1e8]
+  - @betteroffice/vsdx@0.3.0
+  - @betteroffice/vsdx-i18n@0.3.0
+
 ## 0.2.0
 
 ### Minor Changes

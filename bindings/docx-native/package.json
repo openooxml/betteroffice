@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/docx-native",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
   "description": "Native Rust bindings for the BetterOffice DOCX engine in Node.js, Bun and Deno.",
   "main": "./dist/core.mjs",
@@ -300,9 +300,9 @@
   "type": "commonjs",
   "dependencies": {
     "@betteroffice/fonts": "workspace:^",
-    "@betteroffice/fonts-cjk": "workspace:^0",
-    "@betteroffice/fonts-intl": "workspace:^0",
-    "@betteroffice/fonts-latin": "workspace:^0"
+    "@betteroffice/fonts-cjk": "workspace:^0.5.0",
+    "@betteroffice/fonts-intl": "workspace:^0.5.0",
+    "@betteroffice/fonts-latin": "workspace:^0.5.0"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",
