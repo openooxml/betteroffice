@@ -2478,6 +2478,76 @@ test('remote_update_chunks_apply_in_order_as_one_remote_command', async () => {
   }
 });
 
+test('a confirmed key into a story whose slide a collaborator deleted is refused as a bad target', async () => {
+  await wasm.initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
+  const { PptxDocument: Document } = await import('../wasm/engine');
+  const bytes = await deck(['alpha', 'beta']);
+  const author = Document.openCollaborative(bytes, 9001);
+  const seed = author.encodeStateAsUpdate();
+  const [live, removed] = content(JSON.parse(author.readContentJson('{}')) as PptxReadResult).stories;
+  if (!live || !removed) throw new Error('Missing stories');
+  const vector = author.encodeStateVector();
+  author.deleteSlideJson(JSON.stringify({ slideId: removed.slideId }));
+  const update = author.encodeDiff(vector);
+  author.free();
+  const host = await engineHost();
+  const rpc: Rpc = createSessionClient<PresentationCommandMethods, PresentationCommandEvents>(host.transport, { methods: PRESENTATION_COMMAND_METHODS });
+  try {
+    const state = await rpc.call.openCommandEditor(new Uint8Array(bytes).buffer,
+      { ...host.options, initialUpdate: seed }) as unknown as PresentationCommandAck;
+    const applied = await rpc.call.command(envelope(state, 1,
+      { kind: 'applyRemoteUpdate', payload: { ...input, undoGroup: 'remote', bytes: [update.slice().buffer] } }));
+    expect(applied.outcomes).toEqual([expect.objectContaining({ seq: 1, status: 'applied', committed: true })]);
+    const refused = await rpc.call.command(envelope(applied, 2, insert(selection(removed), 'x')));
+    expect(refused.outcomes).toEqual([{ seq: 2, status: 'refused', reason: 'bad-target', committed: false }]);
+    expect(refused.editState.readOnly).toBe(false);
+    const typed = await rpc.call.command(envelope(refused, 3, insert(selection(live), 'y')));
+    expect(typed.outcomes).toEqual([{ seq: 3, status: 'applied', committed: true }]);
+    expect(content((await rpc.call.readEditor({ ...identity, seq: 3 })).result).stories.map((story) => story.text))
+      .toEqual(['yalpha']);
+  } finally {
+    try { await rpc.dispose(); } finally { host.dispose(); }
+  }
+});
+
+test('a confirmed key into a story whose slide left the deck outside the command queue is refused as a bad target', async () => {
+  const session = await open(['alpha', 'beta']);
+  try {
+    const [live, removed] = (await session.read()).stories;
+    if (!live || !removed) throw new Error('Missing stories');
+    session.handle().deleteSlide(removed.slideId);
+    const refused = await session.rpc.call.command(envelope(session.state, 1, insert(selection(removed), 'x')));
+    expect(refused.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'bad-target', committed: false }]);
+    expect(refused.editState.readOnly).toBe(false);
+    const typed = await session.rpc.call.command(envelope(refused, 2, insert(selection(live), 'y')));
+    expect(typed.outcomes).toEqual([{ seq: 2, status: 'applied', committed: true }]);
+    expect((await session.read(2)).stories.map((story) => story.text)).toEqual(['yalpha']);
+  } finally { await session.dispose(); }
+});
+
+test('a queued key after deleting its own slide is refused as a bad target', async () => {
+  const session = await open(['alpha', 'beta']);
+  try {
+    const [live, removed] = (await session.read()).stories;
+    if (!live || !removed) throw new Error('Missing stories');
+    const activated = await session.rpc.call.command(envelope(session.state, 1,
+      { kind: 'activateSlide', payload: { slideId: removed.slideId } }));
+    const selected = await session.rpc.call.command(envelope(activated, 2,
+      { kind: 'setSelection', payload: { ...input, selection: selection(removed, 2) } }));
+    expect(selected.selection).toEqual(selection(removed, 2));
+    const deleted = await session.rpc.call.command(envelope(selected, 3,
+      { kind: 'invoke', payload: { ...input, method: 'deleteSlide', args: [removed.slideId] } }));
+    expect(deleted.outcomes[0]).toMatchObject({ seq: 3, status: 'applied', committed: true });
+    const queued = await session.rpc.call.command(envelope(deleted, 4,
+      { kind: 'insertText', payload: { ...input, at: { source: 'afterSeq', seq: 3 }, text: 'x' } }, undefined, 3));
+    expect(queued.outcomes).toEqual([{ seq: 4, status: 'refused', reason: 'bad-target', committed: false }]);
+    expect(queued.editState.readOnly).toBe(false);
+    const typed = await session.rpc.call.command(envelope(queued, 5, insert(selection(live), 'y')));
+    expect(typed.outcomes).toEqual([{ seq: 5, status: 'applied', committed: true }]);
+    expect((await session.read(5)).stories.map((story) => story.text)).toEqual(['yalpha']);
+  } finally { await session.dispose(); }
+});
+
 test('recovery update leaves client state and can be taken only once', async () => {
   const host = await engineHost();
   let client: PresentationCommandClient | undefined;
