@@ -109,6 +109,58 @@ further. `register_image` supplies bytes keyed by owning part and relationship
 ID. `render_png` draws a placeholder for each image it cannot draw and counts them in `skipped_images` and, by kind, the effects it could not draw yet in `skipped_effects`. Missing font
 chains return an error.
 
+## PDF export
+
+`export_pdf` lays out the current document through the same path as
+`render_png` and returns a paginated PDF with embedded TrueType subsets and
+`ToUnicode` maps, so text stays searchable. After layout it registers the
+provider's Han/Kana/Hangul fallback faces into the export font store without
+changing chains; a mixed CJK run that picked a Japanese face can therefore
+paint Simplified Chinese glyphs from a covering face, while the document's own
+faces stay ahead of the fallbacks in painter resolution order. A display list with an unbuilt page
+is refused rather than exported partially. The default output is a plain,
+untagged PDF and makes no PDF/A claim.
+
+`export_pdf_with_options` opts into PDF/A-2u (ISO 19005-2 level U). It adds
+XMP identification, `/Info`, an sRGB output intent and deterministic trailer
+IDs; it refuses Base-14 or uncovered text instead of downgrading. Tagged PDF and PDF/UA are not supported.
+
+```rust
+use betteroffice_docx::Document;
+
+let document = Document::open(&docx_bytes)?;
+let pdf = document.export_pdf()?;
+std::fs::write("out.pdf", pdf)?;
+```
+
+```rust
+use betteroffice_docx::{PdfConformance, PdfExportOptions};
+
+let pdf = document.export_pdf_with_options(&PdfExportOptions {
+    conformance: PdfConformance::PdfA2u,
+    ..PdfExportOptions::default()
+})?;
+```
+
+The batch example exports every `.docx` under a directory and writes a
+`manifest.json` with page count, byte size, embedded font programs, authored
+text characters and any error per fixture:
+
+```sh
+cargo +1.99.1 run -p betteroffice-docx --example export_pdf_batch -- \
+  path/to/fixtures path/to/pdfs
+```
+
+The structural gate is `scripts/office-quality/pdf_matrix.py`. It stages a
+representative fixture set, then checks every manifest entry with pypdfium2
+(page count, page size against the DOCX section size within 0.01 pt,
+extractable text) and, when installed, `qpdf --check`, `pdffonts` and
+`pdftotext`. The end-to-end Rust smoke test is ignored by default:
+
+```sh
+cargo +1.99.1 test -p betteroffice-docx --test pdf_matrix -- --ignored --nocapture
+```
+
 ## Editing and layout
 
 - `replace_paragraph_text` rewrites a single-run paragraph, or returns

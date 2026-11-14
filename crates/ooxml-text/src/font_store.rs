@@ -467,8 +467,7 @@ impl FontStore {
         self.outline_revision
     }
 
-    /// How many fonts the store holds. Fonts are only ever added, so a store with the same id
-    /// and count holds the same fonts.
+    /// How many fonts the store holds. Fonts are normally only ever added.
     pub fn font_count(&self) -> usize {
         self.fonts.len()
     }

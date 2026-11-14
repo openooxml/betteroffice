@@ -469,6 +469,66 @@ jobs:
           df -h .
           du -sh target
 
+  pdfa:
+    name: PDF/A-2u matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install qpdf, Poppler, a JRE and DejaVu Sans
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            default-jre-headless fonts-dejavu-core poppler-utils qpdf
+          python -m pip install pypdfium2==5.13.0
+
+      - name: Install the pinned veraPDF 1.30.4
+        run: bash scripts/office-quality/install-verapdf.sh "$RUNNER_TEMP/verapdf"
+
+      - name: Test the PDF matrix harness
+        run: python -m unittest discover -s scripts/office-quality -p 'test_pdf_matrix.py'
+
+      # The structural assertions always run; VERAPDF also enables the
+      # external validation test in the same binary.
+      - name: Run the PDF/A-2u export tests
+        env:
+          VERAPDF: ${{ runner.temp }}/verapdf/bin/verapdf
+        run: cargo test -p betteroffice-docx-pdf --test pdfa
+
+      - name: Run the non-BMP and fallback text tests
+        run: |
+          test -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+          cargo test -p betteroffice-docx-pdf --test text_fallback
+
+      - name: Run the 24/103 PDF/A-2u matrices
+        env:
+          VERAPDF: ${{ runner.temp }}/verapdf/bin/verapdf
+          PDFA_MATRIX_DIR: .source/pdf-matrix
+        run: bash scripts/office-quality/pdfa_matrix.sh
+
+      - name: Upload the PDF/A-2u reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pdfa-matrix
+          path: |
+            .source/pdf-matrix/report-curated.json
+            .source/pdf-matrix/report-full.json
+            .source/pdf-matrix/verapdf
+            .source/pdf-matrix/skipped.txt
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
   native-viewer:
     name: Native viewer lint
     needs: route
