@@ -9,6 +9,7 @@ import * as nativeYrs from '@betteroffice/docx-native/yrs';
 import { readTableFragment, type ClipboardTableReader } from '../../packages/docx/src/yrs/clipboardFragment';
 import { decodeEncodedSelection } from '../../packages/docx/src/yrs/encodedSelection';
 import type { YrsStorySegment } from '../../packages/docx/src/yrs/index';
+import { deobfuscateFont } from '../../packages/docx/src/utils/fontDeobfuscation';
 import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
 import {
   coverageProblems,
@@ -81,7 +82,7 @@ const BODY = [
   '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>',
 ].join('');
 
-async function buildFixture(overrides: Record<string, string> = {}): Promise<Uint8Array> {
+async function buildFixture(overrides: Record<string, string | Uint8Array> = {}): Promise<Uint8Array> {
   const zip = new JSZip();
   const date = new Date('2024-01-01T00:00:00Z');
   const parts: Record<string, string | Uint8Array> = {
@@ -118,6 +119,7 @@ let compareOriginal: Uint8Array;
 let compareRevised: Uint8Array;
 let repeatingFixture: Uint8Array;
 let effectFixture: Uint8Array;
+let embeddedFontFixture: Uint8Array;
 
 const SECOND_RUN = '<w:r><w:t xml:space="preserve">Second body paragraph, alpha again.</w:t></w:r>';
 
@@ -169,6 +171,23 @@ function effectParts(): Record<string, string> {
   return { 'word/document.xml': patched('word/document.xml', FINAL_RUN, '<w:r><w:rPr><w:effect w:val="shimmer"/></w:rPr><w:t>Final paragraph.</w:t></w:r>') };
 }
 
+const EMBEDDED_FAMILY = 'Embedded Sans';
+const FONT_KEY = '{00112233-4455-6677-8899-AABBCCDDEEFF}';
+const NORMAL_NAME = '<w:name w:val="Normal"/></w:style>';
+
+// Normal text set in a font the package embeds as an obfuscated face, the way Word writes word/fonts/*.odttf.
+function embeddedFontParts(): Record<string, string | Uint8Array> {
+  return {
+    '[Content_Types].xml': patched('[Content_Types].xml', '</Types>',
+      `<Default Extension="odttf" ContentType="application/vnd.openxmlformats-officedocument.obfuscatedFont"/><Override PartName="/word/fontTable.xml" ContentType="${OFFICE}.fontTable+xml"/></Types>`),
+    'word/_rels/document.xml.rels': patched('word/_rels/document.xml.rels', '</Relationships>', `<Relationship Id="rIdFontTable" Type="${REL}/fontTable" Target="fontTable.xml"/></Relationships>`),
+    'word/fontTable.xml': `<w:fonts ${ROOT}><w:font w:name="${EMBEDDED_FAMILY}"><w:embedRegular r:id="rIdFace" w:fontKey="${FONT_KEY}"/></w:font></w:fonts>`,
+    'word/_rels/fontTable.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFace" Type="${REL}/font" Target="fonts/font1.odttf"/></Relationships>`,
+    'word/fonts/font1.odttf': new Uint8Array(deobfuscateFont(fontBytes.slice().buffer, FONT_KEY)),
+    'word/styles.xml': patched('word/styles.xml', NORMAL_NAME, `<w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="${EMBEDDED_FAMILY}" w:hAnsi="${EMBEDDED_FAMILY}"/></w:rPr></w:style>`),
+  };
+}
+
 beforeAll(async () => {
   await initWasm({ module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)) });
   await initPreflight({ module_or_path: readFileSync(new URL('../../packages/docx/src/wasm/generated/preflight/docx_preflight_bg.wasm', import.meta.url)) });
@@ -179,6 +198,7 @@ beforeAll(async () => {
   compareRevised = await buildFixture(compareParts('The quick brown fox jumps.'));
   repeatingFixture = await buildFixture(repeatingParts());
   effectFixture = await buildFixture(effectParts());
+  embeddedFontFixture = await buildFixture(embeddedFontParts());
 });
 
 // version() is "{nonce:016x}-{epoch}"; mint_nonce in crates/docx-edit/src/batch.rs mixes host entropy and the clock.
@@ -306,7 +326,11 @@ function seededImage(session: Session): string {
 
 function layoutRequest(session: Session) {
   const font = session.register_measure_font(fontBytes);
-  const request = {
+  return { font, request: regionRequest() };
+}
+
+function regionRequest() {
+  return {
     bodyStory: 'body',
     regions: { sections: [{
       sectionId: 'main',
@@ -316,7 +340,6 @@ function layoutRequest(session: Session) {
     measurement: { fontChains: {} as Record<string, number[]>, defaults: { fontSize: 11, fontFamily: 'Calibri' }, authoritativeShaping: true },
     renderEnv: {},
   };
-  return { font, request };
 }
 
 function layoutInput(session: Session) {
@@ -766,6 +789,64 @@ function imageSources(session: Session, input: string): string[] {
   const sources = [...json.matchAll(/"src":"((?:data:image|media:)[^"]*)"/g)].map(([, src]) => src!);
   if (sources.length === 0) throw new Error('the layout carries no image source');
   return sources;
+}
+
+function tokenSources(session: Session): string[] {
+  const { input } = layoutInput(session);
+  const sources = imageSources(session, JSON.stringify({ ...JSON.parse(input), renderEnv: { mediaTokens: true } }));
+  if (!sources.every((src) => src.startsWith('media:'))) throw new Error(`the layout left images untokenized: ${JSON.stringify(sources)}`);
+  return sources;
+}
+
+interface EmbeddedFontWire {
+  embeddedFontParts: { path: string; base64: string }[];
+  fontTableRelationshipsXml?: string;
+  document: { package: { fontTable?: { fonts: { name: string; embedRegular?: { relId: string; fontKey?: string } }[] } } };
+}
+
+// The embedded face as the engine's own parse hands it out, de-obfuscated with its font key.
+function embeddedFace(engine: DocxEngine): Uint8Array {
+  const { embeddedFontParts, fontTableRelationshipsXml, document } = JSON.parse(engine.parse_docx_s9(embeddedFontFixture, '')) as EmbeddedFontWire;
+  const embed = document.package.fontTable?.fonts.find(({ name }) => name === EMBEDDED_FAMILY)?.embedRegular;
+  const target = embed && fontTableRelationshipsXml?.match(new RegExp(`Id="${embed.relId}"[^>]*Target="([^"]+)"`))?.[1];
+  const part = target && embeddedFontParts.find(({ path }) => path === `word/${target}`);
+  if (!embed?.fontKey || !part) throw new Error(`the parse hands out no embedded ${EMBEDDED_FAMILY} face`);
+  const face = new Uint8Array(deobfuscateFont(Uint8Array.from(Buffer.from(part.base64, 'base64')).buffer, embed.fontKey));
+  if (Buffer.compare(Buffer.from(face), Buffer.from(fontBytes)) !== 0) throw new Error('the embedded face does not de-obfuscate to the font it was built from');
+  return face;
+}
+
+function privateFontRequest(session: Session, chain: number[]) {
+  const request = regionRequest();
+  const requirements = JSON.parse(session.layout_font_requirements_json(JSON.stringify(request))) as { key: string; family: string }[];
+  if (!requirements.some(({ family }) => family.toLowerCase() === EMBEDDED_FAMILY.toLowerCase())) {
+    throw new Error(`the layout does not ask for the embedded font: ${JSON.stringify(requirements)}`);
+  }
+  for (const { key } of requirements) request.measurement.fontChains[key] = chain;
+  return { requirements, request: JSON.stringify(request) };
+}
+
+function embeddedFontSession(fresh: () => Session): Session {
+  const f = fresh();
+  f.open_docx(embeddedFontFixture, true, GENERATION);
+  return f;
+}
+
+function sliceAnswers(session: Session, paragraphs: number, inflated: number): number[] {
+  const answers: number[] = [];
+  let answer = 1;
+  for (let slice = 0; slice < 10_000 && answer === 1; slice += 1) {
+    answer = session.prime_save_seed_states_slice(paragraphs, inflated, 64);
+    answers.push(answer);
+  }
+  return answers;
+}
+
+function mediaReplica(fresh: () => Session, seeded: Session): Session {
+  const r = fresh();
+  r.open_docx(fixture, false, GENERATION);
+  r.apply_update(seeded.encode_state());
+  return r;
 }
 
 const MISSING_STORY = 'parity-missing';
@@ -1256,6 +1337,27 @@ const rows: Row<Docx>[] = [
       return { before, slices };
     },
   },
+  defineRow({
+    method: 'EditSession.prime_save_seed_states_slice',
+    mutates: true,
+    setup: (docx: Docx) => seededReplica(docx),
+    call: (_, f) => {
+      const answers = sliceAnswers(f, 1_000, 64 * 1024 * 1024);
+      if (answers.at(-1) !== 0) throw new Error(`the seeded replica did not finish priming: ${JSON.stringify(answers)}`);
+      return { answers, again: f.prime_save_seed_states_slice(1_000, 64 * 1024 * 1024, 64), whole: f.prime_save_seed_states(1_000, 64 * 1024 * 1024) };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.prime_save_seed_states_slice',
+    name: 'EditSession.prime_save_seed_states_slice (over budget)',
+    mutates: true,
+    setup: (docx: Docx) => seededReplica(docx),
+    call: (_, f) => {
+      const declined = [sliceAnswers(f, 1, 1), sliceAnswers(f, 1_000, 1)];
+      if (declined.some((answers) => answers.at(-1) !== 2)) throw new Error(`an over-budget slice was not declined: ${JSON.stringify(declined)}`);
+      return { declined, within: sliceAnswers(f, 1_000, 64 * 1024 * 1024) };
+    },
+  }),
   defineRow({
     method: 'EditSession.apply_update',
     mutates: true,
@@ -2284,6 +2386,109 @@ const rows: Row<Docx>[] = [
       return [type, f.media_type('media:missing')];
     },
   }),
+  defineRow({
+    method: 'EditSession.media_data_url',
+    setup: ({ fresh }: Docx) => tokenizedImage(fresh),
+    call: ({ fresh }, { f, src }) => {
+      const url = f.media_data_url(src);
+      if (url !== `data:image/png;base64,${Buffer.from(PNG).toString('base64')}`) throw new Error(`${src} stands for ${String(url)}, not the fixture PNG`);
+      const untokenized = fresh();
+      untokenized.open_docx(fixture, true, GENERATION);
+      if (imageAt(untokenized).src !== url) throw new Error(`an untokenized opening seeds ${String(imageAt(untokenized).src)}, not ${url}`);
+      return [url, f.media_data_url('media:missing'), f.media_data_url(url), fresh().media_data_url(src)];
+    },
+  }),
+  {
+    method: 'EditSession.set_media_tokens',
+    call: ({ fresh }) => {
+      const opened = (...settings: boolean[]) => {
+        const f = fresh();
+        for (const enabled of settings) f.set_media_tokens(enabled);
+        f.open_docx(fixture, true, GENERATION);
+        return seededImage(f);
+      };
+      const [unset, on, off, toggled] = [opened(), opened(true), opened(false), opened(true, false)];
+      if (unset === on || !on.includes('"media:')) throw new Error(`enabling media tokens did not tokenize the seeded image: ${unset} then ${on}`);
+      return { unset, on, off, toggled };
+    },
+  },
+  {
+    method: 'EditSession.rebuild_media_sources',
+    call: ({ engine, fresh }) => {
+      const bare = fresh().rebuild_media_sources();
+      const seeded = fresh();
+      seeded.open_docx(fixture, true, GENERATION);
+      const kept = seeded.media_sources_json();
+      const seededRebuild = seeded.rebuild_media_sources();
+      if (seeded.media_sources_json() !== kept) throw new Error(`rebuilding a seeded replica changed its sources: ${kept} then ${seeded.media_sources_json()}`);
+      const replica = mediaReplica(fresh, seeded);
+      const before = replica.media_sources_json();
+      const rebuilt = replica.rebuild_media_sources();
+      const json = replica.media_sources_json();
+      const again = replica.rebuild_media_sources();
+      if (replica.media_sources_json() !== json) throw new Error(`a second rebuild changed the sources: ${json} then ${replica.media_sources_json()}`);
+      const other = mediaReplica(fresh, seeded);
+      other.rebuild_media_sources();
+      const sources = JSON.parse(json) as MediaSourcesWire;
+      const reopened = JSON.parse(other.media_sources_json()) as MediaSourcesWire;
+      const [first, second] = [sources.parts[0]?.[0], reopened.parts[0]?.[0]];
+      console.log(`MEDIA-REBUILD-PROBE ${engineName(engine)} ${String(first)} ${String(second)} same=${first === second}`);
+      if (first === undefined || first === second) throw new Error(`two rebuilds drew the same media digest ${String(first)}`);
+      return {
+        bare,
+        seededRebuild,
+        before,
+        rebuilt,
+        again,
+        ...mediaSourcesShape(sources),
+        other: mediaSourcesShape(reopened),
+        tokens: tokenSources(replica),
+      };
+    },
+  },
+  {
+    method: 'EditSession.rebuild_media_sources',
+    name: 'EditSession.rebuild_media_sources (seeded on the other engine)',
+    call: ({ engine, fresh }) => {
+      const seeder = new (engine === wasmEngine ? nativeEngine : wasmEngine).EditSession(HOST_CLIENT);
+      try {
+        seeder.open_docx(fixture, true, GENERATION);
+        const reader = mediaReplica(fresh, seeder);
+        const rebuilt = reader.rebuild_media_sources();
+        const tokens = tokenSources(reader);
+        const media = tokens.map((token) => {
+          const [bytes, seeded] = [reader.media_bytes(token), seeder.media_bytes(token)];
+          if (!bytes || !seeded || Buffer.compare(Buffer.from(bytes), Buffer.from(seeded)) !== 0) throw new Error(`${token} resolves to other bytes than on the seeding engine`);
+          return { token, type: reader.media_type(token), url: reader.media_data_url(token), seededUrl: seeder.media_data_url(token), bytes };
+        });
+        return { rebuilt, tokens, media };
+      } finally {
+        seeder.free();
+      }
+    },
+  },
+  {
+    method: 'EditSession.export_snapshot_with_private_fonts_json',
+    call: ({ engine, fresh }) => {
+      const f = embeddedFontSession(fresh);
+      const face = embeddedFace(engine);
+      const embedded = privateFontRequest(f, [0]);
+      const snapshot = f.export_snapshot_with_private_fonts_json(face, Uint32Array.from([face.length]), embedded.request, EXPORT);
+      if (!(JSON.parse(snapshot) as { ok: boolean }).ok) throw new Error(`the private font export refused: ${snapshot}`);
+      const unfonted = f.export_snapshot_with_private_fonts_json(new Uint8Array(0), new Uint32Array(0), privateFontRequest(f, []).request, EXPORT);
+      return { requirements: embedded.requirements, snapshot, unfonted };
+    },
+  },
+  defineRow({
+    method: 'EditSession.export_snapshot_with_private_fonts_json',
+    name: 'EditSession.export_snapshot_with_private_fonts_json (lengths past the font bytes)',
+    throws: { name: 'string', reason: 'font lengths that run past the joined font bytes are refused' },
+    setup: ({ engine, fresh }: Docx) => {
+      const f = embeddedFontSession(fresh);
+      return { f, face: embeddedFace(engine), request: privateFontRequest(f, [0]).request };
+    },
+    call: (_, { f, face, request }) => f.export_snapshot_with_private_fonts_json(face, Uint32Array.from([face.length + 1]), request, EXPORT),
+  }),
   {
     method: 'EditSession.load',
     mutates: true,
@@ -2543,15 +2748,14 @@ const notYetCovered: string[] = [
   'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json', 'EditSession.display_vertical_move_json',
   'EditSession.echo_glyph_set_json', 'EditSession.encode_diff_chunks',
   'EditSession.encode_peer_metadata',
-  'EditSession.end_shared_reads', 'EditSession.export_snapshot_with_private_fonts_json',
+  'EditSession.end_shared_reads',
   'EditSession.geometry_position_outline_json',
   'EditSession.layout_document_with_regions_after_edit', 'EditSession.layout_document_with_regions_exact_prefix_retained',
   'EditSession.layout_document_with_regions_prefix_retained_json',
   'EditSession.layout_document_with_regions_retained_json', 'EditSession.layout_document_with_regions_retained_meta',
-  'EditSession.measure_paragraph_json', 'EditSession.media_data_url',
+  'EditSession.measure_paragraph_json',
   'EditSession.outline_glyph_json',
-  'EditSession.patch_style_languages_xml', 'EditSession.prime_save_seed_states_slice',
-  'EditSession.rebuild_media_sources',
+  'EditSession.patch_style_languages_xml',
   'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.reset_frame_base',
   'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
   'EditSession.resume_region_layout',
@@ -2559,7 +2763,7 @@ const notYetCovered: string[] = [
   'EditSession.seed_opaque_sequences',
   'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages',
   'EditSession.set_header_footer_aliases',
-  'EditSession.set_local_lowering', 'EditSession.set_media_tokens',
+  'EditSession.set_local_lowering',
   'EditSession.set_windowed_incremental_builds',
   'EditSession.start_update_event_observation',
   'EditSession.story_segment_unit_digests',
@@ -2601,7 +2805,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(80);
+    expect(notYetCovered.length).toBe(75);
   });
 
   for (const row of rows) {
