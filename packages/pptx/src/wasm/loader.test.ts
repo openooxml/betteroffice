@@ -915,6 +915,52 @@ describe('host undo and comment controls', () => {
     }
   });
 
+  const anchoredStory = (deck: PresentationHandle) => {
+    const slide = deck.snapshot().slides[0];
+    const shape = slide.shapes.find((candidate) => candidate.textStories.length)!;
+    const story = shape.textStories[0];
+    deck.addUndoBoundary();
+    return { slide, shape, story, anchor: deck.anchorCaret(story.id, 2) };
+  };
+
+  test('caret anchors resolve to null once their slide is deleted', () => {
+    const deck = openPresentation(fixture, { clientId: 9984 });
+    try {
+      const { slide, anchor } = anchoredStory(deck);
+      deck.deleteSlide(slide.id);
+      expect(deck.resolveCaretAnchor(anchor)).toBeNull();
+    } finally { deck.dispose(); }
+  });
+
+  test('caret anchors resolve to null once their shape is removed', () => {
+    const deck = openPresentation(fixture, { clientId: 9985 });
+    try {
+      const { slide, shape, anchor } = anchoredStory(deck);
+      deck.removeShape(slide.id, shape.id);
+      expect(deck.resolveCaretAnchor(anchor)).toBeNull();
+    } finally { deck.dispose(); }
+  });
+
+  test('caret anchors resolve again after their slide deletion is undone', () => {
+    const deck = openPresentation(fixture, { clientId: 9986 });
+    try {
+      const { slide, anchor } = anchoredStory(deck);
+      deck.deleteSlide(slide.id);
+      expect(deck.undo().applied).toBe(true);
+      expect(deck.resolveCaretAnchor(anchor)).toBe(2);
+    } finally { deck.dispose(); }
+  });
+
+  test('caret anchors on a remaining slide survive another slide deletion', () => {
+    const deck = openPresentation(fixture, { clientId: 9987 });
+    try {
+      const { slide, anchor } = anchoredStory(deck);
+      const other = deck.snapshot().slides.find((candidate) => candidate.id !== slide.id)!;
+      deck.deleteSlide(other.id);
+      expect(deck.resolveCaretAnchor(anchor)).toBe(2);
+    } finally { deck.dispose(); }
+  });
+
   test('moves modern comments without losing their thread or exported position', async () => {
     const bytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/modern-comments.pptx'));
     const deck = openPresentation(bytes, { clientId: 9982 });
