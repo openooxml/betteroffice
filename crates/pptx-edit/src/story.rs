@@ -329,7 +329,7 @@ impl DeckSession {
     pub fn resolve_caret_anchor(&self, anchor: &CaretAnchor) -> Option<u32> {
         let txn = self.doc.transact();
         let story = story_ref(&txn, &anchor.story_id).ok()?;
-        crate::proposal_diff::story_owner(&txn, &anchor.story_id).ok()??;
+        self.story_owners.owner(&txn, &anchor.story_id).ok()??;
         let offset = anchor.position.get_offset(&txn)?;
         let expected = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&story));
         if offset.branch != expected {
@@ -632,7 +632,7 @@ impl DeckSession {
         properties: &ParagraphSnapshot,
     ) -> EditResult<()> {
         let mut txn = self.transact_for(context);
-        let story = story_mut(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         let marker = selected_pilcrows(&story, &txn, story_id, paragraph_start, paragraph_start)
             .pop()
             .ok_or_else(|| EditError::InvalidState("missing replacement paragraph".into()))?;
@@ -733,7 +733,7 @@ impl DeckSession {
             Vec::new()
         };
         let mut txn = self.transact_for(context);
-        let story = story_mut(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index > final_pilcrow {
             return Err(EditError::OutOfBounds {
@@ -777,7 +777,7 @@ impl DeckSession {
         end: u32,
     ) -> EditResult<TextReceipt> {
         let mut txn = self.transact_for(context);
-        let story = story_mut(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         check_text_range(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         if end > start {
@@ -804,7 +804,7 @@ impl DeckSession {
         let fields = crate::target::field_paragraphs(&self.package, &self.snapshot()?, story_id);
         let source_xml = self.source_paragraph_xml(story_id)?;
         let mut txn = self.transact_for(context);
-        let story = story_mut(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let final_index = final_pilcrow_index(&story, &txn)?;
         if start <= final_index && final_index < end {
@@ -920,7 +920,7 @@ impl DeckSession {
             Vec::new()
         };
         let mut txn = self.transact_for(context);
-        let story = story_mut(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         for (paragraph_index, segment_start, segment_end) in
@@ -961,7 +961,7 @@ impl DeckSession {
     ) -> EditResult<TextReceipt> {
         validate_alignment(alignment)?;
         let mut txn = self.transact_for(context);
-        let story = story_mut(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
         let pilcrows = selected_pilcrows(&story, &txn, story_id, start, end);
@@ -992,7 +992,7 @@ impl DeckSession {
         let fields = crate::target::field_paragraphs(&self.package, &self.snapshot()?, story_id);
         let (story, has_fields, inherited) = {
             let txn = self.doc.transact();
-            let story = story_mut(&txn, story_id)?;
+            let story = self.story_mut(&txn, story_id)?;
             let final_pilcrow = final_pilcrow_index(&story, &txn)?;
             if index > final_pilcrow {
                 return Err(EditError::OutOfBounds {
@@ -1068,7 +1068,7 @@ impl DeckSession {
         index: u32,
     ) -> EditResult<TextReceipt> {
         let txn = self.transact_for(context);
-        let story = story_mut(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
         if index >= final_pilcrow {
             return Err(EditError::OutOfBounds {
@@ -1107,7 +1107,7 @@ impl DeckSession {
     ) -> EditResult<()> {
         let fields = crate::target::field_paragraphs(&self.package, &self.snapshot()?, story_id);
         let mut txn = self.transact_for(context);
-        let story = story_mut(&txn, story_id)?;
+        let story = self.story_mut(&txn, story_id)?;
         let markers = paragraph_markers(&story, &txn);
         let selected = markers
             .iter()
@@ -1345,11 +1345,14 @@ pub(crate) fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextR
         .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))
 }
 
-fn story_mut<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
-    let story = story_ref(txn, story_id)?;
-    crate::proposal_diff::story_owner(txn, story_id)?
-        .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))?;
-    Ok(story)
+impl DeckSession {
+    fn story_mut<T: ReadTxn>(&self, txn: &T, story_id: &str) -> EditResult<TextRef> {
+        let story = story_ref(txn, story_id)?;
+        self.story_owners
+            .owner(txn, story_id)?
+            .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))?;
+        Ok(story)
+    }
 }
 
 fn final_pilcrow_index<T: ReadTxn>(story: &TextRef, txn: &T) -> EditResult<u32> {
