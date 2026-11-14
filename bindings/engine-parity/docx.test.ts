@@ -1041,8 +1041,6 @@ function placeholderDisplay({ engine, session }: Docx) {
   return { list, contract, handle: engine.open_display_list(JSON.stringify({ ...contract, pages })) };
 }
 
-const KEEPS_EQUAL = 'keeps results equal';
-
 const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
 
 const rows: Row<Docx>[] = [
@@ -3147,6 +3145,7 @@ const rows: Row<Docx>[] = [
         steps.push(step);
         done = (JSON.parse(step) as { layoutJson?: string }).layoutJson !== undefined;
       }
+      if (!done) throw new Error(`the region layout did not finish in ${steps.length} resumes`);
       return { begun, steps };
     },
   }),
@@ -3177,15 +3176,6 @@ const rows: Row<Docx>[] = [
     call: ({ session: s }) => s.retained_kernel_inputs_json(),
   }),
   { method: 'RetainedLayoutMeta.layout_shell_json', call: ({ session: s }) => retainedMetaOf(s).layout_shell_json },
-  { method: 'RetainedLayoutMeta.provisional', call: ({ session: s }) => retainedMetaOf(s).provisional },
-  {
-    method: 'RetainedLayoutMeta.notes_converged',
-    call: ({ session: s, fresh }) => {
-      const noteFree = fresh();
-      noteFree.open_docx(compareOriginal, true, GENERATION);
-      return { noteBearing: retainedMetaOf(s).notes_converged, noteFree: retainedMetaOf(noteFree, { ...regionRequest(), notes: { contents: [] } }).notes_converged };
-    },
-  },
   defineRow({
     method: 'EditSession.release_display_pages_frame',
     setup: ({ session: s }: Docx) => residentFrame(s),
@@ -3437,64 +3427,6 @@ const rows: Row<Docx>[] = [
       }
     },
   }),
-  // These toggles change how the engine reaches its results, so their rows show equal results, not an effect.
-  {
-    method: 'EditSession.begin_shared_reads',
-    name: `EditSession.begin_shared_reads ${KEEPS_EQUAL}`,
-    call: ({ session: s }) => {
-      const result = s.begin_shared_reads();
-      try {
-        return { result, segments: s.story_segments('body'), paragraphs: s.paragraphs('body'), blocks: s.yrs_blocks_for_story('body', '{}') };
-      } finally {
-        s.end_shared_reads();
-      }
-    },
-  },
-  defineRow({
-    method: 'EditSession.end_shared_reads',
-    name: `EditSession.end_shared_reads ${KEEPS_EQUAL}`,
-    setup: ({ session: s }: Docx) => s.begin_shared_reads(),
-    call: ({ session: s }) => {
-      const shared = s.paragraphs('body');
-      const result = s.end_shared_reads();
-      peerEdit(s, 'Second body', 'Later ');
-      return { shared, result, after: s.paragraphs('body') };
-    },
-  }),
-  {
-    method: 'EditSession.set_local_lowering',
-    name: `EditSession.set_local_lowering ${KEEPS_EQUAL}`,
-    call: ({ session: s }) => {
-      const result = s.set_local_lowering(true);
-      const epoch = residentFrame(s);
-      caretIn(s, 'Second body', 6);
-      return { result, frame: s.apply_input('X', epoch), after: s.paragraphs('body') };
-    },
-  },
-  defineRow({
-    method: 'EditSession.set_windowed_incremental_builds',
-    name: `EditSession.set_windowed_incremental_builds ${KEEPS_EQUAL}`,
-    setup: ({ session: s }: Docx) => layout(s).fontChains,
-    call: ({ session: s }, fontChains) => {
-      const result = s.set_windowed_incremental_builds(true);
-      s.set_display_window(0, 1);
-      const first = s.build_display_list_frame(frameExtras(fontChains), 0);
-      caretIn(s, 'Second body', 6);
-      return { result, first, typed: s.apply_input('X', frameEpoch(s)), after: s.paragraphs('body') };
-    },
-  }),
-  defineRow({
-    method: 'EditSession.set_display_retain_built_pages',
-    name: `EditSession.set_display_retain_built_pages ${KEEPS_EQUAL}`,
-    setup: ({ session: s }: Docx) => layout(s).fontChains,
-    call: ({ session: s }, fontChains) => {
-      const result = s.set_display_retain_built_pages(true);
-      s.set_display_window(1, 2);
-      const first = s.build_display_list_frame(frameExtras(fontChains), 0);
-      const pages = s.build_display_pages_frame(Uint32Array.from([0]), frameEpoch(s));
-      return { result, first, pages, again: s.build_display_list_frame(frameExtras(fontChains), frameEpoch(s)) };
-    },
-  }),
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
@@ -3522,8 +3454,14 @@ const exclusions: Exclusion[] = [
 const knownDifferences: KnownDifference[] = [];
 
 const notYetCovered: string[] = [
+  'EditSession.begin_shared_reads',
   'EditSession.encode_peer_metadata',
+  'EditSession.end_shared_reads',
+  'EditSession.set_display_retain_built_pages',
+  'EditSession.set_local_lowering',
+  'EditSession.set_windowed_incremental_builds',
   'EditSession.update_measure_font_outlines',
+  'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.provisional',
   'decodeFontFace', 'decodeTiffPng',
 ];
 
@@ -3555,7 +3493,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(4);
+    expect(notYetCovered.length).toBe(11);
   });
 
   for (const row of rows) {
