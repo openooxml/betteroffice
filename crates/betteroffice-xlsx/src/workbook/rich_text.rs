@@ -92,8 +92,11 @@ impl Workbook {
                 match source_cell {
                     Some(at) => facts.rich_inline.get(&(at.row, at.col)) == Some(value),
                     None => {
-                        facts.rich_inline.values().any(|rich| rich == value)
-                            || package
+                        (0..package.source_sheet_count()).any(|index| {
+                            package.source_cell_facts(index).is_some_and(|facts| {
+                                facts.rich_inline.values().any(|rich| rich == value)
+                            })
+                        }) || package
                                 .original_workbook()
                                 .shared_strings
                                 .iter()
