@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::parser::parse_formula;
+use crate::parser::{Expr, parse_formula};
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -668,4 +668,250 @@ fn a_graph_whose_parse_cache_was_taken_still_matches_a_fresh_build() {
         assert!(!rebuilt.result.cycle_cells.is_empty(), "{label}");
         assert_same_rebuild(&reused, &rebuilt, &label);
     }
+}
+
+fn at(source: &str) -> CellRef {
+    CellRef::parse_a1(source).expect("an A1 address")
+}
+
+fn rect(source: &str) -> CellRange {
+    CellRange::parse_a1(source).expect("an A1 range")
+}
+
+fn number(value: f64) -> CellValue {
+    CellValue::Number { value }
+}
+
+fn sheets(names: &[&str]) -> Workbook {
+    let mut wb = Workbook::default();
+    wb.sheets.extend(names.iter().map(|name| Sheet::new(*name)));
+    wb
+}
+
+fn put_number(wb: &mut Workbook, sheet: SheetId, address: &str, value: f64) {
+    let cell = Cell {
+        value: number(value),
+        ..Cell::default()
+    };
+    wb.sheet_mut(sheet)
+        .expect("a sheet")
+        .set_cell(at(address), cell);
+}
+
+fn put_formula(wb: &mut Workbook, sheet: SheetId, address: &str, source: &str) {
+    let cell = Cell {
+        formula: Some(source.into()),
+        ..Cell::default()
+    };
+    wb.sheet_mut(sheet)
+        .expect("a sheet")
+        .set_cell(at(address), cell);
+}
+
+fn shown(wb: &Workbook, sheet: SheetId, address: &str) -> CellValue {
+    let cell = wb.sheet(sheet).and_then(|s| s.cell(at(address)));
+    cell.map_or(CellValue::Empty, |cell| cell.value.clone())
+}
+
+struct Edited {
+    reused: Rebuilt,
+    fresh: Rebuilt,
+    /// the parse cache of the previous graph before the reusing rebuild took it.
+    cached: HashMap<String, Arc<Expr>>,
+}
+
+impl Edited {
+    /// whether the reusing rebuild holds the very tree the previous graph
+    /// parsed for `source`.
+    fn kept(&self, source: &str) -> bool {
+        let asts = self
+            .reused
+            .graph
+            .asts()
+            .lock()
+            .expect("parse cache poisoned");
+        match (self.cached.get(source), asts.get(source)) {
+            (Some(before), Some(after)) => Arc::ptr_eq(before, after),
+            _ => false,
+        }
+    }
+}
+
+/// recalculates `before`, applies `edit`, and rebuilds the result over the
+/// previous graph and from scratch, which must agree.
+fn rebuild_after(mut before: Workbook, edit: impl FnOnce(&mut Workbook), label: &str) -> Edited {
+    let (previous, _) =
+        rebuild_and_recalc_all_after(&mut before, None, Some(NOW_SERIAL), Some(RAND_SEED));
+    let cached: HashMap<String, Arc<Expr>> = previous
+        .asts()
+        .lock()
+        .expect("parse cache poisoned")
+        .clone();
+    edit(&mut before);
+    let reused = rebuild(before.clone(), Some(&previous));
+    let fresh = rebuild(before, None);
+    assert_same_rebuild(&reused, &fresh, label);
+    Edited {
+        reused,
+        fresh,
+        cached,
+    }
+}
+
+#[test]
+fn a_rebuild_over_a_resized_table_matches_a_fresh_build() {
+    let s = SheetId(0);
+    let mut wb = sheets(&["Sheet1"]);
+    for (address, qty) in [("B2", 10.0), ("B3", 20.0), ("B4", 30.0)] {
+        put_number(&mut wb, s, address, qty);
+    }
+    wb.tables.push(Table {
+        name: "Sales".into(),
+        sheet: s,
+        range: rect("A1:B4"),
+        header_rows: 1,
+        totals_rows: 0,
+        columns: vec!["Item".into(), "Qty".into()],
+    });
+    put_formula(&mut wb, s, "D1", "SUM(Sales[Qty])");
+    put_formula(&mut wb, s, "D2", "D1*2");
+    let resize = |wb: &mut Workbook| {
+        put_number(wb, s, "B5", 40.0);
+        wb.tables[0].range = rect("A1:B5");
+    };
+    let edited = rebuild_after(wb, resize, "resized table");
+    assert!(edited.kept("SUM(Sales[Qty])"));
+    assert_eq!(shown(&edited.fresh.wb, s, "D1"), number(100.0));
+    assert_eq!(shown(&edited.fresh.wb, s, "D2"), number(200.0));
+}
+
+#[test]
+fn a_rebuild_over_array_formulas_matches_a_fresh_build() {
+    let s = SheetId(0);
+    for (rows, spill, total) in [(5.0, "C1:C5", 15.0), (2.0, "C1:C2", 3.0)] {
+        let label = format!("a sequence of {rows}");
+        let mut wb = sheets(&["Sheet1"]);
+        for (row, a, b) in [(1, 3.0, 1.0), (2, 4.0, 2.0), (3, 5.0, 3.0)] {
+            put_number(&mut wb, s, &format!("A{row}"), a);
+            put_number(&mut wb, s, &format!("B{row}"), b);
+        }
+        put_formula(&mut wb, s, "C1", "_xlfn.SEQUENCE(A1)");
+        put_formula(&mut wb, s, "D1", "SUM(C1:C10)");
+        put_formula(&mut wb, s, "E1", "A1:A3*2");
+        put_formula(&mut wb, s, "F1", "SUM(A1:A3*B1:B3)");
+        let sheet = wb.sheet_mut(s).expect("a sheet");
+        sheet.set_array_formula(at("C1"), rect("C1"));
+        sheet.set_array_formula(at("E1"), rect("E1:E3"));
+        sheet.set_array_formula(at("F1"), rect("F1"));
+        let resize = |wb: &mut Workbook| put_number(wb, s, "A1", rows);
+        let edited = rebuild_after(wb, resize, &label);
+        for source in ["_xlfn.SEQUENCE(A1)", "SUM(C1:C10)", "A1:A3*2", "SUM(A1:A3*B1:B3)"] {
+            assert!(edited.kept(source), "{label}: {source}");
+        }
+        let fresh = &edited.fresh.wb;
+        let spilled = fresh
+            .sheet(s)
+            .and_then(|sheet| sheet.array_formula(at("C1")));
+        assert_eq!(spilled, Some(rect(spill)), "{label}");
+        assert_eq!(shown(fresh, s, "D1"), number(total), "{label}");
+        assert_eq!(shown(fresh, s, "E1"), number(rows * 2.0), "{label}");
+        assert_eq!(shown(fresh, s, "E3"), number(10.0), "{label}");
+        assert_eq!(shown(fresh, s, "F1"), number(rows + 8.0 + 15.0), "{label}");
+    }
+}
+
+#[test]
+fn a_rebuild_over_a_sheet_local_name_matches_a_fresh_build() {
+    let (one, two) = (SheetId(0), SheetId(1));
+    let mut wb = sheets(&["One", "Two"]);
+    put_number(&mut wb, one, "A1", 2.0);
+    put_number(&mut wb, two, "A1", 3.0);
+    for (formula, local_sheet) in [("One!$A$1", None), ("Two!$A$1", Some(two))] {
+        wb.defined_names.push(DefinedName {
+            name: "Rate".into(),
+            formula: formula.into(),
+            local_sheet,
+            hidden: false,
+        });
+    }
+    put_formula(&mut wb, one, "B1", "Rate*10");
+    put_formula(&mut wb, two, "B1", "Rate*10");
+    put_formula(&mut wb, two, "B2", "One!Rate*10");
+    let edit = |wb: &mut Workbook| put_number(wb, two, "A1", 4.0);
+    let edited = rebuild_after(wb, edit, "sheet-local name");
+    assert!(edited.kept("Rate*10"));
+    assert!(edited.kept("One!Rate*10"));
+    assert_eq!(shown(&edited.fresh.wb, one, "B1"), number(20.0));
+    assert_eq!(shown(&edited.fresh.wb, two, "B1"), number(40.0));
+    assert_eq!(shown(&edited.fresh.wb, two, "B2"), number(20.0));
+}
+
+#[test]
+fn a_rebuild_over_stored_and_malformed_formula_text_matches_a_fresh_build() {
+    let s = SheetId(0);
+    let mut wb = sheets(&["Sheet1"]);
+    put_number(&mut wb, s, "A1", 2.0);
+    put_number(&mut wb, s, "A2", 3.0);
+    wb.defined_names.push(DefinedName {
+        name: "Scale".into(),
+        formula: "=Sheet1!$A$2".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+    put_formula(&mut wb, s, "B1", "=A1+1");
+    put_formula(&mut wb, s, "B2", "A1+1");
+    put_formula(&mut wb, s, "B3", "=SUM(A1:A2)*Scale");
+    let malformed = Cell {
+        value: number(7.0),
+        formula: Some("SUM(A1".into()),
+        style: None,
+    };
+    wb.sheet_mut(s)
+        .expect("a sheet")
+        .set_cell(at("C1"), malformed);
+    put_formula(&mut wb, s, "C2", "A2*2");
+    let edit = |wb: &mut Workbook| {
+        put_number(wb, s, "A1", 5.0);
+        put_formula(wb, s, "C2", "A2*");
+    };
+    let edited = rebuild_after(wb, edit, "stored and malformed text");
+    assert!(edited.kept("A1+1"));
+    assert!(edited.kept("SUM(A1:A2)*Scale"));
+    assert!(!edited.cached.contains_key("SUM(A1"));
+    assert!(!edited.cached.contains_key("A2*"));
+    let fresh = &edited.fresh.wb;
+    assert_eq!(shown(fresh, s, "B1"), number(6.0));
+    assert_eq!(shown(fresh, s, "B2"), number(6.0));
+    assert_eq!(shown(fresh, s, "B3"), number(24.0));
+    assert_eq!(shown(fresh, s, "C1"), number(7.0));
+}
+
+#[test]
+fn a_rebuild_after_a_formula_gets_new_text_matches_a_fresh_build() {
+    let s = SheetId(0);
+    let mut wb = sheets(&["Sheet1"]);
+    for (address, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0)] {
+        put_number(&mut wb, s, address, value);
+    }
+    put_formula(&mut wb, s, "B1", "A1*2");
+    put_formula(&mut wb, s, "B2", "A2*2");
+    put_formula(&mut wb, s, "B3", "SUM(B1:B2)");
+    put_formula(&mut wb, s, "B4", "A3*2");
+    let edit = |wb: &mut Workbook| put_formula(wb, s, "B2", "A2*3");
+    let edited = rebuild_after(wb, edit, "new formula text");
+    for source in ["A1*2", "SUM(B1:B2)", "A3*2"] {
+        assert!(edited.kept(source), "{source}");
+    }
+    assert!(!edited.cached.contains_key("A2*3"));
+    let asts = edited
+        .reused
+        .graph
+        .asts()
+        .lock()
+        .expect("parse cache poisoned");
+    assert!(asts.contains_key("A2*3"));
+    assert!(!asts.contains_key("A2*2"));
+    drop(asts);
+    assert_eq!(shown(&edited.fresh.wb, s, "B2"), number(6.0));
+    assert_eq!(shown(&edited.fresh.wb, s, "B3"), number(8.0));
 }
