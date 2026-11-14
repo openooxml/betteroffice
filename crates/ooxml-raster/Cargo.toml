@@ -26,7 +26,7 @@ ooxml-text.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 resvg = { version = "0.48", default-features = false, features = ["text", "raster-images"], optional = true }
 simplecss = { version = "=0.2.2", optional = true }
-svgtypes = { version = "=0.16.1", optional = true }
+svgtypes = { version = "=0.16.2", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 jpeg-decoder = { version = "=0.3.2", default-features = false, optional = true }
