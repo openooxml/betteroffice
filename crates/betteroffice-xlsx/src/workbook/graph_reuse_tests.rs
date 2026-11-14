@@ -393,3 +393,76 @@ fn a_graph_wrongly_kept_after_a_formula_edit_differs_from_a_fresh_build() {
         assert!(reported.is_some(), "seed {seed}: no difference reported");
     }
 }
+
+/// edits that enter formulas, recalculated once with a rebuild, before the value edits under test.
+fn check_after_formulas(formulas: &[(u32, &str, &str)], values: &[(u32, &str, &str)]) {
+    for seed in SEEDS {
+        let mut workbook = workbook(generated(seed, true));
+        for (sheet, a1, input) in formulas {
+            edit(&mut workbook, *sheet, a1, input);
+        }
+        let label = format!("seed {seed}");
+        assert_next_full_recalculation(&mut workbook, false, &format!("{label}, formulas"));
+        for (sheet, a1, input) in values {
+            edit(&mut workbook, *sheet, a1, input);
+        }
+        assert_next_full_recalculation(&mut workbook, true, &format!("{label}, values"));
+    }
+}
+
+#[test]
+fn a_value_over_a_formula_rebuilds_the_graph() {
+    check(true, false, |workbook| edit(workbook, 0, "B2", "5"));
+}
+
+#[test]
+fn a_table_header_edit_keeps_the_graph() {
+    check(true, true, |workbook| {
+        edit(workbook, 3, "B1", "Total Amount")
+    });
+}
+
+#[test]
+fn a_value_blocking_a_spill_keeps_the_graph() {
+    check(true, true, |workbook| {
+        edit(workbook, 4, "A8", "9");
+        edit(workbook, 4, "B1", "7");
+    });
+}
+
+#[test]
+fn clearing_a_spill_blocker_keeps_the_graph() {
+    for seed in SEEDS {
+        let mut workbook = workbook(generated(seed, true));
+        edit(&mut workbook, 4, "A8", "9");
+        edit(&mut workbook, 4, "B1", "7");
+        assert_next_full_recalculation(&mut workbook, true, &format!("seed {seed}, blocked"));
+        edit(&mut workbook, 4, "A8", "");
+        assert_next_full_recalculation(&mut workbook, true, &format!("seed {seed}, cleared"));
+    }
+}
+
+#[test]
+fn a_computed_reference_target_edit_keeps_the_graph() {
+    let formulas = [
+        (2, "H1", "Sheet1!A2"),
+        (2, "H2", "=INDIRECT(H1)+1"),
+        (2, "H3", "=OFFSET(Sheet1!$A$1,H4,0)"),
+        (2, "H4", "1"),
+    ];
+    check_after_formulas(&formulas, &[(2, "H1", "Sheet1!A3"), (2, "H4", "2")]);
+}
+
+#[test]
+fn a_type_change_under_a_criteria_range_keeps_the_graph() {
+    let formulas = [
+        (2, "H5", "=SUMIF(Sheet1!A1:A6,\">10\")"),
+        (2, "H6", "=COUNTIF(Sheet1!A1:A6,\"x\")"),
+    ];
+    check_after_formulas(&formulas, &[(0, "A3", "x")]);
+}
+
+#[test]
+fn a_value_read_by_a_defined_name_keeps_the_graph() {
+    check(true, true, |workbook| edit(workbook, 1, "A2", "77"));
+}
