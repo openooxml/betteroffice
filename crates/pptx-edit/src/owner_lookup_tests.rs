@@ -419,7 +419,7 @@ fn the_lookup_search_finds_the_strict_walk_owner_on_undamaged_generated_decks() 
             if step(&mut rng, &local, &peer, &stories) {
                 discover(&local, &mut seen, &mut stories);
             }
-            if round % 20 != 0 {
+            if seed > 5 && round % 20 != 0 {
                 continue;
             }
             let txn = local.doc.transact();
