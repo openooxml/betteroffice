@@ -805,7 +805,12 @@ fn a_rebuild_over_array_formulas_matches_a_fresh_build() {
         sheet.set_array_formula(at("F1"), rect("F1"));
         let resize = |wb: &mut Workbook| put_number(wb, s, "A1", rows);
         let edited = rebuild_after(wb, resize, &label);
-        for source in ["_xlfn.SEQUENCE(A1)", "SUM(C1:C10)", "A1:A3*2", "SUM(A1:A3*B1:B3)"] {
+        for source in [
+            "_xlfn.SEQUENCE(A1)",
+            "SUM(C1:C10)",
+            "A1:A3*2",
+            "SUM(A1:A3*B1:B3)",
+        ] {
             assert!(edited.kept(source), "{label}: {source}");
         }
         let fresh = &edited.fresh.wb;
