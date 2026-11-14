@@ -513,3 +513,21 @@ fn an_out_of_range_page_fails_as_the_saved_render_does() {
         }
     }
 }
+
+#[test]
+fn an_invalid_scale_fails_as_the_saved_render_does() {
+    let document = open(&one_page_per_paragraph_docx(3, ""));
+    let target = PngTarget { page: 0 };
+    for scale in [0.0, -0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let options = RenderOptions { scale };
+        let saved = document.render_png_saved(target, &options).unwrap_err();
+        assert!(
+            matches!(saved, Error::Render(_)),
+            "scale {scale}: unexpected saved render: {saved:?}"
+        );
+        let before = model_renders();
+        let fast = document.render_png(target, &options).unwrap_err();
+        assert_render_path(before, false, &format!("scale {scale}"));
+        assert_eq!(format!("{fast:?}"), format!("{saved:?}"), "scale {scale}");
+    }
+}
