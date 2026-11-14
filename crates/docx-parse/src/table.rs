@@ -1140,6 +1140,26 @@ mod tests {
     }
 
     #[test]
+    fn row_header_and_cant_split_read_every_on_off_spelling() {
+        for (attribute, expected) in [
+            (r#" w:val="0""#, false),
+            (r#" w:val="false""#, false),
+            (r#" w:val="off""#, false),
+            (r#" w:val="1""#, true),
+            (r#" w:val="true""#, true),
+            (r#" w:val="on""#, true),
+            ("", true),
+        ] {
+            let row = root(&format!(
+                r#"<w:trPr xmlns:w="w"><w:cantSplit{attribute}/><w:tblHeader{attribute}/></w:trPr>"#
+            ));
+            let parsed = parse_document_table_row_properties(Some(&row)).unwrap_or_default();
+            assert_eq!(parsed.header, Some(expected), "{attribute}");
+            assert_eq!(parsed.cant_split, Some(expected), "{attribute}");
+        }
+    }
+
+    #[test]
     fn preserves_zero_columns_but_omits_an_empty_or_all_nonpositive_grid() {
         let mixed = root(
             r#"<w:tblGrid xmlns:w="w"><w:gridCol/><w:gridCol w:w="1200px"/><w:gridCol w:w="-1"/></w:tblGrid>"#,
