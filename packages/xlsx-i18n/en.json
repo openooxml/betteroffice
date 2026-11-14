@@ -114,6 +114,14 @@
     "zoomPercent": "Zoom in percent",
     "apply": "Apply",
     "cancel": "Cancel",
+    "freezeColumn": "Freeze column {column}",
+    "freezeColumns": "Freeze columns {first}–{last}",
+    "freezeRow": "Freeze row {row}",
+    "freezeRows": "Freeze rows {first}–{last}",
+    "unfreezePanes": "Unfreeze panes",
+    "unhideColumns": "Unhide columns",
+    "unhideRows": "Unhide rows",
+    "selectAll": "Select all",
     "reasons": {
       "editorUnavailable": "The editor is not ready.",
       "documentLoading": "The workbook is still opening.",
@@ -135,7 +143,15 @@
       "unsupportedCommand": "Not supported yet.",
       "invalidArguments": "This value is not valid.",
       "inputFailed": "The cell entry before this could not be saved.",
+      "editUnsupported": "This edit can't be applied here. The workbook is unchanged.",
+      "editUnsupportedChart": "This edit can't be applied: a chart uses cells it would move. The workbook is unchanged.",
+      "editUnsupportedTable": "This edit can't be applied: a table uses cells it would move. The workbook is unchanged.",
+      "editUnsupportedPivot": "This edit can't be applied: a pivot table uses cells it would move. The workbook is unchanged.",
+      "editUnsupportedFill": "This fill can't be applied: it would change cells with links, notes or rules. The workbook is unchanged.",
       "sheetProtected": "This cell is on a protected sheet.",
+      "hostRefused": "This edit is not allowed.",
+      "tooManyToCheck": "Too many cells for plugins to check (limit {limit}).",
+      "hostStarting": "The editor is still starting. Try again in a moment.",
       "documentReplaced": "Another workbook was opened.",
       "targetChanged": "The selection changed.",
       "gestureActive": "Finish moving the chart first.",
@@ -144,10 +160,33 @@
       "commandFailed": "The change could not be applied.",
       "commandRefused": "Command was refused",
       "permissionDenied": "The host application has not allowed this plugin to use this command.",
-      "unsupportedPolicy": "Plugins can't run this command yet. Use an edit batch instead.",
+      "unsupportedPolicy": "This command needs a user gesture in the plugin's own UI.",
       "pluginUnavailable": "The plugin is no longer active.",
-      "aborted": "The plugin action was cancelled before the command ran."
-    }
+      "aborted": "The plugin action was cancelled before the command ran.",
+      "clipboardUnavailable": "This browser does not allow pasting from a menu. Use the keyboard shortcut.",
+      "lastSheet": "A workbook needs at least one sheet.",
+      "sheetAtEdge": "The sheet cannot move any further.",
+      "sheetNameInvalid": "Sheet names need 1 to 31 characters, must be unique and cannot contain : \\ / ? * [ ].",
+      "clipboardDenied": "The browser did not allow access to the clipboard."
+    },
+    "cut": "Cut",
+    "copy": "Copy",
+    "paste": "Paste",
+    "pastePlainText": "Paste as plain text",
+    "clearContents": "Clear contents",
+    "insert": "Insert",
+    "delete": "Delete",
+    "insertRowsAbove": "Insert rows above",
+    "insertRowsBelow": "Insert rows below",
+    "insertColumnsLeft": "Insert columns left",
+    "insertColumnsRight": "Insert columns right",
+    "deleteRows": "Delete rows",
+    "deleteColumns": "Delete columns",
+    "insertSheet": "Insert sheet",
+    "deleteSheet": "Delete sheet",
+    "renameSheet": "Rename",
+    "moveSheetLeft": "Move left",
+    "moveSheetRight": "Move right"
   },
   "editor": {
     "appLabel": "Spreadsheet editor",
@@ -162,7 +201,13 @@
     "showDetails": "Show details",
     "openPrompt": "Open an XLSX file",
     "sheetTabsLabel": "Sheets",
-    "clearExceedsLimit": "Clear exceeds the cell limit"
+    "clearExceedsLimit": "Clear exceeds the cell limit",
+    "cellMenuLabel": "Cell menu",
+    "columnHeaderMenuLabel": "Column header menu",
+    "rowHeaderMenuLabel": "Row header menu",
+    "sheetTabMenuLabel": "Sheet tab menu",
+    "renameSheetLabel": "Rename sheet",
+    "sheetNamePrefix": "Sheet"
   },
   "presence": {
     "label": "Collaborators",
@@ -178,6 +223,7 @@
     "accept": "Accept",
     "reject": "Reject",
     "forceApply": "Force apply",
+    "forceBlockedReason": "This proposal cannot be applied after a structural edit.",
     "staleWarning": "Cells changed since proposed: {cells}"
   },
   "a11y": {
@@ -187,12 +233,39 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, selected",
     "emptyCellLabel": "{address}, empty",
-    "emptyCellLabelSelected": "{address}, empty, selected"
+    "emptyCellLabelSelected": "{address}, empty, selected",
+    "hasFormula": "{label}, has formula",
+    "rangeSelected": "{start} to {end} selected, {rows, plural, one {# row} other {# rows}} by {columns, plural, one {# column} other {# columns}}",
+    "sheetActivated": "{name}, sheet {index} of {count}",
+    "cellInputLabel": "Edit cell {address}",
+    "gridRoleDescription": "worksheet",
+    "fillHandleLabel": "Fill handle",
+    "chartResizeNw": "Resize chart from the top-left corner",
+    "chartResizeN": "Resize chart from the top edge",
+    "chartResizeNe": "Resize chart from the top-right corner",
+    "chartResizeE": "Resize chart from the right edge",
+    "chartResizeSe": "Resize chart from the bottom-right corner",
+    "chartResizeS": "Resize chart from the bottom edge",
+    "chartResizeSw": "Resize chart from the bottom-left corner",
+    "chartResizeW": "Resize chart from the left edge",
+    "chartResizeHintBoth": "{label} (arrow keys; hold Shift for 10px)",
+    "chartResizeHintHorizontal": "{label} (left and right arrows; hold Shift for 10px)",
+    "chartResizeHintVertical": "{label} (up and down arrows; hold Shift for 10px)"
   },
   "plugins": {
     "toolbarGroup": "Plugins",
     "panelTabs": "Plugin panels",
     "collapsePanel": "Collapse {title}",
-    "expandPanel": "Expand {title}"
+    "expandPanel": "Expand {title}",
+    "rowGutter": "Plugin row markers"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

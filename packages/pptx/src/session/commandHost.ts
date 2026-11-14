@@ -1,15 +1,19 @@
 import { validPipePayload, type PipeCommandPayload } from '../../../../shared/collaboration-pipe/protocol';
+import { sessionFontDecoder } from './sessionFontDecoder';
 import { DEFAULT_MAX_FRAME_BYTES } from '../collaboration/protocol';
 import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
 import { createPresentationCollaboration } from './collaboration';
-import { PptxDocument } from '../wasm/engine';
-import { transferable, type TransferResult } from '../../../../shared/office-session/protocol';
+import { createMetafileSvg } from './metafileSvg';
+import { PptxDocument, engineKind } from '../wasm/engine';
+import { deferReply, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
+import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
-import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun } from '../textFormatting';
+import type { ProposalDiffSlide } from '../proposals';
+import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun, insertionStyle, typingStyle } from '../textFormatting';
 import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
@@ -17,9 +21,12 @@ import {
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
-import { buildCommandFrame } from './commandFrame';
+import { buildCommandFrame, commandFrameMedia, commandFrameMediaBytes, parseCommandDisplayList } from './commandFrame';
+import type { WorkerSlideFrame, WorkerSlideRender } from './workerRender';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
+import type { createSlicedFontFaces } from './commandSlicedFonts';
+import type { PaintFontCoverage } from '../render/canvas';
 import { presentationEnableBrowserCoverageFallback, presentationRequestedFontFaces } from '../wasm/fontRequests';
 import type { DefaultFontFace, DefaultFontLanding, DefaultFontPayload, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { createPresentationCommandProjection,
@@ -45,11 +52,18 @@ import {
 
 type FontModule = typeof import('./commandDefaultFonts');
 
+/** @internal */
+const DEFAULT_FONT_MAX_ATTEMPTS = 3;
+/** @internal */
+const DEFAULT_FONT_RETRY_DELAYS_MS = [2000, 8000];
+
 const MIN_FONT_SIZE_PT = 1;
 const MAX_FONT_SIZE_PT = 4000;
 const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
 
 export const commandDefaultFontModule = { load: () => import('./commandDefaultFonts') };
+const sessionDecodeFontFace = sessionFontDecoder((bytes, options) => decodeFontFace(bytes, options));
+const COVERAGE_SCRIPTS = new Set<unknown>(['cjk-jp', 'cjk-kr', 'cjk-sc', 'cjk-tc']);
 
 function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
@@ -61,9 +75,14 @@ function normalizeFontSize(size: number): number {
 }
 
 export interface PresentationCommandHostOptions {
+  onActiveFrame?(frame: WorkerSlideFrame): void;
+  activeFrameWanted?(): boolean;
+  onResetMedia?(): void;
   initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
   onPipeOutput?(): void;
   onDefaultFonts?(result: TransferResult<PresentationCommandAck & DefaultFontPayload>): void;
+  /** Sliced faces registered without an install, so paints already made may be stale. */
+  onSlicedFaces?(): void;
   installDefaultFonts?(faces: readonly DefaultFontFace[]): Promise<readonly DefaultFontFace[]>;
 }
 
@@ -71,6 +90,9 @@ export interface PresentationCommandRegistration {
   handlers: MethodHandlers<PresentationCommandMethods & PresentationSharedMethods, null>;
   policies: MethodPolicies<PresentationCommandMethods & PresentationSharedMethods>;
   drainPipe(): ReturnType<ReturnType<typeof createPresentationCollaboration>['drain']>;
+  /** Lays out a slide for an ahead-of-time raster without activating it. */
+  renderSlide(slideId: string): WorkerSlideRender | undefined;
+  fontCoverage(): PaintFontCoverage | undefined;
   dispose(): void;
 }
 
@@ -110,6 +132,7 @@ export function registerPresentationCommandHandlers(
     version: string; beforeText: string };
   type FormattingProjection = { formatting: TextStyleSnapshot; alignment: ParagraphAlignment | null };
   type CachedStory = { text: PptxStoryText; snapshot: StorySnapshot; echoRanges: { start: number; end: number }[];
+    table: PresentationCommandEditState['toolbar']['table'];
     formatting?: StorySnapshot;
     toolbar?: { story: StorySnapshot; selection: PresentationCommandSelection; marks: TextStyle;
       result: FormattingProjection };
@@ -124,13 +147,20 @@ export function registerPresentationCommandHandlers(
   const slideIndices = new Map<string, number>();
   let disposed = false;
   let opening = false;
+  let slicedFonts: ReturnType<typeof createSlicedFontFaces> | undefined;
   let defaultFonts: ReturnType<typeof createCommandDefaultFonts> | undefined;
   let creatingDefaultFonts: Promise<ReturnType<typeof createCommandDefaultFonts> | undefined> | undefined;
   let cancelDefaultFontImport: (() => void) | undefined;
+  let defaultFontImportAttempts = 0;
+  let defaultFontImportRetryAt = 0;
   let gatingFonts = false;
   const gatedDefaultFonts: DefaultFontLanding[] = [];
   let fontProvider: ReturnType<FontModule['commandFontProvider']['load']> | undefined;
-  const sessionFontProvider = (fonts: FontModule) => () => (fontProvider ??= fonts.commandFontProvider.load());
+  let fontCdn: FontCdnConfiguration | undefined;
+  const sessionFontProvider = (fonts: FontModule) => () => (fontProvider ??= fonts.commandFontProvider.load(fontCdn).catch((error) => {
+    fontProvider = undefined;
+    throw error;
+  }));
   let requestedFonts: ((slideId?: string) => RequestedFontFace[]) | undefined;
   const suppliedFonts: { family: string }[] = [];
   let fontTimer: ReturnType<typeof setTimeout> | undefined;
@@ -169,6 +199,48 @@ export function registerPresentationCommandHandlers(
   const selections = new Map<number, AnchoredSelection | null>();
   const revisions = new Map<string, number>();
   const sentMedia = new Set<string>();
+  const pendingMetafiles = new Set<string>();
+  const metafiles = engineKind === 'native' ? {
+    start: async () => {}, ready: () => true,
+    convert: (assetId: string, _bytes: Uint8Array) => presentation().metafileSvg(assetId),
+  } : createMetafileSvg();
+  let metafileLoad: Promise<void> | undefined;
+  let metafileTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function applyMetafileRepaint(): boolean {
+    if (disposed || opening || !metafiles.ready() || !pendingMetafiles.size) return false;
+    for (const assetId of pendingMetafiles) sentMedia.delete(assetId);
+    pendingMetafiles.clear();
+    for (const [id, revision] of revisions) revisions.set(id, revision + 1);
+    layouts.clear();
+    options.onResetMedia?.();
+    return true;
+  }
+
+  function repaintMetafiles(): void {
+    if (gatingFonts || !applyMetafileRepaint()) return;
+    if (options.onDefaultFonts) {
+      const result = ack([], [...revisions.keys()]);
+      options.onDefaultFonts(transferable({ ...result.value, defaultFonts: [] }, result.transfer));
+    }
+  }
+
+  function loadMetafiles(): Promise<void> {
+    if (metafileLoad) return metafileLoad;
+    metafileLoad = metafiles.start().then(() => {
+      repaintMetafiles();
+    }).finally(() => { metafileLoad = undefined; });
+    return metafileLoad;
+  }
+
+  function idleMetafiles(): void {
+    if (disposed || metafileTimer !== undefined) return;
+    metafileTimer = setTimeout(() => {
+      metafileTimer = undefined;
+      if (!disposed) void loadMetafiles().catch(() => {});
+    }, 0);
+  }
+
   const frames = new Map<string, {
     tag: PresentationCommandFrameTag; geometry: CommandHitGeometryIndex; version: string;
   }>();
@@ -179,6 +251,8 @@ export function registerPresentationCommandHandlers(
   function hasDefaultFonts(slideId?: string): boolean {
     if (disposed || !requestedFonts) return false;
     if (defaultFonts) return defaultFonts.hasPending(slideId);
+    if (!creatingDefaultFonts && (defaultFontImportAttempts >= DEFAULT_FONT_MAX_ATTEMPTS ||
+      Date.now() < defaultFontImportRetryAt)) return false;
     try {
       return requestedFonts(slideId).some((face) => face.scripts?.length || !suppliedFonts.some((font) =>
         font.family.trim().toLowerCase() === face.family.trim().toLowerCase()));
@@ -189,33 +263,35 @@ export function registerPresentationCommandHandlers(
     if (!hasDefaultFonts(slideId)) return [];
     if (defaultFonts) return defaultFonts.load(slideId);
     creatingDefaultFonts ??= new Promise<ReturnType<typeof createCommandDefaultFonts> | undefined>((resolve) => {
+      defaultFontImportAttempts++;
       let finished = false;
       const finish = (fonts?: ReturnType<typeof createCommandDefaultFonts>) => {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
         cancelDefaultFontImport = undefined;
-        if (!fonts) {
-          requestedFonts = undefined;
-          if (fontTimer !== undefined) clearTimeout(fontTimer);
-          fontTimer = undefined;
-          fontSlides.clear();
-          collectDeckFonts = false;
-        }
         resolve(fonts);
       };
       const timer = setTimeout(() => finish(), 5000);
       cancelDefaultFontImport = () => finish();
-      void commandDefaultFontModule.load().then((fonts) => {
-        if (finished || disposed || !requestedFonts) { finish(); return; }
+      void Promise.resolve().then(() => commandDefaultFontModule.load()).then((fonts) => {
+        if (disposed || !requestedFonts) { finish(); return; }
+        const late = finished;
         defaultFonts = fonts.createCommandDefaultFonts(suppliedFonts, requestedFonts,
           (face) => {
             const font = { ...face, bytes: new Uint8Array(face.bytes) };
-            if (face.kind === 'coverage') presentation().registerFallbackFont(font);
-            else presentation().registerFont(font);
+            const opened = presentation();
+            if (face.kind === 'coverage') opened.registerFallbackFont(font);
+            else opened.registerFont(font);
+            slicedFonts?.upgradeRegistered(opened, font.family);
           },
           (faces) => {
             if (!faces.length || disposed) return;
+            if (slicedFonts) options.onSlicedFaces?.();
+            slicedFonts?.scheduleFill(() => {
+              const content = handle?.readCommandContent();
+              return content?.ok ? content.stories.map((story) => story.text).join('\n') : undefined;
+            });
             layouts.clear();
             for (const story of stories.values()) { story.formatting = undefined; story.toolbar = undefined; }
             for (const [id, revision] of revisions) revisions.set(id, revision + 1);
@@ -225,9 +301,15 @@ export function registerPresentationCommandHandlers(
               options.onDefaultFonts(transferable({ ...result.value, defaultFonts: faces }, result.transfer));
             }
           }, options.installDefaultFonts, () => presentationEnableBrowserCoverageFallback(presentation()),
-          sessionFontProvider(fonts));
+          sessionFontProvider(fonts), slicedFonts);
         finish(defaultFonts);
-      }).catch(() => finish());
+        creatingDefaultFonts = undefined;
+        if (late) loadDefaultFonts();
+      }).catch(() => {
+        defaultFontImportRetryAt = Date.now() + (DEFAULT_FONT_RETRY_DELAYS_MS[defaultFontImportAttempts - 1] ?? Infinity);
+        creatingDefaultFonts = undefined;
+        finish();
+      });
     });
     return creatingDefaultFonts.then((fonts) => fonts?.load(slideId) ?? []);
   }
@@ -262,6 +344,20 @@ export function registerPresentationCommandHandlers(
 
   function cacheStories(content: Extract<PresentationCommandReadResult, { ok: true }>): void {
     for (const slide of content.slides) notes.set(slide.id, slide.notes ?? '');
+    const tables = new Map<string, NonNullable<PresentationCommandEditState['toolbar']['table']>>();
+    const visit = (shapes: readonly ShapeSnapshot[]) => {
+      for (const shape of shapes) {
+        const graphic = shape.graphic as { type?: string; grid?: unknown[] } | null;
+        if (graphic?.type === 'table' && Array.isArray(graphic.grid) && graphic.grid.length) {
+          const columns = graphic.grid.length;
+          (shape.textStories ?? []).forEach((story, index) => tables.set(story.id, {
+            shapeId: shape.id, row: Math.floor(index / columns), column: index % columns,
+          }));
+        }
+        visit(shape.children ?? []);
+      }
+    };
+    for (const slide of content.slides) visit(slide.shapes ?? []);
     const sources = new Map(content.sources.map((source) => [source.storyId, source.paragraphs]));
     for (const story of content.stories) {
       const key = storyKey(story);
@@ -269,6 +365,7 @@ export function registerPresentationCommandHandlers(
       keys.add(key);
       slideStoryKeys.set(story.slideId, keys);
       stories.set(key, { text: story, snapshot: presentation().story(story.storyId), echoRanges: [],
+        table: tables.get(story.storyId) ?? null,
         source: new Map((sources.get(story.storyId) ?? []).map((paragraph) => {
           const live = story.paragraphs.find((value) => value.paragraphId === paragraph.paragraphId)!;
           const text = story.text.slice(live.start, live.end);
@@ -555,6 +652,8 @@ export function registerPresentationCommandHandlers(
           bold: run.style.bold ?? DEFAULT_EDITOR_TEXT_STYLE.bold,
           italic: run.style.italic ?? DEFAULT_EDITOR_TEXT_STYLE.italic,
           underline: run.style.underline ?? 'none',
+          ...(run.style.strike ?? DEFAULT_EDITOR_TEXT_STYLE.strike) === undefined
+            ? {} : { strike: run.style.strike ?? DEFAULT_EDITOR_TEXT_STYLE.strike },
           fontFamily: run.style.fontFamily ?? DEFAULT_EDITOR_TEXT_STYLE.fontFamily,
           fontSizePt: normalizeFontSize(run.style.fontSizePt ?? DEFAULT_EDITOR_TEXT_STYLE.fontSizePt),
           color: run.style.color ?? DEFAULT_EDITOR_TEXT_STYLE.color };
@@ -582,7 +681,9 @@ export function registerPresentationCommandHandlers(
       formatting = { ...styles[0]! };
       const keys = new Set(styles.flatMap((style) => Object.keys(style))) as Set<keyof TextStyleSnapshot>;
       for (const key of keys) {
-        if (styles.some((style) => style[key] !== styles[0]![key])) formatting[key] = null;
+        if (styles.some((style) => key === 'strike'
+          ? (style.strike ?? 'noStrike') !== (styles[0]!.strike ?? 'noStrike')
+          : style[key] !== styles[0]![key])) formatting[key] = null;
       }
     }
     const value = alignments.size === 1 ? [...alignments][0] : null;
@@ -598,7 +699,8 @@ export function registerPresentationCommandHandlers(
     let echoRun: 'before' | 'after' | null = null;
     if (selection && selection.kind !== 'shape') {
       const cached = stories.get(storyKey(selection))!;
-      const neighbour = insertionEchoRun(cached.snapshot, selection.anchor, selection.focus, storedMarks);
+      const neighbour = insertionEchoRun(cached.formatting ??= presentationStoryFormatting(opened, selection),
+        selection.anchor, selection.focus, storedMarks);
       if (!readOnly && neighbour && cached.echoRanges.some((range) => range.start <= neighbour.start && range.end >= neighbour.end)
         && cached.text.paragraphs.some((paragraph) => paragraph.paragraphId === neighbour.paragraphId
           && paragraph.editable && paragraph.fields.length === 0)) echoRun = neighbour.neighbour;
@@ -615,8 +717,9 @@ export function registerPresentationCommandHandlers(
         storyId: selection.storyId } : null,
       textContext: selection ? selection.kind === 'shape' ? 'shape'
         : selection.anchor === selection.focus ? 'caret' : 'range' : null,
-      storedMarks: { ...storedMarks }, formatting, alignment,
-      hyperlink: null, table: null, canEditText: selection !== null && !readOnly, echoRun } };
+      storedMarks: Object.fromEntries(Object.entries(storedMarks).filter(([, value]) => value !== undefined)), formatting, alignment,
+      hyperlink: null, table: selection && selection.kind !== 'shape' ? stories.get(storyKey(selection))?.table ?? null : null,
+      canEditText: selection !== null && !readOnly, echoRun } };
     return lastEditState;
   }
 
@@ -632,7 +735,7 @@ export function registerPresentationCommandHandlers(
     if (presentation().version() !== metadataVersion) refreshMetadata();
   }
 
-  function frame(slideId: string, retain = true): TransferResult<PresentationCommandFrame> {
+  function frame(slideId: string, retain = true, extracted?: Map<string, Uint8Array>): TransferResult<PresentationCommandFrame> {
     const opened = presentation();
     refreshTopology();
     const slideIndex = slideIndices.get(slideId);
@@ -647,7 +750,8 @@ export function registerPresentationCommandHandlers(
     layout ? undefined : (list) => {
       geometry = indexHitGeometry(list);
       layouts.set(slideId, { slideIndex, revision, list, geometry });
-    }, layout?.list);
+    }, layout?.list, metafiles, pendingMetafiles, extracted);
+    if (pendingMetafiles.size && !metafiles.ready()) idleMetafiles();
     if (!geometry || !retain) return result;
     const { slideId: id, slideRevision, coversThroughSeq, documentEpoch: epoch, incarnation } = result.value;
     const key = frameKey(result.value);
@@ -656,6 +760,38 @@ export function registerPresentationCommandHandlers(
       geometry, version });
     while (frames.size > 257) frames.delete(frames.keys().next().value!);
     return result;
+  }
+
+  function renderSlide(slideId: string): WorkerSlideRender | undefined {
+    if (!identity) return undefined;
+    let opened: PresentationHandle;
+    try { opened = presentation(); refreshTopology(); } catch { return undefined; }
+    const slideIndex = slideIndices.get(slideId);
+    const revision = revisions.get(slideId);
+    if (slideIndex === undefined || revision === undefined) return undefined;
+    const cached = layouts.get(slideId);
+    let list = cached?.revision === revision && cached.slideIndex === slideIndex ? cached.list : undefined;
+    if (!list) {
+      list = parseCommandDisplayList(opened, slideIndex);
+      layouts.set(slideId, { slideIndex, revision, list, geometry: indexHitGeometry(list) });
+    }
+    return { slideId, version, displayList: list, mediaBytes(assetId) {
+      const pending = new Set<string>();
+      const bytes = commandFrameMediaBytes(opened, assetId, metafiles, pending);
+      if (pending.size) throw new Error('Slide media is not converted yet');
+      return bytes;
+    } };
+  }
+
+  async function proposalFrame(diff: ProposalDiffSlide): Promise<TransferResult<ProposalDiffSlide>> {
+    const pending = new Set<string>();
+    const sent = new Set<string>();
+    let media = commandFrameMedia(presentation(), diff.frame, sent, metafiles, pending);
+    if (pending.size) {
+      await loadMetafiles().catch(() => {});
+      media = commandFrameMedia(presentation(), diff.frame, sent, metafiles);
+    }
+    return transferable({ ...diff, media }, media.map(({ bytes }) => bytes));
   }
 
   function authoritativeGeometry(slideId: string): CommandHitGeometryIndex | undefined {
@@ -681,14 +817,26 @@ export function registerPresentationCommandHandlers(
     }
     const edit = editState();
     refreshTopology();
-    const result = activeSlideId === null || !slideIndices.has(activeSlideId) ? null : frame(activeSlideId);
+    const extracted = options.onActiveFrame && (options.activeFrameWanted?.() ?? true) ? new Map<string, Uint8Array>() : undefined;
+    const result = activeSlideId === null || !slideIndices.has(activeSlideId) ? null : frame(activeSlideId, true, extracted);
+    if (result && extracted) {
+      const opened = presentation();
+      options.onActiveFrame!({ slideId: result.value.slideId, frameEpoch: result.value.epoch,
+        displayList: layouts.get(result.value.slideId)!.list,
+        mediaBytes(assetId) {
+          const bytes = extracted.get(assetId);
+          extracted.delete(assetId);
+          return bytes ?? commandFrameMediaBytes(opened, assetId, metafiles);
+        } });
+    }
     retainVersions();
     const updates = pendingUpdates.splice(0);
     const reply = transferable<PresentationCommandAck>({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}),
       ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
       selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
-      dirtySlideIds, activeSlideId, historyThroughSeq, ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
+      dirtySlideIds, activeSlideId, historyThroughSeq, ...slicedFonts?.ack(),
+      ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),
       frame: result?.value ?? null }, [...(result?.transfer ?? []), ...updates.map((update) => update.bytes)]);
     for (const { assetId } of reply.value.frame?.media ?? []) sentMedia.add(assetId);
@@ -1021,7 +1169,7 @@ export function registerPresentationCommandHandlers(
       }
       const { patch, toggle, fontSizeStep } = command.payload;
       if (patch === undefined || !validStyle(patch) || toggle !== undefined &&
-        !['bold', 'italic', 'underline'].includes(toggle)) return 'invalid-payload';
+        !['bold', 'italic', 'underline', 'strikethrough'].includes(toggle)) return 'invalid-payload';
       const resolved: TextStyle = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
       if (fontSizeStep !== undefined) {
         if (!fontSizeStep || typeof fontSizeStep !== 'object' || Array.isArray(fontSizeStep) || toggle !== undefined ||
@@ -1038,6 +1186,7 @@ export function registerPresentationCommandHandlers(
       if (toggle) {
         const current = formattingAt(at).formatting;
         if (toggle === 'underline') resolved.underline = current.underline !== null && current.underline !== 'none' ? 'none' : 'sng';
+        else if (toggle === 'strikethrough') resolved.strike = current.strike === 'sngStrike' || current.strike === 'dblStrike' ? 'noStrike' : 'sngStrike';
         else resolved[toggle] = current[toggle] !== true;
       }
       return { kind: 'format', selection: { ...at }, patch: resolved };
@@ -1068,6 +1217,7 @@ export function registerPresentationCommandHandlers(
         text = command.payload.text;
         style = command.payload.style;
         if (!validStyle(style)) return 'invalid-payload';
+        if (style) style = Object.fromEntries(Object.entries(style).filter(([, value]) => value !== undefined));
         break;
       case 'paragraphBreak':
         text = '\n';
@@ -1133,12 +1283,20 @@ export function registerPresentationCommandHandlers(
         }
       }
     }
+    let inheritMarks = false;
     if (style === undefined && (command.kind === 'insertText' || command.kind === 'replaceText' ||
       command.kind === 'compositionCommit')) {
+      inheritMarks = true;
       style = { ...DEFAULT_EDITOR_TEXT_STYLE,
         ...Object.fromEntries(Object.entries(formattingAt(at).formatting)
           .filter(([key, value]) => key !== 'caps' && value !== null && value !== undefined)),
         ...marksAt(at) };
+    }
+    if (style) {
+      style = typingStyle(style);
+      if (inheritMarks && Object.prototype.hasOwnProperty.call(marksAt(at), 'strike') && marksAt(at).strike === undefined) {
+        style = { ...style, strike: undefined };
+      }
     }
     return { kind: 'text', selection: { ...at }, start, end, text, style };
   }
@@ -1258,9 +1416,9 @@ export function registerPresentationCommandHandlers(
       opened.addUndoBoundary();
       if (before === opened.version()) return false;
       admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: false,
-        slideOrderChanged: ['insertSlide', 'deleteSlide', 'moveSlide'].includes(admitted.method) };
+        slideOrderChanged: ['insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'acceptProposal'].includes(admitted.method) };
       refreshHistory(command.seq, admitted.receipt);
-      if (admitted.method === 'insertSlide') activeSlideId = (admitted.result as { slideId: string }).slideId;
+      if (admitted.method === 'insertSlide' || admitted.method === 'duplicateSlide') activeSlideId = (admitted.result as { slideId: string }).slideId;
       selection = selected ? resolve(selected) : null;
       if (selection && (!target(selection) || selection.slideId !== activeSlideId)) selection = null;
       objectSelection = object && object.slideId === activeSlideId ? selectedObject(object.slideId, object.shapeId) : null;
@@ -1281,6 +1439,7 @@ export function registerPresentationCommandHandlers(
     if (admitted.kind === 'font') {
       const font = { ...admitted.font, bytes: new Uint8Array(admitted.font.bytes) };
       admitted.fontId = admitted.fallback ? opened.registerFallbackFont(font) : opened.registerFont(font);
+      slicedFonts?.forget(font.family, admitted.fontId);
       if (requestedFonts) suppliedFonts.push({ family: font.family });
       defaultFonts?.supply(font.family);
       layouts.clear();
@@ -1358,7 +1517,7 @@ export function registerPresentationCommandHandlers(
       const start = Math.min(at.anchor, at.focus);
       const end = at.kind === 'shape' ? stories.get(storyKey(at))!.snapshot.length : Math.max(at.anchor, at.focus);
       if (admitted.kind === 'format' && start === end && at.kind !== 'shape') {
-        Object.assign(storedMarks, admitted.patch);
+        Object.assign(storedMarks, typingStyle(admitted.patch));
         return false;
       }
       opened.addUndoBoundary();
@@ -1397,7 +1556,7 @@ export function registerPresentationCommandHandlers(
           offset += 1;
         }
         if (paragraph.length > 0) {
-          opened.insertText(at.storyId, offset, paragraph, style);
+          opened.insertText(at.storyId, offset, paragraph, style && insertionStyle(style));
           offset += paragraph.length;
         }
       }
@@ -1483,7 +1642,8 @@ export function registerPresentationCommandHandlers(
       const publish = () => {
         gatingFonts = false;
         const faces = gatedDefaultFonts.splice(0);
-        const result = ack([outcome], faces.length ? [...new Set([...dirtySlideIds, ...revisions.keys()])] : dirtySlideIds,
+        const repainted = applyMetafileRepaint();
+        const result = ack([outcome], faces.length || repainted ? [...new Set([...dirtySlideIds, ...revisions.keys()])] : dirtySlideIds,
           admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
           admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
         if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
@@ -1518,8 +1678,26 @@ export function registerPresentationCommandHandlers(
       if (disposed) throw new Error('Presentation command session is disposed');
       await (options.initWasm ?? initWasm)(wasm);
       if (disposed) throw new Error('Presentation command session is disposed');
-      const face = await decodeFontFace(bytes, input);
+      const face = await sessionDecodeFontFace(bytes, input);
       return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
+    },
+    prefetchCoverageFonts(_, scripts, sliced, configuration) {
+      if (disposed || handle || opening || !Array.isArray(scripts)) return;
+      const coverage = scripts.filter((script): script is string => COVERAGE_SCRIPTS.has(script));
+      if (!coverage.length) return;
+      fontCdn = configuration;
+      void commandDefaultFontModule.load().then((fonts) => {
+        if (!disposed) fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), sliced === true);
+      }).catch(() => {});
+    },
+    readCoverageFont(_, family, text, have) {
+      if (!slicedFonts || disposed || typeof family !== 'string' || typeof text !== 'string') return null;
+      return deferReply(slicedFonts.read(family, text, typeof have === 'number' ? have : null).then((read) =>
+        transferable(read ?? null, read?.bytes ? [read.bytes] : [])));
+    },
+    wholeCoverageFonts(_, have) {
+      if (!slicedFonts) return [];
+      return deferReply(slicedFonts.wholeFonts(have).then((faces) => transferable(faces, faces.map((face) => face.bytes))));
     },
     async openCommandEditor(_, bytes, input) {
       if (disposed) throw new Error('Presentation command session is disposed');
@@ -1527,21 +1705,35 @@ export function registerPresentationCommandHandlers(
       if (!input || typeof input.session !== 'string' || !input.session ||
         typeof input.incarnation !== 'string' || !input.incarnation ||
         (input.readOnly !== undefined && typeof input.readOnly !== 'boolean') ||
-        (input.defaultFonts !== undefined && typeof input.defaultFonts !== 'boolean')) {
+        (input.defaultFonts !== undefined && typeof input.defaultFonts !== 'boolean') ||
+        (input.slicedFonts !== undefined && typeof input.slicedFonts !== 'boolean')) {
         throw new TypeError('Invalid presentation command open options');
       }
+      if ((fontCdn?.baseUrl ?? false) !== (input.fontCdn?.baseUrl ?? false) ||
+        (fontCdn?.timeoutMs ?? 30_000) !== (input.fontCdn?.timeoutMs ?? 30_000)) fontProvider = undefined;
+      fontCdn = input.fontCdn;
       opening = true;
+      const slicing = input.slicedFonts === true
+        ? import('./commandSlicedFonts').then((sliced) => sliced.createSlicedFontFaces(), () => undefined) : undefined;
       try {
+        if (fontCdn) setFontCdnConfiguration(fontCdn);
         const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
-        if (input.defaultFonts !== false) {
-          void import('./coverageScan').then(async (scan) => {
-            const scripts = await scan.activeSlideCoverageScripts(bytes, input.activeSlideIndex ?? 0);
-            if (!scripts.length || disposed) return;
-            const fonts = await commandDefaultFontModule.load();
-            if (!disposed) fonts.prefetchCoverageFaces(scripts, wasmReady, sessionFontProvider(fonts));
-          }).catch(() => {});
-        }
+        let openingMetafiles: Promise<void> | undefined;
+        let scanned: { openingSlideMetafile: boolean; packageMetafile: boolean } | undefined;
+        const scanning = import('./coverageScan').then(async (scan) => {
+          const result = await scan.scanOpeningSlide(bytes, input.activeSlideIndex ?? 0);
+          if (disposed) return;
+          scanned = result;
+          if (result.openingSlideMetafile) openingMetafiles = loadMetafiles().catch(() => {});
+          else if (result.packageMetafile && !opening && !metafiles.ready()) idleMetafiles();
+          if (input.defaultFonts !== false && result.scripts.length) {
+            void commandDefaultFontModule.load().then((fonts) => {
+              if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts), input.slicedFonts === true);
+            }).catch(() => {});
+          }
+        }).catch(() => {});
         await wasmReady;
+        if (slicing) slicedFonts = await slicing;
         if (disposed) throw new Error('Presentation command session is disposed');
         handle = openPresentation(new Uint8Array(bytes), { clientId: input.clientId,
           fonts: input.fonts?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) })),
@@ -1578,7 +1770,22 @@ export function registerPresentationCommandHandlers(
         const loading = !requestedFonts || activeSlideId === null ? [] : requestDefaultFonts(activeSlideId);
         const fonts = loading instanceof Promise ? await loading : undefined;
         if (disposed) throw new Error('Presentation command session is disposed');
+        if (!scanned) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 300);
+            void scanning.finally(() => { clearTimeout(timer); resolve(); });
+          });
+          if (disposed) throw new Error('Presentation command session is disposed');
+        }
+        if (openingMetafiles && !metafiles.ready()) {
+          await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 3000);
+            void (openingMetafiles ?? Promise.resolve()).finally(() => { clearTimeout(timer); resolve(); });
+          });
+        }
+        if (disposed) throw new Error('Presentation command session is disposed');
         const result = ack();
+        if ((scanned?.packageMetafile && !metafiles.ready()) || pendingMetafiles.size) idleMetafiles();
         const sourceBaseline = input.initialUpdate === undefined && !input.collaboration && !result.value.updates?.length;
         const recoveryUpdate = sourceBaseline ? undefined : ownedBuffer(handle.encodeStateAsUpdate());
         if (requestedFonts) loadDefaultFonts();
@@ -1591,7 +1798,12 @@ export function registerPresentationCommandHandlers(
       } catch (error) {
         dispose();
         throw error;
-      } finally { opening = false; }
+      } finally {
+        opening = false;
+        if (!disposed && metafiles.ready() && pendingMetafiles.size) {
+          metafileTimer = setTimeout(() => { metafileTimer = undefined; repaintMetafiles(); }, 0);
+        }
+      }
     },
     command(_: null, command: PresentationCommandEnvelope):
       TransferResult<PresentationCommandAck> | Promise<TransferResult<PresentationCommandAck>> {
@@ -1651,6 +1863,18 @@ export function registerPresentationCommandHandlers(
     return transferable({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}), bytes }, [bytes]);
     },
+    renderCommandPng(_, request, target, options) {
+      fence(request);
+      const opened = presentation();
+      const rendered = slicedFonts ? slicedFonts.completeExport(opened).then((byFamily) =>
+        opened.renderPng(target, { ...options, fonts: [...(options?.fonts ?? []), ...byFamily] }))
+        : opened.renderPng(target, options ?? {});
+      return deferReply(rendered.then((bytes) => {
+        const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
+          bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
+        return transferable(buffer, [buffer]);
+      }));
+    },
     accessCommandEditor(_, request, method, args) {
       fence(request);
       if (!Array.isArray(args)) throw new TypeError('Invalid access arguments');
@@ -1671,7 +1895,14 @@ export function registerPresentationCommandHandlers(
         case 'previewProposal': return opened.previewProposal(args[0] as string);
         case 'layoutSlide': return opened.layoutSlide(args[0] as number);
         case 'layoutProposalSlide': return opened.layoutProposalSlide(args[0] as string, args[1] as number);
-        case 'layoutProposalDiffSlide': return opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
+        case 'proposalSlideStrip': return opened.proposalSlideStrip(args[0] as string);
+        case 'layoutProposalDiffSlideById':
+        case 'layoutProposalDiffSlide': {
+          const diff = method === 'layoutProposalDiffSlideById'
+            ? opened.layoutProposalDiffSlideById(args[0] as string, args[1] as string)
+            : opened.layoutProposalDiffSlide(args[0] as string, args[1] as number);
+          return proposalFrame(diff);
+        }
         default: throw new TypeError('Unsupported access method');
       }
     },
@@ -1697,9 +1928,12 @@ export function registerPresentationCommandHandlers(
   } satisfies MethodHandlers<PresentationCommandMethods & PresentationSharedMethods, null>;
 
   function dispose(): void {
+    slicedFonts?.dispose();
     if (disposed) return;
     disposed = true;
     if (fontTimer !== undefined) clearTimeout(fontTimer);
+    if (metafileTimer !== undefined) clearTimeout(metafileTimer);
+    pendingMetafiles.clear();
     cancelDefaultFontImport?.();
     defaultFonts?.dispose(); defaultFonts = undefined;
     requestedFonts = undefined;
@@ -1728,6 +1962,7 @@ export function registerPresentationCommandHandlers(
     selections.clear();
     revisions.clear();
     sentMedia.clear();
+    options.onResetMedia?.();
     frames.clear();
     layouts.clear();
     opened?.dispose();
@@ -1735,6 +1970,9 @@ export function registerPresentationCommandHandlers(
 
   return { handlers, policies: {
     decodeFontFace: { lane: 'interactive' },
+    prefetchCoverageFonts: { lane: 'interactive' },
+    readCoverageFont: { lane: 'interactive' },
+    wholeCoverageFonts: { lane: 'interactive' },
     openCommandEditor: { lane: 'interactive' },
     command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),
@@ -1744,11 +1982,12 @@ export function registerPresentationCommandHandlers(
     thumbnailFrame: { lane: 'interactive' },
     flushCommandEditor: { lane: 'interactive' },
     saveCommandEditor: { lane: 'interactive' },
+    renderCommandPng: { lane: 'interactive' },
     readEditor: { lane: 'interactive' },
     prepareCommandPicture: { lane: 'interactive' },
     accessCommandEditor: { lane: 'interactive' },
     checkpointCommandEditor: { lane: 'interactive' },
-  }, drainPipe: () => pipe?.drain(), dispose };
+  }, drainPipe: () => pipe?.drain(), renderSlide, fontCoverage: () => slicedFonts?.coverage, dispose };
 }
 
 function storyKey(value: PptxStoryTarget): string {
@@ -1792,12 +2031,13 @@ function validStyle(value: unknown): value is TextStyle | undefined {
     'dash', 'dashHeavy', 'dashLong', 'dashLongHeavy', 'dotDash', 'dotDashHeavy',
     'dotDotDash', 'dotDotDashHeavy', 'wavy', 'wavyHeavy', 'wavyDbl'];
   return Object.entries(value as Record<string, unknown>).every(([key, entry]) => {
-    if (!['bold', 'italic', 'fontFamily', 'underline', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'].includes(key)) return false;
+    if (!['bold', 'italic', 'fontFamily', 'underline', 'strike', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'].includes(key)) return false;
     if (entry === undefined) return true;
     switch (key) {
       case 'bold':
       case 'italic': return typeof entry === 'boolean';
       case 'fontFamily': return validText(entry);
+      case 'strike': return typeof entry === 'string' && ['noStrike', 'sngStrike', 'dblStrike'].includes(entry);
       case 'underline': return typeof entry === 'string' && underlines.includes(entry);
       case 'color': return typeof entry === 'string' && /^#?[0-9a-f]{6}$/i.test(entry);
       case 'fontSizePt': return typeof entry === 'number' && Number.isFinite(entry) && entry >= MIN_FONT_SIZE_PT && entry <= MAX_FONT_SIZE_PT;

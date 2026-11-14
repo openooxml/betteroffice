@@ -200,7 +200,7 @@ fn snapshot_live_subtree_replacement_steps_respect_budget() {
         budget,
     );
     assert_eq!(peer.encode_state_vector_v1(), vector);
-    let txn = peer.authority.snapshot_transaction_for_test();
+    let txn = peer.authority_for_test().snapshot_transaction_for_test();
     assert_eq!(
         txn.get_map("snapshot-live-subtree")
             .unwrap()
@@ -224,9 +224,9 @@ fn snapshot_deep_shared_maps_steps_respect_budget() {
         .spawn(|| {
             let budget = budgets()[0];
             let mut worker = empty_worker();
-            worker.authority.snapshot_skip_gc_for_test();
+            worker.authority_mut_for_test().snapshot_skip_gc_for_test();
             {
-                let mut txn = worker.authority.snapshot_transaction_for_test();
+                let mut txn = worker.authority_for_test().snapshot_transaction_for_test();
                 let mut parent = txn.get_or_insert_map("snapshot-deep-maps");
                 for _ in 0..10_000 {
                     parent = parent.insert(&mut txn, "child", MapPrelim::default());
@@ -236,7 +236,7 @@ fn snapshot_deep_shared_maps_steps_respect_budget() {
             let chunks = encode(&worker, budget);
             let peer = measure_frames(&chunks, "(b) 10000 nested shared maps", budget);
             assert_current_identity(&worker, &peer);
-            let txn = peer.authority.snapshot_transaction_for_test();
+            let txn = peer.authority_for_test().snapshot_transaction_for_test();
             let mut parent = txn.get_map("snapshot-deep-maps").unwrap();
             for _ in 0..10_000 {
                 parent = parent
@@ -294,7 +294,7 @@ fn snapshot_accumulated_any_append_and_interior_delete_steps_respect_budget() {
         budget,
     );
     assert_eq!(peer.encode_state_vector_v1(), expected);
-    let txn = peer.authority.snapshot_transaction_for_test();
+    let txn = peer.authority_for_test().snapshot_transaction_for_test();
     assert_eq!(
         txn.get_array("snapshot-accumulated-any").unwrap().len(&txn),
         19_999
@@ -344,7 +344,7 @@ fn snapshot_increasing_client_sequence_conflicts_steps_respect_budget() {
         budget,
     );
     assert_eq!(peer.encode_state_vector_v1(), expected);
-    let txn = peer.authority.snapshot_transaction_for_test();
+    let txn = peer.authority_for_test().snapshot_transaction_for_test();
     assert_eq!(
         txn.get_array("snapshot-sequence-conflicts")
             .unwrap()

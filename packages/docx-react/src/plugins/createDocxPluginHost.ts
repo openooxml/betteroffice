@@ -1,3 +1,4 @@
+import { pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import {
@@ -13,7 +14,7 @@ import {
   type DocxCommandScope,
   type DocxPluginCommandBinding,
 } from '../commands/createDocxCommandStore';
-import { BUILT_IN_CHORDS, EDITING_CHORDS, normalizeChord } from '../commands/descriptors';
+import { EDITING_CHORDS, isPluginCommandId, normalizeChord } from '../commands/descriptors';
 import { commandReason } from '../commands/evaluate';
 import type {
   DocxCommandStore,
@@ -30,6 +31,7 @@ import {
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './defineDocxPlugin';
 import { scopePluginGeometry } from './geometry';
+import { createDocxSelectionObserver, type DocxSelectionIdentity } from './selectionIdentity';
 import { observeProposals, proposalSnapshot, type DocxProposalSnapshot } from './proposalPreview';
 import type {
   DocxPlugin,
@@ -42,6 +44,7 @@ import type {
   DocxPluginGeometry,
   DocxPluginGrant,
   DocxPluginLayout,
+  DocxPluginRect,
   DocxPluginSelection,
   DocxPluginSnapshot,
 } from './types';
@@ -54,6 +57,14 @@ export type DocxPluginActivation = RuntimeActivation<Definition, Context>;
 /** The editor as the plugin host reaches it; members are read at call time. */
 export interface DocxPluginHostAccess extends DocxPluginEditorAccess {
   translate(key: TranslationKey): string;
+  selectionPublished?(key: string): void;
+  selectionCause?(): 'remote' | 'seed' | undefined;
+  readSelection?(cause: 'remote' | 'seed' | undefined): {
+    selection: DocxPluginSelection;
+    identity: string | DocxSelectionIdentity;
+    owner?: object;
+    ready?: boolean;
+  } | null;
   /** Geometry of the layout that shows the current version, or null. */
   geometry(): DocxPluginGeometry | null;
   /** Calls `listener` when geometry answers change within one layout, so plugin views read them again. */
@@ -73,7 +84,17 @@ export interface DocxPluginHost {
   generation(): string | null;
   version(): string;
   previewVersion(): number;
-  selectionChanged(selection: DocxPluginSelection): void;
+  selectionChanged(selection: DocxPluginSelection, identity?: string | DocxSelectionIdentity,
+    publication?: { owner: object; cause?: 'remote' | 'seed'; ready?: boolean }): string;
+  markSelectionDirty(cause?: 'remote' | 'seed' | 'refresh'): void;
+  flushSelection(): void;
+  selectionUnsettled(generation?: string | null): void;
+  selectionSettled(source: 'pointer' | 'touch' | 'keyboard', generation?: string | null): void;
+  focusChanged(focused: boolean): void;
+  /** The focus tracker's re-check; opening, closing and mode changes run it, since each can replace the surface. */
+  setFocusCheck(check: (() => void) | null): void;
+  checkFocus(): void;
+  localeChanged(locale: string): void;
   modeChanged(mode: EditorMode, readOnly: boolean): void;
   layoutChanged(layout: DocxPluginLayout | null): void;
   /**
@@ -149,20 +170,61 @@ function sameLayout(a: DocxPluginLayout | null, b: DocxPluginLayout | null): boo
 }
 
 export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHost {
+  let observeSelection = createDocxSelectionObserver();
   let reporter: ((error: DocxPluginError) => void) | undefined;
+  let focusCheck: (() => void) | null = null;
   let session: YrsSession | null = null;
   let workerProposalKey: string | null = null;
   let detachUpdates: (() => void) | null = null;
   let detachProposals: (() => void) | null = null;
   let detachGeometry: (() => void) | null = null;
   let installed = false;
+  let installedDefinitions: readonly Definition[] = [];
+  let pendingSelection: { generation: string; cause: 'remote' | 'seed' | undefined } | null = null;
+  let deferredSelectionCause: { cause: 'remote' | 'seed' | undefined } | null = null;
+  let flushingSelection = false;
+  const cancelSelection = () => { pendingSelection = null; deferredSelectionCause = null; };
+  const flushSelection = (): void => {
+    const pending = pendingSelection;
+    if (!pending || flushingSelection) return;
+    pendingSelection = null;
+    if (!installed || runtime.generation() !== pending.generation) return;
+    flushingSelection = true;
+    try {
+      const cause = deferredSelectionCause ? deferredSelectionCause.cause : access.selectionCause?.() ?? pending.cause;
+      const next = access.readSelection?.(cause);
+      if (next) {
+        host.selectionChanged(next.selection, next.identity,
+          next.owner ? { owner: next.owner, cause, ready: next.ready } : undefined);
+        if (next.ready !== false) deferredSelectionCause = null;
+      }
+    } finally { flushingSelection = false; }
+  };
   let generations = 0;
+  let selectionIdentity = 'null';
+  let resolvedSelection = 'null';
+  let emittedSelection = EMPTY_SELECTION;
+  let emittedResolvedSelection = 'null';
+  let selectionSettleKey = 'null';
+  const selectionIdentities = new WeakMap<DocxPluginSnapshot, string>();
+  const resolvedSelectionKeys = new WeakMap<DocxPluginSnapshot, string>();
+  let settledSelection: string | null = null;
+  let settleEvent: Extract<DocxPluginEvent, { type: 'selection-settle' }> | null = null;
+  let settleDelivered = false;
+  const invalidateSettle = () => {
+    if (settleEvent && !settleDelivered) settledSelection = null;
+    settleEvent = null;
+  };
+  let viewport: DocxPluginRect | null = null;
   let commandSignature: string | null = null;
   const state = {
     version: '',
     previewVersion: 0,
     mode: 'editing' as EditorMode,
     readOnly: false,
+    focused: false,
+    locale: 'en',
+    selectionSettled: true,
     selection: EMPTY_SELECTION,
     layout: null as DocxPluginLayout | null,
     geometryLayout: null as DocxPluginLayout | null,
@@ -218,6 +280,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       scopedCommandStore(controller(), scopeFor(invocation))
     );
     const geometry = access.geometry();
+    const selection = selectionIdentities.get(invocation.snapshot);
     return {
       pluginId,
       snapshot: invocation.snapshot,
@@ -231,7 +294,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       edits: clients.edits,
       geometry:
         geometry && sameLayout(invocation.snapshot.layout, geometry.layout)
-          ? scopePluginGeometry(geometry, pluginId)
+          ? scopePluginGeometry(geometry, pluginId, () => !invocation.refusal() &&
+              selection === selectionIdentity, flushSelection, invocation.snapshot)
           : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
@@ -253,15 +317,24 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     DocxPluginErrorPhase
   >({
     context: (invocation) => createContext(invocation),
-    snapshot: (pluginId, generation) => ({
-      generation,
-      version: state.version,
-      mode: state.mode,
-      readOnly: state.readOnly,
-      grant: runtime.grant(pluginId) as DocxPluginGrant,
-      selection: state.selection,
-      layout: state.layout,
-    }),
+    snapshot: (pluginId, generation) => {
+      flushSelection();
+      const snapshot: DocxPluginSnapshot = {
+        generation,
+        version: state.version,
+        mode: state.mode,
+        readOnly: state.readOnly,
+        focused: state.focused,
+        locale: state.locale,
+        grant: runtime.grant(pluginId) as DocxPluginGrant,
+        selection: state.selection,
+        selectionSettled: state.selectionSettled,
+        layout: state.layout,
+      };
+      selectionIdentities.set(snapshot, selectionIdentity);
+      resolvedSelectionKeys.set(snapshot, resolvedSelection);
+      return snapshot;
+    },
     currentVersion: () => runtime.generation() === null ? null : session ? readSessionVersion(session) : state.version,
     loadEvent: (snapshot, reason) => ({
       type: 'load',
@@ -274,15 +347,38 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       generation: snapshot.generation,
       grant: grant as DocxPluginGrant,
     }),
+    eventCurrent: (event, snapshot) => {
+      if (event.type !== 'selection-settle') return true;
+      const current = event === settleEvent && event.version === snapshot.version &&
+        settledSelection === resolvedSelectionKeys.get(snapshot) &&
+        JSON.stringify(event.selection) === JSON.stringify(snapshot.selection);
+      if (event === settleEvent) {
+        if (current) settleDelivered = true;
+        else invalidateSettle();
+      }
+      return current;
+    },
     validate: definitionProblem,
     report,
   });
 
   const observeGeometry = (): void => {
-    if (!detachGeometry) detachGeometry = access.subscribeGeometry?.(() => runtime.touch()) ?? null;
+    if (!detachGeometry) detachGeometry = access.subscribeGeometry?.(() => { notifyViewport(); runtime.touch(); }) ?? null;
   };
 
-  const notify = (event: DocxPluginEvent): void => runtime.notify(event);
+  const notify = (event: DocxPluginEvent): void => {
+    if (event.type === 'selection-change' || event.type === 'document-change') invalidateSettle();
+    runtime.notify(event);
+  };
+  const notifyViewport = (): void => {
+    const generation = runtime.generation();
+    const geometry = state.layout ? access.geometry() : null;
+    const next = geometry && sameLayout(geometry.layout, state.layout) ? geometry.viewport ?? null : null;
+    if (viewport === next || (viewport && next && viewport.x === next.x && viewport.y === next.y &&
+      viewport.width === next.width && viewport.height === next.height)) return;
+    viewport = next ? { ...next } : null;
+    if (generation) notify({ type: 'viewport-change', generation, viewport });
+  };
   const hasGeometry = (): boolean => {
     const geometry = access.geometry();
     return !!geometry && sameLayout(geometry.layout, state.layout);
@@ -290,6 +386,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   const notifyLayout = (generation: string): void => {
     if (hasGeometry()) state.geometryLayout = state.layout;
     notify({ type: 'layout-change', generation, layout: state.layout });
+    notifyViewport();
   };
 
   const documentChanged = (): void => {
@@ -301,6 +398,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     if (state.layout && state.layout.version !== version) {
       state.layout = null;
       notify({ type: 'layout-change', generation, layout: null });
+      notifyViewport();
     }
   };
 
@@ -318,6 +416,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       previewVersion: snapshot.previewVersion,
     });
     if (invalidated) notify({ type: 'layout-change', generation, layout: null });
+    notifyViewport();
   };
 
   /** Observes document and proposal changes while plugins are installed. */
@@ -342,6 +441,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   };
 
   const closeSession = (): void => {
+    cancelSelection();
     detachUpdates?.();
     detachUpdates = null;
     detachProposals?.();
@@ -349,8 +449,9 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     session = null;
   };
 
-  const commandState = (pluginId: string, command: DocxPluginCommand<unknown>) =>
-    runtime.guard(
+  const commandState = (pluginId: string, command: DocxPluginCommand<unknown>) => {
+    flushSelection();
+    return runtime.guard(
       pluginId,
       'command-state',
       (context) => checkedState(command.getState ? command.getState(context) : ENABLED),
@@ -359,6 +460,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
         disabledReason: commandReason('plugin-unavailable', { translate: access.translate }),
       }
     );
+  };
 
   const executeCommand = async (
     pluginId: string,
@@ -372,7 +474,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     return { ok: false, failure: commandReason(code, { translate: access.translate }) };
   };
 
-  return {
+  const host: DocxPluginHost = {
     setPlugins(plugins) {
       const definitions: Definition[] = [];
       for (const plugin of plugins ?? []) {
@@ -392,7 +494,10 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
           error: new TypeError('Plugins must be created with defineDocxPlugin'),
         });
       }
+      if (installedDefinitions.some(definition => !definitions.includes(definition))) cancelSelection();
+      installedDefinitions = definitions;
       installed = definitions.length > 0;
+      if (!installed) cancelSelection();
       observe();
       runtime.setPlugins(definitions);
     },
@@ -405,15 +510,26 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
 
     open(next) {
       closeSession();
+      observeSelection = createDocxSelectionObserver();
       session = next;
       state.version = readSessionVersion(next) ?? '';
       state.previewVersion = proposalSnapshot(next)?.previewVersion ?? 0;
       state.layout = null;
+      state.selectionSettled = true;
+      selectionIdentity = 'null';
+      resolvedSelection = 'null';
+      emittedSelection = EMPTY_SELECTION;
+      emittedResolvedSelection = 'null';
+      selectionSettleKey = 'null';
+      settledSelection = null;
+      settleEvent = null;
       state.selection = EMPTY_SELECTION;
       observe();
       observeGeometry();
+      viewport = null;
       generations += 1;
       runtime.open(`document-${generations}`);
+      focusCheck?.();
     },
 
     close(reason) {
@@ -423,18 +539,30 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
         detachGeometry = null;
       }
       runtime.close(reason);
+      focusCheck?.();
     },
 
     openWorker(version) {
       closeSession();
+      observeSelection = createDocxSelectionObserver();
       workerProposalKey = null;
       state.version = version;
       state.previewVersion = 0;
       state.layout = null;
+      state.selectionSettled = true;
+      selectionIdentity = 'null';
+      resolvedSelection = 'null';
+      emittedSelection = EMPTY_SELECTION;
+      emittedResolvedSelection = 'null';
+      selectionSettleKey = 'null';
+      settledSelection = null;
+      settleEvent = null;
       state.selection = EMPTY_SELECTION;
       observeGeometry();
+      viewport = null;
       generations += 1;
       runtime.open(`document-${generations}`);
+      focusCheck?.();
     },
 
     workerChanged(version) {
@@ -445,6 +573,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (state.layout) {
         state.layout = null;
         notify({ type: 'layout-change', generation, layout: null });
+        notifyViewport();
       }
     },
 
@@ -462,19 +591,123 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       if (invalidated) state.layout = null;
       notify({ type: 'proposal-change', generation, version: snapshot.version, previewVersion: snapshot.previewVersion });
       if (invalidated) notify({ type: 'layout-change', generation, layout: null });
+      notifyViewport();
     },
 
     generation: () => runtime.generation(),
     version: () => state.version,
     previewVersion: () => state.previewVersion,
 
-    selectionChanged(selection) {
-      if (JSON.stringify(selection) === JSON.stringify(state.selection)) return;
-      state.selection = selection;
+    markSelectionDirty(cause) {
       const generation = runtime.generation();
-      if (generation) {
-        notify({ type: 'selection-change', generation, version: state.version, selection });
+      if (!installed || !generation || !access.readSelection) return;
+      if (cause !== 'refresh') {
+        if (deferredSelectionCause) {
+          deferredSelectionCause.cause = deferredSelectionCause.cause === undefined || cause === undefined
+            ? undefined : deferredSelectionCause.cause === 'remote' || cause === 'remote' ? 'remote' : 'seed';
+        } else deferredSelectionCause = { cause };
       }
+      if (pendingSelection) {
+        pendingSelection.cause = deferredSelectionCause?.cause;
+        return;
+      }
+      const pending = { generation, cause: deferredSelectionCause?.cause };
+      pendingSelection = pending;
+      queueMicrotask(() => { if (pendingSelection === pending) flushSelection(); });
+    },
+
+    flushSelection,
+
+    selectionChanged(selection, identity = JSON.stringify(selection), publication) {
+      if (typeof identity !== 'string' && JSON.parse(identity.resolvedKey)?.[1] === false &&
+        (selection.formatting !== null || selection.displayRange !== null)) selection = EMPTY_SELECTION;
+      if (publication && typeof identity !== 'string') {
+        const cause = publication.cause === 'seed' && JSON.parse(identity.resolvedKey)?.[1] === false
+          ? undefined : publication.cause;
+        identity = observeSelection(publication.owner, identity, cause);
+      }
+      const sticky = typeof identity === 'string' ? identity : identity.stickyKey;
+      const moved = sticky !== selectionIdentity;
+      const resolved = typeof identity === 'string' ? identity : identity.resolvedKey;
+      const resolvedMoved = resolved !== resolvedSelection;
+      const settleKey = typeof identity === 'string' ? identity : identity.settleKey;
+      const settleChanged = settleKey !== selectionSettleKey;
+      const selectionChanged = JSON.stringify(selection) !== JSON.stringify(emittedSelection);
+      const emittedMoved = resolved !== emittedResolvedSelection;
+      const stateChanged = JSON.stringify(selection) !== JSON.stringify(state.selection);
+      if (settleKey === selectionSettleKey &&
+        resolved !== resolvedSelection && state.selectionSettled && settledSelection !== null && settleDelivered) {
+        settledSelection = resolved;
+      }
+      selectionIdentity = sticky;
+      resolvedSelection = resolved;
+      selectionSettleKey = settleKey;
+      state.selection = selection;
+      if (publication?.ready === false) {
+        if (settleChanged) {
+          host.selectionUnsettled();
+          access.selectionPublished?.(settleKey);
+        }
+        if (moved || resolvedMoved || stateChanged) { invalidateSettle(); runtime.touch(); }
+      } else if (!selectionChanged && !emittedMoved) {
+        if (moved || resolvedMoved || stateChanged) { invalidateSettle(); runtime.touch(); }
+        if (!state.selectionSettled) access.selectionPublished?.(settleKey);
+      } else {
+        const generation = runtime.generation();
+        if (generation) {
+          emittedSelection = selection;
+          emittedResolvedSelection = resolved;
+          notify({ type: 'selection-change', generation, version: state.version, selection });
+          access.selectionPublished?.(settleKey);
+        }
+      }
+      return sticky;
+    },
+
+    selectionUnsettled(expected = runtime.generation()) {
+      if (!expected || runtime.generation() !== expected || !state.selectionSettled) return;
+      state.selectionSettled = false;
+      invalidateSettle();
+      runtime.touch();
+    },
+
+    selectionSettled(source, expected = runtime.generation()) {
+      flushSelection();
+      if (!expected || runtime.generation() !== expected) return;
+      const changed = !state.selectionSettled;
+      state.selectionSettled = true;
+      const key = resolvedSelection;
+      if (key === settledSelection) {
+        if (changed) runtime.touch();
+        return;
+      }
+      settledSelection = key;
+      settleDelivered = false;
+      settleEvent = { type: 'selection-settle', generation: expected, version: state.version,
+        selection: structuredClone(state.selection), source };
+      notify(settleEvent);
+    },
+
+    focusChanged(focused) {
+      if (focused === state.focused) return;
+      state.focused = focused;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'focus-change', generation, focused });
+    },
+
+    setFocusCheck(check) {
+      focusCheck = check;
+    },
+
+    checkFocus() {
+      focusCheck?.();
+    },
+
+    localeChanged(locale) {
+      if (locale === state.locale) return;
+      state.locale = locale;
+      const generation = runtime.generation();
+      if (generation) notify({ type: 'locale-change', generation, locale });
     },
 
     modeChanged(mode, readOnly) {
@@ -483,6 +716,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       state.readOnly = readOnly;
       const generation = runtime.generation();
       if (generation) notify({ type: 'mode-change', generation, mode, readOnly });
+      focusCheck?.();
     },
 
     layoutChanged(next) {
@@ -499,7 +733,10 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
 
     layoutId: () => (runtime.generation() === null ? null : state.layout?.id ?? null),
 
-    geometryChanged: () => runtime.touch(),
+    geometryChanged() {
+      notifyViewport();
+      runtime.touch();
+    },
 
     layoutPresented(layout) {
       const generation = runtime.generation();
@@ -518,8 +755,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       notifyLayout(generation);
     },
 
-    notificationsIdle: () => runtime.notificationsIdle(),
-    activations: () => runtime.activations(),
+    notificationsIdle: () => { flushSelection(); return runtime.notificationsIdle(); },
+    activations: () => { flushSelection(); return runtime.activations(); },
     subscribe: (listener) => runtime.subscribe(listener),
 
     commandStore(activation) {
@@ -540,13 +777,22 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
         for (const command of definition.commands ?? []) {
           const id: DocxPluginCommandId = `plugin:${entry.pluginId}/${command.id}`;
           const shortcuts: { chord: string; args: null }[] = [];
-          for (const chord of command.shortcuts ?? []) {
+          const hostChords = commands.hostPluginChords(id);
+          for (const chord of hostChords ?? []) {
+            claimed.set(chord, id);
+            shortcuts.push({ chord, args: null });
+          }
+          for (const chord of hostChords ? [] : (command.shortcuts ?? [])) {
             const canonical = normalizeChord(chord)!;
-            const owner = BUILT_IN_CHORDS.has(canonical)
-              ? 'a built-in command'
-              : EDITING_CHORDS.has(canonical)
-                ? 'text editing'
-                : claimed.get(canonical);
+            const held = commands.shortcutOwner(canonical);
+            const owner =
+              held === undefined
+                ? claimed.get(canonical)
+                : isPluginCommandId(held)
+                  ? held
+                  : EDITING_CHORDS.has(canonical)
+                    ? 'text editing'
+                    : 'a built-in command';
             if (!owner) {
               claimed.set(canonical, id);
               shortcuts.push({ chord, args: null });
@@ -571,6 +817,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
               mutatesDocument: command.mutatesDocument,
               shortcuts: Object.freeze(shortcuts),
             }),
+            activationId: pluginActivationId(entry.activation),
             state: () => commandState(entry.pluginId, command),
             execute: () => executeCommand(entry.pluginId, command),
           });
@@ -578,6 +825,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
         for (const local of definition.toolbar ?? [])
           toolbar.push(`plugin:${entry.pluginId}/${local}`);
       }
+      parts.push(`shortcuts:${commands.shortcutRevision()}`);
       const signature = parts.join('|');
       if (signature === commandSignature) {
         commands.refresh();
@@ -587,7 +835,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       commands.setPluginCommands(bindings, toolbar);
     },
 
-    guard: (pluginId, phase, call, fallback) => runtime.guard(pluginId, phase, call, fallback),
+    guard: (pluginId, phase, call, fallback) => { flushSelection(); return runtime.guard(pluginId, phase, call, fallback); },
     fail: (pluginId, phase, error) => runtime.fail(pluginId, phase, error),
   };
+  return host;
 }

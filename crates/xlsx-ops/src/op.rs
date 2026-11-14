@@ -5,7 +5,7 @@ use serde::de::{Error as _, IntoDeserializer};
 use serde::{Deserialize, Serialize};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ChartAnchor, ColId, ColStyle, ConditionalFormatting,
-    DefinedName, DifferentialFormat, FreezePane, Hyperlink, RowId, SheetChart, SheetId,
+    DefinedName, DifferentialFormat, FreezePane, Hyperlink, RowId, SheetChart, SheetId, Table,
 };
 
 use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
@@ -194,6 +194,16 @@ define_ops! {
             col: ColId,
             hidden: bool,
         },
+        /// [`Op::SetColVisibility`] over `count` columns from `col`, so a span
+        /// reported as one hidden range is revealed without one op per column.
+        /// Applying it is applying the single-column op to each column in
+        /// ascending order, and the inverse restores each column separately.
+        SetColsVisibility => "setColsVisibility" {
+            sheet: SheetId,
+            col: ColId,
+            count: u32,
+            hidden: bool,
+        },
         #[doc(hidden)]
         RestoreColDimension => "restoreColDimension" {
             sheet: SheetId,
@@ -209,6 +219,13 @@ define_ops! {
         SetRowVisibility => "setRowVisibility" {
             sheet: SheetId,
             row: RowId,
+            hidden: bool,
+        },
+        /// The row-axis counterpart of [`Op::SetColsVisibility`].
+        SetRowsVisibility => "setRowsVisibility" {
+            sheet: SheetId,
+            row: RowId,
+            count: u32,
             hidden: bool,
         },
         #[doc(hidden)]
@@ -274,6 +291,26 @@ define_ops! {
             #[serde(deserialize_with = "row_keyed")]
             styles: std::collections::BTreeMap<RowId, u32>,
         },
+        /// Absolute restore of one array formula's rectangle, emitted as the
+        /// inverse of a move that clipped it (and of the restore itself).
+        #[doc(hidden)]
+        RestoreArrayFormula => "restoreArrayFormula" {
+            sheet: SheetId,
+            anchor: CellRef,
+            spill: CellRange,
+        },
+        /// Absolute clip of one array formula's rectangle to `spill` at
+        /// `anchor`, clearing the values the old rectangle held outside it.
+        /// Emitted by a track move's inverse: recalculation may have grown a
+        /// rectangle the move left smaller, and the inverse must shrink it back
+        /// before its mirror applies, or the move guard would refuse tracks the
+        /// grown rectangle now crosses.
+        #[doc(hidden)]
+        ClipArrayFormula => "clipArrayFormula" {
+            sheet: SheetId,
+            anchor: CellRef,
+            spill: CellRange,
+        },
         /// Absolute replacement emitted as the inverse of a chart remap.
         #[doc(hidden)]
         SetCharts => "setCharts" {
@@ -328,6 +365,23 @@ define_ops! {
             from: usize,
             to: usize,
         },
+        /// Reorder `count` whole columns without replacing the destination
+        /// tracks. `before` is a boundary in pre-move coordinates: moving
+        /// `col..col+count` before `before` inserts the run there and closes
+        /// the gap. A `before` inside `col..=col+count` is a no-op.
+        MoveCols => "moveCols" {
+            sheet: SheetId,
+            col: ColId,
+            count: u32,
+            before: ColId,
+        },
+        /// The row-axis counterpart of [`Op::MoveCols`].
+        MoveRows => "moveRows" {
+            sheet: SheetId,
+            row: RowId,
+            count: u32,
+            before: RowId,
+        },
         RenameSheet => "renameSheet" {
             sheet: SheetId,
             name: String,
@@ -352,6 +406,12 @@ define_ops! {
             sheet: SheetId,
             name: String,
             formulas: Vec<(SheetId, CellRef, CellState)>,
+        },
+        /// Absolute replacement of the table list, emitted as the inverse of
+        /// sheet removal and insertion.
+        #[doc(hidden)]
+        SetTables => "setTables" {
+            tables: Vec<Table>,
         },
     }
 }

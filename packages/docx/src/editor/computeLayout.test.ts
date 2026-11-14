@@ -539,3 +539,42 @@ describe('frontend derived default lowering', () => {
     }
   });
 });
+
+describe('table style cell margins in the render environment', () => {
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
+
+  const normalTable = {
+    styleId: 'TableNormal',
+    type: 'table',
+    default: true,
+    tblPr: { cellMargins: { left: { value: 108, type: 'dxa' }, right: { value: 108, type: 'dxa' } } },
+  };
+
+  test('a table inserted into an opened parsed document takes its default table style margins', async () => {
+    const document = bodyDoc(
+      [textParagraph('ab')],
+      [{ styleId: 'Normal', type: 'paragraph', default: true }, normalTable as never]
+    );
+    const env = buildResidentRegionLayoutRequest(document, 24, {}).renderEnv;
+    expect(env.defaultTableStyleId).toBe('TableNormal');
+    expect(env.tableStyleCellMargins?.TableNormal).toEqual(normalTable.tblPr.cellMargins as never);
+    const session = await createYrsSession({ clientId: 24840 });
+    try {
+      documentToYrs(session, document);
+      const anchor = session.paragraphs('body')[0];
+      session.insertTable({ story: 'body', paraId: anchor.paraId, offset: 2 }, 1, 2);
+      const blocks = session.yrsBlocksForStory('body', env) as Array<{
+        kind: string;
+        rows?: Array<{ cells: Array<{ padding?: { left: number; right: number } }> }>;
+      }>;
+      const table = blocks.find((block) => block.kind === 'table');
+      const padding = table?.rows?.[0]?.cells[0]?.padding;
+      expect(padding?.left).toBeCloseTo(7.2, 6);
+      expect(padding?.right).toBeCloseTo(7.2, 6);
+      const flush = session.yrsBlocksForStory('body', {}) as typeof blocks;
+      expect(flush.find((block) => block.kind === 'table')?.rows?.[0]?.cells[0]?.padding?.left).toBe(0);
+    } finally {
+      session.destroy();
+    }
+  });
+});

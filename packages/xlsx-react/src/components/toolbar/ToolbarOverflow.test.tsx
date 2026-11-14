@@ -17,6 +17,9 @@ import {
 } from '../../index';
 import { createXlsxCommandController } from '../../commands/createXlsxCommandStore';
 import { testBinding } from '../../commands/testing';
+import { loadMenuList } from '../../../../../shared/react-toolbar/menuListLoader';
+
+await loadMenuList();
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
 

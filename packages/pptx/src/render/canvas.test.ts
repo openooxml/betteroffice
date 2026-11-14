@@ -10,6 +10,7 @@ import type {
   TextBoxPrimitive,
 } from '../types';
 import { applyImageEffects, paintSlide, sizeCanvasForSlide } from './canvas';
+import { prepareTextFamilies } from './textFamilies';
 
 test('sizes the backing store to cover a slide whose page is a fractional pixel', () => {
   const canvas = { width: 0, height: 0, style: { width: '', height: '' } };
@@ -672,17 +673,17 @@ describe('PPTX canvas replay', () => {
     }
   });
 
-  test('paints named family width departures at each glyph position without scaling', async () => {
+  test('paints named family width departures at each glyph position, fitted to the span up to the next', async () => {
     const text = 'Recommendation 6:';
     const run = syntheticPositionedRun(text, Array.from(text, (_, index) => [index, 40 + index * 9, 8]));
     run.fontFamily = 'Corbel';
     run.width = text.length * 9;
     const { calls, scales } = await fittedPositionedRun(run);
     expect(calls).toEqual(Array.from(text, (text, index) => ({ text, x: 40 + index * 9 })));
-    expect(scales).toEqual(Array.from(text, () => 1));
+    expect(scales).toEqual(Array.from(text, () => 9 / 8));
   });
 
-  test('splits named width runs only at pen departures', async () => {
+  test('splits named width runs only at pen departures and fits each piece within the stretch limits', async () => {
     const run = syntheticPositionedRun('ab cd', [
       [0, 40, 8], [1, 49, 8], [2, 58, 8], [3, 66, 8], [4, 75, 8],
     ]);
@@ -690,7 +691,23 @@ describe('PPTX canvas replay', () => {
     expect(calls).toEqual([
       { text: 'a', x: 40 }, { text: 'b', x: 49 }, { text: ' c', x: 58 }, { text: 'd', x: 75 },
     ]);
-    expect(scales).toEqual([1, 1, 1, 1]);
+    expect(scales).toEqual([9 / 8, 9 / 8, 17 / 16, 1]);
+  });
+
+  test('measures and paints a run laid out without kerning with kerning off, then restores it', async () => {
+    const seen: string[] = [];
+    const state: Record<string, unknown> = {
+      fontKerning: 'normal',
+      measureText: (text: string) => { seen.push(`measure:${String(state.fontKerning)}`); return { width: text.length * 8 }; },
+      fillText: () => { seen.push(`fill:${String(state.fontKerning)}`); },
+    };
+    const run = syntheticPositionedRun('ab cd', [[0, 40, 8], [1, 49, 8], [2, 58, 8], [3, 66, 8], [4, 75, 8]]);
+    run.kerning = false;
+    await paintPositionedRun(run, state);
+    expect(seen.some((entry) => entry.startsWith('measure:'))).toBe(true);
+    expect(seen.some((entry) => entry.startsWith('fill:'))).toBe(true);
+    expect(seen.every((entry) => entry.endsWith(':none'))).toBe(true);
+    expect(state.fontKerning).toBe('normal');
   });
 
   test('keeps justified words unscaled at their glyph positions', async () => {
@@ -2753,5 +2770,141 @@ describe('PPTX canvas Round 6 painter comparisons', () => {
     ]);
     await fresh.paintSlide(second.ctx, slide, 1);
     expect(first.calls).toEqual(second.calls);
+  });
+});
+
+test('deleted proposal shapes fade once while surviving shapes keep their opacity', async () => {
+  let alpha = 1;
+  const stack: number[] = [];
+  const painted: number[] = [];
+  const ctx = new Proxy({
+    save() { stack.push(alpha); },
+    restore() { alpha = stack.pop()!; },
+    fill() { painted.push(alpha); },
+  } as Record<string, unknown>, {
+    get(target, key) { return key === 'globalAlpha' ? alpha : target[key as string] ?? (() => undefined); },
+    set(target, key, value) { if (key === 'globalAlpha') alpha = value; else target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const shape = (shapeId: string): ShapePrimitive => ({
+    kind: 'shape', objectId: 1, shapeId, name: shapeId, x: 0, y: 0, w: 10, h: 10, geometry: 'rect',
+    path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 0 }, { type: 'line', x: 1, y: 1 }, { type: 'close' }],
+    fill: { kind: 'solid', color: '#123456' },
+  });
+  const list: SlideDisplayList = { contractVersion: 2, width: 100, height: 100, primitives: [
+    { kind: 'table', objectId: 1, shapeId: 'deleted', name: 'Deleted table', label: 'Table', x: 0, y: 0, w: 10, h: 10, primitives: [shape('deleted')] },
+    shape('surviving'),
+  ] };
+  await paintSlide(ctx, list, 1, 1, { shapeChanges: [{ shapeId: 'deleted', kind: 'deleted' }] });
+  expect(painted).toEqual([0.4, 1]);
+  expect(alpha).toBe(1);
+});
+
+test('paints strike rules with raster geometry, colour, clip and transform', async () => {
+  const rules: { args: number[]; color: unknown; clipped: boolean; transformed: boolean }[] = [];
+  let clipped = false;
+  let transformed = false;
+  const ctx = new Proxy({
+    clip: () => { clipped = true; },
+    rotate: () => { transformed = true; },
+    fillRect: (...args: number[]) => rules.push({ args, color: ctx.fillStyle, clipped, transformed }),
+  } as Record<string, unknown>, {
+    get: (target, key) => target[key as string] ?? (() => undefined),
+    set: (target, key, value) => { target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const list: SlideDisplayList = {
+    contractVersion: 1, width: 200, height: 100,
+    primitives: [{
+      kind: 'textBox', objectId: 1, x: 0, y: 0, w: 200, h: 100,
+      transform: { rotationDeg: 90 },
+      anchor: 'top', paragraphs: [], lines: [{
+        x: 10, y: 20, width: 80, height: 50, baseline: 50, start: 0, end: 4,
+        caretStops: [], runs: ['sngStrike', 'dblStrike', 'noStrike', undefined].map((strike, i) => ({
+          text: 'x', start: i, end: i + 1, x: 10 + i * 20, width: 20,
+          fontId: 1, fontFamily: 'Arial', fontSizePx: i === 0 ? 10 : 40, bold: false, italic: false,
+          underline: false, strike, color: '#475467', baselineOffsetPx: 6, glyphs: [],
+        })),
+      }],
+    }],
+  };
+  await paintSlide(ctx, list, 1);
+  expect(rules).toEqual([
+    { args: [10, 41, 20, 1], color: '#475467', clipped: true, transformed: true },
+    { args: [30, 30, 20, 2], color: '#475467', clipped: true, transformed: true },
+    { args: [30, 34, 20, 2], color: '#475467', clipped: true, transformed: true },
+  ]);
+});
+
+describe('font coverage before text paints', () => {
+  const run = (text: string, fontFamily: string, x: number): PositionedTextRun => ({
+    text, start: 0, end: text.length, x, width: 20 * text.length, fontId: 1,
+    fontFamily, fontSizePx: 20, bold: false, italic: false, underline: false, color: '#000000',
+    glyphs: [...text].map((_, index) => ({ glyphId: index + 1, cluster: index, x: x + index * 20, advance: 20, xOffset: 0, yOffset: 68 })),
+  });
+  const textBox = (runs: PositionedTextRun[], objectId: number): TextBoxPrimitive => ({
+    kind: 'textBox', objectId, x: 0, y: 0, w: 320, h: 80, anchor: 'top', paragraphs: [],
+    lines: [{ x: 0, y: 0, width: 320, height: 24, baseline: 20, start: 0, end: 10, caretStops: [], runs }],
+  });
+  const list = (): SlideDisplayList => ({
+    contractVersion: 1, width: 320, height: 180,
+    primitives: [
+      textBox([run('かな', 'Noto Sans JP', 0), run('ab', 'Arial', 60)], 1),
+      { kind: 'table', objectId: 2, x: 0, y: 90, w: 320, h: 80, primitives: [textBox([run('漢字', 'Noto Sans JP', 0)], 3)] } as TablePrimitive,
+    ],
+  });
+  const recording = () => {
+    const events: string[] = [];
+    const state: Record<string, unknown> = { font: '' };
+    state.fillText = (text: string) => events.push(`draw ${text} ${state.font}`);
+    const ctx = new Proxy(state, {
+      get: (target, key) => target[key as string] ?? (() => undefined),
+      set: (target, key, value) => { target[key as string] = value; return true; },
+    }) as unknown as CanvasRenderingContext2D;
+    return { ctx, events };
+  };
+
+  test('every family a slide draws, tables included, is prepared with all its text before any text paints', async () => {
+    const { ctx, events } = recording();
+    await paintSlide(ctx, list(), 1, 1, { fontCoverage: {
+      async prepare(family, text) {
+        await Promise.resolve();
+        events.push(`prepare ${family} ${[...text.split('\n').join('')].sort().join('')}`);
+        return family === 'Noto Sans JP' ? 'Noto Sans JP r2' : family;
+      },
+    } });
+    const firstDraw = events.findIndex((event) => event.startsWith('draw'));
+    expect(events.slice(0, firstDraw).sort()).toEqual(['prepare Arial ab', `prepare Noto Sans JP ${[...'かな漢字'].sort().join('')}`]);
+    expect(events.filter((event) => event.startsWith('draw') && event.includes('Noto Sans JP'))
+      .every((event) => event.endsWith('"Noto Sans JP r2"'))).toBe(true);
+    expect(events.some((event) => event.startsWith('draw') && event.endsWith(' Arial'))).toBe(true);
+  });
+
+  test('without a coverage provider text draws with each run\'s own family', async () => {
+    const { ctx, events } = recording();
+    await paintSlide(ctx, list(), 1, 1);
+    expect(events.some((event) => event.includes('prepare'))).toBe(false);
+    expect(events.filter((event) => event.includes('Noto Sans JP')).every((event) => event.endsWith('"Noto Sans JP"'))).toBe(true);
+  });
+
+  test('a style coverage does not cover draws under its own name and asks for nothing', async () => {
+    const run = (text: string, bold: boolean) => ({ text, fontFamily: 'Noto Sans JP', bold });
+    const list = { primitives: [{ kind: 'textBox', paragraphs: [], lines: [{ runs: [run('日本', false), run('Bold', true)] }] }] };
+    const asked: string[] = [];
+    const families = await prepareTextFamilies(list as never, {
+      prepare: async (family, text) => { asked.push(text); return `${family} r2`; },
+      covers: (_, bold) => !bold,
+    });
+    expect(asked).toEqual(['日本']);
+    expect(families('Noto Sans JP', false, false)).toBe('Noto Sans JP r2');
+    expect(families('Noto Sans JP', true, false)).toBe('Noto Sans JP');
+  });
+
+  test('document text gets its font and is drawn only where the coverage families apply', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const canvas = await readFile(new URL('./canvas.ts', import.meta.url), 'utf8');
+    const fonts = [...canvas.matchAll(/ctx\.font = ([^;]+);/g)].map((match) => match[1]);
+    expect(canvas.includes('?? families(run.fontFamily, run.bold, run.italic);')).toBe(true);
+    expect(fonts).toEqual(['`${style}${weight}${run.fontSizePx}px ${quoteFamily(family)}`', "'12px sans-serif'"]);
+    const chunks = await readFile(new URL('./textChunks.ts', import.meta.url), 'utf8');
+    expect(chunks.includes('.font =')).toBe(false);
   });
 });

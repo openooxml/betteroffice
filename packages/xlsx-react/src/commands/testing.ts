@@ -66,6 +66,7 @@ export function testEnvironment(
     fontFamilies: DEFAULT_FONT_FAMILIES,
     fontSizes: DEFAULT_FONT_SIZES,
     translate: (key) => key,
+    workbook: { sheets: ['Sheet1', 'Sheet2'], active: 0, clipboardRead: true },
     ...overrides,
   };
 }

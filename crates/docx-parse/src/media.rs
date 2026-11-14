@@ -220,6 +220,25 @@ impl MediaTable {
         }
     }
 
+    /// The bytes a raster backend draws the `index`th part from: the metafile
+    /// itself where the display copy is its SVG conversion, so the backend
+    /// replays it under its own bounds; otherwise [`MediaTable::bytes`].
+    #[doc(hidden)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn raster_bytes(&self, index: usize) -> Result<Cow<'_, [u8]>, String> {
+        let part = self
+            .parts
+            .get(index)
+            .ok_or_else(|| format!("no media part {index}"))?;
+        if part.display.is_some() {
+            let source = self.package.read(part.position)?;
+            if is_metafile_signature(&source) {
+                return Ok(Cow::Owned(source));
+            }
+        }
+        self.bytes(index)
+    }
+
     /// The length of [`MediaTable::data_url`] for the `index`th part, from its
     /// transcode or declared size, without reading the part.
     pub fn data_url_len(&self, index: usize) -> Option<usize> {
@@ -543,6 +562,16 @@ pub fn resolve_image_data(
 }
 
 /// Whether [`display_form`] replaces a part whose bytes start with `prefix`.
+/// An EMF header record, or a WMF file with or without its placeable header.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_metafile_signature(bytes: &[u8]) -> bool {
+    let emf = bytes.len() >= 44 && bytes[..4] == [1, 0, 0, 0] && &bytes[40..44] == b" EMF";
+    let placeable = bytes.starts_with(&[0xd7, 0xcd, 0xc6, 0x9a]);
+    let standard =
+        bytes.len() >= 4 && matches!(bytes[0], 1 | 2) && bytes[1] == 0 && bytes[2..4] == [9, 0];
+    emf || placeable || standard
+}
+
 fn transcodes(prefix: &[u8], mime_type: &str) -> bool {
     #[cfg(feature = "tiff")]
     if is_tiff(prefix) {
@@ -577,7 +606,7 @@ fn display_form<'a>(
 ) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
     #[cfg(feature = "tiff")]
     if is_tiff(data) {
-        return tiff_display_form(data, mime_type, path);
+        return tiff_display_form(data, mime_type, path, budget);
     }
     #[cfg(feature = "metafile")]
     if ooxml_metafile::is_metafile(data)
@@ -593,6 +622,8 @@ fn display_form<'a>(
 #[derive(Debug)]
 #[cfg_attr(not(feature = "metafile"), allow(dead_code))]
 struct DisplayBudget {
+    #[cfg(feature = "tiff")]
+    tiff_pixels: u64,
     metafile_bytes: usize,
     svg_bytes: usize,
     #[cfg(feature = "metafile")]
@@ -602,6 +633,8 @@ struct DisplayBudget {
 impl Default for DisplayBudget {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "tiff")]
+            tiff_pixels: 8 * ooxml_drawingml::media::MAX_IMAGE_PIXELS,
             metafile_bytes: 64 * 1024 * 1024,
             svg_bytes: 64 * 1024 * 1024,
             #[cfg(feature = "metafile")]
@@ -623,7 +656,19 @@ fn tiff_display_form<'a>(
     data: &'a [u8],
     mime_type: &'static str,
     path: &str,
+    budget: &mut DisplayBudget,
 ) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
+    let pixels = ooxml_drawingml::media::tiff_bounded_pixels(data).unwrap_or(0);
+    if pixels > budget.tiff_pixels {
+        return (
+            Cow::Borrowed(data),
+            mime_type,
+            Some(format!(
+                "TIFF image {path} was not decoded for display: the document's budget is spent"
+            )),
+        );
+    }
+    budget.tiff_pixels -= pixels;
     match ooxml_drawingml::media::decode_tiff_png(data) {
         Ok(png) => (Cow::Owned(png), "image/png", None),
         Err(error) => (
@@ -762,6 +807,72 @@ fn find_case_insensitive<'a>(media: &'a MediaMap, path: &str) -> Option<&'a Medi
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(feature = "tiff")]
+    /// A 2x1 uncompressed 8-bit RGB TIFF with this compression tag.
+    fn rgb_tiff(compression: u16) -> Vec<u8> {
+        let entries: [(u16, u16, u32, u32); 9] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 3, 122),
+            (259, 3, 1, u32::from(compression)),
+            (262, 3, 1, 2),
+            (273, 4, 1, 128),
+            (277, 3, 1, 3),
+            (278, 3, 1, 1),
+            (279, 4, 1, 6),
+        ];
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..3 {
+            tiff.extend_from_slice(&8u16.to_le_bytes());
+        }
+        tiff.extend_from_slice(&[0; 6]);
+        tiff
+    }
+
+    #[cfg(feature = "tiff")]
+    #[test]
+    fn tiff_display_forms_stop_once_the_document_budget_is_spent() {
+        let tiff = rgb_tiff(1);
+        let mut budget = DisplayBudget {
+            tiff_pixels: 3,
+            ..Default::default()
+        };
+        let (first, mime, warning) =
+            display_form(&tiff, "image/tiff", "word/media/a.tif", &mut budget);
+        assert_eq!((mime, warning), ("image/png", None));
+        assert!(first.starts_with(b"\x89PNG"));
+        assert_eq!(budget.tiff_pixels, 1);
+        let (second, mime, warning) =
+            display_form(&tiff, "image/tiff", "word/media/b.tif", &mut budget);
+        assert_eq!(mime, "image/tiff");
+        assert_eq!(second.as_ref(), tiff.as_slice());
+        assert!(warning.unwrap().contains("budget is spent"));
+        assert_eq!(budget.tiff_pixels, 1);
+    }
+
+    #[cfg(feature = "tiff")]
+    #[test]
+    fn a_tiff_decode_refused_for_its_encoding_keeps_its_source() {
+        let tiff = rgb_tiff(7);
+        let mut budget = DisplayBudget::default();
+        let before = budget.tiff_pixels;
+        let (kept, mime, warning) =
+            display_form(&tiff, "image/tiff", "word/media/a.tif", &mut budget);
+        assert_eq!(mime, "image/tiff");
+        assert_eq!(kept.as_ref(), tiff.as_slice());
+        assert!(warning.unwrap().contains("unsupported TIFF encoding"));
+        assert_eq!(budget.tiff_pixels, before);
+    }
+
     use super::*;
     use crate::relationships::{Relationship, TargetMode};
 

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { Fragment, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { DisplayListRect } from '@betteroffice/docx/layout/render';
 import type { DocxEditorCollaborationOptions } from '../DocxEditor/types';
 import { useTranslation } from '../../i18n';
@@ -69,11 +69,14 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     if (element) cards.current.set(id, element); else cards.current.delete(id);
     setMeasurement(value => value + 1);
   }, []);
+  const navigation = useRef({ items, setActive, select });
+  useInsertionEffect(() => { navigation.current = { items, setActive, select }; }, [items, setActive, select]);
   const navigate = useCallback((id: string, direction: number) => {
+    const { items, setActive, select } = navigation.current;
     const index = items.findIndex(item => item.id === id);
     const next = items[(index + direction + items.length) % items.length];
     if (next) { clearTimeout(closeTimer.current); setTransient(null); setDismissed(null); setActive(next.id); select(next); }
-  }, [items, setActive, select]);
+  }, []);
   const [transient, setTransient] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const returningFocus = useRef(false);
@@ -99,10 +102,11 @@ export function TrackedChangesReview({ children, items, options, collaboration, 
     placements: [], right: 0, linked: {}, ambiguous: [], width: 300, ready: false,
   });
   const ambiguous = useMemo(() => new Set(layout.ambiguous), [layout.ambiguous]);
-  const itemIndices = useMemo(() => new Map(items.map((item, index) => [item.id, index])), [items]);
+  const itemIds = JSON.stringify(items.map(item => item.id));
+  const itemIndices = useMemo(() => new Map((JSON.parse(itemIds) as string[]).map((id, index) => [id, index])), [itemIds]);
   const context = useMemo(() => ({ options, peers, user: collaboration?.user, clientId: collaboration?.clientId,
-    items, itemIndices, navigate, measureCard, ambiguous }),
-  [options, peers, collaboration?.user, collaboration?.clientId, items, itemIndices, navigate, measureCard, ambiguous]);
+    itemIndices, navigate, measureCard, ambiguous }),
+  [options, peers, collaboration?.user, collaboration?.clientId, itemIndices, navigate, measureCard, ambiguous]);
   const laidOut = useRef(false);
   useLayoutEffect(() => {
     if (!dotsMode || !active) return;

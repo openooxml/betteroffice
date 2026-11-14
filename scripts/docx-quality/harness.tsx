@@ -3,7 +3,17 @@ import { createRoot } from 'react-dom/client';
 import { DocxEditor } from '@betteroffice/docx-react';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import '@betteroffice/docx-react/styles.css';
-import { createFontProvider } from '../../packages/fonts/src/cdn';
+import {
+  BASE_LATIN_FONTS,
+  BUNDLED_FONTS,
+  createFontProvider,
+  resolveGlyphFallbackFace,
+  resolveLastResortChoice,
+  resolveMetricCompatFace,
+  resolveScriptFallbackFace,
+  type BundledFontScript,
+  type LastResortOffice,
+} from 'virtual:docx-quality-fonts';
 import { measuredFontProvider, type FontLoad } from './measured-fonts';
 import { MAX_LOCAL_REFERENCE_PAGES } from '../office-quality/reference.mjs';
 import {
@@ -33,7 +43,24 @@ const provider = createFontProvider(
 );
 setGoogleFontsEnabled(false);
 const fontLoads: FontLoad[] = [];
-const measuredFonts = measuredFontProvider(provider, fontLoads);
+const fontsAdvertised: string[] = BUNDLED_FONTS.map((face: { file: string }) => face.file);
+const baseLatinAdvertised: string[] = BASE_LATIN_FONTS.map((face: { file: string }) => face.file);
+const faceOf = (kind: string, args: unknown[]) => {
+  if (kind === 'base-latin') {
+    const [bold, italic] = args as [boolean, boolean];
+    return BASE_LATIN_FONTS.find((face: { weight: number; style: string }) =>
+      face.weight === (bold ? 700 : 400) && face.style === (italic ? 'italic' : 'normal'))?.file as string | undefined;
+  }
+  const [name, bold, italic, extra] = args as [string, boolean, boolean, string | undefined];
+  const face =
+    kind === 'family' ? resolveMetricCompatFace(name, bold, italic)
+    : kind === 'script' ? resolveScriptFallbackFace(name as BundledFontScript, bold, italic, extra)
+    : kind === 'glyph' ? resolveGlyphFallbackFace(name, bold, italic, (extra as LastResortOffice | undefined) ?? 'powerpoint')
+    : resolveLastResortChoice(name, bold, italic, extra as LastResortOffice | undefined)?.face;
+  return face?.file as string | undefined;
+};
+const measuredFonts = measuredFontProvider(provider, fontLoads, faceOf);
+(window as any).oracleFontReport = () => ({ fontLoads, fontsAdvertised, baseLatinAdvertised });
 let editor: React.RefObject<any>;
 let root: ReturnType<typeof createRoot>;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -60,7 +87,7 @@ api.oracleInit = async (input: number[], fonts: boolean, profile?: unknown) => {
   root.render(
     <DocxEditor
       ref={editor}
-      {...(legacySyncApi ? { legacySyncApi: true as const } : {})}
+      {...(legacySyncApi ? { legacySyncApi: true } : {}) as Record<never, never>}
       documentBuffer={bytes}
       readOnly
       initialZoom={1}

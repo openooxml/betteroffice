@@ -56,7 +56,7 @@ export const TrackedChangeCard = memo(function TrackedChangeCard({
   [suppliedAuthor, change.author, defaultKind, context.options, context.peers, context.user, context.clientId, t]);
   const index = suppliedIndex ?? Math.max(0, (context.itemIndices
     ? context.itemIndices.get(reviewItemId ?? '') : context.items?.findIndex(item => item.id === reviewItemId)) ?? 0);
-  const total = suppliedTotal ?? context.items?.length ?? 1;
+  const total = suppliedTotal ?? context.items?.length ?? context.itemIndices?.size ?? 1;
   const accept = () => decideReviewChange(change, onAcceptById, onAccept);
   const reject = () => decideReviewChange(change, onRejectById, onReject);
   const next = onNext ?? (() => { if (reviewItemId) context.navigate?.(reviewItemId, 1); });
@@ -103,6 +103,7 @@ export const TrackedChangeCard = memo(function TrackedChangeCard({
 
 const structuralKeys = {
   paragraphMarkInsertion: 'revisions.paragraphMarkInserted', paragraphMarkDeletion: 'revisions.paragraphMarkDeleted',
+  runPropertiesChanged: 'revisions.runPropertiesChanged',
   paragraphPropertiesChanged: 'revisions.paragraphPropertiesChanged', rowInserted: 'revisions.rowInserted', rowDeleted: 'revisions.rowDeleted',
   cellInserted: 'revisions.cellInserted', cellDeleted: 'revisions.cellDeleted', cellMerged: 'revisions.cellMerged',
   rowPropertiesChanged: 'revisions.rowPropertiesChanged', cellPropertiesChanged: 'revisions.cellPropertiesChanged',

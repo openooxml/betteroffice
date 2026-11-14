@@ -15,6 +15,7 @@ import type {
   DocxCommandArgs,
   DocxCommandId,
   DocxCommandShortcut,
+  DocxCommandStore,
 } from '../../../commands/types';
 import type { KeyboardShortcut, ShortcutCategory } from '../KeyboardShortcutsDialog';
 
@@ -265,10 +266,14 @@ const COMMAND_HELP: readonly CommandHelp[] = [
 ];
 
 /** Shortcuts of editor commands, as bound by the command descriptors. */
-export function getCommandShortcuts(mac = isMacPlatform()): KeyboardShortcut[] {
+export function getCommandShortcuts(
+  mac = isMacPlatform(),
+  store?: DocxCommandStore
+): KeyboardShortcut[] {
   return COMMAND_HELP.flatMap(({ command, args, ...entry }) => {
     const key = JSON.stringify(args ?? null);
-    const chords = (DOCX_COMMAND_DESCRIPTORS[command].shortcuts as readonly DocxCommandShortcut[])
+    const descriptor = store?.getDescriptor(command) ?? DOCX_COMMAND_DESCRIPTORS[command];
+    const chords = (descriptor.shortcuts as readonly DocxCommandShortcut[])
       .filter(
         (shortcut) => shortcutMatchesPlatform(shortcut, mac) && JSON.stringify(shortcut.args) === key
       )
@@ -471,8 +476,27 @@ export const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [...COMMAND_SHORTCUTS, ...I
 /**
  * Get all default shortcuts
  */
-export function getDefaultShortcuts(): KeyboardShortcut[] {
-  return [...getCommandShortcuts(), ...INPUT_SHORTCUTS];
+export function getDefaultShortcuts(store?: DocxCommandStore): KeyboardShortcut[] {
+  return [...getCommandShortcuts(undefined, store), ...inputShortcuts(store)];
+}
+
+const INPUT_COMMANDS: Readonly<Record<string, DocxCommandId>> = {
+  cut: 'cut',
+  copy: 'copy',
+  paste: 'paste',
+  'paste-plain': 'pasteAsPlainText',
+  'select-all': 'selectAll',
+};
+
+/** The input rows, with the chords `store` runs them on; a disabled one drops out. */
+function inputShortcuts(store: DocxCommandStore | undefined): KeyboardShortcut[] {
+  if (!store) return INPUT_SHORTCUTS;
+  return INPUT_SHORTCUTS.flatMap((shortcut) => {
+    const command = INPUT_COMMANDS[shortcut.id];
+    if (!command) return [shortcut];
+    const chord = store.getDescriptor(command).shortcuts[0]?.chord;
+    return chord ? [{ ...shortcut, keys: formatChord(chord, false) }] : [];
+  });
 }
 
 /**

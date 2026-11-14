@@ -24,8 +24,8 @@ export interface InputCoordinatorHooks {
   seal(): InputSeal;
   /** Reads the text the draft's input shows into the draft. */
   sync(): void;
-  /** Writes `draft`; false leaves it unwritten. */
-  write(draft: InputDraft): boolean;
+  /** Writes `draft`; false, or a refusal such as a plugin's `XlsxHostRefusalError`, leaves it unwritten. */
+  write(draft: InputDraft): boolean | XlsxCommandAdmissionError;
   /** Closes the input of a written draft that is still the live one. */
   close(draft: InputDraft): void;
   /** Shows a rejected draft in its own input when its sheet is active; false otherwise. */
@@ -97,6 +97,7 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
   let sealing = false;
   let sealFailed = false;
   const written = new WeakSet<InputDraft>();
+  const refusals = new WeakMap<InputDraft, XlsxCommandAdmissionError>();
   let rejected: readonly InputDraft[] = [];
   const queued: InputDraft[] = [];
 
@@ -160,7 +161,12 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
   /** Writes a draft once; later writes of the same draft share that outcome. */
   const writeOnce = (target: InputDraft): boolean => {
     if (written.has(target)) return true;
-    if (!hooks.write(target)) return false;
+    const outcome = hooks.write(target);
+    if (outcome !== true) {
+      if (outcome === false) refusals.delete(target);
+      else refusals.set(target, outcome);
+      return false;
+    }
     written.add(target);
     settleRejected(target);
     return true;
@@ -170,6 +176,10 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
     pruneStale();
     return rejected.length > 0;
   };
+
+  /** Why work behind a refused write cannot run: the refusal of the oldest rejected draft. */
+  const refusal = (draft: InputDraft | undefined = rejected[0]) =>
+    (draft && refusals.get(draft)) ?? new XlsxCommandAdmissionError('input-failed');
 
   /**
    * Writes a finished draft after everything queued before it. It supersedes
@@ -191,12 +201,13 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
 
   const writeSealed = (sealed: InputDraft | null, generation: number) => {
     if (hooks.generation() !== generation) throw new XlsxCommandAdmissionError('document-replaced');
-    if (failed || blocked()) throw new XlsxCommandAdmissionError('input-failed');
+    if (blocked()) throw refusal();
+    if (failed) throw new XlsxCommandAdmissionError('input-failed');
     if (!sealed || sealed.generation !== generation) return;
     if (!writeOnce(sealed)) {
       failed = true;
       reject(sealed);
-      throw new XlsxCommandAdmissionError('input-failed');
+      throw refusal(sealed);
     }
     if (draft === sealed) {
       draft = null;
@@ -267,7 +278,7 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
       return true;
     },
     runAfterPendingInput(operation) {
-      if (blocked()) return Promise.reject(new XlsxCommandAdmissionError('input-failed'));
+      if (blocked()) return Promise.reject(refusal());
       sealing = true;
       sealFailed = false;
       let seal: InputSeal;

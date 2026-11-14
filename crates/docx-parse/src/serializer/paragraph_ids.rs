@@ -30,6 +30,32 @@ pub struct S13ParagraphIds {
     /// Story parts written as their source bytes with only some paragraphs re-serialized.
     #[serde(default)]
     pub spliced_parts: Vec<S13SplicedPart>,
+    /// Parts written from the model, whose changes are all run formatting: each is kept as its
+    /// source instead when the written XML would drop structure.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub whole_parts: Vec<S13WholePart>,
+    /// The paragraphs an edit changed or removed in parts with no splice plan: structure a whole
+    /// write loses from them is the edit's, and only what it loses elsewhere is reported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touched_parts: Vec<S13TouchedPart>,
+}
+
+/// A part of [`S13ParagraphIds::touched_parts`], with the ordinals of those paragraphs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct S13TouchedPart {
+    pub part: String,
+    pub touched: Vec<u32>,
+}
+
+/// A part of [`S13ParagraphIds::whole_parts`], with the ordinals of its changed paragraphs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct S13WholePart {
+    pub part: String,
+    /// Lowercase hex SHA-256 of the source the plan was made from: the part is kept only as that.
+    pub sha256: String,
+    pub changed: Vec<u32>,
 }
 
 /// A story part whose model paragraphs each come from one source `w:p`, in source order, or are
@@ -63,6 +89,11 @@ pub struct S13SplicedPart {
     pub legacy_paragraphs: Vec<crate::paragraph_patch::LegacyParagraphV1>,
     #[serde(default)]
     pub table_patches: Vec<S13TablePatch>,
+    /// The ordinals among `changed` whose text, embeds and paragraph properties are as in the
+    /// source, only their run formatting changed. Such a paragraph is kept as its source bytes
+    /// when its written XML would drop structure the source holds.
+    #[serde(default)]
+    pub format_only: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

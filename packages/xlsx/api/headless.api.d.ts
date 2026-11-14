@@ -51,6 +51,12 @@ export interface A11yCell {
     text: string;
     selected: boolean;
     label: string;
+    /**
+     * The cell's hyperlink as the mirror exposes it: a safe external URL, or
+     * `#Sheet!A1` for a place in the workbook. Absent when the cell has no link
+     * or its target is not one the editor follows.
+     */
+    href?: string;
 }
 /**
  * A column header: the letter (`"A"`) and its aria label (`"Column A"`).
@@ -266,6 +272,8 @@ export interface TextCmd {
     bold?: boolean;
     italic?: boolean;
     underline?: boolean;
+    /** The kind of `underline` when it is not single. */
+    underlineStyle?: 'double' | 'singleAccounting' | 'doubleAccounting';
     strike?: boolean;
     highlight?: string;
     dashedUnderline?: boolean;
@@ -313,12 +321,25 @@ export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd
 export interface GridMeta {
     startRow: number;
     startCol: number;
+    /** Leading tracks pinned by a frozen pane; absent when nothing is frozen. */
+    frozenRows?: number;
+    frozenCols?: number;
+    /** Viewport-pixel freeze line on each axis; absent when there is no split. */
+    dividerX?: number;
+    dividerY?: number;
     hiddenRowSpans?: [number, number][];
     hiddenColSpans?: [number, number][];
     rowIndices?: number[];
     colIndices?: number[];
     rowOffsets: number[];
     colOffsets: number[];
+    /**
+     * Full track sizes parallel to `rowOffsets`/`colOffsets`: the sheet-px extent
+     * of each visible track, independent of scroll and of a frozen pane clipping
+     * its leading edge. Absent on lists that predate the field.
+     */
+    rowSizes?: number[];
+    colSizes?: number[];
 }
 export interface HyperlinkRegion {
     top: number;
@@ -355,6 +376,8 @@ export interface ChartRegion {
     clip: Rect;
     /** whether the anchor can be repinned; an absolute one cannot. */
     movable: boolean;
+    /** whether the anchor can be resized. A two-cell anchor writes both corners back, so it can. */
+    resizable: boolean;
 }
 /** Former name of {@link ChartRegion}, when it carried the label alone. */
 export type ChartA11yAttrs = ChartRegion;

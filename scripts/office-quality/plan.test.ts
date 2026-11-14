@@ -6,6 +6,7 @@ import {
   selectPlanSamples,
   validatePlan,
 } from './plan.mjs';
+import { MAX_SAMPLES } from './samples.mjs';
 
 const hash = 'a'.repeat(40);
 const assetHash = 'b'.repeat(64);
@@ -71,7 +72,7 @@ test('rejects bad revisions, metadata, duplicate samples, and format lists', () 
     { ...input(), samples: [input().samples[0], input().samples[0]] },
     {
       ...input(),
-      samples: Array.from({ length: 1001 }, (_, index) => ({
+      samples: Array.from({ length: MAX_SAMPLES + 1 }, (_, index) => ({
         id: `sample-${index}`,
         format: 'pptx',
         metadata: metadata(),
@@ -121,6 +122,10 @@ test('freezes canonical metadata and every package version in one plan', async (
         version: name.endsWith('docx-react') ? '4.5.6' : '1.2.3',
         gitHead: 'd'.repeat(40),
       }),
+      packument: async () => ({ versions: {
+        '1.0.0': { gitHead: 'd'.repeat(40), peerDependencies: { '@betteroffice/fonts-cjk': '^1', '@betteroffice/fonts-intl': '^1' } },
+        '2.0.0': { gitHead: 'e'.repeat(40) },
+      } }),
       poolSize: 2,
     }
   );
@@ -128,10 +133,166 @@ test('freezes canonical metadata and every package version in one plan', async (
   expect(plan.commit).toBe('c'.repeat(40));
   expect(plan.versions).toEqual({ docx: '1.2.3', pptx: '1.2.3', xlsx: '1.2.3' });
   expect(plan.react_version).toBe('4.5.6');
+  expect(plan.published_fonts).toEqual({ docx: '1.0.0', pptx: '1.0.0' });
+  expect(plan.published_fonts_cjk).toEqual({ docx: '1.0.0', pptx: '1.0.0' });
+  expect(plan.published_fonts_intl).toEqual({ docx: '1.0.0' });
   expect(plan.docx_published_source_sha).toBe('d'.repeat(40));
   expect(plan.pptx_published_source_sha).toBe('d'.repeat(40));
   expect(plan.samples.map((sample) => sample.id)).toEqual([
     'docx-example',
     'pptarena-001-original',
   ]);
+});
+
+test('the published channel uses the fonts release from the format release commit, else the latest stable fonts published before it', async () => {
+  const release = 'a'.repeat(40);
+  const formatTime = '2026-10-27T11:28:38.352Z';
+  const dependencies = (fonts: any, cjk: any) => ({
+    download: async (url: string) => {
+      if (url.endsWith('/collections/office-quality.json'))
+        return JSON.stringify({ schema_version: 1, id: 'office-quality', samples: ['pptarena-001-original'] });
+      if (url.endsWith('/pptarena-001-original/metadata.json')) return JSON.stringify(metadata());
+      throw new Error(`Unexpected URL: ${url}`);
+    },
+    command: async (_program: string, args: string[]) => (args[0] === 'rev-parse' ? `${hash}\n` : `${'c'.repeat(40)}\n`),
+    registry: async (name: string) => ({ version: name.endsWith('docx-react') ? '4.5.6' : '0.5.1', gitHead: release }),
+    packument: async (name: string) =>
+      name === '@betteroffice/fonts' ? fonts : name === '@betteroffice/fonts-cjk' ? cjk : { time: { '0.5.1': formatTime } },
+    poolSize: 1,
+  });
+  const fonts = (versions: Record<string, [string, string]>) => ({
+    'dist-tags': { latest: Object.keys(versions).at(-1) },
+    versions: Object.fromEntries(Object.entries(versions).map(([version, [gitHead]]) => [version, { gitHead, peerDependencies: { '@betteroffice/fonts-cjk': '^0' } }])),
+    time: Object.fromEntries(Object.entries(versions).map(([version, [, time]]) => [version, time])),
+  });
+  const cjkVersions = {
+    '0.3.10': ['4'.repeat(40), '2026-10-01T00:00:00Z'],
+    '0.3.5': ['5'.repeat(40), '2026-10-20T00:00:00Z'],
+    '0.4.2': [release, '2026-10-27T11:29:10Z'],
+    '0.6.0': ['6'.repeat(40), '2026-10-30T00:00:00Z'],
+  } satisfies Record<string, [string, string]>;
+  const plan = async (versions: Record<string, [string, string]>) =>
+    preparePlan({}, dependencies(fonts(versions), fonts(cjkVersions)) as any);
+  const sameCommit = await plan({
+    '0.4.1': ['b'.repeat(40), '2026-10-26T00:00:00Z'],
+    '0.4.2': [release, '2026-10-27T11:29:00Z'],
+    '0.9.0': ['f'.repeat(40), '2026-11-01T00:00:00Z'],
+  });
+  expect(sameCommit.published_fonts).toEqual({ pptx: '0.4.2' });
+  expect(sameCommit.fonts_basis).toEqual({ pptx: 'release-commit' });
+  expect(sameCommit.published_fonts_cjk).toEqual({ pptx: '0.4.2' });
+  expect(sameCommit.fonts_cjk_basis).toEqual({ pptx: 'release-commit' });
+  const formatOnly = await plan({
+    '0.0.0': ['0'.repeat(40), '2026-10-27T11:00:00Z'],
+    '0.0.0-stage': ['1'.repeat(40), '2026-10-27T11:10:00Z'],
+    '0.3.0': ['2'.repeat(40), '2026-09-01T00:00:00Z'],
+    '0.4.1': ['b'.repeat(40), '2026-10-26T00:00:00Z'],
+    '0.4.3-next.0': ['3'.repeat(40), '2026-10-27T11:20:00Z'],
+    '0.9.0': ['f'.repeat(40), '2026-11-01T00:00:00Z'],
+  });
+  expect(formatOnly.published_fonts).toEqual({ pptx: '0.4.1' });
+  expect(formatOnly.fonts_basis).toEqual({ pptx: 'latest-before-release' });
+  expect(formatOnly.published_fonts_cjk).toEqual({ pptx: '0.3.5' });
+  expect(formatOnly.fonts_cjk_basis).toEqual({ pptx: 'latest-before-release' });
+  const backport = await plan({
+    '0.4.1': ['b'.repeat(40), '2026-10-20T00:00:00Z'],
+    '0.3.9': ['9'.repeat(40), '2026-10-25T00:00:00Z'],
+  });
+  expect(backport.published_fonts).toEqual({ pptx: '0.3.9' });
+  await expect(plan({ '0.0.0': ['0'.repeat(40), '2026-10-01T00:00:00Z'], '0.9.0': ['f'.repeat(40), '2026-11-01T00:00:00Z'] }))
+    .rejects.toThrow('No @betteroffice/fonts release from the release commit of @betteroffice/pptx@0.5.1 or published before it');
+  await expect(plan({ '0.4.2': [release, '2026-10-27T11:00:00Z'], '0.4.3': [release, '2026-10-27T11:01:00Z'] }))
+    .rejects.toThrow('Expected at most one @betteroffice/fonts release from the release commit of @betteroffice/pptx@0.5.1, found 2');
+});
+
+const RELEASE = 'a'.repeat(40);
+const docxPlan = (fontsDeclares: Record<string, string>, intl: any, requested: string[] = []) => preparePlan({}, {
+  download: async (url: string) => {
+    if (url.endsWith('/collections/office-quality.json'))
+      return JSON.stringify({ schema_version: 1, id: 'office-quality', samples: ['docx-example'] });
+    if (url.endsWith('/docx-example/metadata.json')) return JSON.stringify(metadata('docx'));
+    throw new Error(`Unexpected URL: ${url}`);
+  },
+  command: async (_program: string, args: string[]) => (args[0] === 'rev-parse' ? `${hash}\n` : `${'c'.repeat(40)}\n`),
+  registry: async (name: string) => ({ version: '0.5.1', gitHead: RELEASE, ...(name === '@betteroffice/docx' && { peerDependencies: { '@betteroffice/fonts': '^0' } }) }),
+  packument: async (name: string) => {
+    requested.push(name);
+    if (name === '@betteroffice/fonts')
+      return {
+        versions: { '0.4.1': { gitHead: 'b'.repeat(40) }, '0.4.2': { gitHead: RELEASE, peerDependencies: fontsDeclares, peerDependenciesMeta: { '@betteroffice/fonts-cjk': { optional: true } } } },
+        time: { '0.4.1': '2026-10-26T00:00:00Z', '0.4.2': '2026-10-27T11:27:19Z' },
+      };
+    if (name === '@betteroffice/fonts-cjk')
+      return { versions: { '0.4.1': { gitHead: 'b'.repeat(40) }, '0.4.2': { gitHead: RELEASE }, '0.5.0': { gitHead: 'f'.repeat(40) } }, time: { '0.4.2': '2026-10-27T11:27:27Z' } };
+    if (name === '@betteroffice/fonts-intl') return intl;
+    return { time: { '0.5.1': '2026-10-27T11:28:38Z' } };
+  },
+  poolSize: 1,
+} as any);
+const LIVE_INTL = {
+  'dist-tags': { latest: '0.0.0' },
+  versions: { '0.0.0-stage': { gitHead: '1'.repeat(40) }, '0.0.0': { gitHead: '2'.repeat(40) } },
+  time: { '0.0.0-stage': '2026-10-28T15:44:14.168Z', '0.0.0': '2026-10-28T15:44:50.703Z' },
+};
+
+test('a DOCX plan marks fonts-intl absent when the published fonts release does not declare it', async () => {
+  const requested: string[] = [];
+  const plan = await docxPlan({ '@betteroffice/fonts-cjk': '^0' }, LIVE_INTL, requested);
+  expect(plan.published_fonts).toEqual({ docx: '0.4.2' });
+  expect(plan.fonts_basis).toEqual({ docx: 'release-commit' });
+  expect(plan.published_fonts_cjk).toEqual({ docx: '0.4.2' });
+  expect(plan.fonts_cjk_basis).toEqual({ docx: 'release-commit' });
+  expect(plan.published_fonts_intl).toEqual({ docx: 'absent' });
+  expect(plan.fonts_intl_basis).toEqual({ docx: 'absent' });
+  expect(requested).not.toContain('@betteroffice/fonts-intl');
+  expect(validatePlan(plan)).toEqual(plan);
+});
+
+test('a DOCX plan pins a declared fonts-intl and fails when the registry cannot resolve it', async () => {
+  const declares = { '@betteroffice/fonts-cjk': '^0', '@betteroffice/fonts-intl': '^0' };
+  const intl = { versions: { '0.4.0': { gitHead: '3'.repeat(40) }, '0.5.0': { gitHead: 'f'.repeat(40) } }, time: { '0.4.0': '2026-10-20T00:00:00Z', '0.5.0': '2026-11-01T00:00:00Z' } };
+  const plan = await docxPlan(declares, intl);
+  expect(plan.published_fonts_intl).toEqual({ docx: '0.4.0' });
+  expect(plan.fonts_intl_basis).toEqual({ docx: 'latest-before-release' });
+  expect(validatePlan(plan)).toEqual(plan);
+  await expect(docxPlan(declares, LIVE_INTL)).rejects.toThrow('@betteroffice/fonts@0.4.2 declares @betteroffice/fonts-intl, but the registry has no release of it to install');
+});
+
+test('the plan only accepts "absent" as a pin and basis together', () => {
+  expect(() => createPlan({ ...input(), published_fonts: { docx: '0.4.2' }, published_fonts_intl: { docx: 'absent' }, fonts_intl_basis: { docx: 'release-commit' } })).toThrow('Invalid fidelity plan versions');
+  expect(() => createPlan({ ...input(), published_fonts: { docx: '0.4.2' }, published_fonts_intl: { docx: '0.4.2' }, fonts_intl_basis: { docx: 'absent' } })).toThrow('Invalid fidelity plan versions');
+  expect(() => createPlan({ ...input(), published_fonts: { pptx: '0.4.2' }, published_fonts_cjk: { docx: '0.4.2' } })).toThrow('Invalid fidelity plan versions');
+  expect(() => createPlan({ ...input(), published_fonts: { docx: '0.4.2' }, published_fonts_cjk: { docx: 'latest' } })).toThrow('Invalid fidelity plan versions');
+  expect(() => createPlan({ ...input(), published_fonts: { docx: '0.4.2', pptx: '0.4.2' }, published_fonts_intl: { pptx: '0.4.2' } })).toThrow('Invalid fidelity plan versions');
+  expect(() => createPlan({ ...input(), published_fonts: { docx: '0.4.2' }, published_fonts_intl: { docx: 'latest' } })).toThrow('Invalid fidelity plan versions');
+});
+
+test('the local runner plans PPTX and XLSX collections through the registry loaders it shares with planning', async () => {
+  const { registryLoaders } = await import('./plan.mjs');
+  const release = 'a'.repeat(40);
+  const served: string[] = [];
+  const download = async (url: string) => {
+    served.push(url);
+    if (url.endsWith('/collections/office-quality.json'))
+      return JSON.stringify({ schema_version: 1, id: 'office-quality', samples: ['pptarena-001-original', 'sheet-001'] });
+    if (url.endsWith('/pptarena-001-original/metadata.json')) return JSON.stringify(metadata());
+    if (url.endsWith('/sheet-001/metadata.json')) return JSON.stringify(metadata('xlsx'));
+    if (url.endsWith('/latest')) return JSON.stringify({ version: url.includes('docx-react') ? '4.5.6' : '0.5.1', gitHead: release });
+    if (url === 'https://registry.npmjs.org/%40betteroffice%2Ffonts' || url === 'https://registry.npmjs.org/%40betteroffice%2Ffonts-cjk')
+      return JSON.stringify({ versions: { '0.4.2': { gitHead: release, peerDependencies: { '@betteroffice/fonts-cjk': '^0' } } }, time: { '0.4.2': '2026-10-27T11:27:19Z' } });
+    if (/^https:\/\/registry\.npmjs\.org\/%40betteroffice%2F(pptx|xlsx)$/.test(url))
+      return JSON.stringify({ time: { '0.5.1': '2026-10-27T11:28:38Z' } });
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+  const plan = await preparePlan({}, {
+    download,
+    command: async (_program: string, args: string[]) => (args[0] === 'rev-parse' ? `${hash}\n` : `${'c'.repeat(40)}\n`),
+    ...(registryLoaders as any)(download),
+    poolSize: 1,
+  } as any);
+  expect(plan.published_fonts).toEqual({ pptx: '0.4.2', xlsx: '0.4.2' });
+  expect(served).toContain('https://registry.npmjs.org/%40betteroffice%2Ffonts');
+  expect(served).toContain('https://registry.npmjs.org/%40betteroffice%2Ffonts-cjk');
+  const runner = await Bun.file(new URL('./run.mjs', import.meta.url)).text();
+  expect(runner).toContain('...registryLoaders(download)');
 });

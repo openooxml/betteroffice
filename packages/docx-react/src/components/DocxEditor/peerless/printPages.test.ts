@@ -85,3 +85,29 @@ test('a cancelled provisional print settles independently and leaves other print
   expect(await next.collect(build, complete)).toEqual(['png:1', 'png:2', 'png:3', 'png:4', 'png:5']);
   expect(completions).toBe(2);
 });
+
+test('print waits for outline installs and captures again when outlines arrived during the capture', async () => {
+  const { binding } = fixture();
+  let generation = 0;
+  const capture = createWorkerPrintCapture(binding, (bitmap: ImageBitmap) => `png:${bitmap.width}`, () => true);
+  const build = mock(async (pages: number[]) => {
+    capture.accept({ payload: { stagedPresentation: { pages: pages.map((pageIndex) => ({ page: { pageIndex, pageId: String(pageIndex + 1) }, bitmap: { width: (pageIndex + 1) * 10 + generation } })) } } } as unknown as DocxCommandFrame);
+  });
+  let installs = 0;
+  const outlinesInstalled = mock(async () => {
+    if (build.mock.calls.length === 3 && installs === 0) {
+      installs = 1;
+      generation = 1;
+    }
+    return installs;
+  });
+  expect(await capture.collect(build, async () => {}, outlinesInstalled)).toEqual(['png:11', 'png:21', 'png:31']);
+  expect(build).toHaveBeenCalledTimes(6);
+  expect(outlinesInstalled).toHaveBeenCalledTimes(2);
+
+  build.mockClear();
+  outlinesInstalled.mockClear();
+  expect(await capture.collect(build, async () => {}, outlinesInstalled)).toEqual(['png:11', 'png:21', 'png:31']);
+  expect(build).toHaveBeenCalledTimes(3);
+  expect(outlinesInstalled).toHaveBeenCalledTimes(2);
+});

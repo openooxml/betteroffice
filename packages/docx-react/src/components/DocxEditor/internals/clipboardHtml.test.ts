@@ -195,3 +195,32 @@ test('clipboard HTML emits version one without pictures and version two with pic
   expect(html).toContain('&quot;v&quot;:2');
   expect(parseClipboardHtml(html)).toEqual(picture);
 });
+
+test('formatted runs round trip and read as styled html outside the editor', () => {
+  const fragment: DocxClipboardFragment = { paragraphs: [{ text: 'a<b', runs: [
+    { text: 'a', format: { other: { bold: true, textColor: { rgb: 'FF0000' }, fontSize: { size: 36 } } } },
+    { text: '<b', format: { other: {} }, href: 'https://example.test/?a=1&b=2' },
+  ] }] };
+  const html = clipboardFragmentHtml(fragment);
+  expect(parseClipboardHtml(html)).toEqual(fragment);
+  const body = new DOMParser().parseFromString(html, 'text/html').body;
+  expect(body.textContent).toBe('a<b');
+  expect(body.querySelector('span')?.getAttribute('style')).toBe('font-weight:bold;color:#FF0000;font-size:18pt');
+  expect(body.querySelector('a')?.getAttribute('href')).toBe('https://example.test/?a=1&b=2');
+});
+
+test('a crafted payload is refused and nothing of it reaches a paste', () => {
+  for (const run of [
+    { text: 'x', format: { other: { runStyle: { styleId: 'Evil' } } } },
+    { text: 'x', format: { other: { fontFamily: { ascii: '<w:evil/>' } } } },
+    { text: 'x', format: { other: { rPrChange: [] } } },
+    { text: 'x', href: 'javascript:alert(1)' },
+  ]) {
+    const payload = JSON.stringify({ v: 1, fragment: { paragraphs: [{ text: 'x', runs: [run] }] } }).replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+    expect(parseClipboardHtml(`<div data-betteroffice-docx="${payload}"><p>x</p></div>`)).toBeNull();
+  }
+});
+
+test('external html without a payload stays plain text', () => {
+  expect(parseClipboardHtml('<p><b style="color:red">bold</b> <a href="https://example.test">link</a></p>')).toBeNull();
+});

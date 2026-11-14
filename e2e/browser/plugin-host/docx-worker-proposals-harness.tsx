@@ -8,6 +8,7 @@ import {
   type DocxPluginGeometry,
 } from '@betteroffice/docx-react';
 import type { DocxProposalSnapshot, YrsSession } from '@betteroffice/docx/yrs';
+import type { Document as DocxDocument } from '@betteroffice/docx/types/document';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import { pagedDocx } from '../../../packages/docx-react/src/components/DocxEditor/__fixtures__/pagedDocx';
 import { workerOpenReplicaPending } from '../../../packages/docx-react/src/components/DocxEditor/internals/workerOpenReplica';
@@ -229,7 +230,16 @@ function Harness() {
   return (
     <div style={{ height: '100%' }}>
       <DocxEditor
-        {...(hybrid ? { legacySyncApi: true as const, experimentalWorkerOpen: true } : {})}
+        {...(hybrid ? {
+          legacySyncApi: true,
+          experimentalWorkerOpen: true,
+          onChange: reportChanges ? (document: DocxDocument) => {
+            probe.contentChanges.push({
+              bodyContainsProposedText:
+                JSON.stringify(document.package.document).includes('Reviewed 1'),
+            });
+          } : undefined,
+        } : {}) as Record<never, never>}
         ref={attachEditor}
         documentBuffer={buffer}
         readOnly={readOnly}
@@ -250,14 +260,6 @@ function Harness() {
         fonts={faces}
         measurementFontProvider={fonts}
         onRenderedDomContextReady={() => { probe.renderedDomContextCalls += 1; }}
-        onChange={
-          reportChanges && hybrid ? (document) => {
-            probe.contentChanges.push({
-              bodyContainsProposedText:
-                JSON.stringify(document.package.document).includes('Reviewed 1'),
-            });
-          } : undefined
-        }
         onDocumentChange={reportChanges ? ({ version }) => { probe.documentChanges.push(version); } : undefined}
         onError={(error) => probe.errors.push(error.message)}
         onPluginError={(error) => probe.errors.push(String(error.error))}

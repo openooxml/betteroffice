@@ -2,7 +2,7 @@ use xlsx_calc::{parse_formula, parser::Expr};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRange, CellRef, SheetId, Workbook};
 
-use crate::remap::{formula_has_sheet_span, formula_names_sheet};
+use crate::remap::formula_has_sheet_span;
 use crate::{Op, OpError};
 
 #[derive(Clone, Copy)]
@@ -49,7 +49,9 @@ impl Edit {
 
 /// Refuses structural ops that could affect a conditional format rule
 /// authored or edited in this session. Untouched source rules keep their
-/// original geometry, like data validations and auto filters.
+/// original geometry, like data validations and auto filters. A sheet rename
+/// rewrites every rule formula naming the sheet, so it is refused only for a
+/// formula over a sheet span.
 pub fn ensure_conditional_formats_allow_edit(wb: &Workbook, op: &Op) -> Result<(), OpError> {
     let edit = match *op {
         Op::RenameSheet { sheet, ref name } => {
@@ -113,9 +115,7 @@ fn ensure_allowed(wb: &Workbook, edit: Edit) -> Result<(), OpError> {
                 {
                     true
                 } else if matches!(edit, Edit::Rename { .. }) {
-                    rule.formulas
-                        .iter()
-                        .any(|formula| formula_names_sheet(formula, &target.name))
+                    false
                 } else if let Some(ranges) = &ranges {
                     (owner == edit.sheet() && ranges.iter().any(|range| edit.affects(*range, true)))
                         || rule.formulas.iter().any(|formula| {

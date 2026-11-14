@@ -2,7 +2,9 @@ import { useCallback, useContext, useMemo, useRef, useSyncExternalStore } from '
 import { useTranslation } from '../i18n';
 import { docxCommandController, type DocxChromeContext } from './createDocxCommandStore';
 import { DocxCommandContext } from './DocxCommandProvider';
-import { commandShortcut, formatChord, isPluginCommandId } from './descriptors';
+import { formatChord, isPluginCommandId } from './descriptors';
+import { ariaChord } from '../../../../shared/keyboard/chords';
+import { chordLabels, storeAriaShortcut, storeShortcutLabel } from './shortcuts';
 import type {
   DocxCommandArgs,
   DocxCommandDescriptor,
@@ -76,6 +78,8 @@ export interface DocxBoundCommand<K extends DocxCommandId> {
   state: DocxCommandState<K>;
   label: string;
   shortcut: string | null;
+  /** The shortcut in `aria-keyshortcuts` form. */
+  ariaShortcut: string | null;
   /** Executes with `args`, falling back to the arguments bound to the hook. */
   execute(args?: DocxCommandArgs[K]): Promise<DocxCommandResult>;
 }
@@ -92,6 +96,8 @@ export interface DocxBoundPluginCommand {
   /** The contributed label, or the id while no plugin contributes it. */
   label: string;
   shortcut: string | null;
+  /** The shortcut in `aria-keyshortcuts` form. */
+  ariaShortcut: string | null;
   execute(): Promise<DocxPluginCommandResult>;
 }
 
@@ -112,10 +118,15 @@ export function useDocxCommand(
   const store = useDocxCommands();
   const state = useDocxCommandState(id as DocxCommandId, args as never);
   const { t } = useTranslation();
-  const descriptor = store.getDescriptor(id as DocxCommandId) as
-    | DocxCommandDescriptor
-    | DocxPluginCommandDescriptor
-    | null;
+  const readDescriptor = useCallback(
+    () =>
+      store.getDescriptor(id as DocxCommandId) as
+        | DocxCommandDescriptor
+        | DocxPluginCommandDescriptor
+        | null,
+    [store, id]
+  );
+  const descriptor = useSyncExternalStore(store.subscribe, readDescriptor, readDescriptor);
   const argsKey = args === undefined ? undefined : JSON.stringify(args);
   const execute = useCallback(
     (callArgs?: unknown) =>
@@ -138,7 +149,8 @@ export function useDocxCommand(
         descriptor: contributed,
         state,
         label: contributed?.label ?? id,
-        shortcut: chord ? formatChord(chord) : null,
+        shortcut: chord ? formatChord(chord, undefined, chordLabels(t)) : null,
+        ariaShortcut: chord ? ariaChord(chord) : null,
         execute: () => execute(),
       };
     }
@@ -148,10 +160,25 @@ export function useDocxCommand(
       descriptor: builtIn,
       state: state as DocxCommandState,
       label: t(builtIn.labelKey),
-      shortcut: commandShortcut(id, argsKey === undefined ? undefined : JSON.parse(argsKey)),
+      shortcut: storeShortcutLabel(store, id, t, argsKey === undefined ? undefined : JSON.parse(argsKey)),
+      ariaShortcut: storeAriaShortcut(store, id, argsKey === undefined ? undefined : JSON.parse(argsKey)),
       execute,
     };
-  }, [id, descriptor, state, t, argsKey, execute]);
+  }, [store, id, descriptor, state, t, argsKey, execute]);
+}
+
+const CLIPBOARD_SHORTCUT_IDS = ['cut', 'copy', 'paste', 'pasteAsPlainText', 'selectAll'] as const;
+
+/** Changes when the chords of the clipboard commands do, for lists built outside `useDocxCommand`. */
+export function useDocxShortcutRevision(store: DocxCommandStore): string {
+  const read = useCallback(
+    () =>
+      JSON.stringify(
+        CLIPBOARD_SHORTCUT_IDS.map((id) => store.getDescriptor(id).shortcuts.map(({ chord }) => chord))
+      ),
+    [store]
+  );
+  return useSyncExternalStore(store.subscribe, read, read);
 }
 
 /** The editor's locale, color mode and theme, following their changes. */

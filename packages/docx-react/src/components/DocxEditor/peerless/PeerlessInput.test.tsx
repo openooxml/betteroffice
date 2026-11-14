@@ -4,6 +4,7 @@ import type { DocxCommandPayload, DocxCommandSelection, DocxWorkerEditSession } 
 import type { CommandTicket, SubmitOptions, TicketOutcome } from '../../../../../../shared/office-session/commands/types';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessFrameGeometry, PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';
+import { Activity } from 'react';
 import { PeerlessInput, type PeerlessInputProps } from './PeerlessInput';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
@@ -21,7 +22,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onCompositionChange' | 'onRecoverableText' | 'onClipboard' | 'onNavigateCell' | 'onPasteFragment' | 'caretHostRef' | 'zoom'> = {}) {
+function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onCompositionChange' | 'onRecoverableText' | 'onClipboard' | 'onNavigateCell' | 'onPasteFragment' | 'caretHostRef' | 'zoom' | 'autoFocus'> = {}) {
   const submitted: string[] = [];
   const entries: Array<{
     payload: DocxCommandPayload; options: SubmitOptions<PeerlessEchoIntent>; ticket: CommandTicket;
@@ -78,7 +79,8 @@ function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onComposit
     paint() {}, drop() {}, reconcile() {}, disable() {}, dispose() {},
   };
   const admission = createInputAdmission({ session, viewStore, echoPainter });
-  const view = render(<PeerlessInput admission={admission} viewStore={viewStore} {...callbacks} />);
+  const view = render(<PeerlessInput admission={admission} viewStore={viewStore} {...callbacks} />,
+    callbacks.caretHostRef?.current ? { container: callbacks.caretHostRef.current } : undefined);
   return { textarea: view.getByRole('textbox') as HTMLTextAreaElement, admission, submitted, entries,
     snapshot, session, viewStore, waitForSubmitted, unmount: view.unmount,
     refresh: () => view.rerender(<PeerlessInput admission={admission} viewStore={viewStore} {...callbacks} />) };
@@ -89,6 +91,234 @@ function beforeinput(textarea: HTMLTextAreaElement, inputType: string, data: str
     bubbles: true, cancelable: true, inputType, data,
   })); });
 }
+
+test('scroll does not measure the caret host or write input styles or register a scroll listener', () => {
+  const scroller = document.createElement('div');
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  scroller.appendChild(host);
+  document.body.appendChild(scroller);
+  const listen = spyOn(window, 'addEventListener');
+  const bounds = spyOn(host, 'getBoundingClientRect');
+  const input = mount(false, { caretHostRef: { current: host }, zoom: 1.5 });
+  const style = input.textarea.style;
+  try {
+    const geometry: PeerlessFrameGeometry = {
+      identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+      pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
+    };
+    act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
+    expect(style.position).toBe('absolute');
+    expect(style.left).toBe('120px');
+    expect(style.top).toBe('300px');
+    expect(style.height).toBe('18px');
+    expect(listen.mock.calls.filter(([type]) => type === 'scroll')).toEqual([]);
+    bounds.mockClear();
+    const placed = input.textarea.getAttribute('style');
+    act(() => {
+      for (let step = 1; step <= 40; step++) {
+        scroller.scrollTop = step * 5;
+        fireEvent.scroll(scroller);
+      }
+      fireEvent.scroll(window);
+    });
+    expect(bounds).not.toHaveBeenCalled();
+    expect(input.textarea.getAttribute('style')).toBe(placed);
+    expect(style.top).toBe('300px');
+    act(() => {
+      input.viewStore.installFrameGeometry({ ...geometry, caret: null,
+        selectionFocus: { x: 90, y: 250, width: 1, height: 14 } });
+      input.refresh();
+    });
+    expect(style.left).toBe('135px');
+    expect(style.top).toBe('375px');
+    expect(style.height).toBe('21px');
+    const moved = input.textarea.getAttribute('style');
+    input.textarea.style.top = '0px';
+    fireEvent(window, new Event('resize'));
+    expect(input.textarea.getAttribute('style')).toBe(moved);
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+    listen.mockRestore();
+    bounds.mockRestore();
+    scroller.remove();
+  }
+});
+
+test('input coordinates inherit host zoom and update with editor zoom', () => {
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  host.style.zoom = '1.25';
+  document.body.appendChild(host);
+  const callbacks = { caretHostRef: { current: host }, zoom: 1.5 };
+  const input = mount(false, callbacks);
+  try {
+    act(() => {
+      input.viewStore.installFrameGeometry({ identity: input.snapshot.identity, coversThroughSeq: 0,
+        frameEpoch: 1, layoutRevision: 1, pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [] });
+      input.refresh();
+    });
+    expect(input.textarea.style.left).toBe('120px');
+    expect(input.textarea.style.top).toBe('300px');
+    expect(input.textarea.style.height).toBe('18px');
+    callbacks.zoom = 2;
+    act(input.refresh);
+    expect(input.textarea.style.left).toBe('160px');
+    expect(input.textarea.style.top).toBe('400px');
+    expect(input.textarea.style.height).toBe('24px');
+  } finally { input.unmount(); input.admission.dispose(); host.remove(); }
+});
+
+test('a missing caret host keeps viewport coordinates', () => {
+  const input = mount(false, { caretHostRef: { current: null }, zoom: 1.5 });
+  try {
+    act(() => {
+      input.viewStore.installFrameGeometry({ identity: input.snapshot.identity, coversThroughSeq: 0,
+        frameEpoch: 1, layoutRevision: 1, pages: [], caret: null, selectionRects: [{ x: 20, y: 40, width: 60, height: 12 }] });
+      input.refresh();
+    });
+    expect(input.textarea.style.position).toBe('fixed');
+    expect(input.textarea.style.left).toBe('30px');
+    expect(input.textarea.style.top).toBe('60px');
+    expect(input.textarea.style.height).toBe('18px');
+  } finally { input.unmount(); input.admission.dispose(); }
+});
+
+test('autofocus prevents browser scrolling', () => {
+  const focus = spyOn(HTMLTextAreaElement.prototype, 'focus');
+  const input = mount(false, { autoFocus: true });
+  try {
+    expect(document.activeElement).toBe(input.textarea);
+    expect(focus.mock.calls).toEqual([[{ preventScroll: true }]]);
+  } finally { input.unmount(); input.admission.dispose(); focus.mockRestore(); }
+});
+
+test('autofocus applies on mount only, so enabling editing later keeps focus where the user put it', () => {
+  const input = mount();
+  input.unmount();
+  const other = document.createElement('input');
+  document.body.appendChild(other);
+  const view = render(<PeerlessInput admission={input.admission} viewStore={input.viewStore} autoFocus={false} />);
+  try {
+    other.focus();
+    view.rerender(<PeerlessInput admission={input.admission} viewStore={input.viewStore} autoFocus />);
+    expect(document.activeElement).toBe(other);
+  } finally { view.unmount(); input.admission.dispose(); other.remove(); }
+});
+
+test('a hidden and revealed editor does not take focus back after mount', () => {
+  const input = mount();
+  input.unmount();
+  const other = document.createElement('input');
+  document.body.appendChild(other);
+  const tree = (mode: 'visible' | 'hidden') => <Activity mode={mode}>
+    <PeerlessInput admission={input.admission} viewStore={input.viewStore} autoFocus />
+  </Activity>;
+  const view = render(tree('visible'));
+  try {
+    expect(document.activeElement).toBe(view.container.querySelector('textarea'));
+    other.focus();
+    view.rerender(tree('hidden'));
+    view.rerender(tree('visible'));
+    expect(document.activeElement).toBe(other);
+  } finally { view.unmount(); input.admission.dispose(); other.remove(); }
+});
+
+test('input uses its content host before the parent ref attaches', () => {
+  const input = mount();
+  input.viewStore.installFrameGeometry({ identity: input.snapshot.identity, coversThroughSeq: 0,
+    frameEpoch: 1, layoutRevision: 1, pages: [], caret: { x: 20, y: 40, width: 1, height: 12 }, selectionRects: [] });
+  input.unmount();
+  const caretHostRef = { current: null as HTMLDivElement | null };
+  const view = render(<div ref={caretHostRef} data-docx-caret-host style={{ position: 'relative' }}>
+    <PeerlessInput admission={input.admission} viewStore={input.viewStore} caretHostRef={caretHostRef} />
+  </div>);
+  try {
+    const textarea = view.getByRole('textbox') as HTMLTextAreaElement;
+    expect(textarea.parentElement).toBe(caretHostRef.current);
+    expect(textarea.style.position).toBe('absolute');
+    expect(textarea.style.left).toBe('20px');
+    expect(textarea.style.top).toBe('40px');
+  } finally { view.unmount(); input.admission.dispose(); }
+});
+
+test('a scroll before the first caret placement keeps the view where it was moved', () => {
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  Object.defineProperties(scroller, { clientHeight: { value: 600 }, scrollHeight: { value: 2400 } });
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  scroller.appendChild(host);
+  document.body.appendChild(scroller);
+  const bounds = (top: number) => ({ x: 0, y: top, top, bottom: top + 600, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
+  scroller.getBoundingClientRect = () => bounds(0);
+  host.getBoundingClientRect = () => bounds(-scroller.scrollTop);
+  const input = mount(false, { caretHostRef: { current: host } });
+  const start = { story: 'body', paraId: 'p', offset: 0 };
+  input.snapshot.workerSelection = { anchor: start, focus: start };
+  input.session.state.selection = input.snapshot.workerSelection;
+  try {
+    act(() => { input.textarea.focus({ preventScroll: true }); });
+    act(() => { scroller.scrollTop = 300; fireEvent.scroll(scroller); });
+    act(() => {
+      input.viewStore.installFrameGeometry({ identity: input.snapshot.identity, coversThroughSeq: 0,
+        frameEpoch: 1, layoutRevision: 1, pages: [], caret: { x: 20, y: 50, width: 1, height: 12 }, selectionRects: [] });
+      input.refresh();
+    });
+    expect(input.textarea.style.top).toBe('50px');
+    expect(scroller.scrollTop).toBe(300);
+  } finally { input.unmount(); input.admission.dispose(); scroller.remove(); }
+});
+
+test('typing after scrolling reveals once and composition keeps content coordinates', async () => {
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  Object.defineProperties(scroller, { clientHeight: { value: 600 }, scrollHeight: { value: 2400 } });
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  scroller.appendChild(host);
+  document.body.appendChild(scroller);
+  const bounds = (top: number) => ({ x: 0, y: top, top, bottom: top + 600, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
+  scroller.getBoundingClientRect = () => bounds(0);
+  host.getBoundingClientRect = () => bounds(-scroller.scrollTop);
+  const input = mount(false, { caretHostRef: { current: host } });
+  const geometry: PeerlessFrameGeometry = { identity: input.snapshot.identity, coversThroughSeq: 0,
+    frameEpoch: 1, layoutRevision: 1, pages: [], caret: { x: 20, y: 50, width: 1, height: 12 }, selectionRects: [] };
+  const start = { story: 'body', paraId: 'p', offset: 0 };
+  input.snapshot.workerSelection = { anchor: start, focus: start };
+  input.session.state.selection = input.snapshot.workerSelection;
+  try {
+    act(() => {
+      input.textarea.focus({ preventScroll: true });
+      input.viewStore.installFrameGeometry(geometry);
+      input.refresh();
+    });
+    act(() => { scroller.scrollTop = 300; fireEvent.scroll(scroller); });
+    expect(scroller.scrollTop).toBe(300);
+    beforeinput(input.textarea, 'insertText', 'x');
+    await input.waitForSubmitted(1);
+    const end = { ...start, offset: 1 };
+    await act(async () => { input.entries[0]!.settle({ status: 'applied', seq: 1 }, { anchor: end, focus: end }); });
+    act(() => {
+      input.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: 1, frameEpoch: 2,
+        caret: { x: 30, y: 50, width: 1, height: 12 } });
+      input.refresh();
+    });
+    expect(scroller.scrollTop).toBe(26);
+    expect(input.textarea.style.top).toBe('50px');
+    act(() => { scroller.scrollTop = 300; fireEvent.scroll(scroller); fireEvent(window, new Event('resize')); });
+    expect(scroller.scrollTop).toBe(300);
+    fireEvent.compositionStart(input.textarea);
+    fireEvent.compositionUpdate(input.textarea, { data: '語' });
+    expect(input.textarea.style.left).toBe('30px');
+    expect(input.textarea.style.top).toBe('50px');
+    fireEvent.compositionEnd(input.textarea, { data: '語' });
+    await input.waitForSubmitted(2);
+    expect(input.submitted).toEqual(['insertText', 'replaceSelection']);
+    expect(scroller.scrollTop).toBe(300);
+  } finally { input.unmount(); input.admission.dispose(); scroller.remove(); }
+});
 
 test('page_keys_use_zoomed_viewport_distance_and_wait_for_fresh_predecessor_geometry', async () => {
   const scroller = document.createElement('div');
@@ -211,7 +441,7 @@ test.each([false, true])('shift_page_down_reveals_the_landing_with_cell_rects=%s
     expect(scroller.scrollTop).toBe(86);
     act(() => { fireEvent.scroll(scroller); });
     expect(scroller.scrollTop).toBe(86);
-    expect(Number.parseFloat(input.textarea.style.top)).toBe(564);
+    expect(Number.parseFloat(input.textarea.style.top)).toBe(650);
     expect(document.activeElement).toBe(input.textarea);
   } finally {
     input.unmount();

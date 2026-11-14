@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import json
 import re
@@ -54,8 +55,15 @@ def export_options(args):
 
 
 def saved_bytes(workbook):
-    data = workbook.save()
-    return {"sha256": hashlib.sha256(data).hexdigest(), "byteLength": len(data)}
+    saved = workbook.save_with_warnings()
+    return {
+        "sha256": hashlib.sha256(saved.bytes).hexdigest(),
+        "byteLength": len(saved.bytes),
+        "warnings": [
+            {key: value for key, value in dataclasses.asdict(warning).items() if value is not None}
+            for warning in saved.warnings
+        ],
+    }
 
 
 def includes_target(step, target):
@@ -88,6 +96,14 @@ def normalize_versions(value, expected, versions):
     return value
 
 
+def refusal(call):
+    try:
+        call()
+    except Exception as error:
+        return {"error": str(error)}
+    raise AssertionError("expected the call to fail")
+
+
 def run():
     script = json.loads((PARITY / "script.json").read_text(encoding="utf-8"))
     expected = json.loads((PARITY / "expected.json").read_text(encoding="utf-8"))
@@ -104,8 +120,22 @@ def run():
         )
         return None
 
+    def remove_newest_conditional_format(args):
+        rules = workbook.conditional_formats(args["sheet"])
+        newest = max(rules, key=lambda rule: rule["priority"])
+        op = {"type": "removeConditionalFormat", "sheet": args["sheet"], "id": newest["id"]}
+        return mutation_result(workbook.apply_ops([op], now_serial=now_serial))
+
+    def open_collaborative(args):
+        nonlocal workbook
+        workbook = Workbook.open_collaborative(
+            (ROOT / args["fixture"]).read_bytes(), client_id=args["clientId"]
+        )
+        return None
+
     operations = {
         "open": open_fixture,
+        "openCollaborative": open_collaborative,
         "sheetNames": lambda args: workbook.sheet_names,
         "sheetInfo": lambda args: workbook.sheet_info(),
         "calculationStatus": lambda args: workbook.calculation_status(),
@@ -127,6 +157,35 @@ def run():
         "findText": lambda args: workbook.find_text(args),
         "validateEdits": lambda args: workbook.validate_edits(args),
         "applyEdits": lambda args: workbook.apply_edits(args),
+        "applyOps": lambda args: mutation_result(
+            workbook.apply_ops(args["ops"], now_serial=now_serial)
+        ),
+        "removeNewestConditionalFormat": remove_newest_conditional_format,
+        "moveRange": lambda args: mutation_result(
+            workbook.move_range(
+                args["sheet"], args["source"], args["destination"], now_serial=now_serial
+            )
+        ),
+        "setHyperlink": lambda args: mutation_result(
+            workbook.set_hyperlink(args["sheet"], args["hyperlink"], now_serial=now_serial)
+        ),
+        "removeHyperlink": lambda args: mutation_result(
+            workbook.remove_hyperlink(args["sheet"], args["range"], now_serial=now_serial)
+        ),
+        "editCharts": lambda args: mutation_result(
+            workbook.edit_charts(args["edits"], now_serial=now_serial)
+        ),
+        "moveChart": lambda args: mutation_result(
+            workbook.move_chart(
+                args["sheet"], args["chart"], args["dx"], args["dy"], now_serial=now_serial
+            )
+        ),
+        "captureFormat": lambda args: workbook.capture_format(args["sheet"], args["range"]),
+        "applyFormat": lambda args: mutation_result(
+            workbook.apply_format(
+                args["sheet"], args["range"], args["format"], now_serial=now_serial
+            )
+        ),
         "historyState": lambda args: history_state(workbook),
         "undo": lambda args: mutation_result(workbook.undo(now_serial=now_serial)),
         "redo": lambda args: mutation_result(workbook.redo(now_serial=now_serial)),
@@ -154,7 +213,11 @@ def run():
         if op not in operations:
             raise AssertionError(f"Unknown parity op {op} at step {index}")
         try:
-            result = operations[op](map_strings(step["args"], resolve))
+            args = map_strings(step["args"], resolve)
+            if step.get("expectError") is True:
+                result = refusal(lambda: operations[op](args))
+            else:
+                result = operations[op](args)
             results.append({
                 "op": op,
                 "result": normalize_versions(result, expected[index]["result"], versions),

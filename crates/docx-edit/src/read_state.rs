@@ -208,7 +208,16 @@ impl EditingDoc {
             });
         }
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, &range.story)?;
+        let story = match story_ref(&txn, &range.story) {
+            Ok(story) => story,
+            Err(crate::EditError::CellHasNoStory(_)) => {
+                let cell = crate::empty_cells::EmptyCell::new(&range.story);
+                let mut info = cell.doc().selection_context(range)?;
+                info.in_table = true;
+                return Ok(info);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let story_len = yrs::Text::len(&story, &txn);
         if range.end > story_len {
             return Err(OpError::OutOfBounds {
@@ -459,16 +468,19 @@ impl EditingDoc {
                                 para.view_slice_of_raw(start, chunk.start, &mut full);
                             }
                         }
-                        let key = if change.kind == crate::ChangeKind::Insertion {
-                            crate::INS
-                        } else {
-                            crate::DEL
+                        let key = match change.kind {
+                            crate::ChangeKind::Insertion => crate::INS,
+                            crate::ChangeKind::RunPropertiesChanged => crate::format::RPR_CHANGE,
+                            _ => crate::DEL,
                         };
-                        let inherited = chunk
-                            .attrs
-                            .get(key)
-                            .and_then(crate::queries::revision_parts)
-                            .is_some_and(|(id, ..)| id == change.revision_id);
+                        let inherited = chunk.attrs.get(key).is_some_and(|value| match value {
+                            Any::Array(changes) => changes.iter().any(|value| {
+                                crate::queries::revision_parts(value)
+                                    .is_some_and(|(id, ..)| id == change.revision_id)
+                            }),
+                            value => crate::queries::revision_parts(value)
+                                .is_some_and(|(id, ..)| id == change.revision_id),
+                        });
                         full.push_str(&crate::inline_content::revision_text(
                             content,
                             &change.revision_id,

@@ -1,4 +1,6 @@
+import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 import { DocxSectionError, type SectionInfo } from './sections';
+import { formattingFailure } from './formattingError';
 import { PARAGRAPH_PATCH_WRITER_VERSION, paragraphPatchWriterVersionWire } from '../docx/parseWasm';
 import { normalizeSeedError } from './documentToYrs';
 import { readRetainedLayoutMeta } from './layoutMeta';
@@ -8,6 +10,7 @@ import type {
   YrsCommentReceipt,
   YrsDocxHost,
   YrsEngineApplyProfile,
+  YrsFormatReceipt,
   YrsLoc,
   YrsOpeningOptions,
   YrsParagraph,
@@ -29,6 +32,7 @@ import type {
   YrsSplitReceipt,
   YrsStoryRange,
   YrsStorySegment,
+  YrsTableLoc,
   YrsTableRange,
   YrsTableReceipt,
   YrsTableFragmentReceipt,
@@ -67,6 +71,7 @@ import type {
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
 import { editSessionUpdateEvents } from './updateEvents';
+import { recordYrsSelectionCause, withYrsSelectionCause } from './selectionChanges';
 import { createProposalRegistry, type DocxProposalSession } from './proposals';
 import type { DocxContentControlsResult } from './contentControls';
 import type {
@@ -218,7 +223,8 @@ const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[
 export function wrapSession(
   session: EditSession,
   clientId: number,
-  opened?: { source: Uint8Array; host: YrsDocxHost }
+  opened?: { source: Uint8Array; host: YrsDocxHost },
+  loadPngExporter?: () => Promise<typeof import('./renderPng')>
 ): YrsSession {
   const hub = editSessionUpdateEvents(session);
   session = hub.session;
@@ -236,6 +242,7 @@ export function wrapSession(
   }> = [];
   let observing = false;
   let destroyed = false;
+  let pngExporter: ReturnType<typeof import('./renderPng').createPngExporter> | undefined;
   let nextListenerId = 0;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
@@ -326,6 +333,7 @@ export function wrapSession(
       while (!destroyed && pendingUpdates.length > 0) {
         const event = pendingUpdates.shift();
         if (!event) break;
+        recordYrsSelectionCause(facade, event.origin === 'remote' ? 'remote' : undefined);
         for (const [id, listener] of [...listeners]) {
           if (destroyed) return;
           if (listeners.get(id) !== listener) continue;
@@ -346,7 +354,11 @@ export function wrapSession(
   let partialDocument = false;
   const mutate = <T>(operation: () => T): T => {
     if (displayOnly) throw new Error('A document preview is display-only');
-    return mutateAlways(operation);
+    try {
+      return mutateAlways(operation);
+    } catch (error) {
+      throw formattingFailure(error);
+    }
   };
   const mutateAlways = <T>(operation: () => T): T => {
     invalidateReadCaches();
@@ -358,6 +370,7 @@ export function wrapSession(
       if (wasmCallDepth === 0) {
         hub.drain();
         flushUpdates();
+        if (!destroyed) recordYrsSelectionCause(facade);
       }
     }
   };
@@ -573,6 +586,7 @@ export function wrapSession(
       residentFontsRevision += 1;
       return id;
     },
+    updateFontOutlines: (fontId, bytes) => session.update_measure_font_outlines(fontId, bytes),
     registerSubstituteFont: (base, family) => {
       const id = session.register_substitute_measure_font(base, family);
       residentFonts.push({ substituteOf: base, family });
@@ -660,6 +674,7 @@ export function wrapSession(
     },
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    retainedHeadersFootersJson: () => session.retained_headers_footers_json(),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
     setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
     setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
@@ -848,6 +863,7 @@ export function wrapSession(
       return bytes && mimeType ? { bytes, mimeType } : null;
     },
     loadMediaSources: (json) => session.load_media_sources(json),
+    rebuildMediaSources: () => session.rebuild_media_sources(),
     loadNoteSeparators: (state) => session.load_note_separators(state),
     mediaDataUrl,
     mediaScope: () => mediaScope,
@@ -881,16 +897,16 @@ export function wrapSession(
     },
     applyUpdate: (update) => {
       markDirty('all');
-      return mutate(
+      return withYrsSelectionCause(facade, 'remote', () => mutate(
         () =>
           JSON.parse(
             session.apply_update_with_inference(update)
           ) as CollaborationTextInsertion | null
-      );
+      ));
     },
     applyUpdateChunks: (updates) => {
       markDirty('all');
-      mutate(() => session.apply_update_chunks([...updates]));
+      withYrsSelectionCause(facade, 'remote', () => mutate(() => session.apply_update_chunks([...updates])));
     },
     applyLocalUpdate: (update) => {
       ensureUndo();
@@ -936,10 +952,17 @@ export function wrapSession(
         anchor: { ...anchor },
         head: { ...head },
       };
+      recordYrsSelectionCause(facade, undefined, cachedSelection);
     },
     selection: () => {
       if (cachedSelection !== undefined) return cloneSelection(cachedSelection);
-      cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
+      try {
+        cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
+      } catch (error) {
+        const encoded = decodeEncodedSelection(session.encoded_selection());
+        if (!encoded || session.has_story(encoded.story)) throw error;
+        cachedSelection = null;
+      }
       return cloneSelection(cachedSelection);
     },
     encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
@@ -952,7 +975,11 @@ export function wrapSession(
         return null;
       }
     },
-    setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
+    setCellSelection: (range) => {
+      session.set_cell_selection(JSON.stringify(range));
+      cachedSelection = undefined;
+      recordYrsSelectionCause(facade);
+    },
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
     beginUndoCapture: ensureUndo,
     addUndoBoundary: () => session.add_undo_boundary(),
@@ -1129,6 +1156,15 @@ export function wrapSession(
           )
       );
     },
+    setRowHeight: (at, heightTwips, rule) => {
+      ensureUndo(at.story);
+      return mutate(
+        () =>
+          markReceiptStories(
+            JSON.parse(session.set_row_height(JSON.stringify(at), heightTwips, rule)) as YrsTableReceipt
+          )
+      );
+    },
     setTableWidth: (table, widthTwips) => {
       ensureUndo(table.story);
       return mutate(
@@ -1228,33 +1264,43 @@ export function wrapSession(
           ) as YrsRevisionReceipt
       );
     },
-    toggleMark: (range, mark) => {
+    toggleMark: (range, mark, suggesting) => {
       ensureUndo(range.story);
-      mutate(() =>
+      const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      const receipt = mutate(() =>
         session.toggle_mark(
           range.story,
           range.start.paraId,
           range.start.offset,
           range.end.paraId,
           range.end.offset,
-          JSON.stringify(mark)
+          JSON.stringify(mark),
+          suggesting?.name,
+          suggesting?.date
         )
       );
+      markDirty(facade.storiesChangedSince(since).stories);
+      return JSON.parse(receipt) as YrsFormatReceipt;
     },
-    formatRange: (range, delta) => {
+    formatRange: (range, delta, suggesting) => {
       ensureUndo(range.story);
-      mutate(() =>
+      const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      const receipt = mutate(() =>
         session.format_range(
           range.story,
           range.start.paraId,
           range.start.offset,
           range.end.paraId,
           range.end.offset,
-          JSON.stringify(delta)
+          JSON.stringify(delta),
+          suggesting?.name,
+          suggesting?.date
         )
       );
+      markDirty(facade.storiesChangedSince(since).stories);
+      return JSON.parse(receipt) as YrsFormatReceipt;
     },
-    setHyperlink: (range, hyperlink) => {
+    setHyperlink: (range, hyperlink, suggesting) => {
       ensureUndo(range.story);
       mutate(() =>
         session.set_hyperlink(
@@ -1263,21 +1309,28 @@ export function wrapSession(
           range.start.offset,
           range.end.paraId,
           range.end.offset,
-          JSON.stringify(hyperlink)
+          JSON.stringify(hyperlink),
+          suggesting?.name,
+          suggesting?.date
         )
       );
     },
-    clearFormatting: (range) => {
+    clearFormatting: (range, suggesting) => {
       ensureUndo(range.story);
-      mutate(() =>
+      const since = facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+      const receipt = mutate(() =>
         session.clear_formatting(
           range.story,
           range.start.paraId,
           range.start.offset,
           range.end.paraId,
-          range.end.offset
+          range.end.offset,
+          suggesting?.name,
+          suggesting?.date
         )
       );
+      markDirty(facade.storiesChangedSince(since).stories);
+      return JSON.parse(receipt) as YrsFormatReceipt;
     },
     applyParagraphStyle: (range, styleId, suggesting) => {
       ensureUndo(range.story);
@@ -1444,15 +1497,21 @@ export function wrapSession(
     },
     acceptChange: (target) => {
       markDirty('all');
-      return mutate(
-        () => JSON.parse(session.accept_change(wireChangeTarget(target))) as YrsResolveReceipt
-      );
+      return mutate(() => {
+        const receipt = JSON.parse(session.accept_change(wireChangeTarget(target))) as YrsResolveReceipt;
+        proposals.reconcile();
+        for (const registry of detachedProposals) registry.reconcile();
+        return receipt;
+      });
     },
     rejectChange: (target) => {
       markDirty('all');
-      return mutate(
-        () => JSON.parse(session.reject_change(wireChangeTarget(target))) as YrsResolveReceipt
-      );
+      return mutate(() => {
+        const receipt = JSON.parse(session.reject_change(wireChangeTarget(target))) as YrsResolveReceipt;
+        proposals.reconcile();
+        for (const registry of detachedProposals) registry.reconcile();
+        return receipt;
+      });
     },
 
     selectionContext: (range) => {
@@ -1655,15 +1714,22 @@ export function wrapSession(
         destroy: () => { registry.destroy(); detachedProposals.delete(registry); },
       };
     },
-    mirrorWorkerDocument: (mirror) => {
+    mirrorWorkerDocument: (mirror) => withYrsSelectionCause(facade, 'remote', () => {
       workerDocumentVersion = mirror?.version ?? null;
       proposals.mirror(mirror);
-    },
+    }),
     workerDocumentMirrored: () => workerDocumentVersion !== null,
     onProposalChange: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
       return proposals.subscribe(listener);
     },
+    setStyleLanguage: (styleId, slots) => {
+      ensureUndo();
+      markDirty('all');
+      return mutate(() => session.set_style_language(styleId ?? undefined, JSON.stringify(slots)));
+    },
+    styleLanguages: () => JSON.parse(session.style_languages_json()),
+    patchStyleLanguagesXml: source => session.patch_style_languages_xml(source),
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
       return mutate(
@@ -1696,9 +1762,30 @@ export function wrapSession(
         )
       ) as YrsSelectionText,
 
+    renderPngTarget: (displayListJson, targetJson, optionsJson) =>
+      (session as unknown as { renderPngTarget(list: string, target: string, options: string): Uint8Array })
+        .renderPngTarget(displayListJson, targetJson, optionsJson),
+    renderPngTargetReport: (displayListJson, targetJson, optionsJson) =>
+      (session as unknown as { renderPngTargetReport(list: string, target: string, options: string): { png: Uint8Array; pictures: PngUnavailablePicture[]; skippedEffects: string[] } })
+        .renderPngTargetReport(displayListJson, targetJson, optionsJson),
+    canvasSkippedEffects: (pageIndex, unavailable) =>
+      (session as unknown as { canvasSkippedEffects(page: number, unavailable: Uint32Array): number })
+        .canvasSkippedEffects(pageIndex, unavailable),
+    renderPng: async (target, options) => {
+      if (destroyed) throw new Error('YrsSession is destroyed');
+      if (!pngExporter) {
+        if (!loadPngExporter) throw new Error('renderPng needs a session from createYrsSession');
+        const { createPngExporter } = await loadPngExporter();
+        if (destroyed) throw new Error('YrsSession is destroyed');
+        pngExporter ??= createPngExporter(facade);
+      }
+      return pngExporter.render(target, options);
+    },
+
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
+      pngExporter?.dispose();
       invalidateReadCaches();
       residentFonts.length = 0;
       forgetMaterializedSource(session);
@@ -1723,6 +1810,8 @@ export function wrapSession(
 
   registerSessionInternals(facade, {
     headerFooterAliases,
+    unavailableTablesFrom: (roots) => JSON.parse(session.unavailable_tables_from(JSON.stringify(roots))) as YrsTableLoc[] | null,
+    mediaSources: () => session.media_sources_json(),
     materializedSource,
     setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),
     sourcePackage: () =>

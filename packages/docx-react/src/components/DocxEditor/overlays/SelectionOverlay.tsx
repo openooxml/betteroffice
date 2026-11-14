@@ -29,6 +29,8 @@ export interface SelectionOverlayProps {
   pageGap?: number;
   /** Custom caret color. */
   caretColor?: string;
+  /** Contrasting outline for a caret over a fill of unknown colour. */
+  caretHalo?: string;
   /** Custom selection background color. */
   selectionColor?: string;
   /** Caret width in pixels. */
@@ -100,10 +102,11 @@ const selectionRectStyles = (rect: SelectionRect, color: string): React.CSSPrope
 const Caret: React.FC<{
   position: CaretPosition;
   color: string;
+  halo?: string;
   width: number;
   blinkInterval: number;
   isFocused: boolean;
-}> = ({ position, color, width, blinkInterval, isFocused }) => {
+}> = ({ position, color, halo, width, blinkInterval, isFocused }) => {
   const [visible, setVisible] = useState(isFocused);
   const blinkTimerRef = useRef<number | null>(null);
 
@@ -155,7 +158,8 @@ const Caret: React.FC<{
     };
   }, [position.x, position.y, isFocused, blinkInterval]);
 
-  return <div style={caretStyles(position, color, width, visible)} data-testid="caret" />;
+  const style = caretStyles(position, color, width, visible);
+  return <div style={halo ? { ...style, boxShadow: `0 0 0 1px ${halo}` } : style} data-testid="caret" />;
 };
 
 /**
@@ -187,6 +191,7 @@ export const SelectionOverlay: React.FC<SelectionOverlayProps> = ({
   isFocused,
   readOnly = false,
   caretColor = DEFAULT_CARET_COLOR,
+  caretHalo,
   selectionColor = DEFAULT_SELECTION_COLOR,
   caretWidth = DEFAULT_CARET_WIDTH,
   blinkInterval = DEFAULT_BLINK_INTERVAL,
@@ -215,6 +220,7 @@ export const SelectionOverlay: React.FC<SelectionOverlayProps> = ({
         <Caret
           position={caretPosition}
           color={caretColor}
+          halo={caretHalo}
           width={caretWidth}
           blinkInterval={blinkInterval}
           isFocused={isFocused}

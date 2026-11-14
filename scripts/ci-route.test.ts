@@ -202,7 +202,6 @@ describe('runner routing', () => {
     const directory = mkdtempSync(join(tmpdir(), 'ci-route-'));
     try {
       const output = join(directory, 'output');
-      const started = Date.now();
       const command = Bun.spawn(['node', script], {
         env: {
           ...process.env,
@@ -212,8 +211,9 @@ describe('runner routing', () => {
         stdout: 'pipe',
       });
       expect(await command.exited).toBe(0);
-      expect(Date.now() - started).toBeLessThan(9_000);
-      expect(await new Response(command.stdout).text()).toContain('fell back to kyora');
+      const stdout = await new Response(command.stdout).text();
+      expect(stdout).toContain('fell back to kyora');
+      expect(stdout).toContain('routing deadline');
       expect(readFileSync(output, 'utf8')).toBe('packages=\npython=\npackage_tests=\nrust=\n');
     } finally {
       server.stop(true);

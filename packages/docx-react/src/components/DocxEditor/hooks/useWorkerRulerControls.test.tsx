@@ -15,7 +15,8 @@ function fixture() {
     workerSelection: selection, editState: { toolbar: { paragraphProperties: { indentLeft: 720, hangingIndent: true, indentFirstLine: 180 } } },
     geometry: { pages: [{ page: { pageIndex: 0 }, displayPage: { sectionIndex: 0 } }], frameEpoch: 1 } } };
   const applyQuery = mock(async (_query: unknown, _intent: unknown) => ({ ok: true, status: 'executed' }));
-  const controller = { subscribe: () => () => {}, getSnapshot: () => state, applyQuery,
+  const controller = { subscribe: () => () => {}, getSnapshot: () => state,
+    subscribeShell: () => () => {}, getShellSnapshot: () => state, applyQuery,
     environment: () => ({ readOnly: false, mode: 'editing' }), ref: { focus() {}, getCurrentPage: () => 1 },
     query: async () => ({ version: 'native', selection, value: { version: 'native', sections: [
       { section: 'ending-first', properties: { marginLeft: 1440 } }, { section: 'final', properties: { marginLeft: 2880 } },
@@ -71,7 +72,8 @@ function liveFixture() {
   const publish = (next: typeof state) => { state = next; for (const listener of listeners) listener(); };
   const applyQuery = mock(async (_query: unknown, _intent: unknown) => ({ ok: true, status: 'executed' }));
   const controller = { subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    getSnapshot: () => state, applyQuery,
+    subscribeShell: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    getSnapshot: () => state, getShellSnapshot: () => state, applyQuery,
     environment: () => ({ readOnly: false, mode: 'editing' }), ref: { focus() {}, getCurrentPage: () => 1 },
     query: () => new Promise(resolve => { reads.push(resolve); }),
   } as unknown as WorkerShellController;

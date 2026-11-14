@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useLayoutEffect, useMemo, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { ReviewSidebarItem } from '../components/sidebar/trackedChanges';
 import type { TrackedChangeEntry } from '../components/sidebar/cardUtils';
@@ -38,6 +38,9 @@ export interface UseCommentSidebarItemsProps {
   addCommentYPosition?: number | null;
 }
 
+/** @internal */
+type CachedSidebarItem = { data: string | undefined; callbacks: CommentCallbacks; item: ReviewSidebarItem };
+
 export function useCommentSidebarItems({
   comments,
   trackedChanges,
@@ -46,6 +49,7 @@ export function useCommentSidebarItems({
   isAddingComment = false,
   addCommentYPosition = null,
 }: UseCommentSidebarItemsProps): ReviewSidebarItem[] {
+  const previous = useRef({ items: [] as ReviewSidebarItem[], entries: new Map<string, CachedSidebarItem>() });
   // Active comments always, resolved only when showResolved
   const visibleComments = useMemo(
     () =>
@@ -70,12 +74,22 @@ export function useCommentSidebarItems({
     return map;
   }, [comments]);
 
-  return useMemo(() => {
+  const result = useMemo(() => {
     const items: ReviewSidebarItem[] = [];
+    const entries = new Map<string, CachedSidebarItem>();
+    const append = (id: string, value: unknown, create: () => ReviewSidebarItem) => {
+      const data = JSON.stringify(value);
+      const cached = previous.current.entries.get(id);
+      const sameCallbacks = cached && Object.keys(cached.callbacks).length === Object.keys(callbacks).length &&
+        (Object.keys(callbacks) as (keyof CommentCallbacks)[]).every(key => cached.callbacks[key] === callbacks[key]);
+      const entry = cached && cached.data === data && sameCallbacks ? cached : { data, callbacks, item: create() };
+      entries.set(id, entry);
+      items.push(entry.item);
+    };
 
     // "Add comment" input (temporary item with pre-computed Y)
     if (isAddingComment && addCommentYPosition != null) {
-      items.push({
+      append('new-comment-input', addCommentYPosition, () => ({
         id: 'new-comment-input',
         anchorPos: 0,
         fixedY: addCommentYPosition,
@@ -89,13 +103,13 @@ export function useCommentSidebarItems({
             onCancel={callbacks.onCancelAddComment}
           />
         ),
-      });
+      }));
     }
 
     // Comment cards — resolved render as icon when collapsed, full card when expanded
     for (const comment of visibleComments) {
       const replies = repliesByParent.get(comment.id) ?? [];
-      items.push({
+      append(`comment-${comment.id}`, [comment, replies], () => ({
         id: `comment-${comment.id}`,
         anchorPos: 0,
         anchorKey: `comment-${comment.id}`,
@@ -115,14 +129,14 @@ export function useCommentSidebarItems({
               onDelete={callbacks.onCommentDelete}
             />
           ),
-      });
+      }));
     }
 
     // Tracked change cards
     trackedChanges.forEach((change, idx) => {
       const replies = repliesByParent.get(change.revisionId) ?? [];
       const id = `tc-${change.revisionId}-${idx}`;
-      items.push({
+      append(id, [change, replies], () => ({
         id,
         review: { change, kind: 'human' },
         anchorPos: change.from,
@@ -142,10 +156,11 @@ export function useCommentSidebarItems({
             onReply={callbacks.onTrackedChangeReply}
           />
         ),
-      });
+      }));
     });
 
-    return items;
+    return { entries, items: items.length === previous.current.items.length && items.every((item, index) => item === previous.current.items[index])
+      ? previous.current.items : items };
   }, [
     visibleComments,
     trackedChanges,
@@ -154,4 +169,6 @@ export function useCommentSidebarItems({
     isAddingComment,
     addCommentYPosition,
   ]);
+  useLayoutEffect(() => { previous.current = result; }, [result]);
+  return result.items;
 }

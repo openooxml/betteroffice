@@ -87,6 +87,14 @@ pub fn decode_font_face(
     Ok(object.into())
 }
 
+/// Every kind of effect a PNG export can report as skipped, in reporting order.
+#[wasm_bindgen(js_name = skippedEffectKinds)]
+pub fn skipped_effect_kinds() -> Vec<String> {
+    docx_layout::skipped_effects::SkippedEffect::ALL
+        .map(|effect| effect.name().to_owned())
+        .to_vec()
+}
+
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
@@ -105,6 +113,36 @@ impl From<EngineError> for JsValue {
                 value.into()
             }
             EngineErrorKind::Message => JsValue::from_str(&error.message),
+            EngineErrorKind::SuggestedFormattingOverContainer => {
+                let value = js_sys::Error::new(&error.message);
+                value.set_name("SuggestedFormattingOverContainerError");
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("suggested-formatting-over-container"),
+                );
+                value.into()
+            }
+            EngineErrorKind::TableUnavailable => {
+                let value = js_sys::Error::new(&error.message);
+                value.set_name("TableUnavailableError");
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("table-unavailable"),
+                );
+                value.into()
+            }
+            EngineErrorKind::CellHasNoStory => {
+                let value = js_sys::Error::new(&error.message);
+                value.set_name("CellHasNoStoryError");
+                let _ = js_sys::Reflect::set(
+                    &value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("cell-has-no-story"),
+                );
+                value.into()
+            }
         }
     }
 }
@@ -257,7 +295,8 @@ impl EditSession {
     /// Registers raw sfnt bytes in this session's resident measurement store
     /// and returns the font id that measurement and display inputs reference.
     /// Errors on bytes the font parser rejects.
-    pub fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
+    #[wasm_bindgen(js_name = register_measure_font)]
+    pub fn register_owned_measure_font(&self, bytes: Vec<u8>) -> Result<u32, JsValue> {
         self.core
             .register_measure_font(bytes)
             .map_err(JsValue::from)
@@ -265,6 +304,19 @@ impl EditSession {
 
     pub fn decode_font(&self, bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
         self.core.decode_font(bytes).map_err(JsValue::from)
+    }
+
+    /// Replaces the outlines of measurement font `font_id` with `bytes`, a face
+    /// whose every table but `CFF ` is unchanged. Errors, leaving the font as
+    /// it was, for other bytes.
+    pub fn update_measure_font_outlines(&self, font_id: u32, bytes: &[u8]) -> Result<(), JsValue> {
+        self.core
+            .update_measure_font_outlines(font_id, bytes)
+            .map_err(JsValue::from)
+    }
+
+    pub fn take_base_latin_miss(&self) -> bool {
+        self.core.take_base_latin_miss()
     }
 
     /// Registers a measurement view of `base` carrying the vertical metrics
@@ -497,6 +549,15 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// The text each of `pages` shows in the retained layout, built or not, as
+    /// `[{"pageIndex","paragraphs":[{"text","level"?,"inTable"?}]}]`: body
+    /// paragraphs cut where the page cuts them, headings with their zero-based
+    /// outline level, and the rows of tables the page places, cell by cell.
+    /// Header rows a table repeats on later pages read only once.
+    pub fn page_texts_json(&self, pages: Vec<u32>) -> Result<String, JsValue> {
+        self.core.page_texts_json(pages).map_err(JsValue::from)
+    }
+
     /// Release display pages; an empty result means the request was superseded.
     pub fn release_display_pages_frame(
         &self,
@@ -644,6 +705,22 @@ impl EditSession {
     pub fn display_range_rects_json(&self, from: f64, to: f64) -> Result<String, JsValue> {
         self.core
             .display_range_rects_json(from, to)
+            .map_err(JsValue::from)
+    }
+
+    /// The kinds of effect the web canvas backend leaves off resident display
+    /// page `page_index`, as bits in `skippedEffectKinds()` order, the first
+    /// kind the lowest bit. `unavailable` holds `(region, area, index)` triples
+    /// for the pictures it could not draw: region 0 body, 1 header, 2 footer,
+    /// 3 note separator, 4 note, with `area` the note area's index.
+    #[wasm_bindgen(js_name = canvasSkippedEffects)]
+    pub fn canvas_skipped_effects(
+        &self,
+        page_index: u32,
+        unavailable: &[u32],
+    ) -> Result<u32, JsValue> {
+        self.core
+            .display_canvas_skipped_effects(page_index, unavailable)
             .map_err(JsValue::from)
     }
 
@@ -850,6 +927,13 @@ impl EditSession {
     /// when it seeded none.
     pub fn media_sources_json(&self) -> String {
         self.core.media_sources_json()
+    }
+
+    /// Adds to this replica's media sources every part of its own media table
+    /// they lack, so it resolves the `data:` URLs seeding wrote whether or not
+    /// it was seeded itself; `false` when nothing was added or it has no table.
+    pub fn rebuild_media_sources(&self) -> bool {
+        self.core.rebuild_media_sources()
     }
 
     /// Lays this replica's `data:` image sources out as the `media:{n}` tokens
@@ -1243,6 +1327,29 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// Current style and document-default language overrides as JSON.
+    pub fn style_languages_json(&self) -> String {
+        self.core.style_languages_json()
+    }
+
+    /// Sets language slots; no style ID selects document defaults. Null clears a slot.
+    pub fn set_style_language(
+        &self,
+        style_id: Option<String>,
+        slots_json: &str,
+    ) -> Result<bool, JsValue> {
+        self.core
+            .set_style_language(style_id.as_deref(), slots_json)
+            .map_err(JsValue::from)
+    }
+
+    /// Patches styles XML with the session's language overrides.
+    pub fn patch_style_languages_xml(&self, source: &str) -> Result<String, JsValue> {
+        self.core
+            .patch_style_languages_xml(source)
+            .map_err(JsValue::from)
+    }
+
     pub fn list_sections_json(&self) -> Result<String, JsValue> {
         self.core.list_sections_json().map_err(JsValue::from)
     }
@@ -1477,6 +1584,20 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// Sets the height, in twips, and the `w:hRule` of the row holding the cell
+    /// `at_json` ([`CellLoc`]) names. Always a plain local edit. Errors unless
+    /// `height_twips` is finite and positive and `rule` is `atLeast` or `exact`.
+    pub fn set_row_height(
+        &self,
+        at_json: &str,
+        height_twips: f64,
+        rule: &str,
+    ) -> Result<String, JsValue> {
+        self.core
+            .set_row_height(at_json, height_twips, rule)
+            .map_err(JsValue::from)
+    }
+
     /// Sets the preferred width, in twips, of the table `table_json`
     /// ([`TableLocator`]) names. Always a plain local edit. Errors unless
     /// `width_twips` is finite and positive.
@@ -1653,9 +1774,9 @@ impl EditSession {
     /// {"type":"fontFamily"|"color","value":string} |
     /// {"type":"fontSize","value":number}`. The six boolean types TOGGLE —
     /// they turn on unless the whole range already carries the mark — while
-    /// font family, size and color SET. Formatting is always a plain local
-    /// edit, never a tracked change, so there is no receipt. Errors on an
-    /// unknown `"type"` or a missing/mistyped `"value"`.
+    /// font family, size and color SET. Errors on an
+    /// unknown `"type"` or a missing/mistyped `"value"`. Returns
+    /// `{"keptUnchanged": {reason: count}}`, as `format_range` does.
     #[allow(clippy::too_many_arguments)]
     pub fn toggle_mark(
         &self,
@@ -1665,7 +1786,9 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
         mark_json: &str,
-    ) -> Result<(), JsValue> {
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
         self.core
             .toggle_mark(
                 story,
@@ -1674,6 +1797,8 @@ impl EditSession {
                 end_para,
                 end_offset,
                 mark_json,
+                author_name,
+                author_date,
             )
             .map_err(JsValue::from)
     }
@@ -1697,8 +1822,10 @@ impl EditSession {
     ///
     /// `false` clears `bold`, `italic`, `underline` and `strike`. `color`
     /// takes exactly one of `rgb` or `themeColor`. `other` writes arbitrary
-    /// run attributes, with `null` removing one. Always a plain local edit, so
-    /// there is no receipt. Errors when a key carries a type not listed here.
+    /// run attributes, with `null` removing one. Errors on invalid types.
+    /// Returns `{"keptUnchanged": {reason: count}}`, the table-cell and
+    /// content-control paragraphs left unchanged because saving them
+    /// rewritten would lose content of their source.
     #[allow(clippy::too_many_arguments)]
     pub fn format_range(
         &self,
@@ -1708,7 +1835,9 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
         delta_json: &str,
-    ) -> Result<(), JsValue> {
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
         self.core
             .format_range(
                 story,
@@ -1717,6 +1846,8 @@ impl EditSession {
                 end_para,
                 end_offset,
                 delta_json,
+                author_name,
+                author_date,
             )
             .map_err(JsValue::from)
     }
@@ -1735,6 +1866,8 @@ impl EditSession {
         end_para: &str,
         end_offset: u32,
         hyperlink_json: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> Result<(), JsValue> {
         self.core
             .set_hyperlink(
@@ -1744,13 +1877,16 @@ impl EditSession {
                 end_para,
                 end_offset,
                 hyperlink_json,
+                author_name,
+                author_date,
             )
             .map_err(JsValue::from)
     }
 
     /// Clears every direct run-formatting attribute over `[start, end)`.
     /// Protected attributes — hyperlinks and tracked-change stamps — survive,
-    /// as do paragraph properties.
+    /// as do paragraph properties. Returns `{"keptUnchanged": {reason: count}}`
+    /// as [`Self::format_range`] does.
     #[allow(clippy::too_many_arguments)]
     pub fn clear_formatting(
         &self,
@@ -1759,9 +1895,19 @@ impl EditSession {
         start_offset: u32,
         end_para: &str,
         end_offset: u32,
-    ) -> Result<(), JsValue> {
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
         self.core
-            .clear_formatting(story, start_para, start_offset, end_para, end_offset)
+            .clear_formatting(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                author_name,
+                author_date,
+            )
             .map_err(JsValue::from)
     }
 
@@ -2467,7 +2613,7 @@ impl EditSession {
     /// `[{"revisionId","author","date","kind","story","preview",
     /// "range":{"story","start":{"paraId","offset"},"end":{…}}}, …]`. `kind`
     /// is one of `"insertion"`, `"deletion"`, `"pPrIns"`, `"pPrDel"`,
-    /// `"pPrChange"`, `"trIns"`, `"trDel"`, `"tableIns"` or `"tableDel"`.
+    /// `"pPrChange"`, `"rPrChange"`, `"trIns"`, `"trDel"`, `"tableIns"` or `"tableDel"`.
     /// `preview` holds the first few characters of the affected text, and is
     /// empty for every structural kind, which covers no text.
     pub fn list_revisions(&self) -> Result<String, JsValue> {
@@ -2507,6 +2653,15 @@ impl EditSession {
     /// replicas.
     pub fn story_ids(&self) -> Vec<String> {
         self.core.story_ids()
+    }
+
+    /// `[{"story","tableIndex"}]` from a full walk of the roots in `roots_json`, or `null` when
+    /// a walk cannot finish.
+    /// @internal
+    pub fn unavailable_tables_from(&self, roots_json: &str) -> Result<String, JsValue> {
+        self.core
+            .unavailable_tables_from(roots_json)
+            .map_err(JsValue::from)
     }
 
     /// Story length in UTF-16 units, every embed (pilcrows included) counting
@@ -2552,9 +2707,13 @@ impl EditSession {
 
     /// Compact paragraph-position projection built in one story traversal:
     /// `[{"paraId","length"}, …]` in document order, where `length` counts the
-    /// UTF-16 text and inline embed units before that paragraph's pilcrow —
-    /// exactly the `offset` domain of a Loc in it. One call replaces crossing
-    /// the boundary once per paragraph. Errors on an unknown story.
+    /// UTF-16 text, inline embed units and one unit per block embed (table,
+    /// block content control) that leads the paragraph, before its pilcrow —
+    /// exactly the `offset` domain of a Loc in it. In a paragraph that follows
+    /// one table, offset 0 is before the table and the text starts at offset 1;
+    /// each further leading table or block content control adds one.
+    /// One call replaces crossing the boundary once per paragraph. Errors on an
+    /// unknown story.
     pub fn paragraph_spans(&self, story: &str) -> Result<String, JsValue> {
         self.core.paragraph_spans(story).map_err(JsValue::from)
     }
@@ -2716,6 +2875,11 @@ impl EditSession {
             .prime_save_seed_states_slice(paragraphs, inflated, max_bytes)
     }
 
+    /// What the last [`Self::prime_save_seed_states_slice`] call charged against its `max_bytes`.
+    pub fn prime_last_slice_cost(&self) -> f64 {
+        self.core.prime_last_slice_cost() as f64
+    }
+
     /// The paragraph IDs a save applies, as the package writer's
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
     /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,
@@ -2799,6 +2963,15 @@ pub fn render_docx_markdown_with_pages_json(
     options: &str,
 ) -> Result<String, JsValue> {
     crate::session::free::render_docx_markdown_with_pages_json(content, options).map_err(js_err)
+}
+
+#[cfg(test)]
+impl EditSession {
+    fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
+        self.core
+            .register_measure_font(bytes)
+            .map_err(JsValue::from)
+    }
 }
 
 #[cfg(test)]
@@ -3044,7 +3217,16 @@ mod tests {
         crate::STORY_INDEX_UNITS_BUILT.with(|built| assert!(built.get() <= 3));
         assert_targeted(false);
         session
-            .format_range("body", &para_id, 0, &para_id, 1, r#"{"bold":true}"#)
+            .format_range(
+                "body",
+                &para_id,
+                0,
+                &para_id,
+                1,
+                r#"{"bold":true}"#,
+                None,
+                None,
+            )
             .unwrap();
         assert_targeted(true);
         crate::STORY_INDEX_UNITS_BUILT.with(|built| built.set(0));
@@ -3120,7 +3302,16 @@ mod tests {
             .unwrap();
         assert_targeted();
         session
-            .format_range("body", &para_id, 0, &para_id, 1, r#"{"bold":true}"#)
+            .format_range(
+                "body",
+                &para_id,
+                0,
+                &para_id,
+                1,
+                r#"{"bold":true}"#,
+                None,
+                None,
+            )
             .unwrap();
         crate::TABLE_MEMBERSHIP_STORIES_SCANNED.with(|scanned| scanned.set(0));
         let context = read_context("body", &para_id);

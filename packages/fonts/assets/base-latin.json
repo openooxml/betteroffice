@@ -1,0 +1,48 @@
+{
+  "format": 1,
+  "schema": 1,
+  "pack": "base-latin",
+  "version": "1",
+  "faces": [
+    {
+      "file": "BetterOfficeBaseLatin-Regular.ttf.zst",
+      "source": "BetterOfficeBaseLatin-Regular.ttf",
+      "family": "BetterOffice Base Latin",
+      "codec": "zstd",
+      "dict": null,
+      "encodedLength": 48737,
+      "byteLength": 85920,
+      "sha256": "51d1dcec287000a2043782a69b9ee7f035ae834e465951499176c3355407da43"
+    },
+    {
+      "file": "BetterOfficeBaseLatin-Bold.ttf.zst",
+      "source": "BetterOfficeBaseLatin-Bold.ttf",
+      "family": "BetterOffice Base Latin",
+      "codec": "zstd",
+      "dict": null,
+      "encodedLength": 18848,
+      "byteLength": 34548,
+      "sha256": "9bf0b21fed98275570a190200a97896689558ba7693bc85832aa482eb29c80b7"
+    },
+    {
+      "file": "BetterOfficeBaseLatin-Italic.ttf.zst",
+      "source": "BetterOfficeBaseLatin-Italic.ttf",
+      "family": "BetterOffice Base Latin",
+      "codec": "zstd",
+      "dict": null,
+      "encodedLength": 19853,
+      "byteLength": 35704,
+      "sha256": "b17266b332d081245d500e9a1f136725f2741e98e34d93e30309ba803ce96d60"
+    },
+    {
+      "file": "BetterOfficeBaseLatin-BoldItalic.ttf.zst",
+      "source": "BetterOfficeBaseLatin-BoldItalic.ttf",
+      "family": "BetterOffice Base Latin",
+      "codec": "zstd",
+      "dict": null,
+      "encodedLength": 19803,
+      "byteLength": 35616,
+      "sha256": "ae4d6b157e91f89673009bf2a3d8748eaba978b1daeb81323cc6c4c88589861a"
+    }
+  ]
+}

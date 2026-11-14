@@ -10,10 +10,8 @@ pub const STATUS_HEIGHT: f64 = 28.0;
 pub const ZOOM_MIN: f64 = 0.25;
 pub const ZOOM_MAX: f64 = 5.0;
 
-const FONT_BYTES: &[u8] =
-    include_bytes!("../../../packages/fonts/assets/LiberationSans-Regular.ttf");
-const BOLD_FONT_BYTES: &[u8] =
-    include_bytes!("../../../packages/fonts/assets/LiberationSans-Bold.ttf");
+static FONT_BYTES: &[u8] = base_latin::REGULAR;
+static BOLD_FONT_BYTES: &[u8] = base_latin::BOLD;
 const FONT_SIZE: f32 = 13.0;
 const ICON_SIZE: f32 = 16.0;
 

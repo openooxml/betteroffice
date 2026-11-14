@@ -148,6 +148,22 @@ pub fn resolve_script_fallback_face(
         .or_else(|| faces.first().copied())
 }
 
+/// The script fallback for text that requests `family`: the catalog's face for
+/// that family and script whatever the style, else [`resolve_script_fallback_face`].
+pub fn resolve_family_script_fallback_face(
+    family: &str,
+    script: &str,
+    bold: bool,
+    italic: bool,
+) -> Option<&'static BundledFontFace> {
+    catalog()
+        .requested_family_script_fallback
+        .get(&key(family))
+        .and_then(|scripts| scripts.get(script))
+        .and_then(|file| catalog().faces.iter().find(|face| &face.file == file))
+        .or_else(|| resolve_script_fallback_face(script, bold, italic))
+}
+
 fn variant(family: &str, italic: bool, heavy: bool) -> Option<&'static BundledFontFace> {
     let family = family.trim_matches(whitespace);
     if family.ends_with('-') {
@@ -230,6 +246,9 @@ fn resolve_base_face(
     }
     if let Some(face) = variant(family, italic, true).filter(allowed) {
         return face;
+    }
+    if catalog().emulated_symbol_families.contains(&key(family)) {
+        return resolve_metric_compat_face("Arial", bold, italic).expect("bundled Arial face");
     }
     let families = &catalog().last_resort_families[office.key()];
     if looks_mono(family) {

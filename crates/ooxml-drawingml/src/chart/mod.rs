@@ -4,10 +4,12 @@
 //! here is format-specific. Hosts supply XML access via [`ChartXml`] and
 //! translate the [`PlotOp`] list into their own primitives.
 
+mod data;
 mod geometry;
 mod model;
 mod parse;
 
+pub use data::*;
 pub use geometry::*;
 pub use model::*;
 pub use parse::*;

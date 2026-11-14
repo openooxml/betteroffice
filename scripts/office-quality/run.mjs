@@ -1,20 +1,23 @@
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { FORMATS, renderSection } from './readme.mjs';
+import { FORMATS, fontArmFailures, renderSection } from './readme.mjs';
 import { measureSamples } from './results.mjs';
 import { validateReferenceMetadata } from './reference.mjs';
 import { download } from './download.mjs';
 import { fetchAsset, resolveAssetCacheDir } from './asset-cache.mjs';
-import { CORPUS_ORIGIN as corpus } from './samples.mjs';
-import { preparePlan, selectPlanSamples, validatePlan } from './plan.mjs';
+import { corpusOrigin } from './samples.mjs';
+import { preparePlan, registryLoaders, selectPlanSamples, validatePlan } from './plan.mjs';
+import { measureShard } from './measure-shards.mjs';
 
 const execute = promisify(execFile);
 const output = resolve(process.env.QUALITY_OUTPUT ?? '.source/office-quality/run');
 const assetCache = resolveAssetCacheDir(process.env);
 const python = process.env.QUALITY_PYTHON ?? 'python3';
+const corpus = corpusOrigin();
 if (
   (
     await command('git', [
@@ -42,20 +45,11 @@ async function command(program, args, options = {}) {
   return result.stdout;
 }
 
-async function registry(name) {
-  return JSON.parse(
-    await download(
-      `https://registry.npmjs.org/${encodeURIComponent(name)}/latest`,
-      2 * 1024 * 1024
-    )
-  );
-}
-
 async function checkoutPlan() {
   const file = process.env.QUALITY_PLAN?.trim();
   const plan = file
     ? validatePlan(JSON.parse(await readFile(resolve(file), 'utf8')))
-    : await preparePlan(process.env, { download, command, registry });
+    : await preparePlan(process.env, { download, command, ...registryLoaders(download) });
   const [sourceSha, commit] = await Promise.all([
     command('git', ['rev-parse', 'HEAD']),
     command('git', ['log', '-1', '--format=%H', '--', '.', ':!README.md']),
@@ -106,6 +100,54 @@ async function reference({ id, format, metadata }) {
   };
 }
 
+function publishedFontsVersion(format, record = 'published_fonts', name = '@betteroffice/fonts') {
+  const version = plan[record]?.[format];
+  if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version ?? ''))
+    throw new Error(`The plan does not record the ${name} release of published ${format}`);
+  return version;
+}
+
+const publishedFontsCjkVersion = (format) =>
+  publishedFontsVersion(format, 'published_fonts_cjk', '@betteroffice/fonts-cjk');
+
+async function fontSource(format, channel) {
+  if (channel === 'published')
+    return {
+      package: `@betteroffice/fonts@${publishedFontsVersion(format)}`,
+      cjk: `@betteroffice/fonts-cjk@${publishedFontsCjkVersion(format)}`,
+      copy: 'local release copy',
+    };
+  const { version } = JSON.parse(await readFile(resolve('packages/fonts/package.json'), 'utf8'));
+  return { package: `@betteroffice/fonts@${version}`, copy: 'workspace' };
+}
+
+async function recordFonts(samples, format, channel) {
+  const source = await fontSource(format, channel);
+  for (const sample of samples) {
+    const capture = JSON.parse(
+      await readFile(resolve(sample.directory, channel, 'result.json'), 'utf8').catch(() => 'null')
+    );
+    const comparison = sample.comparisons.find((entry) => entry.channel === channel);
+    if (comparison)
+      comparison.fonts = {
+        ...source,
+        ...(format === 'docx' ? { measured: true, capture: capture?.status ?? 'error' } : {}),
+        ...(capture?.status === 'ok' ? capture.font_faces ?? {} : {}),
+      };
+  }
+}
+
+/** DOCX arms whose completed captures did not load an advertised face, recorded no font loads, or do not exist (named). */
+function fontFailures(samples) {
+  const failures = [];
+  for (const channel of ['published', 'commit']) {
+    const arm = fontArmFailures(samples, channel);
+    console.log(arm.line);
+    failures.push(...arm.failures);
+  }
+  return failures;
+}
+
 async function packageRoot(name, version) {
   const directory = resolve(output, 'packages', name.replace('@betteroffice/', ''));
   await mkdir(directory, { recursive: true });
@@ -121,6 +163,11 @@ async function packageRoot(name, version) {
   );
   const archive = result[0].filename;
   if (!/^[\w.-]+\.tgz$/.test(archive)) throw new Error('Invalid npm tarball filename');
+  const integrity = `sha512-${createHash('sha512').update(await readFile(resolve(directory, archive))).digest('base64')}`;
+  const registered = (await command('npm', ['view', `${name}@${version}`, 'dist.integrity'])).trim();
+  if (integrity !== registered)
+    throw new Error(`${name}@${version} tarball integrity ${integrity} does not match the registry's ${registered || 'missing value'}`);
+  console.log(`${name}@${version} integrity ${integrity} (matches the registry)`);
   await command('tar', [
     '-xzf',
     resolve(directory, archive),
@@ -143,6 +190,8 @@ async function viewer(overrides = {}) {
   delete env.QUALITY_PACKAGE_ROOT;
   delete env.QUALITY_REACT_ROOT;
   delete env.QUALITY_FONT_ASSETS;
+  delete env.QUALITY_FONTS_ROOT;
+  delete env.QUALITY_FONTS_CJK_ROOT;
   Object.assign(env, overrides);
   const child = spawn(process.execPath, ['scripts/docx-quality/server.mjs'], {
     env,
@@ -178,10 +227,15 @@ async function viewer(overrides = {}) {
 
 const plan = await checkoutPlan();
 const requestedFormat = process.env.QUALITY_FORMAT?.trim() || null;
-const { formats: selectedFormats, samples: selectedPlanSamples } = selectPlanSamples(
+const { formats: selectedFormats, samples: formatSamples } = selectPlanSamples(
   plan,
   requestedFormat
 );
+const requestedShard = process.env.QUALITY_SHARD?.trim() || null;
+if (requestedShard !== null && (!requestedFormat || !/^(0|[1-9][0-9]{0,3})$/.test(requestedShard)))
+  throw new Error('QUALITY_SHARD needs QUALITY_FORMAT and a shard index');
+const shardIds = requestedShard === null ? null : new Set(measureShard(plan, requestedFormat, Number(requestedShard)).samples);
+const selectedPlanSamples = shardIds ? formatSamples.filter((sample) => shardIds.has(sample.id)) : formatSamples;
 const samples = [];
 for (const sample of selectedPlanSamples) samples.push(await reference(sample));
 for (const format of selectedFormats) {
@@ -199,6 +253,8 @@ for (const format of selectedFormats) {
           ),
         }
       : {}),
+    QUALITY_FONTS_ROOT: await packageRoot('@betteroffice/fonts', publishedFontsVersion(format)),
+    QUALITY_FONTS_CJK_ROOT: await packageRoot('@betteroffice/fonts-cjk', publishedFontsCjkVersion(format)),
   };
   for (const channel of ['published', 'commit']) {
     const server = await viewer({
@@ -232,6 +288,9 @@ for (const format of selectedFormats) {
                 env: {
                   ...process.env,
                   QUALITY_CAPTURE_CONFIG: JSON.stringify(sample.capture_profile),
+                  ...(channel === 'published'
+                    ? { QUALITY_PUBLISHED_FONTS: publishedFontsVersion(format) }
+                    : {}),
                   QUALITY_ENGINE_LABEL:
                     channel === 'published'
                       ? `@betteroffice/${format}@${plan.versions[format]}${
@@ -259,16 +318,21 @@ for (const format of selectedFormats) {
     } finally {
       server.child.kill();
     }
+    await recordFonts(samples.filter((sample) => sample.format === format), format, channel);
   }
 }
+const docxSamples = samples.filter((sample) => sample.format === 'docx');
+const fontProblems = docxSamples.length ? fontFailures(docxSamples) : [];
 const report = {
   source_sha: plan.source_sha,
   commit: plan.commit,
   versions: plan.versions,
   react_version: plan.react_version,
   ...(requestedFormat ? { format: requestedFormat } : {}),
+  ...(requestedShard !== null ? { shard: Number(requestedShard) } : {}),
   samples: samples.map(({ source, directory, ...sample }) => sample),
 };
 await writeFile(resolve(output, 'report.json'), JSON.stringify(report, null, 2) + '\n');
 await writeFile(resolve(output, 'section.md'), renderSection(report));
 console.log(`Generated ${resolve(output, 'section.md')}`);
+if (fontProblems.length) throw new Error(`Font check failed: ${fontProblems.join('; ')}`);

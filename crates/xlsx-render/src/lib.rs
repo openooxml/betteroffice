@@ -12,7 +12,7 @@ pub mod wrap;
 
 pub use ooxml_drawingml::GeometryPathCommand;
 use std::sync::Arc;
-pub use xlsx_model::PatternType;
+pub use xlsx_model::{PatternType, RunUnderline};
 
 use hashbrown::HashMap;
 use ooxml_drawingml::chart::ChartSpace;
@@ -30,8 +30,9 @@ use xlsx_model::{
 };
 
 pub use chart::{
-    AnchorError, MAX_CHART_OPS_PER_FRAME, RenderError, ResolvedChartAnchor, chart_regions,
-    moved_chart_anchor, resolve_chart_anchor,
+    AnchorError, ChartResize, MAX_CHART_OPS_PER_FRAME, MIN_CHART_EXTENT_PX, RenderError,
+    ResolvedChartAnchor, chart_regions, moved_chart_anchor, resized_chart_anchor,
+    resolve_chart_anchor,
 };
 pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
@@ -76,6 +77,7 @@ const GHOST_INS_HIGHLIGHT: &str = "#2e7d321a";
 const GHOST_CHAR_W_RATIO: f32 = 0.6;
 const GHOST_GAP_PX: f32 = 6.0;
 const GHOST_MIN_SCALE: f32 = 0.6;
+const GHOST_FIT_EPSILON_PX: f32 = 1e-3;
 
 /// a pending edit rendered as a ghost pair in place of the cell's committed
 /// text: `old_text` struck in red, `new_text` in green.
@@ -94,12 +96,15 @@ struct GhostFont {
     bold: bool,
     italic: bool,
     underline: bool,
+    underline_style: Option<RunUnderline>,
 }
 
 #[derive(Clone, Copy)]
 struct AxisTrack {
     index: u32,
     raw_start: f32,
+    /// full track size in sheet px, before the frozen pane or the viewport clips it
+    raw_size: f32,
     start: f32,
     end: f32,
     pinned: bool,
@@ -154,6 +159,7 @@ impl AxisLayout {
                 tracks.push(AxisTrack {
                     index,
                     raw_start: start,
+                    raw_size: edge(index + 1) - start,
                     start,
                     end: edge(index + 1),
                     pinned: true,
@@ -184,6 +190,7 @@ impl AxisLayout {
                 tracks.push(AxisTrack {
                     index,
                     raw_start,
+                    raw_size: raw_end - raw_start,
                     start: if frozen > 0 {
                         raw_start.max(frozen_extent)
                     } else {
@@ -233,6 +240,12 @@ impl AxisLayout {
         std::iter::once(first.start)
             .chain(self.tracks.iter().map(|track| track.end))
             .collect()
+    }
+
+    /// full track sizes, parallel to `offsets`: independent of scroll and of a
+    /// frozen pane clipping the track's leading edge.
+    fn sizes(&self) -> Vec<f32> {
+        self.tracks.iter().map(|track| track.raw_size).collect()
     }
 
     fn contains(&self, index: u32) -> bool {
@@ -765,6 +778,13 @@ where
     .into();
     let pane_divider_color: Arc<str> = PANE_DIVIDER_COLOR.into();
     let print_font_family: Option<Arc<str>> = print.map(|(m, _)| m.font_family.as_str().into());
+    let fallback_font_family: Arc<str> = print_font_family.clone().unwrap_or_else(|| {
+        geometry::normal_font(styles)
+            .and_then(|font| font.name.as_deref())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("Calibri")
+            .into()
+    });
     let indent_step = geometry::indent_step_px(styles, print.map(|(m, _)| m));
     let mut fx = FrameStyles::new(styles, sheet_ref);
     let geom = geometry.expect("sheet geometry initialized");
@@ -775,12 +795,18 @@ where
     let grid = GridMeta {
         start_row: rows.start(),
         start_col: cols.start(),
+        frozen_rows: (rows.frozen > 0).then_some(rows.frozen),
+        frozen_cols: (cols.frozen > 0).then_some(cols.frozen),
+        divider_x: cols.divider,
+        divider_y: rows.divider,
         hidden_row_spans: sheet_ref.hidden_row_spans(0..=MAX_ROWS - 1).collect(),
         hidden_col_spans: sheet_ref.hidden_col_spans(0..=MAX_COLS - 1).collect(),
         row_indices: rows.indices(),
         col_indices: cols.indices(),
         row_offsets: rows.offsets(),
         col_offsets: cols.offsets(),
+        row_sizes: rows.sizes(),
+        col_sizes: cols.sizes(),
     };
     let hyperlinks = sheet_ref
         .hyperlinks
@@ -831,7 +857,8 @@ where
         .map(|g| (g.row, g.col))
         .collect();
 
-    let grid_commands = if print.is_some_and(|(_, gridlines)| !gridlines) {
+    let gridlines = print.map_or(!sheet_ref.format.hide_gridlines, |(_, gridlines)| gridlines);
+    let grid_commands = if !gridlines {
         Vec::new()
     } else {
         emit_grid_segments(
@@ -995,10 +1022,20 @@ where
         let bold = font.is_some_and(|f| f.bold);
         let italic = font.is_some_and(|f| f.italic);
         let underline = font.is_some_and(|f| f.underline);
+        let underline_style = font.and_then(|f| f.underline_style);
         let strike = font.is_some_and(|f| f.strike);
         let font_family = font
             .and_then(|f| f.family.clone())
-            .or_else(|| print_font_family.clone());
+            .or_else(|| Some(fallback_font_family.clone()));
+        let text = match font_family
+            .as_deref()
+            .and_then(ooxml_drawingml::SymbolFont::named)
+        {
+            Some(face) if parts.is_empty() && matches!(cell.value, CellValue::Text { .. }) => face
+                .display_text(&text)
+                .map_or(text, |symbol| symbol.text.into()),
+            _ => text,
+        };
 
         let left_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi);
         let right_pad = print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi);
@@ -1131,6 +1168,7 @@ where
             bold,
             italic,
             underline: hyperlink.is_some() || underline,
+            underline_style,
             strike,
             highlight: None,
             dashed_underline: false,
@@ -1171,10 +1209,11 @@ where
             bold: false,
             italic: false,
             underline: true,
+            underline_style: None,
             strike: false,
             highlight: None,
             dashed_underline: false,
-            font_family: print_font_family.clone(),
+            font_family: Some(fallback_font_family.clone()),
             number_format: None,
             ghost: false,
             chart: false,
@@ -1202,6 +1241,7 @@ where
             bold: font.is_some_and(|font| font.bold),
             italic: font.is_some_and(|font| font.italic),
             underline: font.is_some_and(|font| font.underline),
+            underline_style: font.and_then(|font| font.underline_style),
         };
         let Some(bx) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
@@ -1299,6 +1339,7 @@ fn emit_ghost(
             bold: font.bold,
             italic: font.italic,
             underline: font.underline,
+            underline_style: font.underline_style,
             strike,
             highlight: Some(
                 if preview {
@@ -1347,7 +1388,7 @@ fn emit_ghost(
 
     let old_width = ghost_text_width(old, full_size);
     let new_width = ghost_text_width(new, full_size);
-    if old_width + GHOST_GAP_PX + new_width <= avail {
+    if old_width + GHOST_GAP_PX + new_width <= avail + GHOST_FIT_EPSILON_PX {
         let baseline = baseline_y(cy0, ch, full_size, None);
         line(
             x,
@@ -1409,11 +1450,11 @@ fn ghost_text_width(text: &str, size: f32) -> f32 {
 /// `text` unchanged when its estimate fits `budget`, else a truncated prefix
 /// ending in `…`.
 fn ellipsize(text: &str, budget: f32, size: f32) -> String {
-    if ghost_text_width(text, size) <= budget {
+    if ghost_text_width(text, size) <= budget + GHOST_FIT_EPSILON_PX {
         return text.to_string();
     }
     let char_w = size * geometry::PX_PER_PT as f32 * GHOST_CHAR_W_RATIO;
-    let keep = ((budget / char_w) as i32 - 1).max(0) as usize;
+    let keep = (((budget + GHOST_FIT_EPSILON_PX) / char_w) as i32 - 1).max(0) as usize;
     let prefix: String = text.chars().take(keep).collect();
     format!("{prefix}…")
 }
@@ -2039,6 +2080,7 @@ struct ResolvedFont {
     bold: bool,
     italic: bool,
     underline: bool,
+    underline_style: Option<RunUnderline>,
     strike: bool,
     color: Option<Arc<str>>,
 }
@@ -2102,7 +2144,8 @@ impl<'a> FrameStyles<'a> {
                 family: font.name.as_deref().map(Arc::from),
                 bold: font.bold,
                 italic: font.italic,
-                underline: font.underline,
+                underline: font.underline != RunUnderline::None,
+                underline_style: font.underline_style(),
                 strike: font.strike,
                 color: font
                     .color
@@ -3006,6 +3049,149 @@ mod tests {
         assert!(text.contains(&("Jump", HYPERLINK_COLOR, true)));
     }
 
+    fn screen_text_families(wb: &Workbook) -> Vec<(String, Option<String>)> {
+        build_display_list(
+            wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 120.0,
+            },
+        )
+        .unwrap()
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::Text {
+                text, font_family, ..
+            } => Some((text.to_string(), font_family.as_deref().map(str::to_owned))),
+            _ => None,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn screen_text_without_a_family_takes_the_normal_font_or_calibri() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("Plain"));
+        sheet.set_cell(CellRef::new(1, 0), text_cell("Website"));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("A2").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: None,
+        });
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        for (text, family) in screen_text_families(&wb) {
+            assert_eq!(family.as_deref(), Some("Calibri"), "{text}");
+        }
+        wb.styles.fonts.push(xlsx_model::styles::Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Default::default()
+        });
+        wb.styles.cell_xfs.push(xlsx_model::styles::Xf {
+            font: Some(0),
+            ..Default::default()
+        });
+        let families = screen_text_families(&wb);
+        assert_eq!(families.len(), 2);
+        for (text, family) in families {
+            assert_eq!(family.as_deref(), Some("Arial"), "{text}");
+        }
+    }
+
+    #[test]
+    fn screen_text_fallback_follows_the_grid_normal_font_and_covers_display_only_links() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("Plain"));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("C3").unwrap(),
+            external_target: None,
+            location: Some("Sheet1!A1".into()),
+            tooltip: None,
+            display: Some("Jump".into()),
+        });
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        wb.styles.fonts.push(xlsx_model::styles::Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Default::default()
+        });
+        wb.styles.cell_xfs.push(xlsx_model::styles::Xf::default());
+        let families = screen_text_families(&wb);
+        assert_eq!(families.len(), 2);
+        for (text, family) in families {
+            assert_eq!(family.as_deref(), Some("Arial"), "{text}");
+        }
+    }
+
+    #[test]
+    fn text_commands_carry_the_font_underline_kind() {
+        let kinds = [
+            RunUnderline::None,
+            RunUnderline::Single,
+            RunUnderline::Double,
+            RunUnderline::SingleAccounting,
+            RunUnderline::DoubleAccounting,
+        ];
+        let mut sheet = Sheet::new("Sheet1");
+        let mut wb = Workbook::default();
+        for (index, underline) in kinds.into_iter().enumerate() {
+            let index = index as u32;
+            sheet.set_cell(
+                CellRef::new(index, 0),
+                Cell {
+                    style: Some(index),
+                    ..text_cell(&format!("t{index}"))
+                },
+            );
+            wb.styles.fonts.push(xlsx_model::styles::Font {
+                underline,
+                ..Default::default()
+            });
+            wb.styles.cell_xfs.push(xlsx_model::styles::Xf {
+                font: Some(index),
+                ..Default::default()
+            });
+        }
+        wb.sheets.push(sheet);
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 200.0,
+        };
+        let drawn: Vec<_> = build_display_list(&wb, SheetId(0), &viewport)
+            .unwrap()
+            .commands
+            .into_iter()
+            .filter_map(|command| match command {
+                DrawCmd::Text {
+                    underline,
+                    underline_style,
+                    ..
+                } => Some((underline, underline_style)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                (false, None),
+                (true, None),
+                (true, Some(RunUnderline::Double)),
+                (true, Some(RunUnderline::SingleAccounting)),
+                (true, Some(RunUnderline::DoubleAccounting)),
+            ]
+        );
+    }
+
     #[test]
     fn grid_meta_covers_visible_boundaries() {
         let mut wb = Workbook::default();
@@ -3055,6 +3241,18 @@ mod tests {
 
         assert_eq!(dl.grid.start_col, 0);
         assert_eq!(dl.grid.start_row, 0);
+        assert_eq!(dl.grid.frozen_cols, Some(1));
+        assert_eq!(dl.grid.frozen_rows, Some(1));
+        // the divider sits on the trailing edge of the frozen track, in the
+        // same viewport pixels the canvas draws it in.
+        assert_eq!(dl.grid.divider_x, Some(dc));
+        assert_eq!(dl.grid.divider_y, Some(dr));
+        // the wasm boundary serializes these camelCase and only when present.
+        let wire = serde_json::to_value(&dl).unwrap();
+        assert_eq!(wire["grid"]["frozenRows"], serde_json::json!(1));
+        assert_eq!(wire["grid"]["frozenCols"], serde_json::json!(1));
+        assert_eq!(wire["grid"]["dividerX"], serde_json::json!(dc));
+        assert_eq!(wire["grid"]["dividerY"], serde_json::json!(dr));
         assert_eq!(dl.grid.col_indices.as_deref(), Some(&[0, 3, 4, 5][..]));
         assert_eq!(dl.grid.row_indices.as_deref(), Some(&[0, 4, 5, 6][..]));
         assert_eq!(
@@ -3110,6 +3308,76 @@ mod tests {
                 if *y1 == dr && *y2 == dr && *width == PANE_DIVIDER_WIDTH
                     && &**color == PANE_DIVIDER_COLOR
         )));
+    }
+
+    #[test]
+    fn track_sizes_ignore_the_frozen_clip() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 30.0);
+        sheet.freeze_pane = Some(FreezePane::new(1, 1, CellRef::new(2, 2)));
+        sheet.set_cell(CellRef::new(1, 1), text_cell("x"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let dr = geometry::row_pt_to_px(geometry::DEFAULT_ROW_HEIGHT_PT);
+        let frozen_w = geometry::col_chars_to_px(30.0);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 20.0,
+                y: 5.0,
+                width: 400.0,
+                height: 300.0,
+            },
+        )
+        .unwrap();
+
+        // the frozen pane clips the body tracks' start in the offset arrays...
+        assert!((dl.grid.col_sizes[0] - frozen_w).abs() < 0.01);
+        assert!((dl.grid.col_sizes[1] - dc).abs() < 0.01);
+        assert!((dl.grid.row_sizes[0] - dr).abs() < 0.01);
+        assert!((dl.grid.row_sizes[1] - dr).abs() < 0.01);
+        assert!(dl.grid.col_offsets[2] - dl.grid.col_offsets[1] < dc - 1.0);
+        assert!(dl.grid.row_offsets[2] - dl.grid.row_offsets[1] < dr - 1.0);
+
+        // ...while the sizes report the full track extent.
+        assert_eq!(dl.grid.col_sizes.len(), dl.grid.col_offsets.len() - 1);
+        assert_eq!(dl.grid.row_sizes.len(), dl.grid.row_offsets.len() - 1);
+
+        // the wire serializes the size arrays camelCase.
+        let wire = serde_json::to_value(&dl).unwrap();
+        assert!(wire["grid"]["colSizes"][1].as_f64().unwrap() > (dc - 1.0) as f64);
+        assert!(wire["grid"]["rowSizes"][1].as_f64().unwrap() > (dr - 1.0) as f64);
+    }
+
+    #[test]
+    fn unfrozen_frames_emit_no_freeze_metadata() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("body"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(dl.grid.frozen_rows, None);
+        assert_eq!(dl.grid.frozen_cols, None);
+        assert_eq!(dl.grid.divider_x, None);
+        assert_eq!(dl.grid.divider_y, None);
+        let wire = serde_json::to_value(&dl).unwrap();
+        for field in ["frozenRows", "frozenCols", "dividerX", "dividerY"] {
+            assert!(wire["grid"].get(field).is_none(), "{field} must be absent");
+        }
     }
 
     #[test]
@@ -3394,6 +3662,40 @@ mod tests {
         assert_eq!(lines[0].1, lines[1].1);
         assert!(lines[0].1 < FONT_SIZE_PT);
         assert!(lines[0].1 >= FONT_SIZE_PT * GHOST_MIN_SCALE);
+    }
+
+    fn default_cell_ghost_texts(old: &str, new: &str) -> Vec<String> {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell(old));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl =
+            build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, old, new)]).unwrap();
+        text_cmds(&dl)
+            .into_iter()
+            .map(|(text, ..)| text.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn stacked_ghost_exactly_filling_a_default_column_stays_whole() {
+        let texts = default_cell_ghost_texts("$1,000.00", "$2,000.00");
+        assert_eq!(texts, vec!["$2,000.00", "$1,000.00"]);
+    }
+
+    #[test]
+    fn stacked_ghost_one_char_past_a_default_column_is_shortened() {
+        let texts = default_cell_ghost_texts("$1,000.00", "$20,000.00");
+        assert_eq!(texts.len(), 2);
+        assert!(texts[0].ends_with('…'));
+        assert_eq!(texts[1], "$1,000.00");
     }
 
     #[test]

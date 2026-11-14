@@ -27,6 +27,9 @@ const CONSUMER = `import {
   defineDocxPlugin,
   useDocxCommand,
   type DocxPluginContext,
+  type DocxPluginSelectionSettleEvent,
+  type DocxGeometryTarget,
+  type DocxPluginRect,
   type DocxPluginGrant,
   type DocxPluginSidebarItem,
 } from '@betteroffice/docx-react';
@@ -48,6 +51,39 @@ export const review = defineDocxPlugin<State>({
   id: 'acme.review',
   createState: () => ({ count: 0 }),
   async onEvent(context, event) {
+    const focused: boolean = context.snapshot.focused;
+    const locale: string = context.snapshot.locale;
+    const settled: boolean = context.snapshot.selectionSettled;
+    const target: DocxGeometryTarget = { kind: 'selection' };
+    const anchor = context.geometry?.getAnchorGeometry(target);
+    const anchors = await context.geometry?.readAnchorGeometries([target]);
+    void [focused, locale, settled, anchor, anchors];
+    const viewport: DocxPluginRect | undefined = context.geometry?.viewport;
+    void viewport;
+    switch (event.type) {
+      case 'selection-settle': {
+        const settled: DocxPluginSelectionSettleEvent = event;
+        const source: 'pointer' | 'touch' | 'keyboard' = settled.source;
+        const publicSources: Record<typeof settled.source, true> = { pointer: true, touch: true, keyboard: true };
+        void [source, publicSources, settled.version, settled.selection];
+        break;
+      }
+      case 'focus-change': {
+        const focused: boolean = event.focused;
+        void focused;
+        break;
+      }
+      case 'locale-change': {
+        const locale: string = event.locale;
+        void locale;
+        break;
+      }
+      case 'viewport-change': {
+        const viewport: DocxPluginRect | null = event.viewport;
+        void viewport;
+        break;
+      }
+    }
     if (event.type !== 'document-change') return;
     const read = await context.read.readParagraphs({ view: 'accepted' });
     if (read.ok) context.setState({ count: read.paragraphs.length }, read.version);

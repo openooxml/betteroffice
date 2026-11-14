@@ -142,7 +142,11 @@ export type DocxParagraphAnchorResult =
  * The paragraph IDs a session save applies, as the package writer's
  * `paragraphIds`, with each spliced part's paragraphs as `[ordinal, session key]`. @internal
  */
-export interface DocxParagraphSavePlan extends Omit<RustParagraphIds, 'splicedParts'> {
+export interface DocxParagraphSavePlan extends Omit<RustParagraphIds, 'splicedParts' | 'wholeParts'> {
+  /** The paragraphs edits changed or removed in parts with no splice plan. */
+  touchedParts?: Array<{ part: string; touched: number[] }>;
+  /** Parts written from the model whose changes are all run formatting: kept as their source when writing them would drop structure. */
+  wholeParts?: Array<{ part: string; sha256: string; paragraphs: Array<[number, string]>; changed: number[] }>;
   sectionSplicedParts?: DocxParagraphSavePlan['splicedParts'];
   splicedParts?: Array<{
     part: string;
@@ -155,5 +159,7 @@ export interface DocxParagraphSavePlan extends Omit<RustParagraphIds, 'splicedPa
     tablePatches?: Array<{ ordinal: number; before: unknown; after: unknown }>;
     inserted?: Array<{ before: number } | { after: number }>;
     removed?: number[];
+    /** The changed paragraphs whose run formatting alone changed. */
+    formatOnly?: number[];
   }>;
 }

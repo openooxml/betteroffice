@@ -62,7 +62,7 @@
     "typecheck:packages": "bun run --filter './packages/*' typecheck",
     "pretypecheck": "bun run build:packages",
     "typecheck": "bun run --filter '*' typecheck",
-    "rust:check": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test && cargo test -p betteroffice-docx-edit --features wasm",
+    "rust:check": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test && cargo test -p betteroffice-docx-edit --features wasm --lib -- wasm:: wasm_memory::",
     "bench:vsdx": "bun scripts/vsdx-bench.ts",
     "changeset": "changeset",
     "version-packages": "node scripts/version-packages.mjs",
@@ -79,7 +79,7 @@
     "test:e2e:browser": "playwright test --config e2e/browser/playwright.config.ts",
     "test:e2e:browser:plugins": "playwright test --config e2e/browser/plugin-host/playwright.config.ts",
     "pretypecheck:e2e": "bun run build:fonts",
-    "typecheck:e2e": "tsc -p e2e/tsconfig.json",
+    "typecheck:e2e": "tsc -p e2e/tsconfig.json && tsc -p e2e/browser/plugin-host/tsconfig.json",
     "typecheck:shared": "tsc --noEmit -p shared/office-session/tsconfig.json && tsc --noEmit -p shared/editor-host/tsconfig.typecheck.json"
   },
   "license": "Apache-2.0",

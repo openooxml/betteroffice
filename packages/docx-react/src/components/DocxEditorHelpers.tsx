@@ -5,6 +5,7 @@
  * loading, placeholder, and error states.
  */
 
+import { openFailureKind } from './openFailure';
 import React from 'react';
 import { useTranslation } from '../i18n';
 
@@ -138,9 +139,19 @@ function FailureState({ title, description, details, action }: {
  * Shown when a document could not be opened. The technical message stays
  * behind the details disclosure.
  */
-export function ParseError({ message }: { message: string }): React.ReactElement {
+export function ParseError({ message, opening = true }: {
+  message: string;
+  /** False for a failure after the document opened, which says nothing about the file. */
+  opening?: boolean;
+}): React.ReactElement {
   const { t } = useTranslation();
-  return <FailureState title={t('errors.failedToLoad')} description={t('errors.failedToLoadDescription')} details={message} />;
+  const kind = opening ? openFailureKind(message) : null;
+  const description = kind === 'damaged'
+    ? t('errors.failedToLoadDamaged')
+    : kind === 'unsupported'
+      ? t('errors.failedToLoadUnsupported')
+      : t('errors.failedToLoadDescription');
+  return <FailureState title={t('errors.failedToLoad')} description={description} details={message} />;
 }
 
 /**

@@ -37,6 +37,35 @@ export interface DrawPageOptions {
   glyphCache?: GlyphCache;
   /** The CSS family each document font family paints browser text with, where they differ. */
   fontFamilies?: ReadonlyMap<string, string>;
+  /** Told when a glyph run's outlines fail and it falls back to `fillText`. */
+  onGlyphFallback?: (error: unknown) => void;
+  /**
+   * With it set, a picture that resolves to nothing paints a placeholder and is reported here, instead of being left out:
+   * by its `relId`, or by its `relationshipId` when it has no `relId`.
+   */
+  onPictureUnavailable?: (relId: string) => void;
+}
+
+/** What a picture that cannot be drawn paints for PNG export: a light box with a border, no text. */
+const PLACEHOLDER_FILL = 'rgb(242, 242, 242)';
+const PLACEHOLDER_BORDER = 'rgb(191, 191, 191)';
+
+/** Paints the placeholder; `inside` keeps a frame's border within it, a shape's border is centred on its outline. */
+function paintPicturePlaceholder(ctx: CanvasRenderingContext2D, trace: () => void, inside: boolean): void {
+  ctx.fillStyle = PLACEHOLDER_FILL;
+  trace();
+  ctx.fill();
+  ctx.save();
+  if (inside) {
+    trace();
+    ctx.clip();
+  }
+  ctx.strokeStyle = PLACEHOLDER_BORDER;
+  ctx.lineWidth = inside ? 2 : 1;
+  ctx.setLineDash([]);
+  trace();
+  ctx.stroke();
+  ctx.restore();
 }
 
 /**
@@ -291,7 +320,7 @@ async function drawPrimitiveCore(
       drawLine(ctx, primitive);
       break;
     case 'shape':
-      await drawShape(ctx, primitive, options.resolveImage);
+      await drawShape(ctx, primitive, options.resolveImage, options.onPictureUnavailable);
       break;
     case 'decoration':
       if (primitive.style && primitive.style !== 'solid') {
@@ -331,7 +360,7 @@ async function drawPrimitiveCore(
       ctx.fillRect(primitive.x, primitive.y, primitive.w, primitive.h);
       break;
     case 'image':
-      await drawImagePrimitive(ctx, primitive, options.resolveImage);
+      await drawImagePrimitive(ctx, primitive, options.resolveImage, options.onPictureUnavailable);
       break;
     default:
       throw unknownPrimitiveError(primitive);
@@ -350,7 +379,8 @@ export function drawGlyphRunPrimitive(
     families?.size && primitive.fallbackFont
       ? { ...primitive, fallbackFont: withFontFamilies(primitive.fallbackFont, families) }
       : primitive,
-    options.glyphCache
+    options.glyphCache,
+    options.onGlyphFallback
   );
 }
 
@@ -402,12 +432,10 @@ function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void
     if ('wordSpacing' in ctx) ctx.wordSpacing = '0px';
     for (const cluster of run.canvasClusters) {
       const x = run.x + cluster.offset;
-      if (!drawModernRunText(ctx, cluster.text, x, run.baselineY, run, rect)) {
-        drawCanvasTextWithEffects(ctx, cluster.text, x, run.baselineY, run);
-      }
+      drawRunText(ctx, cluster.text, x, run.baselineY, run, rect);
     }
-  } else if (!drawModernRunText(ctx, text, run.x, run.baselineY, run, rect)) {
-    drawCanvasTextWithEffects(ctx, text, run.x, run.baselineY, run);
+  } else {
+    drawRunText(ctx, text, run.x, run.baselineY, run, rect);
   }
   drawTextEmphasisMarks(ctx, text, run.x, run.baselineY, run.width, run);
   if (wrapped) ctx.restore();
@@ -452,7 +480,8 @@ function warnSyntheticPaintClipOnce(): void {
 function drawGlyphRun(
   ctx: CanvasRenderingContext2D,
   run: GlyphRunPrimitive,
-  cache: GlyphCache | undefined
+  cache: GlyphCache | undefined,
+  onFallback?: (error: unknown) => void
 ): void {
   const rect = glyphRunRect(run);
   let wrapped = beginTextVisualState(
@@ -520,6 +549,7 @@ function drawGlyphRun(
       return;
     } catch (error) {
       warnGlyphFallbackOnce(error);
+      onFallback?.(error);
       // fall through to the fillText safety net below
     }
   }
@@ -542,10 +572,104 @@ function drawGlyphRunFallback(ctx: CanvasRenderingContext2D, run: GlyphRunPrimit
   ctx.direction = run.rtl ? 'rtl' : 'ltr';
   const paintText = run.paintText ?? run.text;
   const text = run.allCaps ? paintText.toUpperCase() : paintText;
-  if (!drawModernRunText(ctx, text, first.x, first.y, run, glyphRunRect(run))) {
-    drawCanvasTextWithEffects(ctx, text, first.x, first.y, run);
-  }
+  drawRunText(ctx, text, first.x, first.y, run, glyphRunRect(run));
   drawGlyphEmphasisMarks(ctx, run);
+}
+
+// fillText has no per-feature control: a run that asks for none of the optional
+// switches paints with optimizeSpeed (no optional ligatures); a run that asks for
+// any of them paints with the browser's defaults, so historical/discretionary
+// forms are not drawn on this path and standard ligatures come with any request.
+function drawRunText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  run: TextRunPrimitive | GlyphRunPrimitive,
+  rect: GeoRect
+): void {
+  const paint = (text: string, x: number) => {
+    if (!drawModernRunText(ctx, text, x, y, run, rect)) {
+      drawCanvasTextWithEffects(ctx, text, x, y, run);
+    }
+  };
+  const enabled = new Set(
+    (run.fontFeatures ?? [])
+      .map(feature => feature.split('='))
+      .filter(([, value]) => Number(value ?? 1) !== 0)
+      .map(([tag]) => tag)
+  );
+  ctx.save();
+  try {
+    const kern = enabled.has('kern');
+    if ('fontKerning' in ctx) ctx.fontKerning = kern ? 'normal' : 'none';
+    if (!('textRendering' in ctx)
+      || ['liga', 'clig', 'hlig', 'dlig', 'calt'].some(tag => enabled.has(tag))
+      || (kern && !speedPreservesKerning(ctx))) {
+      paint(text, x);
+      return;
+    }
+    drawWithoutLigatures(ctx, text, x, run.rtl, paint);
+  } finally {
+    ctx.restore();
+  }
+}
+
+function drawWithoutLigatures(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  rtl: boolean | undefined,
+  paint: (text: string, x: number) => void
+): void {
+  const chars = [...text];
+  const strong = (ch: string) => !/[\p{Script=Common}\p{Script=Inherited}]/u.test(ch);
+  const eligible = (ch: string) => /[\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}]/u.test(ch);
+  let previous = chars.find(strong);
+  const spans: Array<{ text: string; disable: boolean }> = [];
+  for (const ch of chars) {
+    if (strong(ch)) previous = ch;
+    const disable = previous !== undefined && eligible(previous);
+    const last = spans.at(-1);
+    if (last?.disable === disable) last.text += ch;
+    else spans.push({ text: ch, disable });
+  }
+  if (!spans.some(span => span.disable)) {
+    paint(text, x);
+    return;
+  }
+  if (rtl) spans.reverse();
+  let pen = x;
+  for (const span of spans) {
+    ctx.save();
+    try {
+      if (span.disable) {
+        ctx.textRendering = 'optimizeSpeed';
+      }
+      paint(span.text, pen);
+      if (spans.length > 1) pen += ctx.measureText(span.text).width;
+    } finally {
+      ctx.restore();
+    }
+  }
+}
+
+function speedPreservesKerning(ctx: CanvasRenderingContext2D): boolean {
+  if (!('fontKerning' in ctx)) return false;
+  ctx.save();
+  try {
+    ctx.textRendering = 'auto';
+    ctx.fontKerning = 'normal';
+    const normal = ctx.measureText('AV').width;
+    ctx.fontKerning = 'none';
+    const separate = ctx.measureText('AV').width;
+    ctx.fontKerning = 'normal';
+    ctx.textRendering = 'optimizeSpeed';
+    const speed = ctx.measureText('AV').width;
+    return normal < separate && Math.abs(speed - normal) < 0.001;
+  } finally {
+    ctx.restore();
+  }
 }
 
 function drawLine(ctx: CanvasRenderingContext2D, line: LinePrimitive): void {
@@ -572,7 +696,8 @@ function drawLine(ctx: CanvasRenderingContext2D, line: LinePrimitive): void {
 async function drawShape(
   ctx: CanvasRenderingContext2D,
   shape: ShapePrimitive,
-  resolveImage: ImageResolver | undefined
+  resolveImage: ImageResolver | undefined,
+  onPictureUnavailable?: (relId: string) => void
 ): Promise<void> {
   const fillPaint = shape.fillPaint;
   const strokePaint = shape.strokePaint;
@@ -592,10 +717,23 @@ async function drawShape(
   // already-decoded sources. The default resolver only decodes data:/blob:.
   const pictureSource =
     fillKind === 'picture' ? (fillPaint?.pictureSrc ?? fillPaint?.pictureRelId) : undefined;
-  if (fillKind === 'picture' && pictureSource && resolveImage) {
+  const unavailable = shape.geometryPath.length ? onPictureUnavailable : undefined;
+  if (fillKind === 'picture' && !pictureSource && unavailable) {
+    unavailable('');
+    paintPicturePlaceholder(ctx, () => {
+      ctx.beginPath();
+      appendShapePath(ctx, shape.geometryPath);
+    }, false);
+  } else if (fillKind === 'picture' && pictureSource && resolveImage) {
     const source = await resolveImage(pictureSource);
     if (source) {
       drawPictureShapeFill(ctx, shape, path, source);
+    } else if (unavailable) {
+      unavailable(pictureSource);
+      paintPicturePlaceholder(ctx, () => {
+        ctx.beginPath();
+        appendShapePath(ctx, shape.geometryPath);
+      }, false);
     } else {
       // unresolvable picture: fall back to the legacy solid fill so the shape
       // is not invisible (matches the pre-picture-payload behavior baseline)
@@ -1347,15 +1485,16 @@ function strokeSegment(
 async function drawImagePrimitive(
   ctx: CanvasRenderingContext2D,
   image: ImagePrimitive,
-  resolveImage: ImageResolver | undefined
+  resolveImage: ImageResolver | undefined,
+  onPictureUnavailable?: (relId: string) => void
 ): Promise<void> {
   if (!resolveImage) return;
   const source = await resolveImage(image.relId);
-  if (!source) return;
+  if (!source && !onPictureUnavailable) return;
   const frame = imageContentFrame(image);
   ctx.save();
   multiplyGlobalAlpha(ctx, image.opacity);
-  const filter = imageFilter(image);
+  const filter = source ? imageFilter(image) : undefined;
   if (filter && 'filter' in ctx) {
     (ctx as CanvasRenderingContext2D & { filter: string }).filter = filter;
   }
@@ -1367,7 +1506,16 @@ async function drawImagePrimitive(
     if (image.flipH || image.flipV) ctx.scale(image.flipH ? -1 : 1, image.flipV ? -1 : 1);
     ctx.translate(-cx, -cy);
   }
-  if (image.shapeType === 'ellipse') {
+  if (!source) {
+    onPictureUnavailable?.(image.relId || (image.relationshipId ?? ''));
+    paintPicturePlaceholder(ctx, () => {
+      if (image.shapeType === 'ellipse') traceImageEllipse(ctx, frame);
+      else {
+        ctx.beginPath();
+        ctx.rect(frame.x, frame.y, frame.w, frame.h);
+      }
+    }, true);
+  } else if (image.shapeType === 'ellipse') {
     ctx.save();
     traceImageEllipse(ctx, frame);
     ctx.clip();

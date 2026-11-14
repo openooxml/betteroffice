@@ -46,6 +46,56 @@ export interface ProjectCommandEchoContextInput {
 }
 
 /** @internal Undefined declines echo, including when the serialized context exceeds the cap. */
+const BLOCK_EMBEDS = new Set(['table', 'blockSdt', 'pageBreak', 'columnBreak']);
+
+const revised = (values: Record<string, unknown> | undefined, keys: readonly string[]) =>
+  keys.some((key) => values?.[key] !== undefined && values[key] !== null);
+
+/**
+ * A paragraph's accepted-view text and whether it holds inline atoms, read from its own segments
+ * without building the story's view. Undefined wherever tracked changes touch it or the mark
+ * before it (they can join paragraphs or hide text), or its id is not unique: the caller then
+ * reads the story. An engine without segment reads also reads the story.
+ */
+export function readEchoParagraph(
+  engine: Pick<DocxWorkerCommandEngine, 'geometryReader' | 'paragraphUnit' | 'paragraphSegments'>,
+  story: string,
+  paraId: string
+): { text: string; hasAtoms: boolean } | undefined {
+  if (typeof engine.geometryReader.paragraphIdCount !== 'function' || typeof engine.paragraphUnit !== 'function' ||
+    typeof engine.paragraphSegments !== 'function') return undefined;
+  if (engine.geometryReader.paragraphIdCount(story, paraId) !== 1) return undefined;
+  const unit = engine.paragraphUnit(story, paraId);
+  if (unit < 0) return undefined;
+  const units = engine.paragraphSegments(story, unit > 0 ? [unit - 1, unit] : [unit]);
+  const own = units.at(-1);
+  if (!own || units.length !== (unit > 0 ? 2 : 1)) return undefined;
+  if (unit > 0) {
+    const mark = units[0]!.at(-1);
+    if (mark?.kind !== 'pilcrow' || revised(mark.attributes, ['ins', 'del']) ||
+      revised(mark.properties, ['pPrIns', 'pPrDel'])) return undefined;
+  }
+  let text = '';
+  let hasAtoms = false;
+  let leading = true;
+  for (const segment of own) {
+    if (revised(segment.attributes, ['ins', 'del'])) return undefined;
+    if (segment.kind === 'text') {
+      text += segment.text;
+      leading = false;
+    } else if (segment.kind === 'embed') {
+      if (leading && BLOCK_EMBEDS.has(segment.embedKind)) continue;
+      text += '\uFFFC';
+      hasAtoms = true;
+      leading = false;
+    } else {
+      if (segment.paraId !== paraId || revised(segment.properties, ['pPrIns', 'pPrDel'])) return undefined;
+      return { text, hasAtoms };
+    }
+  }
+  return undefined;
+}
+
 export function projectCommandEchoContext(
   input: ProjectCommandEchoContextInput
 ): DocxCommandEchoContext | undefined {
@@ -63,8 +113,11 @@ export function projectCommandEchoContext(
     length = span.end - span.start;
   } catch { return undefined; }
   if (!Number.isSafeInteger(length) || length <= 0 || length > DOCX_ECHO_MAX_CONTEXT_BYTES) return undefined;
-  const read = engine.proposalEngine.readParagraphs({ story: 'body', paraIds: [selection.focus.paraId], view: 'accepted' });
-  const paragraph = read.ok ? read.paragraphs[0] : undefined;
+  const fast = readEchoParagraph(engine, 'body', selection.focus.paraId);
+  const read = fast ? undefined
+    : engine.proposalEngine.readParagraphs({ story: 'body', paraIds: [selection.focus.paraId], view: 'accepted' });
+  const paragraph = fast ? { paraId: selection.focus.paraId, text: fast.text, atoms: fast.hasAtoms ? [0] : [] }
+    : read?.ok ? read.paragraphs[0] : undefined;
   if (!paragraph || paragraph.paraId !== selection.focus.paraId || paragraph.atoms.length || !paragraph.text ||
     echoEncoder.encode(paragraph.text).byteLength > DOCX_ECHO_MAX_CONTEXT_BYTES ||
     /[\u0000-\u001f\u007f\u0590-\u109f\u200e-\u200f\u202a-\u202e\u2066-\u2069]/u.test(paragraph.text)) return undefined;

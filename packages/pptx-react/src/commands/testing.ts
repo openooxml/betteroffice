@@ -2,6 +2,7 @@ import { createT, en } from '@betteroffice/pptx-i18n';
 import type { LocaleStrings } from '@betteroffice/pptx-i18n';
 import type { PptxChromeContext, PptxCommandBinding } from './createPptxCommandStore';
 import { DEFAULT_FONT_FAMILIES, DEFAULT_FONT_SIZES, type PptxCommandEnvironment } from './evaluate';
+import { pptxMenuGates } from './menuGates';
 import type { PptxCommandArgs, PptxCommandId, PptxCommandResult } from './types';
 
 /** An editing environment where every command has what it needs, for tests. */
@@ -15,6 +16,11 @@ export function testEnvironment(
     pendingInput: false,
     canUndo: true,
     canRedo: true,
+    slideCount: 2,
+    table: { shapeId: 'table', row: 1, column: 1 },
+    clipboardRead: true,
+    clipboardWrite: true,
+    gates: pptxMenuGates,
     slide: { id: 'slide:0:256', layoutPartPath: 'ppt/slideLayouts/slideLayout1.xml' },
     layouts: [
       { args: { layoutPartPath: 'ppt/slideLayouts/slideLayout1.xml' }, label: 'Layout 1' },
@@ -82,6 +88,7 @@ export function testBinding(initial: Partial<PptxCommandEnvironment> = {}) {
     chrome: { i18n: undefined } as PptxChromeContext,
   };
   const immediate: ReadonlySet<PptxCommandId> = new Set<PptxCommandId>([
+    'cut', 'copy', 'paste',
     'save',
     'zoom',
     'slideshow',

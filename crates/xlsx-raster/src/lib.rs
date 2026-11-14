@@ -213,6 +213,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 bold,
                 italic,
                 underline,
+                underline_style,
                 strike,
                 highlight,
                 dashed_underline,
@@ -237,6 +238,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     bold: *bold,
                     italic: *italic,
                     underline: *underline,
+                    double_underline: double_underline(*underline_style),
                     strike: *strike,
                     highlight: highlight.as_deref().map(parse_color).transpose()?,
                     dashed_underline: *dashed_underline,
@@ -298,19 +300,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
         }
     }
 
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, w, h);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(data)
+    ooxml_raster::encode_png(pixmap, w, h)
 }
 
 /// paint a line honoring its dash/double style; a `double` without a rail width
@@ -613,65 +603,29 @@ fn clear(pixmap: &mut Pixmap, rect: IntRect) {
 }
 
 fn clipped_to_target(clip: DlRect, width: u32, height: u32) -> Option<DlRect> {
-    let left = clip.x.max(0.0);
-    let top = clip.y.max(0.0);
-    let right = (clip.x + clip.w).min(width as f32);
-    let bottom = (clip.y + clip.h).min(height as f32);
-    (left.is_finite()
-        && top.is_finite()
-        && right.is_finite()
-        && bottom.is_finite()
-        && right > left
-        && bottom > top)
-        .then_some(DlRect {
-            x: left,
-            y: top,
-            w: right - left,
-            h: bottom - top,
-        })
+    ooxml_raster::clipped_to_target(
+        ooxml_raster::RasterRect {
+            x: clip.x,
+            y: clip.y,
+            w: clip.w,
+            h: clip.h,
+        },
+        width,
+        height,
+    )
+    .map(|clip| DlRect {
+        x: clip.x,
+        y: clip.y,
+        w: clip.w,
+        h: clip.h,
+    })
 }
 
 fn build_path(commands: &[GeometryPathCommand]) -> Result<Path, String> {
-    let mut builder = PathBuilder::new();
-    for command in commands {
-        match command {
-            GeometryPathCommand::Move { x, y } => {
-                builder.move_to(path_coord(*x)?, path_coord(*y)?);
-            }
-            GeometryPathCommand::Line { x, y } => {
-                builder.line_to(path_coord(*x)?, path_coord(*y)?);
-            }
-            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
-                builder.quad_to(
-                    path_coord(*cpx)?,
-                    path_coord(*cpy)?,
-                    path_coord(*x)?,
-                    path_coord(*y)?,
-                );
-            }
-            GeometryPathCommand::Cubic {
-                cp1x,
-                cp1y,
-                cp2x,
-                cp2y,
-                x,
-                y,
-            } => {
-                builder.cubic_to(
-                    path_coord(*cp1x)?,
-                    path_coord(*cp1y)?,
-                    path_coord(*cp2x)?,
-                    path_coord(*cp2y)?,
-                    path_coord(*x)?,
-                    path_coord(*y)?,
-                );
-            }
-            GeometryPathCommand::Close => builder.close(),
-        }
-    }
-    builder
-        .finish()
-        .ok_or_else(|| "path has no drawable commands".to_string())
+    ooxml_raster::try_path_from_commands(commands, |x, y| {
+        Ok::<_, String>((path_coord(x)?, path_coord(y)?))
+    })?
+    .ok_or_else(|| "path has no drawable commands".to_string())
 }
 
 fn path_coord(value: f64) -> Result<f32, String> {
@@ -682,6 +636,11 @@ fn path_coord(value: f64) -> Result<f32, String> {
         .ok_or_else(|| "path contains a non-finite coordinate".to_string())
 }
 
+fn double_underline(style: Option<xlsx_render::RunUnderline>) -> bool {
+    use xlsx_render::RunUnderline::{Double, DoubleAccounting};
+    matches!(style, Some(Double | DoubleAccounting))
+}
+
 /// parse a `#rrggbb` string into a tiny-skia color.
 fn parse_color(s: &str) -> Result<Color, String> {
     let hex = s
@@ -690,19 +649,7 @@ fn parse_color(s: &str) -> Result<Color, String> {
     if hex.len() != 6 && hex.len() != 8 {
         return Err(format!("bad color: {s}"));
     }
-    let byte = |i: usize| {
-        hex.as_bytes()
-            .get(i..i + 2)
-            .and_then(|pair| std::str::from_utf8(pair).ok())
-            .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-            .ok_or_else(|| format!("bad color: {s}"))
-    };
-    Ok(Color::from_rgba8(
-        byte(0)?,
-        byte(2)?,
-        byte(4)?,
-        if hex.len() == 8 { byte(6)? } else { 255 },
-    ))
+    ooxml_raster::parse_hex_color(hex).ok_or_else(|| format!("bad color: {s}"))
 }
 
 #[cfg(test)]
@@ -1027,6 +974,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    underline_style: None,
                     strike: false,
                     highlight: None,
                     dashed_underline: false,
@@ -1077,6 +1025,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline: false,
+                underline_style: None,
                 strike: false,
                 highlight: None,
                 dashed_underline: false,
@@ -1139,6 +1088,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline,
+                underline_style: None,
                 strike: underline,
                 highlight: None,
                 dashed_underline: false,
@@ -1192,6 +1142,7 @@ mod tests {
 
     #[test]
     fn vertical_header_defaults_to_the_padded_right_edge() {
+        const COL_WIDTH: f64 = 3.54296875;
         let mut bounds = Vec::new();
         for horizontal in [
             None,
@@ -1209,7 +1160,7 @@ mod tests {
                 ..Default::default()
             });
             let mut sheet = xlsx_model::Sheet::new("Sheet1");
-            sheet.col_widths.insert(0, 3.54296875);
+            sheet.col_widths.insert(0, COL_WIDTH);
             sheet.row_heights.insert(0, 213.5);
             sheet.set_cell(
                 xlsx_model::CellRef::new(0, 0),
@@ -1240,8 +1191,12 @@ mod tests {
             bounds[1].0 < bounds[2].0 && bounds[2].0 < bounds[3].0,
             "{bounds:?}"
         );
+        let col_px = xlsx_render::geometry::col_chars_to_px(COL_WIDTH) as u32;
+        let padded_right = col_px - 2;
         assert!(
-            bounds[0].0 + bounds[0].2 > 30 && bounds[0].2 < 28,
+            bounds[0].0 + bounds[0].2 > col_px
+                && bounds[0].2 < padded_right
+                && bounds[0].2 + 4 >= padded_right,
             "{bounds:?}"
         );
         assert!(bounds.iter().all(|b| b.3 < 283), "{bounds:?}");
@@ -1357,6 +1312,53 @@ mod tests {
             bottom - top < 40,
             "combined cluster should occupy two lines, ink {top}..{bottom}"
         );
+    }
+
+    #[test]
+    fn underline_kinds_paint_one_or_two_lines() {
+        use xlsx_render::RunUnderline;
+
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 160.0,
+            h: 80.0,
+        };
+        let underlined = |underline: bool, style: Option<RunUnderline>| {
+            let mut dl = text_dl("    ", cell, false, None, underline);
+            let DrawCmd::Text {
+                font_size,
+                underline_style,
+                strike,
+                ..
+            } = &mut dl.commands[0]
+            else {
+                unreachable!()
+            };
+            *font_size = 40.0;
+            *underline_style = style;
+            *strike = false;
+            dl
+        };
+        let bands = |underline: bool, style: Option<RunUnderline>| {
+            ink_row_bands(&underlined(underline, style)).len()
+        };
+        assert_eq!(bands(false, None), 0);
+        assert_eq!(bands(false, Some(RunUnderline::Double)), 0);
+        assert_eq!(bands(true, None), 1);
+        assert_eq!(bands(true, Some(RunUnderline::SingleAccounting)), 1);
+        assert_eq!(bands(true, Some(RunUnderline::Double)), 2);
+        assert_eq!(bands(true, Some(RunUnderline::DoubleAccounting)), 2);
+        for (accounting, plain) in [
+            (RunUnderline::SingleAccounting, None),
+            (RunUnderline::DoubleAccounting, Some(RunUnderline::Double)),
+        ] {
+            assert_eq!(
+                render_png(&underlined(true, Some(accounting))).unwrap(),
+                render_png(&underlined(true, plain)).unwrap(),
+                "{accounting:?} draws like {plain:?}"
+            );
+        }
     }
 
     #[test]
@@ -1600,3 +1602,39 @@ mod tests {
 mod native;
 #[cfg(feature = "fonts")]
 pub use native::{RasterFonts, render_png, render_png_with_fonts};
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn color_keeps_long_hex_only_grammar() {
+        for value in ["#abcdef", "#abcdef01"] {
+            assert!(parse_color(value).is_ok());
+        }
+        for value in [
+            "#abc",
+            "#abcd",
+            "transparent",
+            "rgb(1,2,3)",
+            "abcdef",
+            "#gggggg",
+        ] {
+            assert_eq!(parse_color(value), Err(format!("bad color: {value}")));
+        }
+    }
+
+    #[test]
+    fn path_keeps_empty_and_non_finite_errors() {
+        assert_eq!(
+            build_path(&[]).unwrap_err(),
+            "path has no drawable commands"
+        );
+        for value in [f64::NAN, f64::INFINITY, f64::MAX] {
+            assert_eq!(
+                build_path(&[GeometryPathCommand::Move { x: value, y: 0.0 }]).unwrap_err(),
+                "path contains a non-finite coordinate"
+            );
+        }
+    }
+}

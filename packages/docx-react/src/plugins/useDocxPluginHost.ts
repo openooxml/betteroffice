@@ -22,13 +22,22 @@ import {
 import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import type { DocxDocumentReadValues } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import {
+  anchorDisplayRoot,
+  anchorFailure,
+  createYrsInputPositionMap,
+  createYrsPositionProjection,
   resolveReservations,
+  subscribeYrsSelection,
+  yrsSelectionCause,
   type AnchorGeometryTarget,
   type DocxReservationsPayload,
   type DocxResolvedReservations,
   type ResidentEngineWorkerClient,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
+import { createSelectionSettle } from '../../../../shared/plugin-host/selectionSettle';
+import { trackFocus } from '../../../../shared/plugin-host/focusTracker';
+import { resolvedLocale } from '../i18n/LocaleContext';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import {
@@ -46,6 +55,8 @@ import { workerProposalAuthority, workerProposalRoundAuthority, hasEditorWorkerP
 import { workerOpenReplicaReady } from '../components/DocxEditor/internals/workerOpenReplica';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
+import { yrsSelectionState } from '../components/DocxEditor/hooks/useSelectionTracker';
+import { currentYrsToolbarSelection, withStoredYrsFormatting } from '../components/DocxEditor/yrsToolbar';
 import type { ViewerSelectionChange } from '../components/DocxEditor/internals/viewerSelectionController';
 import type { ReactSidebarItem } from '../plugin-api/types';
 import {
@@ -54,14 +65,16 @@ import {
   type DocxPluginHost,
 } from './createDocxPluginHost';
 import { resolveParagraph } from './createPluginClients';
-import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint } from './geometry';
+import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint, visibleViewport } from './geometry';
 import { managedSidebarItems } from './PluginSidebarItems';
+import { docxSelectionIdentity } from './selectionIdentity';
 import { usePluginReservations } from './reservations';
 import { currentPreviewKey } from './proposalPreview';
 import type {
   DocxEditorPluginProps,
   DocxPluginGeometry,
   DocxPluginLayout,
+  DocxPluginSelection,
   DocxPluginSidebarItem,
 } from './types';
 
@@ -70,6 +83,10 @@ const NO_ACTIVATIONS: readonly DocxPluginActivation[] = Object.freeze([]);
 type RenderedDom = { context: RenderedDomContext; queries: DisplayListQueries };
 
 export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
+  locale?: string;
+  focusRoot?: () => Element | null;
+  scrollContainerRef?: React.RefObject<HTMLElement | null>;
+  editorRootRef?: React.RefObject<HTMLElement | null>;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   experimentalWorkerOpen?: boolean;
   writeModeRef: React.RefObject<EditorMode>;
@@ -78,6 +95,8 @@ export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   readOnly: boolean;
   viewerSelection?: boolean;
   commands: DocxCommandController;
+  /** Changes with the host's shortcut map, so contributed chords follow it. */
+  shortcutsKey?: string;
   /** The authoritative session once a document is ready, else null. */
   session: YrsSession | null;
   /** Changes whenever a new document load starts. */
@@ -128,6 +147,14 @@ function layoutComplete(editor: PagedEditorRef | null, queries: DisplayListQueri
   );
 }
 
+function readSelection(session: YrsSession | null | undefined) {
+  const selection = session?.selection();
+  return selection && [selection.anchor, selection.head].every((point) =>
+    typeof point?.story === 'string' && typeof point.paraId === 'string' &&
+    Number.isInteger(point.offset) && point.offset >= 0
+  ) ? selection : null;
+}
+
 /** Owns the plugin host of one `DocxEditor` and binds it to the editor's authority. */
 export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPluginHostBinding {
   const latest = useRef(options);
@@ -150,13 +177,15 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     return held && held.session === session && !layoutError ? held.geometry : null;
   };
   const layoutRef = useRef<DocxPluginLayout | null>(null);
-  const formattingRef = useRef<SelectionState | null>(null);
+  const readSelectionRef = useRef<NonNullable<Parameters<typeof createDocxPluginHost>[0]['readSelection']>>(() => null);
   const viewerSelectionRef = useRef<ViewerSelectionChange | null>(null);
   const layoutListeners = useRef(new Set<() => void>());
   const detachAuthority = useRef<(() => void) | null>(null);
 
   const [host] = useState<DocxPluginHost>(() =>
     createDocxPluginHost({
+      readSelection: (cause) => readSelectionRef.current(cause),
+      selectionPublished: (key) => settleRef.current?.notifySelectionChange(key),
       pagedEditorRef: options.pagedEditorRef,
       writeMode: () => latest.current.writeModeRef.current ?? 'viewing',
       viewer: () => latest.current.viewerDocumentRead !== undefined,
@@ -183,7 +212,32 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     })
   );
 
+  const selectionRef = useRef<DocxPluginSelection>({ formatting: null, displayRange: null });
+  const selectionPublicationRef = useRef<{ owner: YrsSession | null; generation: string | null; story: string | null; cleared: boolean } | null>(null);
+  /** The range last published from a layout of the current version, and the selection it was mapped for. */
+  const mappedSelectionRef = useRef<{ owner: YrsSession | null; generation: string | null; key: string | null;
+    range: DocxPluginSelection['displayRange'] } | null>(null);
+  const laidOutGenerationRef = useRef<string | null>(null);
+  const selectionReadyRef = useRef(true);
+  const settleRef = useRef<ReturnType<typeof createSelectionSettle> | null>(null);
   const managed = (options.plugins?.length ?? 0) > 0;
+  const locale = resolvedLocale(options.locale ?? options.i18n?._lang);
+  useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
+  useLayoutEffect(() => {
+    if (!managed) return;
+    const tracker = trackFocus(() => {
+      const root = latest.current.focusRoot?.();
+      if (!root) return [];
+      const inputId = root.getAttribute('data-docx-input');
+      const input = inputId ? root.ownerDocument.getElementById(inputId) : null;
+      return input ? [root, input] : [root];
+    }, (focused) => host.focusChanged(focused));
+    host.setFocusCheck(tracker.recheck);
+    return () => {
+      host.setFocusCheck(null);
+      tracker();
+    };
+  }, [host, managed]);
 
   useLayoutEffect(() => {
     for (const listener of layoutListeners.current) listener();
@@ -248,7 +302,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     host.syncCommands();
     return host.subscribe(() => host.syncCommands());
-  }, [host]);
+  }, [host, options.shortcutsKey]);
 
   const activations = useSyncExternalStore(host.subscribe, host.activations, () => NO_ACTIVATIONS);
   const reservationsPayload = usePluginReservations(host, managed ? activations : NO_ACTIVATIONS);
@@ -284,38 +338,142 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const reservationsRef = useRef({ resolved: reservations, payload: reservationSets });
   reservationsRef.current = { resolved: reservations, payload: reservationSets };
 
-  const publishSelection = useCallback(() => {
-    if (!latest.current.plugins?.length) return;
-    if (latest.current.viewerSelection) {
-      host.selectionChanged({ formatting: null, displayRange: viewerSelectionRef.current?.displayRange ?? null });
-      return;
+  const refreshSelection = useCallback((cause: 'remote' | 'seed' | undefined) => {
+    if (latest.current.viewerSelection || latest.current.viewerDocumentRead) {
+      const selection = { formatting: null, displayRange: viewerSelectionRef.current?.displayRange ?? null };
+      const range = selection.displayRange;
+      const identity = range
+        ? [range.story, range.from, range.to, viewerSelectionRef.current?.head ?? range.to] : null;
+      const selectionIdentity = { settleKey: JSON.stringify(identity), stickyKey: JSON.stringify(identity),
+        resolvedKey: JSON.stringify(identity) };
+      selectionRef.current = selection;
+      selectionReadyRef.current = true;
+      selectionPublicationRef.current = { owner: null, generation: host.generation(), story: range?.story ?? null, cleared: false };
+      return { selection, identity: selectionIdentity };
     }
     const editor = latest.current.pagedEditorRef.current;
-    const range = editor?.getSelectionRange() ?? null;
-    const layout = layoutRef.current;
-    const story = latest.current.viewerDocumentRead
-      ? 'body'
-      : editor?.getYrsSession()?.selection()?.head.story ?? 'body';
-    host.selectionChanged({
-      formatting: formattingRef.current,
-      displayRange:
-        range && layout ? { story, from: range.from, to: range.to, layoutId: layout.id } : null,
-    });
+    const session = editor?.getYrsSession() ?? latest.current.session;
+    let live = readSelection(session);
+    let anchor = 0;
+    let focus = 0;
+    if (live && session) {
+      try {
+        anchor = session.locateParagraph(live.anchor.story, live.anchor.paraId).start + live.anchor.offset;
+        focus = session.locateParagraph(live.head.story, live.head.paraId).start + live.head.offset;
+      } catch { live = null; }
+    }
+    const published = selectionPublicationRef.current;
+    if (live && cause === 'seed' && published !== null && published.owner === session &&
+      published.generation === host.generation() && published.cleared) {
+      return null;
+    }
+    const root = live ? anchorDisplayRoot(live.head.story) : null;
+    const focusRoot = latest.current.focusRoot?.();
+    const inputId = focusRoot?.getAttribute('data-docx-input');
+    const inputStory = inputId ? focusRoot!.ownerDocument.getElementById(inputId)?.getAttribute('data-yrs-story') : null;
+    const inputCurrent = !inputStory || inputStory === root;
+    let range = live && inputCurrent ? editor?.getSelectionRange() ?? null : null;
+    const generation = host.generation();
+    const latestLayout = layoutRef.current;
+    const layout = latestLayout && latestLayout.version === host.version() &&
+      latestLayout.previewVersion === host.previewVersion() ? latestLayout : null;
+    if (layout) laidOutGenerationRef.current = generation;
+    if (!range && live && session && root && (!inputCurrent || root.startsWith('hf:')) &&
+      layout && layout.pageCount > 0) {
+      const projection = createYrsPositionProjection(session, root);
+      const anchor = projection?.positionForLoc(live.anchor);
+      const focus = projection?.positionForLoc(live.head);
+      if (anchor != null && focus != null) range = { from: Math.min(anchor, focus), to: Math.max(anchor, focus) };
+    }
+    const map = live && session ? createYrsInputPositionMap(live.head.story,
+      session.paragraphs(live.head.story).map(paragraph => ({ paraId: paragraph.paraId, length: paragraph.text.length }))) : null;
+    const toolbar = session && map ? currentYrsToolbarSelection(session, map) : null;
+    const encoded = live ? session?.encodeSelection?.() : null;
+    const key = live ? JSON.stringify([[live.anchor.story, live.anchor.paraId, live.anchor.offset], [live.head.story, live.head.paraId, live.head.offset],
+      encoded ? [encoded.story, Array.from(encoded.anchor), Array.from(encoded.head)] : null]) : null;
+    const pending = !!live && !layout && generation !== null && laidOutGenerationRef.current === generation &&
+      latest.current.layoutError === null;
+    const mapped = mappedSelectionRef.current;
+    const displayRange = pending
+      ? mapped && mapped.owner === (session ?? null) && mapped.generation === generation && mapped.key === key ? mapped.range : null
+      : live && range && layout ? { story: live.head.story, from: range.from, to: range.to, layoutId: layout.id } : null;
+    if (!pending) mappedSelectionRef.current = { owner: session ?? null, generation, key, range: displayRange };
+    selectionReadyRef.current = !pending;
+    const selection = {
+      formatting: toolbar ? yrsSelectionState(withStoredYrsFormatting(toolbar, inputCurrent ? editor?.getYrsStoredFormatting?.() ?? null : null)) : null,
+      displayRange,
+    };
+    const direction = Math.sign(focus - anchor);
+    const collapsed = !!live && live.anchor.story === live.head.story &&
+      live.anchor.paraId === live.head.paraId && live.anchor.offset === live.head.offset;
+    const identity = docxSelectionIdentity(0, encoded
+      ? [encoded.story, Array.from(encoded.anchor), Array.from(encoded.head), direction] : null,
+      live ? [live.anchor.story, anchor, live.head.story, focus, direction] : null, collapsed);
+    selectionRef.current = selection;
+    selectionPublicationRef.current = { owner: session, generation: host.generation(), story: live?.head.story ?? null,
+      cleared: !live && published !== null && published.owner === session && published.generation === host.generation() &&
+        (published.story !== null || published.cleared) };
+    return { selection, identity, owner: session ?? host, ready: !pending };
   }, [host]);
+
+  readSelectionRef.current = refreshSelection;
+
+  const publishSelection = useCallback(() => {
+    if (!latest.current.plugins?.length) return;
+    if (latest.current.viewerSelection || latest.current.viewerDocumentRead) {
+      host.markSelectionDirty();
+      return;
+    }
+    const session = latest.current.pagedEditorRef.current?.getYrsSession() ?? latest.current.session;
+    host.markSelectionDirty(session ? yrsSelectionCause(session) : undefined);
+  }, [host]);
+
+  useEffect(() => {
+    if (!managed || !options.session) return;
+    let generation = host.generation();
+    const settled = (source: 'pointer' | 'touch' | 'keyboard') => {
+      host.selectionSettled(source, generation);
+    };
+    const machine = createSelectionSettle({
+      root: () => latest.current.focusRoot?.() ?? null,
+      restartOnTyping: false,
+      isEditorTarget: (target) => {
+        if (target instanceof Element && latest.current.canvasHostRef.current?.contains(target) &&
+          target.closest('canvas[data-page-index], .canvas-page-mirror .layout-run-image')) return true;
+        const id = latest.current.focusRoot?.()?.getAttribute('data-docx-input');
+        return !!id && target instanceof Element && target.id === id;
+      },
+      canSettle: () => {
+        if (!generation || host.generation() !== generation || !selectionReadyRef.current) return false;
+        const selection = selectionRef.current;
+        if (selection.displayRange !== null || latest.current.viewerSelection === true) return true;
+        const story = selectionPublicationRef.current?.story ?? null;
+        const result = story === null || !(story === 'body' || story.startsWith('body:'));
+        return result;
+      },
+      onUnsettle: () => { generation = host.generation(); host.selectionUnsettled(generation); },
+      onSettle: settled,
+      onResettle: settled,
+    });
+    settleRef.current = machine;
+    return () => { machine.dispose(); settleRef.current = null; };
+  }, [host, managed, options.session, options.loadGeneration, refreshSelection]);
+
+  useEffect(() => {
+    if (!managed || options.viewerSelection || options.viewerDocumentRead || !options.session) return;
+    return subscribeYrsSelection(options.session, () => { publishSelection(); });
+  }, [managed, options.session, options.viewerSelection, options.viewerDocumentRead, publishSelection]);
 
   const publishViewerSelection = useCallback((selection: ViewerSelectionChange) => {
     viewerSelectionRef.current = selection;
     if (!latest.current.plugins?.length) return;
-    host.selectionChanged({ formatting: null, displayRange: selection.displayRange });
-  }, [host]);
+    publishSelection();
+  }, [publishSelection]);
 
   useEffect(() => {
     if (!managed) return;
     const subscribers = options.selectionChangeSubscribersRef.current;
-    const listener = (state: SelectionState | null) => {
-      formattingRef.current = state;
-      publishSelection();
-    };
+    const listener = () => { publishSelection(); };
     subscribers.add(listener);
     return () => {
       subscribers.delete(listener);
@@ -346,6 +504,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     const pages = options.canvasHostRef.current;
     const target = options.overlayTarget;
+    const scroller = options.scrollContainerRef?.current;
     if (!managed || !pages || !target) return;
     let frame = 0;
     const bump = () => {
@@ -359,14 +518,17 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     observer?.observe(pages);
     observer?.observe(target);
     pages.addEventListener('transitionend', bump);
+    scroller?.addEventListener('scroll', bump, { passive: true });
+    if (scroller) observer?.observe(scroller);
     window.addEventListener('resize', bump);
     return () => {
       if (frame) cancelAnimationFrame(frame);
       observer?.disconnect();
       pages.removeEventListener('transitionend', bump);
+      scroller?.removeEventListener('scroll', bump);
       window.removeEventListener('resize', bump);
     };
-  }, [managed, options.canvasHostRef, options.overlayTarget, options.queries]);
+  }, [managed, options.canvasHostRef, options.overlayTarget, options.queries, options.scrollContainerRef]);
 
   const version = useSyncExternalStore(host.subscribe, host.version, host.version);
   const previewVersion = useSyncExternalStore(
@@ -479,15 +641,40 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       (clientX, clientY) => readPluginPositionAtPoint(
         latest.current.pagedEditorRef, clientX, clientY, latest.current.experimentalWorkerOpen === true
       ),
-      () => layoutComplete(latest.current.pagedEditorRef.current, dom.queries)
+      () => layoutComplete(latest.current.pagedEditorRef.current, dom.queries),
+      () => visibleViewport(latest.current.scrollContainerRef?.current ?? layer,
+        latest.current.editorRootRef?.current ?? layer, layer),
+      () => {
+        const range = selectionRef.current.displayRange;
+        if (!range) return null;
+        if (latest.current.viewerSelection || latest.current.viewerDocumentRead) {
+          const head = viewerSelectionRef.current?.head;
+          return { ...range, viewer: true, ...(typeof head === 'number' ? { focus: head } : {}) };
+        }
+        const editor = latest.current.pagedEditorRef.current;
+        const head = readSelection(editor?.getYrsSession())?.head;
+        const focus = head && editor?.yrsLocToDisplayPosition(head);
+        return range && head?.story === range.story && typeof focus === 'number' &&
+          focus >= Math.min(range.from, range.to) && focus <= Math.max(range.from, range.to)
+          ? { ...range, focus } : range;
+      },
+      host.subscribe,
+      () => selectionPublicationRef.current?.story ?? null
     );
     const resolveAnchor = created.getAnchorGeometry;
     created.getAnchorGeometry = (target) => {
+      host.flushSelection();
+      if (target.kind === 'selection' && (!isPresented(dom.context.pagesContainer, shownList) ||
+        latest.current.pagedEditorRef.current?.hasPendingInput())) {
+        return anchorFailure('layout-unavailable', 'No rendered layout shows this selection yet');
+      }
       const previous = proposalTarget;
       proposalTarget = target.kind === 'proposal';
       try { return resolveAnchor(target); }
       finally { proposalTarget = previous; }
     };
+    const readAnchors = created.readAnchorGeometries;
+    created.readAnchorGeometries = (targets) => { host.flushSelection(); return readAnchors(targets); };
     return created;
     // `moved` rebuilds the geometry when its elements move without a new frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -512,10 +699,11 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     return onPresented(() => host.geometryChanged());
   }, [host, holding]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     host.layoutChanged(currentLayout);
     publishSelection();
-  }, [host, currentLayout, publishSelection]);
+    host.flushSelection();
+  }, [host, currentLayout, options.layoutError, publishSelection]);
 
   useLayoutEffect(() => {
     if (!managed) return;

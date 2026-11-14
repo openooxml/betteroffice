@@ -3,15 +3,16 @@ import html
 import json
 from pathlib import Path
 
-import fitz
 import numpy as np
 from PIL import Image, ImageChops, ImageEnhance
 from skimage.metrics import structural_similarity
 
+from raster import load_pdf, render_page
+
 
 class Pages:
     def __init__(self, path, dpi):
-        self.pdf = fitz.open(path) if path.suffix.lower() == '.pdf' else None
+        self.pdf = load_pdf(path) if path.suffix.lower() == '.pdf' else None
         self.paths = [] if self.pdf else sorted(path.glob('page_*.png'))
         if any(page.name != f'page_{index + 1:04d}.png' for index, page in enumerate(self.paths)):
             raise ValueError(f'{path}: page filenames must be contiguous starting at page_0001.png')
@@ -30,8 +31,7 @@ class Pages:
 
     def page(self, index):
         if self.pdf is not None:
-            pixmap = self.pdf[index].get_pixmap(dpi=self.dpi, alpha=False)
-            return Image.frombytes('RGB', (pixmap.width, pixmap.height), pixmap.samples)
+            return render_page(self.pdf, index, self.dpi)
         with Image.open(self.paths[index]) as image:
             rgba = image.convert('RGBA')
         white = Image.new('RGBA', rgba.size, 'white')

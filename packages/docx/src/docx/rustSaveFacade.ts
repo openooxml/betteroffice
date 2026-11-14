@@ -58,6 +58,8 @@ export interface RustParagraphIds {
   };
   assignments: Array<{ part: string; ordinal: number; paraId: string }>;
   patchedParts: Array<{ part: string; paraIds: Array<[number, string]> }>;
+  wholeParts?: Array<{ part: string; sha256: string; changed: number[] }>;
+  touchedParts?: Array<{ part: string; touched: number[] }>;
   /**
    * Story parts written as their source bytes with only some paragraphs
    * re-serialized: those whose `sourceOrdinal` is in `changed`, or whose
@@ -77,6 +79,7 @@ export interface RustParagraphIds {
     tablePatches?: Array<{ ordinal: number; before: unknown; after: unknown }>;
     inserted?: Array<{ before: number } | { after: number }>;
     removed?: number[];
+    formatOnly?: number[];
   }>;
 }
 

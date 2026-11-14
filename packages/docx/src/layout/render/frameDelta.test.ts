@@ -832,7 +832,8 @@ const ENDNOTES = [1, 2];
 
 /**
  * Twelve paragraphs on small pages: footnotes on pages spread through the
- * document, and both endnotes on the last page beside its own footnote.
+ * document, and a short last paragraph that both endnotes follow on the last
+ * page, beside its own footnote.
  */
 function notedDocx(): Uint8Array {
   const run = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -847,7 +848,7 @@ function notedDocx(): Uint8Array {
     11: reference('footnote', 4),
   };
   const body = Array.from({ length: 12 }, (_, index) => {
-    const words = Array.from({ length: 40 }, (_, word) => `w${index}_${word}`).join(' ');
+    const words = Array.from({ length: index === 11 ? 4 : 40 }, (_, word) => `w${index}_${word}`).join(' ');
     return `<w:p>${run(words)}${references[index] ?? ''}</w:p>`;
   }).join('');
   const notes = (kind: 'footnote' | 'endnote', ids: number[]) =>

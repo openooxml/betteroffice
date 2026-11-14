@@ -1,3 +1,4 @@
+import { pptxWorkerRenderClients, type PptxPaintFont, type PptxWorkerRenderClient } from '../../../../shared/office-session/render/pptxWorkerRender';
 export { installFonts, installBrowserFonts, useStableFonts } from '../fontFaces';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 
@@ -30,4 +31,23 @@ export async function installDefaultFonts(
     finally { if (timer !== undefined) clearTimeout(timer); }
   }));
   return results.filter((face): face is DefaultFontFace => face !== undefined);
+}
+
+export function createPptxPaintFontForwarder() {
+  const faces: PptxPaintFont[] = [];
+  let client: PptxWorkerRenderClient | undefined;
+  let disposed = false;
+  return {
+    installed(face: PptxPaintFont) {
+      if (disposed) return;
+      faces.push(face);
+      client?.fonts([face]);
+    },
+    attach(owner: object) {
+      if (disposed) return;
+      client = pptxWorkerRenderClients.get(owner);
+      client?.fonts(faces);
+    },
+    dispose() { disposed = true; faces.length = 0; client = undefined; },
+  };
 }

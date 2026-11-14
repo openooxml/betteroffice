@@ -1,16 +1,18 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use docx_parse::paragraph_patch::{
-    AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, LegacyParagraphV1,
-    ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1,
-    canonical_json_v1, result_sha256, unit_sha256,
+    AttrDeltaV1, Attrs, DonorV1, InheritanceStateV1, InheritanceV1, InsertedTextV1,
+    LegacyParagraphV1, ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1,
+    UnitV1, canonical_json_v1, result_sha256, unit_sha256,
 };
 use serde_json::{Value, json};
 use yrs::Any;
 
 use crate::{SegmentContent, StorySegment};
 
+#[derive(Clone, Copy)]
 pub(crate) struct PatchContext<'a> {
     pub ordinal: u32,
     pub session_key: &'a str,
@@ -218,6 +220,25 @@ fn push_text(units: &mut Vec<UnitV1>, text: &str, attrs: &Attrs) {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum RunRules {
+    Full,
+    Basic,
+}
+
+impl RunRules {
+    fn run_key(self) -> fn(&[String]) -> bool {
+        match self {
+            Self::Full => run_key,
+            Self::Basic => basic_run_key,
+        }
+    }
+}
+
+fn basic_run_key(path: &[String]) -> bool {
+    path.first().is_none_or(|key| key != "characterSpacing") && run_key(path)
+}
+
 fn run_key(path: &[String]) -> bool {
     let Some(key) = path.first().map(String::as_str) else {
         return false;
@@ -230,6 +251,9 @@ fn run_key(path: &[String]) -> bool {
         "textColor" => Some(&["rgb", "themeColor", "themeTint", "themeShade"]),
         "highlight" => Some(&["color"]),
         "fontSize" => Some(&["size", "sizeCs"]),
+        "language" => Some(&["latin", "val", "eastAsia", "bidi"]),
+        "characterSpacing" => Some(&["spacing", "position", "scale", "kerning"]),
+        "typography" => Some(&["ligatures", "contextualAlternates"]),
         "fontFamily" => Some(&[
             "ascii",
             "hAnsi",
@@ -282,6 +306,11 @@ fn para_key(path: &[String]) -> bool {
         | "widowControl"
         | "pageBreakBefore"
         | "contextualSpacing" => path.len() == 1,
+        "language" => {
+            path.len() == 1
+                || (path.len() == 2
+                    && matches!(path[1].as_str(), "latin" | "val" | "eastAsia" | "bidi"))
+        }
         _ => false,
     }
 }
@@ -921,6 +950,7 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
             } => {
                 let comment = atom_kind == "field"
                     && payload.get("modelKind").and_then(Value::as_str) == Some("commentReference");
+                let exempt = comment || (atom_kind == "field" && closed_complex_field(payload));
                 if !matches!(
                     atom_kind.as_str(),
                     "break"
@@ -931,7 +961,7 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
                         | "chart"
                         | "opaqueDrawing"
                         | "horizontalRule"
-                ) && !comment
+                ) && !exempt
                 {
                     let kind = match atom_kind.as_str() {
                         "field" => "field",
@@ -963,7 +993,40 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
     {
         return Some("tc: paragraph revision".to_owned());
     }
-    if snapshot
+    None
+}
+
+fn closed_complex_field(payload: &Attrs) -> bool {
+    let data = payload
+        .get("fieldData")
+        .and_then(Value::as_str)
+        .and_then(|data| serde_json::from_str::<Value>(data).ok());
+    payload.get("modelKind").and_then(Value::as_str) == Some("field")
+        && payload.get("fieldKind").and_then(Value::as_str) == Some("complex")
+        && ![
+            "fieldCodeMarks",
+            "fieldCodeTarget",
+            "fieldResultBlocks",
+            "resultProjection",
+        ]
+        .iter()
+        .any(|key| payload.contains_key(*key))
+        && data.is_some_and(|data| {
+            ["structuredCode", "structuredResult"].iter().all(|key| {
+                data.get(*key)
+                    .and_then(|content| content.get("blocks"))
+                    .is_none_or(Value::is_null)
+            })
+        })
+}
+
+fn complex_field(token: &Token) -> bool {
+    matches!(&token.content, Content::Atom(kind, payload)
+        if kind == "field" && payload.get("modelKind").and_then(Value::as_str) == Some("field"))
+}
+
+fn has_run_revisions(snapshot: &Snapshot) -> bool {
+    snapshot
         .carriers
         .get("_originalRunBoundaries")
         .and_then(Value::as_array)
@@ -974,10 +1037,6 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
                     .is_some_and(|changes| !changes.is_empty())
             })
         })
-    {
-        return Some("tc: run property revision".to_owned());
-    }
-    None
 }
 
 fn validate_deltas(
@@ -1112,7 +1171,8 @@ fn validate_paragraph_clears(
             SlotV1::Missing => true,
             SlotV1::Present { value } => value.is_null(),
         };
-        (para_key(&delta.path) && reset).then_some(delta.path[0].as_str())
+        (para_key(&delta.path) && delta.path[0] != "language" && reset)
+            .then_some(delta.path[0].as_str())
     });
     let source = before
         .carriers
@@ -1144,6 +1204,7 @@ fn validate_theme_fonts(
     before: &Attrs,
     changes: &[AttrDeltaV1],
     context: &PatchContext<'_>,
+    rules: RunRules,
 ) -> Result<(), LegacyParagraphV1> {
     let themes = [
         "asciiTheme",
@@ -1157,10 +1218,18 @@ fn validate_theme_fonts(
             .iter()
             .any(|key| fonts.get(*key).is_some_and(|value| !value.is_null()))
     });
+    let removes_all = |delta: &AttrDeltaV1| {
+        delta.path.len() == 1
+            && match &delta.after {
+                SlotV1::Missing => true,
+                SlotV1::Present { value } => value.is_null(),
+            }
+    };
     if themed
-        && let Some(delta) = changes
-            .iter()
-            .find(|delta| delta.path.first().is_some_and(|key| key == "fontFamily"))
+        && let Some(delta) = changes.iter().find(|delta| {
+            delta.path.first().is_some_and(|key| key == "fontFamily")
+                && !(rules == RunRules::Full && removes_all(delta))
+        })
     {
         let slot = delta.path.get(1).map_or("fontFamily", String::as_str);
         return Err(context.legacy(
@@ -1332,6 +1401,34 @@ pub(crate) fn diff_paragraph_v1(
     live: &[StorySegment],
     context: PatchContext<'_>,
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
+    let widened = Cell::new(false);
+    plan_paragraph(seeded, live, context, RunRules::Full, &widened).map_err(|legacy| {
+        if !widened.get() {
+            return legacy;
+        }
+        plan_paragraph(seeded, live, context, RunRules::Basic, &widened)
+            .err()
+            .unwrap_or(legacy)
+    })
+}
+
+/// Whether `changes` reach a key the full rules accept beyond the basic ones.
+fn widens(changes: &[AttrDeltaV1]) -> bool {
+    changes.iter().any(|delta| {
+        delta
+            .path
+            .first()
+            .is_some_and(|key| key == "fontFamily" || key == "characterSpacing")
+    })
+}
+
+fn plan_paragraph(
+    seeded: &[StorySegment],
+    live: &[StorySegment],
+    context: PatchContext<'_>,
+    rules: RunRules,
+    widened: &Cell<bool>,
+) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
     let before = snapshot(seeded)
         .map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
     let mut after =
@@ -1460,14 +1557,6 @@ pub(crate) fn diff_paragraph_v1(
     if let Some(detail) = unsupported(&before).or_else(|| unsupported(&after)) {
         return Err(context.legacy(PatchErrorCode::UnsupportedStructure, detail));
     }
-    if context.metadata.is_some_and(|metadata| {
-        metadata.patch_has_run_revisions(context.story, context.session_key)
-    }) {
-        return Err(context.legacy(
-            PatchErrorCode::UnsupportedStructure,
-            "tc: run property revision",
-        ));
-    }
     validate_indent_kinds(&before, &after, &context, patchable_restyle)?;
     validate_paragraph_clears(&before, &after, &para_deltas, &context, patchable_restyle)?;
     validate_carriers(
@@ -1525,6 +1614,21 @@ pub(crate) fn diff_paragraph_v1(
         if i != previous.0 || j != previous.1 {
             let removed = &old[previous.0..i];
             let inserted = &new[previous.1..j];
+            if removed.iter().chain(inserted).any(complex_field) {
+                return Err(context.legacy(
+                    PatchErrorCode::UnsupportedStructure,
+                    "field: edit touches a field",
+                ));
+            }
+            if i == previous.0
+                && (old[..i].last().is_some_and(complex_field)
+                    || old.get(i).is_some_and(complex_field))
+            {
+                return Err(context.legacy(
+                    PatchErrorCode::UnsupportedStructure,
+                    "field: insertion at field edge",
+                ));
+            }
             if removed.iter().chain(inserted).any(|token| !token.is_text()) {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
@@ -1571,8 +1675,9 @@ pub(crate) fn diff_paragraph_v1(
                         return Err(context.restyle("inserted run inheritance"));
                     }
                     let changes = deltas(donor_attrs, &token.attrs);
-                    validate_theme_fonts(donor_attrs, &changes, &context)?;
-                    validate_deltas(&changes, run_key, &context)?;
+                    widened.set(widened.get() || widens(&changes));
+                    validate_theme_fonts(donor_attrs, &changes, &context, rules)?;
+                    validate_deltas(&changes, rules.run_key(), &context)?;
                     if token.attrs.get("hyperlink") != donor_attrs.get("hyperlink") {
                         let code = PatchErrorCode::UnsupportedStructure;
                         return Err(context.legacy(code, "hyperlink: mutation"));
@@ -1636,8 +1741,9 @@ pub(crate) fn diff_paragraph_v1(
                     }
                 }
                 run_changes = deltas(&old[i].attrs, &new[j].attrs);
-                validate_theme_fonts(&old[i].attrs, &run_changes, &context)?;
-                validate_deltas(&run_changes, run_key, &context)?;
+                widened.set(widened.get() || widens(&run_changes));
+                validate_theme_fonts(&old[i].attrs, &run_changes, &context, rules)?;
+                validate_deltas(&run_changes, rules.run_key(), &context)?;
                 if !verify_changes(&old[i].attrs, &run_changes, &new[j].attrs) {
                     return Err(context.legacy(
                         PatchErrorCode::UnsupportedKey,
@@ -1679,7 +1785,35 @@ pub(crate) fn diff_paragraph_v1(
             "ambiguous: content replay differs",
         ));
     }
-    validate_markers(&before, &after, &text_edits, &context)?;
+    let language_only = text_edits.is_empty()
+        && run_edits
+            .iter()
+            .flat_map(|edit| &edit.deltas)
+            .chain(&para_deltas)
+            .all(|delta| delta.path.first().is_some_and(|key| key == "language"));
+    if !language_only
+        && (has_run_revisions(&before)
+            || has_run_revisions(&after)
+            || context.metadata.is_some_and(|metadata| {
+                metadata.patch_has_run_revisions(context.story, context.session_key)
+            }))
+    {
+        return Err(context.legacy(
+            PatchErrorCode::UnsupportedStructure,
+            "tc: run property revision",
+        ));
+    }
+    validate_markers(&before, &after, &text_edits, &context).map_err(|legacy| {
+        // A field paragraph declines as one so the save keeps its source.
+        if old.iter().any(complex_field) {
+            context.legacy(
+                PatchErrorCode::UnsupportedStructure,
+                "field: markers around a field",
+            )
+        } else {
+            legacy
+        }
+    })?;
     let mut seed_properties = verification_properties(&before, context.seeded_markers);
     let mut result_properties = verification_properties(&after, context.live_markers);
     let para_deltas = if patchable_restyle && plain_restyle {
@@ -1722,6 +1856,11 @@ pub(crate) fn diff_paragraph_v1(
         para_inherit,
         mark_inherit,
         result_sha256: result_sha256(&units(&replay), &result_properties),
+        inheritance: if context.metadata.is_some() {
+            InheritanceStateV1::Current
+        } else {
+            InheritanceStateV1::Unknown
+        },
     })
 }
 
@@ -1977,6 +2116,31 @@ mod tests {
             { "id": 1, "name": "mark", "kind": "start", "offset": start },
             { "id": 1, "kind": "end", "offset": end }
         ] })
+    }
+
+    #[test]
+    fn a_run_clear_beside_a_marker_change_keeps_the_reason_of_the_run_clear() {
+        let fonts = json!({ "ascii": "Calibri", "asciiTheme": "minorHAnsi" });
+        let spacing = json!({ "spacing": 20 });
+        let markers = [(1, "1".to_owned(), false)];
+        for (key, value, detail) in [
+            ("fontFamily", fonts, "ambiguous: theme font"),
+            ("characterSpacing", spacing, "key:characterSpacing"),
+        ] {
+            let mut before = paragraph("abc", json!({}));
+            before[0]
+                .attributes
+                .insert(key.to_owned(), crate::seed::any_from_value(value).unwrap());
+            let after = paragraph("abc", json!({}));
+            let patch = diff_paragraph_v1(&before, &after, context()).unwrap();
+            assert_eq!(patch.run_edits.len(), 1);
+            let marked = PatchContext {
+                seeded_markers: &markers,
+                ..context()
+            };
+            let legacy = diff_paragraph_v1(&before, &after, marked).unwrap_err();
+            assert!(legacy.detail.starts_with(detail), "{}", legacy.detail);
+        }
     }
 
     #[test]

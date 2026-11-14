@@ -147,9 +147,21 @@ pub(crate) struct Tag<'a> {
     pub(crate) attributes: Vec<(&'a str, Range<usize>)>,
 }
 
+#[cfg(feature = "test-support")]
+static TAGGED_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The bytes [`tags`] has read since the previous call, so a test can pin how often a save
+/// tokenizes a part.
+#[cfg(feature = "test-support")]
+pub fn take_tagged_bytes() -> usize {
+    TAGGED_BYTES.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Walks the tags of `xml` in order, skipping comments, CDATA, processing
 /// instructions and declarations. `None` on an unterminated construct.
 pub(crate) fn tags(xml: &str) -> Option<Vec<Tag<'_>>> {
+    #[cfg(feature = "test-support")]
+    TAGGED_BYTES.fetch_add(xml.len(), std::sync::atomic::Ordering::Relaxed);
     let bytes = xml.as_bytes();
     let mut result = Vec::new();
     let mut cursor = 0;

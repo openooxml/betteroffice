@@ -1,6 +1,7 @@
 import { FONT_FALLBACK_MESSAGE } from '../fontFaces';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn } from 'bun:test';
+import { budgetedTest, budgetedWaitFor } from '../../../../shared/office-session/testing/loadBudget';
 import { readFile } from 'node:fs/promises';
 import * as pptx from '@betteroffice/pptx';
 import type { SlideDisplayList } from '@betteroffice/pptx';
@@ -17,7 +18,9 @@ import { frameImages } from './sessionPaint';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor: waitForCondition } = await import('@testing-library/react');
+const waitFor = budgetedWaitFor(waitForCondition);
+const it = budgetedTest();
 const file = new Uint8Array([1, 2, 3]);
 const restorers: (() => void)[] = [];
 let observed: HTMLElement[] = [];
@@ -53,6 +56,7 @@ function session(count = 4) {
     applyEdits: mock(async (): Promise<pptx.PptxEditResult> => { throw new Error('Unexpected mutation'); }),
     slides: async () => slides, slideSize: async () => ({ width: 960, height: 540 }),
     save: async () => new Uint8Array([8, 9]).buffer,
+    renderPng: mock(async () => new Uint8Array([137, 80, 78, 71])),
   };
   const viewer: PresentationSession = {
     state: { format: 'pptx', stage: 'ready', version: 0, dirty: false, slides, size: { width: 960, height: 540 } },
@@ -715,4 +719,20 @@ it('failed fonts warn once per file across rerenders', async () => {
     if (descriptor) Object.defineProperty(globalThis, 'FontFace', descriptor);
     else Reflect.deleteProperty(globalThis, 'FontFace');
   }
+});
+
+it('read-only and slideshow retain editor anchors while the viewer has no plugin host (viewer)', async () => {
+  const { viewer } = session();
+  open(viewer);
+  let api: PptxWorkerViewerApi | undefined;
+  const view = render(<PptxEditor legacySyncApi file={file} fonts={[]} readOnly experimentalWorkerOpen
+    onReady={value => { api = value; }} />);
+  await waitFor(() => expect(api).toBeDefined());
+  expect(api!.handle).toBeNull();
+  expect(view.queryByTestId('plugin-overlays')).toBeNull();
+  expect(view.queryByTestId('plugin-dock-left')).toBeNull();
+  expect(view.queryByTestId('plugin-dock-right')).toBeNull();
+  expect(view.queryByTestId('plugin-dock-bottom')).toBeNull();
+  expect('geometry' in api!).toBe(false);
+  expect(api!.selectText({ slide: 1, shapeId: 'shape', storyId: 'story', start: 0, end: 0 })).toBe(false);
 });

@@ -34,14 +34,17 @@ fn merged_png_has_background_inside_and_grid_pixels_around_merge() {
     .unwrap();
     let geom = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
     let rendered = workbook
-        .render_png_for(
-            SheetId(0),
-            &Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: geom.col_x(5),
-                height: geom.row_y(5),
+        .render_png(
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: geom.col_x(5),
+                    height: geom.row_y(5),
+                },
             },
+            &betteroffice_xlsx::RenderOptions::default(),
         )
         .unwrap();
     let mut reader = png::Decoder::new(Cursor::new(rendered.bytes))

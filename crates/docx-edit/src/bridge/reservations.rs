@@ -243,6 +243,7 @@ pub(super) fn place(
             reservation: reservation.reference(),
             width: reservation.width,
             height: reservation.height,
+            page_lead: None,
         });
         match reservation.side {
             ReservationSide::Before => placed.before.push(block),

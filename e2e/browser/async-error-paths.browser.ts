@@ -2,6 +2,7 @@ import { test, expect, type Page, type TestInfo } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 import { deflateSync } from 'node:zlib';
 import JSZip from 'jszip';
+import { inputReady } from './pptx-async-helpers';
 
 type Format = 'docx' | 'xlsx' | 'pptx';
 type InputFile = { name: string; mimeType: string; buffer: Buffer };
@@ -244,6 +245,7 @@ const slideInput = (page: Page) => page.getByTestId('pptx-worker-editor')
 async function slideLine(page: Page, last = false) {
   const input = slideInput(page);
   await expect(input).toBeEditable();
+  await inputReady(page);
   const canvas = page.getByTestId('pptx-slide-canvas');
   const bounds = await canvas.boundingBox();
   expect(bounds).not.toBeNull();

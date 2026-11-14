@@ -5,6 +5,10 @@ import JSZip from 'jszip';
 
 const root = resolve(import.meta.dirname, '../..');
 
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+});
+
 async function open(page: Page) {
   await page.goto('/?format=docx&peerless=1');
   await page

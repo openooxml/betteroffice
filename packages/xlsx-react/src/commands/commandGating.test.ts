@@ -131,11 +131,12 @@ describe('xlsx command gating', () => {
       );
     }
     for (const value of ['all', 'horizontal', 'vertical', 'unmerge'] as const) {
-      const state = evaluate('merge', { value }, { collaborative: true, selection: range(0, 0, 3, 3, 1) });
-      expect(code(state)).toBe('collaboration-unsupported');
+      const selection = range(0, 0, 3, 3, 1);
+      const state = evaluate('merge', { value }, { collaborative: true, selection });
+      expect(code(state)).toBe(code(evaluate('merge', { value }, { selection })));
     }
     expect(code(evaluate('merge', undefined, { collaborative: true }))).toBe(
-      'collaboration-unsupported'
+      code(evaluate('merge', undefined, {}))
     );
   });
 
@@ -235,5 +236,47 @@ describe('xlsx command gating', () => {
   test('host-disabled commands say so', () => {
     const state = evaluate('undo', undefined, { hostDisabled: new Set(['undo']) });
     expect(code(state)).toBe('host-disabled');
+  });
+});
+
+describe('xlsx menu command gating', () => {
+  const sheets = (names: string[], active = 0) => ({ workbook: { sheets: names, active, clipboardRead: true } });
+
+  test('editors that do not report the workbook leave menu commands unsupported', () => {
+    for (const id of ['cut', 'copy', 'paste', 'pastePlainText', 'clearContents', 'insertRows', 'deleteRows',
+      'insertColumns', 'deleteColumns', 'insertSheet', 'deleteSheet', 'renameSheet', 'moveSheet'] as const) {
+      expect([id, code(evaluate(id, undefined, { workbook: undefined }))]).toEqual([id, 'unsupported-command']);
+    }
+  });
+
+  test('copy works read-only; cut and paste write; paste needs clipboard read access', () => {
+    expect(code(evaluate('copy', null, { readOnly: true }))).toBeNull();
+    expect(code(evaluate('cut', null, { readOnly: true }))).toBe('read-only');
+    expect(code(evaluate('copy', null, { selection: 'chart' }))).toBe('unsupported-selection');
+    expect(code(evaluate('copy', null, { selection: null }))).toBe('cell-selection-required');
+    expect(code(evaluate('paste', null, { workbook: { sheets: ['Sheet1'], active: 0, clipboardRead: false } })))
+      .toBe('clipboard-unavailable');
+    expect(code(evaluate('pastePlainText', null))).toBeNull();
+  });
+
+  test('row, column and sheet structure is unavailable while editing together', () => {
+    for (const id of ['insertRows', 'deleteRows', 'insertColumns', 'deleteColumns', 'insertSheet', 'deleteSheet',
+      'renameSheet', 'moveSheet'] as const) {
+      expect([id, code(evaluate(id, undefined, { collaborative: true }))]).toEqual([id, 'collaboration-unsupported']);
+    }
+    expect(code(evaluate('insertRows', { position: 'sideways' } as never))).toBe('invalid-arguments');
+  });
+
+  test('sheet commands follow Excel rules', () => {
+    expect(code(evaluate('deleteSheet', null, sheets(['Only'])))).toBe('last-sheet');
+    expect(code(evaluate('moveSheet', { direction: 'left' }, sheets(['A', 'B'], 0)))).toBe('sheet-at-edge');
+    expect(code(evaluate('moveSheet', { direction: 'right' }, sheets(['A', 'B'], 0)))).toBeNull();
+    expect(code(evaluate('moveSheet', { direction: 'right' }, sheets(['A', 'B'], 1)))).toBe('sheet-at-edge');
+    for (const name of ['', 'a'.repeat(32), 'Q1:Q2', 'x/y', "'quoted", 'b', 'History']) {
+      expect([name, code(evaluate('renameSheet', { name }, sheets(['A', 'B'], 0)))]).toEqual([name, 'sheet-name-invalid']);
+    }
+    expect(code(evaluate('renameSheet', { name: 'a' }, sheets(['A', 'B'], 0)))).toBeNull();
+    expect(code(evaluate('renameSheet', { name: 'Budget 2026' }, sheets(['A', 'B'], 0)))).toBeNull();
+    expect(code(evaluate('renameSheet', null, sheets(['A'], 0)))).toBeNull();
   });
 });

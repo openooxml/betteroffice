@@ -35,3 +35,9 @@ test('a paragraph mark kept before an inserted table is listed as the table inse
   expect(entries).toHaveLength(1);
   expect(entries[0]).toMatchObject({ type: 'tableInserted', from: 3, to: 5 });
 });
+
+test('run property changes become formatting review entries', () => {
+  const { entries } = extractTrackedChangesFromYrs([revision('rPrChange', 2)], projection);
+  expect(entries).toHaveLength(1);
+  expect(entries[0]).toMatchObject({ type: 'runPropertiesChanged', author: 'Ann', from: 2, to: 3 });
+});

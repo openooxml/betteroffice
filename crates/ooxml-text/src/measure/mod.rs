@@ -36,8 +36,8 @@
 //!   images, text boxes and breaks are measured by other code paths and are
 //!   never routed here.
 //!
-//! A character no font in the chain covers is *not* refused: it shapes as
-//! the chain's terminal font's `.notdef`, which is a real advance width.
+//! Uncovered characters use a covering backstop face, then the chain's
+//! terminal font's `.notdef`.
 //!
 //! # Measurement rules
 //!
@@ -58,9 +58,7 @@
 //!   line before the cut.
 //! - **`allCaps` uppercases before shaping**, `smallCaps` shapes lowercase
 //!   as small capitals, and `horizontalScale` multiplies glyph advances:
-//!   measurement reflects what a painter draws. `letterSpacing` is added
-//!   once per gap between shaped clusters within a word — never between
-//!   words, and not scaled by `horizontalScale`.
+//!   measurement reflects what a painter draws.
 //! - **Line height** follows `spacing.lineRule` (`exact` / `atLeast` /
 //!   `auto`) and `lineUnit` (`multiplier` / `px`), defaulting to single
 //!   spacing. An empty paragraph floors at 1.15 × the font size under the
@@ -125,18 +123,39 @@ mod input;
 mod intrinsic;
 mod line_filler;
 mod list_marker;
+mod packed_glyphs;
 mod prepare;
 mod tabs;
 
-pub use font_slots::{FontSlotUse, font_slot_use};
+pub use font_slots::{FontSlotUse, font_slot_characters, font_slot_use};
 pub use input::{
     AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChainDependencies,
     FontChains, IndentIn, MeasureInput, MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn,
     RunLanguageSlotsIn, SpacingIn, TabStopIn,
 };
 pub use intrinsic::measure_intrinsic_widths;
+pub use packed_glyphs::{
+    GlyphRunHead, GlyphRunWriter, MeasuredGlyph, MeasuredGlyphRun, pack_glyph_runs,
+    unpack_glyph_runs,
+};
 
 use crate::font_store::{FontId, FontStore};
+
+/// Private-use, symbol and math characters, which belong to no writing system.
+#[doc(hidden)]
+pub fn symbol_character(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{2100}'..='\u{214f}'
+            | '\u{2190}'..='\u{23ff}'
+            | '\u{25a0}'..='\u{27bf}'
+            | '\u{27c0}'..='\u{27ef}'
+            | '\u{2980}'..='\u{2aff}'
+            | '\u{e000}'..='\u{f8ff}'
+            | '\u{1d400}'..='\u{1d7ff}'
+            | '\u{f0000}'..='\u{10ffff}'
+    )
+}
 
 #[doc(hidden)]
 pub fn needs_glyph(ch: char) -> bool {
@@ -210,6 +229,12 @@ pub struct TypesetRowOut {
     /// `Some` only under `authoritativeShaping`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidi_slices: Option<Vec<TypesetBidiSliceOut>>,
+    /// The glyph runs measurement shaped the line's text with, in visual paint
+    /// order, as [`pack_glyph_runs`] packs them. A line break inside a shaped
+    /// segment cuts its glyphs at a cluster boundary rather than reshaping them.
+    /// `Some` only under `authoritativeShaping`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glyph_runs: Option<String>,
 }
 
 /// Advance of one run's slice of a line. A run split by direction yields one
@@ -590,6 +615,7 @@ fn zero_row() -> TypesetRowOut {
         run_advances: None,
         cluster_advances: None,
         bidi_slices: None,
+        glyph_runs: None,
     }
 }
 

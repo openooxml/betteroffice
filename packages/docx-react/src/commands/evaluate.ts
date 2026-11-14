@@ -369,6 +369,11 @@ function validArgs<K extends DocxCommandId>(id: K, args: DocxCommandArgs[K] | un
   }
 }
 
+/** Whether `id` runs without arguments, so a shortcut can trigger it directly. */
+export function acceptsNullArgs(id: DocxCommandId): boolean {
+  return validArgs(id, null);
+}
+
 function validTableAction(value: unknown): boolean {
   if (typeof value === 'string') return TABLE_STRING_ACTIONS.has(value);
   if (!isRecord(value) || typeof value.type !== 'string') return false;
@@ -675,8 +680,13 @@ function evaluate<K extends DocxCommandId>(
     case 'save':
     case 'print':
     case 'find':
+    case 'copy':
+    case 'selectAll':
       return { gate: documentGate(env) };
     case 'replace':
+    case 'cut':
+    case 'paste':
+    case 'pasteAsPlainText':
       return { gate: writeGate(env) };
     case 'zoom': {
       const zoomArgs = args as DocxCommandArgs['zoom'] | undefined;

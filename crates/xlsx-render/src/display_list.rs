@@ -4,7 +4,7 @@
 use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use xlsx_model::PatternType;
+use xlsx_model::{PatternType, RunUnderline};
 
 /// horizontal text anchoring within a cell's clip rect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +111,9 @@ pub enum DrawCmd {
         italic: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         underline: bool,
+        /// The kind of `underline` when it is not single.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        underline_style: Option<RunUnderline>,
         #[serde(default, skip_serializing_if = "is_false")]
         strike: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,6 +161,17 @@ pub struct PathStroke {
 pub struct GridMeta {
     pub start_row: u32,
     pub start_col: u32,
+    /// Leading tracks pinned by the frozen pane; absent when nothing is frozen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_rows: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_cols: Option<u32>,
+    /// Viewport-pixel position of the freeze line on each axis; absent when the
+    /// frozen extent does not split the viewport (or nothing is frozen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub divider_x: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub divider_y: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_indices: Option<Vec<u32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,6 +182,12 @@ pub struct GridMeta {
     pub hidden_col_spans: Vec<(u32, u32)>,
     pub row_offsets: Vec<f32>,
     pub col_offsets: Vec<f32>,
+    /// full track sizes parallel to `row_offsets`/`col_offsets`: the sheet-px
+    /// extent of each visible track, even when a frozen pane clips its start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub row_sizes: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub col_sizes: Vec<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +225,9 @@ pub struct ChartRegion {
     pub clip: Rect,
     /// whether the anchor can be repinned; an absolute one cannot.
     pub movable: bool,
+    /// whether the anchor can be resized. A two-cell anchor writes both
+    /// corners back, so it can; a one-cell extent never is.
+    pub resizable: bool,
 }
 
 /// former name of [`ChartRegion`], when it carried the label alone.
@@ -320,6 +343,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 bold,
                 italic,
                 underline,
+                underline_style,
                 strike,
                 highlight,
                 dashed_underline,
@@ -343,6 +367,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 bold,
                 italic,
                 underline,
+                underline_style,
                 strike,
                 highlight,
                 dashed_underline,
@@ -375,6 +400,10 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
         grid: GridMeta {
             start_row: dl.grid.start_row,
             start_col: dl.grid.start_col,
+            frozen_rows: dl.grid.frozen_rows,
+            frozen_cols: dl.grid.frozen_cols,
+            divider_x: dl.grid.divider_x.map(|x| x * factor),
+            divider_y: dl.grid.divider_y.map(|y| y * factor),
             hidden_row_spans: dl.grid.hidden_row_spans,
             hidden_col_spans: dl.grid.hidden_col_spans,
             row_indices: dl.grid.row_indices,
@@ -391,6 +420,8 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 .into_iter()
                 .map(|v| v * factor)
                 .collect(),
+            row_sizes: dl.grid.row_sizes.into_iter().map(|v| v * factor).collect(),
+            col_sizes: dl.grid.col_sizes.into_iter().map(|v| v * factor).collect(),
         },
         hyperlinks: dl.hyperlinks,
         charts: dl
@@ -403,6 +434,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 rect: scale_rect(chart.rect, factor),
                 clip: scale_rect(chart.clip, factor),
                 movable: chart.movable,
+                resizable: chart.resizable,
             })
             .collect(),
     }
@@ -533,6 +565,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    underline_style: None,
                     strike: false,
                     highlight: None,
                     dashed_underline: false,
@@ -554,12 +587,18 @@ mod tests {
             grid: GridMeta {
                 start_row: 1,
                 start_col: 2,
+                frozen_rows: Some(1),
+                frozen_cols: Some(2),
+                divider_x: Some(8.0),
+                divider_y: Some(4.0),
                 hidden_row_spans: vec![(10, 20)],
                 hidden_col_spans: vec![(4, 5)],
                 row_indices: None,
                 col_indices: None,
                 row_offsets: vec![0.0, 20.0],
                 col_offsets: vec![0.0, 64.0],
+                row_sizes: vec![20.0],
+                col_sizes: vec![64.0],
             },
             hyperlinks: Vec::new(),
             charts: vec![ChartRegion {
@@ -579,6 +618,7 @@ mod tests {
                     h: 40.0,
                 },
                 movable: true,
+                resizable: true,
             }],
         }
     }
@@ -656,6 +696,10 @@ mod tests {
             _ => panic!("expected text"),
         }
         assert_eq!(dl.grid.start_row, 1);
+        assert_eq!(dl.grid.frozen_rows, Some(1));
+        assert_eq!(dl.grid.frozen_cols, Some(2));
+        assert_eq!(dl.grid.divider_x, Some(16.0));
+        assert_eq!(dl.grid.divider_y, Some(8.0));
         assert_eq!(dl.grid.hidden_row_spans, vec![(10, 20)]);
         assert_eq!(dl.grid.hidden_col_spans, vec![(4, 5)]);
         assert_eq!(dl.grid.col_offsets, vec![0.0, 128.0]);

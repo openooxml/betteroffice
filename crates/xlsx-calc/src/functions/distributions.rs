@@ -79,7 +79,7 @@ pub(crate) fn gammaln(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if v[0] <= 0.0 {
         return err(ErrorValue::Num);
     }
-    finish(ctx, special::lngamma(v[0]))
+    finish(ctx, special::lngamma_shown(v[0]))
 }
 
 fn gamma_dist_impl(x: f64, alpha: f64, beta: f64, cumulative: bool) -> Result<f64, ErrorValue> {

@@ -9,7 +9,7 @@ import { createResidentEngineSession } from './residentEngineSession';
 import { setEditWasmHeapLimit } from '../wasm/edit';
 import { wasmModuleMemories } from './index';
 import { commandMayNeedNewFonts } from './residentFontEnvironment';
-import { engineKind } from '../wasm/engineEdit';
+import { engineKind, wasm_heap_counted, wasm_live_bytes } from '../wasm/engineEdit';
 
 const TIMEOUT = 20_000;
 let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
@@ -22,12 +22,16 @@ beforeAll(async () => {
 }, 30_000);
 
 test('oversized WOFF table leaves wasm memory and a bounded editing session intact', async () => {
-  const engine = await createResidentEngineSession(16 * 1024 * 1024);
+  let engine: Awaited<ReturnType<typeof createResidentEngineSession>> | undefined;
   try {
-    engine.openDocument({ package: { document: { content: [{ type: 'paragraph', content: [
+    setEditWasmHeapLimit(Number.MAX_SAFE_INTEGER);
+    const live = wasm_live_bytes();
+    const session = await createResidentEngineSession(live + 16 * 1024 * 1024);
+    engine = session;
+    session.openDocument({ package: { document: { content: [{ type: 'paragraph', content: [
       { type: 'run', content: [{ type: 'text', text: 'Text' }] },
     ] }] } } }, {});
-    engine.decodeFont(font('woff'));
+    session.decodeFont(font('woff'));
     const bytes = new Uint8Array(65);
     bytes.set(new TextEncoder().encode('wOFF'));
     const view = new DataView(bytes.buffer);
@@ -39,16 +43,16 @@ test('oversized WOFF table leaves wasm memory and a bounded editing session inta
     view.setUint32(52, 1);
     view.setUint32(56, 65 * 1024 * 1024);
     const before = wasmModuleMemories().find(entry => entry.label === 'docx-edit');
-    expect(() => engine.decodeFont(bytes)).toThrow('Invalid resident font size');
+    expect(() => session.decodeFont(bytes)).toThrow('Invalid resident font size');
     if (engineKind === 'wasm') {
       const after = wasmModuleMemories().find(entry => entry.label === 'docx-edit')!;
       expect(after.bufferBytes).toBe(before!.bufferBytes);
       expect(after.liveBytes! - before!.liveBytes!).toBeLessThan(65536);
       expect(after.failedAllocationBytes).toBe(0);
     }
-    engine.insertText({ story: 'body', paraId: engine.paragraphs('body')[0]!.paraId, offset: 0 }, 'Still ');
-    expect(engine.paragraphs('body')[0]!.text).toBe('Still Text');
-  } finally { engine.destroy(); setEditWasmHeapLimit(undefined); }
+    session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'Still ');
+    expect(session.paragraphs('body')[0]!.text).toBe('Still Text');
+  } finally { engine?.destroy(); setEditWasmHeapLimit(undefined); }
 }, TIMEOUT);
 
 for (const extension of ['woff', 'woff2']) {
@@ -84,7 +88,7 @@ for (const extension of ['woff', 'woff2']) {
       expect(worker.fontFaces.size).toBe(1);
       expect(events).toMatchObject([{ phase: 'ready', revision: 1 }, { phase: 'presentation', revision: 1, frameEpoch: ack.frame?.revision }]);
       expect(memory.length).toBeGreaterThan(0);
-      expect(client.memory()?.some(sample => sample.label === 'docx-edit')).toBe(engineKind === 'wasm');
+      expect(client.memory()?.some(sample => sample.label === 'docx-edit')).toBe(engineKind === 'wasm' || wasm_heap_counted());
       const duplicate = await client.edit(envelope);
       expect(duplicate.version).toBe(ack.version);
       expect(events).toHaveLength(2);
@@ -122,6 +126,10 @@ test('decoded worker fonts stay in their owning measurement session', async () =
 }, TIMEOUT);
 
 test('commands that may need new fonts: fallback script text, reformatting and remote merges, never bytes alone', () => {
+  expect(commandMayNeedNewFonts('insertText', { text: 'A' })).toBe(false);
+  expect(commandMayNeedNewFonts('insertText', { text: 'B' })).toBe(false);
+  expect(commandMayNeedNewFonts('applyEdits', { request: { steps: [{ op: 'insertText', text: 'Ω' }] } })).toBe(false);
+  expect(commandMayNeedNewFonts('insertImage', { image: { data: Uint8Array.of(65) } })).toBe(false);
   expect(commandMayNeedNewFonts('insertText', { text: 'plain caf\u00e9' })).toBe(false);
   expect(commandMayNeedNewFonts('deleteBackward', {})).toBe(false);
   for (const text of ['\u65e5\u672c', '\u304b', '\ud55c', '\u05d0', '\u0627', '\u{20000}']) {

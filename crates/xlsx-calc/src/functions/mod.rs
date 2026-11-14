@@ -508,20 +508,63 @@ pub(crate) fn uncomputable(name: &str) -> Option<String> {
         .map(|known| (*known).to_owned())
 }
 
-/// whether a formula's text may call a function [`uncomputable`] names: a
+/// the name to report for a call to `name`, which resolved to no builtin,
+/// when the engine has no answer for it: what [`uncomputable`] names, or any
+/// other name as written without its `_xlfn.` prefix. the engine cannot tell a
+/// typo from a function it does not know, such as a VBA function, a named
+/// lambda or one a later excel adds. `None` for the builtins only the array
+/// evaluator implements.
+pub(crate) fn unanswerable(name: &str) -> Option<String> {
+    if crate::array::is_array_builtin(name) {
+        return None;
+    }
+    Some(uncomputable(name).unwrap_or_else(|| bare_name(name).to_owned()))
+}
+
+/// whether a formula's text may call a function [`unanswerable`] names: a
 /// cheap filter that can say yes for text that does not. the parser lets
-/// whitespace stand between a name and its `(`, so this does too.
+/// whitespace stand between a name and its `(`, so this does too; text,
+/// quoted sheet names and bracketed table columns hold no calls.
 pub fn may_call_uncomputable(formula: &str) -> bool {
-    let upper = formula.to_ascii_uppercase();
-    upper.contains("_XLL.")
-        || upper.contains("_XLUDF.")
-        || UNCOMPUTABLE.iter().any(|name| {
-            upper.match_indices(name).any(|(at, _)| {
-                upper[at + name.len()..]
+    let bytes = formula.as_bytes();
+    let mut at = 0;
+    let mut brackets = 0usize;
+    while let Some(&byte) = bytes.get(at) {
+        match byte {
+            b'[' => brackets += 1,
+            b']' => brackets = brackets.saturating_sub(1),
+            _ if brackets > 0 => {}
+            b'"' | b'\'' => {
+                at += bytes[at + 1..]
+                    .iter()
+                    .position(|&other| other == byte)
+                    .map_or(bytes.len(), |closing| closing + 1);
+            }
+            _ if is_name_byte(byte) => {
+                let start = at;
+                while bytes.get(at).copied().is_some_and(is_name_byte) {
+                    at += 1;
+                }
+                let name = &formula[start..at];
+                if formula[at..]
                     .trim_start_matches([' ', '\t', '\n', '\r'])
                     .starts_with('(')
-            })
-        })
+                    && resolve(name).is_none()
+                    && !crate::array::is_array_builtin(name)
+                {
+                    return true;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    false
+}
+
+fn is_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'$' | b'\\') || byte >= 0x80
 }
 
 fn strip_ascii_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
@@ -1603,7 +1646,9 @@ pub(crate) fn finite(x: f64) -> CellValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{Func, UNCOMPUTABLE, UNION_NAME, may_call_uncomputable, resolve, uncomputable};
+    use super::{
+        Func, UNCOMPUTABLE, UNION_NAME, may_call_uncomputable, resolve, unanswerable, uncomputable,
+    };
 
     #[test]
     fn formula_text_filters_for_uncomputable_calls() {
@@ -1617,8 +1662,51 @@ mod tests {
         ] {
             assert!(may_call_uncomputable(formula), "{formula}");
         }
-        for formula in ["SUM(A1:A3)", "WEBSERVICES", "A1&\"RTD\""] {
+        for formula in [
+            "SUM(A1:A3)",
+            "WEBSERVICES",
+            "A1&\"RTD\"",
+            "_xlfn.LET(_xlpm.x,1,_xlpm.x)",
+            "LOG10 (100)",
+            "\"TYPO(1)\"&'Odd (1)'!A1",
+            "'it''s (1)'!A1",
+            "Sales[[#This Row],[Cost (USD)]]",
+        ] {
             assert!(!may_call_uncomputable(formula), "{formula}");
+        }
+    }
+
+    #[test]
+    fn formula_text_filters_for_unknown_calls() {
+        for formula in [
+            "REPRO_UNKNOWN_FUNCTION(1)",
+            "IFERROR(TYPO (A1),0)",
+            "_xlfn.FUTURE(1)",
+            "_xlfn._xlws.FUTURE(1)",
+            "MyLambda(1)",
+            "\"x\"&Fünf(1)",
+            "[1]!Foo(1)",
+            "Sheet1!Foo(1)",
+            "'Odd (1)'!Foo(1)",
+            "Sales[[#This Row],[Cost]]+TYPO(1)",
+        ] {
+            assert!(may_call_uncomputable(formula), "{formula}");
+        }
+    }
+
+    #[test]
+    fn unanswerable_names_read_as_excel_shows_them() {
+        for (stored, reported) in [
+            ("_xlfn.WEBSERVICE", Some("WEBSERVICE")),
+            ("_xll.Quote", Some("_xll.Quote")),
+            ("REPRO_UNKNOWN_FUNCTION", Some("REPRO_UNKNOWN_FUNCTION")),
+            ("_xlfn.FUTURE", Some("FUTURE")),
+            ("_xlfn._xlws.FUTURE", Some("FUTURE")),
+            ("[1]!Foo", Some("[1]!Foo")),
+            ("_xlfn.LET", None),
+            ("LAMBDA", None),
+        ] {
+            assert_eq!(unanswerable(stored).as_deref(), reported, "{stored}");
         }
     }
 

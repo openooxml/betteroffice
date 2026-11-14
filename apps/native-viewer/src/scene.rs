@@ -270,7 +270,7 @@ fn draw_text(
     }
     let letter_spacing = optional_number(run.letter_spacing.as_ref())?.unwrap_or(0.0) as f32;
     let word_spacing = optional_number(run.word_spacing.as_ref())?.unwrap_or(0.0) as f32;
-    let (font_id, size, glyphs) = fonts
+    let (size, runs) = fonts
         .shape_fallback(
             &text,
             &run.font,
@@ -280,9 +280,6 @@ fn draw_text(
             word_spacing,
         )
         .map_err(|error| error.to_string())?;
-    let face = fonts
-        .face(font_id)
-        .ok_or_else(|| format!("text fallback font id {font_id} is unavailable"))?;
     let x = number(&run.x)?;
     let baseline = number(&run.baseline_y)?;
     let width = number(&run.width)?.max(0.0);
@@ -297,13 +294,18 @@ fn draw_text(
         run.rotation_deg.as_ref(),
         run.horizontal_scale.as_ref(),
     )?;
-    scene
-        .draw_glyphs(&face.data)
-        .font_size(size)
-        .brush(color(&run.color, 1.0)?)
-        .brush_alpha(opacity)
-        .transform(visual * Affine::translate((x, baseline)))
-        .draw(Fill::NonZero, glyphs.into_iter());
+    for (font_id, glyphs) in runs {
+        let face = fonts
+            .face(font_id)
+            .ok_or_else(|| format!("text fallback font id {font_id} is unavailable"))?;
+        scene
+            .draw_glyphs(&face.data)
+            .font_size(size)
+            .brush(color(&run.color, 1.0)?)
+            .brush_alpha(opacity)
+            .transform(visual * Affine::translate((x, baseline)))
+            .draw(Fill::NonZero, glyphs.into_iter());
+    }
     Ok(())
 }
 

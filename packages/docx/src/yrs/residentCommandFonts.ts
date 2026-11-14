@@ -1,3 +1,4 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import type { RustTextEngine } from '../layout/measure/rustMeasureSource';
 import type { YrsResidentFontRegistration } from './index';
 
@@ -40,14 +41,14 @@ export function registerCommandFonts(
     if (font instanceof Uint8Array) {
       try { id = engine.registerFont(font); }
       catch (error) {
-        if (error instanceof WebAssembly.RuntimeError) throw error;
+        if (isEngineTrap(error)) throw error;
         id = null;
       }
     } else {
       const base = resolve(font.substituteOf);
       try { id = base === null ? null : engine.registerSubstituteFont?.(base, font.family) ?? base; }
       catch (error) {
-        if (error instanceof WebAssembly.RuntimeError) throw error;
+        if (isEngineTrap(error)) throw error;
         id = base;
       }
     }

@@ -220,14 +220,22 @@ fn raster_calls_still_reject_excessive_visible_cells() {
     }
     let workbook = open(sheet);
     assert!(matches!(
-        workbook.render_png(&SCREEN),
+        workbook.render_png(
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: SCREEN
+            },
+            &betteroffice_xlsx::RenderOptions::default()
+        ),
         Err(Error::DisplayTooLarge { .. })
     ));
     assert!(matches!(
-        workbook.render_sheet(
-            SheetId(0),
+        workbook.render_png(
+            betteroffice_xlsx::PngTarget::Range {
+                sheet: SheetId(0),
+                range: CellRange::new(CellRef::new(0, 0), CellRef::new(999, 999))
+            },
             &betteroffice_xlsx::RenderOptions {
-                range: Some(CellRange::new(CellRef::new(0, 0), CellRef::new(999, 999))),
                 scale: 0.1,
                 ..Default::default()
             }

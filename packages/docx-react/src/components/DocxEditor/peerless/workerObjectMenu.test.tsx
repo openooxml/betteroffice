@@ -33,7 +33,7 @@ test('image context resize targets the clicked physical handle rather than the p
   function Host() {
     menu = useWorkerContextMenu({ binding: () => binding,
       environment: () => ({ readOnly: false, mode: 'editing', translate }),
-      commands: { getState: () => ({ enabled: false }) }, clipboard: async () => {}, submit,
+      commands: { getState: () => ({ enabled: false }), getDescriptor: () => ({ shortcuts: [] }) }, clipboard: async () => {}, submit,
     } as unknown as Parameters<typeof useWorkerContextMenu>[0]);
     return menu.element;
   }
@@ -68,7 +68,7 @@ test.each(['edited', 'replaced', 'readOnly'] as const)('object dialog refuses a 
   function Host() {
     menu = useWorkerContextMenu({ binding: () => binding,
       environment: () => ({ readOnly, mode: 'editing', translate }),
-      commands: { getState: () => ({ enabled: false }) }, clipboard: async () => {}, submit, onError,
+      commands: { getState: () => ({ enabled: false }), getDescriptor: () => ({ shortcuts: [] }) }, clipboard: async () => {}, submit, onError,
     } as unknown as Parameters<typeof useWorkerContextMenu>[0]);
     return menu.element;
   }
@@ -105,7 +105,7 @@ async function clickAfterRepublish(label: string, republish: (snapshot: Record<s
   function Host() {
     menu = useWorkerContextMenu({ binding: () => binding,
       environment: () => ({ readOnly: false, mode: 'editing', translate: (key: string) => key }),
-      commands: { getState: () => ({ enabled: true }), execute }, clipboard, onError,
+      commands: { getState: () => ({ enabled: true }), getDescriptor: () => ({ shortcuts: [] }), execute }, clipboard, onError,
     } as unknown as Parameters<typeof useWorkerContextMenu>[0]);
     return menu.element;
   }

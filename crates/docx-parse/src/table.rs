@@ -11,6 +11,7 @@ use crate::formatting::{
 use crate::inline::{InlineNode, RunContent};
 use crate::paragraph::{ParagraphContent, RawAttribute, TrackedChangeInfo};
 use crate::scalars::{ColorValue, ShadingProperties};
+use crate::styles::{DocDefaults, Style, StyleMap, get_default_paragraph_style};
 use crate::xml::{XmlElement, parse_javascript_integer_prefix};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -360,6 +361,100 @@ pub fn parse_document_table_properties(element: Option<&XmlElement>) -> Option<T
         .filter(|child| child.parse_boolean("w"))
         .map(|_| true);
     (formatting != TableFormatting::default()).then_some(formatting)
+}
+
+/// Whether a `w:tr` holds only known-inert structure, runs with a direct
+/// `w:vanish` and paragraphs whose mark is hidden. A visible paragraph mark
+/// keeps its line even in an empty paragraph, so it keeps the row. Anything
+/// else, including an element this list has never heard of, keeps the row.
+/// Read from the source because later stages can lose field results, form
+/// controls and imported content.
+pub fn row_is_hidden_content_only(
+    row: &XmlElement,
+    styles: Option<&StyleMap>,
+    doc_defaults: Option<&DocDefaults>,
+) -> bool {
+    let mut pending: Vec<_> = row.child_elements().collect();
+    while let Some(element) = pending.pop() {
+        let name = element.local_name();
+        if element.namespace_prefix() != Some("w") {
+            return false;
+        }
+        match name {
+            "tblPrEx" | "trPr" | "tcPr" | "proofErr" | "bookmarkStart" | "bookmarkEnd"
+            | "commentRangeStart" | "commentRangeEnd" => {}
+            "p" => {
+                if !paragraph_mark_hidden(element, styles, doc_defaults) {
+                    return false;
+                }
+                pending.extend(element.child_elements());
+            }
+            "tc" | "fldSimple" => pending.extend(element.child_elements()),
+            "pPr" => {
+                if element.child("w", "shd").is_some() || element.child("w", "pBdr").is_some() {
+                    return false;
+                }
+            }
+            "r" => {
+                let vanished = element
+                    .child("w", "rPr")
+                    .and_then(|properties| properties.child("w", "vanish"))
+                    .is_some_and(|vanish| vanish.parse_boolean("w"));
+                if !vanished {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// The paragraph mark's `w:vanish`, resolved as for a run: direct on the mark
+/// wins; otherwise it toggles across the document defaults, the paragraph
+/// style (or the default one) and the mark's character style (§17.7.3). A
+/// style id naming a style of another type is ignored.
+fn paragraph_mark_hidden(
+    paragraph: &XmlElement,
+    styles: Option<&StyleMap>,
+    doc_defaults: Option<&DocDefaults>,
+) -> bool {
+    let properties = paragraph.child("w", "pPr");
+    let mark = properties.and_then(|properties| properties.child("w", "rPr"));
+    if let Some(vanish) = mark.and_then(|mark| mark.child("w", "vanish")) {
+        return vanish.parse_boolean("w");
+    }
+    let paragraph_style = styles.and_then(|styles| {
+        let default = get_default_paragraph_style(styles);
+        referenced_style(styles, properties, "pStyle", "paragraph")
+            .or(default.filter(|style| style.style_type == "paragraph"))
+    });
+    let character_style =
+        styles.and_then(|styles| referenced_style(styles, mark, "rStyle", "character"));
+    let defaults = doc_defaults_hidden(doc_defaults).unwrap_or(false);
+    let paragraph = style_hidden(paragraph_style).unwrap_or(false);
+    let character = style_hidden(character_style).unwrap_or(false);
+    defaults ^ paragraph ^ character
+}
+
+fn doc_defaults_hidden(doc_defaults: Option<&DocDefaults>) -> Option<bool> {
+    doc_defaults?.r_pr.as_ref()?.hidden
+}
+
+fn referenced_style<'a>(
+    styles: &'a StyleMap,
+    parent: Option<&XmlElement>,
+    name: &str,
+    style_type: &str,
+) -> Option<&'a Style> {
+    let id = parent?.child("w", name)?.attribute(Some("w"), "val")?;
+    styles
+        .get(id)
+        .filter(|style| style.style_type == style_type)
+}
+
+fn style_hidden(style: Option<&Style>) -> Option<bool> {
+    style?.r_pr.as_ref()?.hidden
 }
 
 pub fn parse_document_table_row_properties(
@@ -801,6 +896,7 @@ fn parse_javascript_hex_prefix(raw: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::formatting::TextFormatting;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
 
     fn root(xml: &str) -> XmlElement {
@@ -818,6 +914,115 @@ mod tests {
         let row: TableRow = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(row.extra_attributes, None);
         assert_eq!(serde_json::to_value(row).unwrap(), value);
+    }
+
+    #[test]
+    fn anything_not_known_inert_is_never_hidden_content() {
+        let hidden = r#"<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r></w:p>"#;
+        assert!(row_is_hidden_content_only(
+            &root(&format!("<w:tr><w:tc>{hidden}</w:tc></w:tr>")),
+            None,
+            None
+        ));
+        for imported in [
+            r#"<w:altChunk r:id="chunk"/>"#,
+            r#"<w:contentPart r:id="ink"/>"#,
+            r#"<w:control r:id="activeX"/>"#,
+            r#"<w:futureElement/>"#,
+            r#"<x:unknown/>"#,
+        ] {
+            let row = format!("<w:tr><w:tc>{imported}{hidden}</w:tc></w:tr>");
+            assert!(
+                !row_is_hidden_content_only(&root(&row), None, None),
+                "{imported}"
+            );
+        }
+    }
+
+    fn hidden_only(row: &XmlElement, styles: Option<&StyleMap>) -> bool {
+        row_is_hidden_content_only(row, styles, None)
+    }
+
+    #[test]
+    fn a_visible_paragraph_mark_is_content_even_in_an_empty_paragraph() {
+        let row = |marks: &[&str]| {
+            let cells: String = marks
+                .iter()
+                .map(|mark| format!("<w:tc><w:p>{mark}</w:p></w:tc>"))
+                .collect();
+            root(&format!("<w:tr><w:trPr><w:hidden/></w:trPr>{cells}</w:tr>"))
+        };
+        let hidden = "<w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr>";
+        let shown = r#"<w:pPr><w:rPr><w:vanish w:val="0"/></w:rPr></w:pPr>"#;
+        assert!(hidden_only(&row(&[hidden, hidden]), None));
+        assert!(!hidden_only(&row(&["", ""]), None));
+        assert!(!hidden_only(&row(&[hidden, ""]), None));
+        assert!(!hidden_only(&row(&[hidden, shown]), None));
+    }
+
+    #[test]
+    fn a_paragraph_mark_hidden_by_style_or_defaults_counts_as_hidden() {
+        let vanish = Some(TextFormatting {
+            hidden: Some(true),
+            ..Default::default()
+        });
+        let style = |id: &str, style_type: &str, default: Option<bool>| {
+            (
+                id.to_owned(),
+                Style {
+                    style_id: id.to_owned(),
+                    style_type: style_type.to_owned(),
+                    default,
+                    r_pr: vanish.clone(),
+                    ..Default::default()
+                },
+            )
+        };
+        let styles: StyleMap = [
+            style("HiddenPara", "paragraph", None),
+            style("HiddenChar", "character", None),
+        ]
+        .into_iter()
+        .collect();
+        let styles = Some(&styles);
+        let row = |p_pr: &str| {
+            let paragraph = format!("<w:p><w:pPr>{p_pr}</w:pPr></w:p>");
+            root(&format!("<w:tr><w:tc>{paragraph}</w:tc></w:tr>"))
+        };
+        let para = r#"<w:pStyle w:val="HiddenPara"/>"#;
+        let character = r#"<w:rStyle w:val="HiddenChar"/>"#;
+        let off = r#"<w:rPr><w:vanish w:val="0"/></w:rPr>"#;
+        assert!(hidden_only(&row(para), styles));
+        let by_character = format!("<w:rPr>{character}</w:rPr>");
+        assert!(hidden_only(&row(&by_character), styles));
+        assert!(!hidden_only(&row(&format!("{para}{off}")), styles));
+        assert!(!hidden_only(&row(para), None));
+        let both = format!("{para}<w:rPr>{character}</w:rPr>");
+        assert!(!hidden_only(&row(&both), styles));
+        let mistyped_paragraph = r#"<w:pStyle w:val="HiddenChar"/>"#;
+        assert!(!hidden_only(&row(mistyped_paragraph), styles));
+        let mistyped_character = r#"<w:rPr><w:rStyle w:val="HiddenPara"/></w:rPr>"#;
+        assert!(!hidden_only(&row(mistyped_character), styles));
+        let defaults: StyleMap = [style("Body", "paragraph", Some(true))]
+            .into_iter()
+            .collect();
+        assert!(hidden_only(&row(""), Some(&defaults)));
+        let doc_defaults = DocDefaults {
+            r_pr: vanish.clone(),
+            ..Default::default()
+        };
+        assert!(row_is_hidden_content_only(
+            &row(""),
+            None,
+            Some(&doc_defaults)
+        ));
+        assert!(!row_is_hidden_content_only(
+            &row(para),
+            styles,
+            Some(&doc_defaults)
+        ));
+        let normal: StyleMap = [style("Normal", "character", None)].into_iter().collect();
+        assert!(!hidden_only(&row(""), Some(&normal)));
     }
 
     #[test]

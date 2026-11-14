@@ -61,6 +61,27 @@ describe.skipIf(engineKind === 'native')('lean worker core', () => {
     }
   }, 30_000);
 
+  test('a lean session exports structured content and Markdown', async () => {
+    const requests: string[] = [];
+    const session = await open({ png: false }, requests);
+    const full = await open({ png: true });
+    try {
+      const scope = { scope: [{ sheet: 0, range: 'A1:C5' }] };
+      const content = <T>(exported: { ok: boolean; content?: T }) => {
+        expect(exported.ok).toBe(true);
+        return exported.content;
+      };
+      expect(content(await session.call.exportStructured(scope)))
+        .toEqual(content(await full.call.exportStructured(scope)));
+      expect(content(await session.call.exportMarkdown(scope)))
+        .toEqual(content(await full.call.exportMarkdown(scope)));
+      expect(requests.filter((url) => url.endsWith('xlsx_wasm_bg.wasm'))).toEqual([]);
+    } finally {
+      await session.dispose();
+      await full.dispose();
+    }
+  });
+
   test('a lean recovery reopen from the source adopts the session version and round-trips', async () => {
     const requests: string[] = [];
     const session = await open({ png: false, includeEditState: true }, requests);

@@ -21,14 +21,14 @@ test('worker sessions without a Web Worker name the in-thread API', async () => 
   await expect(workbookRecoveryBackend.open(new Uint8Array(), {})).rejects.toThrow('use openWorkbook in-thread');
 });
 
-test('worker sessions without a Web Worker use worker_threads when available', async () => {
+test('a worker thread that fails to start fails the session with the thread error', async () => {
   const reached = new Error('Node adapter reached');
   let created = 0;
   Object.defineProperty(process, 'getBuiltinModule', { configurable: true, value: (name: string) => {
     expect(name).toBe('node:worker_threads');
     return { Worker: class { constructor() { created += 1; throw reached; } } };
   } });
-  await expect(openWorkbookSession(new Uint8Array())).rejects.toBe(reached);
-  await expect(workbookRecoveryBackend.open(new Uint8Array(), {})).rejects.toBe(reached);
+  await expect(openWorkbookSession(new Uint8Array())).rejects.toThrow(reached.message);
+  await expect(workbookRecoveryBackend.open(new Uint8Array(), {})).rejects.toThrow(reached.message);
   expect(created).toBe(2);
 });

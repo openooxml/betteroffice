@@ -56,17 +56,21 @@ fn a_substituted_bullet_is_drawn_with_a_glyph_the_face_covers() {
 }
 
 #[test]
-fn an_emulated_symbol_bullet_face_is_not_reported_as_substituted() {
+fn only_a_symbol_bullet_slot_without_a_named_shape_is_reported_as_substituted() {
     let session = DeckSession::open(DECK, 5_318).unwrap();
     let rendered = renderer()
         .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
         .unwrap();
+    let symbol: Vec<_> = rendered
+        .font_substitutions
+        .iter()
+        .filter(|substitution| substitution.requested_family.starts_with("Wingdings"))
+        .collect();
+    assert_eq!(symbol.len(), 1, "{:?}", rendered.font_substitutions);
+    assert_eq!(symbol[0].requested_family, "Wingdings");
     assert!(
-        rendered
-            .font_substitutions
-            .iter()
-            .all(|substitution| !substitution.requested_family.starts_with("Wingdings")),
-        "{:?}",
-        rendered.font_substitutions
+        symbol[0].shape_id.ends_with(":shape:3"),
+        "the stand-in bullet of shape 13: {:?}",
+        symbol[0]
     );
 }

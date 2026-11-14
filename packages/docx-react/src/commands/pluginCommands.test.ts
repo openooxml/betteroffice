@@ -18,12 +18,14 @@ function setup(initial = {}) {
 
 function scope(granted: readonly string[], pluginId = 'acme') {
   const listeners = new Set<() => void>();
-  const state = { granted: new Set(granted), ended: null as DocxCommandFailureCode | null };
+  const state = { granted: new Set(granted), gesture: false, write: true, ended: null as DocxCommandFailureCode | null };
   const value: DocxCommandScope = {
+    gesture: () => state.gesture,
     deny(id) {
       if (state.ended) return state.ended;
       if (isPluginCommandId(id))
         return id.startsWith(`plugin:${pluginId}/`) ? null : 'permission-denied';
+      if (id === 'bold' && !state.write) return 'permission-denied';
       return state.granted.has(id) ? null : 'permission-denied';
     },
     subscribe(listener) {
@@ -61,14 +63,14 @@ function contributed(
 }
 
 describe('scoped command stores', () => {
-  test('refuse ungranted commands and mutating built-ins without a policy path', async () => {
+  test('refuse ungranted commands and built-in mutations outside a gesture', async () => {
     const { store, controller, harness } = setup();
     const plugin = scope(['reviewNext', 'bold']);
     const scoped = controller.scoped(plugin.value);
     expect(controller.scoped(plugin.value)).toBe(scoped);
     expect(docxCommandController(scoped)?.store).toBe(scoped);
     expect(scoped.getState('italic').disabledReason?.code).toBe('permission-denied');
-    expect(scoped.getState('bold').disabledReason?.code).toBe('unsupported-policy');
+    expect(scoped.getState('bold').enabled).toBe(true);
     expect(scoped.getState('bold')).toBe(scoped.getState('bold'));
     expect(store.getState('bold').enabled).toBe(true);
     expect(await scoped.execute('italic', null)).toMatchObject({
@@ -85,6 +87,47 @@ describe('scoped command stores', () => {
     harness.update({ readOnly: true });
     controller.refresh();
     expect(scoped.getState('bold').disabledReason?.code).toBe('read-only');
+  });
+
+  test('admit built-in mutations from a gesture with a write grant', async () => {
+    const { controller, harness } = setup();
+    const plugin = scope(['bold']);
+    const scoped = controller.scoped(plugin.value);
+    expect(scoped.getState('bold').enabled).toBe(true);
+    plugin.state.gesture = true;
+    const pending = scoped.execute('bold', null);
+    plugin.state.gesture = false;
+    expect(await pending).toEqual({ ok: true, status: 'executed' });
+    expect(harness.calls.map((call) => call.id)).toEqual(['bold']);
+    expect(await scoped.execute('bold', null)).toMatchObject({
+      ok: false, failure: { code: 'unsupported-policy' },
+    });
+    plugin.state.gesture = true;
+    plugin.state.write = false;
+    expect(await scoped.execute('bold', null)).toMatchObject({
+      ok: false, failure: { code: 'permission-denied' },
+    });
+    expect(harness.calls).toHaveLength(1);
+  });
+
+  test('retain gesture admission across the input queue and recheck the write grant', async () => {
+    const { controller, harness } = setup();
+    const plugin = scope(['bold']);
+    const scoped = controller.scoped(plugin.value);
+    let admit!: () => void;
+    harness.state.admission = () => new Promise<void>((resolve) => (admit = resolve));
+    plugin.state.gesture = true;
+    const pending = scoped.execute('bold', null);
+    plugin.state.gesture = false;
+    admit();
+    expect(await pending).toEqual({ ok: true, status: 'executed' });
+    plugin.state.gesture = true;
+    const revoked = scoped.execute('bold', null);
+    plugin.state.write = false;
+    plugin.state.gesture = false;
+    admit();
+    expect(await revoked).toMatchObject({ ok: false, failure: { code: 'permission-denied' } });
+    expect(harness.calls).toHaveLength(1);
   });
 
   test('check the grant again once the command is admitted', async () => {
@@ -104,6 +147,40 @@ describe('scoped command stores', () => {
     expect(await ended).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
     expect(scoped.getState('reviewPrevious').disabledReason?.code).toBe('plugin-unavailable');
     expect(harness.calls).toEqual([]);
+  });
+
+  test('start a scoped plain-text clipboard read before input admission', async () => {
+    const { controller, harness } = setup();
+    const plugin = scope(['pasteAsPlainText']);
+    const scoped = controller.scoped(plugin.value);
+    const text = Promise.resolve('plain');
+    let reads = 0;
+    let received: Promise<string> | undefined;
+    harness.binding.readClipboardText = () => { reads += 1; return text; };
+    harness.binding.perform = (_id, _args, _env, clipboardText) => {
+      received = clipboardText;
+      return { ok: true, status: 'executed' };
+    };
+    let admit!: () => void;
+    harness.state.admission = () => new Promise<void>((resolve) => (admit = resolve));
+    plugin.state.gesture = true;
+    const pending = scoped.execute('pasteAsPlainText', null);
+    expect(reads).toBe(1);
+    expect(received).toBeUndefined();
+    plugin.state.gesture = false;
+    admit();
+    expect(await pending).toMatchObject({ ok: true });
+    expect(received).toBe(text);
+    const refused = scoped.execute('pasteAsPlainText', null);
+    expect(reads).toBe(1);
+    admit();
+    expect(await refused).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+    plugin.state.gesture = true;
+    plugin.state.granted.clear();
+    const ungranted = scoped.execute('pasteAsPlainText', null);
+    expect(reads).toBe(1);
+    admit();
+    expect(await ungranted).toMatchObject({ ok: false, failure: { code: 'permission-denied' } });
   });
 });
 

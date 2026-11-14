@@ -13,7 +13,7 @@
  * platform-aware key formatter live in `KeyboardShortcutsDialog/ShortcutItem.tsx`.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from '../../i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 import {
@@ -26,6 +26,7 @@ import {
   getAllCategories,
 } from './KeyboardShortcutsDialog/data';
 import { localizeKeys, ShortcutItem } from './KeyboardShortcutsDialog/ShortcutItem';
+import { DocxCommandContext } from '../../commands/DocxCommandProvider';
 export { formatKeys as formatShortcutKeys } from './KeyboardShortcutsDialog/ShortcutItem';
 
 // ============================================================================
@@ -127,13 +128,14 @@ export const KeyboardShortcutsDialog: React.FC<KeyboardShortcutsDialogProps> = (
   className = '',
 }) => {
   const { t } = useTranslation();
+  const commands = useContext(DocxCommandContext) ?? undefined;
   const dialogRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
   // Merge custom shortcuts with defaults
   const allShortcuts = useMemo(() => {
-    const merged = getDefaultShortcuts();
+    const merged = getDefaultShortcuts(commands);
     for (const custom of customShortcuts) {
       const existingIndex = merged.findIndex((s) => s.id === custom.id);
       if (existingIndex >= 0) {
@@ -143,7 +145,7 @@ export const KeyboardShortcutsDialog: React.FC<KeyboardShortcutsDialogProps> = (
       }
     }
     return merged;
-  }, [customShortcuts]);
+  }, [commands, customShortcuts]);
 
   // Filter shortcuts by search query (searches translated name/description)
   const filteredShortcuts = useMemo(() => {

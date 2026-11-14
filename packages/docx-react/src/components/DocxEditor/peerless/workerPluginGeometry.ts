@@ -1,7 +1,7 @@
 import { createDisplayListQueries, effectiveZoom, loadRustDisplayListQueryEngine, type DisplayListQueries, type DisplayListRect } from '@betteroffice/docx/layout/render';
 import { createRenderedDomContext, type DisplayListPageProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import { anchorFailure, type DocxReservationsPayload, type ProposalGeometryTarget } from '@betteroffice/docx/yrs';
-import { hiddenBoundary, overlayProjector, pageBuilt, pageRectOf, placeDrawing, placeRepeated, placeReservation, registerReservationReader, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
+import { hiddenBoundary, visibleViewport, overlayProjector, pageBuilt, pageRectOf, placeDrawing, placeRepeated, placeReservation, registerReservationReader, SELECTION_ANCHOR_WAIT_MS, toOverlayRect, unbuiltPagesOf } from '../../../plugins/geometry';
 import type { DocxAnchorGeometryResult, DocxAnchorRect, DocxGeometryTarget, DocxPluginGeometry, DocxPluginRect, DocxPluginLayout, DocxPluginNavigation, DocxPluginRefusal, DocxPluginSelection } from '../../../plugins/types';
 import { pluginRefusal } from '../../../plugins/createPluginClients';
 import { DocxEditorNotReadyError, WorkerReadSupersededError, type createPeerlessShellController } from './shellController';
@@ -9,6 +9,7 @@ import type { PeerlessFrameGeometry, PeerlessViewIdentity, PeerlessViewSnapshot 
 import { clientPointToPage } from './pagePoint';
 import { reviewVersionOf } from './workerReview';
 import { sameReservationOwner } from '../internals/layoutProvenance';
+import { docxSelectionIdentity } from '../../../plugins/selectionIdentity';
 
 export function workerDocumentVersion(view: PeerlessViewSnapshot | null | undefined): string {
   return view?.editState?.documentVersion ?? view?.geometry?.documentVersion ?? String(view?.version ?? 0);
@@ -24,13 +25,14 @@ export function workerReadRefusal(controller: Pick<ReturnType<typeof createPeerl
 
 /** Reservation boxes answer from the frame carrying their owner's set. */
 export function createWorkerPluginGeometry(controller: ReturnType<typeof createPeerlessShellController>, pages: () => HTMLElement | null, layer: () => HTMLElement | null, changed: () => void,
-  navigate?: (target: { story: string; paraId: string }, focus: boolean, expectVersion: string) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null) {
-  type Read = Exclude<DocxGeometryTarget, { kind: 'proposal' | 'reservation' }>;
-  type ReadAll = (targets: readonly DocxGeometryTarget[], retry: boolean, owner?: string) => Promise<DocxAnchorGeometryResult[]>;
+  navigate?: (target: { story: string; paraId: string }, focus: boolean, expectVersion: string) => Promise<boolean>, reservations: () => DocxReservationsPayload | null = () => null, viewport?: (layer: HTMLElement) => DocxPluginRect, beforeRead?: () => void) {
+  type Read = Exclude<DocxGeometryTarget, { kind: 'proposal' | 'reservation' | 'selection' }>;
+  type ReadAll = (targets: readonly DocxGeometryTarget[], retry: boolean, owner?: string, deadline?: number) => Promise<DocxAnchorGeometryResult[]>;
   let current: { frame: PeerlessFrameGeometry; version: number; pixelRatio: number; layout: DocxPluginLayout; geometry: DocxPluginGeometry; queries: DisplayListQueries; reservations: DocxReservationsPayload | null;
     readAll: ReadAll } | null = null;
   let repaint: { frame: PeerlessFrameGeometry; next: PeerlessFrameGeometry; same: boolean } | null = null;
   let displaySelection: DocxPluginSelection['displayRange'] = null;
+  let selectionRead: { key: string; mapped?: ProposalGeometryTarget; focus?: ProposalGeometryTarget; read: Promise<boolean>; failed: boolean } | null = null;
   let displayWindow: readonly [number, number] | null = null;
   interface Answers { key: string; version: string; resolved: Map<string, ProposalGeometryTarget>; requested: Map<string, Promise<boolean>>; failed: Set<string>;
     batch: { targets: Map<string, Read>; read: Promise<boolean> } | null }
@@ -39,6 +41,16 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
   const listeners = new Set<() => void>();
   const publish = () => { changed(); for (const listener of listeners) listener(); };
   const keyOf = (target: DocxGeometryTarget) => JSON.stringify(target);
+  const selectionIdentity = (localRevision = 0) => {
+    const selection = controller.getSnapshot().view?.workerSelection;
+    const endpoint = (point: NonNullable<typeof selection>['anchor']) =>
+      [point.story, point.sticky ? Array.from(point.sticky) : [point.paraId, point.offset]];
+    const collapsed = !!selection && selection.anchor.story === selection.focus.story &&
+      selection.anchor.paraId === selection.focus.paraId && selection.anchor.offset === selection.focus.offset;
+    const resolved = (point: NonNullable<typeof selection>['anchor']) => [point.story, point.paraId, point.offset];
+    return docxSelectionIdentity(localRevision, selection ? [endpoint(selection.anchor), endpoint(selection.focus)] : null,
+      selection ? [resolved(selection.anchor), resolved(selection.focus)] : null, collapsed);
+  };
   const sameView = (a: PeerlessViewIdentity, b: PeerlessViewIdentity) => a.session === b.session && a.incarnation === b.incarnation && a.epoch === b.epoch;
   const pinnedVersion = (target: DocxGeometryTarget) => target.kind === 'range' ? target.version
     : (target.kind === 'paragraph' || target.kind === 'search') && 'version' in target.paragraph ? target.paragraph.version : undefined;
@@ -92,11 +104,56 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       if (answers === entry) publish();
     });
   };
+  const requestSelection = (retry = false): Promise<boolean> | undefined => {
+    const source = current;
+    const selection = controller.getSnapshot().view?.workerSelection;
+    if (!source || !selection) { selectionRead = null; displaySelection = null; return; }
+    const key = `${source.layout.id}|${JSON.stringify(selection)}`;
+    if (selectionRead?.key === key && (!retry || !selectionRead.failed)) return selectionRead.read;
+    const entry: NonNullable<typeof selectionRead> = { key, read: Promise.resolve(false), failed: false };
+    selectionRead = entry;
+    displaySelection = null;
+    const version = source.layout.version;
+    entry.read = Promise.resolve().then(async () => {
+      const accepted = async (point: typeof selection.anchor) => ({ paraId: point.paraId,
+        offset: (await controller.readAt({ kind: 'rawSelectionInfo', selection: { anchor: point, focus: point } }, version)).before.length });
+      const ordered = await controller.readAt({ kind: 'commentSelectionRange', selection }, version);
+      if (!ordered) {
+        entry.mapped = anchorFailure('missing-target', 'The selection did not resolve');
+        return false;
+      }
+      const start = await accepted({ ...ordered.start, story: ordered.story });
+      const end = await accepted({ ...ordered.end, story: ordered.story });
+      const focus = selection.focus.paraId === ordered.start.paraId && selection.focus.offset === ordered.start.offset
+        ? start : selection.focus.paraId === ordered.end.paraId && selection.focus.offset === ordered.end.offset
+          ? end : await accepted(selection.focus);
+      const result = await controller.readAt({ kind: 'anchorTargets', targets: [{ kind: 'range', version, range: {
+        story: selection.anchor.story, start, end, view: 'accepted',
+      } }, { kind: 'range', version, range: { story: selection.focus.story, start: focus, end: focus, view: 'accepted' } }] }, version);
+      if (current !== source || selectionRead !== entry || JSON.stringify(controller.getSnapshot().view?.workerSelection) !== JSON.stringify(selection)) return false;
+      entry.mapped = result[0];
+      entry.focus = result[1];
+      entry.failed = !entry.mapped;
+      if (entry.mapped?.ok && entry.mapped.ranges[0]) {
+        displaySelection = { story: selection.anchor.story, from: entry.mapped.ranges[0].from,
+          to: entry.mapped.ranges.at(-1)!.to, layoutId: source.layout.id };
+      }
+      return true;
+    }).catch(error => {
+      if (current === source && selectionRead === entry) {
+        if (error instanceof WorkerReadSupersededError) selectionRead = null;
+        else entry.failed = true;
+      }
+      return false;
+    }).finally(() => { if (current === source && selectionRead === entry) publish(); });
+    return entry.read;
+  };
   /**
    * Starts the worker read of `target` with the others asked in this tick; resolves once it lands. A target pinned to
    * another version is never read, and one whose read failed is read again only on `retry`.
    */
   const requestTarget = (target: DocxGeometryTarget, retry = false): Promise<boolean> | undefined => {
+    if (target.kind === 'selection') return requestSelection(retry);
     const source = current;
     if (!source || target.kind === 'proposal' || target.kind === 'reservation') return;
     const entry = answersOf(source.frame, source.layout);
@@ -114,7 +171,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
   const clear = () => {
     generation++;
     const hadGeometry = !!current || !!answers;
-    current?.queries.dispose(); current = null; answers = null; displaySelection = null; repaint = null;
+    current?.queries.dispose(); current = null; answers = null; displaySelection = null; selectionRead = null; repaint = null;
     if (hadGeometry) publish();
   };
   const update = async () => {
@@ -127,7 +184,12 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     const overlay = layer();
     if (snapshot.status !== 'ready' || !view || !frame || !container || !overlay || !sameView(view.identity, frame.identity) || view.presentedThroughSeq < view.throughSeq) return;
     const zoom = controller.ref.getZoom();
-    if (current?.frame === frame && current.layout.zoom === zoom) return;
+    if (current?.frame === frame && current.layout.zoom === zoom) {
+      const review = controller.describedReview();
+      if (review?.version === current.layout.version && review.previewVersion === current.layout.previewVersion) current.version = view.version;
+      await requestSelection();
+      return;
+    }
     const native = await loadRustDisplayListQueryEngine();
     if (request !== generation || controller.getSnapshot().view?.geometry !== frame) return;
     const review = controller.describedReview() ?? await controller.review();
@@ -189,6 +251,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       return item.kind === 'hide' ? { hide: item.anchor } : { result: placeReservation(repeatedOf(measured), owner, id) };
     };
     const answer = (target: DocxGeometryTarget, request: boolean, measured = measure(), owner?: string, hide = false): DocxAnchorGeometryResult => {
+      beforeRead?.();
       if (target.kind === 'reservation') {
         if (owner === undefined) return anchorFailure('unsupported', 'Reservations are read through a plugin context');
         const item = reserved(owner, target.id, measured);
@@ -198,10 +261,13 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       if ((pinnedVersion(target) ?? layout.version) !== layout.version) return { ok: false, failure: { code: 'stale-version', message: 'The document changed after that version' } };
       if (request) requestTarget(target);
       const entry = answersOf(frame, layout);
-      const resolved = target.kind === 'proposal' ? review.proposalGeometry.targets[target.id] : entry.resolved.get(keyOf(target));
+      if (target.kind === 'selection' && !controller.getSnapshot().view?.workerSelection) return anchorFailure('missing-target', 'No selection is available');
+      const resolved = target.kind === 'selection' ? selectionRead?.mapped
+        : target.kind === 'proposal' ? review.proposalGeometry.targets[target.id] : entry.resolved.get(keyOf(target));
       if (target.kind === 'proposal' && !resolved) return { ok: false, failure: { code: 'unknown-proposal', message: 'No proposal is registered' } };
-      if (!resolved) return entry.failed.has(keyOf(target)) ? readFailed : request ? pending : unavailable();
+      if (!resolved) return (target.kind === 'selection' ? selectionRead?.failed : entry.failed.has(keyOf(target))) ? readFailed : request ? pending : unavailable();
       if (!resolved.ok) return resolved;
+      const focus = target.kind === 'selection' && selectionRead?.focus?.ok ? selectionRead.focus.ranges[0]?.from : undefined;
       if (resolved.drawing) {
         const pos = resolved.ranges[0]?.from;
         if (pos === undefined) return { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };
@@ -209,7 +275,8 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
         return placeDrawing(repeatedOf(measured), pos, resolved.root ? resolved.rIds : undefined);
       }
       if (resolved.root) {
-        return resolved.rIds ? placeRepeated(repeatedOf(measured), resolved.rIds, [...resolved.ranges], resolved.hidden ?? [], resolved.paragraph)
+        if (target.kind === 'selection' && focus === undefined) return selectionRead?.focus && !selectionRead.focus.ok ? selectionRead.focus : unavailable();
+        return resolved.rIds ? placeRepeated(repeatedOf(measured), resolved.rIds, [...resolved.ranges], resolved.hidden ?? [], resolved.paragraph, focus)
           : { ok: false, failure: { code: 'unsupported', message: 'The target has no display position' } };
       }
       if (hide) {
@@ -217,10 +284,14 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
         const at = hiddenBoundary(queries, resolved.ranges, [...(review.proposalGeometry?.hidden ?? []), ...resolved.ranges], resolved.paragraph);
         return at && placement.pending(at.pageIndex) ? unavailable() : placement.respond([], at, unbuiltPagesOf(queries, resolved.ranges));
       }
-      const raw = resolved.ranges.flatMap(range => queries.rangeRects(range.from, range.to));
+      const raw = resolved.ranges.flatMap(range => range.from === range.to ? [] : queries.rangeRects(range.from, range.to));
       const rects = raw.map(measured.project).filter(value => value !== null);
       const end = raw.at(-1);
-      const anchorRect = end ? { ...end, x: end.x + end.width, width: 0 } : (resolved.paragraph === null ? null : queries.anchorRect(resolved.paragraph));
+      const collapsed = target.kind === 'selection' && resolved.ranges.length === 1 && resolved.ranges[0]!.from === resolved.ranges[0]!.to;
+      const caret = focus !== undefined || collapsed
+        ? queries.caretRect?.(focus ?? resolved.ranges[0]!.from) ?? queries.anchorRect(focus ?? resolved.ranges[0]!.from) : null;
+      const anchorRect = caret ? { ...caret, width: 0 }
+        : end ? { ...end, x: end.x + end.width, width: 0 } : (resolved.paragraph === null ? null : queries.anchorRect(resolved.paragraph));
       const anchor = anchorRect && measured.project(anchorRect);
       const bounds = anchor && measured.pageBounds(anchor.pageIndex);
       if (!anchor || !bounds) return unavailable();
@@ -230,6 +301,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     };
     const geometry: DocxPluginGeometry = {
       layout, dom,
+      get viewport() { return viewport?.(overlay) ?? visibleViewport(overlay, overlay, overlay); },
       toOverlayRect: rect => current?.geometry === geometry ? toOverlayRect(container, overlay, zoom, rect) : null,
       getPositionAtPoint: () => null,
       async readPositionAtPoint(x, y) {
@@ -261,18 +333,34 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       isPageBuilt: pageIndex => shown() && pageBuilt(queries, pageIndex),
     };
     /** Answers `targets` once their reads land, on the layout then current, until the document is replaced. */
-    const readAll: ReadAll = async (targets, retry, owner) => {
+    const readAll: ReadAll = async (targets, retry, owner, deadline = Date.now() + SELECTION_ANCHOR_WAIT_MS) => {
+      beforeRead?.();
       const sameDocument = () => !!current && sameView(current.frame.identity, frame.identity);
       if (!sameDocument()) return targets.map(unavailable);
+      const selection = selectionIdentity().stickyKey;
       const asked = measure();
-      await Promise.all(targets.map(target => {
+      let expired = false;
+      await Promise.all(targets.map(async target => {
         const item = target.kind === 'reservation' && owner !== undefined ? reserved(owner, target.id, asked) : null;
-        return item && 'hide' in item ? requestTarget(item.hide, retry) : requestTarget(target, retry);
+        const read = item && 'hide' in item ? requestTarget(item.hide, retry) : requestTarget(target, retry);
+        if (target.kind !== 'selection' || !read) return read;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([read, new Promise<void>(resolve => {
+            timer = setTimeout(() => { expired = true; resolve(); }, Math.max(0, deadline - Date.now()));
+          })]);
+        } finally { clearTimeout(timer); }
       }));
       if (!sameDocument()) return targets.map(unavailable);
-      if (current!.geometry !== geometry) return current!.readAll(targets, false, owner);
-      const measured = measure();
-      return targets.map(target => answer(target, false, measured, owner));
+      let results: DocxAnchorGeometryResult[];
+      if (current!.geometry !== geometry && !expired) results = await current!.readAll(targets, false, owner, deadline);
+      else {
+        const measured = measure();
+        results = targets.map(target => answer(target, false, measured, owner));
+      }
+      const selectionCurrent = selectionIdentity().stickyKey === selection;
+      return results.map((result, index) => targets[index]!.kind === 'selection' &&
+        (expired || !selectionCurrent) ? unavailable() : result);
     };
     registerReservationReader(geometry, {
       get: (owner, id) => answer({ kind: 'reservation', id }, true, measure(), owner),
@@ -280,21 +368,7 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
     });
     current?.queries.dispose();
     current = { frame, version: view.version, pixelRatio: globalThis.devicePixelRatio, layout, geometry, queries, reservations: laidReservations, readAll }; displaySelection = null; publish();
-    const selection = view.workerSelection;
-    if (selection) {
-      const accepted = async (point: typeof selection.anchor) => ({ paraId: point.paraId,
-        offset: (await controller.readAt({ kind: 'rawSelectionInfo', selection: { anchor: point, focus: point } }, review.version)).before.length });
-      const start = await accepted(selection.anchor);
-      const end = await accepted(selection.focus);
-      if (current?.layout !== layout) return;
-      const result = await controller.readAt({ kind: 'anchorTargets', targets: [{ kind: 'range', version: review.version, range: {
-        story: selection.anchor.story, start, end, view: 'accepted',
-      } }] }, review.version);
-      const mapped = result[0];
-      if (current?.layout === layout && mapped?.ok && mapped.ranges[0]) {
-        displaySelection = { story: selection.anchor.story, from: mapped.ranges[0].from, to: mapped.ranges.at(-1)!.to, layoutId: layout.id }; publish();
-      }
-    }
+    await requestSelection();
   };
   const navigation: DocxPluginNavigation = {
     async scrollToParagraph(target, options) {
@@ -341,7 +415,14 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
   return {
     update,
     clear,
-    displaySelection: () => displaySelection,
+    displaySelection: () => { void requestSelection(); return displaySelection; },
+    selectionIdentity,
+    selectionMapped: () => {
+      const selection = controller.getSnapshot().view?.workerSelection;
+      return !selection || (!!current && valid(current.layout, current.frame) &&
+        selectionRead?.key === `${current.layout.id}|${JSON.stringify(selection)}` &&
+        (selectionRead.mapped !== undefined || selectionRead.failed));
+    },
     geometry: () => {
       const snapshot = controller.getSnapshot();
       return current && snapshot.status === 'ready' && snapshot.view && sameView(current.frame.identity, snapshot.view.identity) ? current.geometry : null;
@@ -359,6 +440,6 @@ export function createWorkerPluginGeometry(controller: ReturnType<typeof createP
       for (const listener of listeners) listener();
     },
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    dispose() { generation++; current?.queries.dispose(); current = null; displaySelection = null; answers = null; repaint = null; listeners.clear(); },
+    dispose() { generation++; current?.queries.dispose(); current = null; displaySelection = null; selectionRead = null; answers = null; repaint = null; listeners.clear(); },
   };
 }

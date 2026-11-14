@@ -30,12 +30,17 @@ fn open(content: &str) -> EditingDoc {
 }
 
 fn package(content: &str) -> Vec<u8> {
+    package_with_styles(content, None)
+}
+
+fn package_with_styles(content: &str, custom_styles: Option<&str>) -> Vec<u8> {
     let document = format!(
         r#"<w:document {NS}><w:body><w:p w14:paraId="00000001">{content}</w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#
     );
     let styles = format!(
         r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Slant"><w:name w:val="Slant"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Strong"><w:name w:val="Strong"/><w:pPr><w:keepNext/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Right"><w:name w:val="Right"/><w:pPr><w:jc w:val="right"/></w:pPr></w:style></w:styles>"#
     );
+    let styles = custom_styles.map(str::to_owned).unwrap_or(styles);
     let header = format!(
         r#"<w:hdr {NS}><w:p w14:paraId="00000002"><w:r><w:t>abc</w:t></w:r></w:p></w:hdr>"#
     );
@@ -71,6 +76,143 @@ fn text(value: &str) -> String {
 
 fn ctx() -> EditCtx {
     EditCtx::local("", "2026-10-21T00:00:00Z")
+}
+
+#[test]
+fn optional_typography_survives_editing_and_inherited_typing() {
+    let properties =
+        r#"<w14:ligatures w14:val="standardContextual"/><w14:cntxtAlts w14:val="false"/>"#;
+    let styles = format!(
+        r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w14:ligatures w14:val="historical"/><w14:cntxtAlts w14:val="1"/></w:rPr></w:style></w:styles>"#
+    );
+    let content = format!(
+        r#"<w:pPr><w:rPr>{properties}</w:rPr></w:pPr><w:r><w:rPr>{properties}</w:rPr><w:t>fi ti</w:t></w:r><w:r><w:rPr>{properties}</w:rPr><w:t>untouched</w:t></w:r>"#
+    );
+    let bytes = package_with_styles(&content, Some(&styles));
+    let doc = EditingDoc::new(718);
+    seed_from_docx(&doc, &bytes).unwrap();
+    replace(&doc, 3, 4, "f");
+    doc.insert_text(&ctx(), Position::new("body", 1), "i", FormatPolicy::Inherit)
+        .unwrap();
+    let blocks =
+        docx_edit::bridge::yrs_doc_to_layout_blocks(&doc, "body", &Default::default()).unwrap();
+    let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+        panic!("paragraph")
+    };
+    for run in &paragraph.runs {
+        if let docx_layout::types::Run::Text(run) = run {
+            assert_eq!(run.fmt.ligatures.as_deref(), Some("standardContextual"));
+            assert_eq!(run.fmt.contextual_alternates, Some(false));
+        }
+    }
+    let (saved, warnings) = save_paragraph_with_bytes(&doc, &bytes, |_| {});
+    assert!(saved.matches(properties).count() >= 3, "{saved}");
+    let limits = docx_parse::ParseLimits::default();
+    let xml = docx_parse::parse_xml(
+        saved.as_bytes(),
+        "word/document.xml",
+        &mut docx_parse::ParseBudget::new(&limits),
+    )
+    .unwrap();
+    assert_eq!(xml.root().unwrap().text_content(), "fii fiuntouched");
+    assert!(
+        !warnings.iter().any(|warning| warning.contains("legacy=1")),
+        "{warnings:?}"
+    );
+    let content = text("fi ti");
+    let plain = open(&content);
+    plain
+        .insert_text(&ctx(), Position::new("body", 1), "i", FormatPolicy::Inherit)
+        .unwrap();
+    let (saved, _) = save_paragraph(&plain, &content, |_| {});
+    assert!(!saved.contains("w14:ligatures"));
+    assert!(!saved.contains("w14:cntxtAlts"));
+}
+
+#[test]
+fn optional_typography_resolves_each_style_layer() {
+    for (p_style, r_style, direct, expected) in [
+        ("", "", "", "standard"),
+        ("Empty", "", "", "historical"),
+        ("Child", "", "", "contextual"),
+        ("Child", "CharChild", "", "discretionary"),
+        ("Child", "CharChild", "none", "none"),
+        ("Child", "CharChild", "invalid", "discretionary"),
+    ] {
+        let styles = format!(
+            r#"<w:styles {NS}><w:docDefaults><w:rPrDefault><w:rPr><w14:ligatures w14:val="historical"/><w14:cntxtAlts/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w14:ligatures w14:val="standard"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Empty"/><w:style w:type="paragraph" w:styleId="Base"><w:rPr><w14:ligatures w14:val="contextual"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Base"/></w:style><w:style w:type="character" w:styleId="CharBase"><w:rPr><w14:ligatures w14:val="discretionary"/><w14:cntxtAlts w14:val="0"/></w:rPr></w:style><w:style w:type="character" w:styleId="CharChild"><w:basedOn w:val="CharBase"/></w:style></w:styles>"#
+        );
+        let paragraph_style = if p_style.is_empty() {
+            String::new()
+        } else {
+            format!(r#"<w:pPr><w:pStyle w:val="{p_style}"/></w:pPr>"#)
+        };
+        let character_style = if r_style.is_empty() {
+            String::new()
+        } else {
+            format!(r#"<w:rStyle w:val="{r_style}"/>"#)
+        };
+        let direct = if direct.is_empty() {
+            String::new()
+        } else {
+            format!(r#"<w14:ligatures w14:val="{direct}"/>"#)
+        };
+        let bytes = package_with_styles(
+            &format!(
+                r#"{paragraph_style}<w:r><w:rPr>{character_style}{direct}</w:rPr><w:t>fi ti</w:t></w:r>"#
+            ),
+            Some(&styles),
+        );
+        let doc = EditingDoc::new(719);
+        seed_from_docx(&doc, &bytes).unwrap();
+        let blocks =
+            docx_edit::bridge::yrs_doc_to_layout_blocks(&doc, "body", &Default::default()).unwrap();
+        let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!("paragraph")
+        };
+        let docx_layout::types::Run::Text(run) = &paragraph.runs[0] else {
+            panic!("text")
+        };
+        assert_eq!(
+            run.fmt.ligatures.as_deref(),
+            Some(expected),
+            "{p_style}, {r_style}"
+        );
+        assert_eq!(run.fmt.contextual_alternates, Some(r_style.is_empty()));
+    }
+}
+
+#[test]
+fn language_only_edits_patch_runs_and_marks_with_revisions_intact() {
+    let properties = r#"<w:rFonts w:ascii='Arial'/><w:b/><w:sz w:val="24"/><w:lang w:val="en-US" w:eastAsia="ja-JP" w:bidi="ar-SA"/><w:rPrChange w:id="7" w:author="Editor"><w:rPr><w:i/></w:rPr></w:rPrChange>"#;
+    let content = format!(
+        r#"<w:pPr><w:rPr>{properties}</w:rPr></w:pPr><w:r><w:rPr>{properties}</w:rPr><w:t>abc</w:t></w:r>"#
+    );
+    let doc = open(&content);
+    let id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+    doc.format_text_target(
+        &docx_edit::TextTarget::Paragraph(ParagraphTarget {
+            story: "body".to_owned(),
+            para_id: id,
+        }),
+        &InlineFormatDelta {
+            language: Patch::Set(docx_edit::LanguagePatch {
+                latin: Patch::Set("de-DE".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let plan = patch(&doc);
+    assert_eq!(plan.run_edits.len(), 1);
+    assert_eq!(plan.run_edits[0].deltas[0].path, vec!["language", "latin"]);
+    assert_eq!(plan.para_deltas[0].path, vec!["language", "latin"]);
+    let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
+    assert!(saved.contains(&properties.replace("en-US", "de-DE")));
+    assert!(!saved.contains("en-US"));
+    assert!(!warnings.iter().any(|warning| warning.contains("legacy=1")));
 }
 
 fn patch(doc: &EditingDoc) -> ParagraphPatchV1 {
@@ -121,15 +263,31 @@ fn save_paragraph(
     content: &str,
     edit_model: impl FnOnce(&mut serde_json::Value),
 ) -> (String, Vec<String>) {
-    let bytes = package(content);
+    save_paragraph_with_bytes(doc, &package(content), edit_model)
+}
+
+fn save_paragraph_with_bytes(
+    doc: &EditingDoc,
+    bytes: &[u8],
+    edit_model: impl FnOnce(&mut serde_json::Value),
+) -> (String, Vec<String>) {
     let plan = doc.paragraph_save_plan();
     let part = plan
         .spliced_parts
         .iter()
         .find(|part| part.part == "word/document.xml")
         .unwrap();
+    save_planned(&plan, Some(part), bytes, edit_model)
+}
+
+fn save_planned(
+    plan: &docx_edit::ParagraphSavePlan,
+    part: Option<&docx_edit::SplicedPart>,
+    bytes: &[u8],
+    edit_model: impl FnOnce(&mut serde_json::Value),
+) -> (String, Vec<String>) {
     let package = docx_parse::parse_docx_s9_wire(
-        &bytes,
+        bytes,
         docx_parse::S9ParseOptions {
             source_ordinals: true,
             ..Default::default()
@@ -141,21 +299,34 @@ fn save_paragraph(
     let document = save_document(&package.document, |document| {
         edit_model(&mut document["content"][0]);
     });
+    let mut spliced = Vec::new();
+    if let Some(part) = part {
+        spliced.push(json!({
+            "part": part.part, "sha256": part.sha256,
+            "paragraphs": [0], "changed": part.changed,
+            "paragraphPatches": part.paragraph_patches,
+            "legacyParagraphs": part.legacy_paragraphs
+        }));
+    }
     let request = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": document,
         "headerEntries": package.header_entries.unwrap_or_default(),
         "relationshipEntries": package.relationship_entries,
         "options": {"updateModifiedDate": false},
-        "paragraphIds": {"patchedParts": patched_parts(&plan), "splicedParts": [{
-            "part": part.part, "sha256": part.sha256,
-            "paragraphs": [0], "changed": part.changed,
-            "paragraphPatches": part.paragraph_patches,
-            "legacyParagraphs": part.legacy_paragraphs
-        }]}
+        "paragraphIds": {"patchedParts": patched_parts(plan), "splicedParts": spliced}
     }))
     .unwrap();
-    let (saved, warnings) = write_docx_s13_with_warnings(request, &bytes).unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
+    let styles = |bytes: &[u8]| {
+        ooxml_opc::unzip_parts(bytes)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == "word/styles.xml")
+            .unwrap()
+            .1
+    };
+    assert_eq!(styles(&saved), styles(bytes));
     let (_, xml) = ooxml_opc::unzip_parts(&saved)
         .unwrap()
         .into_iter()
@@ -579,6 +750,36 @@ fn bold_toggle_off_on_non_theme_run_still_patches() {
     assert_eq!(patch.run_edits.len(), 1);
     assert_eq!(patch.run_edits[0].deltas[0].path, vec!["bold"]);
     assert_eq!(patch.run_edits[0].deltas[0].after, SlotV1::Missing);
+}
+
+#[test]
+fn a_replica_without_the_opened_styles_saves_bold_turned_off_in_a_bold_paragraph_style() {
+    let content = concat!(
+        r#"<w:pPr><w:pStyle w:val="Strong"/></w:pPr>"#,
+        r#"<w:r><w:rPr><w:b/></w:rPr><w:t>abc</w:t></w:r>"#,
+    );
+    let replica = EditingDoc::new(72);
+    replica
+        .apply_update_v1(&open(content).encode_state_as_update_v1())
+        .unwrap();
+    replica.retain_source_docx(package(content));
+    format(
+        &replica,
+        0,
+        3,
+        InlineFormatDelta {
+            bold: Patch::Set(false),
+            ..Default::default()
+        },
+    );
+    let (saved, warnings) = save_paragraph(&replica, content, |paragraph| {
+        paragraph["content"][0]["formatting"]["bold"] = json!(false);
+    });
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(
+        saved.contains(r#"<w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>abc</w:t></w:r>"#),
+        "{saved}"
+    );
 }
 
 #[test]
@@ -1607,6 +1808,200 @@ fn field_paragraph_is_legacy() {
     );
     replace(&doc, 0, 1, "X");
     assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+const PAGE_REFERENCE: &str = concat!(
+    r#"<w:r w:rsidR="00112233"><w:fldChar w:fldCharType="begin" w:dirty="true"/></w:r>"#,
+    r#"<w:r><w:instrText xml:space="preserve"> PAGEREF _Toc1 \h </w:instrText></w:r>"#,
+    r#"<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>"#,
+    r#"<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:t>2</w:t></w:r>"#,
+    r#"<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>"#,
+);
+
+const PROJECTED_FIELD: &str = concat!(
+    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+    r#"<w:hyperlink w:anchor="top"><w:r><w:t>HYPERLINK</w:t></w:r></w:hyperlink>"#,
+    r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+    r#"<w:hyperlink w:anchor="top"><w:r><w:t>link</w:t></w:r></w:hyperlink>"#,
+    r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+);
+
+fn text_around_page_reference() -> String {
+    format!(
+        r#"<w:r><w:rPr><w:noProof/></w:rPr><w:t>abc</w:t></w:r>{PAGE_REFERENCE}<w:r><w:rPr><w:noProof/></w:rPr><w:t>def</w:t></w:r>"#
+    )
+}
+
+fn assert_typing_beside_a_field_patches(content: &str, at: u32, before: &str, after: &str) {
+    let doc = open(content);
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", at),
+        "X",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    assert_insertion_patch(&doc, at);
+    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let expected = format!("{}</w:p>", content.replacen(before, after, 1));
+    assert!(saved.contains(&expected), "{saved}");
+}
+
+#[test]
+fn typing_before_a_complex_field_patches_and_keeps_the_field_bytes() {
+    assert_typing_beside_a_field_patches(
+        &text_around_page_reference(),
+        1,
+        "<w:t>abc</w:t>",
+        "<w:t>aXbc</w:t>",
+    );
+}
+
+#[test]
+fn typing_after_a_complex_field_patches_and_keeps_the_field_bytes() {
+    assert_typing_beside_a_field_patches(
+        &text_around_page_reference(),
+        5,
+        "<w:t>def</w:t>",
+        "<w:t>dXef</w:t>",
+    );
+}
+
+#[test]
+fn typing_at_either_edge_of_a_complex_field_is_legacy() {
+    for at in [3, 4] {
+        let doc = open(&text_around_page_reference());
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", at),
+            "X",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+    }
+}
+
+#[test]
+fn typing_at_a_bookmark_beside_a_complex_field_is_legacy_as_a_field() {
+    let doc = open(&format!(
+        r#"<w:bookmarkStart w:id="1" w:name="mark"/><w:r><w:t>abc</w:t></w:r><w:bookmarkEnd w:id="1"/><w:r><w:t>de</w:t></w:r>{PAGE_REFERENCE}"#
+    ));
+    doc.insert_text(&ctx(), Position::new("body", 3), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn an_edit_across_a_complex_field_boundary_is_legacy() {
+    let doc = open(&text_around_page_reference());
+    replace(&doc, 2, 5, "X");
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn deleting_a_complex_field_is_legacy() {
+    let doc = open(&text_around_page_reference());
+    doc.delete_range(&ctx(), StoryRange::new("body", 3, 4))
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn an_edit_inside_projected_field_code_is_legacy() {
+    let doc = open(&format!("{}{PROJECTED_FIELD}", text("abc")));
+    replace(&doc, 5, 6, "X");
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn an_edit_inside_projected_field_result_text_is_legacy() {
+    let doc = open(&format!("{}{PROJECTED_FIELD}", text("abc")));
+    replace(&doc, 13, 14, "X");
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn typing_beside_a_field_with_projected_code_is_legacy() {
+    let doc = open(&format!("{}{PROJECTED_FIELD}", text("abc")));
+    doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn typing_beside_a_field_continued_in_the_next_paragraph_is_legacy() {
+    let doc = open(concat!(
+        r#"<w:r><w:t>abc</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> TOC \o "1-3" </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>entry</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000003"><w:r><w:t>more</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+    ));
+    doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+#[test]
+fn typing_beside_a_simple_field_is_legacy() {
+    let doc = open(concat!(
+        r#"<w:r><w:t>abc</w:t></w:r>"#,
+        r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#,
+    ));
+    doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "field:");
+}
+
+fn assert_field_result_kept(saved: &str, result: &str, fields: usize) {
+    assert!(saved.contains(&format!(">{result}</w:t>")), "{saved}");
+    for kind in ["begin", "separate", "end"] {
+        let char_type = format!(r#"w:fldCharType="{kind}""#);
+        assert_eq!(saved.matches(&char_type).count(), fields, "{saved}");
+    }
+}
+
+#[test]
+fn typing_outside_a_nested_field_keeps_both_fields() {
+    let content = concat!(
+        r#"<w:r><w:t>abc</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> QUOTE </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>def</w:t></w:r>"#,
+    );
+    let doc = open(content);
+    doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
+        .unwrap();
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    let planned = !part.paragraph_patches.is_empty();
+    if !planned {
+        assert!(part.legacy_paragraphs[0].detail.starts_with("field:"));
+    }
+    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    if warnings.is_empty() {
+        assert!(planned);
+        let expected = content.replacen("<w:t>abc</w:t>", "<w:t>aXbc</w:t>", 1);
+        assert!(saved.contains(&format!("{expected}</w:p>")), "{saved}");
+    } else {
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("\"field\":1")),
+            "{warnings:?}"
+        );
+    }
+    assert_field_result_kept(&saved, "7", 2);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from 'react';
 import { normalizeRange } from '@betteroffice/xlsx';
-import type { WorkbookHandle, WorkbookSession, XlsxRangeTarget } from '@betteroffice/xlsx';
+import type { WorkbookHandle, WorkbookSession, XlsxFontFace, XlsxPngFont, XlsxRangeTarget } from '@betteroffice/xlsx';
 import type {
   WorkbookAck, WorkbookCommandSelection, WorkbookCommandFrameRequest, WorkbookEditState,
 } from '@betteroffice/xlsx/worker';
@@ -18,6 +18,7 @@ import {
   type XlsxSelectionEnvironment,
 } from './evaluate';
 import { XLSX_COMMAND_DESCRIPTORS } from './descriptors';
+import { REFUSAL_CAUSE_KEYS } from './refusalCause';
 
 import {
   PeerlessWorkerCommandRefusal, type PeerlessWorkerCommandInput, type PeerlessWorkerCommandSession,
@@ -37,6 +38,10 @@ const IMMEDIATE: ReadonlySet<XlsxCommandId> = new Set<XlsxCommandId>([
   'zoom',
   'searchMenus',
   'proposalsPanel',
+  'cut',
+  'copy',
+  'paste',
+  'pastePlainText',
 ]);
 
 export interface PeerlessWorkerXlsxEditorBridge extends Omit<WorkerXlsxEditorBridge,
@@ -45,6 +50,8 @@ export interface PeerlessWorkerXlsxEditorBridge extends Omit<WorkerXlsxEditorBri
     WorkbookSession, 'editState' | 'selection'
   > & Partial<Pick<WorkbookSession, 'call' | 'pngExport'>>) | null;
   deliverPng?(bytes: Uint8Array): void;
+  /** The faces the editor paints these fonts with, forwarded to a PNG export. */
+  exportFonts?(fonts: XlsxPngFont[]): Promise<XlsxFontFace[] | undefined>;
   coordinator: PeerlessWorkerInputCoordinator;
   frame(): WorkbookCommandFrameRequest | undefined;
   selectionRevision(): number;
@@ -53,6 +60,29 @@ export interface PeerlessWorkerXlsxEditorBridge extends Omit<WorkerXlsxEditorBri
   setFormatToken(token: string | null): void;
   selection?(): WorkbookCommandSelection | null;
   refuse?: XlsxCommandBinding['refuse'];
+  /** The grid's own clipboard, clear and sheet tab actions, for menu commands. */
+  menu?: PeerlessWorkerMenuBridge;
+}
+
+export interface PeerlessWorkerMenuBridge {
+  clipboard(kind: 'copy' | 'cut' | 'paste' | 'pastePlainText'): Promise<unknown>;
+  clear(): Promise<unknown>;
+  /** Shows the inline editor for the active sheet's name. */
+  beginRename(): void;
+  /** Makes the sheet with this name active once the workbook lists it. */
+  activate(name: string): void;
+}
+
+function nextSheetName(prefix: string, sheets: readonly string[]): string {
+  const taken = new Set(sheets.map((name) => name.toLowerCase()));
+  for (let number = sheets.length + 1; ; number++) {
+    const name = `${prefix}${number}`;
+    if (!taken.has(name.toLowerCase())) return name;
+  }
+}
+
+function deniedClipboard(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'NotAllowedError';
 }
 
 export interface PeerlessWorkerXlsxCommandBinding extends XlsxCommandBinding {
@@ -157,7 +187,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
   };
   const environment = (executing: boolean): XlsxCommandEnvironment => {
     refreshSubscription();
-    if (executing && admission) return admission.env;
+    if (executing && admission) return { ...admission.env, allowHostProposals: bridge().allowHostProposals?.() };
     const current = bridge();
     const view = current.view();
     const session = current.session();
@@ -168,6 +198,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
     const sheet = restored ? state.sheets?.find((entry) => entry.id === restored.sheetId)?.index ?? view.sheet : view.sheet;
     return {
       status: current.status(), readOnly: current.readOnly() || current.coordinator.readOnly || state.readOnly === true,
+      allowHostProposals: current.allowHostProposals?.(),
       collaborative: current.collaborative(),
       selection: view.chartSelected ? 'chart' : range ? {
         sheet, ...range, merged: state.mergedRanges ?? [],
@@ -183,6 +214,11 @@ export function createPeerlessWorkerXlsxCommandBinding(
       proposals: view.proposalsAvailable ? view.proposals.map((proposal) => ({ id: proposal.id, label: proposal.agentId })) : null,
       proposalsPanelOpen: view.proposalsPanelOpen, fontFamilies: DEFAULT_FONT_FAMILIES,
       fontSizes: DEFAULT_FONT_SIZES, translate: current.translate,
+      workbook: current.menu && state.sheets ? {
+        sheets: [...state.sheets].sort((a, b) => a.index - b.index).map((entry) => entry.name),
+        active: view.sheet,
+        clipboardRead: typeof navigator !== 'undefined' && typeof navigator.clipboard?.readText === 'function',
+      } : undefined,
       hostDisabled: state.selectionEditable === false ? new Set(
         (Object.keys(XLSX_COMMAND_DESCRIPTORS) as XlsxCommandId[]).filter(isCellCommand)
       ) : undefined,
@@ -261,13 +297,76 @@ export function createPeerlessWorkerXlsxCommandBinding(
         const frame = admitted ? admitted.frame : current.frame();
         if (!session.pngExport || !session.call) return fail('png-unavailable');
         if (!frame || !current.deliverPng) return fail('editor-unavailable');
-        const png = await session.call.renderPng(frame.viewport, { sheet: frame.sheet });
+        const target = { sheet: frame.sheet, viewport: frame.viewport };
+        const fonts = await current.exportFonts?.(await session.call.renderPngFonts(target));
+        const png = await session.call.renderPng(target, { fonts });
         if (bridge().generation() !== generation || bridge().session() !== session) return fail('document-replaced');
         current.deliverPng(png);
         return done();
       }
+      const menu = current.menu;
+      const workbook = env.workbook;
+      if (id === 'cut' || id === 'copy' || id === 'paste' || id === 'pastePlainText') {
+        if (!menu) return fail('unsupported-command');
+        await menu.clipboard(id);
+        return bridge().generation() === generation && bridge().session() === session ? done() : fail('document-replaced');
+      }
+      if (id === 'clearContents') {
+        if (!menu) return fail('unsupported-command');
+        await menu.clear();
+        return bridge().generation() === generation && bridge().session() === session ? done() : fail('document-replaced');
+      }
+      if (id === 'renameSheet' && args === null) {
+        if (!menu) return fail('unsupported-command');
+        menu.beginRename();
+        return { ok: true, status: 'opened' };
+      }
+      const activeId = workbook ? session.editState.sheets?.find((sheet) => sheet.index === workbook.active)?.id : undefined;
+      const sheetTarget: XlsxRangeTarget | undefined = activeId ? { sheetId: activeId,
+        range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: 0 } } } : undefined;
+      let settle: (() => void) | null = null;
       let input: PeerlessWorkerCommandInput;
       switch (id) {
+        case 'insertRows': case 'deleteRows': case 'insertColumns': case 'deleteColumns': {
+          if (!cells || !target) return fail('cell-selection-required');
+          const rows = id === 'insertRows' || id === 'deleteRows';
+          const after = argsRecord?.position === 'below' || argsRecord?.position === 'right';
+          const count = rows ? cells.bottom - cells.top + 1 : cells.right - cells.left + 1;
+          const at = rows ? (after ? cells.bottom + 1 : cells.top) : (after ? cells.right + 1 : cells.left);
+          const type = id === 'insertRows' ? 'insertRows' : id === 'deleteRows' ? 'deleteRows' : id === 'insertColumns' ? 'insertCols' : 'deleteCols';
+          input = { kind: 'applyOps', payload: { args: [[{ type, sheet: cells.sheet, at, count, target }]], selection } };
+          break;
+        }
+        case 'insertSheet': {
+          if (!workbook || !menu) return fail('unsupported-command');
+          const name = nextSheetName(env.translate('editor.sheetNamePrefix'), workbook.sheets);
+          input = { kind: 'applyOps', payload: { args: [[{ type: 'addSheet', index: workbook.active, name }]] } };
+          settle = () => menu.activate(name);
+          break;
+        }
+        case 'deleteSheet': {
+          if (!workbook || !menu || !sheetTarget) return fail('unsupported-command');
+          const remaining = workbook.sheets.filter((_, index) => index !== workbook.active);
+          const next = remaining[Math.min(workbook.active, remaining.length - 1)];
+          input = { kind: 'applyOps', payload: { args: [[{ type: 'removeSheet', index: workbook.active, target: sheetTarget }]] } };
+          settle = () => menu.activate(next);
+          break;
+        }
+        case 'renameSheet': {
+          if (!workbook || !sheetTarget) return fail('unsupported-command');
+          const name = (args as XlsxCommandArgs['renameSheet'])!.name;
+          if (name === workbook.sheets[workbook.active]) return done(false);
+          input = { kind: 'applyOps', payload: { args: [[{ type: 'renameSheet', sheet: workbook.active, name, target: sheetTarget }]] } };
+          break;
+        }
+        case 'moveSheet': {
+          if (!workbook || !menu || !sheetTarget) return fail('unsupported-command');
+          const to = workbook.active + (argsRecord.direction === 'left' ? -1 : 1);
+          input = { kind: 'applyOps', payload: { args: [[{ type: 'moveSheet', from: workbook.active, to, target: sheetTarget }]] } };
+          const moved = workbook.sheets[workbook.active];
+          settle = () => menu.activate(moved);
+          break;
+        }
         case 'bold': case 'italic': case 'strikethrough': case 'fontSizeStep':
         case 'merge': case 'paintFormat':
           if (!target) return fail('cell-selection-required');
@@ -326,6 +425,7 @@ export function createPeerlessWorkerXlsxCommandBinding(
         current.refreshProposals();
       }
       if (id === 'proposalReject' && status.result === false) return fail('proposal-not-found');
+      if (status.status !== 'noop') settle?.();
       return done(status.status !== 'noop');
     } catch (error) {
       if (bridge().generation() !== generation || bridge().session() !== session) return fail('document-replaced');
@@ -338,10 +438,16 @@ export function createPeerlessWorkerXlsxCommandBinding(
         }
         if (error.status.reason === 'read-only') return fail('read-only');
         if (id === 'proposalReject' && error.status.reason === 'missing-target') return fail('proposal-not-found');
+        if (error.code === 'edit-unsupported') {
+          return { ok: false, failure: { code: error.code, message: env.translate(REFUSAL_CAUSE_KEYS[error.cause ?? 'other']) } };
+        }
         return fail(error.code);
       }
-      if (error instanceof XlsxCommandAdmissionError) return fail(error.code);
+      if (error instanceof XlsxCommandAdmissionError) {
+        return error.code === 'host-refused' ? { ok: false, failure: { code: error.code, message: error.message } } : fail(error.code);
+      }
       if (error instanceof Error && error.name === 'WorkbookPngUnavailableError') return fail('png-unavailable');
+      if (deniedClipboard(error)) return fail('clipboard-denied');
       return fail('command-failed');
     }
   };

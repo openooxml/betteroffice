@@ -20,6 +20,7 @@ const segments: Record<string, YrsStorySegment[]> = {
       kind: 'embed',
       embedKind: 'table',
       payload: {
+        tblPr: {},
         grid: [100],
         rows: [{ cells: [{ story: 'body:t0:r0c0', tcPr: {} }] }],
       },
@@ -54,6 +55,7 @@ describe('YrsPositionProjection', () => {
           ? {
               ...segment,
               payload: {
+                tblPr: {},
                 grid: [100],
                 rows: [{ cells: [{ story: `${root}:t0:r0c0`, tcPr: {} }] }],
               },

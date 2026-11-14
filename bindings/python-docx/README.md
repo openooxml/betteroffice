@@ -145,10 +145,13 @@ Text renders with the bundled fonts, which the package installs as the
 (Carlito stands in for Calibri, for example):
 
 ```python
-png = document.render_png(layout.display_list, 0)
+png = document.render_png({"page": 0}, scale=1.0)
 png.write("page-0.png")
 print(len(png), png.skipped_images)
 ```
+
+`render_png` accepts a `PngTarget` dictionary. For an existing layout, use
+`document.render_display_list_png(layout.display_list, 0)`.
 
 `register_font` adds a family or replaces a bundled one:
 
@@ -162,7 +165,7 @@ Without the font wheels (installed with `--no-deps`), text whose family has no
 registered face raises `RenderError` naming the chain it wanted
 (``missing font chain for `calibri|0|0` ``).
 
-`png.skipped_images` counts unresolved references. Register image bytes under
+`png.skipped_images` counts unresolved references, and `png.skipped_effects` maps each effect kind the renderer could not draw yet (for example `text.textOutline`) to how often it was left out. Register image bytes under
 the relationship ID and owning part:
 
 ```python
@@ -207,7 +210,8 @@ is the gap this fills.
 | `document.author` / `origin` / `timestamp` | how an edit is attributed and stamped |
 | `document.layout(input)` | paginate a measured envelope |
 | `document.register_font` / `register_image` | raster resources |
-| `document.render_png(display_list, page)` | rasterize one page |
+| `document.render_png(target, *, scale=1.0)` | lay out and rasterize a zero-based page |
+| `document.render_display_list_png(display_list, page=0)` | rasterize an existing layout |
 | `document.save()` / `save_path(path)` | serialize to DOCX |
 
 Errors raise `DocxError` or a more specific subclass: `ParseError`,

@@ -114,6 +114,14 @@
     "zoomPercent": "Zoomen in procenten",
     "apply": "Toepassen",
     "cancel": "Annuleren",
+    "freezeColumn": "Kolom {column} vastzetten",
+    "freezeColumns": "Kolommen {first}–{last} vastzetten",
+    "freezeRow": "Rij {row} vastzetten",
+    "freezeRows": "Rijen {first}–{last} vastzetten",
+    "unfreezePanes": "Blokkering van deelvensters opheffen",
+    "unhideColumns": "Kolommen zichtbaar maken",
+    "unhideRows": "Rijen zichtbaar maken",
+    "selectAll": "Alles selecteren",
     "reasons": {
       "editorUnavailable": "De editor is nog niet gereed.",
       "documentLoading": "De werkmap wordt nog geopend.",
@@ -135,7 +143,15 @@
       "unsupportedCommand": "Nog niet ondersteund.",
       "invalidArguments": "Deze waarde is niet geldig.",
       "inputFailed": "De voorgaande celinvoer kon niet worden opgeslagen.",
+      "editUnsupported": "Deze bewerking kan hier niet worden toegepast. De werkmap is niet gewijzigd.",
+      "editUnsupportedChart": "Deze bewerking kan niet worden toegepast: een grafiek gebruikt cellen die erdoor zouden verschuiven. De werkmap is niet gewijzigd.",
+      "editUnsupportedTable": "Deze bewerking kan niet worden toegepast: een tabel gebruikt cellen die erdoor zouden verschuiven. De werkmap is niet gewijzigd.",
+      "editUnsupportedPivot": "Deze bewerking kan niet worden toegepast: een draaitabel gebruikt cellen die erdoor zouden verschuiven. De werkmap is niet gewijzigd.",
+      "editUnsupportedFill": "Deze doorvoering kan niet worden toegepast: ze zou cellen met koppelingen, notities of regels wijzigen. De werkmap is niet gewijzigd.",
       "sheetProtected": "Deze cel staat op een beveiligd werkblad.",
+      "hostRefused": "Deze bewerking is niet toegestaan.",
+      "tooManyToCheck": "Te veel cellen om door plug-ins te laten controleren (limiet {limit}).",
+      "hostStarting": "De editor wordt nog gestart. Probeer het zo meteen opnieuw.",
       "documentReplaced": "Er is een andere werkmap geopend.",
       "targetChanged": "De selectie is gewijzigd.",
       "gestureActive": "Voltooi eerst het verplaatsen van de grafiek.",
@@ -144,10 +160,33 @@
       "commandFailed": "De wijziging kon niet worden toegepast.",
       "commandRefused": "De opdracht is geweigerd.",
       "permissionDenied": "De hosttoepassing heeft deze plug-in geen toestemming gegeven om deze opdracht te gebruiken.",
-      "unsupportedPolicy": "Plug-ins kunnen deze opdracht nog niet uitvoeren. Gebruik in plaats daarvan een bewerkingsbatch.",
+      "unsupportedPolicy": "Deze opdracht vereist een gebruikersactie in de eigen interface van de plug-in.",
       "pluginUnavailable": "De plug-in is niet meer actief.",
-      "aborted": "De plug-inactie is geannuleerd voordat de opdracht werd uitgevoerd."
-    }
+      "aborted": "De plug-inactie is geannuleerd voordat de opdracht werd uitgevoerd.",
+      "clipboardUnavailable": "Deze browser staat plakken vanuit een menu niet toe. Gebruik de sneltoets.",
+      "lastSheet": "Een werkmap heeft ten minste één blad nodig.",
+      "sheetAtEdge": "Het blad kan niet verder worden verplaatst.",
+      "sheetNameInvalid": "Bladnamen hebben 1 tot 31 tekens nodig, moeten uniek zijn en mogen geen : \\ / ? * [ ] bevatten.",
+      "clipboardDenied": "De browser heeft geen toegang tot het klembord toegestaan."
+    },
+    "cut": "Knippen",
+    "copy": "Kopiëren",
+    "paste": "Plakken",
+    "pastePlainText": "Plakken als platte tekst",
+    "clearContents": "Inhoud wissen",
+    "insert": "Invoegen",
+    "delete": "Verwijderen",
+    "insertRowsAbove": "Rijen boven invoegen",
+    "insertRowsBelow": "Rijen onder invoegen",
+    "insertColumnsLeft": "Kolommen links invoegen",
+    "insertColumnsRight": "Kolommen rechts invoegen",
+    "deleteRows": "Rijen verwijderen",
+    "deleteColumns": "Kolommen verwijderen",
+    "insertSheet": "Blad invoegen",
+    "deleteSheet": "Blad verwijderen",
+    "renameSheet": "Naam wijzigen",
+    "moveSheetLeft": "Naar links verplaatsen",
+    "moveSheetRight": "Naar rechts verplaatsen"
   },
   "editor": {
     "appLabel": "Spreadsheeteditor",
@@ -162,7 +201,13 @@
     "showDetails": "Details weergeven",
     "openPrompt": "Een XLSX-bestand openen",
     "sheetTabsLabel": "Werkbladen",
-    "clearExceedsLimit": "Wissen overschrijdt de cellimiet."
+    "clearExceedsLimit": "Wissen overschrijdt de cellimiet.",
+    "cellMenuLabel": "Celmenu",
+    "columnHeaderMenuLabel": "Menu van de kolomkop",
+    "rowHeaderMenuLabel": "Menu van de rijkop",
+    "sheetTabMenuLabel": "Menu van het bladtabblad",
+    "renameSheetLabel": "Naam van blad wijzigen",
+    "sheetNamePrefix": "Werkblad"
   },
   "presence": {
     "label": "Medewerkers",
@@ -178,6 +223,7 @@
     "accept": "Accepteren",
     "reject": "Afwijzen",
     "forceApply": "Geforceerd toepassen",
+    "forceBlockedReason": "Dit voorstel kan na een structuurwijziging niet worden toegepast.",
     "staleWarning": "Cellen gewijzigd sinds het voorstel: {cells}"
   },
   "a11y": {
@@ -187,12 +233,39 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, geselecteerd",
     "emptyCellLabel": "{address}, leeg",
-    "emptyCellLabelSelected": "{address}, leeg, geselecteerd"
+    "emptyCellLabelSelected": "{address}, leeg, geselecteerd",
+    "hasFormula": "{label}, bevat formule",
+    "rangeSelected": "{start} tot {end} geselecteerd, {rows, plural, one {# rij} other {# rijen}} bij {columns, plural, one {# kolom} other {# kolommen}}",
+    "sheetActivated": "{name}, werkblad {index} van {count}",
+    "cellInputLabel": "Cel {address} bewerken",
+    "gridRoleDescription": "werkblad",
+    "fillHandleLabel": "Vulgreep",
+    "chartResizeNw": "Grootte van grafiek wijzigen vanuit de linkerbovenhoek",
+    "chartResizeN": "Grootte van grafiek wijzigen vanuit de bovenrand",
+    "chartResizeNe": "Grootte van grafiek wijzigen vanuit de rechterbovenhoek",
+    "chartResizeE": "Grootte van grafiek wijzigen vanuit de rechterrand",
+    "chartResizeSe": "Grootte van grafiek wijzigen vanuit de rechteronderhoek",
+    "chartResizeS": "Grootte van grafiek wijzigen vanuit de onderrand",
+    "chartResizeSw": "Grootte van grafiek wijzigen vanuit de linkeronderhoek",
+    "chartResizeW": "Grootte van grafiek wijzigen vanuit de linkerrand",
+    "chartResizeHintBoth": "{label} (pijltoetsen; houd Shift ingedrukt voor 10 px)",
+    "chartResizeHintHorizontal": "{label} (pijl-links en pijl-rechts; houd Shift ingedrukt voor 10 px)",
+    "chartResizeHintVertical": "{label} (pijl-omhoog en pijl-omlaag; houd Shift ingedrukt voor 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Plug-ins",
     "panelTabs": "Plug-inpanelen",
     "collapsePanel": "{title} samenvouwen",
-    "expandPanel": "{title} uitvouwen"
+    "expandPanel": "{title} uitvouwen",
+    "rowGutter": "Rijmarkeringen van plug-ins"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "del": "Del",
+    "escape": "Esc",
+    "pageUp": "Page Up",
+    "pageDown": "Page Down"
   }
 }

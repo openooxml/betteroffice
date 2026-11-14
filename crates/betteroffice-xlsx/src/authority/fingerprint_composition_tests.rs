@@ -28,7 +28,7 @@ fn composition_fingerprint_hashes_both_readings_in_its_own_domain() {
     let model = patterned_facets();
     let base = WorkbookBase::from_model(&model).unwrap();
     let hash = |domain| {
-        fingerprint_model_with_domain_oracle(&model, SCHEMA_VERSION, true, true, domain)
+        fingerprint_model_with_domain_oracle(&model, FINGERPRINT_SCHEMA_VERSION, true, true, domain)
             .unwrap()
             .0
             .rsplit(':')
@@ -155,10 +155,10 @@ fn composition_single_reading_states_restore_source_formats() {
         let mut base = WorkbookBase::from_model(&legacy).unwrap();
         (base.fingerprint, base.bootstrap_client_id) = fingerprint_model_with_domain_oracle(
             &model,
-            SCHEMA_VERSION,
+            FINGERPRINT_SCHEMA_VERSION,
             true,
             true,
-            fingerprint_domain(SCHEMA_VERSION, reading),
+            fingerprint_domain(FINGERPRINT_SCHEMA_VERSION, reading),
         )
         .unwrap();
         let doc = Doc::with_client_id(base.bootstrap_client_id);

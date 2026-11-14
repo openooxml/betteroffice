@@ -13,6 +13,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { createPresentationCommandClient } from '../../../pptx/src/session/commandClient';
 import { registerPresentationCommandHandlers } from '../../../pptx/src/session/commandHost';
 import { initWasm } from '../../../pptx/src/wasm/loader';
+import { pptxWorkerRenderClients } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { commandFontProvider } from '../../../pptx/src/session/commandDefaultFonts';
 import { createPresentationSessionHost } from '../../../pptx/src/session/host';
 import { PptxEditor } from '../PptxEditor';
@@ -355,4 +356,21 @@ test('replacement_open', async () => {
   expect(view.container.querySelector('textarea')).toBeNull();
   expect(view.getByRole('status').textContent).toContain('No slides');
   expect((await ready.mock.calls[0][0].saveAsync()).byteLength).toBeGreaterThan(0);
+});
+
+test('render port absence keeps the editor on the command frame painter', async () => {
+  const factory = peerlessPainterFactories.frame;
+  const paints = spyOn(peerlessPainterFactories, 'frame').mockImplementation(factory);
+  restorers.push(() => paints.mockRestore());
+  const ready = mock((_api: PptxAsyncEditorApi) => {});
+  const errors = mock((_error: Error) => {});
+  const view = render(<PptxEditor fonts={[]} file={await deck()} onReady={ready} onError={errors} />);
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  expect(pptxWorkerRenderClients.has(sessions[sessions.length - 1]!)).toBe(false);
+  expect(paints).toHaveBeenCalled();
+  expect(canvasCalls.some((call) => call.kind === 'paint')).toBe(true);
+  await act(async () => { await ready.mock.calls[0]![0].goToSlide(2); });
+  expect(clients[clients.length - 1]!.state.frame?.slideIndex).toBe(1);
+  expect(errors).not.toHaveBeenCalled();
+  view.unmount();
 });

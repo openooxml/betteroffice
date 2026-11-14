@@ -71,6 +71,7 @@ COPY --from=build --chown=root:root /app/shared/collaboration-limits.ts ./shared
 COPY --from=build --chown=root:root /app/shared/collaboration-pipe ./shared/collaboration-pipe
 COPY --from=build --chown=root:root /app/shared/media.ts ./shared/media.ts
 COPY --from=build --chown=root:root /app/shared/office-session ./shared/office-session
+COPY --from=build --chown=root:root /app/shared/safeHref.ts ./shared/safeHref.ts
 
 RUN chown -R root:root /app \
   && chmod -R a-w /app \

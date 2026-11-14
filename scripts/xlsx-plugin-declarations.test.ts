@@ -28,6 +28,8 @@ const CONSUMER = `import {
   useXlsxCommand,
   type XlsxEditorApi,
   type XlsxPluginContext,
+  type XlsxPluginSelectionSettleEvent,
+  type XlsxGeometryTarget,
   type XlsxPluginGrant,
   type XlsxPluginNavigationResult,
 } from '@betteroffice/xlsx-react';
@@ -43,6 +45,32 @@ export const review = defineXlsxPlugin<State>({
   id: 'acme.review',
   createState: () => ({ count: 0 }),
   async onEvent(context, event) {
+    const focused: boolean = context.snapshot.focused;
+    const locale: string = context.snapshot.locale;
+    const settled: boolean = context.snapshot.selectionSettled;
+    const target: XlsxGeometryTarget = { kind: 'selection' };
+    const anchor = context.geometry?.getAnchorGeometry(target);
+    const anchors = await context.geometry?.readAnchorGeometries([target]);
+    void [focused, locale, settled, anchor, anchors];
+    switch (event.type) {
+      case 'selection-settle': {
+        const settled: XlsxPluginSelectionSettleEvent = event;
+        const source: 'pointer' | 'touch' | 'keyboard' = settled.source;
+        const publicSources: Record<typeof settled.source, true> = { pointer: true, touch: true, keyboard: true };
+        void [source, publicSources, settled.version, settled.selection];
+        break;
+      }
+      case 'focus-change': {
+        const focused: boolean = event.focused;
+        void focused;
+        break;
+      }
+      case 'locale-change': {
+        const locale: string = event.locale;
+        void locale;
+        break;
+      }
+    }
     if (event.type === 'selection-change' && event.selection?.cells) {
       const result: XlsxPluginNavigationResult = await context.navigation.selectCells(
         { sheetId: event.selection.sheetId, selection: event.selection.cells },

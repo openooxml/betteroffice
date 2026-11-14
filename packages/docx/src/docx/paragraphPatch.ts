@@ -32,6 +32,7 @@ export type ParagraphPatchV1 = {
   paraInherit: Attrs;
   markInherit?: Attrs;
   resultSha256: string;
+  inheritance?: 'current' | 'unknown';
 };
 export type PatchErrorCode =
   | 'MISSING_SOURCE'

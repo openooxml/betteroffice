@@ -11,7 +11,7 @@ import type { PeerlessFrameGeometry } from './viewStore';
 import { CanvasPageMirror } from '../CanvasPageMirror';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
 import { glyphChar, installGlyphPaths, testEchoGlyphLine, testEchoGlyphSet } from './echoGlyphs.testing';
-import { commandPageGeometry } from './commandPageGeometry';
+import { commandPageGeometry, frameGeometry } from './commandPageGeometry';
 import { fakeIdleScheduler } from '../__fixtures__/fakeIdleScheduler';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -180,6 +180,37 @@ async function mount(zoom = 1, caretPage = 0, prefix = false, mirrors = false, p
   };
 }
 
+/**
+ * Keeps the scroll-settle timer from firing until `release`, so a slow machine
+ * cannot end the scroll early. Replaces the timers by hand: testing-library
+ * treats a spied setTimeout as fake timers.
+ */
+function heldScrollSettle() {
+  const settling = new Map<number, () => void>();
+  let nextId = -1;
+  const { setTimeout: realTimeout, clearTimeout: realClear } = globalThis;
+  globalThis.setTimeout = ((run: () => void, delay?: number, ...args: unknown[]) => {
+    if (delay !== 150) return realTimeout(run, delay, ...args);
+    const id = nextId--;
+    settling.set(id, run);
+    return id as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((id: ReturnType<typeof setTimeout>) => {
+    if (!settling.delete(id as unknown as number)) realClear(id);
+  }) as typeof clearTimeout;
+  restorers.push(() => {
+    globalThis.setTimeout = realTimeout;
+    globalThis.clearTimeout = realClear;
+  });
+  return {
+    release() {
+      const due = [...settling.values()];
+      settling.clear();
+      for (const run of due) run();
+    },
+  };
+}
+
 test('raster scale starts at device pixels and settles zoom and rearmed DPR changes', async () => {
   const originalDpr = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
   Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 2 });
@@ -269,7 +300,8 @@ function scrapedPrepareGeometry(dependencies: Record<string, unknown>) {
   const end = source.indexOf('\n  }, []);', start);
   const body = new Bun.Transpiler({ loader: 'tsx' }).transformSync(`function prepare(frame) {${source.slice(start, end)} }`);
   const all = { identity: { current: identity }, retained: { current: null }, prepared: { current: new WeakMap() },
-    pageIndexes: { current: new Map() }, CANVAS_PAGE_GAP_PX, commandPageGeometry,
+    pageIndexes: { current: new Map() }, geometrySources: { current: new WeakMap() }, rasterScale: 1,
+    CANVAS_PAGE_GAP_PX, commandPageGeometry, frameGeometry,
     decodeCommandFrameDeltas: (candidate: DocxCommandFrame) =>
       [...(candidate.payload.pageFrames ?? []), candidate.payload.frame].map((bytes) =>
         (dependencies.decodeFrameDelta as (bytes: unknown) => unknown)(bytes)),
@@ -417,13 +449,14 @@ test('pages entering the window while scrolling build their mirror in a frame on
     `[data-page-id="${pageIndex + 1}"] .canvas-page-mirror`);
   const full = (pageIndex: number) => mirror(pageIndex)?.querySelector('.layout-run-text') != null;
   await waitFor(() => expect(full(1)).toBe(true));
+  const settle = heldScrollSettle();
   await editor.scrollTo(10);
   await waitFor(() => expect(mirror(10)).not.toBeNull());
   const { start, end } = editor.requests.at(-1)!;
   const entered = Array.from({ length: end - start }, (_, index) => start + index);
   expect(entered.filter((pageIndex) => (mirror(pageIndex)?.childElementCount ?? 0) > 0)).toEqual([]);
-  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 250)); });
-  expect(entered.filter(full)).toEqual(entered);
+  act(() => settle.release());
+  await waitFor(() => expect(entered.filter(full)).toEqual(entered), { timeout: 10_000 });
   expect(mirror(10)!.textContent).toContain('Readable page 11');
 });
 

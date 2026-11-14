@@ -1,10 +1,13 @@
 import { test, expect, type Page, type TestInfo } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
+import { inputReady } from './pptx-async-helpers';
 
 type Format = 'docx' | 'xlsx' | 'pptx';
 type BrowserProbe = {
   workers: { worker: Worker; url: string; active: boolean }[];
+  /** Holds messages from session workers while set, so their acknowledgements never arrive before a crash. */
+  holdWorkerMessages: boolean;
   printed: number;
   popups: Window[];
   painted(): string;
@@ -47,11 +50,53 @@ async function fixture(format: Format) {
   return { name: `robustness.${format}`, mimeType: 'application/octet-stream', buffer: await zip.generateAsync({ type: 'nodebuffer' }) };
 }
 
+function instrumentWorker() {
+  const scope = self as unknown as { __paintProbe?: { last: string | null } };
+  if (scope.__paintProbe || typeof OffscreenCanvasRenderingContext2D !== 'function') return;
+  const texts = new WeakMap<OffscreenCanvas, string[]>();
+  const probe = { last: null as string | null };
+  scope.__paintProbe = probe;
+  const context = OffscreenCanvasRenderingContext2D.prototype;
+  const fillText = context.fillText;
+  context.fillText = function (...args: Parameters<typeof fillText>) {
+    texts.set(this.canvas, [...(texts.get(this.canvas) ?? []), args[0]].slice(-256));
+    fillText.apply(this, args);
+  };
+  const clearRect = context.clearRect;
+  context.clearRect = function (...args: Parameters<typeof clearRect>) {
+    if (args[0] === 0 && args[1] === 0) texts.set(this.canvas, []);
+    clearRect.apply(this, args);
+  };
+  const drawImage = context.drawImage;
+  context.drawImage = function (source: CanvasImageSource, ...args: number[]) {
+    const copied = texts.get(source as OffscreenCanvas);
+    if (copied) texts.set(this.canvas, [...(texts.get(this.canvas) ?? []), ...copied].slice(-256));
+    Reflect.apply(drawImage, this, [source, ...args]);
+  };
+  const transfer = OffscreenCanvas.prototype.transferToImageBitmap;
+  OffscreenCanvas.prototype.transferToImageBitmap = function () {
+    probe.last = (texts.get(this) ?? []).join('');
+    return transfer.call(this);
+  };
+  const createBitmap = self.createImageBitmap;
+  self.createImageBitmap = function (source: ImageBitmapSource, ...args: unknown[]) {
+    if (source instanceof OffscreenCanvas) probe.last = (texts.get(source) ?? []).join('');
+    return Reflect.apply(createBitmap, self, [source, ...args]) as Promise<ImageBitmap>;
+  } as typeof self.createImageBitmap;
+}
+
+async function painted(page: Page): Promise<string> {
+  const workers = await Promise.all(page.workers().map((worker) => worker.evaluate(() =>
+    (self as unknown as { __paintProbe?: { last: string | null } }).__paintProbe?.last ?? null).catch(() => null)));
+  return workers.find((value) => value !== null) ?? await page.evaluate(() => window.__asyncRobustness.painted());
+}
+
 async function instrument(page: Page) {
+  page.on('worker', (worker) => { void worker.evaluate(instrumentWorker).catch(() => {}); });
   await page.addInitScript(() => {
     const texts = new WeakMap<HTMLCanvasElement, string[]>();
     const probe: BrowserProbe = {
-      workers: [], printed: 0, popups: [],
+      workers: [], printed: 0, popups: [], holdWorkerMessages: false,
       painted() {
         const canvas = document.querySelector<HTMLCanvasElement>('[data-testid="pptx-slide-canvas"]');
         return canvas ? (texts.get(canvas) ?? []).join('') : '';
@@ -61,6 +106,18 @@ async function instrument(page: Page) {
     window.Worker = new Proxy(window.Worker, {
       construct(target, args) {
         const worker = Reflect.construct(target, args) as Worker;
+        const gate = (listener: (event: MessageEvent) => void) => function (this: Worker, event: MessageEvent) {
+          if (!probe.holdWorkerMessages) listener.call(this, event);
+        };
+        const listen = worker.addEventListener.bind(worker);
+        worker.addEventListener = ((type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) =>
+          listen(type, type === 'message' && typeof listener === 'function'
+            ? gate(listener as (event: MessageEvent) => void) as EventListener : listener, options)) as typeof worker.addEventListener;
+        let onmessage: ((event: MessageEvent) => void) | null = null;
+        Object.defineProperty(worker, 'onmessage', { configurable: true, get: () => onmessage, set: (value) => {
+          if (onmessage === null && value) listen('message', gate((event) => onmessage?.call(worker, event)) as EventListener);
+          onmessage = value;
+        } });
         const record = { worker, url: String(args[0]), active: true };
         const terminate = worker.terminate.bind(worker);
         worker.terminate = () => { record.active = false; terminate(); };
@@ -115,7 +172,7 @@ async function ready(page: Page, format: Format) {
   if (format === 'xlsx') await expect(page.getByTestId('xlsx-formula-input')).toHaveValue(/.+/);
   if (format === 'pptx') {
     await expect(page.getByTestId('pptx-worker-status')).toHaveCount(0);
-    await expect.poll(() => page.evaluate(() => window.__asyncRobustness.painted())).toMatch(/\S/);
+    await expect.poll(() => painted(page)).toMatch(/\S/);
   }
 }
 
@@ -141,6 +198,7 @@ async function edit(page: Page, format: Format, value: string) {
     await page.keyboard.insertText(value);
     await input.press('Enter');
   } else {
+    await inputReady(page);
     const box = await canvas(page, format).boundingBox();
     expect(box).not.toBeNull();
     await page.mouse.click(box!.x + box!.width * 0.12, box!.y + box!.height * 0.22);
@@ -154,7 +212,7 @@ async function edit(page: Page, format: Format, value: string) {
 async function visible(page: Page, format: Format, value: string) {
   if (format === 'docx') await expect(page.locator('.canvas-page-mirror').first()).toContainText(value);
   else if (format === 'xlsx') await expect(page.getByRole('gridcell').filter({ hasText: value })).toHaveCount(1);
-  else await expect.poll(() => page.evaluate(() => window.__asyncRobustness.painted())).toContain(value);
+  else await expect.poll(() => painted(page)).toContain(value);
 }
 
 async function save(page: Page, format: Format, info: TestInfo, label: string) {
@@ -180,7 +238,7 @@ async function history(page: Page, format: Format, info: TestInfo, value: string
   else await page.getByTestId(`${format}-undo`).click();
   if (format === 'docx') await expect(page.locator('.canvas-page-mirror').first()).not.toContainText(value);
   else if (format === 'xlsx') await expect(page.getByRole('gridcell').filter({ hasText: value })).toHaveCount(0);
-  else await expect.poll(() => page.evaluate(() => window.__asyncRobustness.painted())).not.toContain(value);
+  else await expect.poll(() => painted(page)).not.toContain(value);
   const undone = await save(page, format, info, 'undone');
   expect(undone.text).toBe(original);
   if (format === 'docx') await docxInput(page).press('ControlOrMeta+Shift+z');
@@ -194,10 +252,38 @@ async function history(page: Page, format: Format, info: TestInfo, value: string
 
 test.beforeEach(async ({ page }) => { await instrument(page); });
 
+test('pptx: an edit the worker painted but never acknowledged before it crashed is reported, not dropped silently', async ({ page }, info) => {
+  await open(page, 'pptx');
+  await inputReady(page);
+  const box = await canvas(page, 'pptx').boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.click(box!.x + box!.width * 0.12, box!.y + box!.height * 0.22);
+  await expect(slideInput(page)).toBeFocused();
+  await slideInput(page).press('Home');
+  await page.evaluate(() => { window.__asyncRobustness.holdWorkerMessages = true; });
+  await page.keyboard.insertText('Held');
+  await expect.poll(() => painted(page)).toContain('Held');
+  await page.evaluate(() => {
+    const record = [...window.__asyncRobustness.workers].reverse().find((entry) => entry.active && entry.url.includes('pptxSessionWorker'));
+    if (!record) throw new Error('No active pptx worker');
+    record.worker.dispatchEvent(new ErrorEvent('error', { message: 'Browser worker failure', error: new Error('Browser worker failure') }));
+    record.worker.terminate();
+  });
+  await page.evaluate(() => { window.__asyncRobustness.holdWorkerMessages = false; });
+  const downloading = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Download recovered presentation', exact: true }).click();
+  const recovered = info.outputPath('recovered.pptx');
+  await (await downloading).saveAs(recovered);
+  const slide = await (await JSZip.loadAsync(await readFile(recovered))).file('ppt/slides/slide1.xml')!.async('string');
+  expect(slide).not.toContain('Held');
+  await expect(page.locator('.notice[role=alert]')).toContainText(/left out \d+ edit/);
+});
+
 for (const format of ['docx', 'pptx'] as const) {
   test(`${format}: worker crash recovery preserves edits and accepts new typing`, async ({ page }, info) => {
     await open(page, format);
     await edit(page, format, 'BeforeCrash');
+    if (format === 'pptx') await expect(page.locator('.document-name')).toContainText('Edited');
     const workerName = format === 'docx' ? 'docxWorker' : `${format}SessionWorker`;
     const count = await page.evaluate(() => window.__asyncRobustness.workers.length);
     await page.evaluate((name) => {
@@ -325,6 +411,7 @@ test.describe('touch input', () => {
         await page.keyboard.press('Enter');
         await expect(page.getByTestId('xlsx-name-box')).toHaveValue('B2');
       } else {
+        await inputReady(page);
         await page.touchscreen.tap(box!.x + box!.width * 0.1 + 2, box!.y + box!.height * 0.35);
         await expect(page.getByTestId('pptx-shape-selection')).toBeVisible();
         await page.touchscreen.tap(box!.x + box!.width * 0.12, box!.y + box!.height * 0.22);

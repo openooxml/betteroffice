@@ -43,6 +43,47 @@ struct Face {
     byte_length: usize,
     sha256: String,
     dict: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slices: Option<SliceRef>,
+}
+
+/// Where a sliced face's index is; the manifest stays small for the browser entry.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SliceRef {
+    format: u32,
+    index: String,
+    index_sha256: String,
+}
+
+/// A face cut into a skeleton and outline chunks (`scripts/fonts/cjk-slices.py`),
+/// written to `<face>/slices.json`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Slices {
+    format: u32,
+    skeleton: SliceFile,
+    core: SliceFile,
+    chunks: Vec<SliceFile>,
+    byte_length: usize,
+    sha256: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SliceFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<u16>,
+    file: String,
+    encoded_length: usize,
+    byte_length: usize,
+    sha256: String,
+}
+
+struct SliceSource {
+    stem: String,
+    files: Vec<(String, Vec<u8>)>,
+    full_sha256: String,
 }
 
 struct Source {
@@ -53,6 +94,7 @@ struct Source {
     payload: Option<Vec<u8>>,
     reference: Option<Vec<u8>>,
     codec: Codec,
+    slices: Option<SliceSource>,
 }
 
 impl Source {
@@ -204,10 +246,12 @@ fn sources(options: &Options) -> Result<Vec<Source>> {
         } else {
             (None, None)
         };
+        let slices = slice_source(&path, &file, &bytes)?;
         files.push(Source {
             file,
             family: family.to_owned(),
             regular: style == "Regular",
+            slices,
             bytes,
             codec: if payload.is_some() {
                 Codec::Woff2tZstd
@@ -223,6 +267,167 @@ fn sources(options: &Options) -> Result<Vec<Source>> {
         return Err(invalid("source directory has no TTF or OTF faces").into());
     }
     Ok(files)
+}
+
+/// The skeleton and chunks cut from `path`, checked against their recorded SHA-256 sidecar.
+fn slice_source(path: &Path, file: &str, bytes: &[u8]) -> Result<Option<SliceSource>> {
+    let dir = path.with_extension("slices");
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| invalid("invalid face filename"))?
+        .to_owned();
+    let regenerate = "regenerate slices with scripts/fonts/cjk-slices.py";
+    let recorded = fs::read_to_string(path.with_extension("slices.sha256")).map_err(|error| {
+        invalid(format!(
+            "cannot read slice SHA-256 for {file}: {error}; {regenerate}"
+        ))
+    })?;
+    let mut lines = recorded.lines().map(|line| line.split_once("  "));
+    if lines.next().flatten() != Some((format!("{:x}", Sha256::digest(bytes)).as_str(), file)) {
+        return Err(invalid(format!(
+            "slices of {file} were cut from other bytes; {regenerate}"
+        ))
+        .into());
+    }
+    let mut files = Vec::new();
+    let mut full_sha256 = None;
+    let prefix = format!("{stem}.slices/");
+    for line in lines {
+        let (hash, name) =
+            line.ok_or_else(|| invalid(format!("malformed slice SHA-256 for {file}")))?;
+        if name == "full" {
+            full_sha256 = Some(hash.to_owned());
+            continue;
+        }
+        let name = name
+            .strip_prefix(&prefix)
+            .ok_or_else(|| invalid(format!("unexpected slice entry {name} for {file}")))?;
+        let data = fs::read(dir.join(name))?;
+        if format!("{:x}", Sha256::digest(&data)) != hash {
+            return Err(invalid(format!(
+                "slice SHA-256 mismatch for {stem}/{name}; {regenerate}"
+            ))
+            .into());
+        }
+        files.push((name.to_owned(), data));
+    }
+    let listed = files.len();
+    let on_disk = fs::read_dir(&dir)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "bin")
+        })
+        .count();
+    if listed != on_disk || !files.iter().any(|(name, _)| name == "skeleton.bin") {
+        return Err(invalid(format!(
+            "slice files of {file} do not match their SHA-256 list; {regenerate}"
+        ))
+        .into());
+    }
+    let full_sha256 = full_sha256
+        .ok_or_else(|| invalid(format!("slice SHA-256 for {file} has no full entry")))?;
+    Ok(Some(SliceSource {
+        stem,
+        files,
+        full_sha256,
+    }))
+}
+
+/// Compresses and verifies the slices of a face and writes them under `<stem>/`.
+fn write_slices(slices: &SliceSource, level: i32, staging: &Path) -> Result<SliceRef> {
+    let skeleton_bytes = &slices
+        .files
+        .iter()
+        .find(|(name, _)| name == "skeleton.bin")
+        .expect("slice source has a skeleton")
+        .1;
+    let skeleton = betteroffice_fonts::slices::Skeleton::parse(skeleton_bytes)?;
+    let chunks: Vec<&[u8]> = slices
+        .files
+        .iter()
+        .filter(|(name, _)| name != "skeleton.bin")
+        .map(|(_, data)| data.as_slice())
+        .collect();
+    let full = skeleton.reassemble(&chunks)?;
+    let full_sha256 = format!("{:x}", Sha256::digest(&full));
+    if full_sha256 != slices.full_sha256 {
+        return Err(io::Error::other(format!(
+            "reassembly of {} differs from the cut",
+            slices.stem
+        ))
+        .into());
+    }
+    fs::create_dir_all(staging.join(&slices.stem))?;
+    let mut skeleton_file = None;
+    let mut core = None;
+    let mut chunk_files = Vec::new();
+    for (name, data) in &slices.files {
+        let encoded = compress(data, None, level)?;
+        let decoded = betteroffice_fonts::decode_face(
+            &encoded,
+            None,
+            Codec::Zstd,
+            verify_limit(&[data, &encoded]),
+        )?;
+        if decoded.font != *data {
+            return Err(io::Error::other(format!(
+                "round-trip mismatch for {}/{name}",
+                slices.stem
+            ))
+            .into());
+        }
+        let base = name
+            .strip_suffix(".bin")
+            .ok_or_else(|| invalid(format!("unexpected slice file {name}")))?;
+        let file = format!("{}/{base}.zst", slices.stem);
+        fs::write(staging.join(&file), &encoded)?;
+        let id = match base {
+            "skeleton" | "core" => None,
+            _ => Some(
+                base.strip_prefix('c')
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .ok_or_else(|| invalid(format!("unexpected slice file {name}")))?,
+            ),
+        };
+        let entry = SliceFile {
+            id,
+            file,
+            encoded_length: encoded.len(),
+            byte_length: data.len(),
+            sha256: format!("{:x}", Sha256::digest(data)),
+        };
+        match base {
+            "skeleton" => skeleton_file = Some(entry),
+            "core" => core = Some(entry),
+            _ => chunk_files.push(entry),
+        }
+    }
+    chunk_files.sort_by_key(|entry| entry.id);
+    let format = u32::from(betteroffice_fonts::slices::SLICES_FORMAT);
+    let index = Slices {
+        format,
+        skeleton: skeleton_file.ok_or_else(|| invalid("slices have no skeleton"))?,
+        core: core.ok_or_else(|| invalid(format!("slices of {} have no core", slices.stem)))?,
+        chunks: chunk_files,
+        byte_length: full.len(),
+        sha256: full_sha256,
+    };
+    let mut json = serde_json::to_vec_pretty(&index)?;
+    json.push(b'\n');
+    let index_file = format!("{}/slices.json", slices.stem);
+    fs::write(staging.join(&index_file), &json)?;
+    Ok(SliceRef {
+        format,
+        index: index_file,
+        index_sha256: format!("{:x}", Sha256::digest(&json)),
+    })
 }
 
 fn glyph_count(bytes: &[u8]) -> Result<u16> {
@@ -448,6 +653,11 @@ fn write_pack(
             byte_length: decoded.font.len(),
             sha256: format!("{:x}", Sha256::digest(&decoded.font)),
             dict: dictionary.map(|source| format!("{}.zst", source.file)),
+            slices: source
+                .slices
+                .as_ref()
+                .map(|slices| write_slices(slices, options.level, staging))
+                .transpose()?,
         });
     }
     faces.sort_by(|left, right| left.file.cmp(&right.file));
@@ -488,6 +698,7 @@ mod tests {
             payload: (codec == Codec::Woff2tZstd).then(|| vec![2]),
             reference: None,
             codec,
+            slices: None,
         }
     }
 

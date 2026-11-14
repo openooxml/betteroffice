@@ -189,7 +189,12 @@ pub(super) fn normalization_contexts(
         .values()
         .flatten()
         .copied()
-        .filter(|&id| id as usize >= fonts)
+        .filter(|&id| {
+            ooxml_text::FontId::from_u32(id)
+                .base_latin_style()
+                .is_none()
+                && id as usize >= fonts
+        })
         .collect();
     missing.sort_unstable();
     missing.dedup();

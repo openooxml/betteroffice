@@ -36,6 +36,41 @@ describe('hyperlinks', () => {
     expect(safeExternalHyperlink({ ...link, externalTarget: '../relative' })).toBeNull();
   });
 
+  const externalCases: Array<[string, string | undefined, string | null]> = [
+    ['javascript:alert(1)', undefined, null],
+    ['JaVaScRiPt:alert(1)', undefined, null],
+    ['java\tscript:alert(1)', undefined, null],
+    ['\x01javascript:alert(1)', undefined, null],
+    [' javascript:alert(1)', undefined, null],
+    ['data:text/html,bad', undefined, null],
+    ['vbscript:bad', undefined, null],
+    ['file:///tmp/file', undefined, null],
+    ['ftp://a.b/c', undefined, null],
+    ['a.html', undefined, null],
+    ['//host/x', undefined, null],
+    ['https:', undefined, null],
+    ['https://[invalid', undefined, null],
+    ['https:foo', undefined, 'https://foo/'],
+    [' https://a.b/c ', undefined, 'https://a.b/c'],
+    ['\x01https://a.b/c', undefined, 'https://a.b/c'],
+    ['\x01 https://a.b/c ', undefined, 'https://a.b/c'],
+    ['HTTP://A.B/c', undefined, 'http://a.b/c'],
+    ['mailto:', undefined, 'mailto:'],
+    ['mailto:user@a.b', undefined, 'mailto:user@a.b'],
+    ['tel:', undefined, 'tel:'],
+    ['tel:+123', undefined, 'tel:+123'],
+    ['https://a.b/c', 'detail', 'https://a.b/c#detail'],
+    ['https://a.b/c', '#detail', 'https://a.b/c#detail'],
+    ['https://a.b/c#existing', 'detail', 'https://a.b/c#existing'],
+  ];
+
+  it.each(externalCases)(
+    'preserves the external URL output for %j with location %j',
+    (externalTarget, location, expected) => {
+      expect(safeExternalHyperlink({ ...link, externalTarget, location })).toBe(expected);
+    }
+  );
+
   it('parses local and quoted cross-sheet cell destinations', () => {
     expect(parseHyperlinkLocation('$B$4', 'Current')).toEqual({
       sheetName: 'Current',

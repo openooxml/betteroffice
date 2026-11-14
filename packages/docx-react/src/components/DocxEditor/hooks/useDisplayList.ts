@@ -39,6 +39,7 @@ import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
+  isCellHasNoStoryRefusal,
   type DocxDocumentRead,
   ResidentWorkerFailureError,
   preloadResidentEngineWorker,
@@ -46,6 +47,7 @@ import {
   takePreloadedResidentEngineWorker,
   ResidentWorkerOutOfMemoryError,
   sameYrsSelection,
+  withYrsSelectionCause,
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
   type ResidentEngineWorkerFrame,
@@ -1319,6 +1321,7 @@ export function useRustDisplayList(
         setWorkerPresentationActive(false);
         let encoded: Uint8Array;
         let deletedUnits: number | undefined;
+        const version = readSessionVersion(hostEngine);
         suppressWorkerInvalidationRef.current += 1;
         try {
           if (pending.kind === 'insert') {
@@ -1329,12 +1332,9 @@ export function useRustDisplayList(
           }
         } catch (error) {
           suppressWorkerInvalidationRef.current -= 1;
-          if (
-            error instanceof Error &&
-            error.message.includes('resident input state is not ready')
-          ) {
-            return null;
-          }
+          if (error instanceof Error && error.message.includes('resident input state is not ready')) return null;
+          // A write into a table cell with no story is refused before the engine changes anything.
+          if (version !== null && isCellHasNoStoryRefusal(error) && readSessionVersion(hostEngine) === version) return null;
           throw error;
         }
         suppressWorkerInvalidationRef.current -= 1;
@@ -1838,8 +1838,10 @@ export function useRustDisplayList(
         if (reply.repair) {
           suppressWorkerInvalidationRef.current += 1;
           try {
-            if (hasEditorWorkerProposalRounds(peer)) peer.applyHostUpdate(reply.repair);
-            else peer.applyLocalUpdate(reply.repair);
+            withYrsSelectionCause(peer, 'remote', () => {
+              if (hasEditorWorkerProposalRounds(peer)) peer.applyHostUpdate(reply.repair!);
+              else peer.applyLocalUpdate(reply.repair!);
+            });
           } finally {
             suppressWorkerInvalidationRef.current -= 1;
           }

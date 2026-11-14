@@ -108,6 +108,7 @@ export type ResidentEngineSession = Pick<
   | 'setHyperlink'
   | 'setImageGeometryAt'
   | 'setColumnWidth'
+  | 'setRowHeight'
   | 'insertText'
   | 'insertLineBreak'
   | 'replaceRange'
@@ -154,6 +155,7 @@ export type ResidentEngineSession = Pick<
   | 'onUpdate'
   | 'outlineGlyphJson'
   | 'registerFont'
+  | 'updateFontOutlines'
   | 'registerSubstituteFont'
   | 'residentCaretSnapshot'
   | 'residentDeletedUnits'
@@ -192,6 +194,11 @@ export type ResidentEngineSession = Pick<
   /** Rects of the resident display list for each `[from, to)` range of one region, in order. */
   storyRangeRects(region: DisplayListHitRegion, partId: string, ranges: readonly (readonly [number, number])[]): DisplayListRect[][];
   clearCellSelection(): YrsLoc | null;
+  /**
+   * @internal A key that changes whenever an embed, a table's rows, cells or cell stories, or
+   * the set of stories changes, and with every document instance, seed or loaded state.
+   */
+  cellStructureKey?(): string;
   controlTargets(): ResidentControlTarget[];
   repeatControlAt(at: ResidentControlPosition, remove: boolean): boolean;
   setControlValue(at: ResidentControlPosition, value: import('./index').YrsContentControlValue): void;
@@ -217,6 +224,8 @@ export type ResidentEngineSession = Pick<
   echoGlyphSetJson(fontId: number, size: number, kern: boolean, alphabet: string): string;
   /** @internal */
   proposalEngine: DocxProposalSession & Pick<YrsSession, 'validateEdits'>;
+  /** @internal */
+  pageTextsJson(pages: Uint32Array): string;
   /** @internal */
   geometryReader: ProposalGeometryReader & DocxSidebarReader;
   /** @internal The segments of the story's paragraphs at `indices`, each ending with its pilcrow. */
@@ -251,12 +260,15 @@ export type ResidentEngineSession = Pick<
   /** With `initialUpdate`, the shared state replaces the package's stories. */
   openSourceDocx(bytes: Uint8Array, options: { digest?: string; generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array; state?: Uint8Array }): string;
   decodeFont(bytes: Uint8Array): Uint8Array;
+  takeBaseLatinMiss?(): boolean;
   openDocument(document: Document, options: { generation?: string; mediaTokens?: boolean; initialUpdate?: Uint8Array }): void;
   saveDocument(host: Document | undefined, comments: Comment[], record: ResidentSaveRecord): Promise<ArrayBuffer>;
   /** Caches save seed states while unchanged, within a paragraph and inflated package budget. */
   primeSaveSeedStates(maxParagraphs: number, maxInflatedBytes: number): boolean;
   /** One slice of {@link primeSaveSeedStates} digesting about `maxBytes` bytes: 0 known, 1 more to do, 2 declined. */
   primeSaveSeedStatesSlice(maxParagraphs: number, maxInflatedBytes: number, maxBytes: number): number;
+  /** What the last {@link primeSaveSeedStatesSlice} call charged against its `maxBytes`. */
+  primeLastSliceCost(): number;
   /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
   openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
   /** The whole document state as one yrs v1 update. */
@@ -535,6 +547,15 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     }
   };
 
+  const applyFormatting = <T>(story: string, apply: () => T): T => {
+    const since = storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+    try {
+      return applyCommandMutation(story, apply);
+    } finally {
+      markProjectionStories(storiesChangedSince(since).stories);
+    }
+  };
+
   const proposalEngine: ResidentEngineSession['proposalEngine'] = {
     validateEdits: request => JSON.parse(session.validate_edits_json(JSON.stringify(request))),
     version: () => session.version(),
@@ -725,6 +746,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       return changed;
     },
     proposalEngine,
+    pageTextsJson: (pages) => session.page_texts_json(pages),
     geometryReader,
     paragraphs: geometryReader.paragraphs,
     storySegments: (story) => geometryStory(story).segments,
@@ -809,12 +831,15 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       const payload = session.table_payload(story, index);
       return payload === undefined ? null : JSON.parse(payload);
     },
-    setHyperlink: (range, hyperlink) => applyCommandMutation(range.story, () =>
-      session.set_hyperlink(...rangeArgs(range), JSON.stringify(hyperlink))),
+    cellStructureKey: () => `${session.version().split('-')[0]}:${session.resident_section_revision().split(':')[0]}`,
+    setHyperlink: (range, hyperlink, suggesting) => applyCommandMutation(range.story, () =>
+      session.set_hyperlink(...rangeArgs(range), JSON.stringify(hyperlink), suggesting?.name, suggesting?.date)),
     setImageGeometryAt: (at, geometry) => applyCommandMutation(at.story, () =>
       session.set_image_geometry_at(at.story, at.paraId, at.offset, JSON.stringify(geometry))),
     setColumnWidth: (at, width) => applyCommandMutation(at.story, () =>
       JSON.parse(session.set_column_width(JSON.stringify(at), width))),
+    setRowHeight: (at, height, rule) => applyCommandMutation(at.story, () =>
+      JSON.parse(session.set_row_height(JSON.stringify(at), height, rule))),
     beginUndoCapture: ensureUndo,
     setUndoInputTime: (span) => {
       if (span) session.set_undo_input_time(span[0], span[1]);
@@ -846,12 +871,12 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     splitParagraph: (at, author) => applyCommandMutation(at.story, () =>
       JSON.parse(session.split_paragraph(at.story, at.paraId, at.offset, author?.name, author?.date))),
     nextParagraphStyle: at => session.next_paragraph_style(at.story, at.paraId, at.offset) ?? null,
-    toggleMark: (range, mark) => applyCommandMutation(range.story, () =>
-      session.toggle_mark(...rangeArgs(range), JSON.stringify(mark))),
-    formatRange: (range, delta) => applyCommandMutation(range.story, () =>
-      session.format_range(...rangeArgs(range), JSON.stringify(delta))),
-    clearFormatting: (range) => applyCommandMutation(range.story, () =>
-      session.clear_formatting(...rangeArgs(range))),
+    toggleMark: (range, mark, suggesting) => applyFormatting(range.story, () =>
+      JSON.parse(session.toggle_mark(...rangeArgs(range), JSON.stringify(mark), suggesting?.name, suggesting?.date))),
+    formatRange: (range, delta, suggesting) => applyFormatting(range.story, () =>
+      JSON.parse(session.format_range(...rangeArgs(range), JSON.stringify(delta), suggesting?.name, suggesting?.date))),
+    clearFormatting: (range, suggesting) => applyFormatting(range.story, () =>
+      JSON.parse(session.clear_formatting(...rangeArgs(range), suggesting?.name, suggesting?.date))),
     setParagraphAttrs: (range, attrs, author) => applyCommandMutation(range.story, () =>
       session.set_paragraph_attrs(...rangeArgs(range), JSON.stringify(attrs), author?.name, author?.date)),
     applyParagraphStyle: (range, styleId, author) => applyCommandMutation(range.story, () =>
@@ -928,6 +953,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       ) as DocxContentControlsResult,
     storiesChangedSince,
     decodeFont: bytes => session.decode_font(bytes),
+    takeBaseLatinMiss: () => session.take_base_latin_miss(),
     openSourceDocx: (bytes, options) => {
       session.set_media_tokens(options.mediaTokens === true);
       const state = options.state ?? options.initialUpdate;
@@ -969,6 +995,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     primeSaveSeedStates: (maxParagraphs, maxInflatedBytes) => session.prime_save_seed_states(maxParagraphs, maxInflatedBytes),
     primeSaveSeedStatesSlice: (maxParagraphs, maxInflatedBytes, maxBytes) =>
       session.prime_save_seed_states_slice(maxParagraphs, maxInflatedBytes, maxBytes),
+    primeLastSliceCost: () => session.prime_last_slice_cost(),
     saveDocument: async (host, comments, record) => {
       if (!parsedFacade || !partBase) throw new Error('The document worker holds no parsed document');
       const { saveEditorDocument, mergeDocxHostMetadata } = await import('./editorSave');
@@ -1074,6 +1101,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
         (revision) => !excluding?.has(revision.revisionId)
       ).length,
     registerFont: (bytes) => session.register_measure_font(bytes),
+    updateFontOutlines: (fontId, bytes) => session.update_measure_font_outlines(fontId, bytes),
     registerSubstituteFont: (base, family) =>
       session.register_substitute_measure_font(base, family),
     clearFonts: () => session.clear_measure_fonts(),

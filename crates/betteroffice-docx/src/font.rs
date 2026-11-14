@@ -23,6 +23,8 @@ pub(crate) struct FontRegistry {
     application: HashMap<String, usize>,
     #[cfg(feature = "fonts")]
     resolved: HashSet<(String, Vec<String>)>,
+    #[cfg(feature = "fonts")]
+    views: HashMap<(ooxml_text::FontId, String), ooxml_text::FontId>,
     registrations: usize,
 }
 
@@ -35,6 +37,20 @@ impl FontRegistry {
         bytes: &[u8],
         priority: u8,
     ) -> Result<u32> {
+        if family.trim().is_empty() {
+            return Err(Error::Font("font family is empty".into()));
+        }
+        self.register_keyed(chain_key(family, bold, italic), bytes, priority)
+    }
+
+    /// Registers `bytes` into the chain under `key`, ahead of bundled faces for
+    /// embedded (`0`) and application (`1`) priorities.
+    fn register_keyed(&mut self, key: String, bytes: &[u8], priority: u8) -> Result<u32> {
+        let id = self.register_bytes(bytes)?;
+        Ok(self.insert(key, id, priority))
+    }
+
+    fn register_bytes(&mut self, bytes: &[u8]) -> Result<ooxml_text::FontId> {
         if bytes.len() > 32 * 1024 * 1024 {
             return Err(Error::ResourceLimit("font exceeds 33554432 bytes".into()));
         }
@@ -46,17 +62,15 @@ impl FontRegistry {
         if self.store.face_count() >= 256 && self.store.find_face(bytes).is_none() {
             return Err(Error::ResourceLimit("more than 256 font faces".into()));
         }
-        if family.trim().is_empty() {
-            return Err(Error::Font("font family is empty".into()));
-        }
-        let id = self
-            .store
+        self.store
             .register_slice(bytes)
-            .map_err(|error| Error::Font(error.to_string()))?;
-        let key = chain_key(family, bold, italic);
+            .map_err(|error| Error::Font(error.to_string()))
+    }
+
+    fn insert(&mut self, key: String, id: ooxml_text::FontId, priority: u8) -> u32 {
         let chain = self.chains.entry(key.clone()).or_default();
         if priority == 2 && chain.contains(&id) {
-            return Ok(id.to_u32());
+            return id.to_u32();
         }
         let embedded = *self.embedded.get(&key).unwrap_or(&0);
         let application = *self.application.get(&key).unwrap_or(&0);
@@ -72,7 +86,23 @@ impl FontRegistry {
             _ => chain.push(id),
         }
         self.registrations += 1;
-        Ok(id.to_u32())
+        id.to_u32()
+    }
+
+    /// `base` measured as Word measures `family`; `base` itself when `family` has no metrics.
+    #[cfg(feature = "fonts")]
+    fn measured_as(&mut self, base: ooxml_text::FontId, family: &str) -> ooxml_text::FontId {
+        let owner = self.store.byte_owner(base).unwrap_or(base);
+        let key = (owner, family.trim().to_lowercase());
+        if let Some(view) = self.views.get(&key) {
+            return *view;
+        }
+        let view = self
+            .store
+            .register_named_substitute(base, family)
+            .unwrap_or(base);
+        self.views.insert(key, view);
+        view
     }
 
     #[cfg(feature = "fonts")]
@@ -87,27 +117,61 @@ impl FontRegistry {
             if self.resolved.contains(&resolved_key) {
                 continue;
             }
-            let faces = manager.resolve(
-                &request.family,
+            let family = if request.family.trim().is_empty() {
+                DEFAULT_LAYOUT_FAMILY
+            } else {
+                request.family.as_str()
+            };
+            let (faces, glyph) = manager.resolve_with_glyph_fallback(
+                family,
                 request.bold,
                 request.italic,
                 &request.scripts,
                 LastResortOffice::Word,
             );
-            for face in faces {
-                self.register(
-                    &request.family,
+            let own = (!request.scripts.is_empty()).then(|| {
+                manager.resolve(
+                    family,
                     request.bold,
                     request.italic,
-                    &face.load()?,
-                    2,
-                )?;
+                    &[],
+                    LastResortOffice::Word,
+                )
+            });
+            let mut deferred = None;
+            let mut scripts = Vec::new();
+            for (index, face) in faces.into_iter().enumerate() {
+                let base = self.register_bytes(&face.load()?)?;
+                let script = own.as_ref().is_some_and(|own| {
+                    !own.iter().any(|known| {
+                        known.family == face.family
+                            && known.bold == face.bold
+                            && known.italic == face.italic
+                    })
+                });
+                if script {
+                    scripts.push(base);
+                } else {
+                    let id = self.measured_as(base, face.measure_as.as_deref().unwrap_or(family));
+                    if glyph == Some(index) {
+                        deferred = Some(id);
+                    } else {
+                        self.insert(key.clone(), id, 2);
+                    }
+                }
+            }
+            for id in deferred.into_iter().chain(scripts) {
+                self.insert(key.clone(), id, 2);
             }
             self.resolved.insert(resolved_key);
         }
         Ok(())
     }
 }
+
+/// The family layout measures a run with when it names none.
+#[cfg(feature = "fonts")]
+const DEFAULT_LAYOUT_FAMILY: &str = "Calibri";
 
 fn chain_key(family: &str, bold: bool, italic: bool) -> String {
     format!(
@@ -218,35 +282,10 @@ impl Document {
         };
         let mut requests = Vec::new();
         let mut collect = |primitives: &[Primitive]| {
-            for primitive in primitives {
-                if let Primitive::Text(run) = primitive
-                    && let Some((style, family)) = run.font.split_once("px")
-                {
-                    let family = family
-                        .trim()
-                        .split(',')
-                        .next()
-                        .unwrap_or_default()
-                        .trim_matches(['\'', '"']);
-                    let bold = style.split_whitespace().any(|word| {
-                        matches!(word, "bold" | "bolder")
-                            || word.parse::<u16>().is_ok_and(|weight| weight >= 600)
-                    });
-                    let italic = style
-                        .split_whitespace()
-                        .any(|word| matches!(word, "italic" | "oblique"));
-                    requests.push(FontRequirement {
-                        key: chain_key(family, bold, italic),
-                        family: family.to_owned(),
-                        bold,
-                        italic,
-                        scripts: ooxml_text::paragraph_scripts_with_han_fallback(
-                            [run.text.as_str()],
-                            false,
-                        ),
-                    });
-                }
-            }
+            requests.extend(primitives.iter().filter_map(|primitive| match primitive {
+                Primitive::Text(run) => text_requirement(run),
+                _ => None,
+            }));
         };
         collect(&page.primitives);
         for parts in [&page.header, &page.footer].into_iter().flatten() {
@@ -259,5 +298,395 @@ impl Document {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .resolve(&self.font_manager, &requests)
+    }
+}
+
+#[cfg(all(feature = "fonts", feature = "raster"))]
+fn text_requirement(run: &docx_layout::display_list::TextRunPrimitive) -> Option<FontRequirement> {
+    let (style, family) = run.font.split_once("px")?;
+    let family = family
+        .trim()
+        .split(',')
+        .next()
+        .unwrap_or_default()
+        .trim_matches(['\'', '"']);
+    let bold = style.split_whitespace().any(|word| {
+        matches!(word, "bold" | "bolder") || word.parse::<u16>().is_ok_and(|weight| weight >= 600)
+    });
+    let italic = style
+        .split_whitespace()
+        .any(|word| matches!(word, "italic" | "oblique"));
+    Some(FontRequirement {
+        key: chain_key(family, bold, italic),
+        family: family.to_owned(),
+        bold,
+        italic,
+        scripts: text_scripts(run),
+        characters: Default::default(),
+    })
+}
+
+#[cfg(all(feature = "fonts", feature = "raster"))]
+fn text_scripts(run: &docx_layout::display_list::TextRunPrimitive) -> Vec<String> {
+    let own = ooxml_text::paragraph_scripts_with_han_fallback([run.text.as_str()], false);
+    let Some(paragraph) = run.scripts.as_deref().filter(|scripts| !scripts.is_empty()) else {
+        return own;
+    };
+    let regional = paragraph
+        .iter()
+        .any(|script| matches!(script.as_str(), "cjk-jp" | "cjk-kr" | "cjk-tc"));
+    let mut scripts = paragraph.clone();
+    for script in own {
+        if (regional && script == "cjk-sc") || scripts.contains(&script) {
+            continue;
+        }
+        scripts.push(script);
+    }
+    scripts
+}
+
+#[cfg(all(test, feature = "fonts", feature = "raster"))]
+mod tests {
+    use super::text_requirement;
+    use docx_layout::display_list::TextRunPrimitive;
+
+    #[test]
+    fn a_requirement_without_a_family_resolves_through_the_default_family() {
+        use super::{FontRegistry, chain_key};
+        use docx_layout::measure_blocks::FontRequirement;
+        let options = crate::OpenOptions::default();
+        let manager =
+            betteroffice_fonts::FontManager::new(&options.font_source, options.font_loading)
+                .unwrap();
+        let requirement = |family: &str| FontRequirement {
+            key: chain_key(family, false, false),
+            family: family.to_owned(),
+            bold: false,
+            italic: false,
+            scripts: Vec::new(),
+            characters: Default::default(),
+        };
+        let mut empty = FontRegistry::default();
+        empty.resolve(&manager, &[requirement("")]).unwrap();
+        let mut calibri = FontRegistry::default();
+        calibri
+            .resolve(&manager, &[requirement("Calibri")])
+            .unwrap();
+        let chain = &empty.chains[&chain_key("", false, false)];
+        assert!(!chain.is_empty());
+        assert_eq!(
+            chain.len(),
+            calibri.chains[&chain_key("Calibri", false, false)].len()
+        );
+    }
+
+    /// Each chain entry for a run of `family` as "<face family> <style> <view|raw>".
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    fn chain(
+        source: &betteroffice_fonts::FontSource,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        scripts: &[&str],
+    ) -> Vec<String> {
+        use super::{FontManager, FontRegistry, LastResortOffice, chain_key};
+        use docx_layout::measure_blocks::FontRequirement;
+        let manager = FontManager::new(source, Default::default()).unwrap();
+        let scripts: Vec<String> = scripts.iter().map(|script| (*script).to_owned()).collect();
+        let key = chain_key(family, bold, italic);
+        let mut registry = FontRegistry::default();
+        registry
+            .resolve(
+                &manager,
+                &[FontRequirement {
+                    key: key.clone(),
+                    family: family.to_owned(),
+                    bold,
+                    italic,
+                    scripts: scripts.clone(),
+                    characters: Default::default(),
+                }],
+            )
+            .unwrap();
+        let faces: Vec<_> = manager
+            .resolve(family, bold, italic, &scripts, LastResortOffice::Word)
+            .into_iter()
+            .map(|face| (registry.store.find_face(&face.load().unwrap()), face))
+            .collect();
+        registry.chains[&key]
+            .iter()
+            .map(|&id| {
+                let owner = registry.store.byte_owner(id).unwrap_or(id);
+                let (_, face) = faces
+                    .iter()
+                    .find(|(known, _)| *known == Some(owner))
+                    .expect("every chain entry is a resolved face");
+                let style = match (face.bold, face.italic) {
+                    (false, false) => "regular",
+                    (true, false) => "bold",
+                    (false, true) => "italic",
+                    (true, true) => "bold italic",
+                };
+                let kind = if registry.views.values().any(|view| *view == id) {
+                    "view"
+                } else {
+                    "raw"
+                };
+                format!("{} {style} {kind}", face.family)
+            })
+            .collect()
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    fn bundled_chain(family: &str, bold: bool, scripts: &[&str]) -> Vec<String> {
+        let source = crate::OpenOptions::default().font_source;
+        chain(&source, family, bold, false, scripts)
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn a_bundled_family_with_hebrew_text_chains_its_face_then_the_last_resort_then_hebrew() {
+        assert_eq!(
+            bundled_chain("Cambria", false, &["hebrew"]),
+            [
+                "Caladea regular view",
+                "Liberation Serif regular view",
+                "Noto Sans Hebrew regular raw"
+            ]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn a_bundled_family_with_cjk_text_chains_its_face_then_the_last_resort_then_cjk() {
+        assert_eq!(
+            bundled_chain("Calibri", false, &["cjk-jp"]),
+            [
+                "Carlito regular view",
+                "Liberation Sans regular view",
+                "Noto Sans JP regular raw"
+            ]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn an_unbundled_family_with_cjk_text_chains_the_last_resort_then_the_glyph_fallback_then_cjk() {
+        assert_eq!(
+            bundled_chain("Segoe UI Heavy", false, &["cjk-jp"]),
+            [
+                "Selawik bold view",
+                "Liberation Sans regular view",
+                "Noto Sans JP regular raw"
+            ]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn an_unbundled_family_with_hebrew_text_chains_the_last_resort_then_the_glyph_fallback_then_hebrew()
+     {
+        assert_eq!(
+            bundled_chain("Segoe UI Black", false, &["hebrew"]),
+            [
+                "Selawik bold view",
+                "Liberation Sans regular view",
+                "Noto Sans Hebrew regular raw"
+            ]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn a_family_whose_face_is_the_base_face_drops_the_last_resort() {
+        assert_eq!(
+            bundled_chain("Arial", true, &[]),
+            ["Liberation Sans bold view"]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn a_glyph_fallback_that_is_the_last_resort_chains_once() {
+        assert_eq!(
+            bundled_chain("Segoe UI", false, &[]),
+            ["Selawik regular view", "Liberation Sans regular view"]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    struct LastResortCarlito(betteroffice_fonts::BundledFonts);
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    impl LastResortCarlito {
+        fn face(
+            &self,
+            family: &str,
+            bold: bool,
+            italic: bool,
+        ) -> betteroffice_fonts::FontFaceHandle {
+            use betteroffice_fonts::resolve_bundled_family_face;
+            let face = resolve_bundled_family_face(family, bold, italic).unwrap();
+            let fonts = self.0.clone();
+            betteroffice_fonts::FontFaceHandle::new(family, bold, italic, move || {
+                fonts.load_face(face)
+            })
+        }
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    impl betteroffice_fonts::FontProvider for LastResortCarlito {
+        fn resolve_family(
+            &self,
+            family: &str,
+            bold: bool,
+            italic: bool,
+        ) -> Option<betteroffice_fonts::FontFaceHandle> {
+            if family == "Segoe UI" {
+                Some(self.face("Liberation Sans", bold, italic))
+            } else {
+                None
+            }
+        }
+
+        fn resolve_script_fallback(
+            &self,
+            _script: &str,
+            _bold: bool,
+            _italic: bool,
+        ) -> Option<betteroffice_fonts::FontFaceHandle> {
+            None
+        }
+
+        fn resolve_glyph_fallback(
+            &self,
+            _family: &str,
+            _bold: bool,
+            _italic: bool,
+            _office: super::LastResortOffice,
+        ) -> Option<betteroffice_fonts::FontFaceHandle> {
+            None
+        }
+
+        fn resolve_last_resort(
+            &self,
+            _family: &str,
+            bold: bool,
+            italic: bool,
+            _office: super::LastResortOffice,
+        ) -> betteroffice_fonts::FontFaceHandle {
+            self.face("Carlito", bold, italic)
+        }
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn a_provider_without_a_glyph_fallback_keeps_its_primary_first() {
+        use betteroffice_fonts::BundledFonts;
+        let fonts = BundledFonts::new(Default::default()).unwrap();
+        let provider = std::sync::Arc::new(LastResortCarlito(fonts));
+        let source = betteroffice_fonts::FontSource::Provider(provider);
+        assert_eq!(
+            chain(&source, "Segoe UI", false, false, &[]),
+            ["Liberation Sans regular view", "Carlito regular view"]
+        );
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    fn assert_resolvers_agree(
+        manager: &super::FontManager,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        scripts: &[String],
+    ) {
+        use super::LastResortOffice;
+        let describe = |faces: &[betteroffice_fonts::FontFaceHandle]| -> Vec<(String, Vec<u8>)> {
+            faces
+                .iter()
+                .map(|face| (format!("{face:?}"), face.load().unwrap()))
+                .collect()
+        };
+        for office in [LastResortOffice::PowerPoint, LastResortOffice::Word] {
+            let faces = manager.resolve(family, bold, italic, scripts, office);
+            let (fallback_faces, glyph) =
+                manager.resolve_with_glyph_fallback(family, bold, italic, scripts, office);
+            let case = format!("{family} bold={bold} italic={italic} {scripts:?} {office:?}");
+            assert!(!faces.is_empty(), "{case}");
+            assert!(describe(&faces) == describe(&fallback_faces), "{case}");
+            assert!(glyph.is_none_or(|index| index < faces.len()), "{case}");
+        }
+    }
+
+    #[cfg(all(feature = "fonts-latin", feature = "fonts-cjk"))]
+    #[test]
+    fn resolve_and_resolve_with_glyph_fallback_return_the_same_faces() {
+        use betteroffice_fonts::BundledFonts;
+        let fonts = BundledFonts::new(Default::default()).unwrap();
+        let provider = std::sync::Arc::new(LastResortCarlito(fonts));
+        let sources = [
+            crate::OpenOptions::default().font_source,
+            betteroffice_fonts::FontSource::Provider(provider),
+        ];
+        let families = ["Cambria", "Calibri", "Segoe UI", "Segoe UI Heavy", "Arial"];
+        let scripts = [
+            Vec::new(),
+            vec!["hebrew".to_owned()],
+            vec!["cjk-jp".to_owned()],
+        ];
+        for source in &sources {
+            let manager = super::FontManager::new(source, Default::default()).unwrap();
+            for family in families {
+                for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                    for scripts in &scripts {
+                        assert_resolvers_agree(&manager, family, bold, italic, scripts);
+                    }
+                }
+            }
+        }
+    }
+
+    fn run(text: &str, scripts: &[&str]) -> TextRunPrimitive {
+        serde_json::from_value(serde_json::json!({
+            "text": text, "x": 0.0, "baselineY": 0.0, "width": 10.0,
+            "font": "bold 16px 'MS Mincho', serif", "color": "#000000", "scripts": scripts
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn text_requirements_keep_their_own_scripts_next_to_the_paragraph_choice() {
+        let field = text_requirement(&run("مرحبا", &["cjk-jp"])).unwrap();
+        assert_eq!(field.scripts, ["cjk-jp", "arabic"]);
+        let marker = text_requirement(&run("١.", &["cjk-jp"])).unwrap();
+        assert_eq!(marker.scripts, ["cjk-jp", "arabic"]);
+        assert_eq!(
+            text_requirement(&run("骨", &["cjk-jp"])).unwrap().scripts,
+            ["cjk-jp"]
+        );
+        assert_eq!(
+            text_requirement(&run("骨", &["cjk-sc"])).unwrap().scripts,
+            ["cjk-sc"]
+        );
+    }
+
+    #[test]
+    fn text_requirements_take_the_paragraph_scripts() {
+        let japanese = text_requirement(&run("骨", &["cjk-jp"])).unwrap();
+        assert_eq!(
+            (japanese.family.as_str(), japanese.bold),
+            ("MS Mincho", true)
+        );
+        assert_eq!(japanese.scripts, ["cjk-jp"]);
+        assert_eq!(
+            text_requirement(&run("漢字", &[])).unwrap().scripts,
+            ["cjk-sc"]
+        );
+        assert!(
+            text_requirement(&run("Latin", &[]))
+                .unwrap()
+                .scripts
+                .is_empty()
+        );
     }
 }

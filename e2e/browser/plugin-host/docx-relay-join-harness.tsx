@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { createRef } from 'react';
 import JSZip from 'jszip';
 import { DocxEditor, type DocxEditorRef } from '@betteroffice/docx-react';
-import { CollaborationProvider, type CollaborationReplica,
+import { CollaborationProvider, type AsyncReplicaAdapter, type CollaborationReplica,
   type CollaborationTransport, type CollaborationTransportEvent } from '@betteroffice/docx/collaboration';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import { classifyFrame, RetainedUpdateLog } from '../../../apps/relay/src/retention';
@@ -96,7 +96,7 @@ function render() {
   const slots = joiner ? [0, 1] : [0];
   root.render(<div style={{ display: 'flex', height: '100%' }}>{slots.map(index =>
     <div key={index} data-editor={index} style={{ width: '50%', height: '100%', minWidth: 0 }}>
-      <DocxEditor ref={refs[index]} documentBuffer={file} {...(index === 1 && joiner?.legacy ? { legacySyncApi: true } : {})}
+      <DocxEditor ref={refs[index]} documentBuffer={file} {...(index === 1 && joiner?.legacy ? { legacySyncApi: true } : {}) as Record<never, never>}
         showToolbar={false} showRuler={false} showOutlineButton={false} measurementFontProvider={fonts}
         collaboration={{ clientId: 5100 + index, initialUpdate: index ? seed : undefined, onReplica: onReplica[index], presence: providers[index] }}
         onError={error => errors.push(error.message)} />

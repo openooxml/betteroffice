@@ -15,9 +15,12 @@ import type {
   PluginError,
   PluginErrorPhase,
   PluginFailureCode,
+  PluginFocusChangeEvent,
   PluginGrant,
   PluginLoadReason,
+  PluginLocaleChangeEvent,
   PluginRefusal,
+  PluginViewportChangeEvent,
 } from '../../../../shared/host-contracts/plugins';
 import type {
   PptxCommandArgs,
@@ -148,6 +151,10 @@ export type PptxPluginSelection = {
 } | null;
 
 export interface PptxPluginSnapshot {
+  /** @experimental Focus inside the document surface. */
+  focused: boolean;
+  /** @experimental The editor's resolved locale tag. */
+  locale: string;
   /** The open presentation; changes when a presentation replaces it. */
   generation: string;
   version: string;
@@ -161,12 +168,45 @@ export interface PptxPluginSnapshot {
 /** A hit under the pointer, with the layout it was resolved against. */
 export type PptxPluginPointPosition = PptxPointPosition & { version: string; layoutId: string };
 
+/** @experimental The plugin API may change in minor releases. */
+export type PptxGeometryTarget =
+  /** Selection anchors are live-only; use a range target to keep a position. */
+  | { kind: 'selection' }
+  | {
+      kind: 'range';
+      version: string;
+      slideId: string;
+      shapeId: string;
+      storyId: string;
+      /** UTF-16 story offsets; `focus` may precede `anchor`. */
+      anchor: number;
+      focus: number;
+    };
+
+/** @experimental The plugin API may change in minor releases. */
+export type PptxAnchorGeometryResult =
+  | {
+      ok: true;
+      rects: readonly PptxPluginRect[];
+      anchor: PptxPluginRect;
+      pageRect: PptxPluginRect;
+      version: string;
+      layoutId: string;
+    }
+  | PluginRefusal<'stale-version' | 'missing-target' | 'layout-unavailable'>;
+
 /**
- * Geometry of the presented slide. Rectangles it returns are in pixels of the unscaled overlay
- * layer; every method returns null once its layout is no longer presented.
+ * Geometry in unscaled overlay-layer pixels. Unpresented layouts return null or a typed
+ * anchor failure.
  */
 export interface PptxPluginGeometry {
+  /** @experimental The visible document area in overlay-layer pixels. */
+  viewport: PptxPluginRect;
   layout: PptxPluginLayout;
+  /** @experimental Line rectangles and a focus-end anchor; collapsed text has no rectangles. */
+  getAnchorGeometry(target: PptxGeometryTarget): PptxAnchorGeometryResult;
+  /** @experimental Resolves each target in order without pending answers. */
+  readAnchorGeometries(targets: readonly PptxGeometryTarget[]): Promise<PptxAnchorGeometryResult[]>;
   /**
    * Converts a slide rectangle into overlay pixels: `slide-emu` in EMU from the slide's top left
    * corner, `slide-px` in unzoomed display-list pixels.
@@ -222,8 +262,20 @@ export interface PptxPluginNavigation {
   ): Promise<PptxPluginNavigationResult>;
 }
 
+/** @experimental The plugin API may change in minor releases. */
+export type PptxPluginFocusChangeEvent = PluginFocusChangeEvent;
+
+/** @experimental The plugin API may change in minor releases. */
+export type PptxPluginLocaleChangeEvent = PluginLocaleChangeEvent;
+
+/** @experimental The plugin API may change in minor releases. */
+export type PptxPluginViewportChangeEvent = PluginViewportChangeEvent<PptxPluginRect>;
+
 /** Lifecycle notifications describe current state; several changes may arrive as one. */
 export type PptxPluginEvent =
+  | PptxPluginFocusChangeEvent
+  | PptxPluginLocaleChangeEvent
+  | PptxPluginViewportChangeEvent
   | { type: 'load'; generation: string; version: string; reason: PluginLoadReason }
   | { type: 'document-change'; generation: string; version: string }
   | {

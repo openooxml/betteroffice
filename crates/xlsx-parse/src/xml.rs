@@ -1,8 +1,12 @@
 //! shared quick-xml plumbing: depth-capped pull loop, text collection,
 //! attribute lookup, and opc path helpers. malformed input errors, never panics.
 
+use std::borrow::Cow;
+
 use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::attributes::Attribute;
+use quick_xml::events::{BytesStart, BytesText, Event};
+use quick_xml::name::QName;
 
 use crate::{MAX_DEPTH, ParseError};
 
@@ -59,8 +63,8 @@ pub(crate) fn collect_text(
     let mut out = String::new();
     loop {
         match next_event(reader, buf, depth)? {
-            Event::Text(t) => out.push_str(&t.decode().map_err(xml_err)?),
-            Event::CData(t) => out.push_str(&t.decode().map_err(xml_err)?),
+            Event::Text(t) => out.push_str(&t.xml10_content().map_err(xml_err)?),
+            Event::CData(t) => out.push_str(&t.xml10_content().map_err(xml_err)?),
             Event::GeneralRef(r) => {
                 let name = r.decode().map_err(xml_err)?;
                 out.push_str(&resolve_entity(&name)?);
@@ -80,6 +84,106 @@ pub(crate) fn resolve_entity(name: &str) -> Result<String, ParseError> {
     quick_xml::escape::unescape(&raw)
         .map(|c| c.into_owned())
         .map_err(|_| ParseError::Malformed(format!("unresolvable entity &{name};")))
+}
+
+/// Formula text, from a cell, a defined name or a conditional format, escaped
+/// for element content. Excel reads `_xHHHH_` in a formula literally, so a CR
+/// and any other control character go out as character references, the only
+/// form in which a file can bring one into a formula; a NUL, which no reference
+/// can carry, is written as it came.
+pub(crate) fn formula_text(text: &str) -> String {
+    char_references(&quick_xml::escape::escape(text), &['\r'])
+}
+
+/// [`formula_text`] as a writer event.
+pub(crate) fn text_event(text: &str) -> BytesText<'static> {
+    BytesText::from_escaped(formula_text(text))
+}
+
+/// `escaped` with `also` and every character XML 1.0 cannot carry literally
+/// written as decimal character references.
+fn char_references(escaped: &str, also: &[char]) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    for ch in escaped.chars() {
+        if ch != '\0' && (also.contains(&ch) || (!is_xml_char(ch) && !matches!(ch, '\t' | '\n'))) {
+            out.push_str(&format!("&#{};", ch as u32));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn is_xml_char(ch: char) -> bool {
+    ch >= ' ' && ch != '\u{fffe}' && ch != '\u{ffff}'
+}
+
+/// An attribute whose value keeps its CR, LF, tab and other control characters,
+/// written as character references since literal ones read back as spaces.
+pub(crate) fn text_attribute<'a>(name: &'a str, value: &str) -> Attribute<'a> {
+    Attribute {
+        key: QName(name.as_bytes()),
+        value: Cow::Owned(attribute_text(value).into_bytes()),
+    }
+}
+
+/// The escaped value [`text_attribute`] writes, for markup built as text.
+pub(crate) fn attribute_text(value: &str) -> String {
+    char_references(&quick_xml::escape::escape(value), &['\r', '\n', '\t'])
+}
+
+/// Encode string item text the way Excel writes ST_Xstring: a CR and the other
+/// characters XML 1.0 cannot carry become `_xHHHH_`, and an underscore that
+/// would start such an escape is written as `_x005F_`.
+pub(crate) fn encode_xstring(text: &str) -> String {
+    xstring(text, false)
+}
+
+/// A number format code (`ST_Xstring`) as element text, the way Excel writes
+/// it: [`encode_xstring`], then xml escaped. Writing one never fails.
+pub(crate) fn format_code_text(code: &str) -> String {
+    quick_xml::escape::escape(xstring(code, false)).into_owned()
+}
+
+/// An `ST_Xstring` attribute value (a number format code, a sheet, defined or
+/// font name), the way Excel writes it: [`encode_xstring`] with tab and line
+/// feed also as `_xHHHH_`, so attribute normalization cannot fold them into
+/// spaces, then xml escaped. Writing one never fails.
+pub(crate) fn xstring_attribute_value(value: &str) -> String {
+    quick_xml::escape::escape(xstring(value, true)).into_owned()
+}
+
+/// [`xstring_attribute_value`] as a writer attribute.
+pub(crate) fn xstring_attribute<'a>(name: &'a str, value: &str) -> Attribute<'a> {
+    Attribute {
+        key: QName(name.as_bytes()),
+        value: Cow::Owned(xstring_attribute_value(value).into_bytes()),
+    }
+}
+
+fn xstring(text: &str, attribute: bool) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '_' if bytes
+                .get(index + 1)
+                .is_some_and(|b| matches!(b, b'x' | b'X'))
+                && bytes.get(index + 6) == Some(&b'_')
+                && bytes
+                    .get(index + 2..index + 6)
+                    .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit)) =>
+            {
+                out.push_str("_x005F_");
+            }
+            '\t' | '\n' if !attribute => out.push(ch),
+            _ if !is_xml_char(ch) => {
+                out.push_str(&format!("_x{:04X}_", ch as u32));
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// look up an attribute by its local name (namespace-prefix agnostic),

@@ -1,9 +1,13 @@
+import { budgetedTest, pollUntil } from '../../../../shared/office-session/testing/loadBudget';
+import { gestureFor, trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { StrictMode, useState } from 'react';
 import { createPortal } from 'react-dom';
+import * as pptx from '@betteroffice/pptx';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -11,13 +15,16 @@ if (ownsDom) GlobalRegistrator.register();
 import {
   initWasm,
   openPresentation,
+  type HitTestResult,
   type PptxEditRequest,
   type PptxEditResult,
+  type TextBoxPrimitive,
 } from '@betteroffice/pptx';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { isMacPlatform } from '../commands/descriptors';
 import type { PptxInThreadEditorProps } from '../PptxEditor';
 import * as publicApi from '../index';
+import * as pluginHosts from './createPptxPluginHost';
 import {
   EditorToolbar,
   PptxEditor,
@@ -27,6 +34,7 @@ import {
   usePptxCommand,
   usePptxCommands,
   type PptxCommandResult,
+  type PptxAnchorGeometryResult,
   type PptxCommandStore,
   type PptxEditorApi,
   type PptxPlugin,
@@ -39,11 +47,11 @@ import {
   type PptxPluginRefusal,
 } from '../index';
 
-const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react');
 
 const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
-const root = resolve(import.meta.dir, '../../../..');
+const root = fileURLToPath(new URL('../../../../', import.meta.url));
 const quiet = { error: console.error, warn: console.warn };
 let fixture: Uint8Array;
 let faces: { family: string; bytes: Uint8Array }[];
@@ -60,6 +68,7 @@ beforeAll(async () => {
   console.error = () => {};
   console.warn = () => {};
 }, 30_000);
+const test = budgetedTest();
 afterEach(cleanup);
 afterAll(async () => {
   await new Promise((done) => setTimeout(done, 50));
@@ -79,7 +88,7 @@ async function settle(ms = 20) {
 }
 
 async function until(done: () => boolean) {
-  for (let attempt = 0; attempt < 300 && !done(); attempt += 1) await settle(10);
+  await pollUntil(done, settle);
   expect(done()).toBe(true);
 }
 
@@ -397,17 +406,114 @@ describe('PptxEditor plugins', () => {
     expect((await read(api())).version).toBe(reread.version);
   });
 
-  test('granted built-in mutations refuse without a policy path; granted views run', async () => {
-    function Probe() {
+  test('locale-change admits the owning plugin\'s handler and onEvent but refuses another granted plugin', async () => {
+    let host!: pluginHosts.PptxPluginHost;
+    const createHost = pluginHosts.createPptxPluginHost;
+    const capture = spyOn(pluginHosts, 'createPptxPluginHost').mockImplementation((access) => {
+      if (!('handle' in access)) throw new Error('Expected document access');
+      host = createHost(access);
+      return host;
+    });
+    let dispatching: Event | undefined;
+    let activationId = '';
+    let peerActivationId = '';
+    let own!: Promise<PptxPluginCommandResult>;
+    const delivered: unknown[] = [];
+    const other: unknown[] = [];
+    const gestures: boolean[] = [];
+    const otherGestures: boolean[][] = [];
+    const plugin = definePptxPlugin({
+      id: 'event-gesture', createState: () => null,
+      panel: { title: 'Events', placement: 'left', render: ({ context }) => (
+        <button type="button" data-testid="event-gesture" onClick={(event) => {
+          event.stopPropagation();
+          host.localeChanged('de');
+          own = context.commands.execute('bold', null);
+        }}>Bold</button>
+      ) },
+      onEvent(context, event) {
+        if (event.type !== 'locale-change') return;
+        gestures.push(gestureFor(activationId));
+        void context.commands.execute('bold', null).then((result) => delivered.push(result));
+      },
+    });
+    const peer = definePptxPlugin({
+      id: 'other-activation', createState: () => null,
+      panel: { title: 'Other', placement: 'right', render: () => <output data-testid="other-activation" /> },
+      onEvent(context, event) {
+        if (event.type !== 'locale-change') return;
+        otherGestures.push([gestureFor(activationId), gestureFor(peerActivationId)]);
+        void context.commands.execute('bold', null).then((result) => other.push(result));
+      },
+    });
+    let mounted!: Awaited<ReturnType<typeof mount>>;
+    try {
+      mounted = await mount({ plugins: [plugin, peer], pluginGrants: {
+        'event-gesture': { document: 'write', commands: ['bold'] },
+        'other-activation': { document: 'write', commands: ['bold'] },
+      } });
+    } finally {
+      capture.mockRestore();
+    }
+    const { api, view } = mounted;
+    const story = (await read(api())).stories[0]!;
+    await act(async () => {
+      api().selectText({ slide: 1, shapeId: story.shapeId, storyId: story.storyId, start: 0, end: 2 });
+    });
+    await settle();
+    const button = view.getByTestId('event-gesture');
+    const marker = button.closest<HTMLElement>('[data-plugin-activation]')!;
+    activationId = marker.dataset.pluginActivation!;
+    peerActivationId = view.getByTestId('other-activation')
+      .closest<HTMLElement>('[data-plugin-activation]')!.dataset.pluginActivation!;
+    const release = trackPluginGestures(marker,
+      (event) => { dispatching = event; return true; }, () => dispatching);
+    try {
+      fireEvent.click(button);
+      Object.defineProperty(dispatching!, 'eventPhase', { value: Event.BUBBLING_PHASE });
+      await until(() => delivered.length === 1 && other.length === 1);
+      expect(delivered[0]).toMatchObject({ ok: true, status: 'executed' });
+      expect(other[0]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(await own).toMatchObject({ ok: true, status: 'executed' });
+      expect(gestures).toEqual([true]);
+      expect(otherGestures).toEqual([[true, false]]);
+    } finally {
+      release();
+    }
+  });
+
+  test('granted built-in mutations need a gesture in their panel; granted views run', async () => {
+    let dispatching: Event | undefined;
+    const trusted = (event: Event) => { dispatching = event; return true; };
+    const currentEvent = () => dispatching;
+    const results: unknown[] = [];
+    const toolbarResults: unknown[] = [];
+    function Probe({ context }: { context: PptxPluginContext<State> }) {
       const bold = usePptxCommands().getState('bold');
       return (
-        <output data-testid="probe">{bold.enabled ? 'enabled' : bold.disabledReason.code}</output>
+        <div>
+          <output data-testid="probe">{bold.enabled ? 'enabled' : bold.disabledReason.code}</output>
+          <button type="button" data-testid="gesture-bold" onClick={() => {
+            void context.commands.execute('bold', null).then((result) => results.push(result));
+          }}>Bold</button>
+          <button type="button" data-testid="delayed-bold" onClick={() => {
+            setTimeout(() => {
+              void context.commands.execute('bold', null).then((result) => results.push(result));
+            }, 0);
+          }}>Delayed bold</button>
+        </div>
       );
     }
     const { plugin, contexts, log } = recorder('acme.review', {
       panel: { title: 'Review', placement: 'left', render: Probe },
+      commands: [{ id: 'format', label: 'Gesture bold', mutatesDocument: true, execute(context) {
+        const result = context.commands.execute('bold', null);
+        void result.then((value) => toolbarResults.push(value));
+        return result;
+      } }],
+      toolbar: ['format'],
     });
-    const { api, view } = await mount({
+    const { api, view, rerender } = await mount({
       plugins: [plugin],
       pluginGrants: { 'acme.review': { document: 'write', commands: ['bold', 'zoom'] } },
     });
@@ -423,18 +529,61 @@ describe('PptxEditor plugins', () => {
       });
     });
     await settle();
-    expect(within(view.container).getByTestId('probe').textContent).toBe('unsupported-policy');
+    expect(within(view.container).getByTestId('probe').textContent).toBe('enabled');
     const context = last(contexts);
     expect(await context.commands.execute('bold', null)).toMatchObject({
       ok: false,
       failure: { code: 'unsupported-policy' },
     });
+    const before = api().commands.getState('bold').active;
+    const button = within(view.container).getByTestId('gesture-bold');
+    const release = trackPluginGestures(button.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
+    try {
+      fireEvent.click(button);
+      await until(() => results.length === 1);
+      expect(results[0]).toMatchObject({ ok: true, status: 'executed' });
+      expect(api().commands.getState('bold').active).toBe(!before);
+      fireEvent.click(within(view.container).getByTestId('delayed-bold'));
+      await until(() => results.length === 2);
+      expect(results[1]).toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+      expect(api().commands.getState('bold').active).toBe(!before);
+    } finally {
+      release();
+    }
+    const more = view.getByTestId('pptx-toolbar-more');
+    act(() => more.focus());
+    fireEvent.keyDown(more, { key: 'ArrowDown' });
+    const overflow = view.getByRole('menu', { name: 'More' });
+    const toolbarButton = within(overflow).queryByRole('menuitem', { name: /^Gesture bold/ })
+      ?? within(overflow).getByRole('menuitemcheckbox', { name: /^Gesture bold/ });
+    const releaseToolbar = trackPluginGestures(toolbarButton.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
+    try {
+      fireEvent.click(toolbarButton);
+      await until(() => toolbarResults.length === 1);
+      expect(toolbarResults[0]).toMatchObject({ ok: true, status: 'executed' });
+      expect(api().commands.getState('bold').active).toBe(before);
+    } finally {
+      releaseToolbar();
+    }
     expect(await act(() => context.commands.execute('zoom', { scale: 2 }))).toEqual({
       ok: true,
       status: 'executed',
     });
     expect(api().commands.getState('zoom').value).toBe(2);
     expect(api().commands.getState('bold').enabled).toBe(true);
+    await act(async () => {
+      rerender({ plugins: [plugin], pluginGrants: { 'acme.review': { commands: ['bold'] } } });
+    });
+    await until(() => within(view.container).getByTestId('probe').textContent === 'permission-denied');
+    const ungrantedButton = within(view.container).getByTestId('gesture-bold');
+    const releaseUngrant = trackPluginGestures(ungrantedButton.closest<HTMLElement>('[data-plugin-activation]')!, trusted, currentEvent);
+    try {
+      fireEvent.click(ungrantedButton);
+      await until(() => results.length === 3);
+      expect(results[2]).toMatchObject({ ok: false, failure: { code: 'permission-denied' } });
+    } finally {
+      releaseUngrant();
+    }
   });
 
   test('edit batches need their grant, wait for pending input and respect readOnly', async () => {
@@ -891,6 +1040,35 @@ describe('PptxEditor plugins', () => {
     expect(thumbnails[1].getAttribute('aria-current')).toBe('page');
   });
 
+  test('host selectText accepts backward ranges and preserves their direction', async () => {
+    const { plugin, contexts, log } = recorder();
+    const { api } = await mount({ plugins: [plugin] });
+    await until(() => log.includes('load:loaded'));
+    const content = await read(api());
+    const slide = content.slides[0];
+    const story = content.stories.find(
+      (candidate) => candidate.slideId === slide.id && candidate.text.length >= 4
+    )!;
+    expect(story.text.length).toBeGreaterThanOrEqual(4);
+
+    await act(async () => {
+      const accepted = api().selectText({
+        slide: 1,
+        shapeId: story.shapeId,
+        storyId: story.storyId,
+        start: 4,
+        end: 1,
+      });
+      expect(accepted).toBe(true);
+    });
+    await until(() => last(contexts).snapshot.selection?.target.kind === 'text');
+    expect(last(contexts).snapshot.selection).toEqual({
+      slideId: slide.id,
+      slide: 1,
+      target: { kind: 'text', shapeId: story.shapeId, storyId: story.storyId, anchor: 4, focus: 1 },
+    });
+  });
+
   test('a load hook that applies a batch every run loads once, then sees its change', async () => {
     const outcomes: (PptxEditResult | PptxPluginRefusal)[] = [];
     const seen: string[] = [];
@@ -955,6 +1133,182 @@ describe('PptxEditor plugins', () => {
     const after = await read(api());
     expect(loads).toEqual([before.version, after.version]);
     expect(changes).toEqual([]);
+  });
+
+  test('a plugin reads selection anchor geometry after selecting text', async () => {
+    const canvases = fakeContexts();
+    const ownBounds = Object.prototype.hasOwnProperty.call(HTMLElement.prototype, 'getBoundingClientRect');
+    const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+      () => ({ left: 0, top: 0, width: 640, height: 360, x: 0, y: 0, right: 640, bottom: 360 } as DOMRect)
+    );
+    try {
+      const contexts: PptxPluginContext<null>[] = [];
+      const answers: PptxAnchorGeometryResult[] = [];
+      const plugin = definePptxPlugin<null>({
+        id: 'selection-geometry',
+        createState: () => null,
+        onEvent(context) {
+          contexts.push(context);
+          if (context.snapshot.selection?.target.kind === 'text' && context.geometry) {
+            answers.push(context.geometry.getAnchorGeometry({ kind: 'selection' }));
+          }
+        },
+      });
+      const { api, view } = await mount({ plugins: [plugin] });
+      await waitFor(() => expect(last(contexts)?.geometry).toBeTruthy());
+      const content = await read(api());
+      const story = content.stories.find((candidate) => candidate.slideId === content.slides[0].id && candidate.text.length > 3)!;
+      await act(async () => {
+        expect(await last(contexts).navigation.selectText({
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 3, focus: 1,
+        }, { expectVersion: content.version })).toEqual({ ok: true });
+      });
+      await waitFor(() => expect(answers.some((answer) => answer.ok)).toBe(true));
+      const context = last(contexts);
+      const geometry = context.geometry!;
+      const answer = geometry.getAnchorGeometry({ kind: 'selection' });
+      expect(answer.ok).toBe(true);
+      if (!answer.ok) throw new Error(answer.failure.message);
+      expect(answer.rects.length).toBeGreaterThan(0);
+      expect(answer.version).toBe(content.version);
+      expect(answer.layoutId).toBe(context.snapshot.layout!.id);
+      expect(answer as PptxAnchorGeometryResult).toEqual(geometry.getAnchorGeometry({
+        kind: 'range', version: content.version, slideId: story.slideId,
+        shapeId: story.shapeId, storyId: story.storyId, anchor: 3, focus: 1,
+      }));
+      expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toEqual([answer]);
+      await act(async () => {
+        fireEvent.keyDown(view.getByRole('application'), { key: 'ArrowRight' });
+      });
+      await waitFor(() => {
+        const selection = last(contexts).snapshot.selection?.target;
+        expect(selection).toMatchObject({ kind: 'text', anchor: 2, focus: 2 });
+        expect(last(contexts).geometry).not.toBeNull();
+      });
+      expect(last(contexts).snapshot.layout!.id).toBe(context.snapshot.layout!.id);
+      expect(last(contexts).geometry!.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, rects: [] });
+      const retained = geometry.getAnchorGeometry({ kind: 'selection' });
+      expect(retained).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+      expect(context.snapshot.selection?.target).toMatchObject({ kind: 'text', anchor: 3, focus: 1 });
+      await act(async () => {
+        expect(await last(contexts).navigation.selectText({
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 2, focus: 2,
+        }, { expectVersion: content.version })).toEqual({ ok: true });
+      });
+      await waitFor(() => {
+        expect(last(contexts).geometry?.getAnchorGeometry({ kind: 'selection' }))
+          .toMatchObject({ ok: true, rects: [] });
+        expect(last(contexts).snapshot.layout!.id).not.toBe(context.snapshot.layout!.id);
+      });
+      expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: false, failure: { code: 'layout-unavailable' },
+      });
+    } finally {
+      bounds.mockRestore();
+      if (!ownBounds) delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+      canvases.restore();
+    }
+  });
+
+  test('retained selection anchors refuse a same-offset caret move to the other wrapped line', async () => {
+    const canvases = fakeContexts();
+    const ownBounds = Object.prototype.hasOwnProperty.call(HTMLElement.prototype, 'getBoundingClientRect');
+    const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 640, 360));
+    const originalOpen = pptx.openPresentation;
+    const restorers: Array<() => void> = [];
+    let text!: TextBoxPrimitive;
+    const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
+      const handle = originalOpen(bytes, options);
+      const slide = handle.snapshot().slides[0];
+      const shape = slide.shapes.find((candidate) => candidate.textStories.some(
+        (story) => handle.story(story.id).length > 10
+      ))!;
+      const story = shape.textStories.find((candidate) => handle.story(candidate.id).length > 10)!;
+      const originalLayout = handle.layoutSlide.bind(handle);
+      const layout = spyOn(handle, 'layoutSlide').mockImplementation((index) => {
+        const frame = originalLayout(index);
+        if (index !== 0) return frame;
+        const source = frame.primitives.find((primitive): primitive is TextBoxPrimitive =>
+          primitive.kind === 'textBox' && primitive.shapeId === shape.id && primitive.storyId === story.id)!;
+        text = { ...source, x: 100, y: 50, w: 400, h: 80, transform: undefined,
+          lines: [0, 5].map((start, row) => ({
+            x: 120, y: 60 + row * 20, width: 50, height: 20, baseline: 75 + row * 20,
+            start, end: start + 5, runs: [],
+            caretStops: Array.from({ length: 6 }, (_, offset) => ({ position: start + offset, x: 120 + offset * 10 })),
+          })) };
+        return { ...frame, primitives: [text] };
+      });
+      const cache = (handle as unknown as Record<symbol, {
+        hitTest(slideId: string, x: number, y: number): HitTestResult | null;
+      }>)[Symbol.for('@betteroffice/pptx/slide-layout-cache')];
+      const hit = spyOn(cache, 'hitTest').mockImplementation(() => ({
+        kind: 'text', shapeId: text.shapeId!, storyId: text.storyId!, position: 5,
+      }));
+      restorers.push(() => layout.mockRestore(), () => hit.mockRestore());
+      return handle;
+    });
+    try {
+      const probe = recorder();
+      const { api, view } = await mount({ plugins: [probe.plugin], showToolbar: false });
+      await waitFor(() => expect(last(probe.contexts)?.geometry).toBeTruthy());
+      const content = await read(api());
+      const story = content.stories.find((candidate) => candidate.slideId === content.slides[0].id &&
+        candidate.shapeId === text.shapeId && candidate.storyId === text.storyId)!;
+      expect(story.text.length).toBeGreaterThanOrEqual(10);
+      await act(async () => {
+        expect(await last(probe.contexts).navigation.selectText({
+          slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId, anchor: 1, focus: 1,
+        }, { expectVersion: content.version, focus: true })).toEqual({ ok: true });
+      });
+      const stage = view.getByRole('application');
+      await act(async () => { fireEvent.keyDown(stage, { key: 'End' }); });
+      await waitFor(() => {
+        expect(last(probe.contexts).snapshot.selection?.target).toMatchObject({ anchor: 5, focus: 5 });
+        expect(last(probe.contexts).geometry).toBeTruthy();
+      });
+      let retained!: PptxPluginContext<State>;
+      await act(async () => { await last(probe.contexts).run((context) => { retained = context; }); });
+      const geometry = retained.geometry!;
+      const before = geometry.getAnchorGeometry({ kind: 'selection' });
+      expect(before).toMatchObject({ ok: true, rects: [], anchor: geometry.toOverlayRect({
+        space: 'slide-px', rect: { x: 170, y: 60, width: 1, height: 20 },
+      }) });
+      const events = () => probe.events.filter((event) => event.type === 'selection-change');
+      const count = events().length;
+      await act(async () => { fireEvent.keyDown(stage, { key: 'End' }); });
+      expect(geometry.getAnchorGeometry({ kind: 'selection' })).toEqual(before);
+      expect(events()).toHaveLength(count);
+      const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
+      canvas.setPointerCapture = () => {};
+      const frame = api().handle.layoutSlide(0);
+      await act(async () => {
+        fireEvent.pointerDown(canvas, { isPrimary: true, button: 0, pointerId: 7,
+          clientX: 120 * 640 / frame.width, clientY: 90 * 360 / frame.height });
+      });
+      let fresh!: PptxPluginContext<State>;
+      await act(async () => { await retained.run((context) => { fresh = context; }); });
+      expect(fresh.snapshot.selection).toEqual(retained.snapshot.selection);
+      expect(fresh.geometry?.layout.id).toBe(geometry.layout.id);
+      expect(fresh.geometry?.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: true, rects: [], anchor: geometry.toOverlayRect({
+          space: 'slide-px', rect: { x: 120, y: 80, width: 1, height: 20 },
+        }),
+      });
+      expect(geometry.getAnchorGeometry({ kind: 'range', version: geometry.layout.version,
+        slideId: retained.snapshot.selection!.slideId, shapeId: text.shapeId!, storyId: text.storyId!, anchor: 5, focus: 5 }))
+        .toEqual(fresh.geometry!.getAnchorGeometry({ kind: 'selection' }));
+      expect(events()).toHaveLength(count);
+      expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: false, failure: { code: 'layout-unavailable' },
+      });
+    } finally {
+      cleanup();
+      for (const restore of restorers.reverse()) restore();
+      open.mockRestore();
+      bounds.mockRestore();
+      if (!ownBounds) delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+      canvases.restore();
+    }
   });
 
   test('layouts follow the presented frame, its version, slide and zoom', async () => {
@@ -1025,6 +1379,7 @@ describe('PptxEditor plugins', () => {
       const story = content.stories.find(
         (candidate) => candidate.slideId === content.slides[2].id
       )!;
+      const retained = last(contexts).geometry!;
       await act(async () => {
         api().handle.propose('Agent', null, [
           { type: 'replaceText', storyId: story.storyId, start: 0, end: 0, text: 'Proposed ' },
@@ -1033,6 +1388,9 @@ describe('PptxEditor plugins', () => {
       });
       await until(() => marker() === null);
       expect(last(contexts).geometry).toBeNull();
+      expect(retained.getAnchorGeometry({ kind: 'selection' })).toMatchObject({
+        ok: false, failure: { code: 'layout-unavailable' },
+      });
       expect(last(layouts)).toBeNull();
       await act(async () => {
         await api().commands.execute('proposalDiff', { enabled: false });
@@ -1643,4 +2001,43 @@ test('in_thread_plugin_reads_preserve_engine_facts', async () => {
     { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 1, marker: 'a)' },
     { kind: 'number', scheme: 'alphaLcParenR', startAt: 1, value: 2, marker: 'b)' },
   ]);
+});
+
+test('plugins receive the resolved locale and one event when it changes', async () => {
+  const contexts: PptxPluginContext<null>[] = [];
+  const events: PptxPluginEvent[] = [];
+  const plugin = definePptxPlugin({ id: 'locale', createState: () => null,
+    onEvent(context, event) { contexts.push(context); events.push(event); } });
+  const { rerender } = await mount({ plugins: [plugin], i18n: { _lang: 'de' } });
+  await until(() => events.some((event) => event.type === 'load'));
+  expect(contexts[0]!.snapshot.locale).toBe('de');
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([]);
+  rerender({ plugins: [plugin], i18n: { _lang: 'fr' } });
+  await until(() => events.some((event) => event.type === 'locale-change'));
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+    { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'fr' },
+  ]);
+  expect(last(contexts).snapshot.locale).toBe('fr');
+  rerender({ plugins: [plugin], i18n: { _lang: 'fr' } });
+  await settle();
+  expect(events.filter((event) => event.type === 'locale-change')).toHaveLength(1);
+});
+
+test('plugin locales are canonical and equivalent tags do not notify twice', async () => {
+  const contexts: PptxPluginContext<null>[] = [];
+  const events: PptxPluginEvent[] = [];
+  const plugin = definePptxPlugin({ id: 'canonical-locale', createState: () => null,
+    onEvent(context, event) { contexts.push(context); events.push(event); } });
+  const { rerender } = await mount({ plugins: [plugin], i18n: { _lang: 'DE-de' } });
+  await until(() => events.some((event) => event.type === 'load'));
+  expect(contexts[0]!.snapshot.locale).toBe('de-DE');
+  rerender({ plugins: [plugin], i18n: { _lang: 'de-DE' } });
+  await settle();
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([]);
+  rerender({ plugins: [plugin], i18n: { _lang: 'invalid_tag' } });
+  await until(() => events.some((event) => event.type === 'locale-change'));
+  expect(events.filter((event) => event.type === 'locale-change')).toEqual([
+    { type: 'locale-change', generation: last(contexts).snapshot.generation, locale: 'en' },
+  ]);
+  expect(last(contexts).snapshot.locale).toBe('en');
 });

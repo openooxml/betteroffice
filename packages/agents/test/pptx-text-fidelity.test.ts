@@ -1,11 +1,14 @@
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import JSZip from 'jszip';
 import { createFontProvider } from '@betteroffice/fonts';
-import { openPresentation } from '@betteroffice/pptx';
+import { initWasm, openPresentation } from '@betteroffice/pptx';
 import { attachPptx, openPptx } from '../src/pptx';
 import { registerPptxTools } from '../src/pptx-tools';
 import type { FileWorkspace } from '../src/workspace';
 import { presentationFixture } from './pptx-fixture';
+import { initialize } from '../src/prototype';
+
+beforeAll(() => initialize('pptx', initWasm));
 
 const slidePath = 'ppt/slides/slide1.xml';
 const untouched = '<p:sp><p:nvSpPr><p:cNvPr id="9" name="Untouched"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr i="1" lang="de-DE"/><a:t>Keep exactly</a:t></a:r></a:p></p:txBody></p:sp>';

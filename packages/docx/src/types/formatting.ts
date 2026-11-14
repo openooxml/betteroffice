@@ -226,6 +226,8 @@ export interface TextFormatting {
   shadow?: boolean;
   /** Modern w14 text effects (glow/shadow/reflection/textFill/textOutline). */
   modernEffects?: TextModernEffects;
+  ligatures?: string;
+  contextualAlternates?: boolean;
 
   // Complex script
   /** Right-to-left text (w:rtl) */
@@ -635,6 +637,8 @@ export interface TableRowFormatting {
   justification?: 'left' | 'center' | 'right';
   /** Hidden row */
   hidden?: boolean;
+  /** Computed on load, never written back: every run in the hidden row has its own `w:vanish`. */
+  hiddenContentOnly?: boolean;
   /** Conditional format style */
   conditionalFormat?: ConditionalFormatStyle;
   /** Leading omitted grid columns (`w:gridBefore`). Undefined = 0. */

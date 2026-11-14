@@ -641,6 +641,13 @@ impl UnitRecorder {
                     record_decision(value);
                 }
             }
+            if let Some(Any::Array(changes)) =
+                attribute(diff.attributes.as_deref(), crate::format::RPR_CHANGE)
+            {
+                for change in changes.iter() {
+                    record_decision(change);
+                }
+            }
         }
         if !window.mutated && (pilcrow || standalone) {
             let has_reads = READS.with(|reads| {
@@ -808,6 +815,11 @@ pub(crate) fn lower_recorded(
     ),
     BridgeError,
 > {
+    if crate::empty_cells::is_empty_cell(&doc.yrs_doc().transact(), story) {
+        local.block(true);
+        let cell = crate::empty_cells::EmptyCell::new(story);
+        return lower_recorded(cell.doc(), story, env, local, false);
+    }
     let mut preview = (record && story == "body").then(PreviewUnits::default);
     let mut revealable = Some(Vec::new());
     let (blocks, map) = yrs_doc_to_mapped_layout_blocks_inner(
@@ -910,7 +922,7 @@ pub(crate) fn replay(
     current_map: &LoweringMap,
     local: &local::LocalLowering,
 ) -> Option<Vec<Replay>> {
-    if !replayable(units, local) {
+    if !local.matches_source(doc) || !replayable(units, local) {
         return None;
     }
     let txn = doc.yrs_doc().transact();
@@ -926,6 +938,7 @@ pub(crate) fn replay(
             .source_index()
             .map(|index| index.group_picture_sources())
             .unwrap_or_else(|| env.group_pictures.clone()),
+        shape_styles: super::shapes::ShapeStyles::new(doc),
         ..env.clone()
     };
     let env = &with_sources;
@@ -951,6 +964,7 @@ pub(crate) fn replay(
         let mut active_stories = BTreeSet::from(["body".to_owned()]);
         let mut replay_local = local::LocalLowering::new(local.enabled && !local.blocked);
         replay_local.source.clone_from(&local.source);
+        replay_local.shape_styles.clone_from(&local.shape_styles);
         if !env.hyperlink_style_font_sizes.is_empty() {
             replay_local.run_size_sources = run_size_provenance::Sources::new(doc);
         }
@@ -1024,6 +1038,7 @@ pub(crate) fn splice(
     revealable: &mut Vec<LayoutBlock>,
     units: &mut PreviewUnits,
     local: &mut local::LocalLowering,
+    note_numbering: &[docx_layout::footnotes::SectionNoteNumbering],
 ) {
     let mut block_shift = 0_isize;
     let mut revealable_shift = 0_isize;
@@ -1075,6 +1090,7 @@ pub(crate) fn splice(
         record.revealable.end = revealable_end;
         record.ids = Rc::new(replay.ids);
     }
+    docx_layout::footnotes::number_note_references(blocks.as_mut_slice(), note_numbering);
     local.refresh_seeds(blocks, map);
 }
 

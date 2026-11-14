@@ -217,7 +217,7 @@ export function useHeaderFooterEditing({
 }
 
 export function useWorkerHeaderFooterEditing(controller: ReturnType<typeof createPeerlessShellController>, onError?: (error: Error) => void) {
-  const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  const state = useSyncExternalStore(controller.subscribeShell, controller.getShellSnapshot, controller.getShellSnapshot);
   const activePart = state.view?.editState?.activePart ?? null;
   const run = useCallback(async (kind: 'openPart' | 'ensurePart' | 'removePart', target: Omit<DocxPartTarget, 'expectVersion'>, sectionIndex?: number) => {
     try {

@@ -1,3 +1,5 @@
+import { fontPreflightFixture } from '../../packages/pptx/src/wasm/__fixtures__/fontPreflight';
+import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, spyOn, test } from 'bun:test';
@@ -32,8 +34,7 @@ describe('@betteroffice/pptx-native', () => {
     expect(JSON.parse(readFileSync(new URL('package.json', dist), 'utf8'))).toEqual({
       type: 'module',
       imports: {
-        '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.browser.js' },
-        '#session-scope': { node: './sessionScope.node.js', default: './sessionScope.browser.js' },
+        '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.missing.js' },
       },
     });
   });
@@ -124,4 +125,42 @@ describe('@betteroffice/pptx-native', () => {
       await session.dispose();
     }
   });
+});
+
+describe('@betteroffice/pptx-native allocator', () => {
+  const runtimes = [process.execPath, Bun.which('node')].filter((runtime): runtime is string => Boolean(runtime));
+  test.each(runtimes.flatMap((runtime) => [
+    [runtime, 'in load order', []],
+    [runtime, 'in reverse load order', ['--reverse']],
+  ]) as [string, string, string[]][])('two images of the binary share a process and its threads under %s, %s', (runtime, _order, flags) => {
+    const result = spawnSync(runtime, ['scripts/native-allocator-smoke.mjs', 'pptx', ...flags], {
+      cwd: fileURLToPath(new URL('../..', import.meta.url)),
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    expect(result.stderr).not.toContain('Error');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('allocator smoke ok');
+  });
+});
+
+test('font preflight works without initializing an engine or fetching wasm', async () => {
+  const instantiate = spyOn(WebAssembly, 'instantiate');
+  const compile = spyOn(WebAssembly, 'compile');
+  const fetch = spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network disabled'));
+  try {
+    const bytes = await fontPreflightFixture();
+    const core = await entry('.') as typeof import('../../packages/pptx/src/index');
+    await core.preloadPreflightWasm();
+    const result = await core.fontPreflight(bytes);
+    expect(result.complete).toBe(true);
+    expect(result.faces.length).toBeGreaterThan(0);
+    expect(instantiate).not.toHaveBeenCalled();
+    expect(compile).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  } finally {
+    instantiate.mockRestore();
+    compile.mockRestore();
+    fetch.mockRestore();
+  }
 });

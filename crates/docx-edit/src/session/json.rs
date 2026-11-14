@@ -56,6 +56,18 @@ pub(crate) fn parse_render_env(env_json: &str) -> EngineResult<crate::bridge::Re
         }
     }
     env.doc_default_font_size = value.get("docDefaultFontSize").and_then(Value::as_f64);
+    if let Some(Value::Object(margins)) = value.get("tableStyleCellMargins") {
+        env.table_style_cell_margins.extend(
+            margins
+                .iter()
+                .map(|(id, margins)| (id.clone(), margins.clone())),
+        );
+    }
+    env.default_table_style_id = value
+        .get("defaultTableStyleId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned);
     env.show_hidden_text = value
         .get("showHiddenText")
         .and_then(Value::as_bool)

@@ -8,10 +8,12 @@
  * changes — the same trigger that re-rasters the canvas — in place, so only
  * the blocks that changed are rebuilt.
  *
- * Focus never lands here: the hidden input remains the editing surface.
+ * Typing focus never lands here: the hidden input remains the editing
+ * surface. Links are Tab stops; activating one follows it through
+ * `followMirrorLink`.
  */
 
-import { useRef } from 'react';
+import { useContext, useEffect, useRef } from 'react';
 import {
   buildMirrorPage,
   buildMirrorPageText,
@@ -22,12 +24,16 @@ import {
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
 import { usePageChrome, type PageChromeHandle, type PageChromeHold } from './usePageChrome';
+import { followMirrorLink, MirrorLinkRouteContext } from './mirrorLinkRoute';
 
 const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
   labels: {
     page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
     header: t('a11y.headerLabel'),
     footer: t('a11y.footerLabel'),
+    chartNoData: t('a11y.chartNoData'),
+    picture: t('a11y.pictureName'),
+    bullet: t('a11y.bulletMarker'),
   },
 });
 const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
@@ -71,6 +77,16 @@ export function CanvasPageMirror({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
+  const linkRoute = useContext(MirrorLinkRouteContext);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const onClick = (event: MouseEvent) => {
+      followMirrorLink(host, event, linkRoute);
+    };
+    host.addEventListener('click', onClick);
+    return () => host.removeEventListener('click', onClick);
+  }, [linkRoute]);
   usePageChrome(hostRef, {
     page,
     t,

@@ -1,6 +1,6 @@
 import { open, story } from './peerlessTestHarness';
-import { expect, test } from 'bun:test';
-import { PptxDocument } from '../../../pptx/src/wasm/generated/pptx_wasm.js';
+import { expect, spyOn, test } from 'bun:test';
+import { PptxDocument, PptxRenderer } from '../../../pptx/src/wasm/engine';
 const { act, fireEvent, waitFor } = await import('@testing-library/react');
 
 test('the default editor shows agent proposals and opens their panel', async () => {
@@ -32,10 +32,21 @@ test('a read-only viewer has no proposals button', async () => {
 
 test('the proposals button stays hidden when the worker has no proposals support', async () => {
   const propose = Object.getOwnPropertyDescriptor(PptxDocument.prototype, 'proposeJson')!;
+  const strip = spyOn(PptxDocument.prototype, 'proposalSlideStripJson');
+  const preview = spyOn(PptxRenderer.prototype, 'layoutProposalDiffSlideByIdJson');
   Object.defineProperty(PptxDocument.prototype, 'proposeJson', { configurable: true, value: undefined });
   try {
     const value = await open();
     expect(value.view.getByTestId('pptx-present')).toBeDefined();
     expect(value.view.queryByTestId('pptx-proposals-button')).toBeNull();
-  } finally { Object.defineProperty(PptxDocument.prototype, 'proposeJson', propose); }
+    const access = await value.api.handleAsync();
+    expect(await access.proposalSlideStrip('unsupported')).toEqual([]);
+    await expect(access.layoutProposalDiffSlideById('unsupported', value.client.state.slides[0]!.id)).rejects.toThrow('Proposal slide previews are unavailable');
+    expect(strip).not.toHaveBeenCalled();
+    expect(preview).not.toHaveBeenCalled();
+  } finally {
+    Object.defineProperty(PptxDocument.prototype, 'proposeJson', propose);
+    strip.mockRestore();
+    preview.mockRestore();
+  }
 });

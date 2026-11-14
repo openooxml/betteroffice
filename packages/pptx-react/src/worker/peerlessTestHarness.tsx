@@ -35,16 +35,17 @@ let releaseReplies = () => {};
 let crashWorker = () => {};
 let suspensions = 0;
 const suspended = new Promise<void>(() => {});
+let openBudgetMs = 5000;
 
 function Suspend({ active }: { active: boolean }) {
   if (active) { suspensions++; throw suspended; }
   return null;
 }
 
-function bounded<T>(promise: Promise<T>): Promise<T> {
+function bounded<T>(promise: Promise<T>, ms = 5000): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   return Promise.race([promise, new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error('Command timed out')), 5000);
+    timer = setTimeout(() => reject(new Error('Command timed out')), ms);
   })]).finally(() => clearTimeout(timer));
 }
 
@@ -83,6 +84,7 @@ beforeEach(() => {
   });
   restorers.push(() => toolbarRect.mockRestore());
   commands = [];
+  openBudgetMs = 5000;
   holding = false; unknownNext = false; held = []; suspensions = 0;
 
   owner = undefined;
@@ -151,7 +153,7 @@ beforeEach(() => {
     const value = font.then((font) => createPptxWorkerSession(bytes, { readOnly: options.readOnly, observeChanges: options.observeChanges,
       activeSlideIndex: options.activeSlideIndex, collaboration: options.collaboration, clientId: options.clientId, initialUpdate: options.initialUpdate, worker: () => endpoint as unknown as Worker,
       fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font) }] })).then((session) => { actual = session; return session; });
-    owner = { ready: bounded(value.then((session) => session.ready)).then((value) => { client = value; return value; }),
+    owner = { ready: bounded(value.then((session) => session.ready), openBudgetMs).then((value) => { client = value; return value; }),
       get failure() { return actual?.failure; },
       subscribeFailure(listener) {
         let live = true;
@@ -184,7 +186,8 @@ afterAll(async () => {
   await GlobalRegistrator.unregister();
 });
 
-export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
+export async function open(options: Partial<PptxAsyncEditorProps> = {}, budget: { openMs?: number } = {}) {
+  openBudgetMs = budget.openMs ?? 5000;
   let api!: PptxAsyncEditorApi;
   const ready = mock((value: PptxAsyncEditorApi) => { api = value; });
   const bytes = await bounded(deck());
@@ -196,7 +199,7 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}) {
   </Suspense>;
   const mounted = render(ui());
   const view = { ...mounted, ...within(mounted.container) };
-  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), { timeout: Math.max(10_000, openBudgetMs) });
   const canvas = view.getByTestId('pptx-slide-canvas') as HTMLCanvasElement;
   const list = decodeCommandDisplayList(client.state.frame!);
   const box = list.primitives.find((primitive) => primitive.kind === 'textBox') as TextBoxPrimitive;

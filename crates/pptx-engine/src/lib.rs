@@ -10,6 +10,8 @@ use pptx_edit::structured;
 pub use pptx_edit::engine::{
     Document, EngineError, ErrorKind, Host, parse_pptx_json, parse_pptx_json_without_media, version,
 };
+#[cfg(feature = "raster")]
+pub use pptx_raster::{Background as PngBackground, RenderOptions as PngOptions};
 pub use renderer::Renderer;
 
 pub fn renderer_version() -> &'static str {

@@ -29,7 +29,7 @@ beforeAll(async () => {
 
 afterAll(restoreFinalizationRegistry);
 
-async function setup() {
+async function setup(bytes = source) {
   const pair = createInProcessPair();
   const calls: { method: string; args: unknown[] }[] = [];
   const held: (() => void)[] = [];
@@ -64,7 +64,7 @@ async function setup() {
   } }, { initEditorWasm: async () => module });
   let errors = 0;
   const faces = [{ family: 'Liberation Sans', bytes: font }];
-  const owner = createPresentationEditorSession(source, { wasm: module, clientId: 7201, fonts: faces,
+  const owner = createPresentationEditorSession(bytes, { wasm: module, clientId: 7201, fonts: faces,
     fallbackFonts: faces, onError: () => { errors += 1; } }, {
     ...pair.client,
     onError(listener) { crash = listener; return pair.client.onError(listener); },
@@ -450,4 +450,55 @@ test.skipIf(engineKind === 'native')('wasm handles unregister finalizers on disp
     .toEqual(expect.arrayContaining(['pptxdocument', 'pptxrenderer']));
   const counts = finalizationRegistrations.map(({ registry, live }) => `${registry}: ${live}`).join('\n');
   expect(finalizationRegistrations.reduce((total, { live }) => total + live, 0), counts).toBe(0);
+});
+
+test('worker editor access reads structural proposal strips and frames by ID', async () => {
+  const context = await setup();
+  try {
+    const { access, owner } = context;
+    const before = access.snapshot();
+    access.propose('agent', null, [
+      { type: 'insertSlide', ref: 'draft', afterSlideId: null },
+      { type: 'setSlideNotes', slideId: '@draft', text: 'Preview only' },
+    ]);
+    await owner.flush();
+    const proposal = access.listProposals()[0]!;
+    const strip = access.proposalSlideStrip(proposal.id);
+    expect(strip[0]).toMatchObject({ slideId: proposal.refs!.draft, status: 'inserted', liveIndex: null });
+    expect(access.layoutProposalDiffSlideById(proposal.id, strip[0]!.slideId).snapshot.slides[0]!.notes).toBe('Preview only');
+    expect(access.snapshot()).toEqual(before);
+    access.acceptProposal(proposal.id);
+    await equal(context);
+    access.undo();
+    await owner.flush();
+    expect(access.snapshot()).toEqual(before);
+  } finally { await context.owner.dispose(); }
+});
+
+test('in-thread paragraph proposals replay, preview and undo with the worker replica', async () => {
+  const bytes = await readFile(new URL('../../../../crates/pptx-edit/tests/fixtures/proposal-shapes.pptx', import.meta.url));
+  const context = await setup(bytes);
+  const { access, owner } = context;
+  try {
+    const before = access.snapshot();
+    const shape = before.slides[0]!.shapes[0]!;
+    access.propose('agent', null, [{ type: 'setStoryParagraphs', storyId: shape.textStories[0]!.id, paragraphs: [
+      { alignment: 'ctr', bullet: true, runs: [{ text: 'First', style: { bold: true } }] },
+      { bullet: false, runs: [{ text: 'Second', style: {} }] },
+    ] }]);
+    await owner.flush();
+    expect(access.snapshot()).toEqual(before);
+    expect(access.listProposals()).toHaveLength(1);
+    const proposal = access.listProposals()[0]!;
+    expect(JSON.parse(context.workerDoc.listProposalsJson())).toEqual([proposal]);
+    const diff = access.layoutProposalDiffSlideById(proposal.id, before.slides[0]!.id);
+    expect(diff.shapeChanges).toContainEqual({ shapeId: shape.id, kind: 'changed' });
+    expect(diff.textChanges.some(change => change.kind === 'deletion')).toBe(true);
+    access.acceptProposal(proposal.id);
+    await equal(context);
+    expect(access.story(shape.textStories[0]!.id).paragraphs).toHaveLength(2);
+    access.undo();
+    await equal(context);
+    expect(access.snapshot()).toEqual(before);
+  } finally { await owner.dispose(); }
 });

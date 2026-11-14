@@ -116,6 +116,8 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             position_px: None,
             horizontal_scale: _,
             kerning_min_pt: _,
+            ligatures: _,
+            contextual_alternates: _,
             imprint: None | Some(false),
             emboss: None | Some(false),
             text_shadow: None | Some(false),
@@ -135,6 +137,7 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             change_author: _,
             change_date: _,
             change_revision_id: _,
+            format_change: None,
             logical_order: _,
             bidi_level: _,
         } = fmt

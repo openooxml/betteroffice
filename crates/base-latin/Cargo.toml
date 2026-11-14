@@ -1,0 +1,19 @@
+[package]
+name = "betteroffice-base-latin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Built-in Latin, Greek, Cyrillic and symbol fallback fonts. Font data is licensed under OFL-1.1."
+include = ["src/**", "fonts/*.ttf", "Cargo.toml", "LICENSE-OFL", "LICENSE-OFL-NotoSans", "LICENSE-OFL-NotoSansSymbols2"]
+
+[package.metadata.fonts]
+license = "OFL-1.1"
+license-file = "LICENSE-OFL"
+
+[lib]
+name = "base_latin"
+
+[dev-dependencies]
+skrifa = "0.44"

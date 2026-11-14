@@ -88,6 +88,29 @@ test('d2c_projection_reads_only_the_active_paragraph_and_caret_page', () => {
   expect(reads).toEqual([{ story: 'body', paraIds: ['p'], view: 'accepted' }]);
 });
 
+test('d2c_projection_reads_the_active_paragraph_from_its_segments_when_the_engine_has_them', () => {
+  const source = input();
+  const reads: unknown[] = [];
+  Object.assign(source.engine, {
+    paragraphs() { throw new Error('whole body read'); },
+    storySegments() { throw new Error('whole story read'); },
+    paragraphUnit: () => 0,
+    paragraphSegments: (story: string, units: readonly number[]) => {
+      reads.push({ story, units });
+      return [[{ kind: 'text', text: 'é🙂a', attributes: {} },
+        { kind: 'pilcrow', paraId: 'p', properties: {}, attributes: {} }]];
+    },
+  });
+  Object.assign(source.engine.geometryReader, {
+    storySegments() { throw new Error('whole story projection'); },
+    positionOutline() { throw new Error('whole story outline'); },
+    paragraphIdCount: () => 1,
+  });
+  source.engine.proposalEngine.readParagraphs = () => { throw new Error('story read'); };
+  expect(projectCommandEchoContext(source)?.text).toBe('é🙂a');
+  expect(reads).toEqual([{ story: 'body', units: [0] }]);
+});
+
 test('projection echoes the caret line of a wrapped paragraph', () => {
   const line = (text: string, docStart: number, y: number): GlyphRunPrimitive => ({ kind: 'glyphRun', text, size: 12,
     fontId: 1, color: '#000', fallbackFont: '12px Arial', docStart, docEnd: docStart + text.length,

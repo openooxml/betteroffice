@@ -96,8 +96,7 @@ export async function fetchAsset(entry, sample, downloadFn, options = {}) {
   const { cacheDir = null, origin, maximum = 32 * 1024 * 1024 } = options;
   const url = new URL(entry?.url);
   if (
-    url.origin !== origin ||
-    !url.pathname.startsWith(`/${sample}/`) ||
+    !url.href.startsWith(`${origin}/${sample}/`) ||
     !Number.isInteger(entry.bytes) ||
     entry.bytes < 1 ||
     entry.bytes > maximum ||

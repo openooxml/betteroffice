@@ -636,7 +636,7 @@ pub(crate) fn revised_story(doc: &EditingDoc, stories: &BTreeSet<String>) -> Opt
     }
     let txn = doc.yrs_doc().transact();
     for story_id in stories {
-        let Ok(story) = story_ref(&txn, story_id) else {
+        let Some(story) = crate::story_text(&txn, story_id) else {
             continue;
         };
         let chunks = doc.chunk_snapshot(story_id, &story, &txn);
@@ -934,6 +934,10 @@ pub(crate) fn build_layout_map(
                         _ => NotePlacement::PageBottom,
                     };
                     let occurrence_id = format!("p{page_index}.{name}.{id}");
+                    let flow = match kind {
+                        LayoutNoteKind::Footnote => occurrence_id.clone(),
+                        LayoutNoteKind::Endnote => story.clone(),
+                    };
                     Occurrence {
                         record: StoryOccurrence {
                             id: occurrence_id.clone(),
@@ -953,7 +957,7 @@ pub(crate) fn build_layout_map(
                             },
                         },
                         root: story,
-                        flow: occurrence_id,
+                        flow,
                     }
                 }
             };

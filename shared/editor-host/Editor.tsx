@@ -56,6 +56,11 @@ export function legacyDocx() {
   return query.get("peerless") === "0";
 }
 
+function pageMirror(): "text" | undefined {
+  if (typeof location === "undefined") return undefined;
+  return new URLSearchParams(location.search).get("pageMirror") === "text" ? "text" : undefined;
+}
+
 function rulerUnit(): "inch" | "cm" {
   if (typeof location === "undefined") return "inch";
   return new URLSearchParams(location.search).get("rulerUnit") === "cm" ? "cm" : "inch";
@@ -479,6 +484,7 @@ export default function Editor({
         i18n={i18n?.docx}
         ref={docx}
         {...(legacyDocx() ? { legacySyncApi: true as const } : { legacySyncApi: false as const })}
+        unbuiltPageMirror={typeof location !== "undefined" && new URLSearchParams(location.search).get("unbuiltPageMirror") === "off" ? "off" : undefined}
         trackedChanges={TRACKED_CHANGES}
         mode={mode}
         readOnly={readOnly}
@@ -496,6 +502,7 @@ export default function Editor({
         showToolbar
         showRuler
         rulerUnit={rulerUnit()}
+        pageMirror={pageMirror()}
         showZoomControl
         colorMode={colorMode()}
         onPrint={() => undefined}

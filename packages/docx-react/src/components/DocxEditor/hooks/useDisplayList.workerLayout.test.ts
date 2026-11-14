@@ -99,6 +99,17 @@ class FakeWorker {
     if (!('id' in message)) throw new Error('Expected a worker request');
     return message;
   }
+  requestOf(type: DocxEngineWorkerRequest['type'], occurrence = 0): DocxEngineWorkerRequest {
+    const matches = this.posted.filter(
+      (message): message is DocxEngineWorkerRequest => 'id' in message && message.type === type
+    );
+    const message = matches[occurrence];
+    if (!message) {
+      const sequence = this.posted.map((entry) => ('type' in entry ? entry.type : 'module')).join(', ');
+      throw new Error(`No ${type} request #${occurrence}; posted: ${sequence}`);
+    }
+    return message;
+  }
   reply(response: DocxEngineWorkerResponse): void {
     this.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>);
   }
@@ -1746,7 +1757,7 @@ test('a provisional layout paints first and settles only once the full layout fo
     await act(async () => {
       void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
     });
-    worker.reply({ id: worker.requestAt(1).id, ok: true });
+    worker.reply({ id: worker.requestOf('attachCanvases').id, ok: true });
     await waitFor(() => expect(worker.posted).toHaveLength(3));
     expect(worker.posted.map((request) => request.type)).toEqual([
       'bootstrap',
@@ -1783,7 +1794,9 @@ test('a provisional layout paints first and settles only once the full layout fo
   }
 });
 
-test.each([false, true])('a bootstrap completion uses the page-build base with worker-open=%s', async (workerOpen) => {
+test.each([
+  [false, 'surfaces'], [true, 'surfaces'], [false, 'surface wait'], [true, 'surface wait'],
+] as const)('a bootstrap completion uses the page-build base with worker-open=%s when its %s comes first', async (workerOpen, first) => {
   let request = JSON.stringify({
     ...JSON.parse(REQUEST),
     regions: { sections: [{ sectionId: 'main', properties: {
@@ -1805,6 +1818,18 @@ test.each([false, true])('a bootstrap completion uses the page-build base with w
   native.reset_frame_base();
   const prefixFrame = native.build_display_list_frame('{}', 0);
   const prefixEpoch = decodeFrameDelta(prefixFrame).frameEpoch;
+  // A plain wrapper rather than a spy: testing-library treats a mocked
+  // setTimeout as fake timers and would try to advance them.
+  const surfaceWaits: Array<() => void> = [];
+  const schedule = globalThis.setTimeout;
+  globalThis.setTimeout = ((...input: Parameters<typeof setTimeout>) => {
+    const [callback, delay, ...args] = input;
+    if (delay === 250 && typeof callback === 'function') {
+      surfaceWaits.push(() => callback(...args));
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }
+    return schedule(callback, delay, ...args);
+  }) as typeof setTimeout;
   const hook = renderHook(
     ({ layout, source }) => useRustDisplayList(
       layout, undefined, undefined, undefined, source, undefined, undefined, undefined, workerOpen
@@ -1833,16 +1858,19 @@ test.each([false, true])('a bootstrap completion uses the page-build base with w
       caret: { frameEpoch: visibleEpoch, caretRect: null }, selection: null, layoutRevision: 1,
     }));
     expect(hook.result.current.frame!.frameEpoch).toBe(visibleEpoch);
+    if (first === 'surface wait') {
+      expect(surfaceWaits).toHaveLength(1);
+      await act(async () => surfaceWaits[0]!());
+      await waitFor(() => expect(worker.requestOf('completeLayout')).toMatchObject({ expectedFrameEpoch: visibleEpoch }));
+    }
     await act(async () => {
       const attaching = hook.result.current.attachOffscreenCanvases(
         [], [], 1, 1, { color: '#000', width: 2 }
       );
-      worker.reply({ id: worker.requestAt(2).id, ok: true });
+      worker.reply({ id: worker.requestOf('attachCanvases').id, ok: true });
       expect(await attaching).toBe(true);
     });
-    await waitFor(() => expect(worker.posted[3]).toMatchObject({
-      type: 'completeLayout', expectedFrameEpoch: visibleEpoch,
-    }));
+    await waitFor(() => expect(worker.requestOf('completeLayout')).toMatchObject({ expectedFrameEpoch: visibleEpoch }));
     const completeJson = native.layout_document_with_regions_retained_json(request);
     native.set_windowed_incremental_builds(false);
     const completedFrame = native.build_display_list_frame('{}', visibleEpoch);
@@ -1851,7 +1879,7 @@ test.each([false, true])('a bootstrap completion uses the page-build base with w
     const fullFrame = native.build_display_list_frame('{}', 0);
     const fullPages = applyFrameDelta(null, decodeFrameDelta(fullFrame)).displayList.pages;
     worker.reply({
-      id: worker.requestAt(3).id, ok: true, frame: completedFrame.slice().buffer,
+      id: worker.requestOf('completeLayout').id, ok: true, frame: completedFrame.slice().buffer,
       caret: { frameEpoch: completedDelta.frameEpoch, caretRect: null }, selection: null,
       layoutRevision: 1, layoutJson: completeJson,
     });
@@ -1863,6 +1891,7 @@ test.each([false, true])('a bootstrap completion uses the page-build base with w
     expect(worker.posted.filter((entry) => entry.type === 'buildFrame')).toEqual([]);
   } finally {
     hook.unmount();
+    globalThis.setTimeout = schedule;
     native.free();
   }
 });
@@ -1891,7 +1920,7 @@ test.each(['delta', 'full'])('a completion %s handles a host base adopted while 
       const attaching = hook.result.current.attachOffscreenCanvases(
         [], [], 1, 1, { color: '#000', width: 2 }
       );
-      worker.reply({ id: worker.requestAt(1).id, ok: true });
+      worker.reply({ id: worker.requestOf('attachCanvases').id, ok: true });
       expect(await attaching).toBe(true);
     });
     const completionRequest = worker.requestAt(2);
@@ -1969,7 +1998,7 @@ test.each([false, true])('layout-complete signal waits for the adopted final fra
     await act(async () => {
       void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
     });
-    worker.reply({ id: worker.requestAt(1).id, ok: true });
+    worker.reply({ id: worker.requestOf('attachCanvases').id, ok: true });
     await waitFor(() => expect(worker.posted).toHaveLength(3));
     expect(result.current.pendingCompletion).toBeNull();
     expect(result.current.layoutCompleteSession).toBeNull();
@@ -2280,7 +2309,7 @@ test('with worker open, a provisional layout names its engine until the rest is 
     await act(async () => {
       void result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
     });
-    worker.reply({ id: worker.requestAt(1).id, ok: true });
+    worker.reply({ id: worker.requestOf('attachCanvases').id, ok: true });
     await waitFor(() => expect(worker.posted).toHaveLength(3));
     expect(worker.posted[2]).toMatchObject({ type: 'completeLayout' });
     expect(result.current.pendingCompletion).toBeNull();
@@ -2337,7 +2366,7 @@ test('an older surface timeout cannot supersede the newer provisional completion
       const attaching = hook.result.current.attachOffscreenCanvases(
         [], [], 1, 1, { color: '#000', width: 2 }
       );
-      worker.reply({ id: worker.requestAt(2).id, ok: true });
+      worker.reply({ id: worker.requestOf('attachCanvases').id, ok: true });
       expect(await attaching).toBe(true);
     });
     expect(worker.posted[3]).toMatchObject({
@@ -2547,7 +2576,7 @@ test('a rejected completion after reload preserves the new session frame, querie
     await waitFor(() => expect(result.current.frame).not.toBeNull());
     await act(async () => {
       const attaching = result.current.attachOffscreenCanvases([], [], 1, 1, { color: '#000', width: 2 });
-      oldWorker.reply({ id: oldWorker.requestAt(-1).id, ok: true });
+      oldWorker.reply({ id: oldWorker.requestOf('attachCanvases').id, ok: true });
       await attaching;
     });
     await waitFor(() => expect(deferred.reject).not.toBeNull());

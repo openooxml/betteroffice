@@ -405,7 +405,41 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
     ])
 }
 
+/// The sides of a `cellMargins` value in twips, `[top, right, bottom, left]`,
+/// with `start`/`end` read as left/right (right/left in a `bidi` table).
+pub(crate) fn cell_margin_sides(margins: Option<&Value>, bidi: bool) -> [Option<f64>; 4] {
+    let margins = margins.filter(|margins| !margins.is_null());
+    let (logical_left, logical_right) = if bidi {
+        ("end", "start")
+    } else {
+        ("start", "end")
+    };
+    let side = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            let side = field(margins, key);
+            field(side, "value")
+                .or(side)
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+        })
+    };
+    [
+        side(&["top"]),
+        side(&["right", logical_right]),
+        side(&["bottom"]),
+        side(&["left", logical_left]),
+    ]
+}
+
 impl SourceMetadata {
+    pub(crate) fn table_cell_margins(
+        &self,
+        style_id: Option<&str>,
+        bidi: bool,
+    ) -> [Option<f64>; 4] {
+        self.styles.table_cell_margins(style_id, bidi)
+    }
+
     pub(crate) fn plain_patch_style_supported(
         &self,
         story: &str,
@@ -541,9 +575,10 @@ impl SourceMetadata {
     }
 
     pub(crate) fn prepare_patch_table_styles(&self, story: &str, source: &SourceIndex) {
-        if crate::structured::source::cell_table(story).is_some()
-            && self.structure.patch_table_styles.is_empty()
-        {
+        let in_cell = std::iter::once(story)
+            .chain(story.match_indices(':').map(|(at, _)| &story[..at]))
+            .any(|prefix| crate::structured::source::cell_table(prefix).is_some());
+        if in_cell && self.structure.patch_table_styles.is_empty() {
             self.peer_patch_table_styles
                 .get_or_init(|| source.patch_table_styles().clone());
         }
@@ -1416,13 +1451,92 @@ pub(crate) fn any_from_value(value: Value) -> Result<Any, String> {
     }
 }
 
-fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
-    let mut entries = values
-        .into_iter()
-        .map(|(key, value)| Ok((Arc::<str>::from(key), any_from_value(value)?)))
-        .collect::<Result<Vec<_>, String>>()?;
-    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    Ok(entries.into_iter().collect())
+/// One seed's attribute and embed keys and values, so equal ones share an allocation.
+#[derive(Default)]
+pub(crate) struct SeedAttrs {
+    strings: HashSet<Arc<str>>,
+    composites: HashMap<String, Any>,
+    #[cfg(test)]
+    unshared: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static UNSHARED_SEED_ATTRS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl SeedAttrs {
+    #[cfg(not(test))]
+    pub(crate) fn for_seed() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_seed() -> Self {
+        Self {
+            unshared: UNSHARED_SEED_ATTRS.with(std::cell::Cell::get),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(not(test))]
+    fn unshared(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn unshared(&self) -> bool {
+        self.unshared
+    }
+
+    pub(crate) fn text(&mut self, value: String) -> Arc<str> {
+        if self.unshared() {
+            return Arc::from(value);
+        }
+        if let Some(shared) = self.strings.get(value.as_str()) {
+            return Arc::clone(shared);
+        }
+        let shared = Arc::<str>::from(value);
+        self.strings.insert(Arc::clone(&shared));
+        shared
+    }
+
+    fn value(&mut self, value: Value) -> Result<Any, String> {
+        if self.unshared() {
+            return any_from_value(value);
+        }
+        match value {
+            Value::String(value) => Ok(Any::String(self.text(value))),
+            Value::Array(_) | Value::Object(_) => {
+                // JSON text keeps 1, 1.0, -0.0, "1" and true apart.
+                let text = value.to_string();
+                if let Some(shared) = self.composites.get(&text) {
+                    return Ok(shared.clone());
+                }
+                let shared = any_from_value(value)?;
+                self.composites.insert(text, shared.clone());
+                Ok(shared)
+            }
+            value => any_from_value(value),
+        }
+    }
+
+    fn attrs(&mut self, values: JsonObject) -> Result<Attrs, String> {
+        let mut entries = values
+            .into_iter()
+            .map(|(key, value)| Ok((self.text(key), self.value(value)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        Ok(entries.into_iter().collect())
+    }
+
+    /// An embed's payload; its keys are shared when the embed is written.
+    fn payload(&mut self, values: JsonObject) -> Result<Vec<(String, Any)>, String> {
+        values
+            .into_iter()
+            .map(|(key, value)| Ok((key, self.value(value)?)))
+            .collect()
+    }
 }
 
 pub(crate) fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
@@ -1625,6 +1739,75 @@ pub(crate) fn package_styles(
 }
 
 impl StyleResolver {
+    /// Cell margins in twips, `[top, right, bottom, left]`, that the document's
+    /// table styles give a table naming `style_id`: that style's
+    /// `w:tblCellMar`, else the default table style's, as seeding resolves them.
+    pub(crate) fn table_cell_margins(
+        &self,
+        style_id: Option<&str>,
+        bidi: bool,
+    ) -> [Option<f64>; 4] {
+        let default_style = self.default_style("table");
+        let table_style = style_id
+            .filter(|id| !id.is_empty())
+            .and_then(|id| self.style(id))
+            .or(default_style);
+        let margins = field(field(table_style, "tblPr"), "cellMargins")
+            .filter(|margins| !margins.is_null())
+            .or_else(|| field(field(default_style, "tblPr"), "cellMargins"));
+        cell_margin_sides(margins, bidi)
+    }
+
+    pub(crate) fn render_paragraph(&self, paragraph: &Value) -> (JsonObject, Option<Arc<Value>>) {
+        (
+            paragraph_attrs(paragraph, self, &[], &[], None),
+            paragraph_style_formatting(paragraph, self, None),
+        )
+    }
+
+    pub(crate) fn render_shape_run_attrs(
+        &self,
+        run: &Value,
+        paragraph_formatting: Option<&Value>,
+    ) -> JsonObject {
+        let direct = field(Some(run), "formatting");
+        let character = self.run_style_own(string(field(direct, "styleId")));
+        let merged = self.run_formatting(paragraph_formatting, direct);
+        let mut attrs = marks_to_attrs(&run_marks_from_formatting(
+            run,
+            paragraph_formatting,
+            self,
+            merged.as_ref(),
+        ));
+        for key in ["boldCs", "italicCs"] {
+            if let Some(value) = field(merged.as_ref(), key).and_then(Value::as_bool) {
+                attrs.insert(key.to_owned(), Value::Bool(value));
+            }
+        }
+        if let Some(value) = field(merged.as_ref(), "cs").and_then(Value::as_bool) {
+            attrs.insert("complexScript".to_owned(), Value::Bool(value));
+        }
+        if let Some(hint) = field(field(merged.as_ref(), "fontFamily"), "hint")
+            && let Some(fonts) = attrs.get_mut("fontFamily").and_then(Value::as_object_mut)
+        {
+            fonts.insert("hint".to_owned(), hint.clone());
+        }
+        if let Some(language) = field(merged.as_ref(), "language").and_then(Value::as_object) {
+            let own_language: serde_json::Map<String, Value> = language
+                .iter()
+                .filter(|(slot, _)| {
+                    field(field(direct, "language"), slot).is_some()
+                        || field(field(character, "language"), slot).is_some()
+                })
+                .map(|(slot, value)| (slot.clone(), value.clone()))
+                .collect();
+            if !own_language.is_empty() {
+                attrs.insert("language".to_owned(), Value::Object(own_language));
+            }
+        }
+        attrs
+    }
+
     /// Reads paragraph and character inheritance from package parts.
     pub fn from_parts(parts: &[(String, Vec<u8>)]) -> Result<Self, String> {
         let (_, definitions) = package_styles(parts)?;
@@ -1695,6 +1878,21 @@ impl StyleResolver {
         resolver.default_table = resolver.find_default("table");
         resolver.default_character = resolver.find_default("character");
         resolver
+    }
+
+    pub(crate) fn for_shape_styles(&self) -> Self {
+        let mut styles = self.clone();
+        styles.styles.retain(|_, style| {
+            matches!(
+                style.get("type").and_then(Value::as_str),
+                Some("paragraph" | "character")
+            )
+        });
+        styles.default_table = None;
+        styles.table_paragraph_formatting = None;
+        styles.table_run_formatting = None;
+        styles.memo = StyleMemo::default();
+        styles
     }
 
     fn find_default(&self, style_type: &str) -> Option<String> {
@@ -2062,6 +2260,21 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
             ]),
         ));
     }
+    if ["ligatures", "contextualAlternates"]
+        .iter()
+        .any(|key| formatting.contains_key(*key))
+    {
+        marks.push(mark(
+            "typography",
+            ordered_object([
+                ("ligatures", nullish(formatting.get("ligatures"))),
+                (
+                    "contextualAlternates",
+                    nullish(formatting.get("contextualAlternates")),
+                ),
+            ]),
+        ));
+    }
     if let Some(value) = string(formatting.get("emphasisMark")).filter(|value| *value != "none") {
         marks.push(mark(
             "emphasisMark",
@@ -2099,7 +2312,9 @@ pub(crate) fn mark_run_attrs(defaults: &Any) -> Vec<(String, Any)> {
 }
 
 /// Run attributes held as one field of a mark: (attribute, field, `defaultTextFormatting` key).
-const MARK_FIELDS: [(&str, &str, &str); 10] = [
+const MARK_FIELDS: [(&str, &str, &str); 12] = [
+    ("typography", "ligatures", "ligatures"),
+    ("typography", "contextualAlternates", "contextualAlternates"),
     ("fontSize", "size", "fontSize"),
     ("fontSize", "sizeCs", "fontSizeCs"),
     ("characterSpacing", "spacing", "spacing"),
@@ -2163,6 +2378,10 @@ pub(crate) fn mark_run_formatting<'a>(
             }
             "strike" => ("strike", Any::Bool(true)),
             "highlight" => match value {
+                Any::Map(_) => match field("color") {
+                    Some(color) => ("highlight", color),
+                    None => continue,
+                },
                 Any::String(color) => match color.strip_prefix('#') {
                     Some(rgb) => {
                         let fill = HashMap::from([("rgb".to_owned(), Any::from(rgb))]);
@@ -2216,6 +2435,15 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
             attrs.insert(mark.name.clone(), Value::Bool(true));
         } else if mark.name == "snapToGrid" {
             attrs.insert("snapToGrid".to_owned(), Value::Bool(false));
+        } else if mark.name == crate::format::RPR_CHANGE {
+            attrs.insert(
+                mark.name.clone(),
+                mark.attrs
+                    .iter()
+                    .find(|(key, _)| key == "changes")
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or(Value::Null),
+            );
         } else if mark.name == "highlight" {
             attrs.insert(
                 "highlight".to_owned(),
@@ -2296,11 +2524,20 @@ fn embed_unit(kind: &str, payload: JsonObject, marks: &[Mark], pm_size: u32) -> 
 }
 
 fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
+    let merged = styles.run_formatting(style_formatting, field(Some(run), "formatting"));
+    run_marks_from_formatting(run, style_formatting, styles, merged.as_ref())
+}
+
+fn run_marks_from_formatting(
+    run: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    merged: Option<&Value>,
+) -> Vec<Mark> {
     let formatting = field(Some(run), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let run_style = styles.run_style_own(style_id);
-    let merged = styles.run_formatting(style_formatting, formatting);
-    let mut marks = formatting_to_marks(merged.as_ref());
+    let mut marks = formatting_to_marks(merged);
     let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
         || style_id
             .and_then(|id| styles.style(id))
@@ -2316,6 +2553,28 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
                     .push(("inheritedHyperlink".to_owned(), Value::Bool(true)));
             }
         }
+    }
+    if let Some(Value::Array(changes)) = field(Some(run), "propertyChanges") {
+        let changes: Vec<_> = changes
+            .iter()
+            .map(|change| {
+                let mut change = change.clone();
+                let previous =
+                    styles.run_formatting(style_formatting, change.get("previousFormatting"));
+                let attrs = marks_to_attrs(&formatting_to_marks(previous.as_ref()));
+                if let Some(change) = change.as_object_mut() {
+                    change.insert(
+                        "previousAttributes".to_owned(),
+                        serde_json::to_value(attrs).unwrap(),
+                    );
+                }
+                change
+            })
+            .collect();
+        marks.push(mark(
+            crate::format::RPR_CHANGE,
+            ordered_object([("changes", Value::Array(changes))]),
+        ));
     }
     marks
 }
@@ -6260,6 +6519,7 @@ fn units_to_raw_ops(
     units: Vec<InlineUnit>,
     referenced_fonts: &mut BTreeSet<String>,
     mut script_fonts: Option<&mut ScriptFontUse>,
+    shared: &mut SeedAttrs,
 ) -> Result<Vec<RawOp>, String> {
     let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
     let mut index = 0u32;
@@ -6268,7 +6528,8 @@ fn units_to_raw_ops(
     let flush = |ops: &mut Vec<RawOp>,
                  index: &mut u32,
                  text: &mut String,
-                 attrs: &mut JsonObject|
+                 attrs: &mut JsonObject,
+                 shared: &mut SeedAttrs|
      -> Result<(), String> {
         if text.is_empty() {
             return Ok(());
@@ -6278,7 +6539,7 @@ fn units_to_raw_ops(
         ops.push(RawOp::Insert {
             index: *index,
             text: inserted,
-            attrs: yrs_attrs(std::mem::take(attrs))?,
+            attrs: shared.attrs(std::mem::take(attrs))?,
         });
         *index += len;
         Ok(())
@@ -6306,7 +6567,7 @@ fn units_to_raw_ops(
                 if text.is_empty() {
                     attrs = unit.attrs;
                 } else if unit.attrs != attrs {
-                    flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+                    flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
                     attrs = unit.attrs;
                 }
                 text.push_str(&value);
@@ -6315,24 +6576,33 @@ fn units_to_raw_ops(
                 kind,
                 payload: values,
             } => {
-                flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+                flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
                 ops.push(RawOp::InsertEmbed {
                     index,
                     kind,
-                    payload: payload(values)?,
-                    attrs: yrs_attrs(unit.attrs)?,
+                    payload: shared.payload(values)?,
+                    attrs: shared.attrs(unit.attrs)?,
                 });
                 index += 1;
             }
         }
     }
-    flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+    flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
     Ok(ops)
 }
 
+#[cfg(test)]
 fn seed_plan(
     plan: StoryPlan,
     script_fonts: Option<&mut ScriptFontUse>,
+) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
+    seed_plan_sharing(plan, script_fonts, &mut SeedAttrs::default())
+}
+
+fn seed_plan_sharing(
+    plan: StoryPlan,
+    script_fonts: Option<&mut ScriptFontUse>,
+    shared: &mut SeedAttrs,
 ) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
     let StoryPlan {
         story_id,
@@ -6341,7 +6611,7 @@ fn seed_plan(
         ..
     } = plan;
     let mut referenced_fonts = BTreeSet::new();
-    let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts)?;
+    let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts, shared)?;
     if !comment_coverage.is_empty() {
         ops.extend(
             comment_coverage
@@ -6452,6 +6722,7 @@ type SourceRoot = (String, SourceStoryKind, Option<String>);
 /// need.
 struct LoweredDocx {
     context: LoweringContext,
+    shape_styles: Option<StyleResolver>,
     referenced_fonts: BTreeSet<String>,
     /// `None` for a seed whose caller does not report unused script fonts.
     script_fonts: Option<ScriptFontUse>,
@@ -6582,6 +6853,7 @@ fn lower_docx_with(
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
     let mut read = read_source(package, &parsed, parts);
     let (mut context, roots) = lower_package(package, source_json);
+    let shape_styles = crate::shape_styles::for_package(package, &context.styles);
     drop(parsed);
     read.provenance = std::mem::take(&mut context.provenance);
     read.seeded_comments = seeded_comments(&context.plans);
@@ -6592,6 +6864,7 @@ fn lower_docx_with(
     }
     Ok(LoweredDocx {
         context,
+        shape_styles,
         referenced_fonts,
         script_fonts: Some(script_fonts),
         roots,
@@ -6609,7 +6882,7 @@ pub(crate) fn seed_parsed_docx_with(
 ) -> Result<Vec<String>, String> {
     let mut lowered = lower_docx(envelope, parts)?;
     lowered.script_fonts = None;
-    seed_lowered(document, lowered, None, SeedMedia::AsParsed).map(|fonts| fonts.referenced)
+    seed_lowered(document, lowered, None, SeedMedia::AsParsed, false).map(|fonts| fonts.referenced)
 }
 
 /// The fonts a seeded document references, and those of them it names only
@@ -6640,9 +6913,11 @@ fn seed_lowered(
     lowered: LoweredDocx,
     index: Option<SourceIndex>,
     media: SeedMedia<'_>,
+    seed_shape_styles: bool,
 ) -> Result<SeededFonts, String> {
     let LoweredDocx {
         context,
+        shape_styles,
         mut referenced_fonts,
         mut script_fonts,
         mut read,
@@ -6671,8 +6946,10 @@ fn seed_lowered(
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
     let mut deletes = Vec::with_capacity(context.plans.len());
+    let mut shared = SeedAttrs::for_seed();
     for plan in context.plans {
-        let (story_id, mut ops, fonts) = seed_plan(plan, script_fonts.as_mut())?;
+        let (story_id, mut ops, fonts) =
+            seed_plan_sharing(plan, script_fonts.as_mut(), &mut shared)?;
         deletes.push((story_id.clone(), vec![ops.remove(0)]));
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
@@ -6695,6 +6972,9 @@ fn seed_lowered(
     document
         .apply_raw_story_batches(deletes, &ctx)
         .map_err(|error| error.to_string())?;
+    if let Some(styles) = shape_styles.as_ref().filter(|_| seed_shape_styles) {
+        crate::shape_styles::seed(document, styles);
+    }
     let ranges = document
         .apply_raw_seed_batches(batches, &ctx)
         .map_err(|error| error.to_string())?;
@@ -6878,8 +7158,9 @@ pub(crate) fn seed_blocks(
     .map_err(|error| error.to_string())?;
     let mut provenance = std::mem::take(&mut context.provenance);
     let mut batches = Vec::with_capacity(context.plans.len());
+    let mut shared = SeedAttrs::for_seed();
     for plan in context.plans {
-        let (story_id, ops, _) = seed_plan(plan, None)?;
+        let (story_id, ops, _) = seed_plan_sharing(plan, None, &mut shared)?;
         batches.push((story_id, ops));
     }
     let ranges = doc
@@ -7158,7 +7439,7 @@ pub(crate) fn seed_parsed_docx(
         &lowered.relationships,
         std::mem::take(&mut lowered.context.paragraphs),
     );
-    seed_lowered(document, lowered, Some(index), media)
+    seed_lowered(document, lowered, Some(index), media, true)
 }
 
 /// Opens a DOCX: seeds every story and starts a new opening with a fresh
@@ -7245,7 +7526,7 @@ pub(crate) fn seed_preview_envelope(
 ) -> Result<SeededFonts, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
-    let fonts = seed_lowered(document, lowered, None, SeedMedia::AsParsed)?;
+    let fonts = seed_lowered(document, lowered, None, SeedMedia::AsParsed, true)?;
     document.install_media(media);
     Ok(fonts)
 }
@@ -7683,7 +7964,7 @@ mod tests {
 
         let split = EditingDoc::new(1);
         let lowered = lower_docx(parse_docx_for_edit(bytes).unwrap(), None).unwrap();
-        seed_lowered(&split, lowered, None, SeedMedia::AsParsed).unwrap();
+        seed_lowered(&split, lowered, None, SeedMedia::AsParsed, false).unwrap();
         assert_eq!(
             split.encode_state_as_update_v1(),
             original.encode_state_as_update_v1()
@@ -9829,6 +10110,229 @@ mod tests {
 
     use super::*;
 
+    fn seeded_sharing(bytes: &[u8], sharing: bool, generation: Option<&str>) -> EditingDoc {
+        let doc = EditingDoc::new(1);
+        UNSHARED_SEED_ATTRS.with(|unshared| unshared.set(!sharing));
+        let seeded = match generation {
+            Some(generation) => seed_from_docx_with_generation(&doc, bytes, generation),
+            None => seed_from_docx(&doc, bytes),
+        };
+        UNSHARED_SEED_ATTRS.with(|unshared| unshared.set(false));
+        seeded.unwrap();
+        doc
+    }
+
+    const GENERATION: &str = "shared-attributes";
+
+    fn seed_bytes(bytes: &[u8], sharing: bool, generation: Option<&str>) -> Vec<u8> {
+        seeded_sharing(bytes, sharing, generation).encode_state_as_update_v1()
+    }
+
+    fn body_attributes(doc: &EditingDoc, text: &str) -> Attrs {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .find_map(|op| match op.insert {
+                Out::Any(Any::String(chunk)) if chunk.contains(text) => {
+                    Some(op.attributes.map(|attrs| *attrs).unwrap_or_default())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no body text holds {text:?}"))
+    }
+
+    fn font_family(doc: &EditingDoc, text: &str) -> Arc<HashMap<String, Any>> {
+        match body_attributes(doc, text).remove("fontFamily") {
+            Some(Any::Map(font)) => font,
+            other => panic!("{text}: fontFamily is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seeded_bytes_match_with_and_without_shared_attributes() {
+        let formatted = concat!(
+            r#"<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/><w:color w:val="C00000"/>"#,
+            r#"<w:sz w:val="28"/><w:highlight w:val="yellow"/><w:u w:val="single" w:color="00B050"/>"#,
+            r#"<w:rPrChange w:id="8" w:author="A" w:date="2024-01-01T00:00:00Z"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>"#,
+        );
+        let other = r#"<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:i/><w:color w:val="0000FF"/></w:rPr>"#;
+        let spaced =
+            r#"<w:pPr><w:spacing w:before="120" w:after="240"/><w:ind w:left="720"/></w:pPr>"#;
+        let body = [
+            fixture::para(
+                "00000001",
+                &format!(
+                    r#"{spaced}<w:r>{formatted}<w:t>First</w:t></w:r>{plain}<w:r>{formatted}<w:t>Second</w:t></w:r><w:r>{other}<w:t>Other</w:t></w:r><w:r>{formatted}<w:br/></w:r>{image}"#,
+                    plain = fixture::run(" plain "),
+                    image = fixture::image("rIdImage", "Picture"),
+                ),
+            ),
+            fixture::para(
+                "00000002",
+                &format!(
+                    r#"{spaced}<w:r>{formatted}<w:t>Third</w:t></w:r><w:r>{other}<w:t>Again</w:t></w:r>"#
+                ),
+            ),
+            fixture::para(
+                "00000003",
+                &format!(
+                    r#"<w:ins w:id="7" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>{formatted}<w:t>Inserted</w:t></w:r></w:ins>"#
+                ),
+            ),
+        ]
+        .concat();
+        let custom = fixture::Package::new(&body)
+            .rel("rIdImage", "image", "media/image1.png")
+            .bytes();
+        for bytes in [custom.clone(), fixture::principal_docx()] {
+            assert_eq!(
+                seed_bytes(&bytes, true, Some(GENERATION)),
+                seed_bytes(&bytes, false, Some(GENERATION)),
+                "sharing attribute allocations changed the seeded bytes"
+            );
+        }
+        assert_ne!(
+            seed_bytes(&custom, false, None),
+            seed_bytes(&custom, false, None),
+            "fresh generations no longer make independent seeds differ"
+        );
+        assert_eq!(
+            seed_bytes(&custom, false, Some(GENERATION)),
+            seed_bytes(&custom, false, Some(GENERATION)),
+            "a fixed generation does not make unshared seeds identical"
+        );
+        let shared = seeded_sharing(&custom, true, Some(GENERATION));
+        let shared_first = font_family(&shared, "First");
+        let shared_third = font_family(&shared, "Third");
+        assert!(Arc::ptr_eq(&shared_first, &shared_third));
+        let unshared = seeded_sharing(&custom, false, Some(GENERATION));
+        let unshared_first = font_family(&unshared, "First");
+        let unshared_third = font_family(&unshared, "Third");
+        assert_eq!(unshared_first, unshared_third);
+        assert!(!Arc::ptr_eq(&unshared_first, &unshared_third));
+    }
+
+    /// The body paragraph marks' `key` entries: the stored key's address and its map value.
+    fn mark_maps(doc: &EditingDoc, key: &str) -> Vec<(usize, Arc<HashMap<String, Any>>)> {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .filter_map(|op| match op.insert {
+                Out::YMap(mark) if crate::is_pilcrow(&mark, &txn) => {
+                    let entry = YrsMap::iter(&mark, &txn)
+                        .find(|(name, _)| *name == key)
+                        .map(|(name, value)| (name.as_ptr() as usize, value));
+                    match entry {
+                        Some((address, Out::Any(Any::Map(value)))) => Some((address, value)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every entry of each body paragraph mark.
+    fn mark_entries(doc: &EditingDoc) -> Vec<HashMap<String, Any>> {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .filter_map(|op| match op.insert {
+                Out::YMap(mark) if crate::is_pilcrow(&mark, &txn) => Some(
+                    YrsMap::iter(&mark, &txn)
+                        .map(|(key, value)| match value {
+                            Out::Any(value) => (key.to_owned(), value),
+                            _ => panic!("{key}: the mark holds a shared type"),
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn seeded_bytes_match_with_and_without_shared_embed_values() {
+        let styles = format!(
+            r#"<w:styles {}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Shared"><w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:b/></w:rPr></w:style></w:styles>"#,
+            fixture::namespaces()
+        );
+        let body = ["00000001", "00000002", "00000003"]
+            .map(|id| {
+                fixture::para(
+                    id,
+                    r#"<w:pPr><w:pStyle w:val="Shared"/><w:spacing w:before="120" w:after="240"/></w:pPr><w:r><w:t>Styled</w:t></w:r>"#,
+                )
+            })
+            .concat();
+        let custom = fixture::Package::new(&body).styles(&styles).bytes();
+        for bytes in [custom.clone(), fixture::principal_docx()] {
+            assert_eq!(
+                seed_bytes(&bytes, true, Some(GENERATION)),
+                seed_bytes(&bytes, false, Some(GENERATION)),
+                "sharing embed payload allocations changed the seeded bytes"
+            );
+        }
+        let shared_doc = seeded_sharing(&custom, true, Some(GENERATION));
+        let shared = mark_maps(&shared_doc, "_originalFormatting");
+        assert_eq!(shared.len(), 3);
+        for (address, value) in &shared[1..] {
+            assert_eq!(*address, shared[0].0);
+            assert!(Arc::ptr_eq(value, &shared[0].1));
+        }
+        let unshared_doc = seeded_sharing(&custom, false, Some(GENERATION));
+        let unshared = mark_maps(&unshared_doc, "_originalFormatting");
+        assert_eq!(unshared.len(), 3);
+        for (address, value) in &unshared[1..] {
+            assert_ne!(*address, unshared[0].0);
+            assert_eq!(value, &unshared[0].1);
+            assert!(!Arc::ptr_eq(value, &unshared[0].1));
+        }
+        let lowered = lower_docx(parse_docx_for_edit(&custom).unwrap(), None).unwrap();
+        let expected: Vec<HashMap<String, Any>> = lowered
+            .context
+            .plans
+            .iter()
+            .filter(|plan| plan.story_id == "body")
+            .flat_map(|plan| &plan.units)
+            .filter_map(|unit| match &unit.content {
+                UnitContent::Embed { kind, payload } if kind == crate::PILCROW_KIND => Some(
+                    payload
+                        .iter()
+                        .map(|(key, value)| (key.clone(), any_from_value(value.clone()).unwrap()))
+                        .chain([(crate::KIND_KEY.to_owned(), Any::from(crate::PILCROW_KIND))])
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let pinned = [
+            (crate::KIND_KEY, Any::from(crate::PILCROW_KIND)),
+            ("pStyle", Any::from("Shared")),
+            ("alignment", Any::from("center")),
+            ("spaceBefore", Any::Number(120.0)),
+            ("spaceAfter", Any::Number(240.0)),
+            (
+                "defaultTextFormatting",
+                Any::Map(Arc::new(HashMap::from([(
+                    "bold".to_owned(),
+                    Any::Bool(true),
+                )]))),
+            ),
+        ];
+        assert_eq!(expected.len(), 3);
+        for mark in &expected {
+            for (key, value) in &pinned {
+                assert_eq!(mark.get(*key), Some(value), "{key}");
+            }
+        }
+        assert_eq!(mark_entries(&shared_doc), expected);
+        assert_eq!(mark_entries(&unshared_doc), expected);
+    }
+
     #[test]
     fn a_passed_package_digest_parses_like_the_parser_hashing_it() {
         let bytes = include_bytes!("../../../apps/demo/public/betteroffice-demo.docx");
@@ -10593,5 +11097,446 @@ mod tests {
         })));
 
         assert_eq!(seeded_widow_control(&styles, json!({})), Some(Value::Null));
+    }
+}
+
+#[cfg(test)]
+mod shape_style_seed_tests {
+    use super::*;
+
+    fn package() -> Vec<u8> {
+        let paragraph = r#"<w:p><w:pPr><w:pStyle w:val="Box"/></w:pPr><w:r><w:rPr><w:rStyle w:val="Accent"/></w:rPr><w:t>Styled box</w:t></w:r></w:p>"#;
+        let drawing = format!(
+            r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="2743200" cy="1371600"/><wp:docPr id="1" name="Box"/><a:graphic><a:graphicData><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>{paragraph}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+        );
+        let vml = format!(
+            r#"<w:p><w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="VML" style="position:absolute;width:216pt;height:108pt"><v:textbox><w:txbxContent>{paragraph}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#
+        );
+        fixture::Package::new(&format!(r#"{drawing}{vml}<w:sectPr><w:headerReference w:type="default" r:id="rHeader"/></w:sectPr>"#))
+            .styles(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="Box"><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:sz w:val="30"/></w:rPr></w:style><w:style w:type="character" w:styleId="Accent"><w:rPr><w:b/></w:rPr></w:style></w:styles>"#)
+            .part("header1.xml", "rHeader", "header", "header",
+                &format!("<w:hdr {}>{drawing}{vml}</w:hdr>", fixture::NS)).bytes()
+    }
+
+    fn payloads(doc: &EditingDoc) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        for story in doc.list_stories().stories {
+            for segment in doc.story_segments(&story.story).unwrap() {
+                if let crate::SegmentContent::OtherEmbed { payload, .. } = segment.content {
+                    for key in ["shapeJson", "textBoxJson"] {
+                        if let Some(Any::String(value)) = payload.get(key) {
+                            result.push((key.to_owned(), value.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    fn source_payloads(value: &Value, source: &BTreeMap<String, String>, output: &mut Vec<String>) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    source_payloads(value, source, output);
+                }
+            }
+            Value::Object(values) => {
+                if value.get("type").and_then(Value::as_str) == Some("shape") {
+                    output.push(source_json(value, source));
+                }
+                for (key, value) in values {
+                    if matches!(key.as_str(), "shape" | "textBox") && value.is_object() {
+                        output.push(source_json(value, source));
+                    }
+                    source_payloads(value, source, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn save_authored_shapes(doc: &EditingDoc, bytes: &[u8]) -> Vec<u8> {
+        fn replace(value: &mut Value, shapes: &mut std::collections::VecDeque<Value>) {
+            match value {
+                Value::Array(values) => {
+                    for value in values {
+                        replace(value, shapes);
+                    }
+                }
+                Value::Object(values) => {
+                    if values.get("type").and_then(Value::as_str) == Some("shape")
+                        && values.contains_key("shape")
+                    {
+                        values.insert("shape".to_owned(), shapes.pop_front().unwrap());
+                        return;
+                    }
+                    for child in values.values_mut() {
+                        replace(child, shapes);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut package =
+            serde_json::to_value(parse_docx_for_edit(bytes).unwrap().document.package).unwrap();
+        let mut shapes = payloads(doc)
+            .into_iter()
+            .filter(|(key, _)| key == "shapeJson")
+            .map(|(_, json)| serde_json::from_str(&json).unwrap())
+            .collect();
+        replace(&mut package, &mut shapes);
+        assert!(shapes.is_empty());
+        let request = serde_json::from_value(json!({
+            "determinism": {"seed": package_digest(bytes), "now": "2030-01-02T03:04:05.006Z"},
+            "document": {
+                "content": package["document"]["content"],
+                "finalSectionProperties": package["document"]["finalSectionProperties"],
+                "comments": package["document"]["comments"],
+            },
+            "headerEntries": package["headerEntries"],
+            "relationshipEntries": package["relationshipEntries"],
+            "selective": {"changedParaIds": []}, "options": {"updateModifiedDate": false}
+        }))
+        .unwrap();
+        docx_parse::write_docx_s13(request, bytes).unwrap()
+    }
+
+    #[test]
+    fn native_seed_keeps_source_writer_payloads_and_parsed_seed_has_no_resolver() {
+        let bytes = package();
+        let envelope = parse_docx_for_edit(&bytes).unwrap();
+        let parsed = serde_json::to_value(&envelope).unwrap();
+        let lowered = lower_docx(envelope, None).unwrap();
+        let mut expected = Vec::new();
+        source_payloads(&parsed, &lowered.context.source_json, &mut expected);
+        let native = EditingDoc::new(75370);
+        seed_from_docx_with_generation(&native, &bytes, "boxes").unwrap();
+        assert!(native.shape_style_resolver().is_some());
+        let actual = payloads(&native);
+        assert!(actual.len() >= 4);
+        for (_, value) in &actual {
+            assert!(
+                expected.contains(value),
+                "payload differs from source_json: {value}"
+            );
+        }
+        let parsed = EditingDoc::new(75371);
+        seed_parsed_docx_with(&parsed, parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        assert!(parsed.shape_style_resolver().is_none());
+        assert_eq!(payloads(&parsed), actual);
+        let saved = save_authored_shapes(&native, &bytes);
+        assert_eq!(save_authored_shapes(&parsed, &bytes), saved);
+        let cold = EditingDoc::new(75372);
+        cold.apply_update_v1(&parsed.encode_state_as_update_v1())
+            .unwrap();
+        assert!(cold.shape_style_resolver().is_none());
+        let env = crate::bridge::RenderEnv::default();
+        assert_eq!(
+            crate::bridge::yrs_doc_to_layout_blocks(&cold, "body", &env).unwrap(),
+            crate::bridge::yrs_doc_to_layout_blocks(&parsed, "body", &env).unwrap()
+        );
+        assert_ne!(
+            crate::bridge::yrs_doc_to_layout_blocks(&native, "body", &env).unwrap(),
+            crate::bridge::yrs_doc_to_layout_blocks(&cold, "body", &env).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_payload_writer_keeps_the_exact_source_json() {
+        let text_box = json!({"content": [{"type": "paragraph", "formatting": {"styleId": "Box"},
+            "content": [{"type": "run", "formatting": {"styleId": "Accent"},
+                "content": [{"type": "text", "text": "Legacy"}]}]}], "width": 914400});
+        let wire = format!("{{\"width\":914400,\"content\":{}}}", text_box["content"]);
+        let source = BTreeMap::from([(serde_json::to_string(&text_box).unwrap(), wire.clone())]);
+        let content = json!({"type": "opaqueDrawing", "kind": "pict", "xml": "<w:pict/>", "textBox": text_box});
+        let units = run_content_to_units(&content, &[], &source);
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("legacy embed")
+        };
+        assert_eq!(payload["textBoxJson"], source_json(&text_box, &source));
+        assert_eq!(payload["textBoxJson"], wire);
+        let doc = EditingDoc::new(75376);
+        let styles = crate::shape_styles::for_package(&content, &StyleResolver::default()).unwrap();
+        crate::shape_styles::seed(&doc, &styles);
+        assert_eq!(payload["textBoxJson"], wire);
+        assert!(doc.shape_style_resolver().is_some());
+    }
+
+    #[test]
+    fn no_text_boxes_seed_the_same_bytes_as_without_style_seeding() {
+        let bytes = fixture::Package::new("<w:p><w:r><w:t>Body</w:t></w:r></w:p>").bytes();
+        let with = EditingDoc::new(75373);
+        let without = EditingDoc::new(75373);
+        for (doc, enabled) in [(&with, true), (&without, false)] {
+            seed_lowered(
+                doc,
+                lower_docx(parse_docx_for_edit(&bytes).unwrap(), None).unwrap(),
+                None,
+                SeedMedia::AsParsed,
+                enabled,
+            )
+            .unwrap();
+        }
+        let txn = with.yrs_doc().transact();
+        assert_eq!(
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .len(&txn),
+            0
+        );
+        assert_eq!(
+            with.encode_state_as_update_v1(),
+            without.encode_state_as_update_v1()
+        );
+    }
+
+    #[test]
+    fn shared_bootstrap_and_removed_styles_keep_authored_state_and_saved_bytes() {
+        let bytes = package();
+        let source = EditingDoc::new(75374);
+        seed_from_docx_with_generation(&source, &bytes, "boxes").unwrap();
+        let repeat = EditingDoc::new(75374);
+        seed_from_docx_with_generation(&repeat, &bytes, "boxes").unwrap();
+        assert_eq!(
+            source.encode_state_as_update_v1(),
+            repeat.encode_state_as_update_v1()
+        );
+        let peer = EditingDoc::new(75375);
+        let state = source.encode_state_as_update_v1();
+        let prepared = peer
+            .prepare_peer_bootstrap(
+                &state,
+                &source.encode_peer_metadata().unwrap(),
+                Some(PackageBytes::from(bytes.as_slice())),
+            )
+            .unwrap();
+        peer.install_peer_bootstrap(prepared, 0).unwrap();
+        peer.load_state_v1(&state).unwrap();
+        assert!(peer.shape_style_resolver().is_some());
+        assert_eq!(payloads(&peer), payloads(&source));
+        let before: Vec<_> = source
+            .list_stories()
+            .stories
+            .into_iter()
+            .map(|story| {
+                let canonical = crate::project_story(&source, &story.story).unwrap();
+                let checksum = crate::story_checksum(&source, &story.story).unwrap();
+                (story.story, canonical, checksum)
+            })
+            .collect();
+        let parsed = EditingDoc::new(75380);
+        seed_parsed_docx_with(&parsed, parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        let saved = save_authored_shapes(&source, &bytes);
+        assert_eq!(save_authored_shapes(&parsed, &bytes), saved);
+        assert_eq!(save_authored_shapes(&peer, &bytes), saved);
+        {
+            let mut txn = source.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .remove(&mut txn, "resolver");
+        }
+        assert!(source.shape_style_resolver().is_none());
+        for (story, canonical, checksum) in before {
+            assert_eq!(crate::project_story(&source, &story).unwrap(), canonical);
+            assert_eq!(crate::story_checksum(&source, &story).unwrap(), checksum);
+        }
+        assert_eq!(payloads(&source), payloads(&peer));
+        assert_eq!(save_authored_shapes(&source, &bytes), saved);
+        let without = EditingDoc::new(75377);
+        let state = source.encode_state_as_update_v1();
+        let prepared = without
+            .prepare_peer_bootstrap(
+                &state,
+                &source.encode_peer_metadata().unwrap(),
+                Some(PackageBytes::from(bytes.as_slice())),
+            )
+            .unwrap();
+        without.install_peer_bootstrap(prepared, 0).unwrap();
+        without.load_state_v1(&state).unwrap();
+        assert!(without.shape_style_resolver().is_none());
+        assert_eq!(save_authored_shapes(&without, &bytes), saved);
+        let env = crate::bridge::RenderEnv::default();
+        assert_eq!(
+            crate::bridge::yrs_doc_to_layout_blocks(&without, "body", &env).unwrap(),
+            crate::bridge::yrs_doc_to_layout_blocks(&source, "body", &env).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_open_captures_the_seed_baseline_after_styles_and_map_edits_preserve_saved_bytes() {
+        let bytes = package();
+        let session =
+            crate::session::EditSessionCore::new(75381, crate::session::Host::deterministic());
+        session
+            .open_docx_retaining(&bytes, true, None, None)
+            .unwrap();
+        let doc = session.engine.doc();
+        assert!(doc.shape_style_resolver().is_some());
+        assert!(doc.unchanged_since_seeded());
+        let saved = save_authored_shapes(doc, &bytes);
+        let mut styles =
+            serde_json::to_value(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
+        styles["doc_defaults"]["rPr"]["fontSize"] = json!(44);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .insert(&mut txn, "resolver", styles.to_string());
+        }
+        assert!(!doc.unchanged_since_seeded());
+        assert_eq!(save_authored_shapes(doc, &bytes), saved);
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .remove(&mut txn, "resolver");
+        }
+        assert_eq!(save_authored_shapes(doc, &bytes), saved);
+    }
+
+    fn with_different_styles(bytes: &[u8]) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(bytes).unwrap();
+        for (name, bytes) in &mut parts {
+            if name == "word/styles.xml" {
+                *bytes = String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("Courier New", "Verdana")
+                    .replace("w:val=\"30\"", "w:val=\"42\"")
+                    .into_bytes();
+            }
+        }
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn reopening_preserves_shared_styles_with_different_styles_or_without_boxes() {
+        let a = package();
+        let b = with_different_styles(&a);
+        let no_boxes =
+            fixture::Package::new("<w:p><w:r><w:t>Direct body</w:t></w:r></w:p>").bytes();
+        let session =
+            crate::session::EditSessionCore::new(75383, crate::session::Host::deterministic());
+        session
+            .open_docx_retaining(&a, true, Some("shape-reopen"), None)
+            .unwrap();
+        let doc = session.engine.doc();
+        let state = doc.encode_state_as_update_v1();
+        let env = crate::bridge::RenderEnv::default();
+        let lowering: Vec<_> = doc
+            .list_stories()
+            .stories
+            .into_iter()
+            .map(|story| {
+                let blocks =
+                    crate::bridge::yrs_doc_to_layout_blocks(doc, &story.story, &env).unwrap();
+                (story.story, blocks)
+            })
+            .collect();
+        for bytes in [&b, &no_boxes] {
+            session
+                .open_docx_retaining(bytes, false, Some("shape-reopen"), None)
+                .unwrap();
+            assert_eq!(doc.encode_state_as_update_v1(), state);
+            for (story, blocks) in &lowering {
+                assert_eq!(
+                    &crate::bridge::yrs_doc_to_layout_blocks(doc, story, &env).unwrap(),
+                    blocks
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_attachment_order_preserves_shared_styles_for_matching_and_different_packages() {
+        let a = package();
+        let b = with_different_styles(&a);
+        let seeded = EditingDoc::new(75382);
+        seed_from_docx(&seeded, &a).unwrap();
+        let state = seeded.encode_state_as_update_v1();
+        let env = crate::bridge::RenderEnv::default();
+        let different = EditingDoc::new(75384);
+        seed_from_docx(&different, &b).unwrap();
+        assert_ne!(
+            crate::bridge::yrs_doc_to_layout_blocks(&seeded, "body", &env).unwrap(),
+            crate::bridge::yrs_doc_to_layout_blocks(&different, "body", &env).unwrap()
+        );
+        for bytes in [&a, &b] {
+            let source_first =
+                crate::session::EditSessionCore::new(75387, crate::session::Host::deterministic());
+            source_first
+                .open_docx_retaining(bytes, false, None, None)
+                .unwrap();
+            source_first.load(&state).unwrap();
+            let state_first =
+                crate::session::EditSessionCore::new(75388, crate::session::Host::deterministic());
+            state_first.load(&state).unwrap();
+            state_first
+                .open_docx_retaining(bytes, false, None, None)
+                .unwrap();
+            assert_eq!(source_first.engine.doc().encode_state_as_update_v1(), state);
+            assert_eq!(
+                source_first.engine.doc().encode_state_as_update_v1(),
+                state_first.engine.doc().encode_state_as_update_v1()
+            );
+            for story in seeded.list_stories().stories {
+                let expected =
+                    crate::bridge::yrs_doc_to_layout_blocks(&seeded, &story.story, &env).unwrap();
+                assert_eq!(
+                    crate::bridge::yrs_doc_to_layout_blocks(
+                        source_first.engine.doc(),
+                        &story.story,
+                        &env
+                    )
+                    .unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    crate::bridge::yrs_doc_to_layout_blocks(
+                        state_first.engine.doc(),
+                        &story.story,
+                        &env
+                    )
+                    .unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_and_oversized_shared_entries_render_like_the_missing_entry() {
+        let doc = EditingDoc::new(75385);
+        seed_from_docx(&doc, &package()).unwrap();
+        let styles = serde_json::to_string(doc.shape_style_resolver().unwrap().as_ref()).unwrap();
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                .unwrap()
+                .remove(&mut txn, "resolver");
+        }
+        let env = crate::bridge::RenderEnv::default();
+        let direct = crate::bridge::yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap();
+        for json in [
+            "{".to_owned(),
+            "{}".to_owned(),
+            format!(
+                "{}{}",
+                " ".repeat(docx_parse::ParseLimits::default().max_attribute_bytes),
+                styles
+            ),
+        ] {
+            {
+                let mut txn = doc.yrs_doc().transact_mut();
+                txn.get_map(crate::shape_styles::SHAPE_STYLES)
+                    .unwrap()
+                    .insert(&mut txn, "resolver", json);
+            }
+            assert!(doc.shape_style_resolver().is_none());
+            assert_eq!(
+                crate::bridge::yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap(),
+                direct
+            );
+        }
     }
 }

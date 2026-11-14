@@ -7,6 +7,7 @@ import {
   type ApplyResult, type CommandAck, type CommandEnvelope, type CommandHost,
   type CommandHostOptions, type CommandOutcome, type CommandOutcomeUnknownError, type FrameEnvelope,
 } from './types';
+import { isEngineTrap } from '../trap';
 
 const MAX_LEDGER_RANGES = 4096;
 const MAX_PENDING_HANDLERS = 4096;
@@ -127,12 +128,12 @@ function unknownOutcome(seq: number, cause: unknown): CommandOutcomeUnknownError
 /** An engine error from a read-only snapshot leaves the document intact; a trap does not. */
 function snapshotRefusal(cause: unknown): cause is Error {
   return cause instanceof Error && !(cause instanceof SessionFailure) &&
-    !(typeof WebAssembly !== 'undefined' && cause instanceof WebAssembly.RuntimeError);
+    !isEngineTrap(cause);
 }
 
 function terminalFailure(cause: unknown): SessionFailure {
   if (cause instanceof SessionFailure) return cause;
-  const trap = typeof WebAssembly !== 'undefined' && cause instanceof WebAssembly.RuntimeError;
+  const trap = isEngineTrap(cause);
   return new SessionFailure(trap ? 'trap' : 'crash', cause instanceof Error ? cause.message : String(cause));
 }
 
@@ -423,7 +424,7 @@ export function createCommandHost<P, S, E, F>(
         result = await options.queries!.handlers[kind]!(args, context);
       } catch (error) {
         if (error instanceof SessionFailure ||
-          (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError)) {
+          isEngineTrap(error)) {
           throw poisonWith(terminalFailure(error));
         }
         return queryRefusal('invalid-payload', error instanceof Error ? error.message : String(error));

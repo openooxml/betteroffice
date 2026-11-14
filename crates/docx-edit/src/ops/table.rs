@@ -15,8 +15,7 @@ use serde_json::Value;
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
-    Any, Assoc, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact,
-    TransactionMut,
+    Any, Assoc, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact, TransactionMut,
 };
 
 use crate::identity::IdAllocator;
@@ -294,17 +293,16 @@ fn record_row_revision(resolved: &mut Vec<String>, value: Option<&Any>) {
     }
 }
 
-fn shared_any<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> OpResult<Any> {
-    match map.get(txn, key) {
-        Some(Out::Any(value)) => Ok(value),
-        _ => Err(invalid(format!("table is missing {key}"))),
-    }
-}
-
 fn read_table<T: ReadTxn>(map: &MapRef, txn: &T) -> OpResult<TableData> {
-    let tbl_pr = any_map(&shared_any(map, txn, "tblPr")?, "tblPr")?;
-    let grid = any_array(&shared_any(map, txn, "grid")?, "grid")?;
-    let row_values = any_array(&shared_any(map, txn, "rows")?, "rows")?;
+    let payload =
+        crate::unavailable_tables::table_payload(map, txn).ok_or(OpError::TableUnavailable)?;
+    let plain = |value: Out, key: &str| match value {
+        Out::Any(value) => Ok(value),
+        _ => Err(invalid(format!("table is missing {key}"))),
+    };
+    let tbl_pr = any_map(&plain(payload.tbl_pr, "tblPr")?, "tblPr")?;
+    let grid = any_array(&plain(payload.grid, "grid")?, "grid")?;
+    let row_values = any_array(&plain(payload.rows, "rows")?, "rows")?;
     if row_values.is_empty() {
         return Err(invalid("table must contain at least one row"));
     }
@@ -607,9 +605,13 @@ fn validate_fragment_table(
         return Err(invalid("table nesting exceeds eight levels"));
     }
     let object = fragment_object(value, "table")?;
+    // A copied table carries the compatibility mode of the document it came
+    // from. Word lays out the pasted table with the destination's mode, which
+    // a table without one takes from the layout environment.
     let tbl_pr = match object.get("tblPr") {
         Some(Value::Object(map)) => map
             .iter()
+            .filter(|(key, _)| key.as_str() != "compatibilityMode")
             .map(|(key, entry)| Ok((key.clone(), fragment_any(entry, "tblPr entry")?)))
             .collect::<OpResult<HashMap<String, Any>>>()?,
         _ => return Err(invalid("table tblPr must be an object")),
@@ -1056,7 +1058,16 @@ fn covering<'a>(anchors: &'a [CellAnchor], row: usize, column: usize) -> Option<
 }
 
 fn table_at<T: ReadTxn>(txn: &T, locator: &TableLocator) -> OpResult<(TextRef, MapRef, u32)> {
-    let story = story_ref(txn, &locator.story).map_err(OpError::from)?;
+    let story = match story_ref(txn, &locator.story) {
+        Ok(story) => story,
+        Err(crate::EditError::CellHasNoStory(_)) => {
+            return Err(OpError::UnknownTable {
+                story: locator.story.clone(),
+                table_index: locator.table_index,
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
     let mut offset = 0u32;
     let mut table_index = 0u32;
     for diff in story.diff(txn, YChange::identity) {
@@ -1161,6 +1172,13 @@ fn reset_cell_spans(mut cell: CellData) -> CellData {
 /// `w:tr` attributes (`w14:paraId`, `w:rsid*`).
 pub(crate) fn fresh_row_properties(mut tr_pr: HashMap<String, Any>) -> HashMap<String, Any> {
     tr_pr.remove("_extraAttributes");
+    if let Some(Any::Map(original)) = tr_pr.get("_originalFormatting")
+        && original.contains_key("hiddenContentOnly")
+    {
+        let mut original = original.as_ref().clone();
+        original.remove("hiddenContentOnly");
+        tr_pr.insert("_originalFormatting".to_owned(), Any::Map(original.into()));
+    }
     tr_pr
 }
 
@@ -1192,15 +1210,32 @@ fn table_base(locator: &TableLocator) -> String {
 }
 
 /// Story ids without the `~{client}` suffix of an edit-born cell, so a slot is fresh only when
-/// no replica's cell holds it.
+/// no replica's cell holds it, live or removed: a removed id keeps its tombstone, and a cell
+/// minted under it again would be born removed. Ids a live table names count too, present or not,
+/// so a new cell never takes the id of a cell that lost its story.
 fn story_ids<T: ReadTxn>(txn: &T) -> HashSet<String> {
-    let Some(stories) = txn.get_map(STORIES) else {
-        return HashSet::new();
-    };
-    stories
-        .iter(txn)
-        .map(|(id, _)| bare_story_id(id).to_owned())
-        .collect()
+    let mut ids: HashSet<String> = txn
+        .get_map(STORIES)
+        .map(|stories| {
+            stories
+                .iter(txn)
+                .map(|(id, _)| bare_story_id(id).to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(removed) = txn.get_map(crate::REMOVED_STORIES) {
+        ids.extend(
+            removed
+                .iter(txn)
+                .map(|(id, _)| bare_story_id(id).to_owned()),
+        );
+    }
+    ids.extend(
+        crate::empty_cells::named_cell_ids(txn)
+            .iter()
+            .map(|id| bare_story_id(id).to_owned()),
+    );
+    ids
 }
 
 fn bare_story_id(id: &str) -> &str {
@@ -1263,7 +1298,7 @@ fn create_cell_story(
         return Err(OpError::StoryExists(story_id.to_owned()));
     }
     let para_id = ids.session_key(doc);
-    let story = stories.insert(txn, story_id, TextPrelim::new(""));
+    let story = crate::insert_story(txn, &stories, story_id);
     let pilcrow = story.insert_embed_with_attributes(
         txn,
         0,
@@ -1671,7 +1706,10 @@ pub(crate) fn resolve_table_row_revisions(
 
     let mut removed_tables = 0;
     for (table_offset, table_index, table) in tables.into_iter().rev() {
-        let mut data = read_table(&table, txn)?;
+        let mut data = match read_table(&table, txn) {
+            Err(OpError::TableUnavailable) => continue,
+            read => read?,
+        };
         let mut remove = Vec::new();
         let mut changed = false;
         for (row_index, row) in data.rows.iter_mut().enumerate() {
@@ -2067,7 +2105,7 @@ impl EditingDoc {
                 if stories.contains_key(txn, &story_id) {
                     return Err(OpError::StoryExists(story_id));
                 }
-                let cell_story = stories.insert(txn, story_id.as_str(), TextPrelim::new(""));
+                let cell_story = crate::insert_story(txn, &stories, story_id.as_str());
                 build.created_story_ids.push(story_id.clone());
                 self.write_fragment_content(
                     txn,
@@ -2261,7 +2299,6 @@ impl EditingDoc {
                     story: String::new(),
                 });
             let story_id = fresh_cell_story(&mut used, &base, row_slot, column, self.client_id());
-            let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
             inserted_anchors.push(CellAnchor {
@@ -2273,7 +2310,6 @@ impl EditingDoc {
                 cell,
             });
             created.push(story_id);
-            new_para_ids.push(para_id);
         }
 
         data.rows.insert(
@@ -2286,6 +2322,10 @@ impl EditingDoc {
         cell_anchors.extend(inserted_anchors);
         data.rows = reconstruct_rows(data.rows, cell_anchors)?;
         ensure_grid(&mut data, columns);
+        anchors(&data)?;
+        for story_id in &created {
+            new_para_ids.push(create_cell_story(self, &mut txn, &mut ids, story_id)?);
+        }
         write_table(&mut txn, &table, &data);
         let mut receipt = receipt(locator, Some(&data), created, Vec::new(), new_para_ids)?;
         receipt.revision_ids = revision_id.into_iter().collect();
@@ -2352,7 +2392,6 @@ impl EditingDoc {
                     story: String::new(),
                 });
             let story_id = fresh_cell_story(&mut used, &base, row, column_slot, self.client_id());
-            let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
             inserted.push(CellAnchor {
@@ -2364,7 +2403,6 @@ impl EditingDoc {
                 cell,
             });
             created.push(story_id);
-            new_para_ids.push(para_id);
         }
         cell_anchors.extend(inserted);
         data.rows = reconstruct_rows(data.rows, cell_anchors)?;
@@ -2375,6 +2413,10 @@ impl EditingDoc {
             data.grid[0].clone()
         };
         data.grid.insert(boundary, inserted_width);
+        anchors(&data)?;
+        for story_id in &created {
+            new_para_ids.push(create_cell_story(self, &mut txn, &mut ids, story_id)?);
+        }
         write_table(&mut txn, &table, &data);
         receipt(locator, Some(&data), created, Vec::new(), new_para_ids)
     }
@@ -2489,7 +2531,13 @@ impl EditingDoc {
     pub fn delete_table(&self, ctx: &EditCtx, locator: &TableLocator) -> OpResult<TableReceipt> {
         let mut txn = self.transact_for(ctx);
         let (parent_story, table, table_story_index) = table_at(&txn, locator)?;
-        let data = read_table(&table, &txn)?;
+        let data = match read_table(&table, &txn) {
+            Err(OpError::TableUnavailable) => {
+                parent_story.remove_range(&mut txn, table_story_index, 1);
+                return receipt(locator.clone(), None, Vec::new(), Vec::new(), Vec::new());
+            }
+            read => read?,
+        };
         delete_table_in_txn(&mut txn, locator, &parent_story, table_story_index, &data)
     }
 
@@ -2607,6 +2655,7 @@ impl EditingDoc {
             })
             .ok_or_else(|| invalid("split target is outside the table"))?;
         let target = cell_anchors[target_index].clone();
+        story_ref(&txn, &target.cell.story).map_err(OpError::from)?;
         let requested_rows = rows.map(|value| value as usize).unwrap_or(target.rowspan);
         let requested_columns = columns
             .map(|value| value as usize)
@@ -2670,7 +2719,6 @@ impl EditingDoc {
                     continue;
                 }
                 let story_id = fresh_cell_story(&mut used, &base, row, column, self.client_id());
-                let para_id = create_cell_story(self, &mut txn, &mut ids, &story_id)?;
                 let mut cell = reset_cell_spans(target.cell.clone());
                 cell.story = story_id.clone();
                 next_anchors.push(CellAnchor {
@@ -2682,7 +2730,6 @@ impl EditingDoc {
                     cell,
                 });
                 created.push(story_id);
-                new_para_ids.push(para_id);
             }
         }
 
@@ -2718,6 +2765,10 @@ impl EditingDoc {
         data.grid
             .splice(target.column..target_column_end, replacement);
         data.rows = reconstruct_rows(data.rows, next_anchors)?;
+        anchors(&data)?;
+        for story_id in &created {
+            new_para_ids.push(create_cell_story(self, &mut txn, &mut ids, story_id)?);
+        }
         write_table(&mut txn, &table, &data);
         receipt(locator, Some(&data), created, Vec::new(), new_para_ids)
     }
@@ -2914,6 +2965,39 @@ impl EditingDoc {
         receipt(locator, Some(&data), Vec::new(), Vec::new(), Vec::new())
     }
 
+    /// Sets one row's height in twips and its `w:hRule`, `atLeast` or `exact`.
+    pub fn set_row_height(
+        &self,
+        ctx: &EditCtx,
+        at: &CellLoc,
+        height_twips: f64,
+        rule: &str,
+    ) -> OpResult<TableReceipt> {
+        if !height_twips.is_finite() || height_twips <= 0.0 {
+            return Err(OpError::InvalidFormatValue(
+                "row height must be a positive finite twip value".to_owned(),
+            ));
+        }
+        if !["atLeast", "exact"].contains(&rule) {
+            return Err(OpError::InvalidFormatValue(format!(
+                "invalid row height rule {rule}"
+            )));
+        }
+        let locator = at.table();
+        let mut txn = self.transact_for(ctx);
+        let (_, table, _) = table_at(&txn, &locator)?;
+        let mut data = read_table(&table, &txn)?;
+        let row = data
+            .rows
+            .get_mut(at.row as usize)
+            .ok_or_else(|| invalid(format!("row {} is outside the table", at.row)))?;
+        row.tr_pr
+            .insert("height".to_owned(), Any::Number(height_twips));
+        row.tr_pr.insert("heightRule".to_owned(), Any::from(rule));
+        write_table(&mut txn, &table, &data);
+        receipt(locator, Some(&data), Vec::new(), Vec::new(), Vec::new())
+    }
+
     /// Sets the table-wide preferred width in twips (`tblPr.widthType = dxa`).
     pub fn set_table_width(
         &self,
@@ -2962,6 +3046,10 @@ impl EditingDoc {
                 "justification" => {
                     matches!(value, Any::Null | Any::Undefined)
                         || matches!(value, Any::String(kind) if ["left", "center", "right"].contains(&&**kind))
+                }
+                "tableLayout" => {
+                    matches!(value, Any::Null | Any::Undefined)
+                        || matches!(value, Any::String(kind) if ["fixed", "autofit"].contains(&&**kind))
                 }
                 _ => false,
             };
@@ -3727,10 +3815,61 @@ mod tests {
             doc.set_table_properties(
                 &direct(),
                 &at,
-                &HashMap::from([("tableLayout".to_owned(), Any::from("fixed")),])
+                &HashMap::from([("tableLayout".to_owned(), Any::from("wide")),])
             )
             .is_err()
         );
+        assert!(
+            doc.set_table_properties(
+                &direct(),
+                &at,
+                &HashMap::from([("bidi".to_owned(), Any::from(true)),])
+            )
+            .is_err()
+        );
+        doc.set_table_properties(
+            &direct(),
+            &at,
+            &HashMap::from([("tableLayout".to_owned(), Any::from("fixed"))]),
+        )
+        .unwrap();
+        let (tbl_pr, _, _) = table_value(&doc);
+        assert_eq!(tbl_pr["tableLayout"], "fixed");
+    }
+
+    #[test]
+    fn set_row_height_sets_one_row_and_refuses_bad_input() {
+        let doc = seed_table();
+        doc.set_row_height(&direct(), &cell(0, 0), 720.0, "atLeast")
+            .unwrap();
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["trPr"]["height"].as_f64(), Some(720.0));
+        assert_eq!(rows[0]["trPr"]["heightRule"], "atLeast");
+        assert_eq!(rows[1]["trPr"]["height"].as_f64(), Some(360.0));
+        assert!(rows[1]["trPr"].get("heightRule").is_none());
+        doc.set_row_height(&direct(), &cell(0, 1), 400.0, "exact")
+            .unwrap();
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["trPr"]["height"].as_f64(), Some(400.0));
+        assert_eq!(rows[0]["trPr"]["heightRule"], "exact");
+        for (height, rule) in [
+            (0.0, "atLeast"),
+            (-1.0, "atLeast"),
+            (f64::NAN, "atLeast"),
+            (f64::INFINITY, "atLeast"),
+            (720.0, "auto"),
+        ] {
+            assert!(
+                doc.set_row_height(&direct(), &cell(0, 0), height, rule)
+                    .is_err()
+            );
+        }
+        assert!(
+            doc.set_row_height(&direct(), &cell(99, 0), 720.0, "atLeast")
+                .is_err()
+        );
+        let (_, _, rows) = table_value(&doc);
+        assert_eq!(rows[0]["trPr"]["height"].as_f64(), Some(400.0));
     }
 
     #[test]
@@ -4727,6 +4866,149 @@ mod tests {
                 .collect();
             ids.sort();
             ids
+        }
+    }
+
+    fn named_cell_story(doc: &EditingDoc, column: usize) -> String {
+        let payload = doc.table_payload(&TableLocator::new("body", 0)).unwrap();
+        let Some(Any::Array(rows)) = payload.get("rows") else {
+            panic!("table rows");
+        };
+        let Any::Map(row) = &rows[0] else {
+            panic!("table row");
+        };
+        let Some(Any::Array(cells)) = row.get("cells") else {
+            panic!("row cells");
+        };
+        let Any::Map(cell) = &cells[column] else {
+            panic!("row cell");
+        };
+        let Some(Any::String(story)) = cell.get("story") else {
+            panic!("cell story");
+        };
+        story.to_string()
+    }
+
+    fn drop_cell_story(doc: &EditingDoc, story: &str, removed: bool) {
+        let mut txn = doc.yrs_doc().transact_mut();
+        if removed {
+            crate::mark_story_removed(&mut txn, story);
+        } else {
+            txn.get_map(STORIES).unwrap().remove(&mut txn, story);
+        }
+    }
+
+    fn state(doc: &EditingDoc) -> (Vec<u8>, Vec<u8>) {
+        (
+            doc.encode_state_vector_v1(),
+            doc.encode_state_as_update_v1(),
+        )
+    }
+
+    fn refused<T: std::fmt::Debug>(result: OpResult<T>, story: &str) {
+        match result {
+            Err(OpError::CellHasNoStory(id)) => assert_eq!(id, story),
+            other => panic!("expected a refusal for {story}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_named_cell_without_its_story_reads_as_one_empty_paragraph_and_refuses_writes() {
+        for removed in [false, true] {
+            let doc = inserted(&direct(), 1, 3);
+            let first = named_cell_story(&doc, 0);
+            let story = named_cell_story(&doc, 1);
+            let last = named_cell_story(&doc, 2);
+            doc.insert_text(
+                &direct(),
+                Position::new(story.as_str(), 0),
+                "old",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+            drop_cell_story(&doc, &story, removed);
+            let key = crate::empty_cells::empty_cell_para_key(&story);
+            let before = state(&doc);
+            let paragraphs = doc.paragraphs(&story).unwrap();
+            assert_eq!(paragraphs.len(), 1, "removed={removed}");
+            assert_eq!(
+                (paragraphs[0].para_id.as_str(), paragraphs[0].text.as_str()),
+                (key.as_str(), "")
+            );
+            assert_eq!(doc.story_len(&story).unwrap(), 1);
+            assert_eq!(
+                doc.paragraph_index(&story).unwrap().para_span(&key),
+                Some((0, 0))
+            );
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            assert_eq!(serde_json::to_value(&blocks).unwrap()[0]["kind"], "table");
+            assert!(!serde_json::to_string(&blocks).unwrap().contains("old"));
+            assert_eq!(state(&doc), before, "reads never write");
+
+            refused(
+                doc.insert_text(
+                    &direct(),
+                    Position::new(story.as_str(), 0),
+                    "x",
+                    crate::FormatPolicy::Inherit,
+                ),
+                &story,
+            );
+            refused(
+                doc.merge_cells(&direct(), &TableRange::new(cell(0, 0), cell(0, 1))),
+                &story,
+            );
+            refused(
+                doc.merge_cells(&direct(), &TableRange::new(cell(0, 1), cell(0, 2))),
+                &story,
+            );
+            refused(
+                doc.split_cell_grid(&direct(), &cell(0, 1), Some(2), Some(1)),
+                &story,
+            );
+            assert_eq!(state(&doc), before, "refused writes change nothing");
+
+            doc.insert_text(
+                &direct(),
+                Position::new(last.as_str(), 0),
+                "kept",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+            assert_eq!(doc.paragraphs(&last).unwrap()[0].text, "kept");
+            doc.delete_column(&direct(), &TableRange::cell(cell(0, 1)))
+                .unwrap();
+            assert!(matches!(
+                doc.story_len(&story),
+                Err(crate::EditError::StoryNotFound(_))
+            ));
+            assert_eq!(doc.paragraphs(&first).unwrap().len(), 1);
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_story_no_live_table_names_stays_unknown() {
+        let doc = inserted(&direct(), 1, 2);
+        for story in [
+            "body:t0:r5c5",
+            "body:t3:r0c0",
+            "nobody:t0:r0c0",
+            "body:sdt0",
+        ] {
+            assert!(matches!(
+                doc.paragraphs(story),
+                Err(crate::EditError::StoryNotFound(_))
+            ));
+            assert!(matches!(
+                doc.insert_text(
+                    &direct(),
+                    Position::new(story, 0),
+                    "x",
+                    crate::FormatPolicy::Inherit,
+                ),
+                Err(OpError::UnknownStory(_))
+            ));
         }
     }
 }

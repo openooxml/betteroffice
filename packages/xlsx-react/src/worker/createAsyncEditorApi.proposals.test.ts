@@ -14,13 +14,13 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function harness(readOnly = false) {
+function harness(readOnly = false, allowHostProposals = false) {
   const sent: WorkbookCommand[] = [];
   const rawCalls: PropertyKey[] = [];
   const replies = new Map<number, ReturnType<typeof deferred<CommandStatus>>>();
   const posted = new Map<WorkbookCommand['kind'], ReturnType<typeof deferred<WorkbookCommand>>>();
   const listeners = new Set<(ack: WorkbookAck) => void>();
-  const state = { throughSeq: 0, seal: {} as PeerlessWorkerInputSeal, readOnly };
+  const state = { throughSeq: 0, seal: {} as PeerlessWorkerInputSeal, readOnly, allowHostProposals };
   const session = {
     commandIdentity: { session: 'book', incarnation: 'worker' },
     get confirmedBasis() { return { epoch: 1, version: `v${state.throughSeq}` }; },
@@ -48,11 +48,13 @@ function harness(readOnly = false) {
   const coordinator = createPeerlessWorkerInputCoordinator({
     session: () => session, generation: () => 1, isReady: () => true,
     seal: () => state.seal, sync: () => {}, readOnly: () => state.readOnly,
+    allowHostProposals: () => state.allowHostProposals,
     target: (sheet, row, col) => ({ sheetId: `sheet:${sheet}`, range: {
       kind: 'rowCol', start: { row, col }, end: { row, col },
     } }),
   });
-  const bridge = { focus() {}, exportCoordinator: () => coordinator } as unknown as WorkerEditorApiBridge;
+  const bridge = { focus() {}, exportCoordinator: () => coordinator,
+    allowHostProposals: () => state.allowHostProposals } as unknown as WorkerEditorApiBridge;
   const api = createAsyncEditorApi(owner, createXlsxCommandController().store, () => bridge);
   const waitFor = (kind: WorkbookCommand['kind']) => {
     const value = deferred<WorkbookCommand>();
@@ -174,6 +176,18 @@ describe('async worker proposals', () => {
     const h = harness(true);
     await expect(h.api.proposeChanges!(request())).resolves.toMatchObject({ ok: false, failure: { code: 'read-only' } });
     expect(h.sent).toEqual([]);
+  });
+
+  test('permits host proposals in read-only mode when opted in', async () => {
+    const h = harness(true, true);
+    const posted = h.waitFor('propose');
+    const result = h.api.proposeChanges!(request());
+    h.ack(await posted, proposal);
+    await expect(result).resolves.toEqual({ ok: true, proposal });
+    expect(h.coordinator.readOnly).toBe(true);
+    await expect(h.coordinator.command({ kind: 'editCell', payload: { args: [0, 0, 0, 'blocked'] } }).result)
+      .rejects.toThrow();
+    expect(h.sent.map((command) => command.kind)).toEqual(['propose']);
   });
 
   for (const [reason, code] of [['read-only', 'read-only'], ['unsupported', 'unsupported-command'],

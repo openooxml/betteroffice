@@ -27,7 +27,9 @@ export interface UsePeerlessEditSessionOptions {
   openConnection(source: PeerlessDocumentSource, signal: AbortSignal, getRasterScale?: () => number): Promise<DocxCommandConnection>;
   recovery?: DocxWorkerEditSessionOptions<PeerlessDocumentSource, PeerlessEchoIntent>['recovery'];
   canvasForPage(page: DocxCommandPageIdentity): HTMLCanvasElement | null;
-  prepareGeometry(frame: DocxCommandFrame): PeerlessFrameGeometry | undefined;
+  prepareGeometry(frame: DocxCommandFrame, rasterScale?: number): PeerlessFrameGeometry | undefined;
+  /** The same frame geometry with page boxes snapped to another raster scale. */
+  rescaleGeometry?(geometry: PeerlessFrameGeometry, rasterScale: number): PeerlessFrameGeometry | undefined;
   onError?(error: Error): void;
   /** Failures the editor survives, such as pages that cannot be painted until the viewport or zoom changes. */
   onRecoverableError?(error: Error): void;

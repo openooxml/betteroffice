@@ -3,12 +3,13 @@ import { defineConfig } from 'tsup';
 // Plain Node cannot type-strip packages; dist remains beside assets so
 // import.meta.url paths stay valid.
 export default defineConfig({
-  entry: ['src/index.ts', 'src/cdn.ts'],
+  entry: { index: 'src/index.ts', cdn: 'src/cdn.ts', progressive: 'src/progressive-entry.ts' },
   format: ['esm'],
   dts: { resolve: true },
   splitting: false,
   sourcemap: false,
-  clean: true,
+  // scripts/build-fonts-decoder.ts writes decoder/ on its own, so a rebuild here must not delete it.
+  clean: ['!decoder/**'],
   minify: false,
   // The Word-family alias table is full of CJK; esbuild would otherwise
   // `\uHHHH`-escape every entry.

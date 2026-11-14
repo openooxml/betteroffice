@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import type * as Wasm from '../../../packages/docx/src/wasm/generated/parse/docx_parse.js';
+import { warnFontPackDiagnostics } from '../../../shared/fontPackDiagnostics';
 
 export type { InitInput, InitOutput, SyncInitInput } from '../../../packages/docx/src/wasm/generated/parse/docx_parse.js';
 
@@ -47,6 +48,7 @@ type Engine = Pick<
 >;
 
 const binding = createRequire(import.meta.url)('../index.js') as Engine;
+binding.install_panic_hook();
 
 export const build_display_list_json = binding.build_display_list_json;
 export const clear_measure_fonts = binding.clear_measure_fonts;
@@ -97,3 +99,5 @@ async function initNativeEngine(): Promise<{ memory: undefined }> {
 }
 
 export default initNativeEngine as unknown as typeof Wasm.default;
+
+void import('@betteroffice/fonts').then((fonts) => fonts.checkFontPacks()).then(warnFontPackDiagnostics, () => {});

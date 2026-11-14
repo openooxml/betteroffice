@@ -190,6 +190,17 @@ fn goldens() -> Vec<Golden> {
             canonical_minimal: r##"{"type":"setColVisibility","sheet":2,"col":3,"hidden":true}"##,
         },
         Golden {
+            op: Op::SetColsVisibility {
+                sheet,
+                col: 3,
+                count: 4,
+                hidden: true,
+            },
+            json: r##"{"type":"setColsVisibility","sheet":2,"col":3,"count":4,"hidden":true}"##,
+            minimal: r##"{"type":"setColsVisibility","sheet":2,"col":3,"count":4,"hidden":true}"##,
+            canonical_minimal: r##"{"type":"setColsVisibility","sheet":2,"col":3,"count":4,"hidden":true}"##,
+        },
+        Golden {
             op: Op::RestoreColDimension {
                 sheet,
                 col: 3,
@@ -225,6 +236,17 @@ fn goldens() -> Vec<Golden> {
             json: r##"{"type":"setRowVisibility","sheet":2,"row":3,"hidden":true}"##,
             minimal: r##"{"type":"setRowVisibility","sheet":2,"row":3,"hidden":true}"##,
             canonical_minimal: r##"{"type":"setRowVisibility","sheet":2,"row":3,"hidden":true}"##,
+        },
+        Golden {
+            op: Op::SetRowsVisibility {
+                sheet,
+                row: 3,
+                count: 4,
+                hidden: false,
+            },
+            json: r##"{"type":"setRowsVisibility","sheet":2,"row":3,"count":4,"hidden":false}"##,
+            minimal: r##"{"type":"setRowsVisibility","sheet":2,"row":3,"count":4,"hidden":false}"##,
+            canonical_minimal: r##"{"type":"setRowsVisibility","sheet":2,"row":3,"count":4,"hidden":false}"##,
         },
         Golden {
             op: Op::RestoreRowDimension {
@@ -575,6 +597,28 @@ fn goldens() -> Vec<Golden> {
             canonical_minimal: r##"{"type":"moveSheet","from":1,"to":2}"##,
         },
         Golden {
+            op: Op::MoveCols {
+                sheet,
+                col: 1,
+                count: 2,
+                before: 4,
+            },
+            json: r##"{"type":"moveCols","sheet":2,"col":1,"count":2,"before":4}"##,
+            minimal: r##"{"type":"moveCols","sheet":2,"col":1,"count":2,"before":4}"##,
+            canonical_minimal: r##"{"type":"moveCols","sheet":2,"col":1,"count":2,"before":4}"##,
+        },
+        Golden {
+            op: Op::MoveRows {
+                sheet,
+                row: 3,
+                count: 2,
+                before: 0,
+            },
+            json: r##"{"type":"moveRows","sheet":2,"row":3,"count":2,"before":0}"##,
+            minimal: r##"{"type":"moveRows","sheet":2,"row":3,"count":2,"before":0}"##,
+            canonical_minimal: r##"{"type":"moveRows","sheet":2,"row":3,"count":2,"before":0}"##,
+        },
+        Golden {
             op: Op::RenameSheet {
                 sheet,
                 name: "Data".into(),
@@ -634,6 +678,25 @@ fn goldens() -> Vec<Golden> {
             ),
             minimal: r##"{"type":"restoreSheet","sheet":2,"name":"Data","formulas":[]}"##,
             canonical_minimal: r##"{"type":"restoreSheet","sheet":2,"name":"Data","formulas":[]}"##,
+        },
+        Golden {
+            op: Op::SetTables {
+                tables: vec![xlsx_model::Table {
+                    name: "Sales".into(),
+                    sheet,
+                    range,
+                    header_rows: 1,
+                    totals_rows: 0,
+                    columns: vec!["Year".into(), "Price".into()],
+                }],
+            },
+            json: concat!(
+                r##"{"type":"setTables","tables":[{"name":"Sales","sheet":2,"##,
+                r##""range":{"start":{"row":0,"col":0},"end":{"row":1,"col":1}},"##,
+                r##""header_rows":1,"totals_rows":0,"columns":["Year","Price"]}]}"##,
+            ),
+            minimal: r##"{"type":"setTables","tables":[]}"##,
+            canonical_minimal: r##"{"type":"setTables","tables":[]}"##,
         },
     ]
 }
@@ -944,7 +1007,7 @@ mod well_formed {
     #[test]
     fn every_variant_has_full_and_minimal_serialization_goldens() {
         let cases = goldens();
-        assert_eq!(cases.len(), 37);
+        assert_eq!(cases.len(), 42);
         for Golden {
             op,
             json,

@@ -13,12 +13,13 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = ["-O3"]
 
 [features]
-default = ["oneshot"]
+default = ["oneshot", "metafile-svg"]
+metafile-svg = ["pptx-edit/metafile-svg", "pptx-engine/metafile-svg"]
 oneshot = []
 
 [dependencies]
 betteroffice-fonts = { workspace = true }
 pptx-edit = { workspace = true, features = ["wasm"] }
-pptx-engine.workspace = true
+pptx-engine = { workspace = true, default-features = false }
 wasm-bindgen = "0.2"
 js-sys = "0.3"

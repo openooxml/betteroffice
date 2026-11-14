@@ -16,7 +16,7 @@ export type PresentationSharedAck = CommandAck<
 > & {
   selection: PresentationCommandSelected | null;
   editState: PresentationCommandEditState;
-  pptx: Pick<PresentationCommandAck, 'incarnation' | 'version' | 'outcomes' | 'dirtySlideIds' | 'activeSlideId' | 'historyThroughSeq' | 'slides' | 'size' | 'creation' | 'editResult' | 'fontId' | 'updates' | 'mutationResult' | 'change'> & {
+  pptx: Pick<PresentationCommandAck, 'incarnation' | 'version' | 'outcomes' | 'dirtySlideIds' | 'activeSlideId' | 'historyThroughSeq' | 'slicedFamilies' | 'slicedPlainStyles' | 'slides' | 'size' | 'creation' | 'editResult' | 'fontId' | 'updates' | 'mutationResult' | 'change'> & {
     retainedBasis?: VersionAssociation;
   };
 };
@@ -80,6 +80,8 @@ export function createPresentationCommandProjection() {
           ...(value.updates ? { updates: value.updates } : {}),
           ...(value.editResult ? { editResult: value.editResult } : {}),
           ...(value.fontId !== undefined ? { fontId: value.fontId } : {}),
+          ...(value.slicedFamilies ? { slicedFamilies: value.slicedFamilies } : {}),
+          ...(value.slicedPlainStyles ? { slicedPlainStyles: value.slicedPlainStyles } : {}),
           ...(value.slides ? { slides: value.slides, size: value.size } : {}),
           ...(retainedBasis === undefined ? {} : { retainedBasis: association(retainedBasis) }) } };
     },
@@ -132,6 +134,8 @@ export function createPresentationSharedAdapter(initial: PresentationSharedAck) 
         ...(value.pptx.updates ? { updates: value.pptx.updates } : {}),
         ...(value.pptx.editResult ? { editResult: value.pptx.editResult } : {}),
         ...(value.pptx.fontId !== undefined ? { fontId: value.pptx.fontId } : {}),
+        ...(value.pptx.slicedFamilies ? { slicedFamilies: value.pptx.slicedFamilies } : {}),
+        ...(value.pptx.slicedPlainStyles ? { slicedPlainStyles: value.pptx.slicedPlainStyles } : {}),
         ...(value.pptx.slides ? { slides: value.pptx.slides, size: value.pptx.size } : {}),
         ...(value.frame ? { frame: value.frame.payload } : value.pptx.activeSlideId === null ? { frame: null } : {}) };
     },

@@ -1,5 +1,5 @@
 import { retainedFramePageById, type RetainedFrame } from '../layout/render/frameDelta';
-import { CANVAS_PAGE_GAP_PX } from '../layout/render/canvasPageMetrics';
+import { canvasPageStack } from '../layout/render/canvasPageMetrics';
 import type { DisplayList, DisplayPage } from '../layout/render/displayList';
 import { createDisplayListQueries, type DisplayListQueries, type DisplayListRect, type DisplayListVisualLine } from '../layout/render/displayListQueries';
 import { loadedRustDisplayListQueryEngine } from '../layout/render/rustDisplayList';
@@ -26,6 +26,8 @@ export type DocxSelectionCommandIntent = Extract<
 export interface DocxCommandSelectionLayout {
   frame: RetainedFrame;
   layoutRevision: number;
+  /** The canvas backing scale page boxes are snapped to. */
+  rasterScale?: number;
 }
 
 /** @internal */
@@ -265,15 +267,11 @@ function lineAt(queries: DisplayListQueries, position: number): DisplayListVisua
 }
 
 function pageMove(queries: DisplayListQueries, position: number, direction: 'up' | 'down', goalX: number, distance: number,
-  documentWidth: number, rootSize: number): number | null {
+  documentWidth: number, rootSize: number, rasterScale = 1): number | null {
   const caret = caretAt(queries, position);
   if (!caret) return null;
-  let top = 0;
-  const pages = queries.displayList.pages.map((page, index) => {
-    const entry = { page, index, top };
-    top += page.height + CANVAS_PAGE_GAP_PX;
-    return entry;
-  });
+  const boxes = canvasPageStack(queries.displayList.pages, { scale: { rasterScale, unitScale: rasterScale } });
+  const pages = queries.displayList.pages.map((page, index) => ({ page, index, top: boxes[index]!.top }));
   const current = pages[caret.pageIndex];
   if (!current) return null;
   const origin = current.top + caret.y + caret.height / 2;
@@ -376,7 +374,7 @@ export function resolveDocxSelectionIntent(
           const movement = navigation.unit === 'page'
             ? { position: pageMove(queries, position, navigation.direction, navigation.goalX, navigation.distance,
               layout.frame.pages.reduce((width, { page }) => Math.max(width, page.width), 0),
-              indexFor(reads, engine, root).projection(root)!.size) ?? position, goalX: navigation.goalX }
+              indexFor(reads, engine, root).projection(root)!.size, layout.rasterScale) ?? position, goalX: navigation.goalX }
             : queries.verticalMove(position, navigation.direction, navigation.goalX);
           if (movement) {
             focus = atDisplay(root, movement.position) ?? focus;

@@ -9,7 +9,7 @@ Arial as its text face, so a test can register Liberation Sans in its place.
 | 10 | Wingdings | `§` U+00A7 | `square4` | `▪` |
 | 11 | Wingdings 3 | U+F075 | `trianglert` | `►` |
 | 12 | Wingdings | `l` U+006C | `circle6` | `●` |
-| 13 | Wingdings | U+F0FC | `checkbld`, no covered equivalent | `•` |
+| 13 | Wingdings | U+F0FC | `checkbld`, no covered equivalent | `•` (reported as a substitution) |
 | 14 | Arial | `»` U+00BB | not a symbol face | `»` |
 
 The slots and their shapes are the faces' own glyph names; the size within a shape class is the

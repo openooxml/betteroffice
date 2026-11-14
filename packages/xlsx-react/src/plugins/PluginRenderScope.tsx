@@ -1,3 +1,4 @@
+import { pluginActivationId } from '../../../../shared/plugin-host/gesture';
 import { Component, type ReactNode, type SyntheticEvent } from 'react';
 import { claimPluginEvent } from '../commands/pluginEvents';
 import { XlsxCommandContext } from '../commands/XlsxCommandProvider';
@@ -63,6 +64,7 @@ export function PluginRenderScope({
             <ToolbarModeContext.Provider value={null}>
               <ToolbarOverflowContext.Provider value={null}>
                 <div
+                  data-plugin-activation={pluginActivationId(activation.activation)}
                   style={{ display: 'contents' }}
                   onKeyDownCapture={mark}
                   onMouseDownCapture={mark}

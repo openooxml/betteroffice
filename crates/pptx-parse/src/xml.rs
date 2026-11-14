@@ -439,7 +439,7 @@ pub(crate) fn parse_xml(
             }
             Event::Text(text) => {
                 let decoded = text
-                    .decode()
+                    .xml10_content()
                     .map_err(|error| malformed(&reader, part, error.to_string()))?;
                 let unescaped = quick_xml::escape::unescape(&decoded)
                     .map_err(|error| malformed(&reader, part, error.to_string()))?;
@@ -454,7 +454,7 @@ pub(crate) fn parse_xml(
             }
             Event::CData(text) => {
                 let decoded = text
-                    .decode()
+                    .xml10_content()
                     .map_err(|error| malformed(&reader, part, error.to_string()))?
                     .into_owned();
                 charge(
@@ -673,5 +673,26 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn element_text_reads_line_ends_as_xml_1_0() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            b"<x>a\r\nb\rc&#13;d&#xD;\r\n<![CDATA[e\r\nf]]></x>",
+            "x.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let text: String = root
+            .children
+            .iter()
+            .map(|child| match child {
+                XmlNode::Text(text) => text.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(text, "a\nb\nc\rd\r\ne\nf");
     }
 }

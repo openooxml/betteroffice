@@ -14,7 +14,7 @@ use crate::read_types::HeadingInfo;
 use crate::seed::SourceMetadata;
 use crate::structured::{ListInfo, MarkerSuffix};
 use crate::target::{EditTextView, Mark, ParagraphList};
-use crate::{EditingDoc, KIND_KEY, map_string, story_ref};
+use crate::{EditingDoc, KIND_KEY, map_string, story_text};
 
 fn present(value: Option<&Any>) -> Option<&Any> {
     value.filter(|value| !matches!(value, Any::Null | Any::Undefined))
@@ -347,7 +347,7 @@ fn facts_story<T: ReadTxn>(
     if active.len() >= 32 || !active.insert(story.to_owned()) {
         return;
     }
-    let Ok(text) = story_ref(txn, story) else {
+    let Some(text) = story_text(txn, story) else {
         active.remove(story);
         return;
     };

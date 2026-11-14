@@ -1,7 +1,9 @@
 import { useCallback, useContext, useMemo, useSyncExternalStore } from 'react';
 import { useTranslation } from '../i18n';
 import { xlsxCommandController, type XlsxChromeContext } from './createXlsxCommandStore';
-import { commandLabelKey, commandShortcut, formatChord, isPluginCommandId } from './descriptors';
+import { commandLabelKey, formatChord, isPluginCommandId } from './descriptors';
+import { ariaChord } from '../../../../shared/keyboard/chords';
+import { chordLabels, storeAriaShortcut, storeShortcutLabel } from './shortcuts';
 import { XlsxCommandContext } from './XlsxCommandProvider';
 import type {
   XlsxCommandArgs,
@@ -77,6 +79,8 @@ export interface XlsxBoundCommand<K extends XlsxCommandId> {
   /** The label for the bound arguments, such as "Format as currency". */
   label: string;
   shortcut: string | null;
+  /** The shortcut in `aria-keyshortcuts` form. */
+  ariaShortcut: string | null;
   /** Executes with `args`, falling back to the arguments bound to the hook. */
   execute(args?: XlsxCommandArgs[K]): Promise<XlsxCommandResult>;
 }
@@ -93,6 +97,8 @@ export interface XlsxBoundPluginCommand {
   /** The contributed label, or the id while no plugin contributes it. */
   label: string;
   shortcut: string | null;
+  /** The shortcut in `aria-keyshortcuts` form. */
+  ariaShortcut: string | null;
   execute(): Promise<XlsxPluginCommandResult>;
 }
 
@@ -113,10 +119,15 @@ export function useXlsxCommand(
   const store = useXlsxCommands();
   const state = useXlsxCommandState(id as XlsxCommandId, args as never);
   const { t } = useTranslation();
-  const descriptor = store.getDescriptor(id as XlsxCommandId) as
-    | XlsxCommandDescriptor
-    | XlsxPluginCommandDescriptor
-    | null;
+  const readDescriptor = useCallback(
+    () =>
+      store.getDescriptor(id as XlsxCommandId) as
+        | XlsxCommandDescriptor
+        | XlsxPluginCommandDescriptor
+        | null,
+    [store, id]
+  );
+  const descriptor = useSyncExternalStore(store.subscribe, readDescriptor, readDescriptor);
   const argsKey = args === undefined ? undefined : JSON.stringify(args);
   const execute = useCallback(
     (callArgs?: unknown) =>
@@ -135,7 +146,8 @@ export function useXlsxCommand(
         descriptor: contributed,
         state,
         label: contributed?.label ?? id,
-        shortcut: chord ? formatChord(chord) : null,
+        shortcut: chord ? formatChord(chord, undefined, chordLabels(t)) : null,
+        ariaShortcut: chord ? ariaChord(chord) : null,
         execute: () => execute(),
       };
     }
@@ -144,10 +156,11 @@ export function useXlsxCommand(
       descriptor: descriptor as XlsxCommandDescriptor,
       state: state as XlsxCommandState,
       label: t(commandLabelKey(id, parse(argsKey))),
-      shortcut: commandShortcut(id, parse(argsKey)),
+      shortcut: storeShortcutLabel(store, id, t, parse(argsKey)),
+      ariaShortcut: storeAriaShortcut(store, id, parse(argsKey)),
       execute,
     };
-  }, [id, descriptor, state, t, argsKey, execute]);
+  }, [store, id, descriptor, state, t, argsKey, execute]);
 }
 
 /** The editor's locale, following its changes; `null` without an editor. */

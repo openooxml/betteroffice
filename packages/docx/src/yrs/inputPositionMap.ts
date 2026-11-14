@@ -3,7 +3,7 @@ import type { YrsLoc } from './index';
 /** One native paragraph in the yrs-backed display-position projection. */
 export interface YrsInputParagraphSpan {
   paraId: string;
-  /** Number of UTF-16/inline units before the paragraph's pilcrow. */
+  /** Offset units before the paragraph's pilcrow, as in `YrsParagraphLength.length`. */
   length: number;
   /** Block start emitted by the yrs display-position projection. */
   displayStart: number;

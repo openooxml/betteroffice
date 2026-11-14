@@ -11,7 +11,8 @@ const output = new URL('../../../crates/betteroffice-fonts/data/', import.meta.u
 const source = readFileSync(new URL('../src/manifest.ts', import.meta.url), 'utf8');
 const privateNames = [
   'UNVENDORED_NOTO_SERIF', 'WIDTH_MATCHED_SUBSTITUTES',
-  'LIGHTER_THAN_REGULAR', 'HEAVIER_THAN_REGULAR', 'looksSerif', 'looksMono',
+  'LIGHTER_THAN_REGULAR', 'HEAVIER_THAN_REGULAR', 'EMULATED_SYMBOL_FAMILIES', 'REQUESTED_FAMILY_SCRIPT_FALLBACK',
+  'looksSerif', 'looksMono',
 ];
 const compiled = ts.transpileModule(`${source}\nexport { ${privateNames.join(', ')} };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
@@ -21,6 +22,8 @@ const tables = {} as {
   WIDTH_MATCHED_SUBSTITUTES: Map<string, { family: string; digitAdvances: Record<string, number> }>;
   LIGHTER_THAN_REGULAR: Set<string>;
   HEAVIER_THAN_REGULAR: Set<string>;
+  EMULATED_SYMBOL_FAMILIES: Set<string>;
+  REQUESTED_FAMILY_SCRIPT_FALLBACK: Record<string, Partial<Record<manifest.BundledFontScript, string>>>;
   looksSerif: (family: string) => boolean;
   looksMono: (family: string) => boolean;
 };
@@ -61,9 +64,17 @@ export function exportCatalog(): Record<string, string> {
     monoMarkers: markers(tables.looksMono),
     monoPattern: pattern(tables.looksMono),
     widthMatchedSubstitutes: Object.fromEntries(tables.WIDTH_MATCHED_SUBSTITUTES),
+    emulatedSymbolFamilies: [...tables.EMULATED_SYMBOL_FAMILIES],
     scriptFallbackOrder: Object.fromEntries(scripts.map((script) => [
       script, faces.filter((face) => face.script === script).map((face) => face.file),
     ])),
+    requestedFamilyScriptFallback: Object.fromEntries(
+      Object.entries(tables.REQUESTED_FAMILY_SCRIPT_FALLBACK).map(([family, preferred]) => [
+        family, Object.fromEntries((Object.keys(preferred) as manifest.BundledFontScript[]).map((script) => [
+          script, manifest.resolveScriptFallbackFace(script, false, false, family)!.file,
+        ])),
+      ]),
+    ),
     lastResortFamilies: Object.fromEntries((['powerpoint', 'word'] as const).map((office) => [office, {
       sans: manifest.resolveLastResortFace('Unknown', false, false, office).family,
       serif: manifest.resolveLastResortFace('Unknown Serif', false, false, office).family,
@@ -82,7 +93,8 @@ export function exportCatalog(): Record<string, string> {
     ...[...tables.HEAVIER_THAN_REGULAR].flatMap((weight) => [`Calibri ${weight}`, `Segoe UI ${weight}`]),
     ...['Calibri Light', 'Inter-Thin', 'Segoe UI Light', 'Segoe UI Semilight', 'Calibri Black',
       'Arial Heavy', 'Segoe UI Heavy', 'Unknown', 'Unknown Serif', 'Unknown Mono',
-      'Consolas', 'Baskerville', 'Sans-serif', 'Verdana', 'Calibri Unknown', ''],
+      'Consolas', 'Baskerville', 'Sans-serif', 'Verdana', 'Calibri Unknown', '',
+      'Wingdings', 'Wingdings 2', 'Wingdings 3', 'Webdings'],
   ])];
   const cases: object[] = [];
   for (const family of [...families, '  CALIBRI  ', '  ＭＳ ゴシック ', 'not-a-family', 'Calibri\tLight',
@@ -115,6 +127,13 @@ export function exportCatalog(): Record<string, string> {
       scriptFallbackFace: faceFile(manifest.resolveScriptFallbackFace(script, bold, italic)),
       glyphFallbackFace: faceFile(manifest.resolveGlyphFallbackFace('Segoe UI', bold, italic)),
     } });
+  }
+  for (const family of ['Simplified Arabic', 'Traditional Arabic', '  SIMPLIFIED ARABIC  ', 'Arial', 'Times New Roman']) {
+    for (const script of ['arabic', 'hebrew'] as const) for (const bold of [false, true]) for (const italic of [false, true]) {
+      cases.push({ query: { family, script, codePoint: samples[script], bold, italic }, answer: {
+        scriptFallbackFace: faceFile(manifest.resolveScriptFallbackFace(script, bold, italic, family)),
+      } });
+    }
   }
   return {
     'catalog.json': `${JSON.stringify(catalog, null, 2)}\n`,

@@ -14,10 +14,12 @@ import { applyDocxCommand, createResidentDocxCommandHooks, preflightDocxCommand 
 import { createResidentCommandHost } from './residentCommandHost';
 import { resolveCommandSelection } from './residentCommandAnchors';
 import { readResidentProperties } from './residentProperties';
+import { propertyCommandTarget } from './residentPropertyCommands';
 import { wrapSession } from './yrsSessionFacade';
 import { yrsToDocument } from './yrsToDocument';
+import { SuggestedFormattingOverContainerError } from './index';
 import type {
-  DocxCommandEnvelope, DocxCommandIntent, DocxCommandPayload, DocxCommandSelection, DocxEditState,
+  DocxCommandEnvelope, DocxCommandIntent, DocxCommandPayload, DocxCommandPayloads, DocxCommandSelection, DocxEditState,
 } from './residentCommandProtocol';
 import {
   TIMEOUT, closeCommandEngines, command, context, execute, expectCaret,
@@ -1018,4 +1020,435 @@ test('setObjectProperties aligns side presets at the text margins and round-trip
       expect(new TextDecoder().decode(unzipContainer(new Uint8Array(resaved))['word/document.xml'])).toContain(horizontalXml);
     }
   }
+}, TIMEOUT);
+
+test('a font environment naming sliced faces is admitted, and malformed slices are refused', async () => {
+  const arm = await openCommandEngine();
+  const environment = { supportsFontEnvironment: true } as Parameters<typeof preflightDocxCommand>[4];
+  const source = {
+    ref: { format: 1, index: 'face/slices.json', indexSha256: 'a'.repeat(64) },
+    urls: { 'face/slices.json': 'https://fonts.example/face/slices.json' },
+  };
+  const payload = {
+    faces: [{ family: 'Sliced', data: new Uint8Array(12) }], chains: { 'sliced|0|0': [0] }, families: ['Sliced'],
+    progressive: [{ slot: 0, source }],
+  };
+  const admitted = command(arm, 'setFontEnvironment', payload);
+  expect(preflightDocxCommand(arm.engine, arm.state, admitted, context(arm, admitted), environment).status).toBe('ready');
+  const malformed = command(arm, 'setFontEnvironment', { ...payload, progressive: [{ slot: 9, source }] });
+  expect(preflightDocxCommand(arm.engine, arm.state, malformed, context(arm, malformed), environment))
+    .toMatchObject({ status: 'refused', reason: 'invalid-font-environment' });
+}, TIMEOUT);
+
+const simpleFormatField = '<w:fldSimple w:instr=" PAGE "><w:r><w:t>field</w:t></w:r></w:fldSimple>';
+const inlineFormatControl = '<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt>';
+const complexFormatField = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r>' +
+  '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>field</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>';
+
+test('suggested formatting over containers refuses before calling the engine', async () => {
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  for (const containers of [simpleFormatField, inlineFormatControl, simpleFormatField + inlineFormatControl, complexFormatField]) {
+    const arm = await openCommandEngine([], { bodyXml:
+      '<w:p w14:paraId="00000001"><w:r><w:t>text</w:t></w:r>' + containers + '</w:p>',
+    });
+    const paragraph = arm.engine.paragraphs('body')[0]!;
+    const span = arm.engine.geometryReader.paragraphSpans('body')[0]!;
+    const cases = [
+      ['toggleMark', { mark: { type: 'bold' } }, 'toggleMark'],
+      ['toggleStrike', {}, 'formatRange'],
+      ['formatRange', { delta: { bold: true } }, 'formatRange'],
+      ['formatRange', { delta: {} }, 'formatRange'],
+      ['formatSelection', { delta: { bold: true } }, 'formatRange'],
+      ['clearFormatting', {}, 'clearFormatting'],
+    ] as const;
+    for (const [kind, payload, method] of cases) {
+      const intent = command(arm, kind, { ...payload, selection: selection(paragraph.paraId, 0, span.length), suggesting } as DocxCommandPayloads[typeof kind]);
+      const before = snapshot(arm);
+      const segments = arm.engine.storySegments('body');
+      const call = spyOn(arm.engine, method);
+      const capture = spyOn(arm.engine, 'beginUndoCapture');
+      try {
+        expect(preflightDocxCommand(arm.engine, arm.state, intent, context(arm, intent)))
+          .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+        expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+        expect(call).not.toHaveBeenCalled();
+        expect(capture).not.toHaveBeenCalled();
+        expect(snapshot(arm)).toEqual(before);
+        expect(arm.engine.storySegments('body')).toEqual(segments);
+        expect(arm.engine.geometryReader.listRevisions()).toEqual([]);
+      } finally {
+        call.mockRestore();
+        capture.mockRestore();
+      }
+    }
+  }
+}, TIMEOUT);
+
+test('suggested bold across a comment reference tracks text and preserves the anchor on save', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:commentRangeStart w:id="0"/><w:r><w:t>hello</w:t></w:r>' +
+    '<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>' +
+    '<w:r><w:t xml:space="preserve"> world</w:t></w:r></w:p>',
+  });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const before = arm.engine.storySegments('body');
+  const anchor = before.find(segment => segment.kind === 'embed' && segment.payload.modelKind === 'commentReference');
+  expect(anchor).toBeDefined();
+  const intent = command(arm, 'toggleMark', {
+    selection: selection(id, 0, 12), mark: { type: 'bold' },
+    suggesting: { name: 'Writer', date: '2026-10-01T12:00:00Z' },
+  });
+  expect(execute(arm, intent).status).toBe('applied');
+  const after = arm.engine.storySegments('body');
+  expect(after.find(segment => segment.kind === 'embed' && segment.payload.modelKind === 'commentReference')).toEqual(anchor);
+  const runs = after.filter(segment => segment.kind === 'text');
+  expect(runs.map(segment => segment.text)).toEqual(['hello', ' world']);
+  for (const run of runs) expect(run.attributes).toMatchObject({
+    bold: true, rPrChange: [expect.objectContaining({ info: expect.objectContaining({ author: 'Writer' }) })],
+  });
+  const revisions = arm.engine.geometryReader.listRevisions();
+  expect(revisions.length).toBeGreaterThan(0);
+  expect(revisions.every(revision => revision.kind === 'rPrChange')).toBe(true);
+  const saved = await repackDocx(yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument()));
+  const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  expect(xml.match(/<w:rPrChange\s/g)).toHaveLength(2);
+  expect(xml.match(/<w:commentReference\s/g)).toHaveLength(1);
+  const reopened = await openCommandEngine([], { bytes: new Uint8Array(saved), clientId: 8102 });
+  expect(reopened.engine.geometryReader.listRevisions().length).toBeGreaterThan(0);
+  const reopenedRuns = reopened.engine.storySegments('body').filter(segment => segment.kind === 'text');
+  expect(reopenedRuns.map(segment => segment.text)).toEqual(['hello', ' world']);
+  expect(reopenedRuns.every(segment => segment.attributes.bold === true && segment.attributes.rPrChange !== undefined)).toBe(true);
+}, TIMEOUT);
+
+test('suggested formatting refuses projected complex field hyperlinks in code and result without mutation', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>text</w:t></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+    '<w:hyperlink r:id="rIdLink"><w:r><w:t>HYPERLINK</w:t></w:r></w:hyperlink>' +
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+    '<w:hyperlink r:id="rIdLink"><w:r><w:t>link</w:t></w:r></w:hyperlink>' +
+    '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+  });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const session = wrapSession(arm.native, 8101);
+  const saveXml = async () => {
+    const saved = await repackDocx(yrsToDocument(session, arm.engine.propertyDocument()));
+    return new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  };
+  const beforeXml = await saveXml();
+  const before = session.encodeState();
+  const segments = arm.engine.storySegments('body');
+  const runs = segments.filter(segment => segment.kind === 'text');
+  expect(runs).toMatchObject([
+    { text: 'text' },
+    { text: 'HYPERLINK', attributes: { fieldResult: { index: -1 } } },
+    { text: 'link', attributes: { fieldResult: { index: 0 } } },
+  ]);
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  const cases = [
+    ['toggleMark', { mark: { type: 'bold' } }, 'toggleMark'],
+    ['toggleStrike', {}, 'formatRange'],
+    ['formatRange', { delta: { bold: true } }, 'formatRange'],
+    ['formatSelection', { delta: { bold: true } }, 'formatRange'],
+    ['clearFormatting', {}, 'clearFormatting'],
+  ] as const;
+  for (const [start, end] of [[4, 13], [13, 17], [0, 13], [0, 17]] as const) {
+    const selected = selection(id, start, end);
+    for (const [kind, payload, method] of cases) {
+      const intent = command(arm, kind, { ...payload, selection: selected, suggesting } as DocxCommandPayloads[typeof kind]);
+      const state = snapshot(arm);
+      const call = spyOn(arm.engine, method);
+      const capture = spyOn(arm.engine, 'beginUndoCapture');
+      try {
+        expect(preflightDocxCommand(arm.engine, arm.state, intent, context(arm, intent)))
+          .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+        expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+        expect(call).not.toHaveBeenCalled();
+        expect(capture).not.toHaveBeenCalled();
+        expect(snapshot(arm)).toEqual(state);
+      } finally {
+        call.mockRestore();
+        capture.mockRestore();
+      }
+    }
+    const range = storyRange(selected);
+    for (const apply of [
+      () => session.toggleMark(range, { type: 'bold' }, suggesting),
+      () => session.formatRange(range, { bold: true }, suggesting),
+      () => session.clearFormatting(range, suggesting),
+    ]) {
+      expect(apply).toThrow(SuggestedFormattingOverContainerError);
+      expect(session.encodeState()).toEqual(before);
+      expect(arm.engine.storySegments('body')).toEqual(segments);
+      expect(session.listRevisions()).toEqual([]);
+    }
+  }
+  expect(await saveXml()).toBe(beforeXml);
+}, TIMEOUT);
+
+test('suggested formatting checks containers across paragraphs and preserves plain text selections', async () => {
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>first</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:t>text</w:t></w:r>' + simpleFormatField + inlineFormatControl + '</w:p>',
+  });
+  const [first, second] = arm.engine.paragraphs('body');
+  const secondSpan = arm.engine.geometryReader.paragraphSpans('body')[1]!;
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  const before = snapshot(arm);
+  const mixed = { anchor: { story: 'body', paraId: second!.paraId, offset: secondSpan.length },
+    focus: { story: 'body', paraId: first!.paraId, offset: 0 } };
+  expect(execute(arm, command(arm, 'toggleMark', { selection: mixed, mark: { type: 'bold' }, suggesting })))
+    .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+  expect(snapshot(arm)).toEqual(before);
+  expect(execute(arm, command(arm, 'toggleMark', {
+    selection: selection(second!.paraId, 0, 4), mark: { type: 'bold' }, suggesting,
+  })).status).toBe('applied');
+  expect(arm.engine.geometryReader.listRevisions()).toEqual([
+    expect.objectContaining({ kind: 'rPrChange', author: suggesting.name }),
+  ]);
+  expect(execute(arm, command(arm, 'toggleMark', {
+    selection: selection(second!.paraId, 4, 6), mark: { type: 'bold' },
+  })).status).toBe('applied');
+  const embeds = arm.engine.paragraphSegments('body', [1])[0]!.filter(segment => segment.kind === 'embed');
+  expect(embeds).toHaveLength(2);
+  expect(embeds.every(segment => segment.attributes.bold === true && segment.attributes.rPrChange === undefined)).toBe(true);
+}, TIMEOUT);
+
+test('direct formatting callers receive a typed container refusal without mutation', async () => {
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>text</w:t></w:r>' + simpleFormatField + inlineFormatControl + '</w:p>',
+  });
+  const session = wrapSession(arm.native, 8101);
+  const paragraph = arm.engine.paragraphs('body')[0]!;
+  const span = arm.engine.geometryReader.paragraphSpans('body')[0]!;
+  const range = storyRange(selection(paragraph.paraId, 0, span.length));
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  const before = session.encodeState();
+  for (const apply of [
+    () => session.toggleMark(range, { type: 'bold' }, suggesting),
+    () => session.formatRange(range, { bold: true }, suggesting),
+    () => session.clearFormatting(range, suggesting),
+  ]) {
+    expect(apply).toThrow(SuggestedFormattingOverContainerError);
+    expect(session.encodeState()).toEqual(before);
+    expect(session.listRevisions()).toEqual([]);
+  }
+}, TIMEOUT);
+
+test('refused formatting preserves imported container run property changes on save', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const importedRun = '<w:r><w:rPr><w:i/><w:rPrChange w:id="41" w:author="Prior"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>field</w:t></w:r>';
+  const containers = (simpleFormatField + complexFormatField + inlineFormatControl)
+    .replaceAll('<w:r><w:t>field</w:t></w:r>', importedRun)
+    .replace('<w:r><w:t>control</w:t></w:r>', importedRun);
+  const arm = await openCommandEngine([], { bodyXml:
+    '<w:p w14:paraId="00000001"><w:r><w:t>text</w:t></w:r>' + containers + '</w:p>',
+  });
+  const session = wrapSession(arm.native, 8101);
+  const saveXml = async () => {
+    const saved = await repackDocx(yrsToDocument(session, arm.engine.propertyDocument()));
+    return new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  };
+  const before = await saveXml();
+  expect(before.match(/<w:rPrChange\s/g)).toHaveLength(3);
+  const paragraph = arm.engine.paragraphs('body')[0]!;
+  const span = arm.engine.geometryReader.paragraphSpans('body')[0]!;
+  expect(execute(arm, command(arm, 'toggleMark', {
+    selection: selection(paragraph.paraId, 0, span.length), mark: { type: 'bold' },
+    suggesting: { name: 'Writer', date: '2026-10-01T12:00:00Z' },
+  }))).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+  expect(await saveXml()).toBe(before);
+}, TIMEOUT);
+
+test('formatting commands forward the suggesting author and create reviewable run changes', async () => {
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  const cases = [
+    ['toggleMark', { mark: { type: 'bold' } }, 'toggleMark'],
+    ['toggleStrike', {}, 'formatRange'],
+    ['formatRange', { delta: { italic: true } }, 'formatRange'],
+    ['formatSelection', { delta: { highlight: 'yellow' } }, 'formatRange'],
+    ['clearFormatting', {}, 'clearFormatting'],
+  ] as const;
+  for (const [kind, payload, method] of cases) {
+    const arm = await openCommandEngine();
+    const id = arm.engine.paragraphs('body')[0]!.paraId;
+    if (kind === 'clearFormatting') arm.engine.formatRange(storyRange(selection(id, 0, 5)), { bold: true });
+    const call = spyOn(arm.engine, method);
+    try {
+      const result = execute(arm, command(arm, kind, { ...payload, selection: selection(id, 0, 5), suggesting } as DocxCommandPayloads[typeof kind]));
+      expect(result.status).toBe('applied');
+      expect(call.mock.calls[0]?.at(-1)).toEqual(suggesting);
+      expect(arm.engine.geometryReader.listRevisions()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: 'rPrChange', author: suggesting.name, date: suggesting.date }),
+      ]));
+    } finally {
+      call.mockRestore();
+    }
+  }
+}, TIMEOUT);
+
+test('suggested formatting survives save and reopen and rejection restores the original runs', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine([], { bodyXml: '<w:p w14:paraId="00000001"><w:r><w:rPr><w:i/></w:rPr><w:t>abcdef</w:t></w:r></w:p>' });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  expect(execute(arm, command(arm, 'toggleMark', { selection: selection(id, 1, 5), mark: { type: 'bold' }, suggesting })).status).toBe('applied');
+  expect(execute(arm, command(arm, 'clearFormatting', { selection: selection(id, 2, 4), suggesting })).status).toBe('applied');
+  const projected = yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument());
+  const saved = await repackDocx(projected);
+  const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  expect(xml.match(/<w:rPrChange\s/g)).toHaveLength(3);
+  expect(xml).toContain('w:author="Writer"');
+  expect(xml).toMatch(/<w:rPrChange[^>]*><w:rPr><w:i\s*\/><\/w:rPr><\/w:rPrChange>/);
+  const reopened = await openCommandEngine([], { bytes: new Uint8Array(saved), clientId: 8102 });
+  const revisions = reopened.engine.geometryReader.listRevisions();
+  expect(revisions.length).toBeGreaterThan(0);
+  expect(revisions.every(revision => revision.kind === 'rPrChange')).toBe(true);
+  for (const revisionId of new Set(revisions.map(revision => revision.revisionId))) reopened.engine.rejectChange({ revisionId });
+  const para = reopened.engine.paragraphs('body')[0]!;
+  expect(reopened.engine.selectionContext(storyRange(selection(para.paraId, 0, 6)))).toMatchObject({ italic: true, bold: false });
+  const rejected = await repackDocx(yrsToDocument(wrapSession(reopened.native, 8102), reopened.engine.propertyDocument()));
+  expect(new TextDecoder().decode(unzipContainer(new Uint8Array(rejected))['word/document.xml'])).not.toContain('w:rPrChange');
+}, TIMEOUT);
+
+test('formatting preflight refuses every reserved run attribute before mutation', async () => {
+  const arm = await openCommandEngine();
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  for (const key of ['ins', 'del', 'hyperlink', 'rPrChange']) {
+    for (const value of [null, [{ info: { author: 'Forged' } }]]) {
+      for (const kind of ['formatSelection', 'formatRange'] as const) {
+        for (const end of [0, 5]) {
+          const intent = command(arm, kind, { selection: selection(id, 0, end), delta: { other: { [key]: value } } });
+          const before = snapshot(arm);
+          expect(preflightDocxCommand(arm.engine, arm.state, intent, context(arm, intent)))
+            .toMatchObject({ status: 'refused', reason: 'invalid-formatting' });
+          expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'invalid-formatting' });
+          expect(snapshot(arm)).toEqual(before);
+        }
+      }
+    }
+  }
+  expect(execute(arm, command(arm, 'insertText', { text: 'safe' })).status).toBe('applied');
+  expect(texts(arm)[0]).toBe('safeAlpha beta');
+}, TIMEOUT);
+
+test('stored run property changes refuse typing and breaks before insertion', async () => {
+  const arm = await openCommandEngine();
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  arm.state.storedMarks = { story: 'body', paraId: id, clear: false, delta: { other: { rPrChange: null } } };
+  for (const [kind, payload] of [
+    ['insertText', { text: 'unsafe' }],
+    ['replaceSelection', { text: 'unsafe', selection: selection(id, 0, 5) }],
+    ['lineBreak', {}],
+  ] as const) {
+    const before = snapshot(arm);
+    expect(execute(arm, command(arm, kind, payload))).toMatchObject({ status: 'refused', reason: 'invalid-stored-marks' });
+    expect(snapshot(arm)).toEqual(before);
+  }
+}, TIMEOUT);
+
+test('suggested hyperlinks refuse existing revisions before changing links or display text', async () => {
+  const changes = [
+    '<w:del w:id="7" w:author="Bob"><w:r><w:delText>old </w:delText></w:r></w:del>',
+    '<w:ins w:id="7" w:author="Ada"><w:r><w:rPr><w:i/><w:rPrChange w:id="8" w:author="Prior"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>old </w:t></w:r></w:ins>',
+    '<w:r><w:rPr><w:i/><w:rPrChange w:id="8" w:author="Prior"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>old </w:t></w:r>',
+  ];
+  for (const change of changes) {
+    const arm = await openCommandEngine([], { bodyXml:
+      '<w:p w14:paraId="00000001"><w:r><w:t>Click </w:t></w:r>' + change + '<w:r><w:t>here</w:t></w:r></w:p>',
+    });
+    const id = arm.engine.paragraphs('body')[0]!.paraId;
+    for (const displayText of [undefined, 'label']) {
+      const intent = command(arm, 'setHyperlink', {
+        selection: selection(id, 0, 14), hyperlink: { href: '#target' }, displayText,
+        expectVersion: arm.engine.proposalEngine.version(), suggesting: { name: 'Ada', date: '2026-10-01T12:00:00Z' },
+      });
+      const before = snapshot(arm);
+      const segments = arm.engine.storySegments('body');
+      expect(propertyCommandTarget(arm.engine, intent as DocxCommandIntent)).toBe('unsupported-suggesting');
+      expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+      expect(snapshot(arm)).toEqual(before);
+      expect(arm.engine.storySegments('body')).toEqual(segments);
+    }
+  }
+}, TIMEOUT);
+
+test('suggested hyperlink display text keeps its insertion revision and rejection restores the original', async () => {
+  const arm = await openCommandEngine();
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  const suggesting = { name: 'Writer', date: '2026-10-01T12:00:00Z' };
+  const link = spyOn(arm.engine, 'setHyperlink');
+  const replace = spyOn(arm.engine, 'replaceRange');
+  try {
+    expect(execute(arm, command(arm, 'setHyperlink', {
+      selection: selection(id, 0, 5), hyperlink: { href: '#target' }, displayText: 'label',
+      expectVersion: arm.engine.proposalEngine.version(), suggesting,
+    })).status).toBe('applied');
+    expect(link.mock.calls[0]?.[2]).toBeUndefined();
+    expect(replace.mock.calls[0]?.[2]).toEqual(suggesting);
+    const runs = arm.engine.storySegments('body').filter(segment => segment.kind === 'text');
+    expect(runs.filter(run => run.attributes.ins != null).map(run => run.text).join('')).toBe('label');
+    expect(runs.filter(run => run.attributes.del != null).map(run => run.text).join('')).toBe('Alpha');
+    expect(runs.find(run => run.attributes.ins != null)?.attributes.hyperlink).toMatchObject({ href: '#target' });
+    for (const revisionId of new Set(arm.engine.geometryReader.listRevisions().map(revision => revision.revisionId))) {
+      arm.engine.rejectChange({ revisionId });
+    }
+    expect(texts(arm)).toEqual(['Alpha beta', 'Second']);
+    expect(arm.engine.storySegments('body').every(segment => segment.attributes.hyperlink == null)).toBe(true);
+  } finally {
+    link.mockRestore();
+    replace.mockRestore();
+  }
+}, TIMEOUT);
+
+test('suggested hyperlink display text at a caret remains a reviewable insertion', async () => {
+  const arm = await openCommandEngine();
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, command(arm, 'setHyperlink', {
+    selection: selection(id, 0), hyperlink: { href: '#target' }, displayText: 'label',
+    expectVersion: arm.engine.proposalEngine.version(), suggesting: { name: 'Ada', date: '2026-10-01T12:00:00Z' },
+  })).status).toBe('applied');
+  const inserted = arm.engine.storySegments('body').find(segment => segment.attributes.ins != null);
+  expect(inserted).toMatchObject({ kind: 'text', text: 'label', attributes: { hyperlink: { href: '#target' } } });
+  expect(arm.engine.storySegments('body').every(segment => segment.attributes.del == null)).toBe(true);
+  for (const revisionId of new Set(arm.engine.geometryReader.listRevisions().map(revision => revision.revisionId))) {
+    arm.engine.rejectChange({ revisionId });
+  }
+  expect(texts(arm)).toEqual(['Alpha beta', 'Second']);
+}, TIMEOUT);
+
+test('suggested hyperlink replacement saves both targets and rejection restores the old target', async () => {
+  await preloadParseWasm(new Uint8Array(readFileSync(resolve(
+    process.cwd(), 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm'
+  ))));
+  const arm = await openCommandEngine([], { bodyXml: '<w:p w14:paraId="00000001"><w:hyperlink w:anchor="old"><w:r><w:t>label</w:t></w:r></w:hyperlink></w:p>' });
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, command(arm, 'setHyperlink', {
+    selection: selection(id, 0, 5), hyperlink: { href: '#new' },
+    expectVersion: arm.engine.proposalEngine.version(), suggesting: { name: 'Writer', date: '2026-10-01T12:00:00Z' },
+  })).status).toBe('applied');
+  const saved = await repackDocx(yrsToDocument(wrapSession(arm.native, 8101), arm.engine.propertyDocument()));
+  const xml = new TextDecoder().decode(unzipContainer(new Uint8Array(saved))['word/document.xml']);
+  expect(xml).toContain('w:anchor="old"');
+  expect(xml).toContain('w:anchor="new"');
+  expect(xml).toContain('<w:ins ');
+  expect(xml).toContain('<w:del ');
+  const reopened = await openCommandEngine([], { bytes: new Uint8Array(saved), clientId: 8102 });
+  for (const revisionId of new Set(reopened.engine.geometryReader.listRevisions().map(revision => revision.revisionId))) {
+    reopened.engine.rejectChange({ revisionId });
+  }
+  const rejected = await repackDocx(yrsToDocument(wrapSession(reopened.native, 8102), reopened.engine.propertyDocument()));
+  const rejectedXml = new TextDecoder().decode(unzipContainer(new Uint8Array(rejected))['word/document.xml']);
+  expect(rejectedXml).toContain('w:anchor="old"');
+  expect(rejectedXml).not.toContain('w:anchor="new"');
 }, TIMEOUT);

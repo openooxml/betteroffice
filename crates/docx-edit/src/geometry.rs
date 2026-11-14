@@ -6,7 +6,8 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
 
 use crate::bridge::inline_sdt_size;
 use crate::{
-    EditingDoc, KIND_KEY, PARA_ID, STORIES, is_identity_key, is_pilcrow, map_string, story_ref,
+    EditingDoc, KIND_KEY, PARA_ID, STORIES, TableLocator, is_identity_key, is_pilcrow, map_string,
+    story_ref,
 };
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -73,10 +74,26 @@ impl EditingDoc {
     pub fn geometry_position_outline(&self, root: &str) -> GeometryRead<GeometryPositionOutline> {
         let txn = self.doc.transact();
         let mut outline = BTreeMap::new();
-        match build_story(&txn, &mut outline, root, 0, 0) {
+        match build_story(&txn, &mut outline, root, 0, 0, &mut Scan::default()) {
             Ok(_) => GeometryRead::Value(outline),
             Err(()) => GeometryRead::Sentinel(GeometrySentinel::Legacy),
         }
+    }
+
+    /// The unavailable tables the outline walk meets from `root`: through the cells of complete
+    /// tables and block controls' stories, as the editor's position projection walks. A story the
+    /// walk names but cannot find reads as empty here. `Err` when the walk cannot finish.
+    pub(crate) fn unavailable_tables_under(&self, root: &str) -> Result<Vec<TableLocator>, ()> {
+        let txn = self.doc.transact();
+        let mut scan = Scan {
+            active: true,
+            ..Scan::default()
+        };
+        build_story(&txn, &mut BTreeMap::new(), root, 0, 0, &mut scan)?;
+        if scan.incomplete {
+            return Err(());
+        }
+        Ok(scan.found)
     }
 
     pub fn owned_revision_ranges(&self, ids: &[String]) -> GeometryRead<Vec<OwnedRevisionRange>> {
@@ -85,6 +102,33 @@ impl EditingDoc {
             Ok(ranges) => GeometryRead::Value(ranges),
             Err(sentinel) => GeometryRead::Sentinel(sentinel),
         }
+    }
+}
+
+/// What a scanning outline walk collects: the unavailable tables it meets, and whether it stopped
+/// at a depth or position limit, which leaves what lies beyond unread.
+#[derive(Default)]
+struct Scan {
+    active: bool,
+    found: Vec<TableLocator>,
+    incomplete: bool,
+}
+
+impl Scan {
+    /// Records that the walk stopped at a limit: a scan that stopped there could not look, so it
+    /// reports no result rather than an empty one.
+    fn limit<V>(&mut self) -> Result<V, ()> {
+        self.incomplete = true;
+        Err(())
+    }
+}
+
+/// `result`, except that a scanning walk takes `skipped` for a malformed entry so it still
+/// reaches everything after it; a layout walk refuses the whole outline instead.
+fn lenient<V>(scan: &Scan, result: Result<V, ()>, skipped: V) -> Result<V, ()> {
+    match result {
+        Err(()) if scan.active => Ok(skipped),
+        other => other,
     }
 }
 
@@ -111,14 +155,24 @@ fn build_story<T: ReadTxn>(
     story_id: &str,
     content_start: u64,
     depth: usize,
+    scan: &mut Scan,
 ) -> Result<u64, ()> {
     if let Some(existing) = outline.get(story_id) {
         return Ok(existing.size);
     }
     if depth > 256 || content_start > MAX_POSITION {
-        return Err(());
+        return scan.limit();
     }
-    let story = story_ref(txn, story_id).map_err(|_| ())?;
+    let story = match story_ref(txn, story_id) {
+        Ok(story) => story,
+        Err(crate::EditError::CellHasNoStory(_)) => {
+            let cell = crate::empty_cells::EmptyCell::new(story_id);
+            let scratch = cell.doc().yrs_doc().transact();
+            return build_story(&scratch, outline, story_id, content_start, depth, scan);
+        }
+        Err(_) if scan.active => return Ok(0),
+        Err(_) => return Err(()),
+    };
     outline.insert(
         story_id.to_owned(),
         GeometryStoryOutline {
@@ -158,7 +212,7 @@ fn build_story<T: ReadTxn>(
             }
             Out::YMap(map) => match map_string(&map, txn, KIND_KEY).as_deref().unwrap_or("") {
                 "table" => {
-                    cursor += build_table(
+                    let size = build_table(
                         txn,
                         outline,
                         &map,
@@ -166,7 +220,9 @@ fn build_story<T: ReadTxn>(
                         table_index,
                         content_start + cursor,
                         depth,
-                    )?;
+                        scan,
+                    );
+                    cursor += lenient(scan, size, 2)?;
                     table_index += 1;
                     paragraph_start = cursor;
                     leading += 1;
@@ -175,10 +231,22 @@ fn build_story<T: ReadTxn>(
                     let child = child_story(
                         plain_value(&map, txn, "story").as_ref(),
                         format!("{story_id}:sdt0"),
-                    )?;
-                    cursor +=
-                        build_story(txn, outline, &child, content_start + cursor + 1, depth + 1)?
-                            + 2;
+                    );
+                    let size = match lenient(scan, child.map(Some), None)? {
+                        Some(child) => {
+                            let size = build_story(
+                                txn,
+                                outline,
+                                &child,
+                                content_start + cursor + 1,
+                                depth + 1,
+                                scan,
+                            );
+                            lenient(scan, size, 0)?
+                        }
+                        None => 0,
+                    };
+                    cursor += size + 2;
                     paragraph_start = cursor;
                     leading += 1;
                 }
@@ -199,7 +267,7 @@ fn build_story<T: ReadTxn>(
             _ => inline_length += 1,
         }
         if cursor > MAX_POSITION || inline_length > MAX_POSITION {
-            return Err(());
+            return scan.limit();
         }
     }
     let size = cursor.max(
@@ -211,7 +279,7 @@ fn build_story<T: ReadTxn>(
             },
     );
     if size > MAX_POSITION {
-        return Err(());
+        return scan.limit();
     }
     let entry = outline.get_mut(story_id).unwrap();
     entry.size = size;
@@ -219,6 +287,7 @@ fn build_story<T: ReadTxn>(
     Ok(size)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_table<T: ReadTxn>(
     txn: &T,
     outline: &mut GeometryPositionOutline,
@@ -227,50 +296,74 @@ fn build_table<T: ReadTxn>(
     table_index: usize,
     start: u64,
     depth: usize,
+    scan: &mut Scan,
 ) -> Result<u64, ()> {
     if start > MAX_POSITION {
-        return Err(());
+        return scan.limit();
     }
-    let rows = plain_value(map, txn, "rows");
+    let Some(payload) = crate::unavailable_tables::table_payload(map, txn) else {
+        if scan.active {
+            scan.found
+                .push(TableLocator::new(story_id, table_index as u32));
+        }
+        return Ok(2);
+    };
+    let rows = match payload.rows {
+        Out::Any(rows) => Some(rows),
+        _ => None,
+    };
     let rows = match rows.as_ref() {
         Some(Any::Array(rows)) => rows.as_ref(),
-        Some(Any::Buffer(_)) => return Err(()),
+        Some(Any::Buffer(_)) => return lenient(scan, Err(()), 2),
         _ => return Ok(2),
     };
     let mut table_size = 0;
     for (row_index, row) in rows.iter().enumerate() {
-        let Any::Map(row) = row else { return Err(()) };
+        let Any::Map(row) = row else {
+            lenient(scan, Err(()), ())?;
+            continue;
+        };
         let cells = match row.get("cells") {
             Some(Any::Array(cells)) => cells.as_ref(),
-            Some(Any::Buffer(_)) => return Err(()),
+            Some(Any::Buffer(_)) => {
+                lenient(scan, Err(()), ())?;
+                continue;
+            }
             _ => {
                 table_size += 2;
                 if table_size > MAX_POSITION {
-                    return Err(());
+                    return scan.limit();
                 }
                 continue;
             }
         };
         let mut row_size = 0;
         for (cell_index, cell) in cells.iter().enumerate() {
-            let Any::Map(cell) = cell else { return Err(()) };
+            let Any::Map(cell) = cell else {
+                lenient(scan, Err(()), ())?;
+                continue;
+            };
             let child = child_story(
                 cell.get("story"),
                 format!("{story_id}:t{table_index}:r{row_index}c{cell_index}"),
-            )?;
+            );
+            let Some(child) = lenient(scan, child.map(Some), None)? else {
+                continue;
+            };
             let child_start = start + 3 + table_size + row_size;
-            row_size += build_story(txn, outline, &child, child_start, depth + 1)? + 2;
+            let size = build_story(txn, outline, &child, child_start, depth + 1, scan);
+            row_size += lenient(scan, size, 0)? + 2;
             if row_size > MAX_POSITION {
-                return Err(());
+                return scan.limit();
             }
         }
         table_size += row_size + 2;
         if table_size > MAX_POSITION {
-            return Err(());
+            return scan.limit();
         }
     }
     if table_size + 2 > MAX_POSITION {
-        return Err(());
+        return scan.limit();
     }
     Ok(table_size + 2)
 }
@@ -282,6 +375,7 @@ fn revision_key(key: &str) -> bool {
             | "pPrIns"
             | "pPrDel"
             | "pPrChange"
+            | "rPrChange"
             | "trIns"
             | "trDel"
             | "tableIns"
@@ -525,22 +619,22 @@ mod tests {
         let doc = EditingDoc::new(84001);
         story(
             &doc,
+            "a",
+            json!([
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": []}, {"text": "😀"}, {"kind": "pilcrow", "paraId": "ap"}
+            ]),
+        );
+        story(&doc, "b", json!([{ "kind": "pilcrow", "paraId": "bp" }]));
+        story(
+            &doc,
             "body",
             json!([
-                {"kind": "table", "rows": [
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": [
                     {"cells": [{"story": "a", "tcPr": {"rowspan": 2, "colspan": 2}}, {"story": "b"}]},
                     {"cells": [{}]}, {"cells": []}
                 ]}, {"text": "Z"}, {"kind": "pilcrow", "paraId": "p"}
             ]),
         );
-        story(
-            &doc,
-            "a",
-            json!([
-                {"kind": "table", "rows": []}, {"text": "😀"}, {"kind": "pilcrow", "paraId": "ap"}
-            ]),
-        );
-        story(&doc, "b", json!([{ "kind": "pilcrow", "paraId": "bp" }]));
         story(&doc, "body:t0:r1c0", json!([]));
         assert_eq!(
             outline(&doc),
@@ -561,8 +655,8 @@ mod tests {
             "body",
             json!([
                 {"text": "x"}, {"kind": "pilcrow", "paraId": "p0"},
-                {"kind": "table", "rows": [{"cells": [{}]}]},
-                {"kind": "table", "rows": [{"cells": [{}]}]},
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [{}]}]},
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [{}]}]},
                 {"text": "z"}, {"kind": "pilcrow", "paraId": "p1"}
             ]),
         );
@@ -570,7 +664,7 @@ mod tests {
             &doc,
             "body:t0:r0c0",
             json!([
-                {"kind": "table", "rows": [{"cells": [{"story": null}]}]},
+                {"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [{"story": null}]}]},
                 {"text": "A"}, {"kind": "pilcrow", "paraId": "cp"}
             ]),
         );
@@ -788,9 +882,9 @@ mod tests {
         for segment in [
             json!({"kind": "blockSdt", "story": 42}),
             json!({"kind": "blockSdt", "story": "missing"}),
-            json!({"kind": "table", "rows": [null]}),
-            json!({"kind": "table", "rows": [{"cells": [false]}]}),
-            json!({"kind": "table", "rows": [{"cells": [{"story": []}]}]}),
+            json!({"kind": "table", "tblPr": {}, "grid": [], "rows": [null]}),
+            json!({"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [false]}]}),
+            json!({"kind": "table", "tblPr": {}, "grid": [], "rows": [{"cells": [{"story": []}]}]}),
         ] {
             let doc = EditingDoc::new(84010);
             story(&doc, "body", json!([segment]));

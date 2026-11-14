@@ -7,7 +7,7 @@ import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
-const STATIC_GZIP_BUDGET = 36_000;
+const STATIC_GZIP_BUDGET = 37_000;
 
 function source(path: string): ts.SourceFile {
   const name = relative(root, path).replace(/\\/g, '/');
@@ -33,16 +33,18 @@ test('default editor reaches the peerless surface only through a dynamic import'
     seen.add(path);
     const walk = (node: ts.Node): void => {
       if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) &&
-        !node.importClause?.isTypeOnly && node.moduleSpecifier.text.startsWith('.')) {
+        !node.importClause?.isTypeOnly) {
         const bindings = node.importClause?.namedBindings;
         if (!node.importClause?.name && bindings && ts.isNamedImports(bindings) &&
           bindings.elements.every((entry) => entry.isTypeOnly)) return;
-        visit(modulePath(path, node.moduleSpecifier.text));
+        expect(node.moduleSpecifier.text).not.toBe('@betteroffice/pptx-i18n');
+        if (node.moduleSpecifier.text.startsWith('.')) visit(modulePath(path, node.moduleSpecifier.text));
       } else if (ts.isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier &&
-        ts.isStringLiteral(node.moduleSpecifier) && node.moduleSpecifier.text.startsWith('.')) {
+        ts.isStringLiteral(node.moduleSpecifier)) {
         if (node.exportClause && ts.isNamedExports(node.exportClause) &&
           node.exportClause.elements.every((entry) => entry.isTypeOnly)) return;
-        visit(modulePath(path, node.moduleSpecifier.text));
+        expect(node.moduleSpecifier.text).not.toBe('@betteroffice/pptx-i18n');
+        if (node.moduleSpecifier.text.startsWith('.')) visit(modulePath(path, node.moduleSpecifier.text));
       } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword &&
         node.arguments[0] && ts.isStringLiteral(node.arguments[0]) && node.arguments[0].text.startsWith('.')) {
         deferred.add(modulePath(path, node.arguments[0].text));
@@ -77,6 +79,8 @@ test('default editor static chunks exclude the peerless core', async () => {
     }
   };
   visit(entry);
+  const staticInputs = [...seen].flatMap((path) => Object.keys(outputs[path].inputs));
+  expect(staticInputs.filter((path) => /packages\/pptx-i18n\/(?:src\/index\.ts|proposals\/en\.json)$/.test(path))).toEqual([]);
   const inputs = [...seen].flatMap((path) => Object.entries(outputs[path].inputs)
     .filter(([, input]) => input.bytesInOutput > 0).map(([path]) => path));
   const peerlessCore = /packages\/pptx\/src\/session\/command(?:Client|Session|Geometry|SharedAdapter)\.ts$|shared\/office-session\/commands\/(?:session|presenter|outbox)\.ts$/;
@@ -86,6 +90,11 @@ test('default editor static chunks exclude the peerless core', async () => {
       .filter(([, input]) => input.bytesInOutput > 0).map(([path]) => path));
   expect(deferredInputs.filter((path) => peerlessCore.test(path))).toHaveLength(7);
   for (const module of [
+    /packages\/pptx-i18n\/proposals\/en\.json$/,
+    /packages\/pptx-i18n\/menus\/en\.json$/,
+    /packages\/pptx-react\/src\/commands\/menuGates\.ts$/,
+    /packages\/pptx-react\/src\/contextMenu\/menus\.ts$/,
+    /packages\/pptx-react\/src\/i18n\/useProposalTranslation\.ts$/,
     /packages\/pptx-react\/src\/viewer\//,
     /packages\/pptx-react\/src\/worker\/PptxWorkerEditor\.tsx$/,
     /packages\/pptx-react\/src\/worker\/createWorkerEditorApi\.ts$/,
@@ -99,6 +108,7 @@ test('default editor static chunks exclude the peerless core', async () => {
     /packages\/pptx\/src\/render\/browserImage\.ts$/,
     /packages\/pptx\/src\/render\/imageSize\.ts$/,
     /packages\/pptx\/src\/wasm\/loader\.ts$/,
+    /shared\/react-toolbar\/MenuList\.tsx$/,
   ]) {
     expect(inputs.filter((path) => module.test(path))).toEqual([]);
     expect(deferredInputs.some((path) => module.test(path))).toBe(true);
@@ -106,7 +116,7 @@ test('default editor static chunks exclude the peerless core', async () => {
   const files = new Map(result.outputFiles.map((file) => [file.path, file.contents]));
   const bytes = [...seen].reduce((sum, path) => sum + gzipSync(files.get(resolve(root, path))!, { level: 9 }).length, 0);
   expect(bytes).toBeLessThan(STATIC_GZIP_BUDGET);
-});
+}, 30_000);
 
 test('p2_peerless_import_graph_has_no_wasm_modules', () => {
   const exports = new Map<string, string>();

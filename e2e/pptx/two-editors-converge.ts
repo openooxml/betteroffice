@@ -1,5 +1,7 @@
 import { expect } from 'bun:test';
 
+import { stateVectorEntries } from '../assertions';
+
 import {
   editStages,
   exchange,
@@ -107,8 +109,8 @@ export const twoEditorsConverge: PptxScenario = {
     expect(right.slides[SLIDE].shapes.map((shape) => shape.id)).toContain(
       added.shapeId
     );
-    expect([...a.handle.encodeStateVector()].join()).toBe(
-      [...b.handle.encodeStateVector()].join()
+    expect(stateVectorEntries(a.handle.encodeStateVector())).toEqual(
+      stateVectorEntries(b.handle.encodeStateVector())
     );
 
     const catchUp = a.timer.op('encodeDiff:inSync', () =>

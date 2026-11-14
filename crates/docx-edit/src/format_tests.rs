@@ -1,0 +1,967 @@
+use super::*;
+use crate::{ChangeKind, ChangeTarget, EngineSession, seed_from_docx};
+use serde_json::json;
+
+#[test]
+fn language_delta_parses_and_lowers_keep_set_clear_slots() {
+    let parse = |value: Value| parse_inline_format_delta(value.as_object().unwrap()).unwrap();
+    assert_eq!(parse(json!({})).language, Patch::Keep);
+    let delta = parse(json!({"language": {"lang": "de-DE", "eastAsia": null}}));
+    assert_eq!(
+        delta.language,
+        Patch::Set(LanguagePatch {
+            latin: Patch::Set("de-DE".to_owned()),
+            east_asia: Patch::Clear,
+            bidi: Patch::Keep,
+        })
+    );
+    let attributes = delta.to_attrs().unwrap();
+    assert_eq!(
+        serde_json::to_value(&attributes["language"]).unwrap(),
+        json!({"latin": "de-DE", "eastAsia": null})
+    );
+    assert_eq!(
+        serde_json::to_value(
+            parse(json!({"language": null}))
+                .to_attrs()
+                .unwrap()
+                .get("language")
+                .unwrap()
+        )
+        .unwrap(),
+        json!({"latin": null, "eastAsia": null, "bidi": null})
+    );
+    for value in [
+        json!({"language": "de-DE"}),
+        json!({"language": {"lang": "en_US"}}),
+        json!({"language": {"val": "de-DE"}}),
+    ] {
+        assert!(parse_inline_format_delta(value.as_object().unwrap()).is_err());
+    }
+}
+
+#[test]
+fn language_range_merges_each_runs_live_slots() {
+    let engine = engine();
+    let doc = engine.doc();
+    let ctx = EditCtx::local("", "");
+    let range = StoryRange::new("body", 0, 6);
+    let apply = |range: StoryRange, slots: Value| {
+        let delta =
+            parse_inline_format_delta(json!({"language": slots}).as_object().unwrap()).unwrap();
+        doc.format_range(&ctx, range, &delta).unwrap();
+    };
+    apply(
+        range.clone(),
+        json!({"lang": "en-US", "eastAsia": "ja-JP", "bidi": "ar-SA"}),
+    );
+    apply(
+        StoryRange::new("body", 3, 6),
+        json!({"eastAsia": "zh-Hant"}),
+    );
+    apply(range.clone(), json!({"lang": "de-DE"}));
+    let runs = attrs(&engine);
+    assert_eq!(
+        runs[0].1["language"],
+        json!({"latin": "de-DE", "eastAsia": "ja-JP", "bidi": "ar-SA"})
+    );
+    assert_eq!(
+        runs[1].1["language"],
+        json!({"latin": "de-DE", "eastAsia": "zh-Hant", "bidi": "ar-SA"})
+    );
+    apply(range, json!({"lang": null}));
+    for (_, attributes) in attrs(&engine) {
+        assert!(attributes["language"]["latin"].is_null());
+        assert_eq!(attributes["language"]["bidi"], "ar-SA");
+    }
+}
+
+#[test]
+fn paragraph_language_updates_the_mark_even_without_text() {
+    let engine = EngineSession::new(9306);
+    seed_from_docx(
+        engine.doc(),
+        &document("<w:p><w:pPr><w:rPr><w:lang w:val=\"en-US\"/></w:rPr></w:pPr></w:p>"),
+    )
+    .unwrap();
+    let id = engine.doc().paragraphs("body").unwrap()[0].para_id.clone();
+    let delta = InlineFormatDelta {
+        language: Patch::Set(LanguagePatch {
+            latin: Patch::Set("de-DE".to_owned()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    engine
+        .doc()
+        .format_text_target(
+            &crate::TextTarget::Paragraph(crate::ParagraphTarget {
+                story: "body".to_owned(),
+                para_id: id,
+            }),
+            &delta,
+        )
+        .unwrap()
+        .unwrap();
+    let segments = engine.doc().story_segments("body").unwrap();
+    let crate::SegmentContent::Pilcrow(mark) = &segments.last().unwrap().content else {
+        panic!("mark missing")
+    };
+    assert_eq!(
+        serde_json::to_value(&mark.values["language"]).unwrap(),
+        json!({"latin": "de-DE"})
+    );
+}
+
+fn document(body: &str) -> Vec<u8> {
+    ooxml_opc::rezip_parts(&[
+        ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+        ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+        ("word/document.xml".to_owned(), format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#).into_bytes()),
+    ]).unwrap()
+}
+
+fn engine() -> EngineSession {
+    let engine = EngineSession::new(9301);
+    seed_from_docx(
+        engine.doc(),
+        &document("<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>abcdef</w:t></w:r></w:p>"),
+    )
+    .unwrap();
+    engine
+}
+
+fn suggesting() -> EditCtx {
+    EditCtx::local("Ada", "2026-10-01T12:00:00Z").suggesting()
+}
+
+fn attrs(engine: &EngineSession) -> Vec<(String, Value)> {
+    engine
+        .doc()
+        .story_segments("body")
+        .unwrap()
+        .into_iter()
+        .filter_map(|segment| {
+            let crate::SegmentContent::Text(text) = segment.content else {
+                return None;
+            };
+            Some((
+                text.to_string(),
+                serde_json::to_value(segment.attributes).unwrap(),
+            ))
+        })
+        .collect()
+}
+
+#[test]
+fn suggested_format_refuses_containers_without_mutation() {
+    let simple = r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>field</w:t></w:r></w:fldSimple>"#;
+    let control = r#"<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt>"#;
+    let complex = concat!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        "<w:r><w:instrText> PAGE </w:instrText></w:r>",
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        "<w:r><w:t>field</w:t></w:r>",
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+    );
+    for containers in [
+        simple.to_owned(),
+        control.to_owned(),
+        format!("{simple}{control}"),
+        complex.to_owned(),
+    ] {
+        for (operation, origin) in [
+            ("format", crate::EditOrigin::Local),
+            ("format", crate::EditOrigin::Agent),
+            ("toggle", crate::EditOrigin::Local),
+            ("clear", crate::EditOrigin::Local),
+            ("empty", crate::EditOrigin::Local),
+        ] {
+            let ctx = EditCtx {
+                origin,
+                ..suggesting()
+            };
+            let engine = EngineSession::new(9310);
+            seed_from_docx(
+                engine.doc(),
+                &document(&format!(
+                    "<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>text</w:t></w:r>{containers}</w:p>"
+                )),
+            )
+            .unwrap();
+            let end = engine
+                .doc()
+                .paragraph_index("body")
+                .unwrap()
+                .pilcrow_at(0)
+                .unwrap();
+            let before = engine.doc().encode_state_as_update_v1();
+            let range = StoryRange::new("body", 0, end);
+            let result = match operation {
+                "toggle" => engine.doc().toggle_format(&ctx, range, SimpleFormat::Bold),
+                "clear" => engine.doc().clear_formatting(&ctx, range),
+                _ => engine.doc().format_range(
+                    &ctx,
+                    range,
+                    &InlineFormatDelta {
+                        bold: if operation == "empty" {
+                            Patch::Keep
+                        } else {
+                            Patch::Set(true)
+                        },
+                        ..Default::default()
+                    },
+                ),
+            };
+            assert_eq!(result, Err(OpError::SuggestedFormattingOverContainer));
+            assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+            assert!(engine.doc().list_revisions().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn suggested_bold_across_comment_reference_tracks_only_text() {
+    let engine = EngineSession::new(9313);
+    seed_from_docx(
+        engine.doc(),
+        &document(concat!(
+            r#"<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>hello</w:t></w:r>"#,
+            r#"<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>"#,
+            r#"<w:r><w:t xml:space="preserve"> world</w:t></w:r></w:p>"#,
+        )),
+    )
+    .unwrap();
+    let before = engine.doc().story_segments("body").unwrap();
+    let receipt = engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 0, 12),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    assert_eq!(receipt.revision_ids.len(), 1);
+    let after = engine.doc().story_segments("body").unwrap();
+    assert_eq!(after[1], before[1]);
+    assert!(
+        matches!(&after[1].content, crate::SegmentContent::OtherEmbed { kind, payload }
+        if kind == "field" && payload.get("modelKind") == Some(&Any::from("commentReference")))
+    );
+    let runs = attrs(&engine);
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].0, "hello");
+    assert_eq!(runs[1].0, " world");
+    for (_, attributes) in runs {
+        assert_eq!(attributes["bold"], true);
+        assert_eq!(attributes["rPrChange"][0]["info"]["author"], "Ada");
+    }
+    let revisions = engine.doc().list_revisions().unwrap();
+    assert!(!revisions.is_empty());
+    assert!(
+        revisions
+            .iter()
+            .all(|revision| revision.change.kind == ChangeKind::RunPropertiesChanged)
+    );
+    engine
+        .doc()
+        .reject_change(
+            &suggesting(),
+            &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+        )
+        .unwrap();
+    assert_eq!(engine.doc().story_segments("body").unwrap(), before);
+}
+
+#[test]
+fn suggested_bold_refuses_projected_field_code_and_result_without_mutation() {
+    let engine = EngineSession::new(9314);
+    seed_from_docx(
+        engine.doc(),
+        &document(concat!(
+            "<w:p><w:r><w:t>text</w:t></w:r>",
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+            r#"<w:hyperlink w:anchor="top"><w:r><w:t>HYPERLINK</w:t></w:r></w:hyperlink>"#,
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+            r#"<w:hyperlink w:anchor="top"><w:r><w:t>link</w:t></w:r></w:hyperlink>"#,
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        )),
+    )
+    .unwrap();
+    let runs = attrs(&engine);
+    assert_eq!(runs[1].0, "HYPERLINK");
+    assert_eq!(runs[1].1["fieldResult"]["index"], -1);
+    assert_eq!(runs[2].0, "link");
+    assert_eq!(runs[2].1["fieldResult"]["index"], 0);
+    let before = engine.doc().encode_state_as_update_v1();
+    for (start, end) in [(4, 13), (13, 17), (0, 13), (0, 17)] {
+        for operation in ["toggle", "format", "clear"] {
+            let range = StoryRange::new("body", start, end);
+            let result = match operation {
+                "toggle" => engine
+                    .doc()
+                    .toggle_format(&suggesting(), range, SimpleFormat::Bold),
+                "clear" => engine.doc().clear_formatting(&suggesting(), range),
+                _ => engine.doc().format_range(
+                    &suggesting(),
+                    range,
+                    &InlineFormatDelta {
+                        bold: Patch::Set(true),
+                        ..Default::default()
+                    },
+                ),
+            };
+            assert_eq!(result, Err(OpError::SuggestedFormattingOverContainer));
+            assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+            assert_eq!(attrs(&engine), runs);
+            assert!(engine.doc().list_revisions().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn plain_text_suggestions_and_plain_container_formatting_remain_supported() {
+    let engine = EngineSession::new(9311);
+    seed_from_docx(
+        engine.doc(),
+        &document(concat!(
+            "<w:p><w:r><w:t>text</w:t></w:r>",
+            r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>field</w:t></w:r></w:fldSimple>"#,
+            r#"<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt>"#,
+            "</w:p>",
+        )),
+    )
+    .unwrap();
+    let receipt = engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 0, 4),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    assert_eq!(receipt.revision_ids.len(), 1);
+    assert_eq!(attrs(&engine)[0].1["bold"], true);
+    let receipt = engine
+        .doc()
+        .toggle_format(
+            &EditCtx::local("Ada", "2026-10-01T12:00:00Z"),
+            StoryRange::new("body", 4, 6),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    assert!(receipt.revision_ids.is_empty());
+    let segments = engine.doc().story_segments("body").unwrap();
+    for segment in &segments[1..3] {
+        assert_eq!(segment.attributes.get("bold"), Some(&Any::Bool(true)));
+        assert!(!segment.attributes.contains_key(RPR_CHANGE));
+    }
+    assert_eq!(engine.doc().list_revisions().unwrap().len(), 1);
+}
+
+#[test]
+fn suggested_container_formatting_keeps_its_typed_session_error() {
+    let core = crate::session::EditSessionCore::new(9312, crate::session::Host::deterministic());
+    seed_from_docx(
+        core.engine.doc(),
+        &document(concat!(
+            "<w:p><w:r><w:t>text</w:t></w:r>",
+            r#"<w:fldSimple w:instr=" PAGE "><w:r><w:t>field</w:t></w:r></w:fldSimple>"#,
+            "</w:p>",
+        )),
+    )
+    .unwrap();
+    let paragraphs: Value = serde_json::from_str(&core.paragraphs("body").unwrap()).unwrap();
+    let id = paragraphs[0]["paraId"].as_str().unwrap();
+    let before = core.encode_state();
+    for operation in ["format", "toggle", "font", "clear"] {
+        let author = Some("Ada".to_owned());
+        let date = Some("2026-10-01T12:00:00Z".to_owned());
+        let result = match operation {
+            "format" => core
+                .format_range("body", id, 0, id, 5, r#"{"bold":true}"#, author, date)
+                .map(|_| ()),
+            "clear" => core
+                .clear_formatting("body", id, 0, id, 5, author, date)
+                .map(|_| ()),
+            _ => core
+                .toggle_mark(
+                    "body",
+                    id,
+                    0,
+                    id,
+                    5,
+                    if operation == "font" {
+                        r#"{"type":"fontFamily","value":"Arial"}"#
+                    } else {
+                        r#"{"type":"bold"}"#
+                    },
+                    author,
+                    date,
+                )
+                .map(|_| ()),
+        };
+        assert_eq!(
+            result.unwrap_err().kind,
+            crate::session::EngineErrorKind::SuggestedFormattingOverContainer
+        );
+        assert_eq!(core.encode_state(), before);
+        assert!(core.engine.doc().list_revisions().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn suggested_format_captures_previous_run_properties() {
+    let engine = engine();
+    let receipt = engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 0, 6),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    assert_eq!(receipt.revision_ids.len(), 1);
+    let runs = attrs(&engine);
+    assert_eq!(runs[0].1["bold"], true);
+    let change = &runs[0].1["rPrChange"][0];
+    assert_eq!(change["previousFormatting"]["italic"], true);
+    assert!(change["previousFormatting"]["bold"].is_null());
+    assert_eq!(change["info"]["author"], "Ada");
+    assert_eq!(change["info"]["date"], "2026-10-01T12:00:00Z");
+    assert_eq!(
+        engine.doc().list_revisions().unwrap()[0].change.kind,
+        ChangeKind::RunPropertiesChanged
+    );
+}
+
+#[test]
+fn partial_and_repeated_format_keep_original_properties_on_both_sides() {
+    let engine = engine();
+    engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 1, 5),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    engine
+        .doc()
+        .clear_formatting(&suggesting(), StoryRange::new("body", 2, 4))
+        .unwrap();
+    let runs = attrs(&engine);
+    assert_eq!(
+        runs.iter().map(|run| run.0.as_str()).collect::<Vec<_>>(),
+        ["a", "b", "cd", "e", "f"]
+    );
+    assert!(runs[0].1["rPrChange"].is_null());
+    assert!(runs[4].1["rPrChange"].is_null());
+    for run in &runs[1..4] {
+        assert_eq!(
+            run.1["rPrChange"][0]["previousFormatting"],
+            json!({"italic": true})
+        );
+    }
+}
+
+#[test]
+fn accept_and_reject_run_properties_by_id_and_range() {
+    for accept in [true, false] {
+        for by_id in [true, false] {
+            let engine = engine();
+            let receipt = engine
+                .doc()
+                .toggle_format(
+                    &suggesting(),
+                    StoryRange::new("body", 0, 6),
+                    SimpleFormat::Bold,
+                )
+                .unwrap();
+            let target = if by_id {
+                ChangeTarget::Revision(receipt.revision_ids[0].clone())
+            } else {
+                ChangeTarget::Range(StoryRange::new("body", 0, 6))
+            };
+            if accept {
+                engine.doc().accept_change(&suggesting(), &target).unwrap();
+            } else {
+                engine.doc().reject_change(&suggesting(), &target).unwrap();
+            }
+            assert!(engine.doc().list_revisions().unwrap().is_empty());
+            let runs = attrs(&engine);
+            assert_eq!(runs[0].1["bold"].as_bool().unwrap_or(false), accept);
+            assert_eq!(runs[0].1["italic"], true);
+            assert!(runs[0].1["rPrChange"].is_null());
+        }
+    }
+}
+
+#[test]
+fn suggested_hyperlink_refuses_pending_deletions_without_mutation() {
+    let engine = EngineSession::new(9305);
+    seed_from_docx(
+        engine.doc(),
+        &document(concat!(
+            "<w:p><w:r><w:t>Click </w:t></w:r>",
+            r#"<w:del w:id="7" w:author="Bob"><w:r><w:delText>old </w:delText></w:r></w:del>"#,
+            "<w:r><w:t>here</w:t></w:r></w:p>",
+        )),
+    )
+    .unwrap();
+    let before = engine.doc().encode_state_as_update_v1();
+    let runs = attrs(&engine);
+    assert_eq!(runs[1].0, "old ");
+    assert!(!runs[1].1["del"].is_null());
+    let result = engine.doc().set_hyperlink(
+        &suggesting(),
+        StoryRange::new("body", 0, 14),
+        Some(Any::from_json(r##"{"href":"#target"}"##).unwrap()),
+    );
+    assert_eq!(result, Err(OpError::OverlapsTrackedChange));
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+    assert_eq!(attrs(&engine), runs);
+}
+
+#[test]
+fn suggested_hyperlink_refuses_insertions_and_preserves_run_property_changes() {
+    for author in ["Ada", "Bob"] {
+        for property_change in [false, true] {
+            let engine = EngineSession::new(9306);
+            let properties = if property_change {
+                r#"<w:rPr><w:i/><w:rPrChange w:id="8" w:author="Prior"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr>"#
+            } else {
+                "<w:rPr><w:i/></w:rPr>"
+            };
+            seed_from_docx(
+                engine.doc(),
+                &document(&format!(
+                    r#"<w:p><w:r><w:t>before</w:t></w:r><w:ins w:id="7" w:author="{author}"><w:r>{properties}<w:t>link</w:t></w:r></w:ins></w:p>"#,
+                )),
+            )
+            .unwrap();
+            let before = engine.doc().encode_state_as_update_v1();
+            let runs = attrs(&engine);
+            assert!(!runs[1].1["ins"].is_null());
+            assert_eq!(!runs[1].1["rPrChange"].is_null(), property_change);
+            let result = engine.doc().set_hyperlink(
+                &suggesting(),
+                StoryRange::new("body", 0, 10),
+                Some(Any::from_json(r##"{"href":"#target"}"##).unwrap()),
+            );
+            assert_eq!(result, Err(OpError::OverlapsTrackedChange));
+            assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+            assert_eq!(attrs(&engine), runs);
+        }
+    }
+}
+
+#[test]
+fn suggested_hyperlink_refuses_existing_run_property_changes_without_mutation() {
+    let engine = engine();
+    engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 2, 4),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    for hyperlink in [
+        None,
+        Some(Any::from_json(r##"{"href":"#target"}"##).unwrap()),
+    ] {
+        let before = engine.doc().encode_state_as_update_v1();
+        let runs = attrs(&engine);
+        let result =
+            engine
+                .doc()
+                .set_hyperlink(&suggesting(), StoryRange::new("body", 1, 5), hyperlink);
+        assert_eq!(result, Err(OpError::OverlapsTrackedChange));
+        assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+        assert_eq!(attrs(&engine), runs);
+    }
+}
+
+#[test]
+fn suggested_hyperlink_can_be_rejected() {
+    let engine = engine();
+    let receipt = engine
+        .doc()
+        .set_hyperlink(
+            &suggesting(),
+            StoryRange::new("body", 1, 5),
+            Some(Any::from_json(r##"{"href":"#target"}"##).unwrap()),
+        )
+        .unwrap();
+    assert!(!receipt.revision_ids.is_empty());
+    let runs = attrs(&engine);
+    assert_eq!(
+        runs.iter()
+            .filter(|run| !run.1["ins"].is_null())
+            .map(|run| run.0.as_str())
+            .collect::<String>(),
+        "bcde"
+    );
+    assert_eq!(
+        runs.iter()
+            .filter(|run| !run.1["del"].is_null())
+            .map(|run| run.0.as_str())
+            .collect::<String>(),
+        "bcde"
+    );
+    engine
+        .doc()
+        .reject_change(
+            &suggesting(),
+            &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+        )
+        .unwrap();
+    assert!(
+        attrs(&engine)
+            .iter()
+            .all(|run| run.1["hyperlink"].is_null())
+    );
+    assert_eq!(
+        attrs(&engine)
+            .iter()
+            .map(|run| run.0.as_str())
+            .collect::<String>(),
+        "abcdef"
+    );
+}
+
+#[test]
+fn generated_run_change_serializes_and_reopens() {
+    let engine = engine();
+    engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 0, 6),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    let runs = attrs(&engine);
+    let mut change = runs[0].1["rPrChange"][0].clone();
+    change["info"]["id"] = json!(42);
+    let run = serde_json::from_value(json!({"type":"run", "formatting":{"bold":true,"italic":true}, "propertyChanges":[change], "content":[{"type":"text","text":"abcdef"}]})).unwrap();
+    let mut context = docx_parse::serializer::SerializerContext::new(
+        &docx_parse::serializer::SerializerDeterminism {
+            seed: "0".repeat(64),
+            now: "2000-01-01T00:00:00.000Z".to_owned(),
+        },
+    )
+    .unwrap();
+    let xml = docx_parse::serializer::serialize_run(&run, &mut context).unwrap();
+    assert!(xml.contains("w:rPrChange"));
+    let reopened = EngineSession::new(9302);
+    seed_from_docx(reopened.doc(), &document(&format!("<w:p>{xml}</w:p>"))).unwrap();
+    let revisions = reopened.doc().list_revisions().unwrap();
+    assert_eq!(revisions[0].change.kind, ChangeKind::RunPropertiesChanged);
+    reopened
+        .doc()
+        .reject_change(&suggesting(), &ChangeTarget::Revision("42".to_owned()))
+        .unwrap();
+    assert!(attrs(&reopened)[0].1["bold"].is_null());
+    assert_eq!(attrs(&reopened)[0].1["italic"], true);
+}
+
+#[test]
+fn run_property_decision_preview_uses_old_or_new_properties_without_mutating() {
+    use crate::bridge::{RenderEnv, RevisionPreview};
+    let engine = engine();
+    let receipt = engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 1, 5),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    let before = engine.doc().encode_state_as_update_v1();
+    for (decision, bold) in [
+        (RevisionPreview::Accepted, true),
+        (RevisionPreview::Rejected, false),
+    ] {
+        let env = RenderEnv::default().with_revision_preview(&receipt.revision_ids[0], decision);
+        let blocks: Value =
+            serde_json::from_str(&engine.lower_story_json("body", &env).unwrap()).unwrap();
+        for run in blocks[0]["runs"].as_array().unwrap() {
+            if run["text"].as_str().unwrap_or_default().contains("bcde") {
+                assert_eq!(run["bold"].as_bool().unwrap_or(false), bold);
+                assert_eq!(run["italic"], true);
+                assert!(run["formatChange"].is_null());
+            }
+        }
+    }
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+}
+
+#[test]
+fn formatted_change_has_a_dotted_display_cue_and_decisions_remove_it() {
+    use crate::bridge::{RenderEnv, RevisionPreview};
+    use docx_layout::display_list::{Primitive, RevisionKind};
+    let font = docx_layout::register_measure_font(include_bytes!(
+        "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+    ))
+    .unwrap();
+    let engine = engine();
+    let receipt = engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 0, 6),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    for decision in [
+        None,
+        Some(RevisionPreview::Accepted),
+        Some(RevisionPreview::Rejected),
+        None,
+    ] {
+        let env = decision.map_or_else(RenderEnv::default, |decision| {
+            RenderEnv::default().with_revision_preview(&receipt.revision_ids[0], decision)
+        });
+        engine.layout_document_with_regions_json(&json!({
+            "bodyStory":"body", "renderEnv":env, "options":{},
+            "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}
+        }).to_string()).unwrap();
+        engine
+            .build_display_list_frame("{}", engine.stats().frame_epoch)
+            .unwrap();
+        let cues = engine.with_display_list(|list| list.pages.iter().flat_map(|page| &page.primitives).filter(|primitive| {
+            matches!(primitive, Primitive::Decoration(cue) if cue.dotted && cue.attrs.revision.as_ref().is_some_and(|revision| revision.kind == RevisionKind::Format && revision.author == "Ada"))
+        }).count()).unwrap();
+        assert_eq!(cues > 0, decision.is_none());
+    }
+}
+
+#[test]
+fn no_op_format_does_not_create_a_revision_and_typing_does_not_inherit_one() {
+    let engine = engine();
+    engine
+        .doc()
+        .format_range(
+            &suggesting(),
+            StoryRange::new("body", 0, 6),
+            &InlineFormatDelta {
+                italic: Patch::Set(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(engine.doc().list_revisions().unwrap().is_empty());
+    engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 0, 6),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    engine
+        .doc()
+        .insert_text(
+            &EditCtx::local("", ""),
+            crate::Position::new("body", 3),
+            "X",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    let runs = attrs(&engine);
+    let inserted = runs.iter().find(|run| run.0 == "X").unwrap();
+    assert!(inserted.1["rPrChange"].is_null());
+    assert_eq!(inserted.1["bold"], true);
+}
+
+#[test]
+fn imported_change_keeps_its_original_properties_after_a_partial_format() {
+    let engine = EngineSession::new(9304);
+    seed_from_docx(engine.doc(), &document(r#"<w:p><w:r><w:rPr><w:i/><w:rPrChange w:id="8" w:author="Prior" w:date="2026-09-01T00:00:00Z"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>abcdef</w:t></w:r></w:p>"#)).unwrap();
+    let receipt = engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 2, 4),
+            SimpleFormat::Underline,
+        )
+        .unwrap();
+    assert_eq!(receipt.revision_ids, ["8"]);
+    let runs = attrs(&engine);
+    assert_eq!(runs.len(), 3);
+    for run in &runs {
+        assert_eq!(
+            run.1["rPrChange"][0]["previousFormatting"],
+            json!({"bold":true})
+        );
+        assert_eq!(run.1["rPrChange"][0]["info"]["author"], "Prior");
+    }
+    engine
+        .doc()
+        .reject_change(&suggesting(), &ChangeTarget::Revision("8".to_owned()))
+        .unwrap();
+    for run in attrs(&engine) {
+        assert_eq!(run.1["bold"], true);
+        assert!(run.1["italic"].is_null());
+        assert!(run.1["underline"].is_null());
+    }
+}
+
+#[test]
+fn resolving_all_includes_run_properties_alongside_text_changes() {
+    for accept in [true, false] {
+        let engine = engine();
+        engine
+            .doc()
+            .toggle_format(
+                &suggesting(),
+                StoryRange::new("body", 0, 6),
+                SimpleFormat::Bold,
+            )
+            .unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &suggesting(),
+                crate::Position::new("body", 6),
+                "X",
+                FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let ids: Vec<_> = engine
+            .doc()
+            .list_revisions()
+            .unwrap()
+            .into_iter()
+            .map(|revision| revision.change.revision_id)
+            .collect();
+        assert_eq!(ids.len(), 2);
+        engine
+            .doc()
+            .settle_revisions(
+                if accept { &ids } else { &[] },
+                if accept { &[] } else { &ids },
+                &crate::UndoSession::new(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(engine.doc().list_revisions().unwrap().is_empty());
+        assert_eq!(
+            attrs(&engine)[0].1["bold"].as_bool().unwrap_or(false),
+            accept
+        );
+    }
+}
+
+#[test]
+fn every_character_format_can_be_suggested_and_rejected() {
+    for format in [
+        SimpleFormat::Bold,
+        SimpleFormat::Italic,
+        SimpleFormat::Underline,
+        SimpleFormat::Strike,
+        SimpleFormat::Superscript,
+        SimpleFormat::Subscript,
+    ] {
+        let engine = engine();
+        let receipt = engine
+            .doc()
+            .toggle_format(&suggesting(), StoryRange::new("body", 0, 6), format)
+            .unwrap();
+        assert_eq!(receipt.revision_ids.len(), 1);
+        engine
+            .doc()
+            .reject_change(
+                &suggesting(),
+                &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+            )
+            .unwrap();
+        assert_eq!(attrs(&engine)[0].1, json!({"italic":true}));
+    }
+    let engine = engine();
+    let delta = InlineFormatDelta {
+        color: Patch::Set(ColorPatch::Rgb("123456".to_owned())),
+        highlight: Patch::Set("yellow".to_owned()),
+        font_size: Patch::Set(18.0),
+        font_family: Patch::Set(FontFamilyPatch {
+            ascii: "Serif".to_owned(),
+            h_ansi: None,
+        }),
+        ..Default::default()
+    };
+    engine
+        .doc()
+        .format_range(
+            &EditCtx::local("", ""),
+            StoryRange::new("body", 0, 6),
+            &delta,
+        )
+        .unwrap();
+    let previous = attrs(&engine)[0].1.clone();
+    let receipt = engine
+        .doc()
+        .clear_formatting(&suggesting(), StoryRange::new("body", 0, 6))
+        .unwrap();
+    let changes = attrs(&engine);
+    assert_eq!(
+        changes[0].1["rPrChange"][0]["previousFormatting"]["highlight"],
+        "yellow"
+    );
+    assert_eq!(
+        changes[0].1["rPrChange"][0]["previousFormatting"]["fontSize"].as_f64(),
+        Some(36.0)
+    );
+    engine
+        .doc()
+        .reject_change(
+            &suggesting(),
+            &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+        )
+        .unwrap();
+    assert_eq!(attrs(&engine)[0].1, previous);
+}
+
+#[test]
+fn partial_rejection_keeps_the_remaining_run_property_change() {
+    let engine = engine();
+    engine
+        .doc()
+        .toggle_format(
+            &suggesting(),
+            StoryRange::new("body", 0, 6),
+            SimpleFormat::Bold,
+        )
+        .unwrap();
+    engine
+        .doc()
+        .reject_change(
+            &suggesting(),
+            &ChangeTarget::Range(StoryRange::new("body", 2, 4)),
+        )
+        .unwrap();
+    let runs = attrs(&engine);
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[0].1["bold"], true);
+    assert!(runs[1].1["bold"].is_null());
+    assert_eq!(runs[2].1["bold"], true);
+    assert!(runs[1].1["rPrChange"].is_null());
+    assert!(runs[0].1["rPrChange"].is_array());
+    assert!(runs[2].1["rPrChange"].is_array());
+}
+
+#[test]
+fn empty_previous_and_current_properties_still_reopen_as_a_change() {
+    let engine = EngineSession::new(9305);
+    seed_from_docx(engine.doc(), &document(r#"<w:p><w:r><w:rPr><w:rPrChange w:id="9" w:author="Writer"><w:rPr/></w:rPrChange></w:rPr><w:t>text</w:t></w:r></w:p>"#)).unwrap();
+    assert_eq!(
+        engine.doc().list_revisions().unwrap()[0].change.kind,
+        ChangeKind::RunPropertiesChanged
+    );
+    engine
+        .doc()
+        .accept_change(&suggesting(), &ChangeTarget::Revision("9".to_owned()))
+        .unwrap();
+    assert!(engine.doc().list_revisions().unwrap().is_empty());
+}

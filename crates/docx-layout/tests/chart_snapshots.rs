@@ -57,6 +57,67 @@ fn chart_texts(chart: Value) -> Vec<String> {
         .collect()
 }
 
+/// The chart data the display list carries, from the chart's first primitive.
+fn chart_data(chart: Value) -> Value {
+    let output = display_list(chart, 260.0, 180.0);
+    let primitives = output["pages"][0]["primitives"]
+        .as_array()
+        .expect("primitives");
+    let carriers: Vec<&Value> = primitives
+        .iter()
+        .filter(|primitive| carries_data(primitive))
+        .collect();
+    assert_eq!(carriers.len(), 1, "exactly one primitive carries the data");
+    assert!(std::ptr::eq(
+        carriers[0],
+        primitives
+            .iter()
+            .find(|p| p.get("chart").is_some())
+            .unwrap()
+    ));
+    carriers[0]["chart"]["data"].clone()
+}
+
+#[test]
+fn a_chart_carries_its_values_in_the_cached_format_on_its_first_primitive() {
+    let mut south = json!({ "name": "South", "categories": ["Q1", "Q2"], "values": [12.0, null] });
+    south["valueFormat"] = json!("0");
+    let mut north = cached_format_series();
+    north["name"] = json!("North");
+    assert_eq!(
+        chart_data(json!({ "chartType": "column", "title": "Revenue", "series": [north, south] })),
+        json!({
+            "categories": ["Q1", "Q2"],
+            "series": [
+                { "name": "North", "values": ["20.8%", "50.0%"] },
+                { "name": "South", "values": ["12", null] }
+            ]
+        })
+    );
+}
+
+#[test]
+fn a_data_label_number_format_wins_over_the_cache() {
+    let mut series = cached_format_series();
+    series["dataLabels"] = json!({ "showValue": true, "numberFormat": "0.00" });
+    assert_eq!(
+        chart_data(json!({ "chartType": "column", "series": [series] }))["series"][0]["values"],
+        json!(["0.21", "0.50"])
+    );
+}
+
+#[test]
+fn a_chart_that_caches_no_points_carries_empty_data() {
+    assert_eq!(
+        chart_data(json!({
+            "chartType": "doughnut",
+            "title": "Population",
+            "series": [{ "name": "Population", "categories": [], "values": [] }]
+        })),
+        json!({ "categories": [], "series": [] })
+    );
+}
+
 #[test]
 fn series_labels_use_the_cached_number_format() {
     let mut series = cached_format_series();
@@ -133,6 +194,22 @@ fn snapshot(name: &str, chart: Value, width: f64, height: f64) -> String {
     let display_list = display_list(chart, width, height);
     let page = &display_list["pages"][0];
     let primitives = page["primitives"].as_array().expect("primitives");
+    let with_data: Vec<usize> = primitives
+        .iter()
+        .enumerate()
+        .filter(|(_, primitive)| carries_data(primitive))
+        .map(|(index, _)| index)
+        .collect();
+    let first_chart = primitives
+        .iter()
+        .position(|primitive| primitive.get("chart").is_some());
+    assert!(
+        with_data.len() <= 1
+            && with_data
+                .first()
+                .is_none_or(|index| Some(*index) == first_chart),
+        "{name}: only the chart's first primitive carries its data"
+    );
     let mut out = format!("# {name}\n");
     let shared = primitives
         .iter()
@@ -171,7 +248,7 @@ fn snapshot(name: &str, chart: Value, width: f64, height: f64) -> String {
 }
 
 fn attrs_of(primitive: &Value) -> Map<String, Value> {
-    primitive
+    let mut attrs: Map<String, Value> = primitive
         .as_object()
         .map(|object| {
             object
@@ -180,7 +257,16 @@ fn attrs_of(primitive: &Value) -> Map<String, Value> {
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(Value::Object(chart)) = attrs.get_mut("chart") {
+        chart.remove("data");
+    }
+    attrs
+}
+
+/// Whether the primitive carries the chart's data table.
+fn carries_data(primitive: &Value) -> bool {
+    primitive["chart"].get("data").is_some()
 }
 
 fn compact(value: &Value) -> String {

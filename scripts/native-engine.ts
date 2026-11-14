@@ -4,37 +4,40 @@ import { resolve } from 'node:path';
 const root = fileURLToPath(new URL('..', import.meta.url));
 
 type NativeEngine = { engine: string; native: string };
-type NativeAsset = { asset: string; native: string };
+type NativeAsset = { asset: string; native: string; preload?: boolean };
 
 /** The engine modules each wasm package links, and their native replacements. */
 export const NATIVE_ENGINES = {
   xlsx: [
+    { engine: 'packages/xlsx/src/wasm/enginePreflight.ts', native: 'bindings/xlsx-native/js/enginePreflight.ts' },
     { engine: 'packages/xlsx/src/wasm/engine.ts', native: 'bindings/xlsx-native/js/engine.ts' },
-    { engine: 'packages/xlsx/src/wasm/engineRaster.ts', native: 'bindings/xlsx-native/js/engineRaster.ts' },
+    { engine: 'packages/xlsx/src/wasm/enginePng.ts', native: 'bindings/xlsx-native/js/enginePng.ts' },
   ],
-  pptx: {
-    engine: 'packages/pptx/src/wasm/engine.ts',
-    native: 'bindings/pptx-native/js/engine.ts',
-  },
+  pptx: [
+    { engine: 'packages/pptx/src/wasm/enginePreflight.ts', native: 'bindings/pptx-native/js/enginePreflight.ts' },
+    { engine: 'packages/pptx/src/wasm/engine.ts', native: 'bindings/pptx-native/js/engine.ts' },
+    { engine: 'packages/pptx/src/wasm/enginePng.ts', native: 'bindings/pptx-native/js/enginePng.ts' },
+  ],
   docx: [
     { engine: 'packages/docx/src/wasm/engineEdit.ts', native: 'bindings/docx-native/js/engineEdit.ts' },
     { engine: 'packages/docx/src/wasm/engineParse.ts', native: 'bindings/docx-native/js/engineParse.ts' },
     { engine: 'packages/docx/src/wasm/engineQuery.ts', native: 'bindings/docx-native/js/engineQuery.ts' },
     { engine: 'packages/docx/src/wasm/engineOpc.ts', native: 'bindings/docx-native/js/engineOpc.ts' },
     { engine: 'packages/docx/src/wasm/enginePreflight.ts', native: 'bindings/docx-native/js/enginePreflight.ts' },
+    { engine: 'packages/docx/src/wasm/enginePng.ts', native: 'bindings/docx-native/js/enginePng.ts' },
   ],
 } as const;
 
 /** The wasm asset modules each -native package build replaces. */
 export const NATIVE_ASSETS = {
-  xlsx: {
-    asset: 'packages/xlsx/src/wasm/asset.ts',
-    native: 'bindings/xlsx-native/js/asset.ts',
-  },
-  pptx: {
-    asset: 'packages/pptx/src/wasm/asset.ts',
-    native: 'bindings/pptx-native/js/asset.ts',
-  },
+  xlsx: [
+    { asset: 'packages/xlsx/src/wasm/asset.ts', native: 'bindings/xlsx-native/js/asset.ts', preload: false },
+    { asset: 'packages/xlsx/src/wasm/assetPreflight.ts', native: 'bindings/xlsx-native/js/assetPreflight.ts' },
+  ],
+  pptx: [
+    { asset: 'packages/pptx/src/wasm/asset.ts', native: 'bindings/pptx-native/js/asset.ts', preload: false },
+    { asset: 'packages/pptx/src/wasm/assetPreflight.ts', native: 'bindings/pptx-native/js/assetPreflight.ts' },
+  ],
   docx: [
     { asset: 'packages/docx/src/wasm/assetEdit.ts', native: 'bindings/docx-native/js/assetEdit.ts' },
     { asset: 'packages/docx/src/wasm/assetParse.ts', native: 'bindings/docx-native/js/assetParse.ts' },
@@ -88,7 +91,8 @@ const aliases = new Map(
     .map(({ engine, native }) => [resolve(root, engine), resolve(root, native)])
 );
 const preloadAssets = new Map(
-  Object.values(NATIVE_ASSETS).flatMap((value) => Array.isArray(value) ? modules<NativeAsset>(value) : [])
+  Object.values(NATIVE_ASSETS).flatMap((value) => modules<NativeAsset>(value))
+    .filter(({ preload }) => preload !== false)
     .map(({ asset, native }) => [resolve(root, asset), resolve(root, native)])
 );
 

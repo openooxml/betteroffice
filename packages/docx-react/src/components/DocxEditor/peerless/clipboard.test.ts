@@ -40,7 +40,7 @@ for (const cut of [false, true]) {
           const { binding, submit, readSelection } = fixture();
           const image = { src: 'data:image/png;base64,AA==' };
           const embed = (embedKind: string, payload: Record<string, unknown>): YrsStorySegment => ({ kind: 'embed', embedKind, payload, attributes: {} });
-          const table = (story: string) => ({ grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
+          const table = (story: string) => ({ tblPr: {}, grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
           const stories: Record<string, YrsStorySegment[]> = { body: [embed('image', image), embed('table', table('cell0'))] };
           for (let level = 0; level < depth; level++) stories[`cell${level}`] = [embed('table', table(`cell${level + 1}`))];
           const object = embed(objectKind, image);
@@ -162,6 +162,11 @@ test('cut in cells mode copies but deletes nothing', async () => {
 test('paste gating follows the insertTable command state', () => {
   expect(isPasteFragmentAllowed({ getState: () => ({ enabled: true }) })).toBe(true);
   expect(isPasteFragmentAllowed({ getState: () => ({ enabled: false }) })).toBe(false);
+  const text = { paragraphs: [{ text: 'a' }] };
+  const table = { paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [] }] }] };
+  const onlyText = { getState: (id: string) => ({ enabled: id === 'bold' }) };
+  expect(isPasteFragmentAllowed(onlyText, text)).toBe(true);
+  expect(isPasteFragmentAllowed(onlyText, table)).toBe(false);
 });
 
 

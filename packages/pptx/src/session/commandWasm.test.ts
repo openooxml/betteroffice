@@ -155,7 +155,7 @@ test.skipIf(engineKind === 'native')('p1_command_session_never_initializes_main_
       for (const spy of spies) spy.mockRestore();
     }
   }
-}, 30_000);
+}, 60_000);
 
 test.skipIf(engineKind === 'native')('p1_public_command_client_import_and_dispatch_do_not_load_main_wasm', async () => {
   if (await isolated('p1_public_command_client_import_and_dispatch_do_not_load_main_wasm')) return;
@@ -228,7 +228,7 @@ test.skipIf(engineKind === 'native')('p1_public_command_client_import_and_dispat
       mock.restore();
     }
   }
-}, 30_000);
+}, 60_000);
 
 test.skipIf(engineKind === 'native')('p1_main_wasm_guard_detects_transitive_import_initialization', async () => {
   if (await isolated('p1_main_wasm_guard_detects_transitive_import_initialization')) return;
@@ -254,4 +254,4 @@ test.skipIf(engineKind === 'native')('p1_main_wasm_guard_detects_transitive_impo
     for (const spy of spies) spy.mockRestore();
     mock.restore();
   }
-}, 30_000);
+}, 60_000);

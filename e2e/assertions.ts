@@ -69,3 +69,20 @@ export function assertLayoutParity(wasm: Layout, native: Layout): void {
   };
   compare(layoutProjection(wasm), layoutProjection(native));
 }
+
+/** A Yrs v1 state vector as sorted [client, clock] pairs, so equal state compares equal whatever the encoding order. */
+export function stateVectorEntries(bytes: Uint8Array): [bigint, bigint][] {
+  let at = 0;
+  const next = (): bigint => {
+    let value = 0n;
+    for (let shift = 0n; ; shift += 7n) {
+      if (at >= bytes.length) throw new Error('truncated state vector');
+      const byte = bytes[at++]!;
+      value |= BigInt(byte & 0x7f) << shift;
+      if (byte < 0x80) return value;
+    }
+  };
+  const entries = Array.from({ length: Number(next()) }, () => [next(), next()] as [bigint, bigint]);
+  if (at !== bytes.length) throw new Error('trailing bytes after state vector');
+  return entries.sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0));
+}

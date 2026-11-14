@@ -97,7 +97,10 @@ interface WorkerProposalProbe {
     readSelectionInfo(): Promise<{ selectedText: string; paragraphText: string } | null>;
     save(): Promise<ArrayBuffer | null>;
     getSearchState(): { total: number; current: number } | null;
-    commands: { execute(id: string, args: unknown): Promise<{ ok: boolean; failure?: { code: string } }> };
+    commands: {
+      execute(id: string, args: unknown): Promise<{ ok: boolean; failure?: { code: string } }>;
+      getState(id: string): { enabled: boolean };
+    };
   } | null;
   session: { selection(): ViewState['selection'] } | null;
   status(): {
@@ -420,7 +423,14 @@ async function flow(page: Page, arm: Arm, readOnly: boolean, options = '') {
     expect(snapshot.version).toBe(before.version);
     expect(snapshot.previewVersion).toBe(before.previewVersion + 1);
     expect(snapshot.proposals).toEqual(before.proposals.map((proposal) =>
-      ids.includes(proposal.id) ? { ...proposal, state } : proposal
+      ids.includes(proposal.id)
+        ? {
+          ...proposal,
+          state,
+          stateVersion: snapshot.previewVersion,
+          ...(state === 'proposed' ? {} : { decisionState: state }),
+        }
+        : proposal
     ));
   };
   for (const id of IDS.slice(0, 4)) {
@@ -768,6 +778,8 @@ test('default: review commands step through, wrap and accept tracked changes in 
   });
   const change = (pageNumber: number) =>
     ({ selectedText: ' Existing insertion.', paragraphText: `Page ${pageNumber} paragraph 12: Original text. Existing insertion.` });
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as ProbeWindow).__workerProposalProbe.editor!.commands.getState('reviewNext').enabled)).toBe(true);
   for (const [id, pageNumber] of [['reviewNext', 5], ['reviewNext', 6], ['reviewNext', 5], ['reviewPrevious', 6]] as const) {
     expect(await execute(id)).toMatchObject({ ok: true, status: 'executed' });
     await expect.poll(selection).toEqual(change(pageNumber));

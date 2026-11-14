@@ -15,6 +15,7 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as display from '@betteroffice/docx/layout/render';
 import { preloadLayoutWasm } from '@betteroffice/docx/wasm/layout';
 import {
+  anchorFailure,
   computeAnchorTargetGeometry,
   createYrsSession,
   proposalRevisionPreview,
@@ -24,15 +25,19 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { createResidentEngineSession, type ResidentEngineSession } from '@betteroffice/docx/yrs/residentEngineSession';
+import { commandSelectionRange } from '@betteroffice/docx/yrs/residentCommandAnchors';
+import type { DocxCommandSelection } from '@betteroffice/docx/yrs/residentCommandProtocol';
+import type { DocxDocumentRead } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { storyAnchorsDocx } from '../../../plugins/__fixtures__/storyAnchorsDocx';
-import { createDocxPluginHost } from '../../../plugins/createDocxPluginHost';
+import { createDocxPluginHost, type DocxPluginHost } from '../../../plugins/createDocxPluginHost';
 import { defineDocxPlugin } from '../../../plugins/defineDocxPlugin';
 import { scopePluginGeometry } from '../../../plugins/geometry';
 import { PluginOverlays } from '../../../plugins/PluginOverlays';
-import type { DocxAnchorGeometryResult, DocxGeometryTarget, DocxPluginGeometry } from '../../../plugins/types';
+import type { DocxAnchorGeometryResult, DocxGeometryTarget, DocxPluginGeometry, DocxPluginSelection } from '../../../plugins/types';
 import { createWorkerPluginGeometry } from './workerPluginGeometry';
 import { inputs, proposalHost } from './workerProposalHost.testing';
 import type { PeerlessFrameGeometry } from './viewStore';
+import { WorkerReadSupersededError } from './shellController';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -243,6 +248,7 @@ test('plugin selection ranges label the native worker caret with its accepted of
   const reads: { kind: string; targets?: { range: unknown }[] }[] = [];
   const readAt = async (request: { kind: string; selection?: { anchor: { offset: number } } }) => {
     reads.push(request);
+    if (request.kind === 'commentSelectionRange') return { story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'p', offset: 3 } };
     return request.kind === 'rawSelectionInfo' ? { paraId: 'p', selectedText: '', paragraphText: 'abc', before: 'a', after: 'bc' }
       : [{ ok: false, failure: { code: 'missing-target', message: 'unused' } }];
   };
@@ -253,6 +259,366 @@ test('plugin selection ranges label the native worker caret with its accepted of
   expect(reads.find(read => read.kind === 'anchorTargets')?.targets?.[0]?.range).toEqual({ story: 'body', view: 'accepted',
     start: { paraId: 'p', offset: 1 }, end: { paraId: 'p', offset: 1 } });
   geometry.dispose();
+});
+
+type WorkerPoint = { story: string; paraId: string; offset: number };
+type WorkerSelection = { anchor: WorkerPoint; focus: WorkerPoint };
+const caretAt = (offset: number): WorkerPoint => ({ story: 'body', paraId: 'p', offset });
+
+/** A plugin host over the worker geometry of a scripted controller whose selection mapping can be held. */
+async function selectionRemap() {
+  let identity = { session: 's', incarnation: 1, epoch: 1 };
+  let frameEpoch = 1;
+  const frame = () => ({ identity, coversThroughSeq: 0, frameEpoch, layoutRevision: 1, pages: [], caret: null, selectionRects: [] });
+  const view = { identity, version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: { anchor: caretAt(1), focus: caretAt(3) } as WorkerSelection | null,
+    anchors: null, editState: undefined, geometry: frame() };
+  const review = { version: 'v1', previewVersion: 0 };
+  const held: (() => void)[] = [];
+  const mapping = { hold: false, geometry: true, supersede: 0, reads: 0 };
+  const readAt = async (request: { kind: string; selection?: WorkerSelection;
+    targets?: { kind: string; range: { start: { offset: number }; end: { offset: number } } }[] }) => {
+    if (request.kind === 'commentSelectionRange') {
+      const [start, end] = [request.selection!.anchor, request.selection!.focus].sort((a, b) => a.offset - b.offset);
+      return { story: 'body', start: { paraId: start!.paraId, offset: start!.offset }, end: { paraId: end!.paraId, offset: end!.offset } };
+    }
+    if (request.kind === 'rawSelectionInfo') {
+      return { paraId: 'p', selectedText: '', paragraphText: '', before: 'x'.repeat(request.selection!.anchor.offset), after: '' };
+    }
+    if (request.kind !== 'anchorTargets') throw new Error(`Unexpected read: ${request.kind}`);
+    mapping.reads += 1;
+    if (mapping.hold) await new Promise<void>(resolve => held.push(resolve));
+    if (mapping.supersede > 0) {
+      mapping.supersede -= 1;
+      throw new WorkerReadSupersededError('Worker read was superseded');
+    }
+    return request.targets!.map(target => mapping.geometry
+      ? { ok: true, ranges: [{ from: 100 + target.range.start.offset, to: 100 + target.range.end.offset }], paragraph: 0 }
+      : anchorFailure('missing-target', 'No layout shows the selection story'));
+  };
+  const controller = { getSnapshot: () => ({ status: 'ready', view }), readAt, review: async () => review, describedReview: () => review,
+    ref: { getZoom: () => 1 } };
+  const queries = { pageCount: () => 0, pageSize: () => null, pageBounds: () => null, rangeRects: () => [], anchorRect: () => null,
+    dispose() {} } as unknown as display.DisplayListQueries;
+  const load = spyOn(display, 'loadRustDisplayListQueryEngine').mockResolvedValue({} as never);
+  const create = spyOn(display, 'createDisplayListQueries').mockReturnValue(queries);
+  const geometry = createWorkerPluginGeometry(controller as never, () => document.createElement('div'), () => document.createElement('div'), () => {});
+  const events: DocxPluginSelection[] = [];
+  const host: DocxPluginHost = createDocxPluginHost({ pagedEditorRef: { current: null }, writeMode: () => 'viewing', commands: () => null,
+    layout: () => ({ queries: null, complete: false, failed: false }), subscribeLayout: () => () => {},
+    geometry: geometry.geometry, translate: (key) => key,
+    readSelection: () => {
+      host.layoutChanged(geometry.layout());
+      return { selection: { formatting: null, displayRange: view.workerSelection ? geometry.displaySelection() : null },
+        identity: geometry.selectionIdentity(), owner: controller, ready: geometry.selectionMapped() };
+    },
+    subscribeGeometry: listener => geometry.subscribe(() => { host.markSelectionDirty('refresh'); listener(); }) });
+  host.setPlugins([defineDocxPlugin({ id: 'test.selection-remap', createState: () => null,
+    onEvent(_context, event) { if (event.type === 'selection-change') events.push(event.selection); } })]);
+  host.openWorker('v1');
+  await waitFor(() => expect(host.activations()).toHaveLength(1));
+  const flush = async () => {
+    for (let turn = 0; turn < 200; turn++) await Promise.resolve();
+    await host.notificationsIdle();
+  };
+  const release = () => {
+    mapping.hold = false;
+    for (const resolve of held.splice(0)) resolve();
+  };
+  await geometry.update();
+  await flush();
+  const first = { story: 'body', from: 101, to: 103, layoutId: 's:0:1' };
+  expect(events).toEqual([{ formatting: null, displayRange: first }]);
+  events.length = 0;
+  type Moved = { selection?: WorkerSelection; version?: number; identity?: typeof identity };
+  const move = (next: Moved = {}) => {
+    if (next.identity) { identity = next.identity; view.identity = identity; }
+    if (next.version !== undefined) view.version = next.version;
+    if (next.selection) view.workerSelection = next.selection;
+    frameEpoch += 1;
+    view.geometry = frame();
+  };
+  return {
+    geometry, host, events, mapping, first, flush, release,
+    layoutId: () => geometry.layout()?.id,
+    snapshot: () => host.activations()[0]!.context.snapshot,
+    present(next: Moved = {}) {
+      move(next);
+      return geometry.update();
+    },
+    ack(version: number) {
+      view.version = version;
+      return geometry.update();
+    },
+    dispose() {
+      release();
+      host.close('unmounted');
+      geometry.dispose();
+      load.mockRestore();
+      create.mockRestore();
+    },
+  };
+}
+
+test('an unchanged worker selection shows no range across a frame replacement until the remap, then changes once', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    const replaced = h.present();
+    await h.flush();
+    expect(h.layoutId()).toBe('s:0:2');
+    expect(h.geometry.selectionMapped()).toBe(false);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.snapshot().layout?.id).toBe('s:0:2');
+    expect(h.snapshot().selection).toEqual({ formatting: null, displayRange: null });
+    expect(h.events).toEqual([]);
+    h.release();
+    await replaced;
+    await h.flush();
+    expect(h.geometry.selectionMapped()).toBe(true);
+    expect(h.events).toEqual([{ formatting: null, displayRange: { ...h.first, layoutId: 's:0:2' } }]);
+    expect(h.snapshot().selection).toEqual(h.events[0]!);
+    h.host.markSelectionDirty('refresh');
+    await h.flush();
+    expect(h.events).toHaveLength(1);
+  } finally { h.dispose(); }
+});
+
+for (const [name, selection, version] of [
+  ['moved', { anchor: caretAt(4), focus: caretAt(6) }, 0],
+  ['under text inserted before it', { anchor: caretAt(8), focus: caretAt(10) }, 1],
+  ['under text inserted inside it', { anchor: caretAt(1), focus: caretAt(10) }, 1],
+] as [string, WorkerSelection, number][]) {
+  test(`a worker selection ${name} across a frame replacement publishes no range until it is mapped, then changes once`, async () => {
+    const h = await selectionRemap();
+    try {
+      h.mapping.hold = true;
+      const replaced = h.present({ selection, version });
+      await h.flush();
+      expect(h.layoutId()).toBe(`s:${version}:2`);
+      expect(h.geometry.selectionMapped()).toBe(false);
+      expect(h.geometry.displaySelection()).toBeNull();
+      expect(h.snapshot().selection).toEqual({ formatting: null, displayRange: null });
+      expect(h.events).toEqual([]);
+      h.release();
+      await replaced;
+      await h.flush();
+      expect(h.events).toEqual([{ formatting: null, displayRange: { story: 'body', from: 100 + selection.anchor.offset,
+        to: 100 + selection.focus.offset, layoutId: `s:${version}:2` } }]);
+    } finally { h.dispose(); }
+  });
+}
+
+test('an unchanged worker selection whose remap finds no geometry shows no range, then changes once to empty', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    h.mapping.geometry = false;
+    const replaced = h.present();
+    await h.flush();
+    expect(h.geometry.selectionMapped()).toBe(false);
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
+    h.release();
+    await replaced;
+    await h.flush();
+    expect(h.geometry.selectionMapped()).toBe(true);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.events).toEqual([{ formatting: null, displayRange: null }]);
+    expect(h.snapshot().selection.displayRange).toBeNull();
+  } finally { h.dispose(); }
+});
+
+test('a frame replaced again before the remap shows no range, then changes once for the latest layout', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    const second = h.present();
+    await h.flush();
+    const third = h.present();
+    await h.flush();
+    expect(h.layoutId()).toBe('s:0:3');
+    expect(h.geometry.selectionMapped()).toBe(false);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
+    h.release();
+    await Promise.all([second, third]);
+    await h.flush();
+    expect(h.events).toEqual([{ formatting: null, displayRange: { ...h.first, layoutId: 's:0:3' } }]);
+  } finally { h.dispose(); }
+});
+
+test('a frame replaced again whose remap finds no geometry shows no range, then changes once to empty', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    const second = h.present();
+    await h.flush();
+    const third = h.present();
+    await h.flush();
+    expect(h.layoutId()).toBe('s:0:3');
+    expect(h.geometry.selectionMapped()).toBe(false);
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
+    h.mapping.geometry = false;
+    h.release();
+    await Promise.all([second, third]);
+    await h.flush();
+    expect(h.geometry.selectionMapped()).toBe(true);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.events).toEqual([{ formatting: null, displayRange: null }]);
+    expect(h.snapshot().selection.displayRange).toBeNull();
+  } finally { h.dispose(); }
+});
+
+test('unmounting while the worker remap is held publishes nothing more', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    const replaced = h.present();
+    await h.flush();
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
+    h.host.close('unmounted');
+    h.geometry.dispose();
+    expect(h.geometry.displaySelection()).toBeNull();
+    h.release();
+    await replaced;
+    await h.flush();
+    expect(h.events).toEqual([]);
+    expect(h.host.activations()).toEqual([]);
+  } finally { h.dispose(); }
+});
+
+test('a replaced worker document shows no range until its remap, then changes once', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    const replaced = h.present({ identity: { session: 's2', incarnation: 1, epoch: 1 } });
+    await h.flush();
+    expect(h.layoutId()).toBe('s2:0:2');
+    expect(h.geometry.selectionMapped()).toBe(false);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
+    h.release();
+    await replaced;
+    await h.flush();
+    expect(h.geometry.displaySelection()).toEqual({ ...h.first, layoutId: 's2:0:2' });
+    expect(h.events).toEqual([{ formatting: null, displayRange: { ...h.first, layoutId: 's2:0:2' } }]);
+  } finally { h.dispose(); }
+});
+
+test('a replaced worker document that cannot place the selection shows no range, then changes once to empty', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    h.mapping.geometry = false;
+    const replaced = h.present({ identity: { session: 's2', incarnation: 1, epoch: 1 } });
+    await h.flush();
+    expect(h.layoutId()).toBe('s2:0:2');
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
+    h.release();
+    await replaced;
+    await h.flush();
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.events).toEqual([{ formatting: null, displayRange: null }]);
+    expect(h.snapshot().selection.displayRange).toBeNull();
+  } finally { h.dispose(); }
+});
+
+/** A superseded remap publishes nothing and reads nothing more on its own. */
+const supersededQuietly = async (h: Awaited<ReturnType<typeof selectionRemap>>) => {
+  const reads = h.mapping.reads;
+  await h.flush();
+  expect(h.mapping.reads).toBe(reads);
+  expect(h.geometry.selectionMapped()).toBe(false);
+  expect(h.events).toEqual([]);
+  return reads;
+};
+
+const mappedOnce = async (h: Awaited<ReturnType<typeof selectionRemap>>) => {
+  const displayRange = { ...h.first, layoutId: 's:0:2' };
+  expect(h.geometry.selectionMapped()).toBe(true);
+  expect(h.geometry.displaySelection()).toEqual(displayRange);
+  expect(h.events).toEqual([{ formatting: null, displayRange }]);
+  expect(h.snapshot().selection.displayRange).toEqual(displayRange);
+  h.host.markSelectionDirty('refresh');
+  await h.flush();
+  expect(h.events).toHaveLength(1);
+};
+
+test('a remap superseded after the version ack shows null, as before, and the host\'s next selection read maps it with one change', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    h.mapping.supersede = 1;
+    const replaced = h.present();
+    await h.flush();
+    expect(h.layoutId()).toBe('s:0:2');
+    const acked = h.ack(1);
+    await h.flush();
+    expect(h.geometry.selectionMapped()).toBe(false);
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
+    h.release();
+    await Promise.all([replaced, acked]);
+    const reads = await supersededQuietly(h);
+    h.mapping.hold = true;
+    h.host.markSelectionDirty('refresh');
+    await h.flush();
+    expect(h.mapping.reads).toBe(reads + 1);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.snapshot().selection.displayRange).toBeNull();
+    expect(h.events).toEqual([]);
+    h.release();
+    await h.flush();
+    expect(h.mapping.reads).toBe(reads + 1);
+    await mappedOnce(h);
+  } finally { h.dispose(); }
+});
+
+test('a remap superseded before the version ack shows null, as before, and the ack maps it with one change', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.hold = true;
+    h.mapping.supersede = 1;
+    const replaced = h.present();
+    await h.flush();
+    h.release();
+    await replaced;
+    const reads = await supersededQuietly(h);
+    h.mapping.hold = true;
+    const acked = h.ack(1);
+    await h.flush();
+    expect(h.mapping.reads).toBe(reads + 1);
+    expect(h.geometry.displaySelection()).toBeNull();
+    expect(h.events).toEqual([]);
+    h.release();
+    await acked;
+    await h.flush();
+    expect(h.mapping.reads).toBe(reads + 1);
+    await mappedOnce(h);
+  } finally { h.dispose(); }
+});
+
+test('remaps that keep being superseded read once per view update and publish nothing until one maps', async () => {
+  const h = await selectionRemap();
+  try {
+    h.mapping.supersede = Number.POSITIVE_INFINITY;
+    await h.present();
+    const reads = await supersededQuietly(h);
+    for (const version of [1, 2, 3]) {
+      await h.ack(version);
+      expect(await supersededQuietly(h)).toBe(reads + version);
+    }
+    h.mapping.supersede = 0;
+    await h.ack(4);
+    await h.flush();
+    expect(h.mapping.reads).toBe(reads + 4);
+    await mappedOnce(h);
+  } finally { h.dispose(); }
 });
 
 interface LaidOut { main: YrsSession; engine: ResidentEngineSession; frame: ReturnType<typeof applyFrameDelta>; window: readonly [number, number] }
@@ -285,12 +651,13 @@ async function laidOut(first = 0, end = 2 ** 32 - 1, reservations?: DocxReservat
 
 interface ShellOptions {
   zoom?: number; window?: readonly [number, number]; answer?(result: ProposalGeometryTarget): ProposalGeometryTarget;
+  selection?: DocxCommandSelection;
   /** The reservation set the frame was laid out with, and the one the editor sends. */
   laidOutWith?: { version: string; key: string | null }; sent?(): DocxReservationsPayload | null;
 }
 
 /** The peer-less plugin geometry over `laid`'s frame, its targets answered by the worker read. */
-async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, window, answer = (result) => result, laidOutWith, sent = () => null }: ShellOptions = {}) {
+async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, window, answer = (result) => result, selection, laidOutWith, sent = () => null }: ShellOptions = {}) {
   const shown = window ?? built;
   const container = document.createElement('div');
   const host = document.createElement('div');
@@ -315,7 +682,7 @@ async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, wi
   const layer = document.createElement('div');
   layer.getBoundingClientRect = container.getBoundingClientRect;
   const identity = { session: 's', incarnation: 1, epoch: 1 };
-  const view = { identity, version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: null, anchors: null, editState: undefined,
+  const view = { identity, version: 0, throughSeq: 0, presentedThroughSeq: 0, workerSelection: selection ?? null, anchors: null, editState: undefined,
     geometry: { identity, coversThroughSeq: 0, frameEpoch: frame.frameEpoch, layoutRevision: 1, pages, caret: null, selectionRects: [],
       ...(laidOutWith ? { reservations: laidOutWith } : {}) } };
   const version = engine.geometryReader.version();
@@ -323,8 +690,12 @@ async function shellOf({ engine, frame, window: built }: LaidOut, { zoom = 1, wi
   const reads: unknown[] = [];
   const controller = { getSnapshot: () => ({ status: 'ready', view }),
     review: async () => review, describedReview: () => review,
-    readAt: async (request: { targets: Parameters<typeof computeAnchorTargetGeometry>[1] }) => {
+    readAt: async (request: DocxDocumentRead) => {
       reads.push(request);
+      if (request.kind === 'commentSelectionRange') return commandSelectionRange(engine, request.selection);
+      if (request.kind === 'rawSelectionInfo') return engine.selectionText({ story: request.selection.anchor.story,
+        start: request.selection.anchor, end: request.selection.focus });
+      if (request.kind !== 'anchorTargets') throw new Error(`Unexpected read: ${request.kind}`);
       return computeAnchorTargetGeometry(engine.geometryReader, request.targets).map(answer);
     },
     ref: { getZoom: () => zoom, readParagraphs: async () => ({ ok: true, version, paragraphs: [] }) } };
@@ -353,6 +724,27 @@ function ok(result: DocxAnchorGeometryResult) {
 }
 
 const pageIndices = (result: DocxAnchorGeometryResult) => [...new Set(ok(result).rects.map(({ pageIndex }) => pageIndex))];
+
+test.each([
+  ['hf:rIdH1', '10000001', '{{odd}}'],
+  ['hf:rIdF1', '10000021', '{{first}}'],
+] as const)('worker selection in %s anchors at its focus in either direction and when collapsed', async (story, paraId, text) => {
+  const laid = await laidOut();
+  const target = range(laid, laid.engine.geometryReader.version(), story, paraId, text);
+  const start = { story, ...target.range.start };
+  const end = { story, ...target.range.end };
+  for (const [anchor, focus] of [[start, end], [end, start], [start, start]] as const) {
+    const shell = await shellOf(laid, { selection: { anchor, focus } });
+    try {
+      const selected = ok(await shell.anchor({ kind: 'selection' }));
+      const caret = ok(await shell.anchor({ ...target, range: { ...target.range, start: focus, end: focus } }));
+      expect(selected.anchor).toEqual(caret.anchor);
+      expect(selected.anchor.width).toBe(0);
+      expect(selected.rects).toEqual(anchor === focus ? [] : ok(await shell.anchor(target)).rects);
+      expect(selected.anchor.pageIndex).toBe(story === 'hf:rIdH1' ? 2 : 0);
+    } finally { shell.plugin.dispose(); }
+  }
+});
 
 test('a header target has rects on every built page that paints it and its anchor on the earliest', async () => {
   const laid = await laidOut();

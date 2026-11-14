@@ -86,6 +86,103 @@ shared starting state for that document. The demo generates these states with
 Call `provider.destroy()` and disconnect the transport when the editor unmounts
 or changes rooms.
 
+## XLSX limits
+
+Collaborative workbooks synchronize cell content and formulas, cell formatting,
+column widths, row heights, row and column visibility, freeze panes, merged
+cells, single hyperlinks, chart positions, defined names, conditional formats,
+auto filters and sheets added at the end of the workbook. Each collaborator's undo
+and redo synchronize their effects.
+
+When two collaborators add a sheet under one name at the same time, every
+replica keeps the name on the first sheet in the shared order and shows the other
+as `Name (2)`. Undo runs newest first, so when an author undoes adding a sheet,
+their own later edits in it are already undone. The sheet is removed on every
+replica when nothing else is left in it. When it still holds anything else, such
+as a collaborator's edit or the author's own edit made without an undo step, the
+undo is refused with `undo would remove a sheet that holds collaborators' edits`
+(`Error::CollaborativeUndoRefused` in Rust; editor sessions report it as
+`unsupported`). The refusal changes nothing in the workbook, the next undo goes
+to the step before it, and the refused step cannot be redone. A collaborator who
+cleared their own edit again leaves nothing to lose, so the sheet is removed. An
+edit a collaborator makes in the sheet before the author's undo reaches them is
+lost with the sheet on every replica.
+
+A defined name is one value per scope, like a cell. When two collaborators write
+one name at the same time, `Rate` and `RATE` included, every replica keeps one of
+the two writes, casing and formula together. Undoing the write that won removes
+it: the name goes back to the source's value, or goes away if the source has no
+such name, and the other write does not come back. Undoing the write that lost
+changes nothing and goes on to the step before it, as an undo does when a
+collaborator has since changed the name. A name set while a collaborator deletes
+it stays. A formula using a deleted name reads `#NAME?` on every replica. A name
+scoped to an added sheet counts as content of that sheet, so a collaborator's name
+refuses the undo described above, and the author's own goes with the sheet. A
+collaborator's name that reaches the replicas after the undo stays stored and
+hidden, and returns if the add is redone.
+
+Each replica refuses to grow a name table past 32 MiB. That cap bounds the memory
+this engine holds for one table, so a hostile file cannot make it keep an unbounded
+one. Two collaborators can still pass it together. Nothing is lost: every replica
+accepts the combined table, deleting always works, and the workbook keeps saving.
+While it is over, adding to the table or lengthening a formula is refused with
+`defined name table exceeded cap`, and `listDefinedNames` reports `overLimit`.
+
+A workbook over the cap saves, but it won't reopen in BetterOffice: the reader
+refuses the file with that same error. The file itself is valid and opens in Excel.
+To keep a workbook reopenable here, delete names until `overLimit` clears before
+saving.
+
+Conditional formats replicate rule by rule. Collaborators can add a rule or remove
+one, and every replica shows the same rules in the same order: rules from the file
+keep their priority, and added rules follow them in the order they were added,
+with concurrent adds ordered by client ID. An added rule's ID is chosen by the
+replica that adds it and looks like `cf:7:12:0`, so read it from
+`conditionalFormats` rather than predicting it. When two collaborators remove the
+same rule from the file, they share one removal. If the one whose removal won
+undoes it, the rule returns even though the other collaborator removed it too, and
+the other's undo changes nothing. A rule on an added sheet counts as content of
+that sheet, as a scoped name does, but it lives with the sheet: a rule that reaches
+the replicas after the add is undone is lost, like a cell. A replica refuses to add
+rules past 65,536 on one sheet, the most the reader takes back from a file. Two
+collaborators can pass it together, and every replica then keeps all of them.
+
+A sheet's auto filter is one value, like a cell. When two collaborators set it, or
+one sets it while another clears it, every replica keeps one of the two writes.
+Undoing the write that won shows the file's filter, not the other write, and
+undoing the write that lost changes nothing. The `_xlnm._FilterDatabase` name is
+worked out from the filter on every replica, so it always matches. A filter edit
+never hides or shows rows. If the file holds a stale `_xlnm._FilterDatabase` for a
+sheet with no filter, setting and then clearing a filter leaves that name in place.
+
+These edits are unavailable while collaborating and are refused without changing
+the workbook:
+
+| Edit | Why it is refused |
+| --- | --- |
+| Inserting or deleting rows or columns | Cells and formulas are stored by address, so a concurrent edit would land on the wrong cell. |
+| Adding a sheet anywhere but the end | Tables are stored by sheet position, which an insert would shift on one replica only. |
+| Removing a sheet | Two collaborators could remove the last sheets, and a concurrent edit could bring one back. |
+| Moving a sheet | Tables are stored by sheet position. |
+| Renaming a sheet | A rename rewrites every formula and defined name that mentions the sheet, which a concurrent edit would miss. |
+| Editing `_xlnm._FilterDatabase` directly | The name follows the sheet's filter on every replica, so it has no value of its own. Set or clear the filter instead. |
+| Editing charts beyond moving them | A sheet's charts are one replicated value, so one of two concurrent changes would be lost. |
+
+In JavaScript, `applyOps` throws `structural operations are unavailable in
+collaborative mode`, or `collaborative sheets can only be added at the end of the
+workbook` for a sheet added elsewhere, and editor sessions report the command as
+refused with reason `unsupported`. Python raises `CollaborativeStructureError`.
+Rust returns `Error::CollaborativeStructureOperation` or
+`Error::CollaborativeSheetPosition`. A peer update that makes one of these
+changes, for example from a copy of the workbook edited outside the session, is
+refused with `remote update changes the frozen workbook structure`
+(`Error::CollaborativeStructureChanged`).
+
+Collaborating peers must run the same BetterOffice version line. A peer that
+predates sheet appends refuses a room that has them with
+`unsupported schema version 7`, and one that predates replicated names refuses a
+room with a name edit with `collaborative document roots do not match the schema`.
+
 ## Relay checkpoints and rehydration
 
 The reference relay checkpoints its retained updates automatically after 512

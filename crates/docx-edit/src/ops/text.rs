@@ -57,13 +57,58 @@ pub struct RichRun {
     pub attrs: BTreeMap<String, Any>,
 }
 
+/// One run of inserted text and the formatting written over the insertion point's;
+/// `Any::Null` removes a key.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RunSlice<'a> {
+    pub text: &'a str,
+    pub overlay: &'a [(String, Any)],
+}
+
+impl<'a> RunSlice<'a> {
+    pub(crate) fn plain(text: &'a str) -> Self {
+        Self { text, overlay: &[] }
+    }
+}
+
+/// An owned [`RunSlice`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct OverlayRun {
+    pub text: String,
+    pub overlay: Vec<(String, Any)>,
+}
+
+impl OverlayRun {
+    pub(crate) fn plain(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            overlay: Vec::new(),
+        }
+    }
+
+    pub(crate) fn slice(&self) -> RunSlice<'_> {
+        RunSlice {
+            text: &self.text,
+            overlay: &self.overlay,
+        }
+    }
+}
+
+pub(crate) fn overlaid(base: &[(String, Any)], overlay: &[(String, Any)]) -> Vec<(String, Any)> {
+    base.iter()
+        .filter(|(key, _)| !overlay.iter().any(|(other, _)| other == key))
+        .chain(overlay)
+        .cloned()
+        .collect()
+}
+
 /// Resolves inherited, explicit, or plain insertion attributes.
 fn policy_attrs(chunks: &[Chunk], at: u32, policy: &FormatPolicy) -> Vec<(String, Any)> {
     match policy {
         FormatPolicy::Plain => Vec::new(),
         FormatPolicy::Explicit(map) => map
             .iter()
-            .filter(|(key, _)| !matches!(key.as_str(), INS | DEL))
+            .filter(|(key, _)| !matches!(key.as_str(), INS | DEL | crate::format::RPR_CHANGE))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
         FormatPolicy::Inherit => {
@@ -77,7 +122,8 @@ fn policy_attrs(chunks: &[Chunk], at: u32, policy: &FormatPolicy) -> Vec<(String
                     .attrs
                     .iter()
                     .filter(|(key, value)| {
-                        !matches!(key.as_str(), INS | DEL) && **value != Any::Null
+                        !matches!(key.as_str(), INS | DEL | crate::format::RPR_CHANGE)
+                            && **value != Any::Null
                     })
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
@@ -361,25 +407,56 @@ impl EditingDoc {
         policy: FormatPolicy,
         observe: impl FnOnce(&Attrs),
     ) -> OpResult<Receipt> {
+        self.refuse_cell_write(&at.story)?;
         validate_text(text)?;
         let mut txn = self.transact_for(ctx);
         self.insert_text_observed_in(&mut txn, ctx, at, text, policy, observe)
+    }
+
+    /// [`Self::insert_text`] with one run per slice; see [`Self::insert_runs_observed_in`].
+    pub(crate) fn insert_runs(
+        &self,
+        ctx: &EditCtx,
+        at: Position,
+        runs: &[RunSlice<'_>],
+        policy: FormatPolicy,
+    ) -> OpResult<Receipt> {
+        let mut txn = self.transact_for(ctx);
+        self.insert_runs_observed_in(&mut txn, ctx, at, runs, policy, |_| {})
     }
 
     pub(crate) fn insert_text_observed_in(
         &self,
         txn: &mut TransactionMut<'_>,
         ctx: &EditCtx,
-        mut at: Position,
+        at: Position,
         text: &str,
         policy: FormatPolicy,
         observe: impl FnOnce(&Attrs),
     ) -> OpResult<Receipt> {
-        validate_text(text)?;
+        self.insert_runs_observed_in(txn, ctx, at, &[RunSlice::plain(text)], policy, observe)
+    }
+
+    /// [`Self::insert_text_observed_in`] with one run per slice, each taking the insertion
+    /// point's formatting with its overlay written over it. `observe` sees the first run's
+    /// attributes.
+    pub(crate) fn insert_runs_observed_in(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ctx: &EditCtx,
+        mut at: Position,
+        runs: &[RunSlice<'_>],
+        policy: FormatPolicy,
+        observe: impl FnOnce(&Attrs),
+    ) -> OpResult<Receipt> {
+        for run in runs {
+            validate_text(run.text)?;
+        }
+        let total: u32 = runs.iter().map(|run| utf16_len(run.text)).sum();
         let story = story_ref(txn, &at.story)?;
         check_position(&story, txn, at.index)?;
         let indexed = IndexedStory::in_txn(self, &at.story, txn);
-        if text.is_empty() {
+        if total == 0 {
             let range = text_edit_range(
                 &at.story,
                 &story,
@@ -412,17 +489,23 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
-        let attrs = stamped_attrs(formatting, ins);
-        observe(&attrs);
+        let mut observe = Some(observe);
         let carry = Carry::capture(&story, txn, at.index, at.index, indexed.as_ref());
-        story.insert_with_attributes(txn, at.index, text, attrs);
-        let end = at.index + utf16_len(text);
+        let mut end = at.index;
+        for run in runs.iter().filter(|run| !run.text.is_empty()) {
+            let attrs = stamped_attrs(overlaid(&formatting, run.overlay), ins.clone());
+            if let Some(observe) = observe.take() {
+                observe(&attrs);
+            }
+            story.insert_with_attributes(txn, end, run.text, attrs);
+            end += utf16_len(run.text);
+        }
         if let Some(carry) = carry {
             carry.inserted(txn, at.index, end - at.index);
         }
         let bounds = bounds.map(|mut bounds| {
             if at.index <= bounds.pilcrow {
-                bounds.pilcrow += utf16_len(text);
+                bounds.pilcrow += total;
             }
             bounds
         });
@@ -445,6 +528,7 @@ impl EditingDoc {
         range: StoryRange,
         observe: impl FnOnce(bool),
     ) -> OpResult<Receipt> {
+        self.refuse_cell_write(&range.story)?;
         let len = crate::format::range_len(&range)?;
         if len == 0 {
             return Err(OpError::EmptyRange);
@@ -533,6 +617,7 @@ impl EditingDoc {
         range: StoryRange,
         text: &str,
     ) -> OpResult<(Receipt, u32)> {
+        self.refuse_cell_write(&range.story)?;
         validate_text(text)?;
         let len = crate::format::range_len(&range)?;
         if len == 0 && text.is_empty() {
@@ -542,16 +627,43 @@ impl EditingDoc {
         self.replace_range_placed_in(&mut txn, ctx, range, text)
     }
 
+    /// [`Self::replace_range_placed`] with one run per slice; see
+    /// [`Self::replace_runs_placed_in`].
+    pub(crate) fn replace_runs_placed(
+        &self,
+        ctx: &EditCtx,
+        range: StoryRange,
+        runs: &[RunSlice<'_>],
+    ) -> OpResult<(Receipt, u32)> {
+        let mut txn = self.transact_for(ctx);
+        self.replace_runs_placed_in(&mut txn, ctx, range, runs)
+    }
+
     pub(crate) fn replace_range_placed_in(
         &self,
         txn: &mut TransactionMut<'_>,
         ctx: &EditCtx,
-        mut range: StoryRange,
+        range: StoryRange,
         text: &str,
     ) -> OpResult<(Receipt, u32)> {
-        validate_text(text)?;
+        self.replace_runs_placed_in(txn, ctx, range, &[RunSlice::plain(text)])
+    }
+
+    /// [`Self::replace_range_placed_in`] with one run per slice, each taking the formatting
+    /// plain text would get with its overlay written over it.
+    pub(crate) fn replace_runs_placed_in(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ctx: &EditCtx,
+        mut range: StoryRange,
+        runs: &[RunSlice<'_>],
+    ) -> OpResult<(Receipt, u32)> {
+        for run in runs {
+            validate_text(run.text)?;
+        }
+        let total: u32 = runs.iter().map(|run| utf16_len(run.text)).sum();
         let len = crate::format::range_len(&range)?;
-        if len == 0 && text.is_empty() {
+        if len == 0 && total == 0 {
             return Err(OpError::EmptyRange);
         }
         let story = story_ref(txn, &range.story)?;
@@ -564,7 +676,7 @@ impl EditingDoc {
         let len = range.end - range.start;
         let after = after_struck_text(&story, txn, ctx, &range, len, &chunks);
         let mut at = after.unwrap_or(range.start);
-        if !text.is_empty() {
+        if total > 0 {
             crate::identity::promote_at(self, txn, &range.story, &story, at);
         }
         let revision_id = ctx.is_suggesting().then(|| {
@@ -586,7 +698,8 @@ impl EditingDoc {
                     .attrs
                     .iter()
                     .filter(|(key, value)| {
-                        !matches!(key.as_str(), INS | DEL) && **value != Any::Null
+                        !matches!(key.as_str(), INS | DEL | crate::format::RPR_CHANGE)
+                            && **value != Any::Null
                     })
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect()
@@ -607,21 +720,16 @@ impl EditingDoc {
                 }
                 changes = outcome.changes;
             } else {
-                changes = plain_delete(
-                    txn,
-                    &story,
-                    range.start,
-                    range.end,
-                    &chunks,
-                    !text.is_empty(),
-                )
-                .changes;
+                changes =
+                    plain_delete(txn, &story, range.start, range.end, &chunks, total > 0).changes;
             }
         }
-        if !text.is_empty() {
-            story.insert_with_attributes(txn, at, text, stamped_attrs(formatting, revision));
+        let mut end = at;
+        for run in runs.iter().filter(|run| !run.text.is_empty()) {
+            let attrs = stamped_attrs(overlaid(&formatting, run.overlay), revision.clone());
+            story.insert_with_attributes(txn, end, run.text, attrs);
+            end += utf16_len(run.text);
         }
-        let end = at + utf16_len(text);
         if let Some(carry) = carry {
             changes.push(Change::Insert { at, len: end - at });
             carry.apply(txn, &changes, &[]);
@@ -654,6 +762,18 @@ impl EditingDoc {
     pub(crate) fn replace_range_rich_placed(
         &self,
         ctx: &EditCtx,
+        range: StoryRange,
+        runs: &[RichRun],
+    ) -> OpResult<(Receipt, u32)> {
+        self.refuse_cell_write(&range.story)?;
+        let mut txn = self.transact_for(ctx);
+        self.replace_range_rich_placed_in(&mut txn, ctx, range, runs)
+    }
+
+    pub(crate) fn replace_range_rich_placed_in(
+        &self,
+        txn: &mut TransactionMut<'_>,
+        ctx: &EditCtx,
         mut range: StoryRange,
         runs: &[RichRun],
     ) -> OpResult<(Receipt, u32)> {
@@ -665,19 +785,18 @@ impl EditingDoc {
         if len == 0 && total == 0 {
             return Err(OpError::EmptyRange);
         }
-        let mut txn = self.transact_for(ctx);
-        let story = story_ref(&txn, &range.story)?;
-        check_range(&story, &txn, range.start, len)?;
+        let story = story_ref(txn, &range.story)?;
+        check_range(&story, txn, range.start, len)?;
         if len == 0 {
-            range.start = past_leading_blocks(&story, &txn, range.start);
+            range.start = past_leading_blocks(&story, txn, range.start);
             range.end = range.start;
         }
-        let chunks = range_chunks(&story, &txn, &mut range);
+        let chunks = range_chunks(&story, txn, &mut range);
         let len = range.end - range.start;
-        let after = after_struck_text(&story, &txn, ctx, &range, len, &chunks);
+        let after = after_struck_text(&story, txn, ctx, &range, len, &chunks);
         let mut at = after.unwrap_or(range.start);
         if total > 0 {
-            crate::identity::promote_at(self, &mut txn, &range.story, &story, at);
+            crate::identity::promote_at(self, txn, &range.story, &story, at);
         }
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
@@ -689,26 +808,19 @@ impl EditingDoc {
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
-        let carry = Carry::capture(&story, &txn, range.start, range.end, None);
+        let carry = Carry::capture(&story, txn, range.start, range.end, None);
         let mut changes = Vec::new();
         if len > 0 {
             if let Some(revision) = revision.as_ref() {
-                let outcome = suggest_delete(
-                    &mut txn,
-                    &story,
-                    ctx,
-                    revision,
-                    range.start,
-                    range.end,
-                    &chunks,
-                );
+                let outcome =
+                    suggest_delete(txn, &story, ctx, revision, range.start, range.end, &chunks);
                 if after.is_some() {
                     at -= outcome.removed;
                 }
                 changes = outcome.changes;
             } else {
                 changes = plain_delete(
-                    &mut txn,
+                    txn,
                     &story,
                     range.start,
                     range.end,
@@ -730,7 +842,7 @@ impl EditingDoc {
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect();
             story.insert_with_attributes(
-                &mut txn,
+                txn,
                 cursor,
                 &run.text,
                 stamped_attrs(formatting, revision.clone()),
@@ -742,9 +854,9 @@ impl EditingDoc {
                 at,
                 len: cursor - at,
             });
-            carry.apply(&mut txn, &changes, &[]);
+            carry.apply(txn, &changes, &[]);
         }
-        let loc_range = loc_range_in_txn(&range.story, &story, &txn, at, cursor)?;
+        let loc_range = loc_range_in_txn(&range.story, &story, txn, at, cursor)?;
         Ok((
             Receipt {
                 new_para_ids: Vec::new(),

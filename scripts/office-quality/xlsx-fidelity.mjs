@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { budgetShards } from './shards.mjs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fetchAsset } from './asset-cache.mjs';
@@ -6,21 +7,12 @@ import { digest } from './docx-benchmark.mjs';
 import { download } from './download.mjs';
 import { mapPool, validatePlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
-import { CORPUS_ORIGIN } from './samples.mjs';
+import { corpusOrigin } from './samples.mjs';
 
 export const METHOD = 'xlsx-libreoffice-print-ranges-v1';
 
 export function xlsxFidelityShards(plan) {
-  const samples = plan.samples.filter(sample => sample.format === 'xlsx');
-  const shards = Array.from({ length: Math.min(4, samples.length) }, () => []);
-  const weights = shards.map(() => 0);
-  for (const sample of [...samples].sort((a, b) =>
-    b.metadata.reference.pages - a.metadata.reference.pages || a.id.localeCompare(b.id))) {
-    const index = weights.indexOf(Math.min(...weights));
-    shards[index].push(sample.id);
-    weights[index] += sample.metadata.reference.pages;
-  }
-  return shards;
+  return budgetShards('xlsx-fidelity', plan.samples.filter(sample => sample.format === 'xlsx')).map(shard => shard.samples);
 }
 
 export function mergeXlsxFidelity(plan, report, parts, planHash) {
@@ -94,7 +86,7 @@ export async function stageXlsxFidelity(planPath, output, shard, cacheDir) {
   }
   let completed = 0;
   await mapPool(tasks, 8, async ({ sample, asset, path, maximum }) => {
-    await writeFile(path, await fetchAsset(asset, sample.id, download, { cacheDir, origin: CORPUS_ORIGIN, maximum }));
+    await writeFile(path, await fetchAsset(asset, sample.id, download, { cacheDir, origin: corpusOrigin(), maximum }));
     if (++completed % 50 === 0 || completed === tasks.length)
       console.log(`XLSX LibreOffice: staged ${completed}/${tasks.length} verified assets`);
   });

@@ -196,6 +196,7 @@ async function mount(root: HTMLElement, probe: WorkerViewerProbe) {
     const paint = paints.get(canvas);
     const scroll = scrollElement(arm);
     if (!canvas || !paint || !scroll || !paint.finished || paint.depth !== 0 || paint.serial <= after) return;
+    if (canvas.dataset.defaultFonts !== 'settled') return;
     if (canvas.width !== Math.round(scroll.clientWidth * devicePixelRatio) ||
       canvas.height !== Math.round(scroll.clientHeight * devicePixelRatio) || canvas.width === 0 || canvas.height === 0) return;
     if (paint.scale !== zoom * devicePixelRatio || paint.scrollLeft !== scroll.scrollLeft ||

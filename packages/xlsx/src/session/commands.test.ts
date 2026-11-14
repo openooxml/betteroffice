@@ -9,7 +9,7 @@ import type {
   WorkbookAck, WorkbookCommand, WorkbookCommandPayload, WorkbookFormatTokenResult, WorkbookToolbarPayload,
 } from './commandProtocol';
 import type { WorkbookSession } from './client';
-import { classifyRefusal, createWorkbookCommandState, workbookAdmissionBudget } from './commandHandlers';
+import { classifyRefusal, createWorkbookCommandState, structuralRefusalCause, workbookAdmissionBudget } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import * as toolbarCommands from './commandToolbar';
 import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod } from './replay';
@@ -252,6 +252,57 @@ describe('workbook commands', () => {
       expect(handle.historyState()).toEqual(history);
       expect(handle.listProposals()).toEqual(proposals);
       expect(await session.save()).toEqual(before);
+    } finally { await session.dispose(); }
+  });
+
+  test('worker proposal refresh retains targets deleted by structural commands', async () => {
+    const { session, handle } = await trackedSession();
+    try {
+      await session.submit(command(session, 1, 'propose', {
+        args: ['agent', null, [{ sheet: 0, row: 20, col: 4, input: '7' }]],
+      }));
+      await session.submit(command(session, 2, 'applyOps', {
+        args: [[{ type: 'insertRows', sheet: 0, at: 20, count: 2 }]],
+      }));
+      expect(handle.listProposals()[0]?.cells[0]?.a1).toBe('E23');
+      await session.submit(command(session, 3, 'applyOps', {
+        args: [[{ type: 'deleteRows', sheet: 0, at: 22, count: 1 }]],
+      }));
+      const refreshed = await session.submit(command(session, 4, 'applyOps', {
+        toolbar: { id: 'refreshProposals', args: null },
+      }));
+      expect(refreshed).toMatchObject({ status: 'applied', result: {
+        proposals: [{ cells: [{ a1: 'E23', stale: true }] }],
+      } });
+      const proposal = handle.listProposals()[0]!;
+      expect(() => handle.acceptProposal(proposal.id, { force: true })).toThrow(wasm.StaleProposalError);
+    } finally { await session.dispose(); }
+  });
+
+  test('read-only host proposals permit only proposing and deciding proposals', async () => {
+    const { session, handle } = await trackedSession();
+    try {
+      await session.submit(command(session, 1, 'setReadOnly', { readOnly: true, allowHostProposals: true }));
+      const proposed = await session.submit(command(session, 2, 'propose', {
+        args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '7' }]],
+      }));
+      expect(proposed).toMatchObject({ status: 'applied', committed: false });
+      const id = (proposed.result as wasm.Proposal).id;
+      expect(await session.submit(command(session, 3, 'editCell', { args: [0, 0, 0, '99'] })))
+        .toMatchObject({ status: 'refused', reason: 'read-only' });
+      expect(await session.submit(command(session, 4, 'acceptProposal', { args: [id] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(handle.cell(0, 0, 0).input).toBe('7');
+      const second = await session.submit(command(session, 5, 'propose', {
+        args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '8' }]],
+      }));
+      expect(await session.submit(command(session, 6, 'rejectProposal', { args: [(second.result as wasm.Proposal).id] })))
+        .toMatchObject({ status: 'applied', committed: false });
+      await session.submit(command(session, 7, 'setReadOnly', { readOnly: true }));
+      expect(await session.submit(command(session, 8, 'propose', {
+        args: ['host', null, [{ sheet: 0, row: 0, col: 0, input: '9' }]],
+      }))).toMatchObject({ status: 'refused', reason: 'read-only' });
+      expect(session.editState.readOnly).toBe(true);
     } finally { await session.dispose(); }
   });
 
@@ -827,6 +878,27 @@ describe('workbook commands', () => {
       await session.submit(command(session, 3, 'redo', { args: [] }));
       const redone = await JSZip.loadAsync(await session.save());
       expect(await redone.file('xl/workbook.xml')!.async('string')).toBe(xml);
+    } finally { await session.dispose(); }
+  });
+
+  test('queued numeric name scope refuses after concurrent sheet deletion', async () => {
+    const session = await createTestWorkbookSession(bytes, batchRequests);
+    try {
+      const remove = command(session, 1, 'applyOps', { args: [[{ type: 'removeSheet', index: 1 }]] });
+      const scoped = command(session, 2, 'applyOps', {
+        args: [[{ type: 'setDefinedName', name: 'Scoped', refers_to: '1', scope: 0 }]],
+      }, 1);
+      const deleted = command(session, 3, 'applyOps', {
+        args: [[{ type: 'deleteDefinedName', name: 'Scoped', scope: 0 }]],
+      }, 1);
+      const global = command(session, 4, 'applyOps', {
+        args: [[{ type: 'setDefinedName', name: 'Global', refers_to: '1', scope: null }]],
+      }, 1);
+      const statuses = await Promise.all([remove, scoped, deleted, global].map((item) => session.submit(item)));
+      expect(statuses[0]).toMatchObject({ status: 'applied', committed: true });
+      expect(statuses[1]).toMatchObject({ status: 'refused', reason: 'stale-target', committed: false });
+      expect(statuses[2]).toMatchObject({ status: 'refused', reason: 'stale-target', committed: false });
+      expect(statuses[3]).toMatchObject({ status: 'applied', committed: true });
     } finally { await session.dispose(); }
   });
 
@@ -1675,6 +1747,10 @@ describe('workbook commands', () => {
     { method: 'applyOps', message: 'defined name Dynamic cannot be safely rewritten', reason: 'unsupported' },
     { method: 'applyOps', message: 'chart reference in xl/charts/chart1.xml cannot be safely rewritten', reason: 'unsupported' },
     { method: 'applyOps', message: 'xl/tables/table1.xml references cells this edit would move, and it cannot be rewritten', reason: 'unsupported' },
+    { method: 'applyOps', message: 'sheet name contains a character xml cannot carry, and the workbook references the sheet', reason: 'invalid-step' },
+    { method: 'applyOps', message: "the data validation formulas on sheet 'Other' cannot follow the sheet rename", reason: 'invalid-step' },
+    { method: 'applyOps', message: "the sparkline formulas on sheet 'Q1 Sales' cannot follow the sheet rename", reason: 'invalid-step' },
+    { method: 'applyOps', message: "the extension data validation formulas on sheet 'Other' cannot follow the sheet removal", reason: 'invalid-step' },
   ] as const) {
     for (const fault of ['precommit', 'postcommit', 'trap'] as const) {
       test(`${fault} ${refusal.message} retains refusal and context guards`, async () => {
@@ -1992,8 +2068,74 @@ describe('workbook commands', () => {
     } finally { failing.mockRestore(); await session.dispose(); }
   });
 
+  test('structural refusals carry the engine message and what the edit would have broken', () => {
+    for (const [method, message, cause] of [
+      ['applyOps', 'xl/charts/chart1.xml references cells this edit would move, and it cannot be rewritten', 'chart'],
+      ['applyOps', 'xl/drawings/drawing2.xml references cells this edit would move, and it cannot be rewritten', 'chart'],
+      ['applyOps', 'xl/tables/table1.xml references cells this edit would move, and it cannot be rewritten', 'table'],
+      ['applyOps', 'xl/pivotTables/pivotTable1.xml references cells this edit would move, and it cannot be rewritten', 'pivot'],
+      ['applyOps', 'xl/pivotCache/pivotCacheDefinition1.xml references cells this edit would move, and it cannot be rewritten', 'pivot'],
+      ['applyOps', 'xl/workbook.xml references cells this edit would move, and it cannot be rewritten', 'other'],
+      ['applyOps', 'chart reference in xl/charts/chart1.xml cannot be safely rewritten', 'chart'],
+      ['applyOps', 'anchor 0 of xl/drawings/drawing1.xml is held by two sheets that disagree on where it sits', 'chart'],
+      ['applyOps', 'chart xl/charts/chart1.xml cannot change how it follows a grid edit', 'chart'],
+      ['resizeChart', 'chart xl/drawings/drawing1.xml#0 is pinned to the sheet and cannot be resized', 'chart'],
+      ['resizeChart', 'chart xl/drawings/drawing1.xml#0 cannot be resized: a one-cell extent is not written back', 'chart'],
+      ['applyOps', 'formula at sheet 0, B1 cannot be safely rewritten', 'other'],
+      ['applyOps', 'defined name Dynamic cannot be safely rewritten', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: merged range B4:D5 crosses the moved tracks', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: table Sales covers the moved tracks', 'table'],
+      ['applyOps', 'cannot move sheet 1 tracks: the run or its destination is outside the worksheet', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: the source run is outside the worksheet', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: moving rows or columns is not supported yet', 'other'],
+      ['fillRange', 'fill cannot safely preserve hyperlinks', 'fill'],
+      ['fillRange', 'fill cannot safely preserve comments', 'fill'],
+      ['fillRange', 'fill cannot safely preserve data validations', 'fill'],
+      ['fillRange', 'fill cannot safely preserve conditional formats', 'fill'],
+      ['moveRange', 'range move cannot safely preserve charts', 'chart'],
+      ['moveRange', 'range move cannot safely preserve Excel tables', 'table'],
+      ['moveRange', 'range move cannot safely preserve merged cells', 'other'],
+      ['moveRange', 'xl/pivotTables/pivotTable1.xml references cells this move would relocate, and it cannot be rewritten', 'pivot'],
+      ['moveRange', 'xl/worksheets/sheet1.xml contains worksheet features a cell move cannot safely preserve', 'other'],
+    ] as const) {
+      expect(structuralRefusalCause(message)).toBe(cause);
+      expect(classifyRefusal(new Error(message), method)).toMatchObject({
+        reason: 'unsupported',
+        result: { failure: { code: 'unsupported', cause, message } },
+      });
+    }
+    for (const message of [
+      'structural operations are unavailable in collaborative mode',
+      'collaborative sheets can only be added at the end of the workbook',
+    ]) {
+      const refusal = classifyRefusal(new Error(message), 'applyOps');
+      expect(refusal?.reason).toBe('unsupported');
+      expect(refusal?.result).toBeUndefined();
+    }
+  });
+
+  test('an unsupported column move is an ordinary structural refusal', async () => {
+    const session = await createTestWorkbookSession(bytes);
+    try {
+      const saved = await session.save();
+      const version = session.confirmedBasis.version;
+      expect(await session.submit(command(session, 1, 'applyOps', { args: [[
+        { type: 'moveCols', sheet: 0, col: 3, count: 1, before: 5 },
+      ]] }))).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false,
+        result: { failure: { code: 'unsupported', cause: 'other',
+          message: 'cannot move sheet 0 tracks: moving rows or columns is not supported yet' } } });
+      expect(await session.save()).toEqual(saved);
+      expect(session.confirmedBasis.version).toBe(version);
+      expect(await session.submit(command(session, 2, 'editCell', { args: [0, 0, 0, '2'] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(session.failure).toBeUndefined();
+    } finally { await session.dispose(); }
+  });
+
   test('copy origin errors from batch edits are classified as invalid commands', () => {
     expect(classifyRefusal(new Error('bad edit args: copy origin is outside the grid'), 'editCells'))
+      .toMatchObject({ reason: 'invalid-command' });
+    expect(classifyRefusal(new Error('bad chart resize args: missing field `sheet`'), 'resizeChart'))
       .toMatchObject({ reason: 'invalid-command' });
   });
 
@@ -2036,6 +2178,36 @@ describe('workbook commands', () => {
     } finally { await session.dispose(); }
   });
 
+  test('fillRange tiles copied cells and refuses protected features without mutating', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      expect(await session.submit(command(session, 1, 'editCell', {
+        args: [0, 0, 0, '7'],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      const before = session.confirmedBasis.version;
+      expect(await session.submit(command(session, 2, 'fillRange', {
+        args: [0, 'A1', 'A1:A3'],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect(session.confirmedBasis.version).not.toBe(before);
+      expect((await session.call.cellInputs(0, 'A1:A3')).cells.map((row) => row[0].input))
+        .toEqual(['7', '7', '7']);
+      expect(await session.submit(command(session, 3, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('');
+    } finally { await session.dispose(); }
+
+    const refusing = await createTestWorkbookSession(bytes);
+    try {
+      const version = refusing.confirmedBasis.version;
+      expect(await refusing.submit(command(refusing, 1, 'fillRange', {
+        args: [0, 'A1', 'A1:E2'],
+      }))).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false });
+      expect(refusing.confirmedBasis.version).toBe(version);
+      expect((await refusing.call.cellInputs(0, 'A1:E2')).cells.flat()
+        .filter((cell) => cell.input !== '').map((cell) => cell.a1)).toEqual(['A1', 'B1']);
+    } finally { await refusing.dispose(); }
+  });
+
   test('moveRange rewrites dependent formulas and undoes through worker commands', async () => {
     const session = await createTestWorkbookSession(plainBytes);
     try {
@@ -2067,7 +2239,7 @@ describe('workbook commands', () => {
 
   for (const kind of Object.keys(WORKBOOK_REPLAY_MUTATORS) as WorkbookReplayMethod[]) {
     test(`applies replay mutator ${kind} without an edit peer`, async () => {
-      const source = kind === 'moveRange' ? plainBytes : bytes;
+      const source = kind === 'moveRange' || kind === 'fillRange' ? plainBytes : bytes;
       const session = await createTestWorkbookSession(source);
       let seq = 0;
       const send = (op: WorkbookCommand) => session.submit(op);
@@ -2092,7 +2264,14 @@ describe('workbook commands', () => {
             payload = { args: [0, chart.id, 24, 12] };
             break;
           }
+          case 'resizeChart': {
+            const chart = main.displayList({ x: 0, y: 0, width: 800, height: 800 }).charts?.find((item) => item.resizable);
+            if (!chart) throw new Error('Missing synthetic resizable chart');
+            payload = { args: [0, chart.id, { left: 0, top: 0, right: 24, bottom: 12 }] };
+            break;
+          }
           case 'moveRange': payload = { args: [0, 'A1', 'A2'] }; break;
+          case 'fillRange': payload = { args: [0, 'A1', 'A1:A2'] }; break;
           case 'setActiveSheet': payload = { args: [1] }; break;
           case 'undo':
           case 'redo':
@@ -2126,6 +2305,7 @@ describe('workbook commands', () => {
           expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe(kind === 'undo' ? '1' : '7');
         }
         if (kind === 'moveRange') expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('1');
+        if (kind === 'fillRange') expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('1');
         if (kind === 'patchRangeStyle' || kind === 'applyFormat') expect(session.editState.formatting?.bold).toBe(true);
         if (kind === 'setNumberFormat') expect(session.editState.formatting?.numberFormat).toBe('percent');
         if (kind === 'setActiveSheet') expect(session.state.activeSheet).toBe(1);

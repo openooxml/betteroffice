@@ -13,9 +13,9 @@ export function PeerlessShapeOverlay({ selection, preview: previews, scale, read
   const bounds = preview?.token === selection.token ? preview.bounds : original;
   return <>
     <div data-testid="pptx-shape-selection" style={{ position: 'absolute', pointerEvents: 'none',
-      left: original.x * scale, top: original.y * scale, width: original.width * scale, height: original.height * scale,
-      border: '2px solid #2563eb', boxSizing: 'border-box', transformOrigin: '0 0',
-      transform: `translate(${(bounds.x - original.x) * scale}px, ${(bounds.y - original.y) * scale}px) scale(${original.width ? bounds.width / original.width : 1}, ${original.height ? bounds.height / original.height : 1})` }} />
+      left: bounds.x * scale, top: bounds.y * scale,
+      width: Math.max(1, bounds.width * scale), height: Math.max(1, bounds.height * scale),
+      border: '2px solid #2563eb', boxSizing: 'border-box' }} />
     {!readOnly && selection.canResize && RESIZE_HANDLES.map((handle) => {
       const point = handleAnchor(bounds, handle);
       return <span key={handle} data-testid={`pptx-resize-${handle}`} data-pptx-resize={handle}

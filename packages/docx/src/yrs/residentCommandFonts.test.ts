@@ -25,6 +25,8 @@ async function initializeFonts(
     export async function initialize(session, request, bindResidentCommands) {
       let fontsRevision = -1;
       let glyphCache;
+      let progressiveFonts = null, commandFontSlots = null, holdWholeFaceRequests = false;
+      const openProgressiveFonts = () => null, setProgressiveFonts = () => {}, releaseWholeFaceRequests = () => {};
       const OffscreenCanvas = class OffscreenCanvas {};
       const activeOffscreenPageIds = [], pendingOffscreenPageIds = new Set(), intactBackBuffers = new Map();
     const openedDocument = true, previewing = false, commandHost = null, commandHooksFactory = true, openedViaSource = false;

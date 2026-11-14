@@ -200,6 +200,10 @@ impl FontChainDependencies {
 }
 
 impl FontChains<'_> {
+    pub(super) fn symbols_shape(&self) -> bool {
+        self.get("@betteroffice/fonts/coverage-symbols").is_some()
+    }
+
     pub(super) fn coverage_only(&self, chain: &[FontId]) -> bool {
         self.get("@betteroffice/fonts/coverage")
             .is_some_and(|ids| chain.last().is_some_and(|id| ids.contains(&id.to_u32())))
@@ -344,6 +348,8 @@ pub struct RunIn {
     /// Minimum font size in points at which pair kerning is enabled.
     #[serde(default)]
     pub kerning_min_pt: Option<f32>,
+    #[serde(default)]
+    pub word_features: Vec<crate::shape::ShapeFeature>,
     /// Shapes at 0.75 of the run's size, raised by 0.4em.
     #[serde(default)]
     pub superscript: bool,

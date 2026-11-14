@@ -4,6 +4,7 @@
 compile_error!("betteroffice-docx-raster is server-side only");
 
 mod font;
+mod shadow;
 
 pub use font::{GlyphCache, measure_text};
 
@@ -20,10 +21,13 @@ use docx_layout::display_list::{
     LinePrimitive, PageBorderPrimitive, PageBorderSide, PageBorderZOrder, Primitive, RectPrimitive,
     RevisionKind, ShapePathCommand, ShapePrimitive,
 };
+use docx_layout::skipped_effects::{PrimitiveAt, Region};
+use ooxml_raster::svg;
+use ooxml_raster::{encode_png, parse_css_color};
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
-    Color, ColorU8, FillRule, FilterQuality, GradientStop, IntRect, IntSize, LineCap, LineJoin,
+    Color, FillRule, FilterQuality, GradientStop, IntRect, IntSize, LineCap, LineJoin,
     LinearGradient, Mask, Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, Point,
     RadialGradient, Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
@@ -40,6 +44,9 @@ pub type ImageMap = HashMap<String, Vec<u8>>;
 pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
 /// Every image decoded for one page, at four times that surface.
 pub const MAX_PAGE_IMAGE_PIXELS: u64 = 67_108_864;
+/// Render work all of one page's SVG and metafile pictures may spend
+/// together: twice what one picture may.
+pub const MAX_PAGE_SVG_WORK: u64 = 2 * svg::MAX_SVG_RENDER_WORK;
 /// One decoded image's source buffer plus the pixmap it converts to, at
 /// [`MAX_IMAGE_PIXELS`] of RGBA8. A deeper source costs more per pixel, so
 /// pixels alone do not bound the memory a decode needs.
@@ -141,11 +148,80 @@ impl<'a> RenderResources<'a> {
     }
 }
 
-/// A rendered page and the image references it left undrawn.
+/// Why a picture was replaced by a placeholder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureReason {
+    Missing,
+    Unsupported,
+    DecodeFailed,
+    Metafile,
+    TooLarge,
+    Budget,
+}
+
+impl PictureReason {
+    /// The stable report name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Unsupported => "unsupported",
+            Self::DecodeFailed => "decode-failed",
+            Self::Metafile => "metafile",
+            Self::TooLarge => "too-large",
+            Self::Budget => "budget",
+        }
+    }
+}
+
+/// A picture reference replaced by a placeholder and any known limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedPicture {
+    pub id: String,
+    pub reason: PictureReason,
+    pub limit: Option<u64>,
+    pub actual: Option<u64>,
+    pub unit: Option<&'static str>,
+    /// The primitive that drew the placeholder.
+    pub at: PrimitiveAt,
+}
+
+#[derive(Clone, Copy)]
+struct PictureFailure {
+    reason: PictureReason,
+    limit: Option<u64>,
+    actual: Option<u64>,
+    unit: Option<&'static str>,
+}
+
+impl PictureFailure {
+    fn new(reason: PictureReason) -> Self {
+        Self {
+            reason,
+            limit: None,
+            actual: None,
+            unit: None,
+        }
+    }
+
+    fn limited(reason: PictureReason, limit: u64, actual: u64, unit: &'static str) -> Self {
+        Self {
+            reason,
+            limit: Some(limit),
+            actual: Some(actual),
+            unit: Some(unit),
+        }
+    }
+}
+
+type ImageOutcome = Result<Arc<Pixmap>, PictureFailure>;
+
+/// A rendered page and the pictures and effects this backend could not draw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedPage {
     pub bytes: Vec<u8>,
     pub skipped_images: usize,
+    pub skipped_pictures: Vec<SkippedPicture>,
+    pub skipped_effects: BTreeMap<String, usize>,
 }
 
 /// Renders one display-list page to deterministic PNG bytes.
@@ -182,20 +258,38 @@ pub fn render_page_cached(
     glyphs: &mut GlyphCache,
     images: &mut ImageCache,
 ) -> Result<RenderedPage, String> {
+    render_page_cached_scaled(display_list, page_ordinal, resources, glyphs, images, 1.0)
+}
+
+pub fn render_page_cached_scaled(
+    display_list: &DisplayList,
+    page_ordinal: usize,
+    resources: &RenderResources<'_>,
+    glyphs: &mut GlyphCache,
+    images: &mut ImageCache,
+    scale: f32,
+) -> Result<RenderedPage, String> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("scale must be finite and positive".to_owned());
+    }
     let page = display_list
         .pages
         .get(page_ordinal)
         .ok_or_else(|| format!("page ordinal {page_ordinal} is out of range"))?;
-    let width = page_dimension(&page.width, "page width")?;
-    let height = page_dimension(&page.height, "page height")?;
+    let width = scaled_page_dimension(&page.width, "page width", scale)?;
+    let height = scaled_page_dimension(&page.height, "page height", scale)?;
     validate_page_surface(width, height)?;
     let mut pixmap = Pixmap::new(width, height).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut renderer = Renderer::new(width, height, glyphs, images);
+    renderer.scratch.images.fonts = Some(resources.fonts);
+    renderer.scale = scale;
     renderer.paint_page(&mut pixmap, page, resources)?;
     Ok(RenderedPage {
         bytes: encode_png(pixmap, width, height)?,
         skipped_images: renderer.scratch.images.skipped,
+        skipped_pictures: renderer.scratch.images.pictures,
+        skipped_effects: renderer.scratch.skipped,
     })
 }
 
@@ -378,9 +472,16 @@ struct Scratch<'k> {
     images: PageImages<'k>,
     masks: MaskCache,
     budget: PageBudget,
+    skipped: BTreeMap<String, usize>,
+}
+
+/// Counts an effect left out of a primitive that was otherwise drawn.
+pub(crate) fn skip_effect(skipped: &mut BTreeMap<String, usize>, kind: &str) {
+    *skipped.entry(kind.to_owned()).or_default() += 1;
 }
 
 struct Renderer<'k> {
+    scale: f32,
     clips: ClipSurface,
     scratch: Scratch<'k>,
 }
@@ -393,6 +494,7 @@ impl<'k> Renderer<'k> {
         images: &'k mut ImageCache,
     ) -> Self {
         Self {
+            scale: 1.0,
             clips: ClipSurface::default(),
             scratch: Scratch {
                 glyphs,
@@ -400,6 +502,7 @@ impl<'k> Renderer<'k> {
                 images: PageImages::new(images),
                 masks: MaskCache::new(width, height),
                 budget: PageBudget::new(width, height),
+                skipped: BTreeMap::new(),
             },
         }
     }
@@ -422,31 +525,60 @@ impl<'k> Renderer<'k> {
             .iter()
             .filter(|border| border.z_order == Some(PageBorderZOrder::Back))
         {
-            paint_page_border(pixmap, border, &mut self.scratch.budget)?;
+            paint_page_border(
+                pixmap,
+                border,
+                &mut self.scratch.budget,
+                Transform::from_scale(self.scale, self.scale),
+            )?;
         }
         let (watermark, body) = page.primitives.split_at(
             page.watermark_primitive_count
                 .unwrap_or(0)
                 .min(page.primitives.len()),
         );
-        for primitive in watermark {
+        for (index, primitive) in watermark.iter().enumerate() {
+            self.scratch.images.at = PrimitiveAt {
+                region: Region::Body,
+                index,
+            };
             self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
         }
-        for region in [&page.header, &page.footer].into_iter().flatten() {
+        let header = (Region::Header, &page.header);
+        for (place, region) in [header, (Region::Footer, &page.footer)] {
+            let Some(region) = region else {
+                continue;
+            };
             let scope = ImageScope::HeaderFooter(&region.r_id);
-            for primitive in &region.primitives {
+            for (index, primitive) in region.primitives.iter().enumerate() {
+                self.scratch.images.at = PrimitiveAt {
+                    region: place,
+                    index,
+                };
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
         }
-        for primitive in body {
+        for (index, primitive) in body.iter().enumerate() {
+            self.scratch.images.at = PrimitiveAt {
+                region: Region::Body,
+                index: watermark.len() + index,
+            };
             self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
         }
-        for area in &page.note_areas {
+        for (area_index, area) in page.note_areas.iter().enumerate() {
             let scope = ImageScope::Notes(NoteKind::from_region(area.kind.as_deref()));
-            for primitive in &area.separator_primitives {
+            for (index, primitive) in area.separator_primitives.iter().enumerate() {
+                self.scratch.images.at = PrimitiveAt {
+                    region: Region::NoteSeparator(area_index),
+                    index,
+                };
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
-            for primitive in &area.primitives {
+            for (index, primitive) in area.primitives.iter().enumerate() {
+                self.scratch.images.at = PrimitiveAt {
+                    region: Region::Note(area_index),
+                    index,
+                };
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
         }
@@ -455,7 +587,12 @@ impl<'k> Renderer<'k> {
             .iter()
             .filter(|border| border.z_order != Some(PageBorderZOrder::Back))
         {
-            paint_page_border(pixmap, border, &mut self.scratch.budget)?;
+            paint_page_border(
+                pixmap,
+                border,
+                &mut self.scratch.budget,
+                Transform::from_scale(self.scale, self.scale),
+            )?;
         }
         Ok(())
     }
@@ -470,25 +607,35 @@ impl<'k> Renderer<'k> {
         let attrs = primitive_attrs(primitive);
         validate_visual_attrs(primitive, attrs)?;
         let opacity = primitive_opacity(primitive)?;
-        let clip = clip_rect(attrs)?;
+        let clip = clip_rect(attrs)?.map(|clip| FRect {
+            x: clip.x * self.scale,
+            y: clip.y * self.scale,
+            w: clip.w * self.scale,
+            h: clip.h * self.scale,
+        });
+        let base = Transform::from_scale(self.scale, self.scale);
         let clips = &mut self.clips;
         let scratch = &mut self.scratch;
         if let Some(clip) = clip {
             clips.paint(pixmap, clip, scratch, |target, scratch, transform, mask| {
                 paint_primitive_core(
-                    target, primitive, resources, scratch, transform, mask, opacity, scope,
+                    target,
+                    primitive,
+                    resources,
+                    scratch,
+                    if base.is_identity() {
+                        transform
+                    } else {
+                        transform.pre_concat(base)
+                    },
+                    mask,
+                    opacity,
+                    scope,
                 )
             })
         } else {
             paint_primitive_core(
-                pixmap,
-                primitive,
-                resources,
-                scratch,
-                Transform::identity(),
-                None,
-                opacity,
-                scope,
+                pixmap, primitive, resources, scratch, base, None, opacity, scope,
             )
         }
     }
@@ -518,6 +665,7 @@ fn paint_primitive_core<'k>(
                 mask,
                 retained_mask_bytes,
                 opacity,
+                skipped: &mut scratch.skipped,
             };
             font::paint_text(&mut context, run)
         }
@@ -533,6 +681,7 @@ fn paint_primitive_core<'k>(
                 mask,
                 retained_mask_bytes,
                 opacity,
+                skipped: &mut scratch.skipped,
             };
             font::paint_glyph_run(&mut context, run)
         }
@@ -543,9 +692,9 @@ fn paint_primitive_core<'k>(
         Primitive::Image(image) => paint_image(
             pixmap, image, resources, scratch, transform, mask, opacity, scope,
         ),
-        Primitive::Shape(shape) => {
-            paint_shape(pixmap, shape, transform, mask, opacity, &mut scratch.budget)
-        }
+        Primitive::Shape(shape) => paint_shape(
+            pixmap, shape, resources, scratch, transform, mask, opacity, scope,
+        ),
         Primitive::Decoration(decoration) => paint_decoration(
             pixmap,
             decoration,
@@ -683,41 +832,435 @@ fn paint_decoration(
     Ok(())
 }
 
-fn paint_shape(
+#[allow(clippy::too_many_arguments)]
+fn paint_shape<'k>(
     pixmap: &mut Pixmap,
-    shape: &ShapePrimitive,
+    shape: &'k ShapePrimitive,
+    resources: &RenderResources<'_>,
+    scratch: &mut Scratch<'k>,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
-    budget: &mut PageBudget,
+    scope: ImageScope<'k>,
 ) -> Result<(), String> {
-    if shape
+    if shape.geometry_path.is_empty() && has_picture_fill(shape) {
+        return Ok(());
+    }
+    let picture = picture_fill_source(shape, resources, scratch, scope);
+    let failed_picture = has_picture_fill(shape) && picture.is_none();
+    let budget = &mut scratch.budget;
+    let (shadow, undrawn) = shape_shadow(&shape.attrs.effects)?;
+    for _ in 0..undrawn {
+        skip_effect(&mut scratch.skipped, "shape.effects");
+    }
+    budget.charge_path(shape.geometry_path.len() as u64)?;
+    let path = build_shape_path(&shape.geometry_path)?;
+    let visual = shape_transform(shape)?;
+    let transform = transform.pre_concat(visual);
+    let fill = if picture.is_some() || failed_picture {
+        None
+    } else {
+        shape_fill(shape, opacity)?
+    };
+    let picture_draws = picture
+        .as_ref()
+        .map(|(source, intrinsic)| picture_fill_draws(shape, source, *intrinsic))
+        .transpose()?;
+    if let Some(draws) = &picture_draws {
+        budget.charge_path(draws.draws.len() as u64)?;
+        budget.charge_masks(
+            scratch
+                .masks
+                .bytes
+                .saturating_add(mask_bytes(pixmap.width(), pixmap.height())),
+        )?;
+    }
+    let stroked = shape_stroke(shape, opacity)?;
+    if let Some(dash) = stroked.as_ref().and_then(|stroked| stroked.dash.as_ref()) {
+        budget.charge_path(dash_segments(path_length(&path), dash))?;
+    }
+    type Draw<'d> = Box<dyn Fn(&mut Pixmap, Transform, Option<&Mask>) + 'd>;
+    let mut parts: Vec<Draw<'_>> = Vec::new();
+    if let (Some((source, _)), Some(draws)) = (&picture, &picture_draws) {
+        let path = &path;
+        parts.push(Box::new(
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                paint_picture_fill(target, path, source, draws, opacity, transform, mask);
+            },
+        ));
+    }
+    if failed_picture {
+        let path = &path;
+        parts.push(Box::new(
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                paint_picture_placeholder(
+                    target,
+                    path,
+                    Some(PlaceholderBorder::Stroke(path)),
+                    transform,
+                    mask,
+                    opacity,
+                );
+            },
+        ));
+    }
+    if let Some(paint) = &fill {
+        parts.push(Box::new(
+            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                target.fill_path(&path, paint, FillRule::Winding, transform, mask);
+            },
+        ));
+    }
+    if let Some(stroked) = &stroked {
+        parts.push(Box::new(
+            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                target.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
+            },
+        ));
+    }
+    let reach =
+        stroked.as_ref().map_or(0.0, |stroked| stroked.stroke.width) * max_axis_scale(transform);
+    let bounds = path.bounds().transform(transform).and_then(|bounds| {
+        Rect::from_ltrb(
+            bounds.left() - reach,
+            bounds.top() - reach,
+            bounds.right() + reach,
+            bounds.bottom() + reach,
+        )
+    });
+    for draw in &parts {
+        if let (Some(shadow), Some(bounds)) = (shadow, bounds)
+            && let Some(mut surface) = shadow::shadow_surface(
+                (pixmap.width(), pixmap.height()),
+                bounds,
+                &shadow,
+                budget,
+                scratch.masks.bytes,
+            )?
+        {
+            draw(
+                &mut surface.pixmap,
+                surface.offset.pre_concat(transform),
+                None,
+            );
+            shadow::composite_shadow(pixmap, mask, surface, &shadow);
+        }
+        draw(pixmap, transform, mask);
+    }
+    Ok(())
+}
+
+/// The most tiles a picture fill repeats before it stretches instead, as the
+/// web backend does.
+const MAX_PICTURE_FILL_TILES: f32 = 4096.0;
+
+fn has_picture_fill(shape: &ShapePrimitive) -> bool {
+    shape
         .attrs
         .fill_paint
         .as_ref()
         .and_then(|paint| paint.get("kind"))
         .and_then(Value::as_str)
         == Some("picture")
+}
+
+/// A picture fill's decoded raster and, for an SVG, the size it tiles at.
+type PictureSource = (Arc<Pixmap>, Option<(f32, f32)>);
+
+fn picture_fill_source<'k>(
+    shape: &'k ShapePrimitive,
+    resources: &RenderResources<'_>,
+    scratch: &mut Scratch<'k>,
+    scope: ImageScope<'k>,
+) -> Option<PictureSource> {
+    if !has_picture_fill(shape) {
+        return None;
+    }
+    let paint = shape.attrs.fill_paint.as_ref()?;
+    let reference = paint
+        .get("pictureSrc")
+        .or_else(|| paint.get("pictureRelId"))
+        .and_then(Value::as_str);
+    let Some(source) = reference.and_then(|rel_id| image_source(rel_id, scope, resources)) else {
+        scratch.images.skip(
+            reference.unwrap_or_default(),
+            PictureFailure::new(PictureReason::Missing),
+        );
+        return None;
+    };
+    let key = scratch.images.cache.key(&source);
+    let pixmap = scratch
+        .images
+        .resolve(reference.unwrap_or_default(), source)?;
+    let intrinsic = scratch.images.cache.intrinsic.get(&key).copied();
+    Some((pixmap, intrinsic))
+}
+
+/// What a picture fill draws: each source placement, the rectangle a stretched
+/// picture stays inside, and its opacity.
+struct PictureFillDraws {
+    draws: Vec<Transform>,
+    frame: Option<FRect>,
+    opacity: f32,
+}
+
+fn fill_number(paint: &Value, object: &str, key: &str) -> f32 {
+    paint
+        .get(object)
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0) as f32
+}
+
+fn picture_fill_draws(
+    shape: &ShapePrimitive,
+    source: &Pixmap,
+    intrinsic: Option<(f32, f32)>,
+) -> Result<PictureFillDraws, String> {
+    let paint = shape
+        .attrs
+        .fill_paint
+        .as_ref()
+        .ok_or_else(|| "picture fill without a paint".to_string())?;
+    let box_x = number_f32(&shape.x)?;
+    let box_y = number_f32(&shape.y)?;
+    let box_w = number_f32(&shape.w)?;
+    let box_h = number_f32(&shape.h)?;
+    let picture_opacity = paint
+        .get("pictureOpacity")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .map_or(1.0, |value| value.clamp(0.0, 1.0) as f32);
+    let tiled = paint.get("pictureFillMode").and_then(Value::as_str) == Some("tile");
+    if tiled
+        && let Some(draws) = picture_tiles(paint, source, intrinsic, box_x, box_y, box_w, box_h)
     {
-        return Ok(());
+        return Ok(PictureFillDraws {
+            draws,
+            frame: None,
+            opacity: picture_opacity,
+        });
     }
-    if !shape.attrs.effects.is_empty() {
-        return Err("unsupported shape field: effects".to_string());
+    let stretch = |key: &str| fill_number(paint, "pictureStretchRect", key).clamp(-10.0, 10.0);
+    let (left, top) = (stretch("left"), stretch("top"));
+    let (right, bottom) = (stretch("right"), stretch("bottom"));
+    let frame = FRect {
+        x: box_x + left * box_w,
+        y: box_y + top * box_h,
+        w: box_w * (1.0 - left - right),
+        h: box_h * (1.0 - top - bottom),
+    };
+    let crop = |key: &str| fill_number(paint, "pictureSrcRect", key);
+    let (source_width, source_height) = (source.width() as f32, source.height() as f32);
+    let requested_w = source_width * (1.0 - crop("left") - crop("right"));
+    let requested_h = source_height * (1.0 - crop("top") - crop("bottom"));
+    if frame.w <= 0.0 || frame.h <= 0.0 || requested_w <= 0.0 || requested_h <= 0.0 {
+        return Ok(PictureFillDraws {
+            draws: Vec::new(),
+            frame: None,
+            opacity: picture_opacity,
+        });
     }
-    budget.charge_path(shape.geometry_path.len() as u64)?;
-    let path = build_shape_path(&shape.geometry_path)?;
-    let visual = shape_transform(shape)?;
-    let transform = transform.pre_concat(visual);
-    if let Some(paint) = shape_fill(shape, opacity)? {
-        pixmap.fill_path(&path, &paint, FillRule::Winding, transform, mask);
+    let (scale_x, scale_y) = (frame.w / requested_w, frame.h / requested_h);
+    Ok(PictureFillDraws {
+        draws: vec![Transform::from_row(
+            scale_x,
+            0.0,
+            0.0,
+            scale_y,
+            frame.x - crop("left") * source_width * scale_x,
+            frame.y - crop("top") * source_height * scale_y,
+        )],
+        frame: Some(frame),
+        opacity: picture_opacity,
+    })
+}
+
+/// The tile grid `a:tile` lays over a shape box, or `None` when it is empty or
+/// past the cap, which stretches instead.
+fn picture_tiles(
+    paint: &Value,
+    source: &Pixmap,
+    intrinsic: Option<(f32, f32)>,
+    box_x: f32,
+    box_y: f32,
+    box_w: f32,
+    box_h: f32,
+) -> Option<Vec<Transform>> {
+    let (source_width, source_height) =
+        intrinsic.unwrap_or((source.width() as f32, source.height() as f32));
+    if box_w <= 0.0 || box_h <= 0.0 {
+        return None;
     }
-    if let Some(stroked) = shape_stroke(shape, opacity)? {
-        if let Some(dash) = &stroked.dash {
-            budget.charge_path(dash_segments(path_length(&path), dash))?;
+    let tile = |key: &str, default: f32| {
+        paint
+            .get("pictureTile")
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .map_or(default, |value| value as f32)
+    };
+    let tile_w = (source_width * tile("scaleX", 1.0).clamp(0.01, 100.0)).max(1.0);
+    let tile_h = (source_height * tile("scaleY", 1.0).clamp(0.01, 100.0)).max(1.0);
+    if ((box_w / tile_w).ceil() + 1.0) * ((box_h / tile_h).ceil() + 1.0) > MAX_PICTURE_FILL_TILES {
+        return None;
+    }
+    let text = |key: &str| {
+        paint
+            .get("pictureTile")
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+    };
+    let alignment = text("alignment").unwrap_or("tl");
+    let mut anchor_x = match alignment {
+        "t" | "ctr" | "b" => box_x + (box_w - tile_w) / 2.0,
+        "tr" | "r" | "br" => box_x + box_w - tile_w,
+        _ => box_x,
+    };
+    let mut anchor_y = match alignment {
+        "l" | "ctr" | "r" => box_y + (box_h - tile_h) / 2.0,
+        "bl" | "b" | "br" => box_y + box_h - tile_h,
+        _ => box_y,
+    };
+    anchor_x += tile("offsetX", 0.0).clamp(-100_000.0, 100_000.0);
+    anchor_y += tile("offsetY", 0.0).clamp(-100_000.0, 100_000.0);
+    let start_col = -((anchor_x - box_x) / tile_w).ceil() as i64;
+    let start_row = -((anchor_y - box_y) / tile_h).ceil() as i64;
+    let flip = text("flip").unwrap_or("none");
+    let flip_x = matches!(flip, "x" | "xy");
+    let flip_y = matches!(flip, "y" | "xy");
+    let (scale_x, scale_y) = (
+        tile_w / source.width() as f32,
+        tile_h / source.height() as f32,
+    );
+    let mut draws = Vec::new();
+    let mut row = start_row;
+    loop {
+        let y = anchor_y + row as f32 * tile_h;
+        if y >= box_y + box_h {
+            break;
         }
-        pixmap.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
+        let mut col = start_col;
+        loop {
+            let x = anchor_x + col as f32 * tile_w;
+            if x >= box_x + box_w {
+                break;
+            }
+            let mirror_x = flip_x && col.rem_euclid(2) == 1;
+            let mirror_y = flip_y && row.rem_euclid(2) == 1;
+            draws.push(Transform::from_row(
+                if mirror_x { -scale_x } else { scale_x },
+                0.0,
+                0.0,
+                if mirror_y { -scale_y } else { scale_y },
+                if mirror_x { x + tile_w } else { x },
+                if mirror_y { y + tile_h } else { y },
+            ));
+            col += 1;
+        }
+        row += 1;
     }
-    Ok(())
+    Some(draws)
+}
+
+/// Draws a picture fill clipped to its shape, and to the outer mask if any.
+fn paint_picture_fill(
+    target: &mut Pixmap,
+    path: &Path,
+    source: &Pixmap,
+    fill: &PictureFillDraws,
+    opacity: f32,
+    transform: Transform,
+    outer: Option<&Mask>,
+) {
+    let Some(mut clip) = Mask::new(target.width(), target.height()) else {
+        return;
+    };
+    clip.fill_path(path, FillRule::Winding, true, transform);
+    if let Some(frame) = fill.frame
+        && let Some(rect) = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
+    {
+        clip.intersect_path(
+            &PathBuilder::from_rect(rect),
+            FillRule::Winding,
+            true,
+            transform,
+        );
+    }
+    if let Some(outer) = outer {
+        for (value, limit) in clip.data_mut().iter_mut().zip(outer.data()) {
+            *value = ((u16::from(*value) * u16::from(*limit)) / 255) as u8;
+        }
+    }
+    let paint = PixmapPaint {
+        opacity: opacity * fill.opacity,
+        quality: FilterQuality::Bicubic,
+        ..PixmapPaint::default()
+    };
+    for placement in &fill.draws {
+        target.draw_pixmap(
+            0,
+            0,
+            source.as_ref(),
+            &paint,
+            transform.pre_concat(*placement),
+            Some(&clip),
+        );
+    }
+}
+
+/// The largest factor `transform` stretches a length by along either axis.
+fn max_axis_scale(transform: Transform) -> f32 {
+    let x = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+    let y = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+    x.max(y)
+}
+
+/// The shadow the web backend draws for a shape, the first shadow, outer shadow
+/// or glow, and how many of the shape's effects it leaves undrawn.
+fn shape_shadow(effects: &[Value]) -> Result<(Option<shadow::Shadow>, usize), String> {
+    let drawn = effects.iter().position(|effect| {
+        matches!(
+            effect.get("kind").and_then(Value::as_str),
+            Some("shadow" | "outerShadow" | "glow")
+        )
+    });
+    let Some(index) = drawn else {
+        return Ok((None, effects.len()));
+    };
+    let effect = &effects[index];
+    let number = |key: &str| {
+        effect
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+    };
+    let color = color_with_opacity(
+        effect
+            .get("color")
+            .and_then(Value::as_str)
+            .unwrap_or("#000000"),
+        1.0,
+    )?;
+    let blur = number("blurRadius")
+        .or_else(|| number("size"))
+        .unwrap_or(0.0)
+        .max(0.0) as f32;
+    let (dx, dy) = if effect.get("kind").and_then(Value::as_str) == Some("glow") {
+        (0.0, 0.0)
+    } else {
+        let radians = number("direction").unwrap_or(0.0).to_radians();
+        let distance = number("distance").unwrap_or(0.0);
+        (
+            (radians.cos() * distance) as f32,
+            (radians.sin() * distance) as f32,
+        )
+    };
+    Ok((
+        Some(shadow::Shadow::new(color, blur, dx, dy)),
+        effects.len() - 1,
+    ))
 }
 
 fn shape_fill(shape: &ShapePrimitive, opacity: f32) -> Result<Option<Paint<'static>>, String> {
@@ -810,7 +1353,11 @@ fn shape_fill(shape: &ShapePrimitive, opacity: f32) -> Result<Option<Paint<'stat
         }
         "gradient" => gradient_paint(shape, object, opacity).map(Some),
         "pattern" => Err("unsupported shape fillPaint kind: pattern".to_string()),
-        "picture" => Err("unsupported shape fillPaint kind: picture".to_string()),
+        "picture" => shape
+            .fill
+            .as_deref()
+            .map(|color| solid_paint(color, opacity))
+            .transpose(),
         other => Err(format!("unsupported shape fillPaint kind: {other}")),
     }
 }
@@ -883,7 +1430,7 @@ fn gradient_paint(
                 Transform::identity(),
             )
         }
-        "radial" => {
+        "radial" | "rectangular" | "path" => {
             let center = Point::from_xy(x + w / 2.0, y + h / 2.0);
             RadialGradient::new(
                 center,
@@ -1146,6 +1693,59 @@ fn build_shape_path(commands: &[ShapePathCommand]) -> Result<Path, String> {
         .ok_or_else(|| "shape path has no drawable commands".to_string())
 }
 
+const PLACEHOLDER_FILL: [u8; 4] = [242, 242, 242, 255];
+const PLACEHOLDER_BORDER: [u8; 4] = [191, 191, 191, 255];
+
+/// Where a placeholder's border goes: a ring filled exactly inside a frame, or
+/// a 1-unit stroke along an outline.
+enum PlaceholderBorder<'p> {
+    Ring(&'p Path),
+    Stroke(&'p Path),
+}
+
+/// What a picture this backend cannot draw paints: a light box with a border, no text.
+fn paint_picture_placeholder(
+    pixmap: &mut Pixmap,
+    path: &Path,
+    border: Option<PlaceholderBorder<'_>>,
+    transform: Transform,
+    mask: Option<&Mask>,
+    opacity: f32,
+) {
+    let mut paint = Paint::default();
+    let [r, g, b, a] = PLACEHOLDER_FILL;
+    let mut fill = Color::from_rgba8(r, g, b, a);
+    fill.apply_opacity(opacity.clamp(0.0, 1.0));
+    paint.set_color(fill);
+    paint.anti_alias = true;
+    pixmap.fill_path(path, &paint, FillRule::Winding, transform, mask);
+    let [r, g, b, a] = PLACEHOLDER_BORDER;
+    let mut color = Color::from_rgba8(r, g, b, a);
+    color.apply_opacity(opacity.clamp(0.0, 1.0));
+    paint.set_color(color);
+    if let Some(PlaceholderBorder::Ring(ring)) = border {
+        pixmap.fill_path(ring, &paint, FillRule::EvenOdd, transform, mask);
+    } else if let Some(PlaceholderBorder::Stroke(outline)) = border {
+        let stroke = Stroke {
+            width: 1.0,
+            ..Stroke::default()
+        };
+        pixmap.stroke_path(outline, &paint, &stroke, transform, mask);
+    } else {
+        pixmap.fill_path(path, &paint, FillRule::Winding, transform, mask);
+    }
+}
+
+/// What a picture is reported by: its source, or for one with none, its
+/// relationship id.
+fn picture_name(image: &ImagePrimitive) -> &str {
+    if image.rel_id.is_empty() {
+        image.relationship_id.as_deref().unwrap_or_default()
+    } else {
+        &image.rel_id
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_image<'k>(
     pixmap: &mut Pixmap,
@@ -1158,25 +1758,95 @@ fn paint_image<'k>(
     scope: ImageScope<'k>,
 ) -> Result<(), String> {
     if image.filter.is_some() {
-        return Err("unsupported image field: filter".to_string());
+        skip_effect(&mut scratch.skipped, "image.filter");
     }
     if !image.attrs.effects.is_empty() {
-        return Err("unsupported image field: effects".to_string());
+        skip_effect(&mut scratch.skipped, "image.effects");
     }
-    let Some(source_bytes) = image_source(&image.rel_id, scope, resources) else {
-        scratch.images.skipped += 1;
-        return Ok(());
+    let decoded = match image_source(&image.rel_id, scope, resources) {
+        Some(source) => scratch.images.resolve(&image.rel_id, source),
+        None => {
+            scratch.images.skip(
+                picture_name(image),
+                PictureFailure::new(PictureReason::Missing),
+            );
+            None
+        }
     };
-    let Some(decoded) = scratch.images.resolve(source_bytes) else {
-        return Ok(());
-    };
-    let source: &Pixmap = &decoded;
     let frame = image_frame(image)?;
     if frame.w == 0.0 || frame.h == 0.0 {
         return Ok(());
     }
     let visual = image_transform(image, frame)?;
     let image_transform = transform.pre_concat(visual);
+    let Some(decoded) = decoded else {
+        let rect = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
+            .ok_or_else(|| "invalid image placeholder rectangle".to_string())?;
+        let ellipse = is_ellipse_image(image);
+        let path = if ellipse {
+            PathBuilder::from_oval(rect)
+                .ok_or_else(|| "invalid image placeholder ellipse".to_string())?
+        } else {
+            PathBuilder::from_rect(rect)
+        };
+        let border = if ellipse {
+            Rect::from_xywh(frame.x + 0.5, frame.y + 0.5, frame.w - 1.0, frame.h - 1.0)
+                .and_then(PathBuilder::from_oval)
+        } else {
+            Rect::from_xywh(frame.x + 1.0, frame.y + 1.0, frame.w - 2.0, frame.h - 2.0).and_then(
+                |inner| {
+                    let mut ring = PathBuilder::new();
+                    ring.push_rect(rect);
+                    ring.push_rect(inner);
+                    ring.finish()
+                },
+            )
+        };
+        let frame_mask = if ellipse {
+            scratch.budget.charge_masks(
+                scratch
+                    .masks
+                    .bytes
+                    .saturating_add(mask_bytes(pixmap.width(), pixmap.height())),
+            )?;
+            Some(ellipse_mask(pixmap, frame, image_transform, mask)?)
+        } else {
+            None
+        };
+        paint_picture_placeholder(
+            pixmap,
+            &path,
+            border.as_ref().map(|border| {
+                if ellipse {
+                    PlaceholderBorder::Stroke(border)
+                } else {
+                    PlaceholderBorder::Ring(border)
+                }
+            }),
+            image_transform,
+            frame_mask.as_ref().or(mask),
+            opacity,
+        );
+        paint_image_border(
+            pixmap,
+            image,
+            frame,
+            image_transform,
+            mask,
+            opacity,
+            &mut scratch.budget,
+        )?;
+        return paint_image_revision(
+            pixmap,
+            image,
+            frame,
+            image_transform,
+            mask,
+            opacity,
+            &mut scratch.budget,
+        );
+    };
+    let source: &Pixmap = &decoded;
     let crop = image.crop.as_ref();
     let source_width = source.width() as f32;
     let source_height = source.height() as f32;
@@ -1211,19 +1881,28 @@ fn paint_image<'k>(
         frame.x - requested_x * frame.w / requested_w,
         frame.y - requested_y * frame.h / requested_h,
     );
-    let mut frame_mask = crop
-        .is_some()
-        .then(|| {
-            crop_mask(
-                pixmap,
-                frame,
-                image_transform,
-                mask,
-                &mut scratch.masks,
-                &mut scratch.budget,
-            )
-        })
-        .transpose()?;
+    let mut frame_mask = if is_ellipse_image(image) {
+        scratch.budget.charge_masks(
+            scratch
+                .masks
+                .bytes
+                .saturating_add(mask_bytes(pixmap.width(), pixmap.height())),
+        )?;
+        Some(Rc::new(ellipse_mask(pixmap, frame, image_transform, mask)?))
+    } else {
+        crop.is_some()
+            .then(|| {
+                crop_mask(
+                    pixmap,
+                    frame,
+                    image_transform,
+                    mask,
+                    &mut scratch.masks,
+                    &mut scratch.budget,
+                )
+            })
+            .transpose()?
+    };
     let paint = PixmapPaint {
         opacity,
         quality: FilterQuality::Bicubic,
@@ -1307,12 +1986,13 @@ struct ImageCharge {
     bytes_pre: u64,
     pixels: u64,
     bytes_post: u64,
+    work: u64,
 }
 
 /// What a decode learned about a source.
 enum Decode {
     Decoded(Pixmap),
-    Refused,
+    Refused(PictureReason),
     OverBudget,
 }
 
@@ -1330,6 +2010,7 @@ fn decoder_limits(declared_width: u32, declared_height: u32, max_alloc: u64) -> 
 /// A decoded image and what resolving it cost the page that decoded it.
 struct CachedImage {
     outcome: Option<Arc<Pixmap>>,
+    refusal: Option<PictureFailure>,
     charge: ImageCharge,
     weight: u64,
     stamp: u64,
@@ -1343,6 +2024,8 @@ pub struct ImageCache {
     clock: u64,
     bytes: u64,
     hasher: std::hash::RandomState,
+    fontdb: Option<(u64, usize, Arc<svg::usvg::fontdb::Database>)>,
+    intrinsic: HashMap<u64, (f32, f32)>,
 }
 
 impl Default for ImageCache {
@@ -1359,7 +2042,22 @@ impl ImageCache {
             clock: 0,
             bytes: 0,
             hasher: std::hash::RandomState::new(),
+            fontdb: None,
+            intrinsic: HashMap::new(),
         }
+    }
+
+    /// The faces a metafile's text renders with, rebuilt when the store grows.
+    fn fontdb_for(&mut self, fonts: &FontStore) -> Arc<svg::usvg::fontdb::Database> {
+        let generation = (fonts.id(), fonts.font_count());
+        if let Some((id, count, fontdb)) = &self.fontdb
+            && (*id, *count) == generation
+        {
+            return Arc::clone(fontdb);
+        }
+        let fontdb = svg::metafile_fontdb(fonts);
+        self.fontdb = Some((generation.0, generation.1, Arc::clone(&fontdb)));
+        fontdb
     }
 
     /// Content digest of one source's bytes, namespaced by source kind.
@@ -1379,17 +2077,25 @@ impl ImageCache {
     }
 
     /// A cached outcome, renewed as the cache's most recently resolved.
-    fn get(&mut self, key: u64) -> Option<(Option<Arc<Pixmap>>, ImageCharge)> {
+    fn get(&mut self, key: u64) -> Option<(ImageOutcome, ImageCharge)> {
         let entry = self.entries.get_mut(&key)?;
         self.recency.remove(&(entry.stamp, key));
         self.clock += 1;
         entry.stamp = self.clock;
         self.recency.insert((self.clock, key), ());
-        Some((entry.outcome.clone(), entry.charge))
+        let outcome = match &entry.outcome {
+            Some(pixmap) => Ok(Arc::clone(pixmap)),
+            None => Err(entry.refusal?),
+        };
+        Some((outcome, entry.charge))
     }
 
     /// Caches one decode, evicting least-recently-resolved entries until under budget.
-    fn insert(&mut self, key: u64, outcome: Option<Arc<Pixmap>>, charge: ImageCharge) {
+    fn insert(&mut self, key: u64, result: ImageOutcome, charge: ImageCharge) {
+        let (outcome, refusal) = match result {
+            Ok(pixmap) => (Some(pixmap), None),
+            Err(refusal) => (None, Some(refusal)),
+        };
         let weight = outcome
             .as_ref()
             .map_or(0, |pixmap| pixmap.data().len() as u64)
@@ -1403,6 +2109,7 @@ impl ImageCache {
             key,
             CachedImage {
                 outcome,
+                refusal,
                 charge,
                 weight,
                 stamp: self.clock,
@@ -1415,6 +2122,7 @@ impl ImageCache {
                 break;
             };
             self.recency.remove(&(stamp, evicted));
+            self.intrinsic.remove(&evicted);
             if let Some(entry) = self.entries.remove(&evicted) {
                 self.bytes -= entry.weight;
             }
@@ -1426,54 +2134,145 @@ impl ImageCache {
 /// source pays this page's decode budget, later references resolve free.
 struct PageImages<'c> {
     cache: &'c mut ImageCache,
-    resolved: HashMap<u64, Option<Arc<Pixmap>>>,
+    fonts: Option<&'c FontStore>,
+    resolved: HashMap<u64, ImageOutcome>,
     pixels: u64,
     bytes: u64,
+    work: u64,
+    replay: ooxml_metafile::ReplayBudget,
+    intrinsic: Option<(f32, f32)>,
     skipped: usize,
+    pictures: Vec<SkippedPicture>,
+    refusal: Option<PictureFailure>,
+    at: PrimitiveAt,
 }
 
 impl<'c> PageImages<'c> {
     fn new(cache: &'c mut ImageCache) -> Self {
         Self {
             cache,
+            fonts: None,
             resolved: HashMap::new(),
             pixels: 0,
             bytes: 0,
+            work: 0,
+            replay: ooxml_metafile::ReplayBudget::default(),
+            intrinsic: None,
             skipped: 0,
+            pictures: Vec::new(),
+            refusal: None,
+            at: PrimitiveAt {
+                region: Region::Body,
+                index: 0,
+            },
         }
     }
 
-    fn resolve(&mut self, source: ImageSource<'_, '_>) -> Option<Arc<Pixmap>> {
-        let key = self.cache.key(&source);
-        if let Some(outcome) = self.resolved.get(&key) {
-            self.skipped += usize::from(outcome.is_none());
-            return outcome.clone();
-        }
-        let outcome = match self.cache.get(key) {
-            Some((cached, charge)) if self.charge(charge) => cached,
-            Some(_) => None,
-            None => self.materialize(key, source),
+    fn skip(&mut self, id: &str, failure: PictureFailure) {
+        let id = if id.starts_with("data:") {
+            id.split_once(',').map_or(id, |(prefix, _)| prefix)
+        } else {
+            id
         };
-        self.resolved.insert(key, outcome.clone());
-        self.skipped += usize::from(outcome.is_none());
-        outcome
+        self.pictures.push(SkippedPicture {
+            id: id.to_owned(),
+            reason: failure.reason,
+            limit: failure.limit,
+            actual: failure.actual,
+            unit: failure.unit,
+            at: self.at,
+        });
+        self.skipped += 1;
     }
 
-    /// Charges this page what the cached decode spent; `false` means this
-    /// page's budget is spent and nothing is written back.
+    fn resolve(&mut self, id: &str, source: ImageSource<'_, '_>) -> Option<Arc<Pixmap>> {
+        let key = self.cache.key(&source);
+        let outcome = if let Some(outcome) = self.resolved.get(&key) {
+            outcome.clone()
+        } else {
+            let outcome = match self.cache.get(key) {
+                Some((Err(failure), charge)) => {
+                    if !self.charge(charge) {
+                        self.refusal = None;
+                    }
+                    Err(failure)
+                }
+                Some((cached, charge)) if self.charge(charge) => cached,
+                Some(_) => Err(self
+                    .refusal
+                    .take()
+                    .unwrap_or_else(|| PictureFailure::new(PictureReason::Budget))),
+                None => self.materialize(key, source),
+            };
+            self.resolved.insert(key, outcome.clone());
+            outcome
+        };
+        match outcome {
+            Ok(pixmap) => Some(pixmap),
+            Err(failure) => {
+                self.skip(id, failure);
+                None
+            }
+        }
+    }
+
+    fn limit(
+        &mut self,
+        reason: PictureReason,
+        limit: u64,
+        actual: u64,
+        unit: &'static str,
+    ) -> Decode {
+        self.refusal = Some(PictureFailure::limited(reason, limit, actual, unit));
+        if reason == PictureReason::Budget {
+            Decode::OverBudget
+        } else {
+            Decode::Refused(reason)
+        }
+    }
+
+    /// Charges this page what the cached decode spent.
     fn charge(&mut self, charge: ImageCharge) -> bool {
         if self.bytes + charge.bytes_pre > MAX_PAGE_IMAGE_BYTES {
+            self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_BYTES,
+                self.bytes + charge.bytes_pre,
+                "bytes",
+            );
             return false;
         }
         self.bytes += charge.bytes_pre;
         if self.pixels + charge.pixels > MAX_PAGE_IMAGE_PIXELS {
+            self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_PIXELS,
+                self.pixels + charge.pixels,
+                "pixels",
+            );
             return false;
         }
         if self.bytes + charge.bytes_post > MAX_PAGE_IMAGE_BYTES {
+            self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_BYTES,
+                self.bytes + charge.bytes_post,
+                "bytes",
+            );
+            return false;
+        }
+        if self.work + charge.work > MAX_PAGE_SVG_WORK {
+            self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_SVG_WORK,
+                self.work + charge.work,
+                "work",
+            );
             return false;
         }
         self.pixels += charge.pixels;
         self.bytes += charge.bytes_post;
+        self.work += charge.work;
         true
     }
 
@@ -1482,37 +2281,235 @@ impl<'c> PageImages<'c> {
     /// expands it into a buffer. Only `Decoded` and `Refused` are cached: an
     /// over-budget refusal is this page's, and the next page spends its own
     /// budget to retry.
-    fn materialize(&mut self, key: u64, source: ImageSource<'_, '_>) -> Option<Arc<Pixmap>> {
+    fn materialize(&mut self, key: u64, source: ImageSource<'_, '_>) -> ImageOutcome {
+        self.refusal = None;
         let mut charge = ImageCharge::default();
         let decoded = match source {
             ImageSource::Registered(bytes) => self.decode(bytes, &mut charge),
             ImageSource::Data(payload) => {
-                let declared = payload.len() as u64 / 4 * 3;
+                let padding = payload
+                    .as_bytes()
+                    .iter()
+                    .rev()
+                    .take(2)
+                    .take_while(|byte| **byte == b'=')
+                    .count() as u64;
+                let declared = (payload.len() as u64 / 4 * 3).saturating_sub(padding);
                 if declared > MAX_DATA_URL_BYTES {
-                    Decode::Refused
+                    self.limit(
+                        PictureReason::TooLarge,
+                        MAX_DATA_URL_BYTES,
+                        declared,
+                        "bytes",
+                    )
                 } else if self.bytes + declared > MAX_PAGE_IMAGE_BYTES {
-                    Decode::OverBudget
+                    self.limit(
+                        PictureReason::Budget,
+                        MAX_PAGE_IMAGE_BYTES,
+                        self.bytes + declared,
+                        "bytes",
+                    )
                 } else {
                     self.bytes += declared;
                     charge.bytes_pre = declared;
                     match base64::engine::general_purpose::STANDARD.decode(payload) {
                         Ok(bytes) => self.decode(&bytes, &mut charge),
-                        Err(_) => Decode::Refused,
+                        Err(_) => Decode::Refused(PictureReason::DecodeFailed),
                     }
                 }
             }
         };
+        if let Some(intrinsic) = self.intrinsic.take()
+            && matches!(decoded, Decode::Decoded(_))
+        {
+            self.cache.intrinsic.insert(key, intrinsic);
+        }
         match decoded {
             Decode::Decoded(pixmap) => {
                 let pixmap = Arc::new(pixmap);
-                self.cache.insert(key, Some(pixmap.clone()), charge);
-                Some(pixmap)
+                self.cache.insert(key, Ok(pixmap.clone()), charge);
+                Ok(pixmap)
             }
-            Decode::Refused => {
-                self.cache.insert(key, None, charge);
+            Decode::Refused(reason) => {
+                let failure = self
+                    .refusal
+                    .take()
+                    .unwrap_or_else(|| PictureFailure::new(reason));
+                self.cache.insert(key, Err(failure), charge);
+                Err(failure)
+            }
+            Decode::OverBudget => Err(self
+                .refusal
+                .take()
+                .unwrap_or_else(|| PictureFailure::new(PictureReason::Budget))),
+        }
+    }
+
+    /// An SVG, or a metafile played into one, rasterized within what the
+    /// page's budget has left. A refusal the budget caused is retried by the
+    /// next page; one the document caused is cached.
+    fn decode_vector(&mut self, bytes: &[u8], charge: &mut ImageCharge) -> Decode {
+        let left = MAX_PAGE_IMAGE_PIXELS
+            .saturating_sub(self.pixels)
+            .min(MAX_PAGE_IMAGE_BYTES.saturating_sub(self.bytes) / 8)
+            .min(MAX_IMAGE_PIXELS);
+        let work_left = MAX_PAGE_SVG_WORK.saturating_sub(self.work);
+        let metafile = ooxml_metafile::is_metafile(bytes);
+        let parsed = if metafile {
+            let Ok(markup) = ooxml_metafile::to_svg_with_budget(bytes, &mut self.replay) else {
+                return Decode::Refused(PictureReason::Metafile);
+            };
+            let fontdb = if svg::has_text_element(markup.markup.as_bytes()) {
+                self.fonts.map(|fonts| self.cache.fontdb_for(fonts))
+            } else {
                 None
+            };
+            svg::parse_metafile_within(markup.markup.as_bytes(), left, work_left, fontdb)
+        } else {
+            svg::parse_within_work(bytes, left, work_left)
+        };
+        let image = match parsed {
+            Ok(image) => image,
+            Err(svg::SvgRefusal::RenderTooCostly | svg::SvgRefusal::RasterTooLarge)
+                if left < MAX_IMAGE_PIXELS || work_left < svg::MAX_SVG_RENDER_WORK =>
+            {
+                return Decode::OverBudget;
             }
-            Decode::OverBudget => None,
+            Err(_) if metafile => return Decode::Refused(PictureReason::Metafile),
+            Err(svg::SvgRefusal::DocumentTooLarge) if bytes.len() > svg::MAX_SVG_BYTES => {
+                return self.limit(
+                    PictureReason::TooLarge,
+                    svg::MAX_SVG_BYTES as u64,
+                    bytes.len() as u64,
+                    "bytes",
+                );
+            }
+            Err(
+                svg::SvgRefusal::RasterTooLarge
+                | svg::SvgRefusal::RenderTooCostly
+                | svg::SvgRefusal::DocumentTooLarge
+                | svg::SvgRefusal::ExpansionTooLarge
+                | svg::SvgRefusal::TooDeeplyNested
+                | svg::SvgRefusal::TooManyLayers,
+            ) => return Decode::Refused(PictureReason::TooLarge),
+            Err(
+                svg::SvgRefusal::NotSvg | svg::SvgRefusal::Unparsable | svg::SvgRefusal::Panicked,
+            ) => return Decode::Refused(PictureReason::DecodeFailed),
+            Err(_) => return Decode::Refused(PictureReason::Unsupported),
+        };
+        let pixels = image.pixels();
+        let cost = pixels.saturating_mul(8);
+        if pixels > MAX_IMAGE_PIXELS {
+            return self.limit(PictureReason::TooLarge, MAX_IMAGE_PIXELS, pixels, "pixels");
+        }
+        if cost > MAX_IMAGE_BYTES {
+            return self.limit(PictureReason::TooLarge, MAX_IMAGE_BYTES, cost, "bytes");
+        }
+        if self.pixels + pixels > MAX_PAGE_IMAGE_PIXELS {
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_PIXELS,
+                self.pixels + pixels,
+                "pixels",
+            );
+        }
+        if self.bytes + cost > MAX_PAGE_IMAGE_BYTES {
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_BYTES,
+                self.bytes + cost,
+                "bytes",
+            );
+        }
+        if self.work + image.work() > MAX_PAGE_SVG_WORK {
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_SVG_WORK,
+                self.work + image.work(),
+                "work",
+            );
+        }
+        self.pixels += pixels;
+        self.bytes += cost;
+        self.work += image.work();
+        charge.pixels = pixels;
+        charge.bytes_post = cost;
+        charge.work = image.work();
+        IMAGE_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let Ok((mut data, size)) = image.render() else {
+            return Decode::Refused(if metafile {
+                PictureReason::Metafile
+            } else {
+                PictureReason::DecodeFailed
+            });
+        };
+        ooxml_raster::premultiply_rgba(&mut data);
+        self.intrinsic = Some(image.intrinsic());
+        match Pixmap::from_vec(data, size) {
+            Some(pixmap) => Decode::Decoded(pixmap),
+            None => Decode::Refused(PictureReason::DecodeFailed),
+        }
+    }
+
+    /// A JPEG or PNG past [`MAX_IMAGE_PIXELS`], decoded at a reduced size. The
+    /// page is charged the source pixels the decode reads and the bytes it may
+    /// hold, before it allocates.
+    fn decode_reduced(
+        &mut self,
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        charge: &mut ImageCharge,
+    ) -> Decode {
+        let declared = u64::from(width) * u64::from(height);
+        if ooxml_raster::downscale::reduced_size(width, height, MAX_IMAGE_PIXELS).is_none()
+            || !(bytes.starts_with(&[0xff, 0xd8]) || bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+        {
+            return self.limit(
+                PictureReason::TooLarge,
+                MAX_IMAGE_PIXELS,
+                declared,
+                "pixels",
+            );
+        }
+        let Some((pixels, cost)) =
+            ooxml_raster::downscale::reduced_cost(bytes, width, height, MAX_IMAGE_PIXELS)
+        else {
+            return Decode::Refused(PictureReason::DecodeFailed);
+        };
+        if cost > MAX_IMAGE_BYTES {
+            return self.limit(PictureReason::TooLarge, MAX_IMAGE_BYTES, cost, "bytes");
+        }
+        if self.pixels + pixels > MAX_PAGE_IMAGE_PIXELS {
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_PIXELS,
+                self.pixels + pixels,
+                "pixels",
+            );
+        }
+        if self.bytes + cost > MAX_PAGE_IMAGE_BYTES {
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_BYTES,
+                self.bytes + cost,
+                "bytes",
+            );
+        }
+        self.pixels += pixels;
+        self.bytes += cost;
+        charge.pixels = pixels;
+        charge.bytes_post = cost;
+        IMAGE_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let Some((mut data, width, height)) =
+            ooxml_raster::downscale::decode_reduced(bytes, MAX_IMAGE_PIXELS)
+        else {
+            return Decode::Refused(PictureReason::DecodeFailed);
+        };
+        ooxml_raster::premultiply_rgba(&mut data);
+        match IntSize::from_wh(width, height).and_then(|size| Pixmap::from_vec(data, size)) {
+            Some(pixmap) => Decode::Decoded(pixmap),
+            None => Decode::Refused(PictureReason::DecodeFailed),
         }
     }
 
@@ -1524,29 +2521,72 @@ impl<'c> PageImages<'c> {
     fn decode(&mut self, bytes: &[u8], charge: &mut ImageCharge) -> Decode {
         use image::ImageDecoder as _;
 
-        let Some(mut decoder) = image::ImageReader::new(Cursor::new(bytes))
+        if bytes.len() as u64 > MAX_IMAGE_BYTES {
+            return self.limit(
+                PictureReason::TooLarge,
+                MAX_IMAGE_BYTES,
+                bytes.len() as u64,
+                "bytes",
+            );
+        }
+        if ooxml_metafile::is_placeholder_svg(bytes) {
+            return Decode::Refused(PictureReason::Metafile);
+        }
+        if ooxml_metafile::is_metafile(bytes) || svg::looks_like_svg(bytes) {
+            return self.decode_vector(bytes, charge);
+        }
+
+        let bytes = ooxml_raster::png_with_end(bytes);
+        let Some(reader) = image::ImageReader::new(Cursor::new(bytes.as_ref()))
             .with_guessed_format()
             .ok()
-            .and_then(|reader| reader.into_decoder().ok())
         else {
-            return Decode::Refused;
+            return Decode::Refused(PictureReason::DecodeFailed);
+        };
+        if reader.format().is_none() {
+            return Decode::Refused(PictureReason::Unsupported);
+        }
+        if reader.format() == Some(image::ImageFormat::Tiff)
+            && ooxml_drawingml::media::tiff_bounded_pixels(&bytes).is_none()
+        {
+            return Decode::Refused(PictureReason::Unsupported);
+        }
+        let mut decoder = match reader.into_decoder() {
+            Ok(decoder) => decoder,
+            Err(image::ImageError::Limits(_)) => {
+                return Decode::Refused(PictureReason::TooLarge);
+            }
+            Err(image::ImageError::Unsupported(_)) => {
+                return Decode::Refused(PictureReason::Unsupported);
+            }
+            Err(_) => return Decode::Refused(PictureReason::DecodeFailed),
         };
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
         if declared > MAX_IMAGE_PIXELS {
-            return Decode::Refused;
+            return self.decode_reduced(&bytes, declared_width, declared_height, charge);
         }
         if self.pixels + declared > MAX_PAGE_IMAGE_PIXELS {
-            return Decode::OverBudget;
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_PIXELS,
+                self.pixels + declared,
+                "pixels",
+            );
         }
         let cost = decoder
             .total_bytes()
             .saturating_add(declared.saturating_mul(4));
         if cost > MAX_IMAGE_BYTES {
-            return Decode::Refused;
+            return self.limit(PictureReason::TooLarge, MAX_IMAGE_BYTES, cost, "bytes");
         }
         if self.bytes + cost > MAX_PAGE_IMAGE_BYTES {
-            return Decode::OverBudget;
+            return self.limit(
+                PictureReason::Budget,
+                MAX_PAGE_IMAGE_BYTES,
+                self.bytes + cost,
+                "bytes",
+            );
         }
         self.pixels += declared;
         self.bytes += cost;
@@ -1556,32 +2596,38 @@ impl<'c> PageImages<'c> {
         let image_left = MAX_IMAGE_BYTES.saturating_sub(cost);
         let page_left = MAX_PAGE_IMAGE_BYTES.saturating_sub(self.bytes);
         let limits = decoder_limits(declared_width, declared_height, image_left.min(page_left));
-        if decoder.set_limits(limits).is_err() {
-            return Decode::Refused;
+        if let Err(error) = decoder.set_limits(limits) {
+            return Decode::Refused(match error {
+                image::ImageError::Limits(_) => PictureReason::TooLarge,
+                _ => PictureReason::DecodeFailed,
+            });
         }
-        let Ok(orientation) = decoder.orientation() else {
-            return Decode::Refused;
+        let orientation = match decoder.orientation() {
+            Ok(orientation) => orientation,
+            Err(image::ImageError::Limits(_)) => {
+                return Decode::Refused(PictureReason::TooLarge);
+            }
+            Err(_) => return Decode::Refused(PictureReason::DecodeFailed),
         };
         let mut decoded = match image::DynamicImage::from_decoder(decoder) {
             Ok(decoded) => decoded,
             Err(image::ImageError::Limits(_)) if page_left < image_left => {
                 return Decode::OverBudget;
             }
-            Err(_) => return Decode::Refused,
+            Err(image::ImageError::Limits(_)) => {
+                return Decode::Refused(PictureReason::TooLarge);
+            }
+            Err(_) => return Decode::Refused(PictureReason::DecodeFailed),
         };
         decoded.apply_orientation(orientation);
         let Some(size) = IntSize::from_wh(decoded.width(), decoded.height()) else {
-            return Decode::Refused;
+            return Decode::Refused(PictureReason::DecodeFailed);
         };
         let mut data = decoded.into_rgba8().into_raw();
-        let (pixels, _) = data.as_chunks_mut::<4>();
-        for pixel in pixels {
-            let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
-        }
+        ooxml_raster::premultiply_rgba(&mut data);
         match Pixmap::from_vec(data, size) {
             Some(pixmap) => Decode::Decoded(pixmap),
-            None => Decode::Refused,
+            None => Decode::Refused(PictureReason::DecodeFailed),
         }
     }
 }
@@ -1692,6 +2738,31 @@ fn transformed_rect_mask(
     Ok(mask)
 }
 
+fn is_ellipse_image(image: &ImagePrimitive) -> bool {
+    image.attrs.image_shape_type.as_deref() == Some("ellipse")
+}
+
+/// The ellipse inscribed in an image's frame, clipped by the outer mask if any.
+fn ellipse_mask(
+    pixmap: &Pixmap,
+    frame: FRect,
+    transform: Transform,
+    outer: Option<&Mask>,
+) -> Result<Mask, String> {
+    let mut mask = Mask::new(pixmap.width(), pixmap.height())
+        .ok_or_else(|| "invalid image ellipse mask size".to_string())?;
+    let oval = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
+        .and_then(PathBuilder::from_oval)
+        .ok_or_else(|| "invalid image ellipse".to_string())?;
+    mask.fill_path(&oval, FillRule::Winding, true, transform);
+    if let Some(outer) = outer {
+        for (value, clip) in mask.data_mut().iter_mut().zip(outer.data()) {
+            *value = ((u16::from(*value) * u16::from(*clip) + 127) / 255) as u8;
+        }
+    }
+    Ok(mask)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_image_border(
     pixmap: &mut Pixmap,
@@ -1728,7 +2799,11 @@ fn paint_image_border(
     };
     let rect = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
         .ok_or_else(|| "invalid image border rectangle".to_string())?;
-    let path = PathBuilder::from_rect(rect);
+    let path = if is_ellipse_image(image) {
+        PathBuilder::from_oval(rect).ok_or_else(|| "invalid image border ellipse".to_string())?
+    } else {
+        PathBuilder::from_rect(rect)
+    };
     let mut paint = Paint::default();
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
@@ -1756,6 +2831,7 @@ fn paint_image_revision(
     let color = match revision.kind {
         RevisionKind::Ins => "rgb(46, 125, 50)",
         RevisionKind::Del => "rgb(198, 40, 40)",
+        RevisionKind::Format => "rgb(106, 27, 154)",
     };
     let rect = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
         .ok_or_else(|| "invalid image revision rectangle".to_string())?;
@@ -2267,6 +3343,7 @@ fn paint_page_border(
     pixmap: &mut Pixmap,
     border: &PageBorderPrimitive,
     budget: &mut PageBudget,
+    transform: Transform,
 ) -> Result<(), String> {
     let x = number_f32(&border.x)?;
     let y = number_f32(&border.y)?;
@@ -2283,6 +3360,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     if let Some(side) = &border.right {
@@ -2296,6 +3374,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     if let Some(side) = &border.bottom {
@@ -2309,6 +3388,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     if let Some(side) = &border.left {
@@ -2322,6 +3402,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     Ok(())
@@ -2332,6 +3413,7 @@ fn paint_page_border_side(
     segment: Segment,
     side: &PageBorderSide,
     budget: &mut PageBudget,
+    transform: Transform,
 ) -> Result<(), String> {
     let style = match side.style.as_str() {
         "solid" => DisplayBorderStyle::Solid,
@@ -2352,7 +3434,7 @@ fn paint_page_border_side(
         style,
         None,
         None,
-        Transform::identity(),
+        transform,
         None,
         1.0,
         budget,
@@ -2400,7 +3482,7 @@ fn validate_visual_attrs(primitive: &Primitive, attrs: &DocAttrs) -> Result<(), 
     if !is_decoration && attrs.style.is_some() {
         return Err("decoration style is attached to a non-decoration primitive".to_string());
     }
-    if !is_text && attrs.leader_glyphs.is_some() {
+    if !is_text && !is_glyph && attrs.leader_glyphs.is_some() {
         return Err("leaderGlyphs are attached to a non-text primitive".to_string());
     }
     if !is_text && !is_glyph && attrs.modern_effects.is_some() {
@@ -2640,22 +3722,22 @@ fn clear(pixmap: &mut Pixmap, rect: IntRect) {
 }
 
 fn clipped_to_target(clip: FRect, width: u32, height: u32) -> Option<FRect> {
-    let left = clip.x.max(0.0);
-    let top = clip.y.max(0.0);
-    let right = (clip.x + clip.w).min(width as f32);
-    let bottom = (clip.y + clip.h).min(height as f32);
-    (left.is_finite()
-        && top.is_finite()
-        && right.is_finite()
-        && bottom.is_finite()
-        && right > left
-        && bottom > top)
-        .then_some(FRect {
-            x: left,
-            y: top,
-            w: right - left,
-            h: bottom - top,
-        })
+    ooxml_raster::clipped_to_target(
+        ooxml_raster::RasterRect {
+            x: clip.x,
+            y: clip.y,
+            w: clip.w,
+            h: clip.h,
+        },
+        width,
+        height,
+    )
+    .map(|clip| FRect {
+        x: clip.x,
+        y: clip.y,
+        w: clip.w,
+        h: clip.h,
+    })
 }
 
 pub(crate) fn primitive_visual_transform(
@@ -2751,6 +3833,17 @@ fn validate_page_surface(width: u32, height: u32) -> Result<(), String> {
     Ok(())
 }
 
+fn scaled_page_dimension(number: &Number, name: &str, scale: f32) -> Result<u32, String> {
+    if scale == 1.0 {
+        return page_dimension(number, name);
+    }
+    let value = number.as_f64().ok_or_else(|| format!("invalid {name}"))? * f64::from(scale);
+    if !value.is_finite() || value <= 0.0 || value.ceil() > f64::from(u32::MAX) {
+        return Err(format!("invalid scaled {name}"));
+    }
+    Ok(value.ceil() as u32)
+}
+
 fn page_dimension(number: &Number, name: &str) -> Result<u32, String> {
     let value = number_f32(number)?;
     if value <= 0.0 || value.ceil() > u32::MAX as f32 {
@@ -2766,84 +3859,39 @@ fn solid_paint(color: &str, opacity: f32) -> Result<Paint<'static>, String> {
     Ok(paint)
 }
 
+fn vml_color(value: &str) -> Option<&'static str> {
+    const NAMES: [(&str, &str); 16] = [
+        ("black", "#000000"),
+        ("silver", "#c0c0c0"),
+        ("gray", "#808080"),
+        ("white", "#ffffff"),
+        ("maroon", "#800000"),
+        ("red", "#ff0000"),
+        ("purple", "#800080"),
+        ("fuchsia", "#ff00ff"),
+        ("green", "#008000"),
+        ("lime", "#00ff00"),
+        ("olive", "#808000"),
+        ("yellow", "#ffff00"),
+        ("navy", "#000080"),
+        ("blue", "#0000ff"),
+        ("teal", "#008080"),
+        ("aqua", "#00ffff"),
+    ];
+    NAMES
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(value.trim()))
+        .map(|(_, hex)| *hex)
+}
+
+pub(crate) fn parse_color(value: &str) -> Result<Color, String> {
+    parse_css_color(vml_color(value).unwrap_or(value))
+}
+
 pub(crate) fn color_with_opacity(value: &str, opacity: f32) -> Result<Color, String> {
     let mut color = parse_color(value)?;
     color.apply_opacity(opacity.clamp(0.0, 1.0));
     Ok(color)
-}
-
-fn parse_color(value: &str) -> Result<Color, String> {
-    if value.eq_ignore_ascii_case("transparent") {
-        return Ok(Color::TRANSPARENT);
-    }
-    if let Some(hex) = value.strip_prefix('#') {
-        return parse_hex_color(hex).ok_or_else(|| format!("bad color: {value}"));
-    }
-    if let Some(body) = value
-        .strip_prefix("rgb(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return parse_rgb_function(body, false).ok_or_else(|| format!("bad color: {value}"));
-    }
-    if let Some(body) = value
-        .strip_prefix("rgba(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return parse_rgb_function(body, true).ok_or_else(|| format!("bad color: {value}"));
-    }
-    Err(format!("bad color: {value}"))
-}
-
-fn parse_hex_color(hex: &str) -> Option<Color> {
-    let expanded;
-    let hex = match hex.len() {
-        3 | 4 => {
-            expanded = hex
-                .chars()
-                .flat_map(|character| [character, character])
-                .collect::<String>();
-            expanded.as_str()
-        }
-        6 | 8 => hex,
-        _ => return None,
-    };
-    let byte = |index: usize| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok();
-    Some(Color::from_rgba8(
-        byte(0)?,
-        byte(2)?,
-        byte(4)?,
-        if hex.len() == 8 { byte(6)? } else { 255 },
-    ))
-}
-
-fn parse_rgb_function(body: &str, alpha: bool) -> Option<Color> {
-    let values = body.split(',').map(str::trim).collect::<Vec<_>>();
-    if values.len() != if alpha { 4 } else { 3 } {
-        return None;
-    }
-    let channel = |value: &str| -> Option<u8> {
-        if let Some(percent) = value.strip_suffix('%') {
-            let value = percent.parse::<f32>().ok()?.clamp(0.0, 100.0);
-            Some((value * 2.55).round() as u8)
-        } else {
-            Some(value.parse::<f32>().ok()?.clamp(0.0, 255.0).round() as u8)
-        }
-    };
-    let alpha = if alpha {
-        if let Some(percent) = values[3].strip_suffix('%') {
-            (percent.parse::<f32>().ok()?.clamp(0.0, 100.0) * 2.55).round() as u8
-        } else {
-            (values[3].parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round() as u8
-        }
-    } else {
-        255
-    };
-    Some(Color::from_rgba8(
-        channel(values[0])?,
-        channel(values[1])?,
-        channel(values[2])?,
-        alpha,
-    ))
 }
 
 fn mix_color(left: Color, right: Color, amount: f32) -> Color {
@@ -2868,25 +3916,546 @@ fn ensure_keys(
     Ok(())
 }
 
-fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(data)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn picture_scene(references: &[&str]) -> DisplayList {
+        let primitives: Vec<Value> = references
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| {
+                json!({
+                    "kind": "image",
+                    "relId": reference,
+                    "x": 2 + index * 16,
+                    "y": 2,
+                    "w": 12,
+                    "h": 12
+                })
+            })
+            .collect();
+        serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0,
+                "width": references.len() * 16 + 4,
+                "height": 20,
+                "primitives": primitives
+            }]
+        }))
+        .expect("display list")
+    }
+
+    fn render_pictures(
+        scene: &DisplayList,
+        images: &ImageMap,
+        cache: &mut ImageCache,
+        scale: f32,
+    ) -> RenderedPage {
+        let fonts = FontStore::new();
+        let chains = FontChains::new();
+        let resources = RenderResources::new(&fonts, &chains, images);
+        render_page_cached_scaled(
+            scene,
+            0,
+            &resources,
+            &mut GlyphCache::default(),
+            cache,
+            scale,
+        )
+        .expect("render")
+    }
+
+    fn picture_pixel(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let pixels = image::load_from_memory(bytes).expect("png").into_rgba8();
+        pixels.get_pixel(x, y).0
+    }
+
+    #[test]
+    fn a_rotated_and_flipped_frame_keeps_a_closed_placeholder_border() {
+        let scene: DisplayList = serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0,
+                "width": 40,
+                "height": 40,
+                "primitives": [{
+                    "kind": "image",
+                    "relId": "rIdMissing",
+                    "x": 10,
+                    "y": 15,
+                    "w": 20,
+                    "h": 10,
+                    "rotationDeg": 90,
+                    "flipH": true
+                }]
+            }]
+        }))
+        .expect("display list");
+        for scale in [1u32, 2] {
+            let rendered = render_pictures(
+                &scene,
+                &ImageMap::new(),
+                &mut ImageCache::default(),
+                scale as f32,
+            );
+            assert_eq!(rendered.skipped_pictures.len(), 1);
+            let at = |x: u32, y: u32| picture_pixel(&rendered.bytes, x * scale, y * scale);
+            assert_eq!(at(20, 20), PLACEHOLDER_FILL);
+            for (x, y) in [(15, 20), (24, 20), (20, 10), (20, 29), (15, 10), (24, 29)] {
+                assert_eq!(
+                    at(x, y),
+                    PLACEHOLDER_BORDER,
+                    "border at {x},{y} scale {scale}"
+                );
+            }
+            for (x, y) in [(14, 20), (25, 20), (20, 9), (20, 30)] {
+                assert_eq!(
+                    at(x, y),
+                    [255, 255, 255, 255],
+                    "outside at {x},{y} scale {scale}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_picture_with_no_source_is_reported_by_its_relationship_id() {
+        let picture = |relationship_id: Option<&str>, x: u32| {
+            let mut image = json!({
+                "kind": "image",
+                "relId": "",
+                "x": x,
+                "y": 2,
+                "w": 12,
+                "h": 12
+            });
+            if let Some(id) = relationship_id {
+                image["relationshipId"] = json!(id);
+            }
+            image
+        };
+        let scene: DisplayList = serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0,
+                "width": 36,
+                "height": 20,
+                "primitives": [picture(Some("rIdLost"), 2), picture(None, 18)]
+            }]
+        }))
+        .expect("display list");
+        let rendered = render_pictures(&scene, &ImageMap::new(), &mut ImageCache::default(), 1.0);
+        let named: Vec<(&str, PictureReason)> = rendered
+            .skipped_pictures
+            .iter()
+            .map(|picture| (picture.id.as_str(), picture.reason))
+            .collect();
+        let expected = vec![
+            ("rIdLost", PictureReason::Missing),
+            ("", PictureReason::Missing),
+        ];
+        assert_eq!(
+            named, expected,
+            "only a picture with a relationship id is named"
+        );
+        assert_eq!(
+            picture_pixel(&rendered.bytes, 8, 8),
+            PLACEHOLDER_FILL,
+            "a named missing picture still draws its placeholder",
+        );
+    }
+
+    #[test]
+    fn a_failed_picture_is_reported_at_its_position_beside_one_with_the_same_id() {
+        let drawn = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==";
+        let failed = "data:image/png;base64,bm90IGFuIGltYWdl";
+        let scene = picture_scene(&[drawn, failed]);
+        let rendered = render_pictures(&scene, &ImageMap::new(), &mut ImageCache::default(), 1.0);
+        let reported: Vec<(&str, PrimitiveAt)> = rendered
+            .skipped_pictures
+            .iter()
+            .map(|picture| (picture.id.as_str(), picture.at))
+            .collect();
+        let at = PrimitiveAt {
+            region: Region::Body,
+            index: 1,
+        };
+        assert_eq!(reported, [("data:image/png;base64", at)]);
+    }
+
+    #[test]
+    fn missing_and_unknown_pictures_paint_scaled_placeholders_and_report_reasons() {
+        let scene = picture_scene(&["rIdMissing", "rIdGarbage"]);
+        let images = ImageMap::from([("rIdGarbage".to_owned(), b"not an image".to_vec())]);
+        let mut cache = ImageCache::default();
+        for scale in [1, 2] {
+            let rendered = render_pictures(&scene, &images, &mut cache, scale as f32);
+            assert_eq!(rendered.skipped_images, 2);
+            assert_eq!(rendered.skipped_images, rendered.skipped_pictures.len());
+            assert_eq!(
+                rendered.skipped_pictures,
+                vec![
+                    SkippedPicture {
+                        id: "rIdMissing".to_owned(),
+                        reason: PictureReason::Missing,
+                        limit: None,
+                        actual: None,
+                        unit: None,
+                        at: PrimitiveAt {
+                            region: Region::Body,
+                            index: 0,
+                        },
+                    },
+                    SkippedPicture {
+                        id: "rIdGarbage".to_owned(),
+                        reason: PictureReason::Unsupported,
+                        limit: None,
+                        actual: None,
+                        unit: None,
+                        at: PrimitiveAt {
+                            region: Region::Body,
+                            index: 1,
+                        },
+                    },
+                ],
+            );
+            for x in [2, 18] {
+                assert_eq!(
+                    picture_pixel(&rendered.bytes, (x + 6) * scale, 8 * scale),
+                    PLACEHOLDER_FILL,
+                );
+                assert_eq!(
+                    picture_pixel(&rendered.bytes, x * scale, 8 * scale),
+                    PLACEHOLDER_BORDER,
+                );
+                assert_eq!(
+                    picture_pixel(&rendered.bytes, (x - 1) * scale, 8 * scale),
+                    [255, 255, 255, 255],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_picture_fill_paints_a_placeholder_instead_of_its_solid_fill() {
+        for paint in [
+            json!({"kind": "picture", "pictureRelId": "rIdMissing"}),
+            json!({"kind": "picture"}),
+        ] {
+            let id = paint
+                .get("pictureRelId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let scene: DisplayList = serde_json::from_value(json!({
+                "pages": [{
+                    "pageIndex": 0,
+                    "width": 20,
+                    "height": 20,
+                    "primitives": [{
+                        "kind": "shape",
+                        "x": 2,
+                        "y": 2,
+                        "w": 12,
+                        "h": 12,
+                        "geometryPath": [
+                            {"type": "move", "x": 2, "y": 2},
+                            {"type": "line", "x": 14, "y": 2},
+                            {"type": "line", "x": 14, "y": 14},
+                            {"type": "line", "x": 2, "y": 14},
+                            {"type": "close"}
+                        ],
+                        "fill": "#0000ff",
+                        "fillPaint": paint,
+                        "stroke": {"color": "#00ff00", "width": 2}
+                    }]
+                }]
+            }))
+            .expect("display list");
+            let rendered =
+                render_pictures(&scene, &ImageMap::new(), &mut ImageCache::default(), 1.0);
+            assert_eq!(picture_pixel(&rendered.bytes, 8, 8), PLACEHOLDER_FILL);
+            assert_eq!(picture_pixel(&rendered.bytes, 2, 8), [0, 255, 0, 255]);
+            assert_eq!(rendered.skipped_images, 1);
+            assert_eq!(rendered.skipped_pictures.len(), 1);
+            let picture = &rendered.skipped_pictures[0];
+            assert_eq!(picture.id, id);
+            assert_eq!(picture.reason, PictureReason::Missing);
+            assert_eq!(picture.limit, None);
+            assert_eq!(picture.actual, None);
+            assert_eq!(picture.unit, None);
+        }
+    }
+
+    #[test]
+    fn repeated_cached_refusals_keep_each_reference_and_hide_data_payloads() {
+        let scene = picture_scene(&[
+            "rIdFirst",
+            "rIdSecond",
+            "rIdFirst",
+            "rIdBrokenPng",
+            "data:image/png;base64,%%%%",
+            "data:image/jpeg;base64,%%%%",
+            "data:image/png,private-payload",
+        ]);
+        let images = ImageMap::from([
+            ("rIdFirst".to_owned(), b"not an image".to_vec()),
+            ("rIdSecond".to_owned(), b"not an image".to_vec()),
+            ("rIdBrokenPng".to_owned(), b"\x89PNG\r\n\x1a\n".to_vec()),
+        ]);
+        let mut cache = ImageCache::default();
+        let expected = [
+            ("rIdFirst", PictureReason::Unsupported),
+            ("rIdSecond", PictureReason::Unsupported),
+            ("rIdFirst", PictureReason::Unsupported),
+            ("rIdBrokenPng", PictureReason::DecodeFailed),
+            ("data:image/png;base64", PictureReason::DecodeFailed),
+            ("data:image/jpeg;base64", PictureReason::DecodeFailed),
+            ("data:image/png", PictureReason::Missing),
+        ];
+        for _ in 0..2 {
+            let rendered = render_pictures(&scene, &images, &mut cache, 1.0);
+            assert_eq!(rendered.skipped_images, expected.len());
+            assert_eq!(rendered.skipped_images, rendered.skipped_pictures.len());
+            for (picture, (id, reason)) in rendered.skipped_pictures.iter().zip(expected) {
+                assert_eq!(picture.id, id);
+                assert_eq!(picture.reason, reason);
+                assert_eq!(picture.limit, None);
+                assert_eq!(picture.actual, None);
+                assert_eq!(picture.unit, None);
+            }
+        }
+    }
+
+    #[test]
+    fn an_oversized_picture_keeps_its_pixel_limit_and_actual_size_in_the_cache() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(concat!(
+                "iVBORw0KGgoAAAANSUhEUgAAnEAAAJxACAIAAADebplS",
+                "AAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=",
+            ))
+            .expect("png header");
+        let images = ImageMap::from([
+            ("rIdHuge".to_owned(), bytes.clone()),
+            ("rIdHugeAgain".to_owned(), bytes),
+        ]);
+        let scene = picture_scene(&["rIdHuge", "rIdHugeAgain"]);
+        let mut cache = ImageCache::default();
+        for _ in 0..2 {
+            let rendered = render_pictures(&scene, &images, &mut cache, 1.0);
+            assert_eq!(rendered.skipped_images, 2);
+            assert_eq!(rendered.skipped_pictures.len(), 2);
+            for (picture, id) in rendered
+                .skipped_pictures
+                .iter()
+                .zip(["rIdHuge", "rIdHugeAgain"])
+            {
+                assert_eq!(picture.id, id);
+                assert_eq!(picture.reason, PictureReason::TooLarge);
+                assert_eq!(picture.limit, Some(MAX_IMAGE_PIXELS));
+                assert_eq!(picture.actual, Some(40_000 * 40_000));
+                assert!(picture.actual > picture.limit);
+                assert_eq!(picture.unit, Some("pixels"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_cached_picture_reports_the_page_total_it_would_have_reached() {
+        let mut cache = ImageCache::default();
+        let source = b"cached picture";
+        let key = cache.key(&ImageSource::Registered(source));
+        cache.insert(
+            key,
+            Ok(Arc::new(Pixmap::new(1, 1).expect("picture"))),
+            ImageCharge {
+                pixels: 64,
+                bytes_post: 256,
+                ..ImageCharge::default()
+            },
+        );
+        let mut page = PageImages::new(&mut cache);
+        page.pixels = MAX_PAGE_IMAGE_PIXELS - 32;
+        for id in ["rIdFirst", "rIdSecond"] {
+            assert!(page.resolve(id, ImageSource::Registered(source)).is_none());
+        }
+        assert_eq!(page.skipped, page.pictures.len());
+        assert_eq!(page.skipped, 2);
+        for (picture, id) in page.pictures.iter().zip(["rIdFirst", "rIdSecond"]) {
+            assert_eq!(picture.id, id);
+            assert_eq!(picture.reason, PictureReason::Budget);
+            assert_eq!(picture.limit, Some(MAX_PAGE_IMAGE_PIXELS));
+            assert_eq!(picture.actual, Some(MAX_PAGE_IMAGE_PIXELS + 32));
+            assert_eq!(picture.unit, Some("pixels"));
+        }
+        let mut next = PageImages::new(&mut cache);
+        assert!(
+            next.resolve("rIdFirst", ImageSource::Registered(source))
+                .is_some()
+        );
+        assert!(next.pictures.is_empty());
+    }
+
+    #[test]
+    fn the_parsers_metafile_stand_in_is_reported_as_a_metafile_placeholder() {
+        let scene = picture_scene(&["rIdStandIn"]);
+        let images = ImageMap::from([(
+            "rIdStandIn".to_owned(),
+            ooxml_metafile::placeholder_svg(96.0, 72.5).into_bytes(),
+        )]);
+        let rendered = render_pictures(&scene, &images, &mut ImageCache::default(), 1.0);
+        assert_eq!(rendered.skipped_pictures.len(), 1);
+        assert_eq!(rendered.skipped_pictures[0].reason, PictureReason::Metafile);
+    }
+
+    #[test]
+    fn a_cached_refusal_keeps_its_reason_on_a_page_without_budget_left() {
+        let mut cache = ImageCache::default();
+        let broken = b"cached refusal";
+        let key = cache.key(&ImageSource::Registered(broken));
+        cache.insert(
+            key,
+            Err(PictureFailure::new(PictureReason::DecodeFailed)),
+            ImageCharge {
+                bytes_pre: 256,
+                ..ImageCharge::default()
+            },
+        );
+        let mut page = PageImages::new(&mut cache);
+        page.bytes = MAX_PAGE_IMAGE_BYTES - 1;
+        assert!(
+            page.resolve("rIdBroken", ImageSource::Registered(broken))
+                .is_none()
+        );
+        assert_eq!(page.pictures.len(), 1);
+        assert_eq!(page.pictures[0].reason, PictureReason::DecodeFailed);
+        assert_eq!(page.pictures[0].limit, None);
+        assert!(page.refusal.is_none());
+    }
+
+    /// A 2x1 uncompressed 8-bit RGB TIFF with this compression tag.
+    fn rgb_tiff(compression: u16) -> Vec<u8> {
+        let entries: [(u16, u16, u32, u32); 9] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 3, 122),
+            (259, 3, 1, u32::from(compression)),
+            (262, 3, 1, 2),
+            (273, 4, 1, 128),
+            (277, 3, 1, 3),
+            (278, 3, 1, 1),
+            (279, 4, 1, 6),
+        ];
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..3 {
+            tiff.extend_from_slice(&8u16.to_le_bytes());
+        }
+        tiff.extend_from_slice(&[0; 6]);
+        tiff
+    }
+
+    /// A 2x1 TIFF whose strip is a real JPEG of those pixels.
+    fn jpeg_tiff() -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode(
+                &[255, 0, 0, 0, 255, 0],
+                2,
+                1,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        let entries: [(u16, u16, u32, u32); 9] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 3, 122),
+            (259, 3, 1, 7),
+            (262, 3, 1, 2),
+            (273, 4, 1, 128),
+            (277, 3, 1, 3),
+            (278, 3, 1, 1),
+            (279, 4, 1, jpeg.len() as u32),
+        ];
+        let mut tiff = b"II*\0\x08\0\0\0".to_vec();
+        tiff.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            tiff.extend_from_slice(&tag.to_le_bytes());
+            tiff.extend_from_slice(&kind.to_le_bytes());
+            tiff.extend_from_slice(&count.to_le_bytes());
+            tiff.extend_from_slice(&value.to_le_bytes());
+        }
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..3 {
+            tiff.extend_from_slice(&8u16.to_le_bytes());
+        }
+        tiff.extend_from_slice(&jpeg);
+        tiff
+    }
+
+    /// Proves the decoder would draw it, so a refusal comes from the check.
+    fn opens_without_the_check(tiff: &[u8]) -> bool {
+        image::ImageReader::new(Cursor::new(tiff))
+            .with_guessed_format()
+            .unwrap()
+            .decode()
+            .is_ok()
+    }
+
+    #[test]
+    fn a_tiff_whose_decode_its_size_does_not_bound_is_refused_before_opening() {
+        assert_eq!(decoded_size(&rgb_tiff(1)), Some((2, 1)));
+        let tiff = jpeg_tiff();
+        assert!(opens_without_the_check(&tiff));
+        assert_eq!(decoded_size(&tiff), None);
+    }
+
+    fn decoded_size(bytes: &[u8]) -> Option<(u32, u32)> {
+        let mut cache = ImageCache::default();
+        let mut page = PageImages::new(&mut cache);
+        match page.decode(bytes, &mut ImageCharge::default()) {
+            Decode::Decoded(pixmap) => Some((pixmap.width(), pixmap.height())),
+            _ => None,
+        }
+    }
+
+    fn solid_rgb_png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, width, height);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_compression(png::Compression::Fast);
+            let mut writer = encoder.write_header().expect("png header");
+            let mut stream = writer.stream_writer().expect("png stream");
+            let row = [0x11_u8, 0x66, 0xcc].repeat(width as usize);
+            for _ in 0..height {
+                std::io::Write::write_all(&mut stream, &row).expect("png row");
+            }
+            stream.finish().expect("png finish");
+        }
+        bytes
+    }
+
+    #[test]
+    fn only_a_picture_past_the_pixel_cap_is_decoded_reduced() {
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode_image(&image::RgbImage::from_pixel(
+                5000,
+                1000,
+                image::Rgb([200, 40, 10]),
+            ))
+            .expect("jpeg");
+        assert_eq!(decoded_size(&jpeg), Some((5000, 1000)));
+        assert_eq!(decoded_size(&solid_rgb_png(6000, 6000)), Some((4096, 4096)));
+    }
 
     fn clip(x: f32, y: f32, w: f32, h: f32) -> FRect {
         FRect { x, y, w, h }
@@ -3032,6 +4601,7 @@ mod tests {
                 key,
                 CachedImage {
                     outcome: None,
+                    refusal: Some(PictureFailure::new(PictureReason::Unsupported)),
                     charge: ImageCharge::default(),
                     weight,
                     stamp: cache.clock,
@@ -3043,7 +4613,7 @@ mod tests {
         put(&mut cache, 1, MAX_IMAGE_CACHE_BYTES / 2);
         put(&mut cache, 2, MAX_IMAGE_CACHE_BYTES / 2);
         put(&mut cache, 3, 1);
-        cache.get(1).expect("key 1 still cached");
+        let _ = cache.get(1).expect("key 1 still cached");
         put(&mut cache, 4, MAX_IMAGE_CACHE_BYTES / 2);
         // `put` bypasses `insert`, so drive the same eviction loop by hand.
         while cache.bytes > MAX_IMAGE_CACHE_BYTES {
@@ -3071,13 +4641,20 @@ mod tests {
             bytes_pre: 100,
             pixels: 64,
             bytes_post: 1_000,
+            work: 10,
         };
         assert!(page.charge(charge));
         assert_eq!(page.bytes, 1_100);
         assert_eq!(page.pixels, 64);
+        assert_eq!(page.work, 10);
         let mut broke = PageImages::new(&mut cache);
         broke.bytes = MAX_PAGE_IMAGE_BYTES;
         assert!(!broke.charge(charge));
+        let failure = broke.refusal.expect("budget refusal");
+        assert_eq!(failure.reason, PictureReason::Budget);
+        assert_eq!(failure.limit, Some(MAX_PAGE_IMAGE_BYTES));
+        assert_eq!(failure.actual, Some(MAX_PAGE_IMAGE_BYTES + 100));
+        assert_eq!(failure.unit, Some("bytes"));
     }
 
     fn gif_bytes(width: u32, height: u32) -> Vec<u8> {
@@ -3100,9 +4677,13 @@ mod tests {
         let mut crowded = PageImages::new(&mut cache);
         crowded.pixels = MAX_PAGE_IMAGE_PIXELS - 16;
         crowded.bytes = MAX_PAGE_IMAGE_BYTES - 1024;
-        assert!(crowded.resolve(ImageSource::Registered(&gif)).is_none());
+        assert!(
+            crowded
+                .resolve("rIdGif", ImageSource::Registered(&gif))
+                .is_none()
+        );
         let pixmap = PageImages::new(&mut cache)
-            .resolve(ImageSource::Registered(&gif))
+            .resolve("rIdGif", ImageSource::Registered(&gif))
             .expect("a page with budget left decodes it");
         assert_eq!((pixmap.width(), pixmap.height()), (1, 1));
 
@@ -3111,5 +4692,24 @@ mod tests {
         let mut page = PageImages::new(&mut cache);
         let mut charge = ImageCharge::default();
         assert!(matches!(page.decode(&gif, &mut charge), Decode::Decoded(_)));
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn color_keeps_css_forms_and_error_text() {
+        assert_eq!(
+            parse_color("rgba(1,2,3,0.5)"),
+            Ok(Color::from_rgba8(1, 2, 3, 128))
+        );
+        assert_eq!(
+            parse_color("#abcd"),
+            Ok(Color::from_rgba8(170, 187, 204, 221))
+        );
+        assert_eq!(parse_color("Black"), Ok(Color::from_rgba8(0, 0, 0, 255)));
+        assert_eq!(parse_color("ochre"), Err("bad color: ochre".to_string()));
     }
 }

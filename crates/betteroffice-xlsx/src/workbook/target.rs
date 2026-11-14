@@ -129,8 +129,8 @@ pub struct ReadCalculation {
 pub struct UnevaluatedTarget {
     #[serde(flatten)]
     pub cell: CellTarget,
-    /// The uncomputable functions involved, sorted; empty when only gaps of
-    /// the engine were.
+    /// The uncomputable and unknown functions involved, sorted; empty when
+    /// only gaps of the engine were.
     pub functions: Vec<String>,
 }
 

@@ -68,6 +68,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
     }
+    #[cfg(feature = "png-target")]
+    let rendered = deck.render_png(betteroffice_pptx::PngTarget { slide: 0 }, &RenderOptions::default())?;
+    #[cfg(not(feature = "png-target"))]
     let rendered = deck.render_png(0, &RenderOptions::default())?;
     if rendered.skipped_images != 0 {
         return Err(format!("renderer skipped {} images", rendered.skipped_images).into());

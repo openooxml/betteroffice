@@ -59,6 +59,11 @@ const DEFAULT_MAX_OUTPUT = 64 * 1024 * 1024;
 const WOFF2T_MAX_OUTPUT = 64 * 1024 * 1024;
 const instances = new Map<string, Promise<DecoderInstance>>();
 
+/** Drops the decoder instances, and with them their memory; decodes already running keep theirs until done. */
+export function releaseFontDecoder(): void {
+  instances.clear();
+}
+
 function builtinModule<T>(name: string): T | undefined {
   const proc = (
     globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }

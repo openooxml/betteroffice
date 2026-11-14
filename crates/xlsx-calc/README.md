@@ -185,6 +185,19 @@ with `~` escaping a literal `*`, `?`, or `~`.
   Volatility itself is handled generically by the dependency graph.
 - **`TODAY` / `NOW`** return `#VALUE!` when no clock is injected via
   `EvalContext::with_now`.
+- **Calls the engine cannot answer** are listed in
+  `RecalcResult::unevaluated_cells` with the function names, and no handler
+  answers for them: what Excel returned is unknown, so `IFERROR`'s answer is
+  too. A function no offline engine can run (`WEBSERVICE`, `RTD`, the `CUBE`
+  family, `_xll.`) is `#VALUE!` to a handler and its cell is never written. Any
+  other name in call position is `#NAME?`: a typo, a VBA function, a named or
+  `LET`-bound lambda, `[1]!Foo(..)`, `Sheet1!Foo(..)` or a function of a later
+  Excel. The engine cannot tell these apart, so the cell keeps Excel's saved
+  value; with none, its answer stands (`#NAME?`, or the handler's) and the cell
+  is still listed. Readers of a kept value keep theirs and readers of an answer
+  compute from it; both are listed. A name that is not called keeps plain
+  `#NAME?`, which a handler may answer. After a sheet rename, a listed
+  `Sheet1!Foo` shows the old sheet name until its next recalculation.
 - **Array results** spill from a dynamic-array anchor into the cells beside
   it and report `#SPILL!` when an authored value or formula is in the way.
   Array evaluation is charged against the recalculation budget, and a formula

@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
-import { useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { resolvePresenceColor, type CollaborationPeer } from '@betteroffice/docx/collaboration';
 import { TrackedChangeCard } from './TrackedChangeCard';
 import { ReviewSummary, TrackedChangesReview } from './TrackedChangesReview';
@@ -305,6 +305,40 @@ test('scrolling the review viewport does not render unchanged tracked change car
   expect(view.getByTestId('review-219').textContent).toContain('120/120 true');
   fireEvent.click(view.getByTestId('review-100').querySelector('button')!);
   await waitFor(() => expect(override.mock.calls.some(([props]) => props.change.revisionId === 101 && props.isActive)).toBe(true));
+});
+
+test('custom card layout navigation uses current items and select after removing a change', () => {
+  function SkippingCard({ change, isActive, next, measureRef }: Parameters<NonNullable<TrackedChangesOptions['renderCard']>>[0]) {
+    useLayoutEffect(() => {
+      if (isActive && change.text === 'skip') next();
+    }, [change, isActive, next]);
+    return <div ref={measureRef} data-testid={`review-${change.revisionId}`} data-active={isActive} />;
+  }
+  const options: TrackedChangesOptions = { renderCard: props => <SkippingCard {...props} /> };
+  const item = (id: string, revisionId: number, text: string): ReviewSidebarItem => {
+    const entry = { ...change, revisionId, text };
+    return { id, anchorPos: entry.from, review: { change: entry, kind: 'human' },
+      render: props => <TrackedChangeCard {...props} change={entry} replies={[]} reviewItemId={id} /> };
+  };
+  const initialItems = [item('A', 1, 'A'), item('B', 2, 'B'), item('C', 3, 'C')];
+  const currentItems = [item('A', 1, 'skip'), initialItems[2]!];
+  const initialSelect = mock((_item: ReviewSidebarItem) => {}), currentSelect = mock((_item: ReviewSidebarItem) => {});
+  function Harness({ items, select }: { items: ReviewSidebarItem[]; select(item: ReviewSidebarItem): void }) {
+    const [active, setActive] = useState<string | null>('A');
+    return <TrackedChangesReview items={items} options={options} pages={onePage} rects={new Map()}
+      zoom={1} pageWidth={600} sidebarOpen hostRef={{ current: null }} scrollerRef={{ current: null }}
+      activeId={active} setActive={setActive} select={select} readOnly={false} acceptAll={() => {}}>
+      {items.map(item => <div key={item.id}>{item.render({ ...sidebarProps, isExpanded: item.id === active })}</div>)}
+    </TrackedChangesReview>;
+  }
+  const view = render(<Harness items={initialItems} select={initialSelect} />);
+  expect(view.getByTestId('review-1').getAttribute('data-active')).toBe('true');
+  view.rerender(<Harness items={currentItems} select={currentSelect} />);
+  expect(view.getByTestId('review-3').getAttribute('data-active')).toBe('true');
+  expect(initialSelect).not.toHaveBeenCalled();
+  expect(currentSelect).toHaveBeenCalledTimes(1);
+  expect(currentSelect).toHaveBeenCalledWith(currentItems[1]);
+  expect(currentSelect).not.toHaveBeenCalledWith(initialItems[1]);
 });
 
 test('viewport-only scroll frames move the summary without rendering review dots, leaders or the balloon', async () => {

@@ -1,0 +1,168 @@
+{
+  "bodyStory": "body",
+  "notes": {
+    "contents": [
+      {
+        "height": 0,
+        "id": 1,
+        "noteKind": "footnote"
+      },
+      {
+        "height": 0,
+        "id": 1,
+        "noteKind": "endnote"
+      }
+    ]
+  },
+  "options": {
+    "pageGap": 24
+  },
+  "regions": {
+    "sections": [
+      {
+        "properties": {
+          "footerReferences": [
+            {
+              "rId": "rIdFooter1",
+              "type": "default"
+            }
+          ],
+          "headerReferences": [
+            {
+              "rId": "rIdHeader1",
+              "type": "default"
+            }
+          ],
+          "sectionStart": "continuous"
+        }
+      },
+      {
+        "properties": {
+          "footerReferences": [
+            {
+              "rId": "rIdFooter1",
+              "type": "default"
+            }
+          ],
+          "headerReferences": [
+            {
+              "rId": "rIdHeader1",
+              "type": "default"
+            },
+            {
+              "rId": "rIdHeader2",
+              "type": "first"
+            }
+          ],
+          "titlePg": true
+        }
+      },
+      {
+        "properties": {
+          "footerReferences": [
+            {
+              "rId": "rIdFooter1",
+              "type": "default"
+            }
+          ],
+          "headerReferences": [
+            {
+              "rId": "rIdHeader1",
+              "type": "default"
+            },
+            {
+              "rId": "rIdHeader2",
+              "type": "first"
+            }
+          ],
+          "titlePg": true
+        }
+      }
+    ],
+    "settings": {
+      "compatibilityFlags": {
+        "adjustLineHeightInTable": false,
+        "allowSpaceOfSameStyleInTable": false,
+        "balanceSingleByteDoubleByteWidth": false,
+        "compatibilityMode": 12,
+        "doNotExpandShiftReturn": false,
+        "doNotUseHTMLParagraphAutoSpacing": false,
+        "noLeading": false,
+        "suppressSpBfAfterPgBrk": false,
+        "useWord97LineBreakRules": false
+      },
+      "defaultTabStop": 720
+    }
+  },
+  "renderEnv": {
+    "compatibilityFlags": {
+      "adjustLineHeightInTable": false,
+      "allowSpaceOfSameStyleInTable": false,
+      "balanceSingleByteDoubleByteWidth": false,
+      "compatibilityMode": 12,
+      "doNotExpandShiftReturn": false,
+      "doNotUseHTMLParagraphAutoSpacing": false,
+      "noLeading": false,
+      "suppressSpBfAfterPgBrk": false,
+      "useWord97LineBreakRules": false
+    },
+    "defaultParagraphStyleId": "Normal",
+    "defaultTabStopTwips": 720,
+    "docDefaultFontSize": 10,
+    "fontTheme": {
+      "colorScheme": {
+        "accent1": "4472C4",
+        "accent2": "ED7D31",
+        "accent3": "A5A5A5",
+        "accent4": "FFC000",
+        "accent5": "5B9BD5",
+        "accent6": "70AD47",
+        "dk1": "000000",
+        "dk2": "44546A",
+        "folHlink": "954F72",
+        "hlink": "0563C1",
+        "lt1": "FFFFFF",
+        "lt2": "E7E6E6"
+      },
+      "fontScheme": {
+        "majorFont": {
+          "cs": "",
+          "ea": "",
+          "fonts": {},
+          "latin": "Calibri Light"
+        },
+        "minorFont": {
+          "cs": "",
+          "ea": "",
+          "fonts": {},
+          "latin": "Calibri"
+        }
+      },
+      "name": "Office Theme"
+    },
+    "numericIds": {},
+    "paragraphStyleFontSizes": {
+      "Heading1": 10,
+      "Heading2": 10,
+      "Heading3": 10,
+      "Normal": 10,
+      "Title": 10
+    },
+    "showHiddenText": false,
+    "themeColors": {
+      "accent1": "4472C4",
+      "accent2": "ED7D31",
+      "accent3": "A5A5A5",
+      "accent4": "FFC000",
+      "accent5": "5B9BD5",
+      "accent6": "70AD47",
+      "dk1": "000000",
+      "dk2": "44546A",
+      "folHlink": "954F72",
+      "hlink": "0563C1",
+      "lt1": "FFFFFF",
+      "lt2": "E7E6E6"
+    },
+    "tocStyleIds": []
+  }
+}

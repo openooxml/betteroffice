@@ -3,7 +3,8 @@
 `<format>/script.json` runs one call sequence against TS wasm, TS native, Rust and Python.
 Each target compares `[{ "op", "result" }]` with `<format>/expected.json`.
 An optional step `targets` list selects `"ts"`, `"rust"` and/or `"python"` (default: all); TS always executes every step to produce the golden, while Rust and Python skip excluded steps, retain the golden's version token numbers and fail on unsupported included operations.
-The `open` operation takes `{ "fixture": "path/from/repo/root.xlsx" }` to replace the current workbook using the script's calculation settings.
+The `open` operation takes `{ "fixture": "path/from/repo/root.xlsx" }` to replace the current workbook using the script's calculation settings; `openCollaborative` takes `{ "fixture", "clientId" }` and opens a replica instead.
+A step with `"expectError": true` must fail and records `{ "error": message }`, the message each target's call raises.
 
 Normalization spec: Visit steps in script order, arrays in index order and object keys in ascending order. Replace each entire string matching the format's version token pattern (xlsx: 32 lowercase hex digits, pptx: 16 lowercase hex digits, each followed by `-` and a decimal epoch) with `<version:N>`, assigning N from 1 on first sight and reusing it for equal tokens across the run. Leave every other value unchanged. In arguments, resolve `<version:N>` to the previously observed token, failing on unknown references. The `save` op records `{ "sha256", "byteLength" }` from the exact saved bytes.
 

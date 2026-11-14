@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import type { DisplayList, GridMeta } from '@betteroffice/xlsx';
+import type { DisplayList, GridMeta, Proposal } from '@betteroffice/xlsx';
+import { positionAtPoint } from '../viewer/sessionGeometry';
+import type { XlsxPointPosition } from '../XlsxEditor.types';
 import { createPeerlessPluginGeometry } from './createPeerlessPluginDocument';
 import {
   createPluginGeometry,
@@ -8,15 +10,23 @@ import {
   pluginLayout,
   visibleGridRange,
   type PaintedGrid,
+  type ProposalGeometrySnapshot,
 } from './geometry';
 
-function element(left: number, top: number): HTMLElement {
+function element(left: number, top: number, width = 0, height = 0): HTMLElement {
   return {
     clientLeft: 0,
     clientTop: 0,
     scrollLeft: 0,
     scrollTop: 0,
-    getBoundingClientRect: () => ({ left, top }),
+    getBoundingClientRect: () => ({
+      left,
+      top,
+      width,
+      height,
+      right: left + width,
+      bottom: top + height,
+    }),
   } as unknown as HTMLElement;
 }
 
@@ -43,12 +53,62 @@ function painted(overrides: Partial<PaintedGrid> = {}): PaintedGrid {
     zoom: 2,
     version: 'v1',
     sheetId: 'sheet:0',
+    sheet: 0,
     viewport: { x: 192, y: 160, width: 300, height: 100 },
     ...overrides,
   };
 }
 
 describe('grid track geometry', () => {
+  test('peerless proposal anchors use the same snapshot and refuse replaced frames', () => {
+    const frame = painted();
+    let live: PaintedGrid | null = frame;
+    const geometry = createPeerlessPluginGeometry(pluginLayout(frame, 'v1')!, frame,
+      element(0, 0), element(0, 0), () => ({ version: 'v1', painted: live }),
+      () => ({ proposals: [{ id: 'p1', agentId: 'host', note: null,
+        cells: [{ sheet: 0, row: 0, col: 0, a1: 'A1', oldText: '', newText: '7' }] }],
+        sheetIndex: 0, previewVersion: 1 }));
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: true, anchor: { x: 0, y: 0, width: 128, height: 40 } });
+    live = null;
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  });
+
+  test('proposal anchors follow visible cells, zoom, scroll and sheet changes', () => {
+    const proposal: Proposal = { id: 'p1', agentId: 'agent', note: null, cells: [
+      { sheet: 0, row: 10, col: 4, a1: 'E11', oldText: '', newText: '7' },
+      { sheet: 0, row: 11, col: 5, a1: 'F12', oldText: '', newText: '8' },
+    ] };
+    let current = true;
+    let pending = false;
+    const create = (frame: PaintedGrid) => createPluginGeometry(pluginLayout(frame, 'v1')!, frame,
+      element(110, 60), element(100, 50), () => current,
+      () => pending ? null : { proposals: [proposal], sheetIndex: frame.sheetId === 'sheet:0' ? 0 : 1,
+        previewVersion: 2 });
+    const geometry = create(painted());
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'p1' })).toMatchObject({ ok: true,
+      version: 'v1', previewVersion: 2, layoutId: geometry.layout.id,
+      rects: [{ x: 138, y: 90, width: 128, height: 40 }, { x: 266, y: 130, width: 128, height: 40 }],
+      anchor: { x: 138, y: 90, width: 256, height: 80 } });
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'missing' }))
+      .toMatchObject({ ok: false, failure: { code: 'unknown-proposal' } });
+    expect(create(painted({ zoom: 1 })).getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: true, anchor: { x: 74, y: 50, width: 128, height: 40 } });
+    expect(create(painted({ sheetId: 'sheet:1' })).getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    const scrolled = frozenFrame();
+    scrolled.grid!.rowIndices = [0, 1, 20, 21, 22];
+    expect(create(painted({ frame: scrolled })).getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+    pending = true;
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: false, failure: { code: 'pending' } });
+    current = false;
+    expect(geometry.getAnchorGeometry({ kind: 'proposal', id: 'p1' }))
+      .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  });
+
   test('frozen extents count visible frozen tracks after hidden tracks are compacted', () => {
     const grid: GridMeta = {
       ...frozenFrame().grid!,
@@ -146,6 +206,23 @@ describe('overlay coordinates', () => {
     expect(geometry.getRangeRect(range)).toBeNull();
   });
 
+  test('retained point queries refuse a new acknowledged version or painted frame', () => {
+    const frame = painted();
+    let projection = { version: 'v1', painted: frame };
+    const layout = pluginLayout(frame, 'v1')!;
+    const geometry = createPeerlessPluginGeometry(layout, frame, element(0, 0), element(0, 0),
+      () => projection, undefined, () => ({ sheet: 0, row: 1, col: 4 }));
+    expect(geometry.getPositionAtPoint!(1, 1)).toEqual({
+      sheet: 0, sheetId: 'sheet:0', row: 1, col: 4, version: 'v1', layoutId: layout.id,
+    });
+    projection = { version: 'v2', painted: frame };
+    expect(geometry.getPositionAtPoint!(1, 1)).toBeNull();
+    projection = { version: 'v1', painted: painted() };
+    expect(geometry.getPositionAtPoint!(1, 1)).toBeNull();
+    expect(createPeerlessPluginGeometry(layout, frame, element(0, 0), element(0, 0),
+      () => ({ version: 'v1', painted: frame })).getPositionAtPoint).toBeNull();
+  });
+
   test('zoom viewport-local grid rects, clip them to the frame and offset them by the canvas', () => {
     const grid = { frame: { width: 300, height: 100 } as DisplayList, zoom: 1.5 };
     expect(gridRectToOverlay(grid, { x: 64, y: 20, w: 64, h: 20 }, { x: 3, y: 4 })).toEqual({
@@ -167,12 +244,15 @@ describe('overlay coordinates', () => {
     const frame = painted();
     const layout = pluginLayout(frame, 'v1')!;
     let current = true;
+    const canvas = element(110, 60, 600, 200) as unknown as HTMLCanvasElement;
     const geometry = createPluginGeometry(
       layout,
       frame,
-      element(110, 60),
+      canvas,
       element(100, 50),
-      () => current
+      () => current,
+      undefined,
+      (clientX, clientY) => positionAtPoint(frame.frame, 0, canvas, clientX, clientY)
     );
     const cell = (row: number, col: number) =>
       geometry.getCellRect({ sheetId: 'sheet:0', row, col });
@@ -192,12 +272,180 @@ describe('overlay coordinates', () => {
     expect(geometry.getCellRect({ sheetId: 'sheet:1', row: 0, col: 0 })).toBeNull();
     expect(geometry.getCellRect({ sheetId: 'sheet:0', row: -1, col: 0 })).toBeNull();
     expect(geometry.getCellRect({ sheetId: 'sheet:0', row: 0.5, col: 0 })).toBeNull();
-    expect(geometry.getPositionAtPoint).toBeNull();
+    const at = (rect: { x: number; y: number; width: number; height: number }) =>
+      geometry.getPositionAtPoint!(100 + rect.x + rect.width / 2, 50 + rect.y + rect.height / 2);
+    const position = (row: number, col: number) => ({
+      sheet: 0,
+      sheetId: 'sheet:0',
+      row,
+      col,
+      version: 'v1',
+      layoutId: layout.id,
+    });
+    expect(at(cell(0, 0)!)).toEqual(position(0, 0));
+    expect(at(cell(10, 4)!)).toEqual(position(10, 4));
+    expect(at(cell(1, 6)!)).toEqual(position(1, 6));
+    expect(geometry.getPositionAtPoint!(109, 100)).toBeNull();
+    expect(geometry.getPositionAtPoint!(710, 100)).toBeNull();
+    expect(geometry.getPositionAtPoint!(Number.NaN, 100)).toBeNull();
 
     current = false;
     expect(cell(0, 0)).toBeNull();
     expect(
       geometry.getRangeRect({ sheetId: 'sheet:0', range: { top: 0, left: 0, bottom: 1, right: 1 } })
     ).toBeNull();
+    expect(geometry.getPositionAtPoint!(110 + 2, 60 + 2)).toBeNull();
   });
+
+  test('point queries keep only editor answers on the frame sheet', () => {
+    const frame = painted({ sheet: 1, sheetId: 'sheet:1' });
+    const layout = pluginLayout(frame, 'v1')!;
+    let answer: XlsxPointPosition | null = { sheet: 1, row: 2, col: 3 };
+    let current = true;
+    const calls: [number, number][] = [];
+    const geometry = createPluginGeometry(layout, frame, element(0, 0), element(0, 0), () => current, undefined,
+      (clientX, clientY) => {
+        calls.push([clientX, clientY]);
+        return answer;
+      });
+    expect(geometry.getPositionAtPoint!(5, 6)).toEqual({
+      sheet: 1, sheetId: 'sheet:1', row: 2, col: 3, version: 'v1', layoutId: layout.id,
+    });
+    expect(calls).toEqual([[5, 6]]);
+    answer = { sheet: 0, row: 2, col: 3 };
+    expect(geometry.getPositionAtPoint!(5, 6)).toBeNull();
+    answer = { sheet: 1, row: -1, col: 3 };
+    expect(geometry.getPositionAtPoint!(5, 6)).toBeNull();
+    answer = { sheet: 1, row: 2, col: 0.5 };
+    expect(geometry.getPositionAtPoint!(5, 6)).toBeNull();
+    answer = null;
+    expect(geometry.getPositionAtPoint!(5, 6)).toBeNull();
+    current = false;
+    answer = { sheet: 1, row: 2, col: 3 };
+    expect(geometry.getPositionAtPoint!(5, 6)).toBeNull();
+    expect(calls).toHaveLength(5);
+    expect(
+      createPluginGeometry(layout, frame, element(0, 0), element(0, 0), () => true).getPositionAtPoint
+    ).toBeNull();
+  });
+});
+
+for (const peerless of [false, true]) test(`selection anchors follow ranges and refuse offscreen cells (${peerless ? 'peerless' : 'in-thread'})`, async () => {
+  const frame = painted();
+  const layout = pluginLayout(frame, 'v1')!;
+  let selection: import('./types').XlsxPluginSelection = { sheetId: frame.sheetId, sheetIndex: 0,
+    cells: { anchor: { row: 0, col: 0 }, focus: { row: 11, col: 4 } }, chartId: null };
+  let live = true;
+  const geometry = peerless
+    ? createPeerlessPluginGeometry(layout, frame, element(110, 60), element(100, 50),
+        () => ({ version: live ? 'v1' : 'v2', painted: frame }), undefined, undefined, () => selection)
+    : createPluginGeometry(layout, frame, element(110, 60), element(100, 50), () => live,
+        undefined, undefined, () => selection);
+  for (const range of [
+    { top: 0, left: 0, bottom: 11, right: 4 },
+    { top: 10, left: 4, bottom: 12, right: 6 },
+  ]) {
+    selection.cells = { anchor: { row: range.top, col: range.left }, focus: { row: range.bottom, col: range.right } };
+    const rect = geometry.getRangeRect({ sheetId: frame.sheetId, range });
+    expect(rect).not.toBeNull();
+    expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([
+      { ok: true, version: 'v1', layoutId: layout.id, rects: [rect], anchor: rect },
+    ]);
+  }
+  const region = { top: 10, left: 4, bottom: 12, right: 6 };
+  selection.cells = { anchor: { row: 10, col: 4 }, focus: { row: 10, col: 4 }, range: region };
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true,
+    rects: [geometry.getRangeRect({ sheetId: frame.sheetId, range: region })] });
+  selection.cells = { anchor: { row: 300, col: 300 }, focus: { row: 302, col: 302 } };
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  selection.chartId = 'chart';
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  selection = null;
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+  live = false;
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+});
+
+
+for (const peerless of [false, true]) test(`selection failure precedence ignores proposal reads (${peerless ? 'peerless' : 'in-thread'})`, async () => {
+  const frame = painted();
+  const layout = pluginLayout(frame, 'v1')!;
+  let current = true;
+  let reads = 0;
+  let selection: import('./types').XlsxPluginSelection = null;
+  let proposalState: 'failed' | 'ready' | 'pending' = 'failed';
+  const proposals = (): ProposalGeometrySnapshot | null => {
+    reads += 1;
+    if (proposalState === 'failed') throw new Error('Proposals unavailable');
+    return proposalState === 'pending' ? null : { proposals: [], sheetIndex: 0, previewVersion: 3 };
+  };
+  const geometry = peerless
+    ? createPeerlessPluginGeometry(layout, frame, element(0, 0), element(0, 0),
+        () => ({ version: current ? 'v1' : 'v2', painted: frame }), proposals, undefined, () => selection)
+    : createPluginGeometry(layout, frame, element(0, 0), element(0, 0), () => current,
+        proposals, undefined, () => selection);
+  const check = async (code: string, expectedReads = 0) => {
+    expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: false, failure: { code } });
+    expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([{ ok: false, failure: { code } }]);
+    expect(reads).toBe(expectedReads);
+  };
+  await check('missing-target');
+  selection = { sheetId: 'sheet:1', sheetIndex: 1, chartId: 'chart', cells: null };
+  await check('missing-target');
+  selection = { ...selection, chartId: null, cells: { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } } };
+  await check('layout-unavailable');
+  selection.sheetId = frame.sheetId;
+  selection.cells = { anchor: { row: 900, col: 900 }, focus: { row: 901, col: 901 } };
+  await check('layout-unavailable');
+  current = false;
+  selection = null;
+  await check('layout-unavailable');
+  current = true;
+  selection = { sheetId: frame.sheetId, sheetIndex: 0, chartId: null,
+    cells: { anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 } } };
+  proposalState = 'ready';
+  expect(geometry.getAnchorGeometry({ kind: 'selection' })).toMatchObject({ ok: true, previewVersion: 3 });
+  expect(await geometry.readAnchorGeometries([{ kind: 'selection' }])).toMatchObject([{ ok: true, previewVersion: 3 }]);
+  proposalState = 'pending';
+  await check('layout-unavailable', 4);
+  proposalState = 'failed';
+  await check('read-failed', 6);
+});
+
+for (const engine of ['XI', 'XL', 'XP'] as const) test(`F: ${engine} selection mapping-pending is unreachable`, async () => {
+  const frame = painted();
+  const layout = pluginLayout(frame, 'v1')!;
+  let current = true;
+  let refreshing = false;
+  let selection: import('./types').XlsxPluginSelection = null;
+  const proposals = () => refreshing ? null : { proposals: [], sheetIndex: 0, previewVersion: 0 };
+  const geometry = engine === 'XP'
+    ? createPeerlessPluginGeometry(layout, frame, element(0, 0), element(0, 0),
+        () => ({ version: current ? 'v1' : 'v2', painted: frame }), proposals, undefined, () => selection)
+    : createPluginGeometry(layout, frame, element(0, 0), element(0, 0), () => current,
+        proposals, undefined, () => selection);
+  const check = async (expected: string) => {
+    const sync = geometry.getAnchorGeometry({ kind: 'selection' });
+    const asyncResults = await geometry.readAnchorGeometries([{ kind: 'selection' }]);
+    expect(asyncResults).toEqual([sync]);
+    expect(sync.ok ? 'ok' : sync.failure.code).toBe(expected);
+    expect(sync.ok || sync.failure.code !== 'pending').toBe(true);
+  };
+  await check('missing-target');
+  selection = { sheetId: 'sheet:0', sheetIndex: 0, chartId: null, cells: {
+    anchor: { row: 0, col: 0 }, focus: { row: 0, col: 0 },
+  } };
+  await check('ok');
+  refreshing = true;
+  await check('layout-unavailable');
+  refreshing = false;
+  selection.sheetId = 'sheet:1';
+  await check('layout-unavailable');
+  selection.sheetId = 'sheet:0';
+  selection.cells = { anchor: { row: 900, col: 900 }, focus: { row: 901, col: 901 } };
+  await check('layout-unavailable');
+  selection.chartId = 'chart';
+  await check('missing-target');
+  current = false;
+  await check('layout-unavailable');
 });

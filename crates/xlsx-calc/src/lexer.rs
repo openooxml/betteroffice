@@ -162,12 +162,38 @@ pub fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
             "formula length exceeded cap",
         ));
     }
-    Lexer { input, pos: 0 }.run()
+    Lexer {
+        input,
+        pos: 0,
+        external_prefixes: false,
+    }
+    .run()
+}
+
+/// [`lex`] for rewriting formula text rather than evaluating it. It also
+/// reads the prefix excel stores before a reference into another workbook,
+/// `[1]` before `Sheet!A1` and `[1]!` before a name, as an
+/// [`TokKind::Ident`] spanning just that prefix, so the text around such a
+/// reference still tokenizes. The parser never sees these tokens.
+pub fn lex_for_rewrite(input: &str) -> Result<Vec<Token>, ParseError> {
+    if input.len() > MAX_FORMULA_BYTES {
+        return Err(ParseError::new(
+            MAX_FORMULA_BYTES,
+            "formula length exceeded cap",
+        ));
+    }
+    Lexer {
+        input,
+        pos: 0,
+        external_prefixes: true,
+    }
+    .run()
 }
 
 struct Lexer<'a> {
     input: &'a str,
     pos: usize,
+    external_prefixes: bool,
 }
 
 impl Lexer<'_> {
@@ -183,6 +209,8 @@ impl Lexer<'_> {
                 '"' => self.lex_string()?,
                 '#' => self.lex_error_literal()?,
                 '\'' => self.lex_quoted_sheet_ref()?,
+                '[' if self.workbook_function_end().is_some() => self.lex_workbook_function(),
+                '[' if self.external_prefix_end().is_some() => self.lex_external_prefix(),
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
                 ',' => self.punct(TokKind::Comma),
@@ -345,6 +373,46 @@ impl Lexer<'_> {
             }
         }
         Err(ParseError::new(start, "unknown error literal"))
+    }
+
+    /// where `[1]!Foo` ends when one stands here before its `(`: the form
+    /// excel stores a call to a function of another workbook, an add-in's, in.
+    fn workbook_function_end(&self) -> Option<usize> {
+        let rest = self.input[self.pos..].strip_prefix('[')?;
+        let (index, name) = rest.split_once("]!")?;
+        let word = name
+            .find(|c: char| !c.is_alphanumeric() && !matches!(c, '_' | '.'))
+            .unwrap_or(name.len());
+        let named = !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) && word > 0;
+        (named && name[word..].starts_with('('))
+            .then_some(self.pos + "[".len() + index.len() + "]!".len() + word)
+    }
+
+    /// where `[1]` or `[1]!` ends when one stands here and this lexer reads
+    /// the prefixes of references into other workbooks.
+    fn external_prefix_end(&self) -> Option<usize> {
+        if !self.external_prefixes {
+            return None;
+        }
+        let rest = self.input[self.pos..].strip_prefix('[')?;
+        let (index, after) = rest.split_once(']')?;
+        if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let bang = usize::from(after.starts_with('!'));
+        Some(self.pos + "[".len() + index.len() + "]".len() + bang)
+    }
+
+    fn lex_external_prefix(&mut self) -> TokKind {
+        let start = self.pos;
+        self.pos = self.external_prefix_end().unwrap_or(self.pos);
+        TokKind::Ident(self.input[start..self.pos].to_string())
+    }
+
+    fn lex_workbook_function(&mut self) -> TokKind {
+        let start = self.pos;
+        self.pos = self.workbook_function_end().unwrap_or(self.pos);
+        TokKind::Ident(self.input[start..self.pos].to_string())
     }
 
     /// `'Quoted Sheet'!A1` or `'Quoted Sheet'!A1:B2`. `''` escapes a quote.
@@ -612,6 +680,33 @@ mod tests {
 
     fn kinds(src: &str) -> Vec<TokKind> {
         lex(src).unwrap().into_iter().map(|t| t.kind).collect()
+    }
+
+    /// Only the rewrite lexer reads the prefix of a reference into another
+    /// workbook, as one token spanning `[1]` or `[1]!`; the text around it
+    /// tokenizes as usual, and the evaluating lexer still refuses it.
+    #[test]
+    fn the_rewrite_lexer_reads_external_workbook_prefixes() {
+        for (source, prefix, rest) in [
+            ("[1]Data!$A$1+Sales[Amt]", "[1]", 3),
+            ("Sales[[#This Row],[Amt]]*[12]Rates!B2", "[12]", 1),
+            ("[3]!Total+1", "[3]!", 3),
+        ] {
+            assert!(lex(source).is_err(), "{source}");
+            let tokens = lex_for_rewrite(source).unwrap();
+            let at = tokens
+                .iter()
+                .position(|t| t.kind == TokKind::Ident(prefix.into()))
+                .unwrap();
+            assert_eq!(&source[tokens[at].start..tokens[at].end], prefix);
+            assert_eq!(tokens.len() - at - 1, rest, "{source}");
+        }
+        assert!(matches!(
+            lex_for_rewrite("Sales[Amt]").unwrap()[0].kind,
+            TokKind::TableRef { .. }
+        ));
+        assert!(lex_for_rewrite("[x]Data!A1").is_err());
+        assert!(lex_for_rewrite("[]Data!A1").is_err());
     }
 
     #[test]

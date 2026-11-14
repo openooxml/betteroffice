@@ -509,6 +509,48 @@ describe('YrsSession edit batches', () => {
     }
   });
 
+  it('projects live run property records without a type into serializable inline nodes', async () => {
+    const changed = '<w:r><w:rPr><w:i/><w:rPrChange w:id="8" w:author="Prior"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>Template</w:t></w:r>';
+    const session = await open(fixture(paragraph('00000001', changed)));
+    const reopened = await createYrsSession({ clientId: nextClientId++ });
+    const changes = [{ info: { id: 8, author: 'Prior' }, previousFormatting: { bold: true }, formatting: { italic: true } }];
+    try {
+      const base = session.materializeDocx();
+      if (!base) throw new Error('the opened package must materialize');
+      session.applyRawOps('body', [{ op: 'format', index: 0, len: 8, attrs: { rPrChange: changes } }]);
+      const before = session.encodeState();
+      const projected = yrsToDocument(session, base);
+      expect(projected.package.document.content[0]).toMatchObject({
+        type: 'paragraph',
+        content: [{
+          type: 'run',
+          formatting: { italic: true },
+          propertyChanges: [{
+            type: 'runPropertyChange',
+            info: { id: 8, author: 'Prior' },
+            previousFormatting: { bold: true },
+          }],
+          content: [{ type: 'text', text: 'Template' }],
+        }],
+      });
+      expect(session.encodeState()).toEqual(before);
+      expect(session.storySegments('body').find(segment => segment.kind === 'text')?.attributes.rPrChange).toEqual(changes);
+      const saved = await repackDocx(projected);
+      expect(text(part(saved, 'word/document.xml'))).toMatch(/<w:rPrChange [^>]*w:author="Prior"/);
+      reopened.openDocx(new Uint8Array(saved), true);
+      expect(texts(reopened)).toEqual(['Template']);
+      expect(reopened.listRevisions()).toMatchObject([{ revisionId: '8', kind: 'rPrChange', author: 'Prior' }]);
+      reopened.rejectChange({ revisionId: '8' });
+      const attributes = reopened.storySegments('body').find(segment => segment.kind === 'text')?.attributes;
+      expect(attributes?.bold).toBe(true);
+      expect(attributes?.italic).not.toBe(true);
+      expect(attributes?.rPrChange).toBeUndefined();
+    } finally {
+      reopened.destroy();
+      session.destroy();
+    }
+  });
+
   it('refuses edits that would drop tracked run formatting and keeps it through other edits', async () => {
     const changed =
       '<w:r><w:rPr><w:b/><w:rPrChange w:id="7" w:author="Ann" w:date="2026-09-24T12:00:00Z"><w:rPr/></w:rPrChange></w:rPr><w:t>bold</w:t></w:r>';

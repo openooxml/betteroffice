@@ -4,7 +4,9 @@ use xlsx_model::styles::{
     Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection,
     Theme, VAlign, Xf,
 };
-use xlsx_model::{AnchorCell, AutoFilter, ChartRefKind, ConditionalFormatRule, DifferentialFormat};
+use xlsx_model::{
+    AnchorCell, AutoFilter, ChartRefKind, ConditionalFormatRule, DifferentialFormat, RunUnderline,
+};
 
 use crate::snapshot::growth::Growth;
 use crate::snapshot::header::{SnapshotHeader, SnapshotMode};
@@ -812,6 +814,10 @@ enum_codec!(HAlign {
     CenterContinuous = 6, Distributed = 7,
 });
 enum_codec!(VAlign { Top = 0, Center = 1, Bottom = 2, Justify = 3, Distributed = 4 });
+// none and single keep the bytes of the boolean they replace.
+enum_codec!(RunUnderline {
+    None = 0, Single = 1, Double = 2, SingleAccounting = 3, DoubleAccounting = 4,
+});
 enum_codec!(AnchorEditAs { TwoCell = 0, OneCell = 1, Absolute = 2 });
 enum_codec!(ChartRefKind {
     SeriesName = 0, Categories = 1, Values = 2, BubbleSize = 3, Title = 4,
@@ -1058,8 +1064,43 @@ struct_codec!(Hyperlink {
 struct_codec!(SheetFormat {
     default_row_height_pt,
     custom_height,
+    zero_height,
+    default_col_width,
+    base_col_width
+}; hide_gridlines = false);
+
+/// `SheetFormat` as laid out before column defaults, which it reads as absent.
+pub(super) struct LegacyFormat {
+    default_row_height_pt: Option<f64>,
+    custom_height: bool,
+    zero_height: bool,
+}
+struct_codec!(LegacyFormat {
+    default_row_height_pt,
+    custom_height,
     zero_height
 });
+
+impl From<&SheetFormat> for LegacyFormat {
+    fn from(format: &SheetFormat) -> Self {
+        Self {
+            default_row_height_pt: format.default_row_height_pt,
+            custom_height: format.custom_height,
+            zero_height: format.zero_height,
+        }
+    }
+}
+
+impl From<LegacyFormat> for SheetFormat {
+    fn from(format: LegacyFormat) -> Self {
+        Self {
+            default_row_height_pt: format.default_row_height_pt,
+            custom_height: format.custom_height,
+            zero_height: format.zero_height,
+            ..Self::default()
+        }
+    }
+}
 struct_codec!(ColStyle { first, last, xf });
 struct_codec!(HiddenDimensions {
     col_widths,
@@ -1612,6 +1653,12 @@ const XF_V2_TAG: usize = 17;
 /// Tags a chart section record whose charts carry edited part XML; a record
 /// tagged with the section itself predates it.
 const CHART_XML_TAG: usize = 27;
+/// Tags a format section record that carries column defaults; a record
+/// tagged with the section itself predates them.
+const SIZED_FORMAT_TAG: usize = 28;
+/// Tags a format section record, laid out as one tagged `SIZED_FORMAT_TAG`,
+/// whose sheet hides its gridlines.
+const GRIDLESS_FORMAT_TAG: usize = 29;
 const FILL_RECORD: usize = 18;
 const BORDER_RECORD: usize = 19;
 
@@ -1623,6 +1670,7 @@ fn base_section(tag: usize) -> usize {
         21 => ROW_STYLE_SECTION,
         XF_V2_TAG => XF_SECTION,
         CHART_XML_TAG => 7,
+        SIZED_FORMAT_TAG | GRIDLESS_FORMAT_TAG => 4,
         FILL_RECORD => 11,
         BORDER_RECORD => 12,
         tag if tag <= RELEASED_BASE_SECTIONS => tag,
@@ -1827,6 +1875,10 @@ impl BaseCursor {
             && charts[self.index]
                 .iter()
                 .any(|chart| chart.raw_xml.is_some());
+        let gridless = self.section == 4 && formats[self.index].hide_gridlines;
+        let sized = self.section == 4
+            && (formats[self.index].default_col_width.is_some()
+                || formats[self.index].base_col_width.is_some());
         let mut w = Writer::new();
         w.u8(match self.section {
             0 => usize::from(manifest_tag(base)),
@@ -1838,6 +1890,8 @@ impl BaseCursor {
             12 => BORDER_RECORD,
             XF_SECTION if !released => XF_V2_TAG,
             7 if edited => CHART_XML_TAG,
+            4 if gridless => GRIDLESS_FORMAT_TAG,
+            4 if sized => SIZED_FORMAT_TAG,
             section => section,
         } as u8);
         let index = self.index;
@@ -1857,7 +1911,8 @@ impl BaseCursor {
                 self.fingerprint_key = Some(*key);
             }
             3 => freeze_panes[index].write(&mut w),
-            4 => formats[index].write(&mut w),
+            4 if gridless || sized => formats[index].write(&mut w),
+            4 => LegacyFormat::from(&formats[index]).write(&mut w),
             5 => col_styles[index].write(&mut w),
             6 => hyperlinks[index].write(&mut w),
             7 if edited => charts[index]
@@ -2019,12 +2074,14 @@ impl AuthoritySnapshotEncoder {
         let WorkbookAuthority {
             doc,
             projection_valid: _,
+            plain_style_cells: _,
             snapshot_revision: _,
             base,
             history: _,
             next_sheet_id: _,
             undo_stack: _,
             redo_stack: _,
+            collaborative: _,
         } = a;
         let mut preflight = BaseCursor::default();
         while let Some(record) = preflight.next(base) {
@@ -2110,12 +2167,14 @@ impl WorkbookAuthority {
         let Self {
             doc,
             projection_valid: _,
+            plain_style_cells: _,
             snapshot_revision: _,
             base: _,
             history: _,
             next_sheet_id,
             undo_stack: _,
             redo_stack: _,
+            collaborative: _,
         } = self;
         (
             doc.client_id().get(),
@@ -2173,7 +2232,8 @@ impl BaseRecord {
             1 => r.value::<DefinedName>()?,
             2 => r.value::<(i64, Vec<String>)>()?,
             3 => r.value::<Option<FreezePane>>()?,
-            4 => r.value::<SheetFormat>()?,
+            4 => r.value::<LegacyFormat>()?,
+            SIZED_FORMAT_TAG | GRIDLESS_FORMAT_TAG => r.value::<SheetFormat>()?,
             5 => r.value::<Vec<ColStyle>>()?,
             6 => r.value::<Vec<Hyperlink>>()?,
             7 => r.value::<Vec<SheetChart>>()?,
@@ -2210,7 +2270,8 @@ impl BaseRecord {
             1 => DefinedName::decode_cost(),
             2 => <(i64, Vec<String>)>::decode_cost(),
             3 => <Option<FreezePane>>::decode_cost(),
-            4 => SheetFormat::decode_cost(),
+            4 => LegacyFormat::decode_cost(),
+            SIZED_FORMAT_TAG | GRIDLESS_FORMAT_TAG => SheetFormat::decode_cost(),
             5 => <Vec<ColStyle>>::decode_cost(),
             6 => <Vec<Hyperlink>>::decode_cost(),
             7 => <Vec<SheetChart>>::decode_cost(),
@@ -2272,7 +2333,12 @@ impl BaseRecord {
             1 => Self::DefinedName(r.value()?),
             2 => Self::Fingerprints(r.value()?),
             3 => Self::FreezePane(r.value()?),
-            4 => Self::Format(r.value()?),
+            4 => Self::Format(r.value::<LegacyFormat>()?.into()),
+            SIZED_FORMAT_TAG => Self::Format(r.value()?),
+            GRIDLESS_FORMAT_TAG => Self::Format(SheetFormat {
+                hide_gridlines: true,
+                ..r.value()?
+            }),
             5 => Self::Columns(r.value()?),
             6 => Self::Hyperlinks(r.value()?),
             7 => Self::Charts(r.value()?),
@@ -2514,7 +2580,12 @@ impl BaseBuilder {
                     self.cursor.fingerprint_key = Some(key);
                 }
                 3 => base.freeze_panes.push(Codec::read(&mut r)?),
-                4 => base.formats.push(Codec::read(&mut r)?),
+                4 => base.formats.push(LegacyFormat::read(&mut r)?.into()),
+                SIZED_FORMAT_TAG => base.formats.push(Codec::read(&mut r)?),
+                GRIDLESS_FORMAT_TAG => base.formats.push(SheetFormat {
+                    hide_gridlines: true,
+                    ..Codec::read(&mut r)?
+                }),
                 5 => base.col_styles.push(Codec::read(&mut r)?),
                 6 => base.hyperlinks.push(Codec::read(&mut r)?),
                 7 => base.charts.push(Codec::read(&mut r)?),
@@ -2871,7 +2942,9 @@ impl AuthorityHydrator {
         }
         let base = self.base.finish()?;
         let authority = WorkbookAuthority::hydrated(self.doc, Arc::new(base), self.next_sheet_id);
-        if !self.vector_validated && authority.encode_state_vector_v1() != self.state_vector {
+        if !self.vector_validated
+            && !same_state_vector(&authority.encode_state_vector_v1(), &self.state_vector)
+        {
             return Err(SnapshotError::new(
                 "authority snapshot state vector differs",
             ));
@@ -2932,6 +3005,15 @@ impl AuthorityHydrator {
     }
 }
 
+fn same_state_vector(left: &[u8], right: &[u8]) -> bool {
+    use yrs::updates::decoder::Decode;
+    left == right
+        || matches!(
+            (yrs::StateVector::decode_v1(left), yrs::StateVector::decode_v1(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2942,6 +3024,14 @@ mod tests {
     use crate::snapshot::wire::unframe;
 
     use super::*;
+
+    #[test]
+    fn snapshot_state_vectors_compare_by_client_not_byte_order() {
+        assert!(same_state_vector(&[2, 1, 1, 5, 1], &[2, 5, 1, 1, 1]));
+        assert!(!same_state_vector(&[2, 1, 1, 5, 1], &[2, 5, 2, 1, 1]));
+        assert!(!same_state_vector(&[2, 1, 1, 5, 1], &[1, 1, 1]));
+        assert!(!same_state_vector(&[9], &[2, 1, 1, 5, 1]));
+    }
 
     #[test]
     fn precision_settings_are_rejected_by_the_legacy_date_reader() {
@@ -3812,11 +3902,14 @@ mod tests {
                 default_row_height_pt: Some(f64::from_bits(0x7ff8_0000_0000_0042)),
                 custom_height: true,
                 zero_height: false,
+                ..SheetFormat::default()
             },
             SheetFormat {
                 default_row_height_pt: Some(-0.0),
                 custom_height: false,
                 zero_height: true,
+                hide_gridlines: true,
+                ..SheetFormat::default()
             },
             SheetFormat::default(),
         ];
@@ -3905,7 +3998,7 @@ mod tests {
                 size_pt: Some(-0.0),
                 bold: true,
                 italic: false,
-                underline: true,
+                underline: RunUnderline::Single,
                 strike: false,
                 color: Some(Color::Theme {
                     idx: 5,
@@ -3981,6 +4074,15 @@ mod tests {
         push_all(&mut encoder, &mut hydrator, budget);
         let restored = hydrator.finish().unwrap();
         assert_eq!(base_records(&a.base), base_records(&restored.base));
+        assert_eq!(
+            restored
+                .base
+                .formats
+                .iter()
+                .map(|format| format.hide_gridlines)
+                .collect::<Vec<_>>(),
+            [false, true, false]
+        );
         assert_eq!(restored.base.bootstrap_client_id, 17);
         assert_eq!(restored.base.fingerprint, "kept-verbatim");
         assert_eq!(restored.base.fingerprints, a.base.fingerprints);
@@ -4357,7 +4459,8 @@ mod tests {
             let budget = SnapshotBudget::new(100, usize::MAX).unwrap();
             let mut encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
             let mut header = header(&a, &encoder, budget);
-            assert_eq!(header.chunk_count(ChunkKind::Yrs), 1);
+            assert!(header.chunk_count(ChunkKind::Yrs) >= 1);
+            header.chunk_counts[ChunkKind::Yrs as usize - 1] = 1;
             header.state_vector = StateVector::default().encode_v1();
             let mut hydrator = AuthorityHydrator::new(&header).unwrap();
             while let Some(chunk) = encoder.next(budget).unwrap() {
@@ -4588,6 +4691,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn column_defaults_survive_base_records_under_their_own_tag() {
+        let mut model = model();
+        model.sheets[1].format.default_col_width = Some(22.86);
+        model.sheets[1].format.base_col_width = Some(10);
+        let base = WorkbookBase::from_model(&model).unwrap();
+        let records = base_records(&base);
+        let formats = records
+            .iter()
+            .map(|record| usize::from(record[0]))
+            .filter(|&tag| base_section(tag) == 4)
+            .collect::<Vec<_>>();
+        assert_eq!(formats, [4, SIZED_FORMAT_TAG]);
+        for decoded in decoded_bases(&records) {
+            assert_eq!(decoded.formats, base.formats);
+            assert_eq!(base_records(&decoded), records);
+        }
+    }
+
     /// Italic formats (26) and edited charts (27) ride tags a release before
     /// them maps to no section, so it refuses such a base through the same arm
     /// that refuses any unknown tag here; a base with neither keeps the tags
@@ -4633,7 +4755,7 @@ mod tests {
             unknown
                 .iter_mut()
                 .find(|record| usize::from(record[0]) == tag)
-                .unwrap()[0] = 28;
+                .unwrap()[0] = GRIDLESS_FORMAT_TAG as u8 + 1;
             let mut whole = BaseBuilder::default();
             assert!(
                 unknown

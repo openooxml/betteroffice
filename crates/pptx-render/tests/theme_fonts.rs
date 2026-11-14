@@ -16,7 +16,9 @@ fn rendered(slide: usize, families: &[(&str, &[u8])]) -> RenderedSlide {
     let session = DeckSession::open(DECK, 291).unwrap();
     let mut renderer = SlideRenderer::new();
     for (family, bytes) in families {
-        renderer.register_font(family, false, false, bytes).unwrap();
+        renderer
+            .register_font(family, false, false, *bytes)
+            .unwrap();
     }
     renderer
         .layout_slide(session.package(), &session.snapshot().unwrap(), slide)

@@ -7,14 +7,14 @@ use crate::deck::{map_number, map_string, map_string_array, required_map, shape_
 use crate::story::{materialize_paragraph_joins, snapshot_story, story_ref};
 use crate::{DeckSession, EditCtx, EditError, EditResult, PARA_ID, STORIES, ShapeSnapshot};
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TableInsertPosition {
     Before,
     After,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TableColumnWidth {
     #[default]
@@ -556,7 +556,7 @@ impl DeckSession {
                         .and_then(|paragraph| paragraph.runs.first())
                         .map(|run| run.style.clone())
                         .unwrap_or_default();
-                    crate::story::insert_styled_text(&story, &mut txn, 0, text, &style);
+                    crate::story::insert_styled_text(&story, &mut txn, 0, text, &style, false);
                 }
                 let snapshot = snapshot_story(&story, &txn, key)?;
                 new_cell_refs.push(project_paragraph_id(

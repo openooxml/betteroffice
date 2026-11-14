@@ -39,6 +39,7 @@ const STYLE: CSSProperties = {
 const MOVE_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'];
 
 export interface ViewerInputProps {
+  id?: string;
   /** Reads the resident document. */
   read: ResidentEngineWorkerClient['documentRead'];
   story: string;
@@ -51,7 +52,7 @@ export interface ViewerInputProps {
 }
 
 const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function ViewerInput(
-  { read, story, queries, document: documentKey, onSelectionChange, onFocusChange },
+  { id, read, story, queries, document: documentKey, onSelectionChange, onFocusChange },
   ref
 ) {
   const { t } = useTranslation();
@@ -76,6 +77,7 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
       const queries = queriesRef.current;
       const capture = controller.settledCapture();
       const selection: ViewerSelectionChange = {
+        head: range?.head ?? null,
         displayRange: range && queries ? {
           story,
           from: Math.min(range.anchor, range.head),
@@ -201,6 +203,7 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
 
   const textarea = (
     <textarea
+      id={id}
       ref={textareaRef}
       className="paged-editor__yrs-input paged-editor__hidden-pm ProseMirror"
       data-testid="yrs-input"

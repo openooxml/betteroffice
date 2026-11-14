@@ -73,6 +73,7 @@ export interface PeerlessViewPainters {
     media?: PresentationCommandFrame['media']): void;
   paintEcho(view: PeerlessViewSnapshot): void;
   restoreLine(view: PeerlessViewSnapshot): void;
+  resync?(): void;
 }
 
 export interface PeerlessViewStore {
@@ -141,6 +142,8 @@ export class PptxCommandRefusedError extends Error {
     super(`Presentation ${operation} refused: ${outcome.reason}`);
   }
 }
+
+export const peerlessEchoStores = new WeakSet<PeerlessViewStore>();
 
 export function createPeerlessViewStore(
   client: PresentationCommandClient, painters: PeerlessViewPainters,
@@ -457,12 +460,20 @@ export function createPeerlessViewStore(
     if (changedSlide && !activation || previous && !changedSlide &&
       (frame.slideRevision < previous.slideRevision || frame.slideRevision === previous.slideRevision &&
         frame.coversThroughSeq <= view.presentedThroughSeq) ||
-      frame.coversThroughSeq < view.presentedThroughSeq) return false;
+      frame.coversThroughSeq < view.presentedThroughSeq) {
+      if (previous && !changedSlide && frame.slideRevision === previous.slideRevision &&
+        frame.coversThroughSeq === previous.coversThroughSeq && frame.version === previous.version && frame.epoch > previous.epoch) {
+        view.confirmed!.frame = { ...previous, epoch: frame.epoch };
+        painters.resync?.();
+      }
+      return false;
+    }
     const covered = view.pending.filter((record) => record.seq <= frame.coversThroughSeq);
     if (!activation && previous && !changedSlide && frame.version === previous.version &&
       frame.slideRevision === previous.slideRevision && covered.length > 0 &&
       covered.every((record) => record.intent.kind === 'collabPipe')) {
       view.confirmed!.frame = { ...frame, displayList: previous.displayList, media: previous.media };
+      if (frame.epoch > previous.epoch) painters.resync?.();
       echoContext = echoContexts.get(frame.coversThroughSeq) ?? echoContext;
       view = { ...view, presentedThroughSeq: frame.coversThroughSeq,
         pending: view.pending.filter((record) => record.seq > frame.coversThroughSeq) };
@@ -786,6 +797,7 @@ export function createPeerlessViewStore(
     return () => { listeners.delete(listener); };
   }
 
+  if (echoEnabled) peerlessEchoStores.add(store);
   controllers.set(store, {
     install, known, reference, hit: (point, borderScale) => hitGeometry(geometry, point, undefined, borderScale),
     navigate: (motion, extend) => navigateGeometry(geometry, view.selection, motion, extend),

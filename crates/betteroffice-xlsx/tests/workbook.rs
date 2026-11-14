@@ -1,13 +1,18 @@
+#[cfg(any(
+    feature = "unstable-track-moves",
+    feature = "unstable-track-visibility"
+))]
+use betteroffice_xlsx::MAX_COLS;
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
-    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
+    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ChartResize, ColStyle,
     DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, ErrorValue, FreezePane,
     GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
     MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
     ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, Stylesheet,
-    UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    UpdateOrigin, Viewport, Workbook, WorkbookModel, resolve_chart_anchor,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2994,56 +2999,289 @@ fn shared_chart_formula(workbook: &Workbook, sheet: SheetId) -> String {
         .clone()
 }
 
-/// Inserting a row on one of two sheets that share a chart part moves only that
-/// sheet's references, so the part can no longer carry both. The save is
-/// refused rather than rewriting the chart the other sheet shows.
+/// Inserting a row on one of two sheets that share a chart part would move only
+/// that sheet's references, so the part could no longer carry both. The edit
+/// is refused before it applies rather than accepted and left for the save to
+/// refuse; edits that leave the shared references alone still go through.
 #[test]
-fn refuses_to_save_a_shared_chart_part_a_structural_edit_split() {
+fn refuses_a_structural_edit_splitting_a_shared_chart_part_before_it_applies() {
     let mut workbook = Workbook::open(&shared_chart_fixture()).unwrap();
     assert_eq!(shared_chart_formula(&workbook, SheetId(0)), "$A$1:$A$2");
     assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
     let untouched = workbook.save().unwrap();
+    let version = workbook.version();
 
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::InsertRows {
+            sheet: SheetId(1),
+            at: 0,
+            count: 2,
+        },
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+    ] {
+        let error = workbook
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "xl/charts/chart1.xml references cells this edit would move, and it cannot be rewritten",
+            "{op:?}"
+        );
+        assert_eq!(workbook.version(), version, "{op:?}");
+        assert!(!workbook.can_undo(), "{op:?}");
+        assert_eq!(shared_chart_formula(&workbook, SheetId(0)), "$A$1:$A$2");
+        assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
+        assert_eq!(workbook.save().unwrap(), untouched, "{op:?}");
+    }
+
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
+        .unwrap();
     workbook
         .apply_ops(
             vec![Op::InsertRows {
                 sheet: SheetId(0),
-                at: 0,
+                at: 30,
                 count: 1,
             }],
             CalculationOptions::default(),
         )
         .unwrap();
-    assert_eq!(shared_chart_formula(&workbook, SheetId(0)), "$A$2:$A$3");
-    assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
-
-    let error = workbook.save().unwrap_err();
-    assert!(
-        matches!(&error, Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
-            if message.contains("xl/charts/chart1.xml")
-                && message.contains("sheet First")
-                && message.contains("sheet Second")),
-        "{error:?}"
-    );
-
-    workbook.undo(CalculationOptions::default()).unwrap();
-    assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
-    let restored = package_map(&workbook.save().unwrap());
+    workbook
+        .apply_ops(
+            vec![
+                Op::AddSheet {
+                    index: 2,
+                    name: "Plain".into(),
+                },
+                Op::InsertRows {
+                    sheet: SheetId(2),
+                    at: 0,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
     let before = package_map(&untouched);
-    for path in [
-        "xl/charts/chart1.xml",
-        "xl/drawings/drawing1.xml",
-        "xl/drawings/drawing2.xml",
-    ] {
-        assert_eq!(
-            restored.get(path),
-            before.get(path),
-            "undoing the split lets {path} save unchanged again"
-        );
-    }
-    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    let after = package_map(&saved);
+    assert_eq!(
+        after.get("xl/charts/chart1.xml"),
+        before.get("xl/charts/chart1.xml")
+    );
+    let reopened = Workbook::open(&saved).unwrap();
     assert_eq!(shared_chart_formula(&reopened, SheetId(0)), "$A$1:$A$2");
     assert_eq!(shared_chart_formula(&reopened, SheetId(1)), "$A$1:$A$2");
+    assert_eq!(
+        reopened.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 5.0 }
+    );
+}
+
+fn shared_chart_xml(saved: &[u8]) -> String {
+    String::from_utf8(package_map(saved)["xl/charts/chart1.xml"].clone()).unwrap()
+}
+
+fn insert_above_both_shared_ranges() -> Vec<Op> {
+    (0..2)
+        .map(|sheet| Op::InsertRows {
+            sheet: SheetId(sheet),
+            at: 0,
+            count: 1,
+        })
+        .collect()
+}
+
+/// Two sheets moving a shared part's unqualified references the same way
+/// write the same references, but each rebuilds the cache from its own cells.
+/// A value edit on one of them then makes the rebuilt caches differ. The part
+/// takes the first sheet's, so the save cannot fail on what the cells read.
+#[test]
+fn a_value_edit_under_a_shared_chart_part_moved_on_both_sheets_saves() {
+    let mut workbook = Workbook::open(&shared_chart_fixture()).unwrap();
+    workbook
+        .apply_ops(
+            insert_above_both_shared_ranges(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("A2"), "5", CalculationOptions::default())
+        .unwrap();
+
+    let saved = workbook.save().unwrap();
+    let chart = shared_chart_xml(&saved);
+    assert!(
+        chart.contains("<c:f>$A$2:$A$3</c:f>") && chart.contains("<c:v>5</c:v>"),
+        "{chart}"
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(shared_chart_formula(&reopened, SheetId(0)), "$A$2:$A$3");
+    assert_eq!(shared_chart_formula(&reopened, SheetId(1)), "$A$2:$A$3");
+}
+
+/// The batch moves both references the same way and changes an input whose
+/// formula lands under the shared range only once the batch recalculates. What
+/// decides the edit reads no cell value, so the recalculated value cannot turn
+/// an accepted batch into a failing save.
+#[test]
+fn a_recalculated_value_under_a_moved_shared_chart_part_saves() {
+    let mut workbook = Workbook::open(&shared_chart_fixture()).unwrap();
+    for (sheet, address, input) in [
+        (0, "B1", "1"),
+        (0, "A1", "=B1"),
+        (0, "A2", "2"),
+        (1, "A1", "1"),
+        (1, "A2", "2"),
+    ] {
+        workbook
+            .edit_cell(
+                SheetId(sheet),
+                cell(address),
+                input,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }
+    workbook.save().unwrap();
+    let mut ops = insert_above_both_shared_ranges();
+    ops.push(Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("B2"),
+        cell: CellState {
+            value: CellValue::Number { value: 9.0 },
+            ..CellState::default()
+        },
+    });
+    workbook
+        .apply_ops(ops, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(
+        workbook.model().sheets[0].cell(cell("A2")).unwrap().value,
+        CellValue::Number { value: 9.0 }
+    );
+
+    let saved = workbook.save().unwrap();
+    let chart = shared_chart_xml(&saved);
+    assert!(
+        chart.contains("<c:f>$A$2:$A$3</c:f>") && chart.contains("<c:v>9</c:v>"),
+        "{chart}"
+    );
+    Workbook::open(&saved).unwrap();
+}
+
+/// Seeded value edits on both sheets of a shared chart part, before and after
+/// the part's references move on both: every save succeeds and reopens.
+#[test]
+fn value_edits_on_a_shared_chart_part_never_fail_the_save() {
+    let mut state: u64 = 0x5eed_c4a7;
+    let mut next = |bound: u64| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) % bound
+    };
+    let mut workbook = Workbook::open(&shared_chart_fixture()).unwrap();
+    for step in 0..120 {
+        if step == 40 {
+            workbook
+                .apply_ops(
+                    insert_above_both_shared_ranges(),
+                    CalculationOptions::default(),
+                )
+                .unwrap();
+        }
+        let sheet = SheetId(next(2) as u32);
+        let at = CellRef::new(next(5) as u32, next(2) as u32);
+        let input = match next(5) {
+            0 => String::new(),
+            1 => "text".to_owned(),
+            2 => "=1/0".to_owned(),
+            3 => format!("={}*2", next(100)),
+            _ => format!("{}", next(1000)),
+        };
+        workbook
+            .edit_cell(sheet, at, &input, CalculationOptions::default())
+            .unwrap();
+        if step % 8 == 7 {
+            let saved = workbook
+                .save()
+                .unwrap_or_else(|error| panic!("step {step}: {error}"));
+            Workbook::open(&saved).unwrap();
+        }
+    }
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(shared_chart_formula(&reopened, SheetId(0)), "$A$2:$A$3");
+    assert_eq!(shared_chart_formula(&reopened, SheetId(1)), "$A$2:$A$3");
+}
+
+/// [`shared_chart_fixture`] with a string category cache, the kind whose
+/// points carry cell text, beside its numeric values.
+fn shared_string_chart_fixture() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&shared_chart_fixture()).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/charts/chart1.xml",
+        br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:cat><c:strRef><c:f>$A$1:$A$2</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>a</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>$B$1:$B$2</c:f><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// A control character in a cell under a shared part's reshaped string cache
+/// cannot fail the save: only the first sheet's cache is rebuilt and written,
+/// and a cache point carries a character xml cannot as `_xHHHH_`.
+#[test]
+fn a_control_character_under_a_reshaped_shared_chart_part_saves() {
+    for (sheet, written) in [(1, false), (0, true)] {
+        let mut workbook = Workbook::open(&shared_string_chart_fixture()).unwrap();
+        workbook
+            .apply_ops(
+                (0..2)
+                    .map(|sheet| Op::InsertRows {
+                        sheet: SheetId(sheet),
+                        at: 1,
+                        count: 1,
+                    })
+                    .collect(),
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        workbook
+            .edit_cell(
+                SheetId(sheet),
+                cell("A1"),
+                "=CHAR(1)",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+
+        let saved = workbook
+            .save()
+            .unwrap_or_else(|error| panic!("CHAR(1) on sheet {sheet}: {error}"));
+        let chart = shared_chart_xml(&saved);
+        assert!(chart.contains("<c:f>$A$1:$A$3</c:f>"), "{chart}");
+        assert_eq!(
+            chart.contains("<c:v>_x0001_</c:v>"),
+            written,
+            "CHAR(1) on sheet {sheet}: {chart}"
+        );
+        assert!(!chart.contains('\u{1}'), "{chart}");
+        let reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(
+            reopened.model().sheets[1].charts[0].refs[0].formula,
+            "$A$1:$A$3"
+        );
+    }
 }
 
 #[test]
@@ -3084,12 +3322,12 @@ fn edits_recalculate_render_and_round_trip() {
     #[cfg(feature = "raster")]
     {
         let png = workbook
-            .render_sheet(
-                SheetId(0),
-                &RenderOptions {
-                    range: Some(betteroffice_xlsx::CellRange::parse_a1("A1:B2").unwrap()),
-                    ..RenderOptions::default()
+            .render_png(
+                betteroffice_xlsx::PngTarget::Range {
+                    sheet: SheetId(0),
+                    range: betteroffice_xlsx::CellRange::parse_a1("A1:B2").unwrap(),
                 },
+                &RenderOptions::default(),
             )
             .unwrap();
         assert_eq!(
@@ -3986,6 +4224,804 @@ fn move_range_materializes_missing_cell_styles_in_one_transaction() {
 }
 
 #[test]
+fn fill_range_tiles_values_styles_and_translated_formulas_one_undo() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    let mut model = WorkbookModel::default();
+    let style = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#00ff00".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 10.0 },
+            style: Some(style),
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Number { value: 20.0 },
+            formula: Some("A1+$A$1".into()),
+            style: Some(style),
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model_collaborative(model.clone(), 809).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B1")),
+            CellRange::new(cell("A1"), cell("B4")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(result.applied);
+    assert_eq!(workbook.history_state().undo_depth, 1);
+    for (address, expected) in [
+        ("A2", "10"),
+        ("B2", "=A2+$A$1"),
+        ("A3", "10"),
+        ("B3", "=A3+$A$1"),
+        ("A4", "10"),
+        ("B4", "=A4+$A$1"),
+    ] {
+        assert_eq!(
+            workbook.cell(SheetId(0), cell(address)).unwrap().input,
+            expected,
+            "{address}"
+        );
+    }
+    for address in ["A2", "B2", "A3", "B3", "A4", "B4"] {
+        assert_eq!(
+            workbook.model().sheets[0]
+                .cell(cell(address))
+                .unwrap()
+                .style,
+            Some(style),
+            "{address} style"
+        );
+    }
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.cell(SheetId(0), cell("B4")).unwrap().input,
+        "=A4+$A$1"
+    );
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(workbook.model(), &before);
+    assert!(!workbook.can_undo());
+}
+
+#[test]
+fn fill_range_extends_right_and_keeps_absolute_references() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 5.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            formula: Some("A1+$A$1+B$1+$B2".into()),
+            ..Cell::default()
+        },
+    );
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    })
+    .unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B1")),
+            CellRange::new(cell("A1"), cell("D1")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        workbook.cell(SheetId(0), cell("C1")).unwrap().input,
+        "5",
+        "a two-column source tiles B1's formula into D1, not C1"
+    );
+    assert_eq!(
+        workbook.cell(SheetId(0), cell("D1")).unwrap().input,
+        "=C1+$A$1+D$1+$B2"
+    );
+}
+
+#[test]
+fn fill_range_tiles_the_whole_source_block_including_the_corner() {
+    let mut sheet = Sheet::new("Data");
+    for (address, value) in [("A1", 1.0), ("B1", 2.0), ("A2", 3.0), ("B2", 4.0)] {
+        sheet.set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    })
+    .unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("B2")),
+            CellRange::new(cell("A1"), cell("C4")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for (address, expected) in [
+        ("C1", "1"),
+        ("A3", "1"),
+        ("B3", "2"),
+        ("C3", "1"),
+        ("A4", "3"),
+        ("B4", "4"),
+        ("C4", "3"),
+        ("C2", "3"),
+    ] {
+        assert_eq!(
+            workbook.cell(SheetId(0), cell(address)).unwrap().input,
+            expected,
+            "{address}"
+        );
+    }
+}
+
+#[test]
+fn fill_range_pins_plain_style_over_inherited_column_formatting() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    let mut model = WorkbookModel::default();
+    let styled = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#ff0000".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let mut sheet = Sheet::new("Data");
+    sheet.col_styles.push(ColStyle {
+        first: 1,
+        last: 1,
+        xf: styled,
+    });
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            CellRange::new(cell("A1"), cell("B1")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let filled = workbook.model().sheets[0].cell(cell("B1")).unwrap();
+    assert_eq!(filled.value, CellValue::Empty);
+    assert_eq!(
+        filled.style,
+        Some(0),
+        "a blank source cell pins the plain style instead of leaving column formatting"
+    );
+    assert_ne!(filled.style, Some(styled));
+}
+
+fn assert_fill_refused(model: WorkbookModel, source: &str, destination: &str, expected: &str) {
+    let mut workbook = Workbook::from_model_collaborative(model, 810).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let model_before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::parse_a1(source).unwrap(),
+        CellRange::parse_a1(destination).unwrap(),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains(expected)),
+        "{result:?}"
+    );
+    assert!(!workbook.can_undo());
+    assert_eq!(workbook.history_state().undo_depth, 0);
+    assert_eq!(workbook.model(), &model_before);
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+}
+
+#[test]
+fn fill_range_materializes_a_plain_style_when_no_cell_xf_reads_plain() {
+    use xlsx_model::{Border, Fill, Font, Xf};
+    let mut model = WorkbookModel::default();
+    model.styles.fonts.push(Font {
+        bold: true,
+        ..Default::default()
+    });
+    model.styles.fills.push(Fill::None);
+    model.styles.borders.push(Border::default());
+    model.styles.cell_xfs.push(Xf {
+        font: Some(0),
+        fill: Some(0),
+        border: Some(0),
+        ..Default::default()
+    });
+    let mut sheet = Sheet::new("Data");
+    sheet.col_styles.push(ColStyle {
+        first: 6,
+        last: 6,
+        xf: 0,
+    });
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let result = workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("F1"), cell("F1")),
+            CellRange::new(cell("F1"), cell("G1")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(result.applied);
+    let filled = workbook.model().sheets[0]
+        .cell(cell("G1"))
+        .expect("a blank source cell writes its copied appearance");
+    let style = filled.style.expect("the plain style is pinned explicitly");
+    assert_ne!(style, 0, "style 0 is not the plain format");
+    let plain = workbook.model().styles.resolved_format(None);
+    assert_eq!(workbook.model().styles.resolved_format(Some(style)), plain);
+    assert!(
+        !workbook
+            .model()
+            .styles
+            .resolved_format(Some(style))
+            .font
+            .bold
+    );
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    let reopened_style = reopened.model().sheets[0]
+        .cell(cell("G1"))
+        .and_then(|cell| cell.style)
+        .expect("G1 saves its explicit plain style");
+    assert_eq!(
+        reopened
+            .model()
+            .styles
+            .resolved_format(Some(reopened_style)),
+        reopened.model().styles.resolved_format(None)
+    );
+}
+
+#[test]
+fn fill_range_refuses_merge_fully_inside_the_destination() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Number { value: 2.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.merges.push(CellRange::new(cell("A2"), cell("B2")));
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1:B1",
+        "A1:B3",
+        "merged cells",
+    );
+}
+
+#[test]
+fn fill_range_refuses_an_array_formula_in_the_filled_range() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            formula: Some("SEQUENCE(2)".into()),
+            ..Cell::default()
+        },
+    );
+    sheet.set_array_formula(cell("B1"), CellRange::new(cell("B1"), cell("B2")));
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:B2",
+        "array formulas",
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_table_in_the_filled_range() {
+    use xlsx_model::Table;
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    let mut model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    model.tables.push(Table {
+        name: "Sales".into(),
+        sheet: SheetId(0),
+        range: CellRange::new(cell("A1"), cell("B2")),
+        header_rows: 1,
+        totals_rows: 0,
+        columns: vec!["A".into(), "B".into()],
+    });
+    assert_fill_refused(model, "A1", "A1:A3", "Excel tables");
+}
+
+#[test]
+fn fill_range_refuses_a_chart_anchored_in_the_filled_range() {
+    let bytes = charted_fixture();
+    let mut workbook = Workbook::open_collaborative(&bytes, 810).unwrap();
+    let before = workbook.encode_state_as_update_v1();
+    let model_before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("C1"), cell("C1")),
+        CellRange::new(cell("C1"), cell("C6")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains("charts anchored")),
+        "{result:?}"
+    );
+    assert!(!workbook.can_undo());
+    assert_eq!(workbook.history_state().undo_depth, 0);
+    assert_eq!(workbook.model(), &model_before);
+    assert_eq!(workbook.encode_state_as_update_v1(), before);
+    assert_eq!(workbook.save().unwrap(), bytes);
+}
+
+#[test]
+fn fill_range_pins_plain_style_over_an_unstyled_target_it_clears() {
+    use xlsx_model::{CellFormat, Color, Fill};
+    let mut model = WorkbookModel::default();
+    let styled = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            fill: Fill::Solid(Color::Rgb("#ff0000".into())),
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    let mut sheet = Sheet::new("Data");
+    sheet.col_styles.push(ColStyle {
+        first: 1,
+        last: 1,
+        xf: styled,
+    });
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Text {
+                value: "text".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook
+        .fill_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            CellRange::new(cell("A1"), cell("B1")),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let filled = workbook.model().sheets[0].cell(cell("B1"));
+    assert_eq!(
+        filled.and_then(|filled| filled.style),
+        Some(0),
+        "a cleared unstyled target keeps the plain look instead of taking the column's"
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_hyperlink_on_a_source_cell() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.hyperlinks.push(Hyperlink {
+        range: CellRange::new(cell("A1"), cell("A1")),
+        external_target: Some("https://example.com".into()),
+        location: None,
+        tooltip: None,
+        display: None,
+    });
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:A2",
+        "hyperlinks",
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_hyperlink_on_a_target_cell() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.hyperlinks.push(Hyperlink {
+        range: CellRange::new(cell("A2"), cell("A2")),
+        external_target: Some("https://example.com".into()),
+        location: None,
+        tooltip: None,
+        display: None,
+    });
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:A2",
+        "hyperlinks",
+    );
+}
+
+#[test]
+fn fill_range_refuses_a_comment_on_a_target_cell() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".into(),
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/></Relationships>"#.into(),
+    ));
+    parts.push((
+        "xl/comments/comment1.xml".into(),
+        r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="A2" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#.into(),
+    ));
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A2")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains("comments")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+fn fill_validation_bytes(sqref: &str) -> Vec<u8> {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><dataValidations count="1"><dataValidation type="whole" sqref="{sqref}"><formula1>1</formula1></dataValidation></dataValidations></worksheet>"#
+        )
+        .into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn fill_range_refuses_a_validation_covering_only_the_source() {
+    let mut workbook = Workbook::open(&fill_validation_bytes("A1")).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains("data validations")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_refuses_any_sheet_with_validations() {
+    let mut workbook = Workbook::open(&fill_validation_bytes("A1:A3")).unwrap();
+    assert_preserved_fill_refused(&mut workbook, "A1", "A1:A3", "data validations");
+}
+
+#[test]
+fn fill_range_refuses_two_validations_that_split_the_filled_cells() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><dataValidations count="2"><dataValidation type="whole" sqref="A1"><formula1>1</formula1></dataValidation><dataValidation type="decimal" sqref="A2:A3"><formula1>2</formula1></dataValidation></dataValidations></worksheet>"#.to_vec(),
+    );
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("data validations")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_refuses_a_validation_once_rows_moved_since_opening() {
+    let mut workbook = Workbook::open(&fill_validation_bytes("A1:A3")).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A2"), cell("A2")),
+        CellRange::new(cell("A2"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("data validations")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+fn fill_extension_rule_bytes(sqref: &str) -> Vec<u8> {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        format!(r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><extLst><ext uri="{{78C0D931-6437-407d-A8EE-F0AAD7539E65}}"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="dataBar" id="{{00000000-0000-0000-0000-000000000001}}"><x14:dataBar><x14:cfvo type="autoMin"/><x14:cfvo type="autoMax"/></x14:dataBar></x14:cfRule><xm:sqref>{sqref}</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst></worksheet>"#).into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn fill_range_refuses_any_sheet_with_extension_rules() {
+    for sqref in ["A1", "Z1:Z9"] {
+        let mut workbook = Workbook::open(&fill_extension_rule_bytes(sqref)).unwrap();
+        assert_preserved_fill_refused(&mut workbook, "A1", "A1:A2", "conditional formats");
+    }
+}
+
+#[test]
+fn fill_range_refuses_any_extension_rule_once_rows_moved_since_opening() {
+    let mut workbook = Workbook::open(&fill_extension_rule_bytes("Z1:Z9")).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A2"), cell("A2")),
+        CellRange::new(cell("A2"), cell("A3")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+fn fill_comment_bytes(anchor: &str) -> Vec<u8> {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".into(),
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/></Relationships>"#.into(),
+    ));
+    parts.push((
+        "xl/comments/comment1.xml".into(),
+        format!(r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Author</author></authors><commentList><comment ref="{anchor}" authorId="0"><text><t>Note</t></text></comment></commentList></comments>"#).into_bytes(),
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn fill_range_refuses_any_sheet_with_comments() {
+    for anchor in ["A2", "Z99"] {
+        let mut workbook = Workbook::open(&fill_comment_bytes(anchor)).unwrap();
+        assert_preserved_fill_refused(&mut workbook, "A1", "A1:A2", "comments");
+    }
+}
+
+#[test]
+fn fill_range_refuses_conditional_formats_in_alternate_content() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" mc:Ignorable="x14"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><mc:AlternateContent><mc:Choice Requires="x14"><conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>A1&gt;0</formula></cfRule></conditionalFormatting></mc:Choice></mc:AlternateContent></worksheet>"#.to_vec(),
+    );
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    assert_preserved_fill_refused(&mut workbook, "A1", "A1:A2", "conditional formats");
+}
+
+#[test]
+fn fill_range_refuses_source_conditional_formats_once_rows_moved_since_opening() {
+    let mut parts = sample_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>A1&gt;0</formula></cfRule></conditionalFormatting></worksheet>"#.to_vec(),
+    );
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_preserved_fill_refused(&mut workbook, "A2", "A2:A3", "conditional formats");
+}
+
+fn assert_preserved_fill_refused(
+    workbook: &mut Workbook,
+    source: &str,
+    destination: &str,
+    expected: &str,
+) {
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::parse_a1(source).unwrap(),
+        CellRange::parse_a1(destination).unwrap(),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("cannot safely preserve") && reason.contains(expected)),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_refuses_a_comment_whose_row_was_deleted() {
+    let mut workbook = Workbook::open(&fill_comment_bytes("A2")).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let before = workbook.model().clone();
+    let result = workbook.fill_range(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        CellRange::new(cell("A1"), cell("A2")),
+        CalculationOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(Error::InvalidOperation(reason)) if reason.contains("comments")),
+        "{result:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn fill_range_refuses_a_conditional_format_covering_only_the_target() {
+    use xlsx_model::{ConditionalFormatRule, ConditionalFormatting};
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.conditional_formats.push(ConditionalFormatting {
+        sqref: "B1".into(),
+        rules: vec![ConditionalFormatRule {
+            id: "cf:0".into(),
+            rule_type: "expression".into(),
+            operator: None,
+            formulas: vec!["B1>0".into()],
+            priority: 1,
+            dxf_id: None,
+            format: Default::default(),
+            raw_xml: None,
+        }],
+    });
+    assert_fill_refused(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        },
+        "A1",
+        "A1:B1",
+        "conditional formats",
+    );
+}
+
+#[test]
 fn move_range_refuses_related_comment_anchors_without_mutation() {
     for anchor in ["A1", "B1"] {
         for relationship_type in ["comments", "threadedComment"] {
@@ -4269,7 +5305,7 @@ fn proposal_acceptance_applies_duplicate_targets_sequentially() {
 }
 
 #[test]
-fn rename_invalidates_pending_proposals() {
+fn rename_keeps_pending_proposals() {
     let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
     workbook
         .propose(
@@ -4295,7 +5331,14 @@ fn rename_invalidates_pending_proposals() {
             CalculationOptions::default(),
         )
         .unwrap();
-    assert!(workbook.proposals().is_empty());
+    let proposals = workbook.proposals();
+    assert_eq!(proposals.len(), 1);
+    let edit = &proposals[0].edits[0];
+    assert_eq!(
+        (edit.sheet, edit.a1.as_str(), edit.input.as_str()),
+        (0, "A1", "=Renamed!A2")
+    );
+    assert_ne!(edit.stale, Some(true));
 }
 
 #[test]
@@ -4409,7 +5452,7 @@ fn a_refused_array_formula_saves_its_rectangle() {
 }
 
 #[test]
-fn structural_ops_invalidate_coordinate_proposals() {
+fn structural_ops_rebase_coordinate_proposals() {
     let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
     workbook
         .propose(
@@ -4436,7 +5479,11 @@ fn structural_ops_invalidate_coordinate_proposals() {
             CalculationOptions::default(),
         )
         .unwrap();
-    assert!(workbook.proposals().is_empty());
+    let proposals = workbook.proposals();
+    assert_eq!(proposals.len(), 1);
+    let edit = &proposals[0].edits[0];
+    assert_eq!((edit.row, edit.col, edit.a1.as_str()), (1, 0, "A2"));
+    assert_ne!(edit.stale, Some(true));
 }
 
 #[test]
@@ -4474,12 +5521,18 @@ fn display_lists_degrade_excessive_cell_spans() {
 fn raster_rejects_excessive_total_pixel_area() {
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
     let error = workbook
-        .render_png(&Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: 5_000.0,
-            height: 5_000.0,
-        })
+        .render_png(
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 5_000.0,
+                    height: 5_000.0,
+                },
+            },
+            &betteroffice_xlsx::RenderOptions::default(),
+        )
         .unwrap_err();
     assert!(matches!(error, Error::RenderAreaTooLarge { .. }));
 }
@@ -4501,10 +5554,20 @@ fn collaboration_vectors_diffs_and_deterministic_baseline_handshake() {
         left.encode_state_as_update_v1(),
         right.encode_state_as_update_v1()
     );
-    assert_eq!(
-        left.encode_diff_v1(&right.encode_state_vector_v1())
-            .unwrap(),
-        &[0, 0]
+    let unchanged = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    assert!(
+        YrsUpdate::decode_v1(&unchanged)
+            .unwrap()
+            .state_vector()
+            .is_empty()
+    );
+    assert!(
+        !right
+            .apply_update_v1(&unchanged, CalculationOptions::default())
+            .unwrap()
+            .applied
     );
 
     left.edit_cell(SheetId(0), cell("A1"), "21", CalculationOptions::default())
@@ -5866,10 +6929,6 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
             at: 0,
             count: 1,
         },
-        Op::AddSheet {
-            index: 1,
-            name: "Added".into(),
-        },
         Op::RemoveSheet { index: 1 },
         Op::RenameSheet {
             sheet: SheetId(0),
@@ -5883,6 +6942,18 @@ fn collaborative_mode_rejects_all_structural_ops_before_mutation() {
     ];
     let model = workbook.model().clone();
     let state = workbook.encode_state_as_update_v1();
+    assert!(matches!(
+        workbook.apply_ops(
+            vec![Op::AddSheet {
+                index: 1,
+                name: "Added".into(),
+            }],
+            CalculationOptions::default(),
+        ),
+        Err(Error::CollaborativeSheetPosition)
+    ));
+    assert_eq!(workbook.model(), &model);
+    assert_eq!(workbook.encode_state_as_update_v1(), state);
     for op in structural_ops {
         assert!(matches!(
             workbook.apply_ops(vec![op], CalculationOptions::default()),
@@ -6751,6 +7822,352 @@ fn concurrent_collaborative_freeze_panes_converge() {
     );
 }
 
+struct FreezePaneRace {
+    bytes: Vec<u8>,
+    source: Option<FreezePane>,
+    winner: Workbook,
+    loser: Workbook,
+    winner_pane: Option<FreezePane>,
+    winner_cell: CellRef,
+    loser_cell: CellRef,
+}
+
+impl FreezePaneRace {
+    /// Two peers freeze one sheet at once, each after an edit of its own when
+    /// `earlier` is set, and meet again.
+    fn new(source: Option<FreezePane>, ids: (u64, u64), earlier: bool) -> Self {
+        let options = CalculationOptions::default();
+        let mut model = WorkbookModel::default();
+        let mut sheet = Sheet::new("Data");
+        sheet.freeze_pane = source;
+        model.sheets.push(sheet);
+        let bytes =
+            ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+        let mut left = Workbook::open_collaborative(&bytes, ids.0).unwrap();
+        let mut right = Workbook::open_collaborative(&bytes, ids.1).unwrap();
+        assert_eq!(left.model().sheets[0].freeze_pane, source);
+        let (left_cell, right_cell) = (cell("C1"), cell("D1"));
+        if earlier {
+            left.edit_cell(SheetId(0), left_cell, "1", options).unwrap();
+            right
+                .edit_cell(SheetId(0), right_cell, "2", options)
+                .unwrap();
+            exchange_updates(&mut left, &mut right);
+        }
+        let left_pane = Some(FreezePane::new(1, 0, cell("A2")));
+        let right_pane = Some(FreezePane::new(2, 0, cell("A3")));
+        for (workbook, pane) in [(&mut left, left_pane), (&mut right, right_pane)] {
+            workbook
+                .apply_ops(
+                    vec![Op::SetFreezePane {
+                        sheet: SheetId(0),
+                        pane,
+                    }],
+                    options,
+                )
+                .unwrap();
+        }
+        exchange_updates(&mut left, &mut right);
+        let merged = left.model().sheets[0].freeze_pane;
+        let race = if merged == left_pane {
+            Self {
+                bytes,
+                source,
+                winner: left,
+                loser: right,
+                winner_pane: left_pane,
+                winner_cell: left_cell,
+                loser_cell: right_cell,
+            }
+        } else {
+            Self {
+                bytes,
+                source,
+                winner: right,
+                loser: left,
+                winner_pane: right_pane,
+                winner_cell: right_cell,
+                loser_cell: left_cell,
+            }
+        };
+        assert_eq!(merged, race.winner_pane);
+        race.assert_converged(race.winner_pane);
+        race
+    }
+
+    fn sync(&mut self) {
+        exchange_updates(&mut self.winner, &mut self.loser);
+    }
+
+    fn assert_converged(&self, pane: Option<FreezePane>) {
+        let (winner, loser) = (&self.winner, &self.loser);
+        assert_eq!(winner.model().sheets[0].freeze_pane, pane);
+        assert_eq!(winner.model(), loser.model());
+        assert_eq!(
+            winner.encode_state_vector_v1(),
+            loser.encode_state_vector_v1()
+        );
+        let saved = winner.save().unwrap();
+        assert_eq!(saved, loser.save().unwrap());
+        let reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(reopened.model().sheets[0].freeze_pane, pane);
+        assert_eq!(
+            reopened.model(),
+            Workbook::open(&loser.save().unwrap()).unwrap().model()
+        );
+    }
+}
+
+fn exchange_updates(left: &mut Workbook, right: &mut Workbook) {
+    let options = CalculationOptions::default();
+    let to_right = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let to_left = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&to_left, options).unwrap();
+    right.apply_update_v1(&to_right, options).unwrap();
+}
+
+fn freeze_pane_races(earlier: bool) -> impl Iterator<Item = FreezePaneRace> {
+    [None, Some(FreezePane::new(3, 1, cell("B4")))]
+        .into_iter()
+        .flat_map(move |source| {
+            [(1040, 1041), (1041, 1040)]
+                .into_iter()
+                .map(move |ids| FreezePaneRace::new(source, ids, earlier))
+        })
+}
+
+#[test]
+fn undoing_the_winning_freeze_pane_shows_the_source_pane_on_every_peer() {
+    let options = CalculationOptions::default();
+    for mut race in freeze_pane_races(true) {
+        assert!(race.winner.undo(options).unwrap().applied);
+        assert_eq!(race.winner.model().sheets[0].freeze_pane, race.source);
+        race.sync();
+        race.assert_converged(race.source);
+
+        let mut joiner = Workbook::open_collaborative(&race.bytes, 1042).unwrap();
+        joiner
+            .apply_update_v1(&race.winner.encode_state_as_update_v1(), options)
+            .unwrap();
+        assert_eq!(joiner.model(), race.winner.model());
+
+        assert!(race.winner.redo(options).unwrap().applied);
+        race.sync();
+        race.assert_converged(race.winner_pane);
+    }
+}
+
+#[test]
+fn history_below_an_undone_winning_freeze_pane_stays_restorable() {
+    let options = CalculationOptions::default();
+    for mut race in freeze_pane_races(true) {
+        let at = race.winner_cell;
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+        assert!(race.winner.model().sheets[0].cell(at).is_some());
+
+        assert!(race.winner.undo(options).unwrap().applied);
+        assert!(race.winner.model().sheets[0].cell(at).is_none());
+        race.sync();
+        race.assert_converged(race.source);
+
+        assert!(race.winner.redo(options).unwrap().applied);
+        assert!(race.winner.model().sheets[0].cell(at).is_some());
+        assert!(race.winner.redo(options).unwrap().applied);
+        race.sync();
+        race.assert_converged(race.winner_pane);
+    }
+}
+
+#[test]
+fn the_losing_freeze_pane_stays_gone_whichever_peer_undoes_first() {
+    let options = CalculationOptions::default();
+    for mut race in freeze_pane_races(false) {
+        let state = race.loser.encode_state_as_update_v1();
+        assert!(!race.loser.undo(options).unwrap().applied);
+        assert_eq!(race.loser.encode_state_as_update_v1(), state);
+        race.assert_converged(race.winner_pane);
+
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+        race.assert_converged(race.source);
+    }
+    for mut race in freeze_pane_races(false) {
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+        assert!(!race.loser.undo(options).unwrap().applied);
+        race.sync();
+        race.assert_converged(race.source);
+    }
+}
+
+#[test]
+fn the_losing_peer_undoes_past_its_lost_freeze_pane_into_its_earlier_step() {
+    let options = CalculationOptions::default();
+    for mut race in freeze_pane_races(true) {
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+
+        assert!(race.loser.undo(options).unwrap().applied);
+        assert!(race.loser.model().sheets[0].cell(race.loser_cell).is_none());
+        assert!(
+            race.loser.model().sheets[0]
+                .cell(race.winner_cell)
+                .is_some()
+        );
+        race.sync();
+        race.assert_converged(race.source);
+    }
+}
+
+#[test]
+fn a_freeze_pane_set_after_the_winning_undo_is_kept_and_undoes_to_the_source() {
+    let options = CalculationOptions::default();
+    let pane = Some(FreezePane::new(0, 2, cell("C1")));
+    for mut race in freeze_pane_races(false) {
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+
+        race.loser
+            .apply_ops(
+                vec![Op::SetFreezePane {
+                    sheet: SheetId(0),
+                    pane,
+                }],
+                options,
+            )
+            .unwrap();
+        race.sync();
+        race.assert_converged(pane);
+
+        assert!(race.loser.undo(options).unwrap().applied);
+        race.sync();
+        race.assert_converged(race.source);
+    }
+}
+
+#[test]
+fn a_peer_rejoining_after_the_winning_freeze_pane_undo_keeps_collaborating() {
+    let options = CalculationOptions::default();
+    for mut race in freeze_pane_races(true) {
+        assert!(race.winner.undo(options).unwrap().applied);
+        race.sync();
+        let state = race.winner.encode_state_as_update_v1();
+
+        let mut rejoined = Workbook::open_collaborative(&race.bytes, 1045).unwrap();
+        rejoined.apply_update_v1(&state, options).unwrap();
+        assert_eq!(rejoined.model(), race.winner.model());
+        assert_eq!(rejoined.model().sheets[0].freeze_pane, race.source);
+
+        let mut offline = Workbook::open_collaborative(&race.bytes, 1046).unwrap();
+        offline
+            .edit_cell(SheetId(0), cell("E1"), "3", options)
+            .unwrap();
+        offline.apply_update_v1(&state, options).unwrap();
+        assert_eq!(offline.model().sheets[0].freeze_pane, race.source);
+        assert!(offline.model().sheets[0].cell(cell("E1")).is_some());
+
+        rejoined
+            .edit_cell(SheetId(0), cell("F1"), "4", options)
+            .unwrap();
+        exchange_updates(&mut rejoined, &mut race.winner);
+        assert!(race.winner.model().sheets[0].cell(cell("F1")).is_some());
+
+        assert!(race.winner.redo(options).unwrap().applied);
+        exchange_updates(&mut rejoined, &mut race.winner);
+        assert_eq!(rejoined.model().sheets[0].freeze_pane, race.winner_pane);
+        assert_eq!(rejoined.model(), race.winner.model());
+    }
+}
+
+#[test]
+fn a_reversed_freeze_pane_delivery_reads_the_source_pane_until_the_replacement_lands() {
+    let options = CalculationOptions::default();
+    let source_pane = Some(FreezePane::new(3, 1, cell("B4")));
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.freeze_pane = source_pane;
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut source = Workbook::open_collaborative(&bytes, 1043).unwrap();
+    let mut target = Workbook::open_collaborative(&bytes, 1044).unwrap();
+    let set_pane = |workbook: &mut Workbook, rows: u32| {
+        let pane = Some(FreezePane::new(rows, 0, CellRef::new(rows, 0)));
+        let vector = workbook.encode_state_vector_v1();
+        workbook
+            .apply_ops(
+                vec![Op::SetFreezePane {
+                    sheet: SheetId(0),
+                    pane,
+                }],
+                options,
+            )
+            .unwrap();
+        (pane, workbook.encode_diff_v1(&vector).unwrap())
+    };
+    let (current, first) = set_pane(&mut source, 1);
+    target.apply_update_v1(&first, options).unwrap();
+    assert_eq!(target.model().sheets[0].freeze_pane, current);
+
+    let (_, second) = set_pane(&mut source, 2);
+    let (last, third) = set_pane(&mut source, 5);
+    assert!(target.apply_update_v1(&third, options).unwrap().applied);
+    assert_eq!(target.model().sheets[0].freeze_pane, source_pane);
+
+    assert!(target.apply_update_v1(&second, options).unwrap().applied);
+    assert_eq!(target.model().sheets[0].freeze_pane, last);
+    assert_eq!(target.model(), source.model());
+    assert_eq!(
+        target.encode_state_vector_v1(),
+        source.encode_state_vector_v1()
+    );
+}
+
+#[test]
+fn interleaved_held_updates_carrying_a_freeze_pane_undo_all_apply_and_converge() {
+    let options = CalculationOptions::default();
+    let edit = |workbook: &mut Workbook, at: &str, input: &str| {
+        let vector = workbook.encode_state_vector_v1();
+        workbook
+            .edit_cell(SheetId(0), cell(at), input, options)
+            .unwrap();
+        workbook.encode_diff_v1(&vector).unwrap()
+    };
+    let merge = |updates: [&[u8]; 3]| {
+        YrsUpdate::merge_updates(updates.map(|update| YrsUpdate::decode_v1(update).unwrap()))
+            .encode_v1()
+    };
+    for mut race in freeze_pane_races(false) {
+        let vector = race.loser.encode_state_vector_v1();
+        assert!(race.winner.undo(options).unwrap().applied);
+        let undo = race.winner.encode_diff_v1(&vector).unwrap();
+
+        let mut first = Workbook::open_collaborative(&race.bytes, 1047).unwrap();
+        let mut second = Workbook::open_collaborative(&race.bytes, 1048).unwrap();
+        let (a1, a2) = (edit(&mut first, "E1", "1"), edit(&mut first, "E2", "2"));
+        let (b1, b2) = (edit(&mut second, "F1", "3"), edit(&mut second, "F2", "4"));
+
+        race.loser
+            .apply_update_v1(&merge([&undo, &a1, &b2]), options)
+            .unwrap();
+        race.loser
+            .apply_update_v1(&merge([&undo, &b1, &a2]), options)
+            .unwrap();
+        for at in ["E1", "E2", "F1", "F2"] {
+            assert!(race.loser.model().sheets[0].cell(cell(at)).is_some());
+        }
+
+        for update in [&a1, &a2, &b1, &b2] {
+            race.winner.apply_update_v1(update, options).unwrap();
+        }
+        race.assert_converged(race.source);
+    }
+}
+
 #[test]
 fn concurrent_freeze_and_cell_edit_do_not_overwrite_each_other() {
     let bytes = sample_xlsx();
@@ -6810,11 +8227,12 @@ fn freeze_pane_updates_recover_from_reversed_delivery_and_full_snapshot() {
     let updates = updates.lock().unwrap().clone();
     assert_eq!(updates.len(), 2);
     assert!(
-        !target
+        target
             .apply_update_v1(&updates[1], options)
             .unwrap()
             .applied
     );
+    assert_eq!(target.model().sheets[0].freeze_pane, None);
     assert!(
         target
             .apply_update_v1(&updates[0], options)
@@ -8182,10 +9600,11 @@ fn undo_restores_defined_names_dropped_by_a_sheet_removal() {
     assert_eq!(workbook.model().defined_names, before);
 }
 
-/// v1 leaves preserved sheet fragments at their original geometry after an
-/// axis edit; the file must still open, even though the ranges have drifted.
+/// v1 leaves the preserved sheet fragments it does not model at their original
+/// geometry after an axis edit, and the file must still open even though those
+/// ranges have drifted; drawings follow the edit.
 #[test]
-fn row_insertion_preserves_unmodeled_ranges_and_anchors_without_corruption() {
+fn row_insertion_preserves_unmodeled_ranges_and_moves_anchors_without_corruption() {
     let original = preservation_fixture();
     let before = package_map(&original);
     let mut workbook = Workbook::open(&original).unwrap();
@@ -8205,10 +9624,17 @@ fn row_insertion_preserves_unmodeled_ranges_and_anchors_without_corruption() {
     assert!(worksheet.contains(r#"<autoFilter ref="A2:B3""#));
     assert!(worksheet.contains(r#"<dataValidation type="whole" sqref="B2""#));
     assert!(worksheet.contains(r#"<conditionalFormatting sqref="B2""#));
-    assert_eq!(
-        after["xl/drawings/drawing1.xml"],
-        before["xl/drawings/drawing1.xml"]
-    );
+    let moved = String::from_utf8(before["xl/drawings/drawing1.xml"].clone())
+        .unwrap()
+        .replace(
+            "<xdr:row>0</xdr:row></xdr:from>",
+            "<xdr:row>1</xdr:row></xdr:from>",
+        )
+        .replace(
+            "<xdr:row>2</xdr:row></xdr:to>",
+            "<xdr:row>3</xdr:row></xdr:to>",
+        );
+    assert_eq!(after["xl/drawings/drawing1.xml"], moved.into_bytes());
     Workbook::open(&saved).unwrap();
 }
 
@@ -8432,8 +9858,11 @@ fn sample_chart() -> SheetChart {
 }
 
 /// Chart state a peer controls reaches the writer, so an off-grid anchor, a
-/// character xml cannot carry, a smuggled part path and two charts claiming one
-/// anchor are all refused before anything is written.
+/// smuggled part path and two charts claiming one anchor are all refused before
+/// anything is written. A reference holding a character xml cannot carry is
+/// opened content here, kept as authored. tests/chart_control_references.rs
+/// covers the edits and snapshots that would rewrite one, and workbook/charts.rs
+/// the check that peer states and hydrated snapshots pass.
 #[test]
 fn refuses_chart_state_the_writer_could_not_express() {
     let off_grid = {
@@ -8449,11 +9878,6 @@ fn refuses_chart_state_the_writer_could_not_express() {
         };
         (chart, "off the sheet grid")
     };
-    let illegal_character = {
-        let mut chart = sample_chart();
-        chart.refs[0].formula = "Data!$A$1\u{7}".to_owned();
-        (chart, "xml cannot carry")
-    };
     let traversal = {
         let mut chart = sample_chart();
         chart.part = "../../etc/passwd".to_owned();
@@ -8464,7 +9888,7 @@ fn refuses_chart_state_the_writer_could_not_express() {
         chart.drawing = "/xl/drawings/drawing1.xml".to_owned();
         (chart, "not a package part path")
     };
-    for (chart, reason) in [off_grid, illegal_character, traversal, absolute] {
+    for (chart, reason) in [off_grid, traversal, absolute] {
         let Err(error) = Workbook::from_model(charted_model(chart)) else {
             panic!("{reason} must be refused");
         };
@@ -8710,6 +10134,324 @@ fn a_moved_chart_survives_a_save_and_undoes_in_one_step() {
     assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
     workbook.redo(CalculationOptions::default()).unwrap();
     assert_eq!(workbook.model().sheets[0].charts[0].anchor, moved);
+}
+
+/// Resizing a two-cell chart is one undo step that survives a save and reopen:
+/// both corners reach the drawing part, the anchor resolves back to the dragged
+/// rect, and the way the anchor follows a grid edit is untouched.
+#[test]
+fn a_resized_chart_survives_a_save_and_undoes_in_one_step() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    let before = workbook.model().sheets[0].charts[0].anchor;
+    let geometry = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
+    let before_rect = resolve_chart_anchor(before, &geometry, 0, 0).unwrap().rect;
+
+    assert!(
+        workbook
+            .resize_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                ChartResize {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 96.0,
+                    bottom: 48.0,
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap()
+            .applied
+    );
+    let resized = workbook.model().sheets[0].charts[0].anchor;
+    assert_ne!(resized, before);
+    assert_eq!(
+        resized.edit_as(),
+        AnchorEditAs::OneCell,
+        "a resize must not change how the anchor follows a grid edit"
+    );
+    let after_rect = resolve_chart_anchor(resized, &geometry, 0, 0).unwrap().rect;
+    assert_eq!(after_rect.x, before_rect.x, "the left edge did not move");
+    assert_eq!(after_rect.y, before_rect.y, "the top edge did not move");
+    assert!(
+        (after_rect.w - (before_rect.w + 96.0)).abs() < 0.5,
+        "{after_rect:?} after {before_rect:?}"
+    );
+    assert!(
+        (after_rect.h - (before_rect.h + 48.0)).abs() < 0.5,
+        "{after_rect:?} after {before_rect:?}"
+    );
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+    let undone = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(undone.model().sheets[0].charts[0].anchor, before);
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, resized);
+}
+
+/// An east or south resize leaves the `from` marker exactly as read, even when
+/// it sits on a hidden column or carries an offset past its row's height.
+#[test]
+fn a_resize_keeps_the_marker_of_an_edge_that_did_not_move() {
+    let hidden_from_column = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let sheet = test_part_text(&parts, "xl/worksheets/sheet1.xml").replace(
+            "<sheetData>",
+            r#"<cols><col min="3" max="3" width="9" customWidth="1" hidden="1"/></cols><sheetData>"#,
+        );
+        set_test_part(&mut parts, "xl/worksheets/sheet1.xml", sheet.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let oversized_row_offset = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec()).unwrap().replace(
+            "<xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff>",
+            "<xdr:row>4</xdr:row><xdr:rowOff>762000</xdr:rowOff>",
+        );
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let from_of = |anchor: ChartAnchor| match anchor {
+        ChartAnchor::TwoCell { from, .. } => from,
+        other => panic!("expected a two-cell anchor, got {other:?}"),
+    };
+
+    for (bytes, edges, expected_from) in [
+        (
+            hidden_from_column,
+            ChartResize {
+                right: 40.0,
+                ..ChartResize::default()
+            },
+            AnchorCell {
+                col: 2,
+                col_off: 12700,
+                row: 4,
+                row_off: 0,
+            },
+        ),
+        (
+            oversized_row_offset,
+            ChartResize {
+                bottom: 30.0,
+                ..ChartResize::default()
+            },
+            AnchorCell {
+                col: 2,
+                col_off: 12700,
+                row: 4,
+                row_off: 762000,
+            },
+        ),
+    ] {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        let before = workbook.model().sheets[0].charts[0].anchor;
+        assert_eq!(from_of(before), expected_from);
+
+        assert!(
+            workbook
+                .resize_chart(
+                    SheetId(0),
+                    "xl/drawings/drawing1.xml#0",
+                    edges,
+                    CalculationOptions::default(),
+                )
+                .unwrap()
+                .applied
+        );
+        let resized = workbook.model().sheets[0].charts[0].anchor;
+        assert_ne!(resized, before, "{edges:?} must move an edge");
+        assert_eq!(
+            from_of(resized),
+            expected_from,
+            "{edges:?} must not renormalize the untouched corner"
+        );
+
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+        assert_eq!(
+            from_of(reopened.model().sheets[0].charts[0].anchor),
+            expected_from
+        );
+    }
+}
+
+/// A resize is clamped to a pixel and to the grid rather than collapsing into
+/// an inverted anchor no save could write.
+#[test]
+fn a_resize_keeps_a_pixel_of_chart_on_the_sheet() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    let before = workbook.model().sheets[0].charts[0].anchor;
+    let geometry = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
+    let before_rect = resolve_chart_anchor(before, &geometry, 0, 0).unwrap().rect;
+
+    let frame = "xl/drawings/drawing1.xml#0";
+    workbook
+        .resize_chart(
+            SheetId(0),
+            frame,
+            ChartResize {
+                left: -10_000.0,
+                top: -10_000.0,
+                right: -(before_rect.w as f32) - 500.0,
+                bottom: -(before_rect.h as f32) - 500.0,
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let resized = workbook.model().sheets[0].charts[0].anchor;
+    let rect = resolve_chart_anchor(resized, &geometry, 0, 0).unwrap().rect;
+    assert_eq!(rect.x, 0.0, "the left edge stops at the sheet");
+    assert_eq!(rect.y, 0.0, "the top edge stops at the sheet");
+    assert!(rect.w >= 1.0, "{rect:?}");
+    assert!(rect.h >= 1.0, "{rect:?}");
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+
+    assert!(
+        !workbook
+            .resize_chart(
+                SheetId(0),
+                frame,
+                ChartResize::default(),
+                CalculationOptions::default(),
+            )
+            .unwrap()
+            .applied,
+        "a resize with no edge movement changes nothing"
+    );
+}
+
+/// A one-cell anchor keeps its size in `xdr:ext`, which a save never rewrites,
+/// and an absolute anchor carries its position in attributes; resizing either
+/// is refused before anything changes.
+#[test]
+fn resizing_refuses_a_one_cell_and_an_absolute_anchor() {
+    let one_cell = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+            .unwrap()
+            .replace(
+                r#"<xdr:twoCellAnchor editAs="oneCell">"#,
+                "<xdr:oneCellAnchor>",
+            )
+            .replace(
+                "<xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>",
+                "",
+            )
+            .replace("</xdr:twoCellAnchor>", "</xdr:oneCellAnchor>")
+            .replace(
+                "<xdr:graphicFrame>",
+                r#"<xdr:ext cx="1905000" cy="1143000"/><xdr:graphicFrame>"#,
+            );
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let absolute = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+            .unwrap()
+            .replace(
+                r#"<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"#,
+                r#"<xdr:absoluteAnchor><xdr:pos x="95250" y="190500"/><xdr:ext cx="1905000" cy="1143000"/>"#,
+            )
+            .replace("</xdr:twoCellAnchor>", "</xdr:absoluteAnchor>");
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+
+    for (bytes, kind, reason) in [
+        (one_cell, "OneCell", "one-cell extent"),
+        (absolute, "Absolute", "pinned"),
+    ] {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        assert_eq!(
+            match workbook.model().sheets[0].charts[0].anchor {
+                ChartAnchor::OneCell { .. } => "OneCell",
+                ChartAnchor::Absolute { .. } => "Absolute",
+                ChartAnchor::TwoCell { .. } => "TwoCell",
+            },
+            kind
+        );
+        let before = workbook.model().sheets[0].charts[0].anchor;
+        let saved = workbook.save().unwrap();
+        let error = workbook
+            .resize_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                ChartResize {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 50.0,
+                    bottom: 50.0,
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message) if message.contains(reason)),
+            "{error:?}"
+        );
+        assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+        assert_eq!(
+            workbook.save().unwrap(),
+            saved,
+            "a refused resize must leave the package alone"
+        );
+    }
+}
+
+/// One drawing anchor held by two sheets is one element in one part, so a
+/// resize repins every sheet holding it and undo takes them back together.
+#[test]
+fn a_resize_repins_every_sheet_sharing_the_drawing() {
+    let mut workbook = Workbook::open(&shared_drawing_fixture()).unwrap();
+    assert_eq!(
+        workbook.model().sheets[1].charts[0].drawing,
+        workbook.model().sheets[0].charts[0].drawing,
+        "the fixture must share one drawing"
+    );
+    let before = workbook.model().sheets[0].charts[0].anchor;
+
+    assert!(
+        workbook
+            .resize_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                ChartResize {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 48.0,
+                    bottom: 24.0,
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap()
+            .applied
+    );
+    let resized = workbook.model().sheets[0].charts[0].anchor;
+    assert_ne!(resized, before);
+    assert_eq!(
+        workbook.model().sheets[1].charts[0].anchor,
+        resized,
+        "the sheet sharing the anchor must follow it"
+    );
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+    assert_eq!(reopened.model().sheets[1].charts[0].anchor, resized);
+
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+    assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
 }
 
 /// One chart part can back two anchors on a sheet, so a part cannot name a
@@ -9067,6 +10809,63 @@ fn set_chart_anchor_refuses_what_a_save_cannot_write() {
     assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
 }
 
+/// A resize reaches a live peer as the anchor its author wrote: both sides end
+/// on one anchor whose untouched `from` marker still sits on the hidden column.
+#[test]
+fn collaborative_sessions_resize_a_chart_and_converge() {
+    let bytes = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let sheet = test_part_text(&parts, "xl/worksheets/sheet1.xml").replace(
+            "<sheetData>",
+            r#"<cols><col min="3" max="3" width="9" customWidth="1" hidden="1"/></cols><sheetData>"#,
+        );
+        set_test_part(&mut parts, "xl/worksheets/sheet1.xml", sheet.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let mut left = Workbook::open_collaborative(&bytes, 305).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 306).unwrap();
+    let before = left.model().sheets[0].charts[0].anchor;
+    let ChartAnchor::TwoCell { from, .. } = before else {
+        panic!("two-cell anchor");
+    };
+
+    assert!(
+        left.resize_chart(
+            SheetId(0),
+            "xl/drawings/drawing1.xml#0",
+            ChartResize {
+                right: 40.0,
+                bottom: 20.0,
+                ..ChartResize::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap()
+        .applied
+    );
+    let resized = left.model().sheets[0].charts[0].anchor;
+    assert_ne!(resized, before);
+
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    assert!(
+        right
+            .apply_update_v1(&update, CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(right.model().sheets[0].charts[0].anchor, resized);
+    assert_eq!(right.model(), left.model());
+    assert!(
+        matches!(resized, ChartAnchor::TwoCell { from: kept, .. } if kept == from),
+        "{resized:?} must keep the from marker {from:?}"
+    );
+
+    let reopened = Workbook::open(&right.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+}
+
 /// A chart anchor is replicated content, not workbook structure: the freeze
 /// pins which drawing anchors which part, and where that anchor sits travels
 /// through the document like any other edit.
@@ -9291,6 +11090,608 @@ fn a_drag_repins_every_sheet_sharing_the_drawing() {
     );
     assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
     assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
+}
+
+const MOVED_FRAME: &str = "xl/drawings/drawing1.xml#0";
+
+#[derive(Clone, Copy, Debug)]
+enum ChartDelivery {
+    InOrder,
+    Reversed,
+    Merged,
+}
+
+const CHART_DELIVERIES: [ChartDelivery; 3] = [
+    ChartDelivery::InOrder,
+    ChartDelivery::Reversed,
+    ChartDelivery::Merged,
+];
+
+fn deliver_updates(to: &mut Workbook, updates: &[Vec<u8>], delivery: ChartDelivery) {
+    let options = CalculationOptions::default();
+    match delivery {
+        ChartDelivery::InOrder => {
+            for update in updates {
+                to.apply_update_v1(update, options).unwrap();
+            }
+        }
+        ChartDelivery::Reversed => {
+            for update in updates.iter().rev() {
+                to.apply_update_v1(update, options).unwrap();
+            }
+        }
+        ChartDelivery::Merged => {
+            let merged = yrs::merge_updates_v1(updates).unwrap();
+            to.apply_update_v1(&merged, options).unwrap();
+        }
+    }
+}
+
+/// The update `edit` publishes.
+fn published(workbook: &mut Workbook, edit: impl FnOnce(&mut Workbook)) -> Vec<u8> {
+    let before = workbook.encode_state_vector_v1();
+    edit(workbook);
+    workbook.encode_diff_v1(&before).unwrap()
+}
+
+fn sync_chart_peers(left: &mut Workbook, right: &mut Workbook) {
+    let options = CalculationOptions::default();
+    let to_right = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let to_left = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&to_left, options).unwrap();
+    right.apply_update_v1(&to_right, options).unwrap();
+}
+
+fn merge_range(workbook: &mut Workbook, range: &str) {
+    let result = workbook.apply_ops(
+        vec![Op::MergeCells {
+            sheet: SheetId(0),
+            range: CellRange::parse_a1(range).unwrap(),
+        }],
+        CalculationOptions::default(),
+    );
+    assert!(result.unwrap().applied);
+}
+
+fn link_range(workbook: &mut Workbook, range: &str) {
+    let link = internal_link(range, "Data!A1");
+    let result = workbook.set_hyperlink(SheetId(0), link, CalculationOptions::default());
+    assert!(result.unwrap().applied);
+}
+
+fn move_frame(workbook: &mut Workbook, frame: &str, dx: f32, dy: f32) {
+    let result = workbook.move_chart(SheetId(0), frame, dx, dy, CalculationOptions::default());
+    assert!(result.unwrap().applied);
+}
+
+fn undo_step(workbook: &mut Workbook) {
+    let result = workbook.undo(CalculationOptions::default());
+    assert!(result.unwrap().applied);
+}
+
+fn redo_step(workbook: &mut Workbook) {
+    let result = workbook.redo(CalculationOptions::default());
+    assert!(result.unwrap().applied);
+}
+
+fn anchor_of(workbook: &Workbook) -> ChartAnchor {
+    workbook.model().sheets[0].charts[0].anchor
+}
+
+fn merged_ranges(workbook: &Workbook) -> Vec<String> {
+    let mut ranges = workbook.model().sheets[0]
+        .merges
+        .iter()
+        .map(CellRange::to_a1)
+        .collect::<Vec<_>>();
+    ranges.sort();
+    ranges
+}
+
+fn linked_ranges(workbook: &Workbook) -> Vec<String> {
+    let mut ranges = workbook.model().sheets[0]
+        .hyperlinks
+        .iter()
+        .map(|link| link.range.to_a1())
+        .collect::<Vec<_>>();
+    ranges.sort();
+    ranges
+}
+
+/// Every key the first sheet holds in the shared document, read from the
+/// document itself rather than from the model projected out of it.
+fn stored_sheet(workbook: &Workbook) -> std::collections::HashMap<String, yrs::Any> {
+    use yrs::types::ToJson;
+    use yrs::{Any, Doc, Map, MapRef, ReadTxn, Transact, Update};
+
+    let doc = Doc::new();
+    let state = Update::decode_v1(&workbook.encode_state_as_update_v1()).unwrap();
+    doc.transact_mut().apply_update(state).unwrap();
+    let txn = doc.transact_mut();
+    let sheets = txn.get_map("xlsx:sheets").unwrap();
+    let sheet = sheets
+        .get(&txn, "sheet:0")
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .unwrap();
+    match sheet.to_json(&txn) {
+        Any::Map(keys) => keys.as_ref().clone(),
+        other => panic!("sheet is not a map: {other:?}"),
+    }
+}
+
+/// A receiver forgets shared-string provenance and an author that has received
+/// nothing keeps it, so the two write a source string differently after any
+/// edit. Once `left` has received and `right` receives in turn, a comparison of
+/// their saves sees the workbook alone.
+fn share_an_edit_from(right: &mut Workbook, left: &mut Workbook) {
+    let result = right.edit_cell(
+        SheetId(0),
+        cell("A9"),
+        "peer",
+        CalculationOptions::default(),
+    );
+    assert!(result.unwrap().applied);
+    sync_chart_peers(left, right);
+}
+
+fn assert_chart_peers_match(left: &Workbook, right: &Workbook, context: &str) {
+    assert_eq!(left.model(), right.model(), "{context}");
+    assert_eq!(
+        left.encode_state_vector_v1(),
+        right.encode_state_vector_v1(),
+        "{context}"
+    );
+    let saved = left.save().unwrap();
+    assert_eq!(saved, right.save().unwrap(), "{context}");
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].charts[0].anchor,
+        anchor_of(left),
+        "{context}"
+    );
+    assert_eq!(
+        reopened.model(),
+        Workbook::open(&right.save().unwrap()).unwrap().model(),
+        "{context}"
+    );
+}
+
+/// A merge or a link lives in an edit key beside a pinned baseline, so moving a
+/// chart has to leave both alone: folding the edit into the baseline is a
+/// structure change the freeze refuses, under a message about a remote update.
+#[test]
+fn collaborative_chart_move_applies_after_layout_edits() {
+    let bytes = charted_fixture();
+    for (merge, link) in [(true, false), (false, true), (true, true)] {
+        for (author, mover) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            for delivery in CHART_DELIVERIES {
+                let context = format!("merge={merge} link={link} {author}->{mover} {delivery:?}");
+                let mut peers = [
+                    Workbook::open_collaborative(&bytes, 611).unwrap(),
+                    Workbook::open_collaborative(&bytes, 612).unwrap(),
+                ];
+                let before = anchor_of(&peers[0]);
+                let seeded = stored_sheet(&peers[0]);
+                let mut links = linked_ranges(&peers[0]);
+                if link {
+                    links.push("H22".to_owned());
+                }
+                let layout = published(&mut peers[author], |workbook| {
+                    if merge {
+                        merge_range(workbook, "E22:F23");
+                    }
+                    if link {
+                        link_range(workbook, "H22");
+                    }
+                });
+                let receiver = 1 - mover;
+                let mut unseen = Vec::new();
+                if author == mover {
+                    unseen.push(layout);
+                } else {
+                    deliver_updates(&mut peers[mover], &[layout], ChartDelivery::InOrder);
+                }
+
+                let unmoved = stored_sheet(&peers[mover]);
+                unseen.push(published(&mut peers[mover], |workbook| {
+                    move_frame(workbook, MOVED_FRAME, 12.0, 8.0);
+                }));
+                let moved = anchor_of(&peers[mover]);
+                assert_ne!(moved, before, "{context}");
+                let mut written = stored_sheet(&peers[mover]);
+                assert_ne!(written.remove("charts"), unmoved.get("charts").cloned());
+                let mut expected = unmoved.clone();
+                expected.remove("charts");
+                assert_eq!(written, expected, "only the chart state moves: {context}");
+
+                let concurrent = published(&mut peers[receiver], |workbook| {
+                    merge_range(workbook, "J22:K23");
+                });
+                if matches!(delivery, ChartDelivery::Reversed) {
+                    deliver_updates(&mut peers[mover], &[concurrent], delivery);
+                    deliver_updates(&mut peers[receiver], &unseen, delivery);
+                } else {
+                    deliver_updates(&mut peers[receiver], &unseen, delivery);
+                    deliver_updates(&mut peers[mover], &[concurrent], delivery);
+                }
+
+                let mut merges = vec!["J22:K23".to_owned()];
+                if merge {
+                    merges.insert(0, "E22:F23".to_owned());
+                }
+                for peer in &peers {
+                    assert_eq!(anchor_of(peer), moved, "{context}");
+                    assert_eq!(merged_ranges(peer), merges, "{context}");
+                    assert_eq!(linked_ranges(peer), links, "{context}");
+                    let stored = stored_sheet(peer);
+                    assert_eq!(stored["merges"], seeded["merges"], "{context}");
+                    assert_eq!(stored["hyperlinks"], seeded["hyperlinks"], "{context}");
+                    assert!(stored.contains_key("merge:J22:K23"), "{context}");
+                    assert_eq!(stored.contains_key("merge:E22:F23"), merge, "{context}");
+                    assert_eq!(stored.contains_key("hyperlink:H22"), link, "{context}");
+                }
+                assert_chart_peers_match(&peers[0], &peers[1], &context);
+
+                let undone = published(&mut peers[mover], undo_step);
+                deliver_updates(&mut peers[receiver], &[undone], delivery);
+                for peer in &peers {
+                    assert_eq!(anchor_of(peer), before, "{context}");
+                    assert_eq!(merged_ranges(peer), merges, "{context}");
+                    assert_eq!(linked_ranges(peer), links, "{context}");
+                }
+                assert_chart_peers_match(&peers[0], &peers[1], &context);
+
+                let redone = published(&mut peers[mover], redo_step);
+                deliver_updates(&mut peers[receiver], &[redone], delivery);
+                for peer in &peers {
+                    assert_eq!(anchor_of(peer), moved, "{context}");
+                    assert_eq!(merged_ranges(peer), merges, "{context}");
+                }
+                assert_chart_peers_match(&peers[0], &peers[1], &context);
+            }
+        }
+    }
+}
+
+/// The move is one step on the stack, so undo walks through it into the layout
+/// edits under it, and redo back up, with the peer following every step.
+#[test]
+fn collaborative_chart_move_undo_walks_through_the_layout_edits() {
+    let bytes = charted_fixture();
+    let mut left = Workbook::open_collaborative(&bytes, 621).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 622).unwrap();
+    share_an_edit_from(&mut right, &mut left);
+    let before = anchor_of(&left);
+    merge_range(&mut left, "E22:F23");
+    link_range(&mut left, "H22");
+    move_frame(&mut left, MOVED_FRAME, 12.0, 8.0);
+    let moved = anchor_of(&left);
+    sync_chart_peers(&mut left, &mut right);
+    assert_chart_peers_match(&left, &right, "moved");
+
+    let merged = vec!["E22:F23".to_owned()];
+    let linked = vec!["B2".to_owned(), "H22".to_owned()];
+    let source_links = vec!["B2".to_owned()];
+    let steps = [
+        (before, merged.clone(), linked.clone()),
+        (before, merged.clone(), source_links.clone()),
+        (before, vec![], source_links.clone()),
+    ];
+    for (anchor, merges, links) in &steps {
+        undo_step(&mut left);
+        sync_chart_peers(&mut left, &mut right);
+        assert_eq!(anchor_of(&right), *anchor);
+        assert_eq!(merged_ranges(&right), *merges);
+        assert_eq!(linked_ranges(&right), *links);
+        assert_chart_peers_match(&left, &right, "undo");
+    }
+    assert!(!left.can_undo());
+
+    let steps = [
+        (before, merged.clone(), source_links.clone()),
+        (before, merged.clone(), linked.clone()),
+        (moved, merged.clone(), linked.clone()),
+    ];
+    for (anchor, merges, links) in &steps {
+        redo_step(&mut left);
+        sync_chart_peers(&mut left, &mut right);
+        assert_eq!(anchor_of(&right), *anchor);
+        assert_eq!(merged_ranges(&right), *merges);
+        assert_eq!(linked_ranges(&right), *links);
+        assert_chart_peers_match(&left, &right, "redo");
+    }
+}
+
+/// A peer's move and its undo do not reach into another peer's layout edits,
+/// which stay that peer's to take back.
+#[test]
+fn collaborative_chart_move_leaves_a_remote_merge_undoable() {
+    let bytes = charted_fixture();
+    let mut left = Workbook::open_collaborative(&bytes, 631).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 632).unwrap();
+    merge_range(&mut left, "E22:F23");
+    link_range(&mut left, "H22");
+    sync_chart_peers(&mut left, &mut right);
+    move_frame(&mut right, MOVED_FRAME, 12.0, 8.0);
+    let moved = anchor_of(&right);
+    sync_chart_peers(&mut left, &mut right);
+
+    undo_step(&mut left);
+    undo_step(&mut left);
+    sync_chart_peers(&mut left, &mut right);
+    assert_eq!(anchor_of(&left), moved);
+    assert!(merged_ranges(&right).is_empty());
+    assert_eq!(linked_ranges(&right), ["B2"]);
+    assert_chart_peers_match(&left, &right, "layout undone");
+
+    undo_step(&mut right);
+    redo_step(&mut left);
+    sync_chart_peers(&mut left, &mut right);
+    assert_ne!(anchor_of(&left), moved);
+    assert_eq!(merged_ranges(&left), ["E22:F23"]);
+    assert_chart_peers_match(&left, &right, "move undone");
+}
+
+struct ChartRace {
+    source: ChartAnchor,
+    winner: Workbook,
+    loser: Workbook,
+    won: ChartAnchor,
+    lost: ChartAnchor,
+}
+
+impl ChartRace {
+    /// Two peers drag one chart at once, after a merge on one and a link on the
+    /// other, and meet again.
+    fn new(bytes: &[u8], ids: (u64, u64), delivery: ChartDelivery) -> Self {
+        let mut left = Workbook::open_collaborative(bytes, ids.0).unwrap();
+        let mut right = Workbook::open_collaborative(bytes, ids.1).unwrap();
+        let source = anchor_of(&left);
+        merge_range(&mut left, "E22:F23");
+        link_range(&mut right, "H22");
+        sync_chart_peers(&mut left, &mut right);
+
+        let to_right = published(&mut left, |workbook| {
+            move_frame(workbook, MOVED_FRAME, 16.0, 0.0);
+        });
+        let to_left = published(&mut right, |workbook| {
+            move_frame(workbook, MOVED_FRAME, 0.0, 24.0);
+        });
+        let (left_anchor, right_anchor) = (anchor_of(&left), anchor_of(&right));
+        assert_ne!(left_anchor, right_anchor);
+        match delivery {
+            ChartDelivery::InOrder => {
+                deliver_updates(&mut right, &[to_right], delivery);
+                deliver_updates(&mut left, &[to_left], delivery);
+            }
+            ChartDelivery::Reversed => {
+                deliver_updates(&mut left, &[to_left], delivery);
+                deliver_updates(&mut right, &[to_right], delivery);
+            }
+            ChartDelivery::Merged => {
+                let both = [to_right, to_left];
+                deliver_updates(&mut left, &both, delivery);
+                deliver_updates(&mut right, &both, delivery);
+            }
+        }
+        let merged = anchor_of(&left);
+        let race = if merged == left_anchor {
+            Self {
+                source,
+                winner: left,
+                loser: right,
+                won: left_anchor,
+                lost: right_anchor,
+            }
+        } else {
+            Self {
+                source,
+                winner: right,
+                loser: left,
+                won: right_anchor,
+                lost: left_anchor,
+            }
+        };
+        assert_eq!(merged, race.won);
+        race.assert_converged(race.won);
+        race
+    }
+
+    fn sync(&mut self) {
+        sync_chart_peers(&mut self.winner, &mut self.loser);
+    }
+
+    fn assert_converged(&self, anchor: ChartAnchor) {
+        assert_eq!(anchor_of(&self.winner), anchor);
+        assert_chart_peers_match(&self.winner, &self.loser, "chart race");
+    }
+
+    fn assert_layout_kept(&self) {
+        for peer in [&self.winner, &self.loser] {
+            assert_eq!(merged_ranges(peer), ["E22:F23"]);
+            assert_eq!(linked_ranges(peer), ["B2", "H22"]);
+        }
+    }
+}
+
+fn chart_races() -> impl Iterator<Item = ChartRace> {
+    let bytes = charted_fixture();
+    [(641, 642), (642, 641)].into_iter().flat_map(move |ids| {
+        let bytes = bytes.clone();
+        CHART_DELIVERIES
+            .into_iter()
+            .map(move |delivery| ChartRace::new(&bytes, ids, delivery))
+    })
+}
+
+/// Undoing the assignment that won a race deletes the `charts` key, since yrs
+/// will not restore the older value past the losing write. The key is optional,
+/// so every peer reads the source anchor instead of refusing the workbook.
+#[test]
+fn collaborative_chart_move_winner_undo_shows_the_source_anchor() {
+    for mut race in chart_races() {
+        assert!(stored_sheet(&race.winner).contains_key("charts"));
+        undo_step(&mut race.winner);
+        assert!(!stored_sheet(&race.winner).contains_key("charts"));
+        assert_ne!(anchor_of(&race.winner), race.lost);
+        race.sync();
+        race.assert_converged(race.source);
+        race.assert_layout_kept();
+
+        redo_step(&mut race.winner);
+        race.sync();
+        race.assert_converged(race.won);
+        race.assert_layout_kept();
+    }
+}
+
+/// A move after the key emptied starts from what the key reads as, the source
+/// state, on either peer, and stays undoable.
+#[test]
+fn collaborative_chart_move_after_the_winner_undo_starts_from_the_source() {
+    for winner_moves in [false, true] {
+        for mut race in chart_races() {
+            undo_step(&mut race.winner);
+            race.sync();
+
+            let mover = if winner_moves {
+                &mut race.winner
+            } else {
+                &mut race.loser
+            };
+            move_frame(mover, MOVED_FRAME, 12.0, 8.0);
+            let moved = anchor_of(mover);
+            assert_ne!(moved, race.source);
+            assert!(stored_sheet(mover).contains_key("charts"));
+            race.sync();
+            race.assert_converged(moved);
+
+            let mover = if winner_moves {
+                &mut race.winner
+            } else {
+                &mut race.loser
+            };
+            undo_step(mover);
+            race.sync();
+            race.assert_converged(race.source);
+            race.assert_layout_kept();
+        }
+    }
+}
+
+/// The loser's write is gone, so its move has nothing left to take back and its
+/// undo moves on to that peer's previous step. The winner's anchor stands.
+#[test]
+fn collaborative_chart_move_loser_undo_leaves_the_winner_standing() {
+    for mut race in chart_races() {
+        let layout = (merged_ranges(&race.loser), linked_ranges(&race.loser));
+        undo_step(&mut race.loser);
+        race.sync();
+        race.assert_converged(race.won);
+        assert_ne!(
+            (merged_ranges(&race.loser), linked_ranges(&race.loser)),
+            layout
+        );
+    }
+}
+
+/// The fallback is the source file's anchor, not one agreed earlier in the
+/// session: a key emptied by the winner's undo has no older value to read.
+#[test]
+fn collaborative_chart_move_winner_undo_skips_an_agreed_anchor() {
+    let bytes = charted_fixture();
+    for ids in [(651, 652), (652, 651)] {
+        let mut left = Workbook::open_collaborative(&bytes, ids.0).unwrap();
+        let mut right = Workbook::open_collaborative(&bytes, ids.1).unwrap();
+        let source = anchor_of(&left);
+        move_frame(&mut left, MOVED_FRAME, 12.0, 8.0);
+        sync_chart_peers(&mut left, &mut right);
+        move_frame(&mut left, MOVED_FRAME, 16.0, 0.0);
+        let left_anchor = anchor_of(&left);
+        move_frame(&mut right, MOVED_FRAME, 0.0, 24.0);
+        sync_chart_peers(&mut left, &mut right);
+        let (winner, loser) = if anchor_of(&left) == left_anchor {
+            (&mut left, &mut right)
+        } else {
+            (&mut right, &mut left)
+        };
+        undo_step(winner);
+        sync_chart_peers(winner, loser);
+        assert_eq!(anchor_of(winner), source);
+        assert_chart_peers_match(winner, loser, "agreed anchor");
+    }
+}
+
+/// A drag repins each sheet holding the frame, and after a merge that is still
+/// one step of chart state on both sheets.
+#[test]
+fn collaborative_chart_move_repins_a_shared_drawing_after_a_merge() {
+    let bytes = shared_drawing_fixture();
+    let mut left = Workbook::open_collaborative(&bytes, 661).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 662).unwrap();
+    share_an_edit_from(&mut right, &mut left);
+    let before = anchor_of(&left);
+    merge_range(&mut left, "E22:F23");
+    move_frame(&mut left, MOVED_FRAME, 18.0, 9.0);
+    let moved = anchor_of(&left);
+    sync_chart_peers(&mut left, &mut right);
+    assert_eq!(right.model().sheets[1].charts[0].anchor, moved);
+    assert_chart_peers_match(&left, &right, "shared drawing");
+
+    undo_step(&mut left);
+    sync_chart_peers(&mut left, &mut right);
+    assert_eq!(right.model().sheets[0].charts[0].anchor, before);
+    assert_eq!(right.model().sheets[1].charts[0].anchor, before);
+    assert_eq!(merged_ranges(&right), ["E22:F23"]);
+    assert_chart_peers_match(&left, &right, "shared drawing undone");
+}
+
+/// Moving one frame keeps a sheet's other frames as stored, including a peer's
+/// earlier move of them, after a merge and with the peers taking turns.
+#[test]
+fn collaborative_chart_move_keeps_the_other_frames_on_the_sheet() {
+    let second = "xl/drawings/drawing1.xml#1";
+    let bytes = two_anchor_fixture();
+    let mut left = Workbook::open_collaborative(&bytes, 671).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 672).unwrap();
+    merge_range(&mut left, "E22:F23");
+    move_frame(&mut left, MOVED_FRAME, 12.0, 8.0);
+    sync_chart_peers(&mut left, &mut right);
+    move_frame(&mut right, second, 16.0, 0.0);
+    sync_chart_peers(&mut left, &mut right);
+    let charts = left.model().sheets[0].charts.clone();
+    assert_chart_peers_match(&left, &right, "turns");
+
+    undo_step(&mut right);
+    sync_chart_peers(&mut left, &mut right);
+    assert_eq!(left.model().sheets[0].charts[0].anchor, charts[0].anchor);
+    assert_ne!(left.model().sheets[0].charts[1].anchor, charts[1].anchor);
+    assert_chart_peers_match(&left, &right, "second frame undone");
+}
+
+/// A sheet's chart state is one key, so two frames moved at once still settle
+/// on one peer's write, the same one everywhere.
+#[test]
+fn collaborative_chart_move_of_two_frames_at_once_converges() {
+    let bytes = two_anchor_fixture();
+    for delivery in CHART_DELIVERIES {
+        let mut left = Workbook::open_collaborative(&bytes, 681).unwrap();
+        let mut right = Workbook::open_collaborative(&bytes, 682).unwrap();
+        let to_right = published(&mut left, |workbook| {
+            move_frame(workbook, MOVED_FRAME, 12.0, 8.0);
+        });
+        let to_left = published(&mut right, |workbook| {
+            move_frame(workbook, "xl/drawings/drawing1.xml#1", 16.0, 0.0);
+        });
+        let both = [to_right, to_left];
+        deliver_updates(&mut left, &both, delivery);
+        deliver_updates(&mut right, &both, delivery);
+        assert_chart_peers_match(&left, &right, "two frames");
+    }
 }
 
 /// The chart references `charted_fixture` parses, so a handcrafted peer update
@@ -10216,9 +12617,25 @@ fn an_imported_chart_follows_a_cell_edit_without_a_save() {
 
     let plot = chart_only_viewport(&workbook);
     let before = plotted(&workbook);
-    let before_png = workbook.render_png_for(SheetId(0), &plot).unwrap();
+    let before_png = workbook
+        .render_png(
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: plot,
+            },
+            &betteroffice_xlsx::RenderOptions::default(),
+        )
+        .unwrap();
     bump_b2(&mut workbook);
-    let after_png = workbook.render_png_for(SheetId(0), &plot).unwrap();
+    let after_png = workbook
+        .render_png(
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: plot,
+            },
+            &betteroffice_xlsx::RenderOptions::default(),
+        )
+        .unwrap();
 
     assert_ne!(before, plotted(&workbook));
     assert_ne!(before_png.bytes, after_png.bytes);
@@ -10715,6 +13132,148 @@ fn hidden_custom_sizes_survive_bounded_workbook_snapshots() {
     assert_eq!(restored.model().sheets[0].row_heights.get(&0), Some(&30.0));
 }
 
+#[cfg(feature = "unstable-track-visibility")]
+#[test]
+fn a_visibility_range_hides_its_span_and_refuses_a_span_past_the_sheet() {
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(5, 21.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    let before = workbook.model().clone();
+    workbook
+        .apply_ops(
+            vec![Op::SetColsVisibility {
+                sheet: SheetId(0),
+                col: 4,
+                count: 4,
+                hidden: true,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        workbook.model().sheets[0].hidden_col_widths.get(&5),
+        Some(&21.0)
+    );
+    assert!(workbook.model().sheets[0].col_hidden(4));
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model(), &before);
+
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(MAX_COLS - 1, 12.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    for op in [
+        Op::SetColsVisibility {
+            sheet: SheetId(0),
+            col: MAX_COLS - 2,
+            count: 8,
+            hidden: true,
+        },
+        Op::SetRowsVisibility {
+            sheet: SheetId(0),
+            row: MAX_ROWS - 2,
+            count: 8,
+            hidden: true,
+        },
+        Op::SetColsVisibility {
+            sheet: SheetId(0),
+            col: 3,
+            count: 0,
+            hidden: true,
+        },
+    ] {
+        assert!(
+            matches!(
+                workbook.apply_ops(vec![op.clone()], CalculationOptions::default()),
+                Err(Error::InvalidOperation(_))
+            ),
+            "{op:?} crosses the sheet limit or names no track"
+        );
+    }
+    assert_eq!(
+        workbook.model().sheets[0].col_widths.get(&(MAX_COLS - 1)),
+        Some(&12.0),
+        "a refused range leaves the widths alone"
+    );
+    assert!(!workbook.can_undo());
+}
+
+#[cfg(feature = "unstable-track-visibility")]
+#[test]
+fn a_visibility_range_syncs_its_whole_span_to_a_peer() {
+    let mut sheet = Sheet::new("Sized");
+    for col in 2..6 {
+        sheet.col_widths.insert(col, 10.0 + f64::from(col));
+    }
+    for row in 2..6 {
+        sheet.row_heights.insert(row, 20.0 + f64::from(row));
+    }
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut source = Workbook::open_collaborative(&bytes, 751).unwrap();
+    let mut peer = Workbook::open_collaborative(&bytes, 752).unwrap();
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&updates);
+    let _subscription = source
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    source
+        .apply_ops(
+            vec![
+                Op::SetColsVisibility {
+                    sheet: SheetId(0),
+                    col: 2,
+                    count: 4,
+                    hidden: true,
+                },
+                Op::SetRowsVisibility {
+                    sheet: SheetId(0),
+                    row: 2,
+                    count: 4,
+                    hidden: true,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for update in updates.lock().unwrap().drain(..) {
+        peer.apply_update_v1(&update, CalculationOptions::default())
+            .unwrap();
+    }
+    assert_eq!(
+        peer.model().sheets[0].col_widths,
+        source.model().sheets[0].col_widths
+    );
+    assert_eq!(
+        peer.model().sheets[0].row_heights,
+        source.model().sheets[0].row_heights
+    );
+    for col in 2..6 {
+        assert!(
+            peer.model().sheets[0].col_hidden(col),
+            "column {col} must hide for the peer"
+        );
+    }
+    for row in 2..6 {
+        assert!(
+            peer.model().sheets[0].row_hidden(row),
+            "row {row} must hide for the peer"
+        );
+    }
+}
+
 fn hidden_custom_sizes_source() -> Vec<u8> {
     let mut sheet = Sheet::new("Sized");
     sheet.col_widths.insert(0, 0.0);
@@ -11112,7 +13671,7 @@ fn defined_name_edits_recalculate_dependents_and_undo_redo() {
 }
 
 #[test]
-fn defined_name_edits_refuse_ambiguous_source_and_collaboration() {
+fn defined_name_edits_refuse_an_ambiguous_source() {
     let source = reference_operator_names_fixture(
         r#"<definedName name="Rate">1</definedName><definedName name="RATE">2</definedName>"#,
     );
@@ -11126,18 +13685,27 @@ fn defined_name_edits_refuse_ambiguous_source_and_collaboration() {
         .is_err()
     );
     assert_eq!(book.save().unwrap(), before);
-    for op in [
-        set_name("Other", "3", None, None),
-        Op::DeleteDefinedName {
-            name: "Rate".into(),
-            scope: None,
-        },
+    for (op, reason) in [
+        (
+            set_name("Other", "3", None, None),
+            "ambiguous defined name source layout",
+        ),
+        (
+            Op::DeleteDefinedName {
+                name: "Rate".into(),
+                scope: None,
+            },
+            "ambiguous defined name in this scope",
+        ),
     ] {
         let mut book = Workbook::open_collaborative(&source, 101).unwrap();
-        assert!(matches!(
-            book.apply_ops(vec![op], CalculationOptions::default()),
-            Err(Error::CollaborativeStructureOperation)
-        ));
+        let state = book.encode_state_as_update_v1();
+        let failure = book
+            .apply_ops(vec![op], CalculationOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains(reason), "{failure}");
+        assert_eq!(book.encode_state_as_update_v1(), state);
     }
 }
 
@@ -11282,4 +13850,575 @@ fn unrelated_currency_format_edits_refresh_formula_results() {
         workbook.model().sheets[0].cell(cell("B2")).unwrap().value,
         CellValue::Number { value: 13.0 }
     );
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_used_range_matches_render_sheet() {
+    let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let target = betteroffice_xlsx::PngTarget::UsedRange { sheet: SheetId(0) };
+    for address in ["B1", "D5"] {
+        workbook
+            .edit_cell(
+                SheetId(0),
+                cell(address),
+                "42",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        for (scale, max_width) in [(1.0, None), (1.5, Some(80))] {
+            let options = RenderOptions {
+                scale,
+                max_width,
+                ..Default::default()
+            };
+            let expected = workbook.render_sheet(SheetId(0), &options).unwrap();
+            let actual = workbook.render_png(target.clone(), &options).unwrap();
+            assert_eq!(actual, expected);
+            if let Some(cap) = max_width {
+                assert!(actual.width <= cap);
+            }
+            let with_range = RenderOptions {
+                range: Some(CellRange::new(cell("A1"), cell("A1"))),
+                ..options.clone()
+            };
+            assert_eq!(
+                workbook.render_png(target.clone(), &with_range).unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_used_range_matches_render_sheet_for_an_empty_sheet() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    for (scale, max_width) in [(1.0, None), (1.5, Some(80))] {
+        let options = RenderOptions {
+            scale,
+            max_width,
+            ..Default::default()
+        };
+        let expected = workbook.render_sheet(SheetId(1), &options);
+        let actual = workbook.render_png(
+            betteroffice_xlsx::PngTarget::UsedRange { sheet: SheetId(1) },
+            &options,
+        );
+        assert_eq!(
+            actual.map_err(|error| format!("{error:?}")),
+            expected.map_err(|error| format!("{error:?}"))
+        );
+    }
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_dimension_caps_hold_at_fractional_scales() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    for (scale, cap) in [(1.2, 52), (3.0, 10), (1.7, 33)] {
+        let options = RenderOptions {
+            scale,
+            max_width: Some(cap),
+            max_height: Some(cap),
+            ..Default::default()
+        };
+        for target in [
+            betteroffice_xlsx::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 200.0,
+                    height: 100.0,
+                },
+            },
+            betteroffice_xlsx::PngTarget::Range {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1:D12").unwrap(),
+            },
+        ] {
+            let rendered = workbook.render_png(target, &options).unwrap();
+            assert!(
+                rendered.width <= cap && rendered.height <= cap,
+                "{scale} {cap}: {}x{}",
+                rendered.width,
+                rendered.height
+            );
+            let decoded = image_size(&rendered.bytes);
+            assert!(
+                decoded.0 <= cap && decoded.1 <= cap,
+                "{scale} {cap}: decoded {decoded:?}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_caps_do_not_hide_an_invalid_viewport() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let options = RenderOptions {
+        max_width: Some(40),
+        max_height: Some(40),
+        ..Default::default()
+    };
+    for viewport in [
+        Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: f32::NAN,
+            height: 64.0,
+        },
+        Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: f32::INFINITY,
+            height: 64.0,
+        },
+        Viewport {
+            x: 3e38,
+            y: 0.0,
+            width: 3e38,
+            height: 64.0,
+        },
+    ] {
+        let error = workbook
+            .render_png(
+                betteroffice_xlsx::PngTarget::Viewport {
+                    sheet: SheetId(0),
+                    viewport,
+                },
+                &options,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, betteroffice_xlsx::Error::InvalidViewport),
+            "{error:?}"
+        );
+    }
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_dimension_caps_apply_to_both_target_forms() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let options = RenderOptions {
+        max_width: Some(40),
+        max_height: Some(30),
+        ..Default::default()
+    };
+    for target in [
+        betteroffice_xlsx::PngTarget::Viewport {
+            sheet: SheetId(0),
+            viewport: Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 128.0,
+                height: 64.0,
+            },
+        },
+        betteroffice_xlsx::PngTarget::Range {
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:D12").unwrap(),
+        },
+    ] {
+        let rendered = workbook.render_png(target, &options).unwrap();
+        assert_eq!((rendered.width, rendered.height), (40, 30));
+    }
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_targets_validate_sheets_and_scale_all_forms() {
+    let workbook = Workbook::open(&sample_xlsx()).unwrap();
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 128.0,
+        height: 64.0,
+    };
+    let range = CellRange::parse_a1("A1:B2").unwrap();
+    for target in [
+        betteroffice_xlsx::PngTarget::Viewport {
+            sheet: SheetId(0),
+            viewport,
+        },
+        betteroffice_xlsx::PngTarget::Range {
+            sheet: SheetId(0),
+            range,
+        },
+        betteroffice_xlsx::PngTarget::UsedRange { sheet: SheetId(0) },
+    ] {
+        let first = workbook
+            .render_png(target.clone(), &RenderOptions::default())
+            .unwrap();
+        let second = workbook
+            .render_png(
+                target,
+                &RenderOptions {
+                    scale: 2.0,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(second.width.abs_diff(first.width * 2) <= 1);
+        assert!(second.height.abs_diff(first.height * 2) <= 1);
+        assert_eq!(
+            u32::from_be_bytes(second.bytes[16..20].try_into().unwrap()),
+            second.width
+        );
+        assert_eq!(
+            u32::from_be_bytes(second.bytes[20..24].try_into().unwrap()),
+            second.height
+        );
+    }
+    for target in [
+        betteroffice_xlsx::PngTarget::Viewport {
+            sheet: SheetId(u32::MAX),
+            viewport,
+        },
+        betteroffice_xlsx::PngTarget::Range {
+            sheet: SheetId(u32::MAX),
+            range,
+        },
+        betteroffice_xlsx::PngTarget::UsedRange {
+            sheet: SheetId(u32::MAX),
+        },
+    ] {
+        assert!(matches!(
+            workbook.render_png(target, &RenderOptions::default()),
+            Err(Error::SheetOutOfRange(_))
+        ));
+    }
+}
+
+/// A row that holds an array formula and nothing else is a permitted move, but
+/// the recalculation that follows evaluates `SEQUENCE(ROW())` at its new row
+/// and grows the relocated rectangle past the moved run. Undo has to put that
+/// array back where it was rather than mirror the grown rectangle: the mirror
+/// no longer fits the run it would tear.
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn a_row_move_that_recalculation_grows_undoes_and_redoes() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            formula: Some("SEQUENCE(ROW())".into()),
+            ..Cell::default()
+        },
+    );
+    sheet.set_array_formula(cell("A1"), CellRange::new(cell("A1"), cell("A1")));
+    for (at, value) in [("A2", 2.0), ("A3", 3.0), ("A6", 6.0)] {
+        sheet.set_cell(
+            cell(at),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveRows {
+                sheet: SheetId(0),
+                row: 0,
+                count: 1,
+                before: 3,
+            }],
+            options,
+        )
+        .unwrap();
+    let moved = &workbook.model().sheets[0];
+    assert_eq!(
+        moved.array_formula(cell("A3")),
+        Some(CellRange::parse_a1("A3:A5").unwrap()),
+        "recalculation grows the relocated array"
+    );
+    assert_eq!(
+        moved.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 2.0 })
+    );
+
+    workbook
+        .undo(options)
+        .expect("undo must not be refused by the rectangle recalculation grew");
+    assert_eq!(
+        workbook.model(),
+        &base,
+        "undo restores the pre-move workbook, including the retired spill cells"
+    );
+
+    workbook.redo(options).unwrap();
+    let redone = &workbook.model().sheets[0];
+    assert_eq!(
+        redone.array_formula(cell("A3")),
+        Some(CellRange::parse_a1("A3:A5").unwrap())
+    );
+    assert_eq!(
+        redone.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 2.0 })
+    );
+}
+
+/// The mirror image: the moved run passes *over* the array, so the array sits
+/// in the tracks the move shifts rather than in the run itself. Recalculation
+/// grows the relocated rectangle after the move was recorded, and the inverse
+/// mirror's run does not carry the grown anchor. The inverse has to clip the
+/// rectangle back to the extent the move left before the mirror, or undo is
+/// refused as if a user had tried to tear the array.
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn a_row_move_stepping_over_a_grown_array_undoes_and_redoes() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            formula: Some("SEQUENCE(2*ROW()-1)".into()),
+            ..Cell::default()
+        },
+    );
+    sheet.set_array_formula(cell("A1"), CellRange::new(cell("A1"), cell("A1")));
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveRows {
+                sheet: SheetId(0),
+                row: 2,
+                count: 1,
+                before: 0,
+            }],
+            options,
+        )
+        .unwrap();
+    let moved = &workbook.model().sheets[0];
+    assert_eq!(
+        moved.array_formula(cell("A2")),
+        Some(CellRange::parse_a1("A2:A4").unwrap()),
+        "recalculation grows the array now in the stepped-over row"
+    );
+    assert_eq!(
+        moved.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 3.0 })
+    );
+
+    workbook
+        .undo(options)
+        .expect("undo must clip the grown rectangle before its mirror");
+    assert_eq!(
+        workbook.model(),
+        &base,
+        "undo restores the pre-move workbook and leaves no array at the old anchor"
+    );
+
+    workbook.redo(options).unwrap();
+    let redone = &workbook.model().sheets[0];
+    assert_eq!(
+        redone.array_formula(cell("A2")),
+        Some(CellRange::parse_a1("A2:A4").unwrap())
+    );
+    assert_eq!(
+        redone.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 3.0 })
+    );
+}
+
+/// A move may be submitted with `before` naming the gap after the last track
+/// (dropping past XFD, or the mirror of a move to the front). The apply layer
+/// reads that as the terminal insertion gap, so validation must too.
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn a_move_to_the_terminal_gap_applies_and_undoes() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    for (at, value) in [("A1", 1.0), ("B3", 2.0)] {
+        sheet.set_cell(
+            cell(at),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveRows {
+                sheet: SheetId(0),
+                row: 0,
+                count: 1,
+                before: MAX_ROWS,
+            }],
+            options,
+        )
+        .expect("the gap after the last row is a legal move destination");
+    assert_eq!(
+        workbook.model().sheets[0]
+            .cell(CellRef::new(MAX_ROWS - 1, 0))
+            .map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 1.0 }),
+        "the row lands last"
+    );
+    workbook.undo(options).unwrap();
+    assert_eq!(workbook.model(), &base, "the terminal move undoes");
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveCols {
+                sheet: SheetId(0),
+                col: 1,
+                count: 1,
+                before: MAX_COLS,
+            }],
+            options,
+        )
+        .expect("the gap after the last column is a legal move destination");
+    assert_eq!(
+        workbook.model().sheets[0]
+            .cell(CellRef::new(2, MAX_COLS - 1))
+            .map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 2.0 }),
+        "the column lands last"
+    );
+    workbook.undo(options).unwrap();
+    assert_eq!(workbook.model(), &base, "the terminal column move undoes");
+}
+
+#[cfg(not(feature = "unstable-track-moves"))]
+#[test]
+fn a_batch_holding_a_track_move_is_refused_whole() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+    let probe = Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("C1"),
+        cell: CellState {
+            value: CellValue::Number { value: 7.0 },
+            ..CellState::default()
+        },
+    };
+    for track_move in [
+        Op::MoveCols {
+            sheet: SheetId(0),
+            col: 0,
+            count: 1,
+            before: 2,
+        },
+        Op::MoveRows {
+            sheet: SheetId(0),
+            row: 0,
+            count: 1,
+            before: 2,
+        },
+    ] {
+        let ops = vec![probe.clone(), track_move];
+        for error in [
+            workbook.apply_ops(ops.clone(), options).unwrap_err(),
+            workbook
+                .apply_ops_profiled(ops, options, &mut || 0.0)
+                .unwrap_err(),
+        ] {
+            assert!(matches!(error, Error::Operation(_)));
+            assert_eq!(
+                error.to_string(),
+                "cannot move sheet 0 tracks: moving rows or columns is not supported yet"
+            );
+        }
+        assert_eq!(workbook.model(), &base);
+        assert!(!workbook.undo(options).unwrap().applied);
+    }
+}
+
+#[cfg(not(feature = "unstable-track-visibility"))]
+#[test]
+fn a_batch_holding_a_visibility_range_is_refused_whole() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+    let probe = Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("C1"),
+        cell: CellState {
+            value: CellValue::Number { value: 7.0 },
+            ..CellState::default()
+        },
+    };
+    for range in [
+        Op::SetColsVisibility {
+            sheet: SheetId(0),
+            col: 0,
+            count: 2,
+            hidden: true,
+        },
+        Op::SetRowsVisibility {
+            sheet: SheetId(0),
+            row: 0,
+            count: 2,
+            hidden: true,
+        },
+    ] {
+        let ops = vec![probe.clone(), range];
+        for error in [
+            workbook.apply_ops(ops.clone(), options).unwrap_err(),
+            workbook
+                .apply_ops_profiled(ops, options, &mut || 0.0)
+                .unwrap_err(),
+        ] {
+            assert!(matches!(error, Error::Operation(_)));
+            assert_eq!(
+                error.to_string(),
+                "cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet"
+            );
+        }
+        assert_eq!(workbook.model(), &base);
+        assert!(!workbook.undo(options).unwrap().applied);
+    }
+}
+
+#[cfg(feature = "raster")]
+fn image_size(png: &[u8]) -> (u32, u32) {
+    let header = &png[16..24];
+    (
+        u32::from_be_bytes(header[0..4].try_into().unwrap()),
+        u32::from_be_bytes(header[4..8].try_into().unwrap()),
+    )
 }

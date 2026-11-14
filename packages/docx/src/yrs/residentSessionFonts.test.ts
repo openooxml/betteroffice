@@ -47,3 +47,34 @@ test('font publication failures discard prepared faces and retain the old faces'
   expect(s.faces.size).toBe(1);
   s.first.dispose();
 });
+
+test('sliced faces reach registration with their files and get no CSS face; malformed slices are refused', async () => {
+  const s = setup();
+  const source = {
+    ref: { format: 1, index: 'face/slices.json', indexSha256: 'a'.repeat(64) },
+    urls: { 'face/slices.json': 'https://fonts.example/face/slices.json' },
+    timeoutMs: 30_000,
+  };
+  const environment = {
+    faces: [{ family: 'Sliced', data: new Uint8Array(12) }, { family: 'Shared', data: new Uint8Array(12) }],
+    chains: { 'sliced|0|0': [0], 'shared|0|0': [1] }, families: ['Sliced', 'Shared'],
+    progressive: [{ slot: 0, source }],
+  };
+  let registered: unknown;
+  s.first.commit(await s.first.prepare(environment), (_fonts, _chains, progressive) => { registered = progressive; });
+  expect(registered).toEqual([{ slot: 0, source }]);
+  const inlined = { ...source, urls: { ...source.urls, 'face/c001.zst': `data:application/octet-stream;base64,${'A'.repeat(20_000)}` } };
+  await expect(s.first.prepare({ ...environment, progressive: [{ slot: 0, source: inlined }] })).resolves.toBeDefined();
+  expect(s.faces.size).toBe(1);
+  for (const progressive of [
+    [{ slot: 2, source }],
+    [{ slot: 0, source }, { slot: 0, source }],
+    [{ slot: 0, source: { ...source, urls: { 'face/slices.json': 7 } } }],
+    [{ slot: 0, source: { ...source, ref: { ...source.ref, indexSha256: 'not hex' } } }],
+    [{ slot: 0, source: { ...source, urls: { 'face/slices.json': `https://fonts.example/${'a'.repeat(9000)}` } } }],
+    [{ slot: 0, source: { ...source, urls: { 'face/c001.zst': `data:application/octet-stream;base64,${'A'.repeat(16 * 1024 * 1024)}` } } }],
+  ]) {
+    await expect(s.first.prepare({ ...environment, progressive } as typeof environment)).rejects.toThrow('Invalid worker font environment');
+  }
+  s.first.dispose();
+});

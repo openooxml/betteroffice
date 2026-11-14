@@ -336,3 +336,80 @@ fn undoing_a_rename_keeps_names_that_already_named_the_new_sheet_text() {
     apply_ops(&mut book, &redo).unwrap();
     assert_eq!(book, renamed);
 }
+
+#[test]
+fn a_run_of_name_edits_records_one_table_snapshot_that_restores_it() {
+    let mut book = Workbook::default();
+    book.sheets.push(Sheet::new("Data"));
+    book.defined_names = numbered(1_000, "1");
+    let original = book.clone();
+    let mut ops = (0..1_000)
+        .map(|index| set(&format!("name_{index}"), "2", None, None))
+        .collect::<Vec<_>>();
+    ops.extend([
+        set("Added", "3", Some(SheetId(0)), None),
+        Op::DeleteDefinedName {
+            name: "Name_5".into(),
+            scope: None,
+        },
+        set("NAME_5", "4", None, Some(true)),
+        set("added", "5", Some(SheetId(0)), Some(true)),
+    ]);
+
+    let inverse = apply_ops(&mut book, &ops).unwrap();
+
+    let mut stepped = original.clone();
+    for op in &ops {
+        apply(&mut stepped, op).unwrap();
+    }
+    assert_eq!(book, stepped);
+    assert_eq!(inverse.len(), 1);
+    apply_ops(&mut book, &inverse).unwrap();
+    assert_eq!(book, original);
+}
+
+#[test]
+fn a_run_of_name_edits_refuses_an_ambiguous_name_after_other_edits() {
+    let mut book = Workbook::default();
+    book.sheets.push(Sheet::new("Data"));
+    book.defined_names = numbered(10, "1");
+    for name in ["Rate", "RATE"] {
+        book.defined_names.push(DefinedName {
+            name: name.into(),
+            formula: "1".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+    }
+    let before = book.clone();
+    assert_eq!(
+        apply_ops(
+            &mut book,
+            &[
+                set("Name_1", "5", None, None),
+                set("Fresh", "1", None, None),
+                set("rate", "3", None, None),
+            ],
+        ),
+        Err(OpError::InvalidDefinedName(
+            "ambiguous defined name in this scope".into()
+        ))
+    );
+    assert_eq!(book, before);
+
+    apply_ops(
+        &mut book,
+        &[
+            set("Fresh", "1", None, None),
+            set("FRESH", "2", None, Some(true)),
+            set("rate", "3", Some(SheetId(0)), None),
+        ],
+    )
+    .unwrap();
+    assert_eq!(book.defined_names.len(), before.defined_names.len() + 2);
+    let fresh = &book.defined_names[before.defined_names.len()];
+    assert_eq!(
+        (fresh.name.as_str(), fresh.formula.as_str(), fresh.hidden),
+        ("Fresh", "2", true)
+    );
+}

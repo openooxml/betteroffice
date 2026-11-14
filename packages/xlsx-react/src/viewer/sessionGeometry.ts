@@ -1,5 +1,6 @@
 import type { CellAddr, CellRange, DisplayList, MergedRange, Rect, SelectionLimits, SheetInfo, Viewport, WorkbookSheetView } from '@betteroffice/xlsx';
 import { cellAtPoint, cellRect, chartRegionAtPoint } from '@betteroffice/xlsx';
+import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '../sheetLimits';
 import type { XlsxPointPosition } from '../XlsxEditor';
 
 const ROW_H = 24;
@@ -34,6 +35,10 @@ export function deriveLimits(
   const rowH = medianTrack(dl?.grid?.rowOffsets, ROW_H);
   const rowsPerPage = Math.max(1, Math.floor(viewportHeight / rowH));
   return { rows: 1_048_576, cols: 16_384, rowsPerPage };
+}
+
+export function coversWholeTrack(range: CellRange, limits: Pick<SelectionLimits, 'rows' | 'cols'>): boolean {
+  return (range.top <= 0 && range.bottom >= limits.rows - 1) || (range.left <= 0 && range.right >= limits.cols - 1);
 }
 
 export function extendScrollExtent<T extends Pick<SheetInfo, 'contentWidth' | 'contentHeight'>>(
@@ -107,8 +112,13 @@ function intersects(left: CellRange, right: CellRange): boolean {
 
 export function expandRangeToMergedCells(
   range: CellRange,
-  mergedRanges: readonly MergedRange[]
+  mergedRanges: readonly MergedRange[],
+  keepWholeTracks = false
 ): CellRange {
+  // with sheet headers shown, a whole column or row is chrome, not a rectangular
+  // cell selection: a merged cell inside it must not widen it past the track.
+  if (keepWholeTracks && range.top === 0 && range.bottom === XLSX_MAX_ROWS - 1) return { ...range };
+  if (keepWholeTracks && range.left === 0 && range.right === XLSX_MAX_COLUMNS - 1) return { ...range };
   const expanded = { ...range };
   let changed = true;
   while (changed) {

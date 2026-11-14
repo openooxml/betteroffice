@@ -12,7 +12,9 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 export declare class EditSession {
   free(): void
   register_measure_font(bytes: Uint8Array): number
+  update_measure_font_outlines(fontId: number, bytes: Uint8Array): void
   decode_font(bytes: Uint8Array): Uint8Array
+  take_base_latin_miss(): boolean
   register_substitute_measure_font(base: number, requestedFamily: string): number
   clear_measure_fonts(): void
   measure_paragraph_json(input: string): string
@@ -32,6 +34,8 @@ export declare class EditSession {
   retained_kernel_inputs_json(): string
   reset_frame_base(): void
   build_display_list_json(input: string): string
+  renderPngTarget(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array
+  renderPngTargetReport(displayListJson: string, targetJson: string, optionsJson: string): PngTargetReport
   build_display_list_frame(input: string, expectedFrameEpoch: number): Uint8Array
   set_display_window(start: number, end: number): void
   set_display_retain_built_pages(retain: boolean): void
@@ -40,6 +44,7 @@ export declare class EditSession {
   direct_batches_applied(): number
   set_windowed_incremental_builds(enabled: boolean): void
   build_display_pages_frame(pages: Uint32Array, expectedFrameEpoch: number): Uint8Array
+  page_texts_json(pages: Uint32Array): string
   release_display_pages_frame(pages: Uint32Array, expectedFrameEpoch: number): Uint8Array
   resident_caret_snapshot_json(): string
   apply_input(text: string, expectedFrameEpoch: number): Uint8Array
@@ -48,6 +53,14 @@ export declare class EditSession {
   resident_deleted_units(): number
   apply_delete_profiled(direction: string, expectedFrameEpoch: number, count: number): Uint8Array
   apply_input_profile_json(): string
+  /**
+   * The kinds of effect the web canvas backend leaves off resident display
+   * page `page_index`, as bits in `skippedEffectKinds()` order, the first
+   * kind the lowest bit. `unavailable` holds `(region, area, index)` triples
+   * for the pictures it could not draw: region 0 body, 1 header, 2 footer,
+   * 3 note separator, 4 note, with `area` the note area's index.
+   */
+  canvasSkippedEffects(pageIndex: number, unavailable: Uint32Array): number
   display_hit_test_regions_json(pageIndex: number, x: number, y: number): string
   display_vertical_move_json(position: number, direction: string, goalX: number): string
   display_range_rects_json(from: number, to: number): string
@@ -76,7 +89,7 @@ export declare class EditSession {
   cell_selection(): string
   clear_cell_selection(): string | undefined
   clear_content_control_value(embedId: string): void
-  clear_formatting(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number): void
+  clear_formatting(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
   clear_undo_input_time(): void
   clear_update_event_observation(): void
   client_id(): number
@@ -108,7 +121,7 @@ export declare class EditSession {
   find_content_controls_json(query: string, options: string): string
   find_text_json(request: string): string
   finish_compared_docx_json(bytes: Uint8Array): string
-  format_range(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, deltaJson: string): void
+  format_range(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, deltaJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
   format_text_target_json(targetJson: string, deltaJson: string): string
   geometry_position_outline_json(root: string): string
   has_pending_update(): boolean
@@ -133,6 +146,7 @@ export declare class EditSession {
   list_stories_json(): string
   load(update: Uint8Array): void
   load_json(storiesJson: string): string
+  rebuild_media_sources(): boolean
   load_media_sources(json: string): void
   load_note_separators(state: Uint8Array): void
   locate_paragraph(story: string, paraId: string): string
@@ -154,6 +168,7 @@ export declare class EditSession {
   paragraph_identities(): string
   prime_save_seed_states(paragraphs: number, inflated: number): boolean
   prime_save_seed_states_slice(paragraphs: number, inflated: number, maxBytes: number): number
+  prime_last_slice_cost(): number
   paragraph_save_plan(): string
   paragraph_spans(story: string): string
   paragraph_unit(story: string, paraId: string): number
@@ -191,13 +206,17 @@ export declare class EditSession {
   set_cell_shading(rangeJson: string, color?: string | undefined | null): string
   set_cell_text_format(rangeJson: string, patchJson: string): string
   set_column_width(atJson: string, widthTwips: number): string
+  set_row_height(atJson: string, heightTwips: number, rule: string): string
   set_comment_ranges(commentId: string, rangesJson: string): void
   set_content_control_value_at(story: string, paraId: string, offset: number, valueJson: string): void
   set_content_control_value(embedId: string, valueJson: string): void
   set_content_control_value_index(story: string, index: number, json: string): void
+  style_languages_json(): string
+  set_style_language(styleId: string | undefined | null, slotsJson: string): boolean
+  patch_style_languages_xml(source: string): string
   set_document_property(key: string, json: string): boolean
   set_header_footer_aliases(json: string): void
-  set_hyperlink(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, hyperlinkJson: string): void
+  set_hyperlink(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, hyperlinkJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void
   set_image_geometry_at(story: string, paraId: string, offset: number, geometryJson: string): void
   set_image_geometry(embedId: string, geometryJson: string): void
   set_media_tokens(enabled: boolean): void
@@ -224,13 +243,14 @@ export declare class EditSession {
   stories_changed_since(since: number): string
   story_checksum(story: string): string
   story_ids(): string[]
+  unavailable_tables_from(rootsJson: string): string
   story_len(story: string): number
   story_paragraph_ids(story: string): string
   story_segment_unit_digests(story: string): string
   story_segment_units(story: string, units: Uint32Array): string
   story_segments(story: string): string
   table_payload(story: string, tableIndex: number): string | undefined
-  toggle_mark(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, markJson: string): void
+  toggle_mark(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, markJson: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): string
   track_undo(): void
   undo_capture_mode(): string
   undo(): boolean
@@ -322,6 +342,20 @@ export declare function parse_docx_s9(data: Uint8Array, optionsJson: string): st
 
 export declare function parse_relationships_xml(xml: Uint8Array, partPath: string): string
 
+export interface PngPictureReport {
+  id: string
+  reason: string
+  limit?: number
+  actual?: number
+  unit?: string
+}
+
+export interface PngTargetReport {
+  png: Uint8Array
+  pictures: Array<PngPictureReport>
+  skippedEffects: Array<string>
+}
+
 export declare function range_rects_by_handle(handle: number, from: number, to: number): string
 
 export declare function range_rects_json(displayList: string, from: number, to: number): string
@@ -342,7 +376,7 @@ export declare function render_docx_markdown_json(content: string, options: stri
 
 export declare function render_docx_markdown_with_pages_json(content: string, options: string): string
 
-/** Native no-op; native allocations are not counted. */
+/** Starts a new peak window at the calling thread's live bytes. */
 export declare function reset_wasm_peak_bytes(): void
 
 export declare function rezip_docx(entries: any): Uint8Array
@@ -355,8 +389,22 @@ export declare function serialize_docx_s11(requestJson: string): string
 
 export declare function serialize_docx_s12(requestJson: string): string
 
-/** Native no-op; native allocations are not limited. */
+/**
+ * Starts counting heap bytes on every thread when `on` is true; counting starts at zero and
+ * cannot be stopped again, so `false` changes nothing. Returns whether counting is on.
+ */
+export declare function set_wasm_heap_counting(on: boolean): boolean
+
+/**
+ * Caps the bytes the calling thread's engine may hold at once; a non-finite or negative value
+ * removes the cap. The engine call that crosses it fails at its next checkpoint (call entry or
+ * exit, or a progress tick) and its object then refuses every call but `free()`. While any thread
+ * has a cap, heap counting is on.
+ */
 export declare function set_wasm_heap_limit(bytes: number): void
+
+/** Every kind of effect a PNG export can report as skipped, in reporting order. */
+export declare function skippedEffectKinds(): string[]
 
 export declare function unzip_docx(data: Uint8Array): any
 
@@ -366,16 +414,22 @@ export declare function vertical_move_by_handle(handle: number, position: number
 
 export declare function vertical_move_json(displayList: string, position: number, direction: string, goalX: number): string
 
-/** Native no-op; native allocations are not counted. */
+/**
+ * Size of the calling thread's last allocation that failed, or 0. It keeps that size after the
+ * thread recovers, until a later failure replaces it.
+ */
 export declare function wasm_failed_allocation_bytes(): number
 
-/** Native no-op; native allocations are not counted. */
+/**
+ * Whether the counters below see the allocations of this thread's engine: true from
+ * `set_wasm_heap_counting(true)` on, and while any thread has a heap limit.
+ */
 export declare function wasm_heap_counted(): boolean
 
-/** Native no-op; native allocations are not counted. */
+/** Bytes the calling thread currently holds on the engine's heap. */
 export declare function wasm_live_bytes(): number
 
-/** Native no-op; native allocations are not counted. */
+/** The most bytes the calling thread held at once since it started or the last reset. */
 export declare function wasm_peak_bytes(): number
 
 export declare function write_docx_s13_wasm(requestJson: string, originalDocx: Uint8Array): Uint8Array

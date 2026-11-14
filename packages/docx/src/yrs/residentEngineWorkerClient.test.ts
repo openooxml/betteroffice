@@ -193,6 +193,19 @@ function setup() {
   return { worker, client };
 }
 
+test('font environment commands leave the caller\'s face bytes attached', async () => {
+  const { worker, client } = setup();
+  const data = new Uint8Array([1, 2, 3]);
+  const pending = client.edit({ session: 'room', incarnation: 1, seq: 1, basis: { epoch: 1, version: 0 },
+    kind: 'setFontEnvironment', payload: { faces: [{ family: 'Calibri', data }], chains: {}, families: ['Calibri'] } });
+  const request = worker.requestAt(0);
+  structuredClone(request, { transfer: worker.transfers[0]! });
+  worker.reply({ id: request.id, ok: false, error: 'test complete' });
+  await expect(pending).rejects.toThrow('test complete');
+  expect(worker.transfers[0]).toEqual([]);
+  expect(data).toEqual(new Uint8Array([1, 2, 3]));
+});
+
 test('remote command updates transfer an owned buffer and preserve caller bytes', async () => {
   const { worker, client } = setup();
   const update = new Uint8Array([1, 2, 3]).buffer;

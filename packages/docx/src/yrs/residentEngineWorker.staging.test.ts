@@ -103,7 +103,7 @@ async function stageRequestedPages(requested: number[], damaged: number[] = [], 
     },
     fetch: async (source: string) => { fetches.push(source); return fetch(source); },
     createImageBitmap: async (blob: Blob) => { decoded.push(blob); return image; },
-    rasterizeDisplayPageToBackBuffer: async (_buffer: unknown, page: RetainedFrame['displayList']['pages'][number], options: { resolveImage(source: string): Promise<unknown> },
+    rasterizePage: async (_buffer: unknown, page: RetainedFrame['displayList']['pages'][number], options: { resolveImage(source: string): Promise<unknown> },
       _pixelRatio?: number, _zoom?: number, clip?: unknown) => {
       rasters.push(page.pageIndex);
       rasterCalls.push({ primitives: page.primitives.length, clip });

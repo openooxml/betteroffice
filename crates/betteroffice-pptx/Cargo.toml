@@ -12,7 +12,7 @@ keywords = ["pptx", "powerpoint", "ooxml", "presentationml"]
 categories = ["parser-implementations", "rendering"]
 
 [features]
-default = ["fonts", "fonts-latin", "fonts-intl", "fonts-cjk"]
+default = ["raster", "fonts", "fonts-latin", "fonts-intl", "fonts-cjk"]
 fonts = ["betteroffice-fonts/manager", "pptx-render/font-registration"]
 fonts-latin = ["fonts", "betteroffice-fonts/fonts-latin"]
 fonts-intl = ["fonts", "betteroffice-fonts/fonts-intl"]
@@ -21,7 +21,7 @@ raster = ["dep:pptx-raster"]
 
 [dependencies]
 betteroffice-fonts = { workspace = true }
-pptx-edit = { workspace = true, features = ["engine"] }
+pptx-edit = { workspace = true, features = ["engine", "metafile-svg"] }
 pptx-parse.workspace = true
 pptx-raster = { workspace = true, optional = true }
 pptx-render.workspace = true

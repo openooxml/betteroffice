@@ -38,7 +38,7 @@ fn binary_token(op: &BinaryOp) -> &'static str {
 }
 
 /// quote a sheet name when it needs it (anything beyond ascii alnum + `_`).
-fn sheet_prefix(sheet: &Option<String>) -> String {
+pub(crate) fn sheet_prefix(sheet: &Option<String>) -> String {
     match sheet {
         None => String::new(),
         Some(name) => {

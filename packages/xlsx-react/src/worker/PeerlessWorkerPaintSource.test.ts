@@ -261,6 +261,74 @@ describe('WorkerPaintSource', () => {
     expect(source.coversThroughSeq).toBe(2);
   });
 
+  test('a provisional frame paints through the transactions without confirming coverage, sequence or revision', () => {
+    const covered: number[] = [];
+    const installed: WorkerPaintResult[] = [];
+    const { source, state, paints, callbacks, requests, tick } = harness(undefined,
+      (painted) => installed.push(painted), (seq) => covered.push(seq));
+    state.sentSequence = 1;
+    const first = source.captureCommandFrame()!;
+    expect(source.install(replyFrame(first, 1), first)).toBe(true);
+    const transactions: (true | undefined)[] = [];
+    source.registerPaintTransaction((painted, publish) => { transactions.push(painted.provisional); publish(); });
+    state.request = { ...state.request, sheet: 1, navigation: 1 };
+    const neighbor = { displayList: displayList('neighbor', state.request.viewport), mergedRanges: [], version: 'v1' };
+    expect(source.installProvisional(neighbor, state.request)).toBe(true);
+    expect(source.painted).toMatchObject({ provisional: true, version: 'v1', sequence: 1, request: { sheet: 1 } });
+    expect(source.painted!.displayList).toBe(neighbor.displayList);
+    expect(source.painted!.coversThroughSeq).toBeUndefined();
+    expect(source.coversThroughSeq).toBe(1);
+    expect(transactions).toEqual([true]);
+    expect(installed).toHaveLength(2);
+    expect(callbacks.size).toBe(0);
+    expect(requests).toEqual([]);
+    state.sentSequence = 2;
+    expect(source.advanceCoverage('v1', 2)).toBe(false);
+    expect(covered).toEqual([]);
+    const command = source.captureCommandFrame()!;
+    expect(source.queuePipeFrame(replyFrame(command, 2), command)).toBe(true);
+    tick();
+    expect(source.painted).toMatchObject({ version: 'v2', coversThroughSeq: 2, sequence: 2, request: { sheet: 1 } });
+    expect(source.painted!.provisional).toBeUndefined();
+    expect(source.coversThroughSeq).toBe(2);
+    expect(transactions).toEqual([true, undefined]);
+    expect(paints).toHaveLength(3);
+  });
+
+  test('a provisional frame must match the current request', () => {
+    const { source, state, paints, errors } = harness();
+    state.request = { ...state.request, sheet: 1, navigation: 1 };
+    const other = { ...state.request, sheet: 2 };
+    const paint = { displayList: displayList('other', other.viewport), mergedRanges: [], version: 'v0' };
+    expect(source.installProvisional(paint, other)).toBe(false);
+    state.available = false;
+    expect(source.installProvisional(paint, { ...state.request })).toBe(false);
+    expect(paints).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test('a frame requested before the switch cannot replace the provisional frame', async () => {
+    const { source, state, requests, callbacks, tick, respond } = harness();
+    source.schedule();
+    tick();
+    expect(requests).toHaveLength(1);
+    const before = requests[0].request;
+    state.request = { ...state.request, sheet: 1, navigation: 1 };
+    const neighbor = { displayList: displayList('neighbor', state.request.viewport), mergedRanges: [], version: 'v0' };
+    expect(source.installProvisional(neighbor, state.request)).toBe(true);
+    await respond(0, frame(before, 1));
+    await Promise.resolve();
+    expect(source.painted).toMatchObject({ provisional: true, request: { sheet: 1 } });
+    expect(callbacks.size).toBe(1);
+    tick();
+    expect(requests).toHaveLength(2);
+    expect(requests[1].request.sheet).toBe(1);
+    await respond(1, frame(requests[1].request, 1));
+    await Promise.resolve();
+    expect(source.painted).toMatchObject({ version: 'v1', request: { sheet: 1 } });
+    expect(source.painted!.provisional).toBeUndefined();
+  });
+
   test('coverage cannot bypass a pending visual invalidation', () => {
     const { source, state, paints } = harness();
     const request = source.captureCommandFrame()!;

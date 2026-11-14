@@ -3,6 +3,7 @@ import type { DisplayList, DisplayPrimitive } from './displayList';
 import {
   deriveDisplayListTableFragments,
   deriveDisplayListTableFragmentsOnPages,
+  displayListTableFragmentEndsTable,
 } from './displayListTables';
 
 function cell(tableId: string, row: number, y: number, docStart?: number): DisplayPrimitive {
@@ -66,4 +67,21 @@ test('a page window without table cells reads no other page', () => {
   } as DisplayList;
   expect(deriveDisplayListTableFragmentsOnPages(list, () => 'A', 1, 1)).toEqual([]);
   expect(read).toBe(false);
+});
+
+test('rows hidden from view leave gaps in the bands and the stamped row count ends the table', () => {
+  const stamped = (row: number, y: number, docStart: number, rowCount: number) => {
+    const primitive = cell('A', row, y, docStart);
+    return { ...primitive, table: { tableId: 'A', rowCount } } as DisplayPrimitive;
+  };
+  const list: DisplayList = {
+    pages: [{ pageIndex: 0, width: 600, height: 800, primitives: [stamped(0, 10, 5, 3), stamped(2, 40, 9, 3)] }],
+  };
+  const [fragment] = deriveDisplayListTableFragments(list, () => 'A');
+  expect(fragment!.rowBands.map((band) => band.rowIndex)).toEqual([0, 2]);
+  expect(fragment!.rowCount).toBe(3);
+  expect(displayListTableFragmentEndsTable(fragment!, 4)).toBe(true);
+  expect(displayListTableFragmentEndsTable({ rowBands: fragment!.rowBands }, 4)).toBe(false);
+  expect(displayListTableFragmentEndsTable({ rowBands: fragment!.rowBands }, 3)).toBe(true);
+  expect(displayListTableFragmentEndsTable({ ...fragment!, rowCount: 5 }, 4)).toBe(false);
 });

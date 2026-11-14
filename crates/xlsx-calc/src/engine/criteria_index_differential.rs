@@ -1075,6 +1075,7 @@ fn criteria_index_spill_schedules_guard_before_later_readers() {
             spilled: Vec::new(),
             readers: Readers::new(&graph),
             inherited: HashMap::new(),
+            answered_reads: HashMap::new(),
             replaced: HashMap::new(),
             rerun: Vec::new(),
             early: HashMap::new(),

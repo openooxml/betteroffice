@@ -1726,6 +1726,45 @@ fn stories_sharing_a_part_are_views_of_one_paragraph_each() {
     }
 }
 
+#[test]
+fn a_saved_source_id_is_taken_only_by_a_holder_of_another_occurrence() {
+    let doc = seeded(&shared_header());
+    let header_views: Vec<String> = doc
+        .paragraph_identities()
+        .paragraphs
+        .into_iter()
+        .filter_map(|identity| match identity.paragraph {
+            ParagraphRef::Session { story, para_id }
+                if story.starts_with("hf:")
+                    && identity.ooxml_para_id.as_deref() == Some("6F7A8B9C") =>
+            {
+                Some(para_id)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(header_views.len(), 2);
+    let state = doc.encode_state_vector_v1();
+
+    assert!(
+        doc.record_saved_paragraph_ids(&[(header_views[0].clone(), "6F7A8B9C".to_owned())])
+            .is_empty()
+    );
+    let other_occurrence = [("1A2B3C4D".to_owned(), "1A2B3C4D".to_owned())];
+    assert_eq!(
+        doc.record_saved_paragraph_ids(&other_occurrence),
+        other_occurrence
+    );
+    assert!(
+        doc.record_saved_paragraph_ids(&[
+            ("1A2B3C4D".to_owned(), "1A2B3C4D".to_owned()),
+            ("body:p3".to_owned(), "1A2B3C4D".to_owned()),
+        ])
+        .is_empty()
+    );
+    assert_eq!(doc.encode_state_vector_v1(), state);
+}
+
 /// Every paragraph block the accepted body export locates, table cells included, as its
 /// anchor's story and key and its exported text, with the version the export read.
 fn exported_paragraphs(doc: &EditingDoc) -> (DocumentVersion, Vec<(String, String, String)>) {
@@ -1785,6 +1824,7 @@ fn edit_through_export_anchors(doc: &EditingDoc) {
         .enumerate()
         .map(|(index, (story, key, _))| {
             EditStep::new(EditOperation::InsertText {
+                runs: None,
                 target: TextTarget::Paragraph(ParagraphTarget {
                     story: story.clone(),
                     para_id: key.clone(),
@@ -1970,6 +2010,66 @@ fn spliced(doc: &EditingDoc, part: &str) -> Option<SplicedPart> {
         .spliced_parts
         .into_iter()
         .find(|spliced| spliced.part == part)
+}
+
+#[test]
+fn an_unchanged_page_break_ending_the_body_still_splices() {
+    let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let page_break = r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#;
+    let table = concat!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>"#,
+        r#"<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    for tail in [page_break.to_owned(), format!("{table}{page_break}")] {
+        let doc = seeded(&paragraphs_package(&format!(
+            "{}{}{tail}",
+            paragraph("A"),
+            paragraph("B")
+        )));
+        let unchanged = spliced(&doc, "word/document.xml");
+        assert!(unchanged.is_some(), "{tail}");
+        doc.insert_text(&ctx(), Position::new("body", 0), "x", FormatPolicy::Plain)
+            .unwrap();
+        let edited =
+            spliced(&doc, "word/document.xml").expect("an unchanged tail keeps the splice");
+        assert_eq!(edited.changed.len(), 1, "{tail}");
+    }
+}
+
+#[test]
+fn merging_into_a_page_break_ending_the_body_does_not_splice() {
+    let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let page_break = r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#;
+    for direction in [MergeDirection::Forward, MergeDirection::Backward] {
+        let doc = seeded(&paragraphs_package(&format!(
+            "{}{}{page_break}",
+            paragraph("A"),
+            paragraph("B")
+        )));
+        let key = key_of(&doc, "body", "B");
+        if doc.merge_paragraphs(&ctx(), &key, direction).is_err() {
+            continue;
+        }
+        assert!(
+            spliced(&doc, "word/document.xml").is_none(),
+            "{direction:?}"
+        );
+    }
+}
+
+#[test]
+fn an_edited_page_break_ending_the_body_does_not_splice() {
+    let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+    let page_break = r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#;
+    let doc = seeded(&paragraphs_package(&format!(
+        "{}{}{page_break}",
+        paragraph("A"),
+        paragraph("B")
+    )));
+    let end = doc.story_len("body").unwrap();
+    doc.delete_range(&ctx(), StoryRange::new("body", end - 1, end))
+        .unwrap();
+    assert!(spliced(&doc, "word/document.xml").is_none());
 }
 
 #[test]

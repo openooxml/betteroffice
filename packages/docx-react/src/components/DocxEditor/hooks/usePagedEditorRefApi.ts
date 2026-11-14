@@ -233,6 +233,11 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       bumpInputEpochRef.current?.();
       yrsInputRef.current?.selectAll();
     },
+    pasteContent: (plain, fragment) => {
+      bumpInputEpochRef.current?.();
+      yrsInputRef.current?.pasteContent?.(plain, fragment);
+    },
+    copySelection: (cut) => yrsInputRef.current?.copySelection?.(cut) ?? false,
     readSelectedText: () => yrsInputRef.current?.readSelectedText?.() ?? null,
     getSelectionRange: () => {
       const selection = yrsInputRef.current?.displaySelection();

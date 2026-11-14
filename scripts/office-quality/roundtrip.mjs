@@ -5,7 +5,7 @@ import { fetchAsset } from './asset-cache.mjs';
 import { digest } from './docx-benchmark.mjs';
 import { download } from './download.mjs';
 import { mapPool, validatePlan } from './plan.mjs';
-import { CORPUS_ORIGIN } from './samples.mjs';
+import { corpusOrigin } from './samples.mjs';
 
 export const METHOD = 'office-single-edit-preservation-v2';
 export const CHANNELS = ['published', 'commit', 'libreoffice'];
@@ -14,12 +14,23 @@ export const SHARD_SIZE = 16;
 export const ENGINE_TIMEOUT = 180;
 export const HELPER_TIMEOUT = 30;
 
+export const MAX_MATRIX_JOBS = 256;
+export const ROUNDTRIP_MATRICES = 2;
+
 export function roundtripShards(plan) {
   return plan.formats.flatMap(format => {
     const ids = plan.samples.filter(sample => sample.format === format).map(sample => sample.id).sort();
     return Array.from({ length: Math.ceil(ids.length / SHARD_SIZE) }, (_, shard) =>
       ({ format, shard, ids: ids.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE) }));
   });
+}
+
+export function roundtripMatrices(plan) {
+  const shards = roundtripShards(plan).map(({ format, shard }) => ({ format, shard }));
+  const size = Math.ceil(shards.length / ROUNDTRIP_MATRICES);
+  if (size > MAX_MATRIX_JOBS)
+    throw new Error(`Roundtrip needs ${shards.length} jobs; ${ROUNDTRIP_MATRICES} workflow matrices hold at most ${ROUNDTRIP_MATRICES * MAX_MATRIX_JOBS}`);
+  return Array.from({ length: ROUNDTRIP_MATRICES }, (_, index) => shards.slice(index * size, (index + 1) * size));
 }
 
 function validateOutcome(result) {
@@ -145,7 +156,7 @@ export async function stageRoundtrip(planPath, output, format, shardIndex, cache
     const directory = resolve(output, sample.id);
     await mkdir(directory, { recursive: true });
     await writeFile(resolve(directory, `source.${format}`), await fetchAsset(sample.metadata.source, sample.id,
-      download, { cacheDir, origin: CORPUS_ORIGIN, maximum: 128 * 1024 * 1024 }));
+      download, { cacheDir, origin: corpusOrigin(), maximum: 128 * 1024 * 1024 }));
     if (++completed % 25 === 0 || completed === samples.length)
       console.log(`${format.toUpperCase()} roundtrip: staged ${completed}/${samples.length} verified files`);
   });

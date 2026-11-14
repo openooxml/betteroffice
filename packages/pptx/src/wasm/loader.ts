@@ -1,3 +1,4 @@
+import { upgradeExportFaces } from './exportFaces';
 import initWasmModule, {
   decodeFontFace as decodePackedFontFace,
   decodeTiffPng,
@@ -13,6 +14,13 @@ import initWasmModule, {
 import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { metafileImageBytes } from '../render/browserImage';
+import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
+import { releasePng, renderPng as renderEnginePng } from './enginePng';
+import { exportPictureBytes } from '../render/png';
+import type { PptxPngOptions, PptxPngTarget } from './pngOptions';
+export type { PptxPngOptions, PptxPngTarget } from './pngOptions';
+import { frameAssetIds } from '../session/frame';
 import { presentationContexts } from './presentationContext';
 
 export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
@@ -21,7 +29,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { OPEN_SYNC_CLIENT } from '../collaboration/protocol';
-import { StaleProposalError } from '../proposals';
+import { ProposalPictureMediaTooLargeError, StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';
 import type {
   PptxExportFailure,
@@ -31,7 +39,7 @@ import type {
   PptxMarkdownOptions,
   PptxStructuredContent,
 } from '../structuredExport';
-import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
+import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry } from '../proposals';
 import type {
   PptxEditRequest,
   PptxEditResult,
@@ -130,12 +138,21 @@ export type PresentationCommandReadResult = Extract<PptxReadResult, { ok: false 
 );
 
 export interface PresentationHandle extends CollaborationReplica {
+  /**
+   * Draws a slide as PNG bytes with the editor's painter on a canvas, with the
+   * faces layout measured with. Rejects with `PngExportError` rather than
+   * paint a substitute font, and where no canvas exists names
+   * `@betteroffice/pptx-native`.
+   */
+  renderPng(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
   isProposalsAvailable(): boolean;
   propose(agentId: string, note: string | null, edits: readonly ProposalEdit[]): Proposal;
   listProposals(): Proposal[];
   previewProposal(id: string): ProposalPreview;
   layoutProposalSlide(id: string, slideIndex: number): SlideDisplayList;
   layoutProposalDiffSlide(id: string, slideIndex: number): ProposalDiffSlide;
+  layoutProposalDiffSlideById(id: string, slideId: string): ProposalDiffSlide;
+  proposalSlideStrip(id: string): ProposalStripEntry[];
   acceptProposal(id: string, options?: { force?: boolean }): ProposalAcceptance;
   rejectProposal(id: string): boolean;
   readonly clientId: number;
@@ -181,6 +198,8 @@ export interface PresentationHandle extends CollaborationReplica {
   registerFont(face: PptxFontFace): number;
   /** Registers a face drawn only where a run's own face has no glyph. */
   registerFallbackFont(face: PptxFontFace): number;
+  /** Gives PNG export the complete bytes of a family layout measured with only part of. */
+  replaceExportFace(family: string, bytes: Uint8Array, keep?: (face: { id: number; bold?: boolean; italic?: boolean }) => boolean): void;
   layoutSlide(slideIndex: number): SlideDisplayList;
   /** `layoutSlide` with scope, layout and serialize time measured inside the renderer. */
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
@@ -363,7 +382,7 @@ export type PresentationPeerHandle = Pick<PresentationHandle,
   'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' |
   'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' |
   'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' |
-  'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' |
+  'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'renderPng' | 'hitTest' |
   'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
 >;
 
@@ -611,10 +630,15 @@ function openPresentationInternal(
     try { doc.free(); } catch {}
     throw peer ? peerError(error) : error;
   }
+  const exportFaces = new Map<number, PptxFontFace & { id: number; fallback?: boolean }>();
+  const keepFace = (id: number, face: PptxFontFace, fallback = false) => {
+    exportFaces.set(id, { id, family: face.family, bold: face.bold ?? false, italic: face.italic ?? false, bytes: face.bytes.slice(), fallback });
+    return id;
+  };
   if (!peer) {
     try {
-      for (const face of options.fonts ?? []) registerFont(renderer, face);
-      for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
+      for (const face of options.fonts ?? []) keepFace(registerFont(renderer, face), face);
+      for (const face of options.fallbackFonts ?? []) keepFace(registerFont(renderer, face, true), face, true);
     } catch (error) {
       try { renderer.free(); } catch {}
       try { doc.free(); } catch {}
@@ -710,6 +734,21 @@ function openPresentationInternal(
   const jsonWasmCall = <T,>(operation: () => string, drainUpdates = false): T =>
     wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
 
+  const proposalMedia = (diff: ProposalDiffSlide): ProposalDiffSlide => {
+    const media: NonNullable<ProposalDiffSlide['media']> = [];
+    for (const assetId of frameAssetIds(diff.frame)) {
+      if (assetId.startsWith('pending-media:')) continue;
+      try {
+        let source = wasmCall(() => doc.mediaBytes(assetId));
+        if (isTiff(source) && source.byteLength <= MAX_TIFF_BYTES) source = decodeTiffImage(source);
+        const bytes = metafileImageBytes(source, () => wasmCall(() => doc.metafileSvg(assetId)));
+        if (!bytes.byteLength) continue;
+        media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
+      } catch {}
+    }
+    return { ...diff, media };
+  };
+
   const ensureUpdateObserver = (): void => {
     if (observerInstalled) return;
     wasmCall(() => doc.startUpdateObservation());
@@ -764,8 +803,18 @@ function openPresentationInternal(
     previewProposal(id) {
       return jsonWasmCall(() => doc.previewProposalJson(JSON.stringify({ id })));
     },
+    proposalSlideStrip(id) {
+      if (!isProposalsAvailable() || typeof doc.proposalSlideStripJson !== 'function') return [];
+      return jsonWasmCall(() => doc.proposalSlideStripJson(id));
+    },
+    layoutProposalDiffSlideById(id, slideId) {
+      if (!isProposalsAvailable() || typeof renderer.layoutProposalDiffSlideByIdJson !== 'function') {
+        throw new Error('Proposal slide previews are unavailable');
+      }
+      return proposalMedia(jsonWasmCall<ProposalDiffSlide>(() => renderer.layoutProposalDiffSlideByIdJson(doc, id, slideId)));
+    },
     layoutProposalDiffSlide(id, slideIndex) {
-      return jsonWasmCall(() => renderer.layoutProposalDiffSlideJson(doc, id, slideIndex));
+      return proposalMedia(jsonWasmCall<ProposalDiffSlide>(() => renderer.layoutProposalDiffSlideJson(doc, id, slideIndex)));
     },
     layoutProposalSlide(id, slideIndex) {
       return jsonWasmCall(() => renderer.layoutProposalSlideJson(doc, id, slideIndex));
@@ -844,10 +893,52 @@ function openPresentationInternal(
       );
     },
     registerFont(face: PptxFontFace): number {
-      return wasmCall(() => registerFont(renderer, face));
+      return keepFace(wasmCall(() => registerFont(renderer, face)), face);
     },
     registerFallbackFont(face: PptxFontFace): number {
-      return wasmCall(() => registerFont(renderer, face, true));
+      return keepFace(wasmCall(() => registerFont(renderer, face, true)), face, true);
+    },
+    replaceExportFace(family: string, bytes: Uint8Array, keep?: (face: { id: number; bold?: boolean; italic?: boolean }) => boolean): void {
+      upgradeExportFaces(exportFaces.values(), family, bytes, keep);
+      releasePng(doc);
+    },
+    renderPng(target: PptxPngTarget, options: PptxPngOptions = {}): Promise<Uint8Array> {
+      let slide: number;
+      let slideId: string;
+      try {
+        assertAlive();
+        if (typeof target !== 'object' || target === null || Object.keys(target).length !== 1 || !('slide' in target)) {
+          throw new TypeError('target must be { slide } with a slide index or ID');
+        }
+        const slides = jsonWasmCall<DeckSnapshot>(() => doc.snapshotJson()).slides;
+        const key = target.slide;
+        if (typeof key === 'string') {
+          slide = slides.findIndex((candidate) => candidate.id === key);
+          if (slide < 0) throw new RangeError(`no slide with ID ${JSON.stringify(key)}`);
+        } else if (typeof key === 'number' && Number.isInteger(key)) {
+          if (key < 0 || key >= slides.length) throw new RangeError(`slide index ${key} out of range for ${slides.length} slide(s)`);
+          slide = key;
+        } else throw new TypeError('slide must be an ID (string) or an index (number)');
+        slideId = slides[slide]!.id;
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return renderEnginePng({
+        doc, renderer,
+        displayList: (index) => jsonWasmCall<SlideDisplayList>(() => renderer.exportSlideJson(doc, index)),
+        media: (assetId) => {
+          assertAlive();
+          let source: Uint8Array;
+          try {
+            source = wasmCall(() => doc.mediaBytes(assetId));
+            if (isTiff(source) && source.byteLength <= MAX_TIFF_BYTES) source = decodeTiffImage(source);
+          } catch { return undefined; }
+          return exportPictureBytes(source, () => {
+            try { return wasmCall(() => doc.metafileSvg(assetId)); } catch { return undefined; }
+          });
+        },
+        fonts: () => [...exportFaces.values()],
+      }, { slide, id: slideId }, options).then((bytes) => { assertAlive(); return bytes; }, (error) => { assertAlive(); throw error; });
     },
     layoutSlide(slideIndex: number): SlideDisplayList {
       return jsonWasmCall(() => renderer.layoutSlideJson(doc, slideIndex));
@@ -1192,6 +1283,11 @@ function openPresentationInternal(
         observerInstalled = false;
       }
       try {
+        releasePng(doc);
+      } catch (error) {
+        disposalError ??= error;
+      }
+      try {
         renderer.free();
       } catch (error) {
         disposalError ??= error;
@@ -1260,7 +1356,7 @@ function openPresentationInternal(
           }
           manifest = JSON.stringify(entries);
           wasmCall(() => {
-            for (const face of faces) registerFont(renderer, face, face.fallback);
+            for (const face of faces) keepFace(registerFont(renderer, face, face.fallback), face, face.fallback);
             if (peer.kind === 'peer') doc.registerPeerFontsJson(manifest);
           });
           faces.length = 0;
@@ -1410,6 +1506,9 @@ function toError(error: unknown): Error {
   if (typeof error === 'string') {
     try {
       const parsed = JSON.parse(error);
+      if (parsed.code === 'proposalPictureMediaTooLarge' && typeof parsed.totalBytes === 'number') {
+        return new ProposalPictureMediaTooLargeError(parsed.totalBytes, parsed.limitBytes);
+      }
       if (parsed.code === 'staleProposal' && Array.isArray(parsed.targets)
           && parsed.targets.every((target: unknown) => typeof target === 'string')) {
         return new StaleProposalError(parsed.targets);

@@ -19,6 +19,9 @@
 
 import { version as packageVersion } from '../package.json';
 
+export { fontPackDiagnostics } from './fontPackDiagnostics';
+export type { FontPackDiagnostic } from './fontPackDiagnostics';
+
 export const VERSION: string = packageVersion;
 
 // ============================================================================

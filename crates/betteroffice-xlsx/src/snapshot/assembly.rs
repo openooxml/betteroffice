@@ -54,12 +54,15 @@ pub(super) struct Lineage {
 
 impl Lineage {
     fn capture(workbook: &Workbook) -> SnapshotResult<Self> {
+        let built = workbook
+            .authority()
+            .map_err(|failure| error(failure.to_string()))?;
         let Workbook {
             #[cfg(feature = "fonts")]
                 font_manager: _,
             #[cfg(all(feature = "fonts", feature = "raster"))]
                 fonts: _,
-            authority,
+            authority: _,
             mode: _,
             pending_remote_updates,
             model,
@@ -151,9 +154,9 @@ impl Lineage {
             active_sheet: *active_sheet,
             seed: *rand_seed,
             recalculated: *recalculated_since_open,
-            projection_valid: authority.snapshot_projection_valid()?,
-            state_vector: authority.encode_state_vector_v1(),
-            authority_revision: authority.snapshot_revision(),
+            projection_valid: built.snapshot_projection_valid()?,
+            state_vector: built.encode_state_vector_v1(),
+            authority_revision: built.snapshot_revision(),
         })
     }
 
@@ -183,10 +186,13 @@ impl Lineage {
         if !observers.listeners.is_empty() || observers.next_id != 0 {
             return Ok(false);
         }
+        let Some(built) = workbook.authority.built.get() else {
+            return Ok(false);
+        };
         let mut proposals = workbook.proposals.clone();
         Ok(proposals.next_id() == "p1"
-            && self.projection_valid == workbook.authority.snapshot_projection_valid()?
-            && self.authority_revision == workbook.authority.snapshot_revision())
+            && self.projection_valid == built.snapshot_projection_valid()?
+            && self.authority_revision == built.snapshot_revision())
     }
 }
 
@@ -248,7 +254,9 @@ impl WorkbookSnapshotEncoder {
         let part_budget = SnapshotBudget::new(1, part_bytes)?;
         let record_budget = record_budget()?;
         let authority = AuthoritySnapshotEncoder::new(
-            &workbook.authority,
+            workbook
+                .authority()
+                .map_err(|failure| error(failure.to_string()))?,
             SnapshotBudget::new(budget.max_records(), part_bytes)?,
         )?;
         let split_fallback = authority.split_fallback();
@@ -294,7 +302,10 @@ impl WorkbookSnapshotEncoder {
                 .div_ceil(part_budget.max_bytes())
                 .max(1) as u64;
         }
-        let (client_id, guid, next_sheet_id) = workbook.authority.snapshot_identity();
+        let (client_id, guid, next_sheet_id) = workbook
+            .authority()
+            .map_err(|failure| error(failure.to_string()))?
+            .snapshot_identity();
         let header = SnapshotHeader {
             snapshot_id,
             mode: SnapshotMode::Standalone,
@@ -985,6 +996,7 @@ pub struct WorkbookSnapshotBuilder {
     source: Option<SourceBuilder>,
     source_received_bytes: usize,
     restored: Option<Workbook>,
+    projection_valid: bool,
     graph: Option<SnapshotGraphBuilder>,
     anchor_sheet: usize,
     anchor_chart: usize,
@@ -1001,8 +1013,8 @@ pub struct WorkbookSnapshotBuilder {
     unevaluated: Unevaluated,
 }
 
-/// the restored session's re-derivation of the cells an uncomputable call
-/// leaves unevaluated, a step per advance like every other phase.
+/// the restored session's re-derivation of the cells an uncomputable or
+/// unknown call leaves unevaluated, a step per advance like every other phase.
 enum Unevaluated {
     /// looking through defined names, then each sheet's cells after the last
     /// one looked at, for a formula that may call an uncomputable function.
@@ -1036,6 +1048,7 @@ impl WorkbookSnapshotBuilder {
             source: None,
             source_received_bytes: 0,
             restored: None,
+            projection_valid: false,
             graph: None,
             anchor_sheet: 0,
             anchor_chart: 0,
@@ -1759,12 +1772,16 @@ impl WorkbookSnapshotBuilder {
             return Ok(SnapshotProgress::pending());
         }
         if !self.authority_validated {
-            self.authority_validated = workbook.authority.validate_snapshot_model(
-                &mut workbook.model,
-                &mut self.authority_validation,
-                &mut self.authority_keys,
-                budget,
-            )?;
+            self.authority_validated = workbook
+                .authority
+                .get()
+                .map_err(|failure| error(failure.to_string()))?
+                .validate_snapshot_model(
+                    &mut workbook.model,
+                    &mut self.authority_validation,
+                    &mut self.authority_keys,
+                    budget,
+                )?;
             return Ok(SnapshotProgress::pending());
         }
         if !self.anchors_done {
@@ -1923,6 +1940,11 @@ impl WorkbookSnapshotBuilder {
             workbook.adopt_derived_unevaluated();
             self.unevaluated = Unevaluated::Done;
         }
+        workbook
+            .authority
+            .get_mut()
+            .map_err(|failure| error(failure.to_string()))?
+            .set_snapshot_projection_valid(self.projection_valid);
         self.ready = Some(HydratedWorkbook {
             workbook: self
                 .restored
@@ -1965,7 +1987,7 @@ impl WorkbookSnapshotBuilder {
             .take()
             .ok_or_else(|| error("snapshot authority builder is missing"))?
             .finish_drained()?;
-        authority.set_snapshot_projection_valid(projection_valid);
+        self.projection_valid = projection_valid;
         let model_builder = self
             .model
             .take()
@@ -2075,7 +2097,7 @@ impl WorkbookSnapshotBuilder {
             .map_err(|source| error(source.to_string()))?,
             #[cfg(all(feature = "fonts", feature = "raster"))]
             fonts: Mutex::new(crate::font::FontRegistry::default()),
-            authority,
+            authority: super::AuthoritySlot::built(authority),
             mode: WorkbookMode::Standalone,
             pending_remote_updates: Vec::new(),
             model,

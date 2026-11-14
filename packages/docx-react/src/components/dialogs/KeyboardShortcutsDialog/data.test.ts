@@ -7,9 +7,18 @@ import {
 import type { DocxCommandShortcut } from '../../../commands/types';
 import { COMMAND_SHORTCUTS, DEFAULT_SHORTCUTS, getCommandShortcuts } from './data';
 
+const CLIPBOARD_ROWS: ReadonlySet<string> = new Set([
+  'cut',
+  'copy',
+  'paste',
+  'pasteAsPlainText',
+  'selectAll',
+]);
+
 describe('keyboard help', () => {
   test('lists every command binding the descriptors define, and no other', () => {
     const bound = Object.values(DOCX_COMMAND_DESCRIPTORS)
+      .filter(({ id }) => !CLIPBOARD_ROWS.has(id))
       .flatMap((descriptor) => descriptor.shortcuts as readonly DocxCommandShortcut[])
       .filter((shortcut) => shortcutMatchesPlatform(shortcut))
       .map((shortcut) => formatChord(shortcut.chord, false))

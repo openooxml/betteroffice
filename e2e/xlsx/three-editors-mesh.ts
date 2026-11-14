@@ -1,5 +1,7 @@
 import { expect } from 'bun:test';
 
+import { stateVectorEntries } from '../assertions';
+
 import { SHEET, exchange, fingerprint, replicas } from './context';
 import type { XlsxScenario } from './context';
 
@@ -73,8 +75,8 @@ export const threeEditorsMesh: XlsxScenario = {
     expect(a.timer.op('redo:own', () => a.handle.redo()).applied).toBe(true);
     exchange(peers, 'applyUpdate:afterRedo');
     converged();
-    expect([...b.handle.encodeStateVector()].join()).toBe(
-      [...c.handle.encodeStateVector()].join()
+    expect(stateVectorEntries(b.handle.encodeStateVector())).toEqual(
+      stateVectorEntries(c.handle.encodeStateVector())
     );
   },
 };

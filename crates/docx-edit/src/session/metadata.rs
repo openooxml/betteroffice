@@ -33,6 +33,28 @@ impl EditSessionCore {
             .map_err(EngineError::message)
     }
 
+    pub fn style_languages_json(&self) -> String {
+        self.engine.doc().style_languages_json()
+    }
+
+    pub fn set_style_language(
+        &self,
+        style_id: Option<&str>,
+        slots_json: &str,
+    ) -> EngineResult<bool> {
+        self.engine
+            .doc()
+            .set_style_language(&EditCtx::local("", ""), style_id, slots_json)
+            .map_err(EngineError::message)
+    }
+
+    pub fn patch_style_languages_xml(&self, source: &str) -> EngineResult<String> {
+        self.engine
+            .doc()
+            .patch_style_languages_xml(source)
+            .map_err(EngineError::message)
+    }
+
     pub fn list_sections_json(&self) -> EngineResult<String> {
         let sections = self
             .engine
@@ -68,7 +90,7 @@ impl EditSessionCore {
             .engine
             .doc()
             .create_story(story_id, initial_text, p_style, alignment)
-            .map_err(EngineError::message)?;
+            .map_err(EngineError::from)?;
         Ok(json!({ "paraId": para_id }).to_string())
     }
 
@@ -77,6 +99,6 @@ impl EditSessionCore {
         self.engine
             .doc()
             .delete_story(story_id)
-            .map_err(EngineError::message)
+            .map_err(EngineError::from)
     }
 }

@@ -11,7 +11,7 @@ export interface LocaleProviderProps {
   children: ReactNode;
 }
 
-function formattingLocale(lang: unknown): string {
+export function resolvedLocale(lang: unknown): string {
   if (typeof lang !== 'string') return 'en';
   try {
     return Intl.getCanonicalLocales(lang)[0] ?? 'en';
@@ -21,7 +21,7 @@ function formattingLocale(lang: unknown): string {
 }
 
 export function LocaleProvider({ i18n, children }: LocaleProviderProps) {
-  const lang = formattingLocale(i18n?._lang);
+  const lang = resolvedLocale(i18n?._lang);
   const merged = useMemo(
     () => deepMerge(en as Record<string, unknown>, i18n as Record<string, unknown> | undefined),
     [i18n]

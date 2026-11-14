@@ -19,6 +19,9 @@ import {
 import { createPptxCommandController } from '../../commands/createPptxCommandStore';
 import { testBinding } from '../../commands/testing';
 import { LocaleProvider } from '../../i18n';
+import { loadMenuList } from '../../../../../shared/react-toolbar/menuListLoader';
+
+await loadMenuList();
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
 

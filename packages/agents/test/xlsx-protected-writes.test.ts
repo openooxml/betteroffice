@@ -1,14 +1,17 @@
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import JSZip from 'jszip';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { openWorkbook } from '@betteroffice/xlsx';
+import { initWasm, openWorkbook } from '@betteroffice/xlsx';
 import { attachXlsx, openXlsx } from '../src/xlsx';
 import { implicitFontWorkbook } from './format-fixtures';
 import { cliEnv } from './cli-env';
+import { initialize } from '../src/prototype';
+
+beforeAll(() => initialize('xlsx', initWasm));
 
 const protection = '<sheetProtection password="CAFE" sheet="1" objects="1" scenarios="1" formatCells="1" sort="1"/>';
 

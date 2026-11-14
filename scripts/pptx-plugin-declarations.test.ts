@@ -16,7 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dir, '..');
 const declarationMode = process.env.BETTEROFFICE_PACKAGE_DECLARATIONS;
-const PACKAGES = ['pptx-i18n', 'pptx', 'pptx-react'];
+const PACKAGES = ['fonts', 'pptx-i18n', 'pptx', 'pptx-react'];
 const LINKED = ['react', 'react-dom', '@types/react', '@types/react-dom', 'csstype'];
 
 const CONSUMER = `import {
@@ -26,9 +26,24 @@ const CONSUMER = `import {
   definePptxPlugin,
   usePptxCommand,
   type PptxPluginContext,
+  type PptxAnchorGeometryResult,
+  type PptxGeometryTarget,
+  type PptxPluginRect,
   type PptxPluginGrant,
   type PptxPluginNavigationResult,
+  type BundledFontFace,
+  type PptxBundledFont,
 } from '@betteroffice/pptx-react';
+import { resolveMetricCompatFace } from '@betteroffice/fonts';
+import { en, type LocaleStrings } from '@betteroffice/pptx-i18n';
+import enDefault, { en as enSubpath } from '@betteroffice/pptx-i18n/en';
+import { createT, deepMerge, editorEn } from '@betteroffice/pptx-i18n/editor';
+import { proposalEn } from '@betteroffice/pptx-i18n/proposals';
+
+const english: LocaleStrings[] = [en, enSubpath, enDefault];
+const proposalLabel: string = proposalEn.proposals.layoutChanged;
+const translated: string = createT(en)('proposals.layoutChanged');
+void [english, proposalLabel, translated, deepMerge(editorEn, proposalEn)];
 
 type State = { count: number };
 
@@ -41,7 +56,47 @@ export const review = definePptxPlugin<State>({
   id: 'acme.review',
   createState: () => ({ count: 0 }),
   async onEvent(context, event) {
+    const focused: boolean = context.snapshot.focused;
+    const locale: string = context.snapshot.locale;
+    void [focused, locale];
+    const viewport: PptxPluginRect | undefined = context.geometry?.viewport;
+    void viewport;
+    switch (event.type) {
+      case 'focus-change': {
+        const focused: boolean = event.focused;
+        void focused;
+        break;
+      }
+      case 'locale-change': {
+        const locale: string = event.locale;
+        void locale;
+        break;
+      }
+      case 'viewport-change': {
+        const viewport: PptxPluginRect | null = event.viewport;
+        void viewport;
+        break;
+      }
+    }
     if (event.type === 'selection-change' && event.selection?.target.kind === 'text') {
+      const target: PptxGeometryTarget = {
+        ...event.selection.target, kind: 'range', version: event.version, slideId: event.selection.slideId,
+      };
+      const anchor: PptxAnchorGeometryResult | undefined = context.geometry?.getAnchorGeometry({ kind: 'selection' });
+      const anchors: PptxAnchorGeometryResult[] | undefined = await context.geometry?.readAnchorGeometries([target, { kind: 'selection' }]);
+      if (anchor?.ok) {
+        const rects: readonly PptxPluginRect[] = anchor.rects;
+        const caret: PptxPluginRect = anchor.anchor;
+        const pageRect: PptxPluginRect = anchor.pageRect;
+        const version: string = anchor.version;
+        const layoutId: string = anchor.layoutId;
+        void [rects, caret, pageRect, version, layoutId];
+      } else if (anchor) {
+        const code: 'stale-version' | 'missing-target' | 'layout-unavailable' = anchor.failure.code;
+        const message: string = anchor.failure.message;
+        void [code, message];
+      }
+      void anchors;
       const result: PptxPluginNavigationResult = await context.navigation.selectText(
         { slideId: event.selection.slideId, ...event.selection.target },
         { expectVersion: event.version }
@@ -65,9 +120,12 @@ const grant: PptxPluginGrant = { document: 'write', editBatches: true, commands:
 const invalid: PptxPluginGrant = { editBatches: true };
 void invalid;
 
+const face: BundledFontFace | undefined = resolveMetricCompatFace('Arial', false, false);
+const bundled: PptxBundledFont[] = face ? [{ face, baseUrl: 'https://example.test/fonts/' }] : [];
+
 export const editor = (
   <PptxEditor
-    fonts={[]}
+    fonts={bundled}
     plugins={[review]}
     pluginGrants={{ 'acme.review': grant }}
     onPluginError={(error) => console.error(error.phase)}

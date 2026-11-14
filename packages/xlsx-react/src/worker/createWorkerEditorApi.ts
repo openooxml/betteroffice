@@ -7,6 +7,7 @@ import { WorkbookRecoveryRefusal, workbookEditPeerOperations } from '@betteroffi
 import type { XlsxWorkerViewerApi } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
+import { commandReason } from '../commands/evaluate';
 import {
   WorkerInputNotReadyError, WorkerInputRefusal, inputRefusal, type WorkerInputCoordinator, type WorkerInputLease,
 } from '../commands/workerInputCoordinator';
@@ -30,6 +31,7 @@ export interface WorkerEditorApiBridge {
   getPositionAtPoint?: XlsxWorkerViewerApi['getPositionAtPoint'];
   coordinator(): WorkerInputCoordinator | null;
   readOnly(): boolean;
+  allowHostProposals?(): boolean;
   clearSelection(): void;
   focus(): void;
   refreshProposals(): void;
@@ -214,6 +216,24 @@ export function createWorkerEditorApi(
     clearSelection: () => { if (session.current && !session.failure) bridge().clearSelection(); },
     focus: () => { if (session.current && !session.failure) bridge().focus(); },
     refreshProposals: () => { if (session.ready) bridge().refreshProposals(); },
+    async proposeChanges(request) {
+      try {
+        const captured = structuredClone(request);
+        const result = await ordered('propose', (markApplied) => {
+          if (bridge().readOnly() && !bridge().allowHostProposals?.()) {
+            return { ok: false as const, failure: commandReason('read-only', null) };
+          }
+          const proposal = requirePeer().edits.propose(captured.agentId, captured.note ?? null, captured.edits);
+          markApplied();
+          bridge().refreshProposals();
+          return { ok: true as const, proposal };
+        }, true);
+        return result ?? { ok: false, failure: commandReason('document-replaced', null) };
+      } catch (error) {
+        const code = error instanceof XlsxCommandAdmissionError ? error.code : 'command-failed';
+        return { ok: false, failure: commandReason(code, null) };
+      }
+    },
     selectCells(sheet, selection) {
       if (session.failure || !session.ready || !session.peer || !validSelection(session.peer, sheet, selection) ||
         bridge().canNavigateSync?.() === false) return false;

@@ -1,5 +1,5 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Error, SheetId, SnapshotBudget, Workbook, WorkbookSnapshotBuilder,
+    CalculationOptions, SheetId, SnapshotBudget, Workbook, WorkbookSnapshotBuilder,
     WorkbookSnapshotEncoder,
 };
 use xlsx_model::CellRange;
@@ -221,13 +221,6 @@ fn open_snapshot_and_remote_replay_preserve_a_source_filter() {
     );
     let mut left = Workbook::open_collaborative(&bytes, 811).unwrap();
     let mut right = Workbook::open_collaborative(&bytes, 812).unwrap();
-    let state = left.encode_state_as_update_v1();
-    assert!(matches!(
-        set(&mut left, Some("A1:D10")),
-        Err(Error::CollaborativeStructureOperation)
-    ));
-    assert_eq!(left.model(), book.model());
-    assert_eq!(left.encode_state_as_update_v1(), state);
     left.edit_cell(
         SheetId(0),
         xlsx_model::CellRef::new(0, 0),

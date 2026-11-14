@@ -15,6 +15,8 @@ mod fonts;
 mod gpu;
 #[cfg(feature = "docx")]
 mod images;
+#[cfg(any(feature = "docx", feature = "pptx"))]
+mod picture_decode;
 #[cfg(feature = "pptx")]
 mod pptx_editing;
 #[cfg(feature = "pptx")]

@@ -6,7 +6,8 @@
  * DOM, no i18n import — label templates arrive as a param.
  */
 
-import type { DisplayList, GridMeta } from '../display-list/types';
+import type { DisplayList, GridMeta, HyperlinkRegion } from '../display-list/types';
+import { safeExternalHyperlink } from '../hyperlinks/index';
 import { normalizeRange } from '../selection/index';
 import type { CellRange, Selection } from '../selection/index';
 import type {
@@ -62,6 +63,31 @@ function textByCellOrigin(displayList: DisplayList): Map<string, string> {
   return map;
 }
 
+// the first link holding a visible cell wins, as `hyperlinkAtCell` resolves it.
+function linksByCell(displayList: DisplayList, rows: number[], cols: number[]): Map<string, HyperlinkRegion> {
+  const map = new Map<string, HyperlinkRegion>();
+  for (const link of displayList.hyperlinks ?? []) {
+    const linkRows = rows.filter((row) => row >= link.top && row <= link.bottom);
+    if (linkRows.length === 0) continue;
+    const linkCols = cols.filter((col) => col >= link.left && col <= link.right);
+    for (const row of linkRows) {
+      for (const col of linkCols) {
+        const cell = `${row},${col}`;
+        if (!map.has(cell)) map.set(cell, link);
+      }
+    }
+  }
+  return map;
+}
+
+function linkHref(link: HyperlinkRegion | undefined): string | undefined {
+  if (!link) return undefined;
+  const external = safeExternalHyperlink(link);
+  if (external) return external;
+  const location = link.location?.replace(/^#/, '');
+  return location ? `#${location}` : undefined;
+}
+
 function isSelected(range: CellRange | null, row: number, col: number): boolean {
   if (!range) return false;
   return row >= range.top && row <= range.bottom && col >= range.left && col <= range.right;
@@ -77,7 +103,8 @@ function buildCell(
   lc: number,
   text: string,
   selected: boolean,
-  t: A11yStrings
+  t: A11yStrings,
+  href: string | undefined
 ): A11yCell {
   const row = trackAddress(grid.startRow, grid.rowIndices, lr);
   const col = trackAddress(grid.startCol, grid.colIndices, lc);
@@ -90,7 +117,7 @@ function buildCell(
     : selected
       ? t.cellLabelSelected
       : t.cellLabel;
-  return {
+  const cell: A11yCell = {
     row,
     col,
     address,
@@ -98,6 +125,8 @@ function buildCell(
     selected,
     label: fill(template, { address, value: text }),
   };
+  if (href) cell.href = href;
+  return cell;
 }
 
 /**
@@ -123,6 +152,9 @@ export function buildA11yGrid(
   const rows = grid.rowOffsets.length - 1;
   const range = selection ? normalizeRange(selection) : null;
   const textAt = textByCellOrigin(displayList);
+  const visibleRows = Array.from({ length: rows }, (_, lr) => trackAddress(grid.startRow, grid.rowIndices, lr));
+  const visibleCols = Array.from({ length: cols }, (_, lc) => trackAddress(grid.startCol, grid.colIndices, lc));
+  const linkAt = linksByCell(displayList, visibleRows, visibleCols);
 
   const columnHeaders: A11yColumnHeader[] = [];
   for (let lc = 0; lc < cols; lc++) {
@@ -139,7 +171,8 @@ export function buildA11yGrid(
       const origin = key(grid.colOffsets[lc], grid.rowOffsets[lr]);
       const text = textAt.get(origin) ?? '';
       const col = trackAddress(grid.startCol, grid.colIndices, lc);
-      cells.push(buildCell(grid, lr, lc, text, isSelected(range, row, col), t));
+      const href = linkHref(linkAt.get(`${row},${col}`));
+      cells.push(buildCell(grid, lr, lc, text, isSelected(range, row, col), t, href));
     }
     outRows.push({ row, header: fill(t.rowHeaderLabel, { row: row + 1 }), cells });
   }

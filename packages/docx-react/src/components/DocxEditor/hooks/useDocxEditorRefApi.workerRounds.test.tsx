@@ -322,6 +322,7 @@ test('same proposal ids retain separate records and decisions after permanent wo
   const workerIds = workerRecords.flatMap(({ revisionIds }) => revisionIds);
   expect(localIds.length).toBeGreaterThan(0);
   expect(workerIds.length).toBeGreaterThan(0);
+  expect(localIds.some((id) => workerIds.includes(id))).toBe(false);
   const authors = () => h.peer.listRevisions().filter(({ revisionId }) =>
     [...localIds, ...workerIds].includes(revisionId)).map(({ revisionId, author, date }) => ({ revisionId, author, date }));
   const originalAuthors = authors();
@@ -336,8 +337,14 @@ test('same proposal ids retain separate records and decisions after permanent wo
     expect(await h.renderer.result.current.layoutInWorker(h.peer, LAYOUT)).toBeNull();
   });
   expect(h.authority.retirementReason()).toBe('source-fallback');
-  expect(h.peer.getProposals().proposals).toEqual(localRecords);
-  expect((await h.api.getProposals()).proposals).toEqual(workerRecords);
+  const recoveredLocal = h.peer.getProposals();
+  const recoveredWorker = await h.api.getProposals();
+  expect(recoveredLocal.proposals).toEqual(localRecords);
+  expect(recoveredWorker.proposals).toEqual(workerRecords);
+  expect(recoveredLocal.previewVersion).toBe(local.previewVersion);
+  expect(recoveredWorker.previewVersion).toBe(remote.previewVersion);
+  expect(recoveredLocal.revision).toBe(local.revision);
+  expect(recoveredWorker.revision).toBe(remote.revision);
   expect(authors()).toEqual(originalAuthors);
   expect(h.authority.previewVersion()).toBeGreaterThanOrEqual(previewVersion);
   expect(h.hook.result.current.preview.revisionPreview).toEqual(preview);
@@ -348,13 +355,19 @@ test('same proposal ids retain separate records and decisions after permanent wo
       expectPreviewVersion: remote.previewVersion, changes: [{ id: 'same', state: 'rejected' }] }));
   });
   expect(h.peer.getProposals().proposals).toEqual(localRecords);
-  expect(remote.proposals).toEqual(workerRecords.map((record) => ({ ...record, state: 'rejected' })));
+  expect(remote.proposals).toEqual(workerRecords.map((record) => ({
+    ...record, state: 'rejected', decisionState: 'rejected', stateVersion: recoveredWorker.previewVersion + 1,
+  })));
+  expect(remote.revision).toBe(recoveredWorker.revision! + 1);
   await act(async () => {
     local = snapshot(h.peer.setProposalStates({ expectVersion: h.peer.version(),
       expectPreviewVersion: local.previewVersion, changes: [{ id: 'same', state: 'accepted' }] }));
   });
   expect((await h.api.getProposals()).proposals).toEqual(remote.proposals);
-  expect(local.proposals).toEqual(localRecords.map((record) => ({ ...record, state: 'accepted' })));
+  expect(local.proposals).toEqual(localRecords.map((record) => ({
+    ...record, state: 'accepted', decisionState: 'accepted', stateVersion: recoveredLocal.previewVersion + 1,
+  })));
+  expect(local.revision).toBe(recoveredLocal.revision! + 1);
   await act(async () => {
     snapshot(await h.api.withdrawProposals({ expectVersion: h.peer.version(), ids: ['same'] }));
   });

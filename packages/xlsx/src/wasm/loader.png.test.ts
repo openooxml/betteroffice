@@ -71,11 +71,14 @@ describe('wasm PNG initialization', () => {
     const loader = createLoader(assetFetch(requests));
     await loader.initWasm(undefined, options);
     expect(requests).toEqual([new URL('xlsx_wasm_bg.wasm', generated).href]);
-    expect(loader.isPngExportAvailable()).toBe(true);
+    expect(loader.isPngExportAvailable()).toBe(false);
     const handle = loader.openWorkbook(fixture);
     try {
-      expect(Array.from(handle.renderPng(viewport).subarray(0, 8)))
-        .toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+      for (const target of [{ sheet: 0, viewport }, { sheet: 0, range: 'A1:B2' }]) {
+        await expect(handle.renderPng(target)).rejects.toMatchObject({
+          name: 'PngExportError', code: 'canvas-unavailable', message: expect.stringContaining('@betteroffice/xlsx-native'),
+        });
+      }
     } finally { handle.dispose(); }
   });
 
@@ -87,7 +90,7 @@ describe('wasm PNG initialization', () => {
     expect(requests).toEqual([new URL('xlsx_wasm_lean_bg.wasm', generated).href]);
     expect(lean.isWasmAvailable()).toBe(true);
     expect(lean.isPngExportAvailable()).toBe(false);
-    expect(full.isPngExportAvailable()).toBe(true);
+    expect(full.isPngExportAvailable()).toBe(false);
     for (const loader of [lean, full]) {
       const handle = loader.openWorkbook(unchanged);
       try {
@@ -101,8 +104,8 @@ describe('wasm PNG initialization', () => {
     try {
       expect(leanHandle.sheetInfo()).toEqual(fullHandle.sheetInfo());
       expect(leanHandle.displayList(viewport)).toEqual(fullHandle.displayList(viewport));
-      expect(() => leanHandle.renderPng(viewport)).toThrow('png export not in this build');
-      expect(() => leanHandle.renderRangePng({ range: 'A1:B2' })).toThrow('png export not in this build');
+      await expect(leanHandle.renderPng({ sheet: 0, viewport })).rejects.toMatchObject({ name: 'PngExportError', code: 'canvas-unavailable' });
+      await expect(leanHandle.renderPng({ sheet: 0, range: 'A1:B2' })).rejects.toMatchObject({ name: 'PngExportError', code: 'canvas-unavailable' });
       for (const handle of [leanHandle, fullHandle]) {
         expect(handle.editCell(0, 2, 1, '1234').applied).toBe(true);
         expect(handle.cell(0, 2, 1).input).toBe('1234');
@@ -118,7 +121,7 @@ describe('wasm PNG initialization', () => {
     }
   });
 
-  test('honors explicit full bytes with png disabled and detects an explicit lean module', async () => {
+  test('honors explicit full bytes with png disabled and an explicit lean module', async () => {
     const requests: string[] = [];
     const full = createLoader(assetFetch(requests));
     const lean = createLoader(assetFetch(requests));
@@ -127,10 +130,10 @@ describe('wasm PNG initialization', () => {
     await full.initWasm(fullBytes, { png: false });
     await lean.initWasm(Promise.resolve(leanModule));
     expect(requests).toEqual([]);
-    expect(full.isPngExportAvailable()).toBe(true);
+    expect(full.isPngExportAvailable()).toBe(false);
     expect(lean.isPngExportAvailable()).toBe(false);
     const handle = lean.openWorkbook(fixture);
-    try { expect(() => handle.renderPng(viewport)).toThrow('png export not in this build'); }
+    try { await expect(handle.renderPng({ sheet: 0, viewport })).rejects.toMatchObject({ code: 'canvas-unavailable' }); }
     finally { handle.dispose(); }
   });
 

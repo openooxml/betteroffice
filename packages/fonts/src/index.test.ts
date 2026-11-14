@@ -124,6 +124,14 @@ describe('resolution', () => {
     }
   });
 
+  test('emulated symbol families take the face that covers their marker stand-ins', () => {
+    for (const family of ['Wingdings', 'wingdings 2', 'Wingdings 3', ' Webdings ']) {
+      for (const office of ['powerpoint', 'word'] as const) {
+        expect(resolveLastResortFace(family, false, false, office).file).toBe('LiberationSans-Regular.ttf.zst');
+      }
+    }
+  });
+
   test('Google Sans retains the Carlito fallback', () => {
     expect(resolveMetricCompatFamily('Google Sans')).toBeUndefined();
     expect(resolveLastResortFace('Google Sans', false, false).file).toBe('Carlito-Regular.ttf.zst');
@@ -308,6 +316,19 @@ describe('resolution', () => {
     expect(resolveScriptFallbackFace('cjk-sc', false, false)?.family).toBe('Noto Sans SC');
     expect(resolveScriptFallbackFace('arabic', false, false)?.family).toBe('Noto Sans Arabic');
     expect(resolveScriptFallbackFace('hebrew', true, false)?.file).toBe('NotoSansHebrew-Bold.ttf.zst');
+  });
+
+  test('Naskh-styled Word families fall back to Noto Naskh Arabic in every style', () => {
+    for (const family of ['Simplified Arabic', 'Traditional Arabic', ' traditional ARABIC ']) {
+      for (const bold of [false, true]) for (const italic of [false, true]) {
+        expect(resolveScriptFallbackFace('arabic', bold, italic, family)?.file).toBe('NotoNaskhArabic-Regular.ttf.zst');
+      }
+      expect(resolveScriptFallbackFace('hebrew', false, false, family)?.file).toBe('NotoSansHebrew-Regular.ttf.zst');
+    }
+    expect(resolveScriptFallbackFace('arabic', false, false, 'Arial')?.file).toBe('NotoSansArabic-Regular.ttf.zst');
+    expect(resolveScriptFallbackFace('arabic', true, false, 'Arial')?.file).toBe('NotoSansArabic-Bold.ttf.zst');
+    expect(resolveScriptFallbackFace('arabic', false, false, 'Times New Roman')?.file)
+      .toBe('NotoSansArabic-Regular.ttf.zst');
   });
 
   test('known heavy family names select the bold face and preserve italics', () => {

@@ -1,5 +1,7 @@
 import { expect } from 'bun:test';
 
+import { stateVectorEntries } from '../assertions';
+
 import { SHEET, editStages, exchange, fingerprint, replicas } from './context';
 import type { XlsxScenario } from './context';
 
@@ -90,8 +92,8 @@ export const twoEditorsConverge: XlsxScenario = {
         .op('searchText:probe', () => b.handle.searchText('seen'))
         .map((match) => match.a1)
     ).toEqual(probe.map((match) => match.a1));
-    expect([...a.handle.encodeStateVector()].join()).toBe(
-      [...b.handle.encodeStateVector()].join()
+    expect(stateVectorEntries(a.handle.encodeStateVector())).toEqual(
+      stateVectorEntries(b.handle.encodeStateVector())
     );
 
     const catchUp = a.timer.op(

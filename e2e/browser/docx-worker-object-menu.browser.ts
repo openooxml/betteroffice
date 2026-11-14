@@ -68,6 +68,13 @@ test('worker image context move uses the clicked physical image', async ({ page 
 test('worker cell context width targets the clicked column and saves it', async ({ page }, info) => {
   await open(page, 'table');
   const dialog = await objectMenu(page, 384, 125, 'Column width');
+  await dialog.screenshot({ path: info.outputPath('column-width-dialog.png') });
+  const cancel = dialog.getByRole('button', { name: 'Cancel', exact: true });
+  const apply = dialog.getByRole('button', { name: 'Apply', exact: true });
+  const [cancelBox, applyBox] = [(await cancel.boundingBox())!, (await apply.boundingBox())!];
+  expect(applyBox.x).toBeGreaterThanOrEqual(cancelBox.x + cancelBox.width + 6);
+  const background = (button: typeof apply) => button.evaluate(element => getComputedStyle(element).backgroundColor);
+  expect(await background(apply)).not.toBe(await background(cancel));
   await dialog.getByLabel('Width (px)').fill('160');
   await dialog.getByRole('button', { name: 'Apply', exact: true }).click();
   await expect(dialog).toBeHidden();

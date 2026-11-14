@@ -318,6 +318,13 @@ impl Document {
             .map_err(message)
     }
 
+    pub fn resize_chart_json(&mut self, args: &str) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session
+            .resize_chart_json(args, now_serial)
+            .map_err(message)
+    }
+
     pub fn png_display_list_json(&self, viewport_json: &str) -> Result<String, EngineError> {
         self.session
             .png_display_list_json(viewport_json)
@@ -338,6 +345,28 @@ impl Document {
     #[cfg(feature = "raster")]
     pub fn render_range_png(&self, args: &str) -> Result<Vec<u8>, EngineError> {
         self.session.render_range_png(args).map_err(message)
+    }
+
+    #[cfg(feature = "raster")]
+    pub fn render_png_target(
+        &self,
+        target_json: &str,
+        options_json: &str,
+    ) -> Result<Vec<u8>, EngineError> {
+        self.render_png_target_with_faces(target_json, options_json, None)
+    }
+
+    /// [`Self::render_png_target`]. `Some` paints with those faces alone, for this export only.
+    #[cfg(feature = "raster")]
+    pub fn render_png_target_with_faces(
+        &self,
+        target_json: &str,
+        options_json: &str,
+        faces: Option<&[betteroffice_xlsx::PngFontFace<'_>]>,
+    ) -> Result<Vec<u8>, EngineError> {
+        self.session
+            .render_png_target_with_faces(target_json, options_json, faces)
+            .map_err(message)
     }
 
     pub fn sheet_info_json(&self) -> Result<String, EngineError> {
@@ -396,10 +425,22 @@ impl Document {
             .map_err(message)
     }
 
+    /// Formulas moved between cells as a paste moves them; see [`Session::translate_formulas_json`].
+    pub fn translate_formulas_json(&self, args: &str) -> Result<String, EngineError> {
+        Session::translate_formulas_json(args).map_err(message)
+    }
+
     pub fn move_range_json(&mut self, args: &str) -> Result<String, EngineError> {
         let now_serial = (self.host.now_serial)()?;
         self.session
             .move_range_json(args, now_serial)
+            .map_err(message)
+    }
+
+    pub fn fill_range_json(&mut self, args: &str) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session
+            .fill_range_json(args, now_serial)
             .map_err(message)
     }
 
@@ -574,6 +615,10 @@ impl Document {
 
     pub fn save_bytes(&self) -> Result<Vec<u8>, EngineError> {
         self.session.save().map_err(message)
+    }
+
+    pub fn save_warnings_json(&self) -> Result<String, EngineError> {
+        self.session.save_warnings_json().map_err(message)
     }
 
     pub fn version(&self) -> &'static str {

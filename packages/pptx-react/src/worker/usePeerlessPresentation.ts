@@ -3,23 +3,25 @@ import {
   PptxWorkerEditorFailedError,
 } from '@betteroffice/pptx/worker';
 import { sizeCanvasForSlide } from '@betteroffice/pptx';
-import type { DeckSnapshot, PptxFontFace } from '@betteroffice/pptx';
+import type { DeckSnapshot, PaintFontCoverage, PptxFontFace } from '@betteroffice/pptx';
 import type {
   PptxWorkerSession, PresentationCommandClient, PresentationCommandFrame, PresentationCommandAck,
 } from '@betteroffice/pptx/worker';
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import { flushSync } from 'react-dom';
+import { pptxWorkerRenderClients } from '../../../../shared/office-session/render/pptxWorkerRender';
+import { createWorkerFramePainter, peerlessPrerenders } from './workerFramePainter';
 import { useFontWarning } from '../fontFaces';
 import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import type { SlideFit } from '../fitSlideScale';
-import { installDefaultFonts, installFonts, useStableFonts } from './peerlessFonts';
+import { createPptxPaintFontForwarder, installDefaultFonts, installFonts, useStableFonts } from './peerlessFonts';
 import { peerlessRecoveryFactory } from './peerlessRecoveryJournal';
 import { generateCollaborationClientId } from '../collaborationClientId';
 import { createCommandFrameImages, createCommandFramePainter, type CommandFrameImages } from './commandFramePainter';
 import { createLocalEchoPainter } from './localEchoPainter';
 import {
-  createPeerlessViewStore, installCoveringFrame,
+  createPeerlessViewStore, installCoveringFrame, peerlessEchoStores,
   type PeerlessConfirmedFrame, type PeerlessViewSnapshot, type PeerlessViewStore,
 } from './peerlessViewStore';
 
@@ -66,14 +68,46 @@ export interface PeerlessPresentation {
   readonly hydrated: boolean;
   readonly failure: PptxWorkerEditorFailedError | undefined;
   getVisualSnapshot(): PeerlessVisualSnapshot | null;
+  /** @internal */
+  pluginVisual(): PeerlessVisualSnapshot | null;
   subscribeVisual(listener: () => void): () => void;
   require(): void;
   fit(value: SlideFit): void;
+  /** Rasters a slide ahead of its expected activation, such as a press on its thumbnail; a later request replaces it. */
+  prerenderSlide?(slideId: string): void;
+  dropPrerender?(): void;
+  /** Paints the prerendered slide on the stage at once if the deck and stage are unchanged since it was rastered. */
+  presentPrerendered?(slideId: string): boolean;
+  /** After the activation settles, shows the confirmed slide again if it is not the presented prerender. */
+  settlePrerendered?(slideId: string): void;
+  /** Prepares a main-thread paint's text in the worker's sliced faces. */
+  readonly fontCoverage?: PaintFontCoverage & { readonly thumbnails: PaintFontCoverage };
+  /** Installs complete faces for the paints that do not prepare their text: present mode and proposal review. */
+  ensureWholeFonts?(): Promise<void>;
   installFont(face: PptxFontFace): Promise<void>;
   setReadOnly(readOnly: boolean): void;
   setChangeObserver(enabled: boolean): void;
-  recover(): Promise<{ bytes: Uint8Array; recovery: true; throughSeq: number; version: string }>;
+  recover(): Promise<PeerlessRecoveryResult>;
 }
+
+/** An edit sent just before the worker failed whose outcome never arrived, so recovery left it out. */
+export interface PeerlessUnrecoveredIntent {
+  seq: number;
+  kind: string;
+  reason: 'unknown-outcome';
+}
+
+export interface PeerlessRecoveryResult {
+  bytes: Uint8Array;
+  recovery: true;
+  throughSeq: number;
+  version: string;
+  /** Document edits left out because their outcome is unknown; recovery does not replay them. */
+  unrecoveredIntents?: PeerlessUnrecoveredIntent[];
+}
+
+/** Writes that change nothing a reader would miss when left out. */
+const UNREPORTED_WRITES = new Set<string>(['registerFont', 'compositionStart']);
 
 const THUMBNAIL_IMAGE_DIMENSION = 512;
 
@@ -123,12 +157,14 @@ export function usePeerlessPresentation(
     let echoPainter: ReturnType<typeof createLocalEchoPainter> | undefined;
     const images = createCommandFrameImages();
     const thumbnailImages = createCommandFrameImages({ maxDimension: THUMBNAIL_IMAGE_DIMENSION, reuse: images });
+    const paintFonts = createPptxPaintFontForwarder();
     let activeImages: ReturnType<typeof images.pin> | undefined;
     let fatal: PptxWorkerEditorFailedError | undefined;
     let failedView: PeerlessViewSnapshot | undefined;
     let fit: SlideFit | undefined;
     let queuedFrame: PeerlessConfirmedFrame | undefined;
     let visual: PeerlessVisualSnapshot | null = null;
+    let prerenderPresented = false;
     let cancelIdle: (() => void) | undefined;
     let draining = false;
     let changeSeq: number | undefined;
@@ -218,7 +254,7 @@ export function usePeerlessPresentation(
       try { callbacks.current.onError?.(fatal); } catch {}
       void session?.dispose().catch(() => {});
     };
-    const fontsReady = installFonts(fonts, installedFonts, current, warnFonts);
+    const fontsReady = installFonts(fonts, installedFonts, current, warnFonts, paintFonts.installed);
     void fontsReady.catch(report);
 
     async function whenPainted(): Promise<void> {
@@ -236,6 +272,7 @@ export function usePeerlessPresentation(
 
     function paintLocal(view: PeerlessViewSnapshot, restore = false): void {
       if (!current() || !firstPainted || !visual || fit !== visual.fit || view.confirmed !== visual.view.confirmed) return;
+      if (prerenderPresented) return;
       if (restore) echoPainter?.restoreLine(view); else echoPainter?.paintEcho(view);
       paintedView = view;
       visual = { ...visual, view };
@@ -244,12 +281,16 @@ export function usePeerlessPresentation(
 
     function paintFrame(frame: PeerlessConfirmedFrame, view: PeerlessViewSnapshot): void {
       if (!current()) return;
-      const nextImages = images.pin(frame, [...pendingMedia].map(([assetId, bytes]) => ({ assetId, bytes })));
+      const suppliedImages = [...pendingMedia].map(([assetId, bytes]) => ({ assetId, bytes }));
+      const workerPaint = session && pptxWorkerRenderClients.get(session)?.supported && !peerlessEchoStores.has(base!);
+      images.ingest([...suppliedImages, ...frame.frame.media]);
+      const nextImages = workerPaint ? undefined : images.pin(frame, suppliedImages);
       activeImages?.release(); activeImages = nextImages;
       queuedFrame = frame;
       firstPainted = false;
       cancelIdle?.(); cancelIdle = undefined;
       signal();
+      if (visual?.view.confirmed?.frame.slideId !== frame.frame.slideId) notifyVisual();
       if (!fit?.scale || !framePainter) return;
       const supplied = [...pendingMedia].map(([assetId, bytes]) => ({ assetId, bytes }));
       pendingMedia.clear();
@@ -386,7 +427,7 @@ export function usePeerlessPresentation(
 
     try {
       session = peerlessSessionOpener.open(props.file, Object.assign({
-        fonts, defaultFonts: props.defaultFonts, clientId: props.clientId, collaboration: sessionCollaboration,
+        fonts, defaultFonts: props.defaultFonts, slicedFonts: props.experimentalSlicedFonts, clientId: props.clientId, collaboration: sessionCollaboration,
         readOnly: mode.current, observeChanges: observedChanges,
         activeSlideIndex: Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0,
       }, { pptxDefaultFontInstaller: (faces: Parameters<typeof installDefaultFonts>[0], allowed?: (family: string) => boolean) =>
@@ -394,6 +435,7 @@ export function usePeerlessPresentation(
           (family) => !suppliedFamilies.has(family.trim().toLowerCase()) && (allowed?.(family) ?? true)) }));
       disposers.push(session.subscribeFailure(report));
       const owner = session;
+      paintFonts.attach(owner);
       void owner.ready.then((client) => {
         if (!current()) return;
         recovery.open(client.takeRecoveryUpdate?.(), client.state.throughSeq, client.state.version,
@@ -413,7 +455,8 @@ export function usePeerlessPresentation(
         }
         sendModes();
       }).catch(report);
-      void Promise.all([owner.ready, fontsReady]).then(async ([client]) => {
+      const slicedModule = props.experimentalSlicedFonts ? import('./peerlessFontCoverage') : undefined;
+      void Promise.all([owner.ready, fontsReady, slicedModule]).then(async ([client, , sliced]) => {
         while (current() && openingModes.size) await Promise.all([...openingModes]);
         if (!current()) return;
         base = peerlessViewStoreFactory.create(client, {
@@ -421,7 +464,7 @@ export function usePeerlessPresentation(
             const restoreFrame = framePainter?.checkpoint(pixels);
             const restoreEcho = echoPainter?.checkpoint();
             const savedImages = activeImages?.retain();
-            const saved = { queuedFrame, paintedFrame, paintedView, firstPainted, fit, visual,
+            const saved = { queuedFrame, paintedFrame, paintedView, firstPainted, fit, visual, prerenderPresented,
               pendingMedia: new Map(pendingMedia) };
             let settled = false;
             const finish = () => {
@@ -432,7 +475,7 @@ export function usePeerlessPresentation(
             return Object.assign(() => {
               if (settled) return;
               if (current() && fit === saved.fit) {
-                ({ queuedFrame, paintedFrame, paintedView, firstPainted, visual } = saved);
+                ({ queuedFrame, paintedFrame, paintedView, firstPainted, visual, prerenderPresented } = saved);
                 activeImages?.release(); activeImages = savedImages?.retain();
                 pendingMedia.clear();
                 for (const [assetId, bytes] of saved.pendingMedia) pendingMedia.set(assetId, bytes);
@@ -447,6 +490,7 @@ export function usePeerlessPresentation(
           paintFrame,
           paintEcho: (view) => paintLocal(view),
           restoreLine: (view) => paintLocal(view, true),
+          resync: () => framePainter?.resync?.(),
         }, { onError: (error) => callbacks.current.onError?.(new PptxWorkerEditorFailedError(error)) });
         const original = base;
         const getSnapshot = original.getSnapshot.bind(original);
@@ -536,10 +580,20 @@ export function usePeerlessPresentation(
           visualListeners.add(listener);
           return () => { visualListeners.delete(listener); };
         };
+        const fontCoverage = sliced?.createPeerlessFontCoverage(client, current);
+        if (fontCoverage) disposers.push(() => fontCoverage.dispose());
         run = {
+          fontCoverage,
+          ensureWholeFonts: sliced?.createWholeFontInstaller(
+            async (have) => await client.wholeCoverageFonts?.(have) ?? [],
+            (faces) => installDefaultFonts(faces, installedFonts, current, warnFonts, (family) => !suppliedFamilies.has(family.trim().toLowerCase())),
+            (family) => suppliedFamilies.has(family.trim().toLowerCase())),
           fileGeneration, session: owner, client, store, images, thumbnailImages, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
-          getVisualSnapshot: () => visual, subscribeVisual,
+          getVisualSnapshot: () => visual,
+          pluginVisual: () => prerenderPresented ||
+            visual?.view.confirmed?.frame.slideId !== getSnapshot().confirmed?.frame.slideId ? null : visual,
+          subscribeVisual,
           get ready() { return whenPainted(); },
           get current() { return current(); },
           get selectionEnabled() { return selectionEnabled(); },
@@ -558,17 +612,29 @@ export function usePeerlessPresentation(
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
             const baseline = recovery.baseline && recovery.validate();
             if (baseline?.kind === 'source' && !recoveryBase?.size) throw new Error('Recovery baseline is unavailable');
+            const unrecoveredIntents: PeerlessUnrecoveredIntent[] = (client.pendingIntents?.() ?? [])
+              .filter(({ intent }) => PRESENTATION_COMMAND_ADMISSION[intent.kind] === 'local-write' && !UNREPORTED_WRITES.has(intent.kind))
+              .map(({ seq, intent }) => ({ seq, kind: intent.kind, reason: 'unknown-outcome' }));
+            const reported = <T extends object>(result: T): T & { unrecoveredIntents?: PeerlessUnrecoveredIntent[] } => {
+              if (!unrecoveredIntents.length) return result;
+              try {
+                callbacks.current.onError?.(new Error(`Recovery left out ${unrecoveredIntents.length} edit(s) made just before the failure, `
+                  + 'because whether they were applied is unknown'));
+              } catch {}
+              return { ...result, unrecoveredIntents };
+            };
             if (!recovery.hasUncheckpointedUpdates()) {
               const saved = recovery.saved;
               const bytes = saved.bytes?.slice() ?? await readRecoveryBase();
               if (!currentFile()) throw new PptxWorkerEditorDisposedError();
-              return { ...saved, bytes, recovery: true };
+              return reported({ ...saved, bytes, recovery: true as const });
             }
             if (!baseline) throw new Error('Recovery baseline is unavailable');
             const journal = recovery.journal.slice();
             let source: Uint8Array | undefined = await readRecoveryBase();
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
             const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: callbacks.current.defaultFonts,
+              slicedFonts: callbacks.current.experimentalSlicedFonts,
               ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
             source = undefined;
             try {
@@ -587,14 +653,34 @@ export function usePeerlessPresentation(
               const bytes = await replay.save();
               if (!currentFile()) throw new PptxWorkerEditorDisposedError();
               const latest = journal[journal.length - 1]!;
-              return { bytes, throughSeq: latest.throughSeq, version: latest.version, recovery: true };
+              return reported({ bytes, throughSeq: latest.throughSeq, version: latest.version, recovery: true as const });
             } finally { await recovering.dispose(); }
           },
           async installFont(face) {
             require();
             suppliedFamilies.add(face.family.trim().toLowerCase());
-            await installFonts([face], installedFonts, current, warnFonts);
+            await installFonts([face], installedFonts, current, warnFonts, paintFonts.installed);
             require();
+          },
+          prerenderSlide(slideId) {
+            if (current() && framePainter) peerlessPrerenders.get(framePainter)?.request(slideId);
+          },
+          dropPrerender() {
+            if (framePainter) peerlessPrerenders.get(framePainter)?.drop();
+          },
+          presentPrerendered(slideId) {
+            const presented = Boolean(current() && framePainter && peerlessPrerenders.get(framePainter)?.present(slideId, client.state.version));
+            if (presented) { prerenderPresented = true; notifyVisual(); }
+            return presented;
+          },
+          settlePrerendered(slideId) {
+            const prerender = framePainter && peerlessPrerenders.get(framePainter);
+            if (!current() || !prerender?.presented() || getSnapshot().confirmed?.frame.slideId === slideId) return;
+            if (prerender.restore()) {
+              prerenderPresented = false;
+              paintLocal(getSnapshot());
+              notifyVisual();
+            }
           },
           fit(token) {
             if (!current() || !getSnapshot().confirmed || fit === token) return;
@@ -607,8 +693,12 @@ export function usePeerlessPresentation(
             signal();
             if (!token.scale) return;
             let preparedEcho: ReturnType<typeof createLocalEchoPainter> | undefined;
-            framePainter = peerlessPainterFactories.frame(surface, {
-              ...token, images, current: (frame) => current() && fit === token && (!frame || frame === queuedFrame),
+            const render = pptxWorkerRenderClients.get(owner);
+            const factory: typeof createCommandFramePainter = render?.supported && !peerlessEchoStores.has(original)
+              ? (target, options) => createWorkerFramePainter(target, render, { ...options, mainFirstFrame: true })
+              : peerlessPainterFactories.frame;
+            framePainter = factory(surface, {
+              ...token, images, fontCoverage, current: (frame) => current() && fit === token && (!frame || frame === queuedFrame),
               beforeCommit: (currentPaint) => waitForMode(token, currentPaint),
               compose(raster, frame) {
                 if (!current() || fit !== token || getSnapshot().confirmed !== frame) return;
@@ -633,6 +723,13 @@ export function usePeerlessPresentation(
                   pixels.width = pixels.height = 0;
                 } };
               },
+              onAdopt(frame) {
+                if (!current() || fit !== token || !firstPainted || frame !== queuedFrame || getSnapshot().confirmed !== frame) return;
+                echoPainter?.dispose();
+                echoPainter = peerlessPainterFactories.echo(surface, { ...token,
+                  current: () => current() && firstPainted && fit === token });
+                echoPainter.paintEcho(getSnapshot());
+              },
               onCommit(frame) {
                 if (!current() || fit !== token || frame !== queuedFrame || getSnapshot().confirmed !== frame) return;
                 const view = getSnapshot();
@@ -644,6 +741,7 @@ export function usePeerlessPresentation(
                 paintedView = view;
                 firstPainted = true;
                 visual = { view, fit: token };
+                prerenderPresented = false;
                 echoPainter = preparedEcho ?? peerlessPainterFactories.echo(surface, { ...token,
                   current: () => current() && firstPainted && fit === token });
                 if (preparedEcho) { preparedEcho.attach(surface); preparedEcho = undefined; }
@@ -681,6 +779,7 @@ export function usePeerlessPresentation(
       activeImages?.release();
       images.dispose();
       thumbnailImages.dispose();
+      paintFonts.dispose();
       pendingMedia.clear();
       for (const face of installedFonts) document.fonts.delete(face);
       cancelCheckpoint?.();

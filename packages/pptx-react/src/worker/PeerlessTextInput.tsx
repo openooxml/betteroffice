@@ -1,8 +1,10 @@
+import { isKeyReleasedFromInput, takeClipboardGesture } from '../../../../shared/keyboard/nativeGesture';
 import { useEffect, useRef, useSyncExternalStore, type ReactElement, type RefObject } from 'react';
 import type { PeerlessViewStore } from './peerlessViewStore';
 import type { PeerlessVisualStore } from './usePeerlessPresentation';
 import { commitComposition, peerlessInputReference } from './peerlessViewStore';
-import type { PresentationCommandAck, PresentationCommandIntent } from '@betteroffice/pptx/worker';
+import { findLine, indexGeometry, type PresentationCommandAck, type PresentationCommandIntent } from '@betteroffice/pptx/worker';
+import { pptxCaretColors } from './caretColor';
 import type { PptxCommandStore } from '../commands/types';
 import { useTranslation } from '../i18n';
 import { formatPeerlessText } from './peerlessTextCommands';
@@ -32,7 +34,7 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
   const shortcutRef = useRef(onShortcut);
   shortcutRef.current = onShortcut;
   const view = useSyncExternalStore(visual.subscribePresentation, visual.getSnapshot, visual.getSnapshot);
-  const { move } = usePeerlessTextSelection(store);
+  const { move, selectAll } = usePeerlessTextSelection(store);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -122,7 +124,7 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
     }
 
     function keyDown(event: KeyboardEvent): void {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || isKeyReleasedFromInput(event)) return;
       const modifier = event.ctrlKey || event.metaKey;
       const key = event.key.toLowerCase();
       if (modifier && !event.altKey && (key === 'z' || key === 'y' && !event.shiftKey)) {
@@ -145,6 +147,11 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
         else if (commandsRef.current) void commandsRef.current.execute(key === 'b' ? 'bold' : key === 'i' ? 'italic' : 'underline', null);
         else void formatPeerlessText(store, key === 'b' ? 'bold' : key === 'i' ? 'italic' : 'underline',
           event.timeStamp)?.catch(() => {});
+        return;
+      }
+      if (modifier && !event.altKey && !event.shiftKey && key === 'a') {
+        event.preventDefault();
+        selectAll(event);
         return;
       }
       if (modifier) {
@@ -198,6 +205,7 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
     function paste(event: ClipboardEvent): void {
       if (store.getSnapshot().composition || store.getSnapshot().editState.readOnly) return;
       event.preventDefault();
+      if (takeClipboardGesture(input!) === 'ignore') return;
       const text = event.clipboardData?.getData('text/plain') ?? '';
       pastedText = text;
       insert(text, event.timeStamp, true);
@@ -213,8 +221,14 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
     input.addEventListener('compositionend', compositionEnd);
     input.addEventListener('input', inputEvent);
     input.addEventListener('paste', paste);
-    const copy = (event: ClipboardEvent) => { event.preventDefault(); shortcutRef.current?.('copy'); };
-    const cut = (event: ClipboardEvent) => { event.preventDefault(); if (!store.getSnapshot().editState.readOnly) shortcutRef.current?.('cut'); };
+    const copy = (event: ClipboardEvent) => {
+      event.preventDefault();
+      if (takeClipboardGesture(input!) !== 'ignore') shortcutRef.current?.('copy');
+    };
+    const cut = (event: ClipboardEvent) => {
+      event.preventDefault();
+      if (takeClipboardGesture(input!) !== 'ignore' && !store.getSnapshot().editState.readOnly) shortcutRef.current?.('cut');
+    };
     input.addEventListener('copy', copy); input.addEventListener('cut', cut);
     input.addEventListener('focus', focus);
     input.addEventListener('blur', blur);
@@ -234,14 +248,18 @@ export function PeerlessTextInput({ store, visual = store, viewport, onShortcut,
       input.removeEventListener('focus', focus);
       input.removeEventListener('blur', blur);
     };
-  }, [store, move, inputRef]);
+  }, [store, move, selectAll, inputRef]);
 
   const scale = viewport?.scale ?? 1;
   const left = (viewport?.left ?? 0) + (view.caret?.x ?? 0) * scale;
   const top = (viewport?.top ?? 0) + (view.caret?.y ?? 0) * scale;
   const height = Math.max(1, (view.caret?.height ?? 1) * scale);
+  const preedit = view.composition?.text && !view.echo && view.caret ? pptxCaretColors(view.confirmed?.displayList,
+    (view.activeLine ?? (view.confirmed ? findLine(indexGeometry(view.confirmed.displayList), view.selection) : null))?.line,
+    view.selection && view.selection.kind !== 'object' ? view.selection.focus : null, view.caret,
+    view.editState?.toolbar?.formatting?.color) : null;
   return <>
-    {view.composition?.text && !view.echo && view.caret && <span data-testid="pptx-preedit" aria-hidden="true" style={{ position: 'absolute', left, top, lineHeight: `${height}px`, fontSize: height * 0.8, whiteSpace: 'pre', borderBottom: '1px solid currentColor', background: '#fff', pointerEvents: 'none' }}>{view.composition.text}</span>}
+    {preedit && <span data-testid="pptx-preedit" aria-hidden="true" style={{ position: 'absolute', left, top, lineHeight: `${height}px`, fontSize: height * 0.8, whiteSpace: 'pre', color: preedit.color, borderBottom: '1px solid currentColor', background: preedit.background, pointerEvents: 'none' }}>{view.composition?.text}</span>}
     <span role="status" aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }}>{view.selection && view.selection.anchor !== view.selection.focus ? selectionAnnouncement : ''}</span>
     <textarea ref={inputRef} aria-label={textInput} autoComplete="off" autoCorrect="off"
     autoCapitalize="off" spellCheck={false} tabIndex={0} readOnly={view.editState.readOnly}

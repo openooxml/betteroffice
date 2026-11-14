@@ -16,10 +16,11 @@ name = "docx_parse"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["wasm"]
+default = []
 wasm = ["dep:wasm-bindgen"]
 wasm-layout = ["wasm", "dep:docx-layout"]
 tiff = ["ooxml-drawingml/tiff"]
+test-support = []
 metafile = ["dep:ooxml-metafile"]
 
 [dependencies]
@@ -34,7 +35,7 @@ ooxml-metafile = { workspace = true, features = ["svg"], optional = true }
 quick-xml = { version = "0.41", features = ["encoding"] }
 ryu-js = "1"
 serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 sha2 = "0.10"
 thiserror = "2"
 wasm-bindgen = { version = "0.2", optional = true }

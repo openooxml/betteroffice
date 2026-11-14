@@ -6,7 +6,9 @@ import { flushSync } from 'react-dom';
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import * as xlsx from '@betteroffice/xlsx';
 import * as xlsxWorker from '@betteroffice/xlsx/worker';
-import type { DisplayList, EditResult, WorkbookHandle, WorkbookSession, XlsxEditRequest } from '@betteroffice/xlsx';
+import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '@betteroffice/xlsx/collaboration';
+import type { DisplayList, EditResult, Selection, WorkbookHandle, WorkbookSession, XlsxEditRequest } from '@betteroffice/xlsx';
+import type { RenderResult } from '@testing-library/react';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx/worker';
 import { SessionFailure } from '../../../../shared/office-session';
 import { workbookEditPeerInternals } from '../../../xlsx/src/session/editPeerInternals';
@@ -25,12 +27,13 @@ import * as peerlessInput from '../commands/peerlessWorkerInputCoordinator';
 import type { PeerlessWorkerCommand } from '../commands/peerlessWorkerInputCoordinator';
 import type { XlsxCommandStore } from '../commands/types';
 import { defineXlsxPlugin } from '../plugins/defineXlsxPlugin';
-import type { XlsxPluginContext, XlsxPluginSelection } from '../plugins/types';
+import type { XlsxAnchorGeometryResult, XlsxPluginEvent, XlsxPluginContext, XlsxPluginGeometry, XlsxPluginSelection } from '../plugins/types';
 import { workbookSessionOpener } from '../viewer/useSessionWorkbook';
 import { defaultFontPainterModule } from '../useDefaultFonts';
 import { XlsxWorkerEditorCollaborationError, type XlsxWorkerEditorApi } from './createWorkerEditorApi';
 import { XlsxWorkerEditor, xlsxPeerlessEditorLoader } from './XlsxWorkerEditor';
 import { editableWorkbookSessionBackend } from './useEditableSessionWorkbook';
+import { selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -69,6 +72,7 @@ function harness(realFacade = false, normalizeInput = false) {
   const cells = new Map<string, string>([['0:0:0', 'initial']]);
   const workerCells = new Map(cells);
   const charts: xlsx.ChartRegion[] = [];
+  const hidden = { rows: [] as [number, number][], cols: [] as [number, number][] };
   const updates = new Set<() => void>();
   let active = 0;
   let sequence = 0;
@@ -85,7 +89,8 @@ function harness(realFacade = false, normalizeInput = false) {
       return { op: 'text' as const, text: `${source}:${text}`, x: col * 96 + 8, y: row * 24 + 18,
         fontSize: 11, color: '#000000', clip: { x: col * 96, y: row * 24, w: 96, h: 24 } };
     }),
-    grid: { startRow: 0, startCol: 0, rowOffsets: [0, 24, 48, 72, 96], colOffsets: [0, 96, 192, 288] },
+    grid: { startRow: 0, startCol: 0, rowOffsets: [0, 24, 48, 72, 96], colOffsets: [0, 96, 192, 288],
+      hiddenRowSpans: hidden.rows, hiddenColSpans: hidden.cols },
     charts,
   });
   const result = (): EditResult => ({ applied: true, sheetInfo: info() });
@@ -160,6 +165,16 @@ function harness(realFacade = false, normalizeInput = false) {
       version += 1;
       return result();
     }),
+    resizeChart: mock((_sheet: number, id: string, edges: xlsx.ChartResizeEdges) => {
+      if (!realFacade) throw new Error('Direct peer chart mutation forbidden');
+      const chart = charts.find((entry) => entry.id === id)!;
+      chart.rect = { ...chart.rect, x: chart.rect.x + edges.left,
+        w: chart.rect.w + edges.right - edges.left, h: chart.rect.h + edges.bottom - edges.top,
+        y: chart.rect.y + edges.top };
+      log.push(`recover:resize:${id}:${edges.left}:${edges.top}:${edges.right}:${edges.bottom}`);
+      version += 1;
+      return result();
+    }),
     save: mock(() => {
       if (realFacade) return new TextEncoder().encode(JSON.stringify([...cells]));
       throw new Error('Full peer save forbidden');
@@ -177,6 +192,10 @@ function harness(realFacade = false, normalizeInput = false) {
       for (const edit of edits) mutate(sheet, edit.row, edit.col, edit.input);
       return result();
     }),
+    fillRange: mock((sheet: number, source: string, destination: string) => {
+      log.push(`fill:${sheet}:${source}:${destination}`);
+      return result();
+    }),
     applyEdits: mock((_request: XlsxEditRequest): xlsx.XlsxEditResult => {
       log.push('plugin:batch');
       mutate(0, 0, 0, 'plugin');
@@ -186,6 +205,10 @@ function harness(realFacade = false, normalizeInput = false) {
     setActiveSheet: mock((sheet: number) => { active = sheet; sequence += 1; log.push(`sheet:${sheet}`); }),
     moveChart: mock((_sheet: number, id: string, dx: number, dy: number) => {
       sequence += 1; log.push(`chart:${id}:${dx}:${dy}`); return result();
+    }),
+    resizeChart: mock((_sheet: number, id: string, edges: xlsx.ChartResizeEdges) => {
+      sequence += 1; log.push(`resize:${id}:${edges.left}:${edges.top}:${edges.right}:${edges.bottom}`);
+      return result();
     }),
     undo: mock(() => { sequence += 1; log.push('undo'); return result(); }),
     flush: mock(async () => {}), save: mock(async () => new Uint8Array([8, 9]).buffer),
@@ -214,6 +237,7 @@ function harness(realFacade = false, normalizeInput = false) {
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, activeSheet: 0,
       sheets: [{ id: 'sheet:0', index: 0, name: 'First' }, { id: 'sheet:1', index: 1, name: 'Second' }] },
     call: sessionMethods as unknown as WorkbookSession['call'], save: sessionSave,
+    saveWithWarnings: mock(async () => ({ bytes: new Uint8Array([0]), warnings: [] })),
     on: () => () => {},
     onFailure(listener) {
       failureListeners.add(listener);
@@ -260,11 +284,15 @@ function harness(realFacade = false, normalizeInput = false) {
       if (op.method === 'applyEdits') return editMethods.applyEdits(op.args[0]);
       if (op.method === 'editCell') return editMethods.editCell(...op.args);
       if (op.method === 'editCells') return editMethods.editCells(...op.args);
+      if (op.method === 'fillRange') return editMethods.fillRange(...op.args);
+      if (op.method === 'resizeChart') return editMethods.resizeChart(...op.args);
       throw new Error('Unexpected mock operation');
     },
     applyRecoveryOp: (op) => {
       if (op.method === 'editCell') return xlsxWorker.createWorkbookRecoveryMutators(edits).editCell(...op.args);
       if (op.method === 'editCells') return peerMethods.editCells(...op.args);
+      if (op.method === 'fillRange') return editMethods.fillRange(...op.args);
+      if (op.method === 'resizeChart') return peerMethods.resizeChart(...op.args);
       throw new Error('Unexpected mock recovery operation');
     },
   });
@@ -274,7 +302,7 @@ function harness(realFacade = false, normalizeInput = false) {
     return attached;
   });
   restorers.push(() => open.mockRestore(), () => hydrate.mockRestore(), () => attach.mockRestore());
-  return { log, cells, charts, peer, peerMethods, edits, editMethods, session, sessionSave, sessionMethods, open, hydrate, replay, preview,
+  return { log, cells, charts, hidden, peer, peerMethods, edits, editMethods, session, sessionSave, sessionMethods, open, hydrate, replay, preview,
     get attached() { return attached; },
     fail(error = new SessionFailure('crash', 'Worker stopped')) {
       failure = error;
@@ -484,7 +512,8 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
     }),
     onAck: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     on: () => () => {}, onFailure: (listener) => { failures.add(listener); return () => { failures.delete(listener); }; },
-    save: mock(async () => new Uint8Array([8, 9])), dispose: mock(async () => {}),
+    save: mock(async () => new Uint8Array([8, 9])),
+    saveWithWarnings: mock(async () => ({ bytes: new Uint8Array([8, 9]), warnings: [] })), dispose: mock(async () => {}),
     markPresented: mock((paint) => {
       presentedThroughSeq = Math.max(presentedThroughSeq, paint.coversThroughSeq);
       for (const pending of presentations.splice(0)) {
@@ -585,9 +614,10 @@ function peerlessHarness(toolbarCommands = false, workerCommands = false, defaul
       } } : {}),
     });
   };
-  const replace = (view: ReturnType<typeof render>, replacement = new Uint8Array([4])) => view.rerender(
+  const replace = (view: ReturnType<typeof render>, replacement = new Uint8Array([4]),
+    hostProps: Partial<Omit<XlsxAsyncEditorProps, 'file'>> = {}) => view.rerender(
     <Profiler id="peerless" onRender={renderCount}>
-      <XlsxWorkerEditor backend="peerless" file={replacement} toolbar={<Chrome />} onReady={ready} />
+      <XlsxWorkerEditor backend="peerless" file={replacement} toolbar={<Chrome />} onReady={ready} {...hostProps} />
     </Profiler>);
   const asyncEditor = (props: Partial<XlsxAsyncEditorProps> = {}) => (
     <XlsxEditor file={file} toolbar={<Chrome />} {...props} />
@@ -2001,7 +2031,7 @@ describe('XlsxEditor async API', () => {
     await expect(host.replica.async.encodeStateVector()).resolves.toEqual(Uint8Array.of(1));
   });
 
-  for (const route of ['renderPng', 'renderRangePng', 'exportStructured', 'exportMarkdown', 'printDisplayList', 'exportPng'] as const) {
+  for (const route of ['renderPng', 'renderPngRange', 'exportStructured', 'exportMarkdown', 'printDisplayList', 'exportPng'] as const) {
     for (const status of ['applied', 'refused'] as const) {
       it(`exports acknowledged composition and preserves input refusals (${route}, ${status})`, async () => {
         const host = peerlessHarness(true);
@@ -2013,7 +2043,6 @@ describe('XlsxEditor async API', () => {
         };
         const sheet = { sheetId: 'sheet:0', index: 0, name: 'First' };
         const renderPng = mock<WorkbookSession['call']['renderPng']>(async () => new TextEncoder().encode(read()));
-        const renderRangePng = mock<WorkbookSession['call']['renderRangePng']>(async () => new TextEncoder().encode(read()));
         const exportStructured = mock<WorkbookSession['call']['exportStructured']>(async () => {
           const value = read();
           return { ok: true, version: 'v1', content: {
@@ -2038,7 +2067,8 @@ describe('XlsxEditor async API', () => {
           commands: [{ op: 'text', text: read(), x: 8, y: 18, fontSize: 11, color: '#000000' }],
         }));
         Object.assign(host.session, { pngExport: true });
-        Object.assign(host.session.call, { renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList });
+        const renderPngFonts = mock<WorkbookSession['call']['renderPngFonts']>(async () => []);
+        Object.assign(host.session.call, { renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList });
         for (const name of ['createObjectURL', 'revokeObjectURL'] as const) {
           const descriptor = Object.getOwnPropertyDescriptor(URL, name);
           Object.defineProperty(URL, name, { configurable: true, value: () => 'blob:png' });
@@ -2061,8 +2091,8 @@ describe('XlsxEditor async API', () => {
         fireEvent.change(input, { target: { value: 'composed' } });
         const invoke = (): Promise<unknown> => {
           switch (route) {
-            case 'renderPng': return api.renderPng({ x: 0, y: 0, width: 120, height: 48 });
-            case 'renderRangePng': return api.renderRangePng({ range: 'A1' });
+            case 'renderPng': return api.renderPng({ sheet: 0, viewport: { x: 0, y: 0, width: 120, height: 48 } });
+            case 'renderPngRange': return api.renderPng({ sheet: 0, range: 'A1' });
             case 'exportStructured': return api.exportStructured();
             case 'exportMarkdown': return api.exportMarkdown();
             case 'printDisplayList': return api.printDisplayList(0, 'A1', {
@@ -2089,7 +2119,7 @@ describe('XlsxEditor async API', () => {
         } else {
           expect(values).toEqual(['composed']);
           const result = await exporting;
-          if (route === 'renderPng' || route === 'renderRangePng') expect(new TextDecoder().decode(result as Uint8Array)).toBe('composed');
+          if (route === 'renderPng' || route === 'renderPngRange') expect(new TextDecoder().decode(result as Uint8Array)).toBe('composed');
           else if (route === 'exportStructured') expect(result).toMatchObject({ content: { sheets: [{ cells: [{ displayText: 'composed' }] }] } });
           else if (route === 'exportMarkdown') expect(result).toMatchObject({ content: { markdown: 'composed' } });
           else if (route === 'printDisplayList') expect(result).toMatchObject({ commands: [{ text: 'composed' }] });
@@ -2104,8 +2134,7 @@ describe('XlsxEditor async API', () => {
   it('opens the worker lean, downloads viewport PNG and resolves the export API', async () => {
     const host = peerlessHarness(true);
     const png = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10);
-    const renderPng = mock(async (_viewport: xlsx.Viewport, _options?: { sheet?: number }) => png);
-    const renderRangePng = mock(async (_range?: { range?: string; scale?: number }, _options?: { sheet?: number }) => png);
+    const renderPng = mock(async (_target: xlsx.XlsxPngTarget, _options?: xlsx.XlsxPngOptions) => png);
     const structured: xlsx.XlsxExportResult<xlsx.XlsxStructuredContent> = { ok: true, version: 'v1', content: {
       schemaVersion: 1, anchorScope: 'session', dateSystem: '1900', truncated: false,
       calculation: { policy: 'asStored', freshness: 'unverified' },
@@ -2120,7 +2149,8 @@ describe('XlsxEditor async API', () => {
     const list: DisplayList = { width: 120, height: 48, commands: [] };
     const printDisplayList = mock(async (_sheet: number, _range: string, _metrics: xlsx.PrintMetrics, _gridlines: boolean) => list);
     Object.assign(host.session, { pngExport: true });
-    Object.assign(host.session.call, { renderPng, renderRangePng, exportStructured, exportMarkdown, printDisplayList });
+    const renderPngFonts = mock(async (_target: xlsx.XlsxPngTarget, _options?: xlsx.XlsxPngOptions) => [] as xlsx.XlsxPngFont[]);
+    Object.assign(host.session.call, { renderPng, renderPngFonts, exportStructured, exportMarkdown, printDisplayList });
     const createUrl = mock((_blob: Blob) => 'blob:png');
     const revokeUrl = mock((_url: string) => {});
     for (const [name, value] of [['createObjectURL', createUrl], ['revokeObjectURL', revokeUrl]] as const) {
@@ -2145,7 +2175,8 @@ describe('XlsxEditor async API', () => {
     expect(api.commands.getState('exportPng').enabled).toBe(true);
     await act(async () => fireEvent.click(view.getByTestId('xlsx-export-png')));
     await waitFor(() => expect(downloads).toEqual([{ name: 'Report.png', href: 'blob:png' }]));
-    expect(renderPng).toHaveBeenCalledWith({ x: 0, y: 0, width: 800, height: 600 }, { sheet: 0 });
+    expect(renderPng.mock.calls[0]).toEqual([{ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } }, {}]);
+    expect(renderPngFonts.mock.calls[0]![0]).toEqual({ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } });
     const blob = createUrl.mock.calls[0]![0];
     expect(blob.type).toBe('image/png');
     expect(new Uint8Array(await blob.arrayBuffer())).toEqual(png);
@@ -2154,13 +2185,13 @@ describe('XlsxEditor async API', () => {
     const options = { scope: [{ sheet: 1, range: 'A1:B2' }], maxCells: 2 };
     const metrics = { dpi: 144, maxDigitWidth: 9, defaultRowHeightPt: 18,
       fontSizePt: 12, fontFamily: 'Arial', fontAscent: 12, fontDescent: 4 };
-    await expect(api.renderPng(viewport)).resolves.toEqual(png);
-    await expect(api.renderRangePng({ range: 'A1:B2', scale: 2 })).resolves.toEqual(png);
+    await expect(api.renderPng({ sheet: 0, viewport })).resolves.toEqual(png);
+    expect(renderPng.mock.lastCall).toEqual([{ sheet: 0, viewport }, {}]);
+    await expect(api.renderPng({ sheet: 'First', range: 'A1:B2' }, { scale: 2 })).resolves.toEqual(png);
     await expect(api.exportStructured(options)).resolves.toEqual(structured);
     await expect(api.exportMarkdown(options, { maxRows: 1 })).resolves.toEqual(markdown);
     await expect(api.printDisplayList(1, 'A1:B2', metrics, false)).resolves.toEqual(list);
-    expect(renderPng).toHaveBeenLastCalledWith(viewport, { sheet: 0 });
-    expect(renderRangePng).toHaveBeenCalledWith({ range: 'A1:B2', scale: 2 }, { sheet: 0 });
+    expect(renderPng.mock.lastCall).toEqual([{ sheet: 'First', range: 'A1:B2' }, { scale: 2 }]);
     expect(exportStructured).toHaveBeenCalledWith(options);
     expect(exportMarkdown).toHaveBeenCalledWith(options, { maxRows: 1 });
     expect(printDisplayList).toHaveBeenCalledWith(1, 'A1:B2', metrics, false);
@@ -2758,6 +2789,66 @@ describe('peerless editor chunk failures', () => {
 });
 
 describe('peerless workbook worker editor', () => {
+  it('follows the worker to a surviving sheet when a remote update removes the active sheet', async () => {
+    const host = collaborativePeerlessHarness();
+    const ready = mock((_api: XlsxAsyncEditorApi) => {});
+    const view = render(host.asyncEditor({ collaboration: { clientId: 101 }, onReady: ready }));
+    await opened();
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    await act(async () => { fireEvent.click(view.getByRole('tab', { name: 'Second' })); });
+    const switched = host.sent[host.sent.length - 1]!;
+    if (switched.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+    expect(switched.payload.args).toEqual([1]);
+    await act(async () => host.ack(switched, { selection: switched.payload.selection, paint: true }));
+    expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
+    let merging!: Promise<unknown>;
+    await act(async () => { merging = ready.mock.calls[0]![0].collaboration!.applyUpdate(new TextEncoder().encode('remote')); });
+    const updateIndex = host.sent.length - 1;
+    const update = host.sent[updateIndex]!;
+    expect(update.kind).toBe('applyUpdate');
+    const seen = { sheetView: host.sheetView.mock.calls.length, cellGeometry: host.cellGeometry.mock.calls.length,
+      cellInputs: host.cellInputs.mock.calls.length, frame: host.frame.mock.calls.length };
+    await act(async () => host.push({ throughSeq: update.seq, version: 'v9',
+      statuses: [{ seq: update.seq, status: 'applied', committed: true, result: { remoteUpdate: true, proposals: [] } }],
+      editState: { activeSheet: 0, sheets: [{ id: 'sheet:0', index: 0, name: 'First' }] } }));
+    await merging;
+    await advance();
+    expect(view.queryByRole('tab', { name: 'Second' })).toBeNull();
+    expect(view.getByRole('tab', { name: 'First' }).getAttribute('aria-selected')).toBe('true');
+    expect(host.sent.slice(updateIndex + 1).filter((command) => command.kind === 'setActiveSheet'))
+      .toEqual([expect.objectContaining({ payload: expect.objectContaining({ args: [0] }) })]);
+    expect(host.sent.slice(updateIndex + 1).filter((command) => (command.frame?.sheet ?? 0) !== 0)).toEqual([]);
+    expect(host.sheetView.mock.calls.slice(seen.sheetView).filter(([sheet]) => sheet !== 0)).toEqual([]);
+    expect(host.cellGeometry.mock.calls.slice(seen.cellGeometry).filter(([sheet]) => sheet !== 0)).toEqual([]);
+    expect(host.cellInputs.mock.calls.slice(seen.cellInputs).filter(([sheet]) => sheet !== 0)).toEqual([]);
+    expect(host.frame.mock.calls.slice(seen.frame).filter(([, options]) => (options?.sheet ?? 0) !== 0)).toEqual([]);
+  });
+
+  it('keeps the active sheet by id when a remote update inserts a sheet before it', async () => {
+    const host = collaborativePeerlessHarness();
+    const ready = mock((_api: XlsxAsyncEditorApi) => {});
+    const view = render(host.asyncEditor({ collaboration: { clientId: 101 }, onReady: ready }));
+    await opened();
+    await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+    await act(async () => { fireEvent.click(view.getByRole('tab', { name: 'Second' })); });
+    const switched = host.sent[host.sent.length - 1]!;
+    if (switched.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+    await act(async () => host.ack(switched, { selection: switched.payload.selection, paint: true }));
+    let merging!: Promise<unknown>;
+    await act(async () => { merging = ready.mock.calls[0]![0].collaboration!.applyUpdate(new TextEncoder().encode('remote')); });
+    const updateIndex = host.sent.length - 1;
+    const update = host.sent[updateIndex]!;
+    await act(async () => host.push({ throughSeq: update.seq, version: 'v9',
+      statuses: [{ seq: update.seq, status: 'applied', committed: true, result: { remoteUpdate: true, proposals: [] } }],
+      editState: { activeSheet: 2, sheets: [{ id: 'sheet:9', index: 0, name: 'Inserted' },
+        { id: 'sheet:0', index: 1, name: 'First' }, { id: 'sheet:1', index: 2, name: 'Second' }] } }));
+    await merging;
+    await advance();
+    expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
+    expect(host.sent.slice(updateIndex + 1).filter((command) => command.kind === 'setActiveSheet')).toEqual([]);
+    expect(host.sent.slice(updateIndex + 1).filter((command) => command.frame && command.frame.sheet !== 2)).toEqual([]);
+  });
+
   it('bounds visible Enter commits with unchanged formatting and geometry', async () => {
     const formattingRenders = mock(() => {});
     const formulaRenders = mock(() => {});
@@ -3241,6 +3332,70 @@ describe('peerless workbook worker editor', () => {
     });
   }
 
+  const neighborPrefetched = async (neighborDelay = 0) => {
+    const host = peerlessHarness();
+    const sample = await host.frame({ x: 0, y: 0, width: 800, height: 600 });
+    host.frame.mockClear();
+    host.frame.mockImplementation(async (viewport, options) => {
+      if (options?.sheet === 1 && neighborDelay) await new Promise((resolve) => setTimeout(resolve, neighborDelay));
+      return {
+        ...sample, viewport, sheet: options?.sheet ?? 0,
+        displayList: { ...sample.displayList, commands: options?.sheet === 1 ? [...sample.displayList.commands,
+          { op: 'text' as const, text: 'second-sheet', x: 200, y: 66, fontSize: 11, color: '#000000' }]
+          : sample.displayList.commands },
+      };
+    });
+    const view = await host.mount();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1500)); });
+    expect(host.frame.mock.calls.some(([, options]) => options?.sheet === 1)).toBe(true);
+    const settled = host.frame.mock.calls.length;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    expect(host.frame.mock.calls.length).toBe(settled);
+    const canvas = () => view.container.querySelector('canvas')!;
+    return { host, view, canvas };
+  };
+
+  it('a sheet tab switch paints the prefetched neighbor frame before the worker replies', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    const frames = host.frame.mock.calls.length;
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset).toMatchObject({ paintedSheet: '1', provisional: 'true' });
+    const command = host.sent[host.sent.length - 1];
+    if (command.kind !== 'setActiveSheet') throw new Error('Expected a sheet tab command');
+    expect(canvas().dataset.commandCoverage).not.toBe(String(command.seq));
+    await act(async () => host.ack(command, { selection: command.payload.selection, paint: true }));
+    await advance();
+    expect(canvas().dataset).toMatchObject({ paintedSheet: '1', provisional: 'false' });
+    expect(canvas().dataset.commandCoverage).toBe(String(command.seq));
+    expect(host.frame.mock.calls.length).toBeGreaterThanOrEqual(frames);
+  });
+
+  it('a neighbor too slow to prepare is neither painted provisionally nor prepared again', async () => {
+    const { host, view, canvas } = await neighborPrefetched(60);
+    const neighborCalls = () => host.frame.mock.calls.filter(([, options]) => options?.sheet === 1).length;
+    expect(neighborCalls()).toBe(1);
+    await act(async () => host.push({ throughSeq: 0, version: 'v1', statuses: [], editState: { canUndo: false } }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)); });
+    expect(neighborCalls()).toBe(1);
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
+  it('a proposal change drops the prefetched neighbor frame', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    await act(async () => host.push({ throughSeq: 0, version: 'v1',
+      statuses: [{ seq: 0, status: 'applied', committed: false, result: { remoteUpdate: true, proposals: [] } }] }));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
+  it('a neighbor frame prefetched before an edit is not painted after it', async () => {
+    const { host, view, canvas } = await neighborPrefetched();
+    await act(async () => host.push({ throughSeq: 0, version: 'v2', statuses: [] }));
+    await act(async () => fireEvent.click(view.getByRole('tab', { name: 'Second' })));
+    expect(canvas().dataset.provisional).not.toBe('true');
+  });
+
   it('cross-sheet hyperlinks reveal their target even when the initial sheet view arrives later', async () => {
     const host = peerlessHarness();
     const frame = await host.frame({ x: 0, y: 0, width: 800, height: 600 }, { sheet: 0 });
@@ -3497,6 +3652,41 @@ describe('peerless workbook worker editor', () => {
     expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'editCells', payload: {
       args: [0, [{ row: 1, col: 0, input: 'initial' }]],
     } });
+  });
+
+  it('read-only host proposals use ordered worker commands and leave other writes disabled', async () => {
+    const host = peerlessHarness();
+    const available = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
+    restorers.push(() => available.mockRestore());
+    let api!: XlsxAsyncEditorApi;
+    const view = await host.mount(undefined, true, { allowHostProposals: true,
+      onReady(ready) { api = ready; host.ready(); } });
+    expect(await host.commandAt(0)).toMatchObject({ kind: 'setReadOnly',
+      payload: { readOnly: true, allowHostProposals: true } });
+    await act(async () => host.ack(host.sent[0]));
+    const proposal = { id: 'host-review', agentId: 'Host agent', note: 'Review this cell',
+      cells: [{ sheet: 0, row: 0, col: 0, a1: 'A1', oldText: 'initial', newText: '7' }] };
+    const proposed = api.proposeChanges!({ agentId: 'Host agent', note: proposal.note,
+      edits: [{ sheet: 0, row: 0, col: 0, input: '7' }] });
+    expect(await host.commandAt(1)).toMatchObject({ kind: 'propose' });
+    await act(async () => host.ack(host.sent[1], { result: proposal }));
+    await expect(proposed).resolves.toEqual({ ok: true, proposal });
+    expect(await host.commandAt(2)).toMatchObject({ kind: 'applyOps',
+      payload: { toolbar: { id: 'refreshProposals' } } });
+    await act(async () => host.ack(host.sent[2], { result: { proposals: [proposal] } }));
+    await act(async () => { await host.commands().execute('proposalsPanel', { open: true }); });
+    await host.commandAt(3);
+    await act(async () => host.ack(host.sent[3], { result: { proposals: [proposal] } }));
+    expect(view.getByText('Review this cell')).toBeDefined();
+    expect(await host.commands().execute('bold', null)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+    const accepted = host.commands().execute('proposalAccept', { proposalId: proposal.id });
+    expect(await host.commandAt(4)).toMatchObject({ kind: 'acceptProposal', payload: { args: [proposal.id, {}] } });
+    await act(async () => host.ack(host.sent[4], { result: { applied: true }, paint: true }));
+    await expect(accepted).resolves.toMatchObject({ ok: true });
+    await host.commandAt(5);
+    await act(async () => host.ack(host.sent[5], { result: { proposals: [] } }));
+    expect(view.queryByText('Review this cell')).toBeNull();
+    expect(host.session.editState.readOnly).toBe(true);
   });
 
   it('read-only proposal panel loads proposals through a worker read command', async () => {
@@ -3797,10 +3987,35 @@ describe('peerless workbook worker editor', () => {
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
   });
 
+  it('answers plugin point queries through the peerless hit test and refuses them after replacement', async () => {
+    const host = peerlessHarness();
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: false,
+      rect: { x: 192, y: 48, w: 96, h: 48 }, clip: { x: 192, y: 48, w: 96, h: 48 } });
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugins = [defineXlsxPlugin({ id: 'point', createState: () => null, onEvent(context) { contexts.push(context); } })];
+    const view = await host.mount(undefined, false, { plugins });
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, 800, 600);
+    const geometry = () => contexts.reduce<XlsxPluginGeometry | null>((found, context) => context.geometry ?? found, null);
+    await waitFor(() => expect(geometry()?.getPositionAtPoint?.(40 + 144, 60 + 36)).toEqual({ sheet: 0, sheetId: 'sheet:0',
+      row: 1, col: 1, version: geometry()!.layout.version, layoutId: geometry()!.layout.id }));
+    const retained = geometry()!;
+    expect(retained.getPositionAtPoint!(40 + 240, 60 + 72)).toBeNull();
+    expect(retained.getPositionAtPoint!(39, 96)).toBeNull();
+    expect(retained.getPositionAtPoint!(40 + 100, 60 + 600)).toBeNull();
+    expect(retained.getPositionAtPoint!(Number.POSITIVE_INFINITY, 96)).toBeNull();
+    host.open.mockResolvedValueOnce({ ...host.session, commandIdentity: { session: 'replacement', incarnation: 'worker' } });
+    await act(async () => host.replace(view, new Uint8Array([4]), { plugins }));
+    expect(retained.getPositionAtPoint!(40 + 144, 60 + 36)).toBeNull();
+    await opened();
+    await waitFor(() => expect(host.ready).toHaveBeenCalledTimes(2));
+    expect(retained.getPositionAtPoint!(40 + 144, 60 + 36)).toBeNull();
+  });
+
   it('replacement cancels retained chart nudges even with the same chart id', async () => {
     const host = peerlessHarness();
-    host.charts.push({ id: 'chart', label: 'Chart', movable: true, rect: { x: 200, y: 100, w: 100, h: 100 },
-      clip: { x: 200, y: 100, w: 100, h: 100 } });
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: false,
+      rect: { x: 200, y: 100, w: 100, h: 100 }, clip: { x: 200, y: 100, w: 100, h: 100 } });
     const view = await host.mount();
     const original = globalThis.setTimeout;
     let callback: (() => void) | undefined;
@@ -3821,6 +4036,26 @@ describe('peerless workbook worker editor', () => {
     await act(async () => callback!());
     expect(host.sent.filter((command) => command.kind === 'moveChart')).toEqual([]);
     expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+  });
+
+  it('refuses save during an active chart resize as it does during a chart drag', async () => {
+    const host = peerlessHarness();
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
+    const view = await host.mount();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+    await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+    const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!;
+    fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+    expect(await host.commands().execute('save', null))
+      .toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+    expect(host.session.save).not.toHaveBeenCalled();
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 404, clientY: 202, button: 0 });
+    await act(async () => {});
+    expect(host.sent.filter((command) => command.kind === 'resizeChart')).toHaveLength(1);
   });
 
   it('Escape cancels pending offscreen keyboard input before its frame arrives', async () => {
@@ -4459,7 +4694,8 @@ describe('peerless workbook worker editor', () => {
     const host = peerlessHarness();
     const available = spyOn(xlsx, 'isProposalsAvailable').mockReturnValue(true);
     restorers.push(() => available.mockRestore());
-    host.charts.push({ id: 'chart', label: 'Chart', movable: true, rect: { x: 200, y: 100, w: 100, h: 100 }, clip: { x: 200, y: 100, w: 100, h: 100 } });
+    host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: false,
+      rect: { x: 200, y: 100, w: 100, h: 100 }, clip: { x: 200, y: 100, w: 100, h: 100 } });
     const view = await host.mount();
     const execute = host.commands().execute('paintFormat', null);
     await act(async () => {});
@@ -4619,6 +4855,30 @@ describe('workbook worker editor', () => {
     await act(async () => { view.rerender(<XlsxEditor legacySyncApi file={file.slice()} experimentalWorkerOpen onReady={onReady} />); });
     expect(apis[0].getPositionAtPoint(40 + 144 * 1.5, 60 + 36 * 1.5)).toBeNull();
     await expect(apis[0].flushPendingInput()).rejects.toThrow('replaced');
+  });
+
+  it('answers plugin point queries through the worker hit test and refuses them after replacement', async () => {
+    harness();
+    const apis: XlsxWorkerEditorApi[] = [];
+    const onReady = (api: XlsxWorkerEditorApi) => { apis.push(api); };
+    const contexts: XlsxPluginContext<null>[] = [];
+    const plugins = [defineXlsxPlugin({ id: 'point', createState: () => null, onEvent(context) { contexts.push(context); } })];
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen plugins={plugins} onReady={onReady} />);
+    await opened();
+    await advance();
+    const canvas = view.container.querySelector('canvas')!;
+    canvas.getBoundingClientRect = () => new DOMRect(40, 60, 1200, 900);
+    const geometry = () => contexts.reduce<XlsxPluginGeometry | null>((found, context) => context.geometry ?? found, null);
+    const point = [40 + 144 * 1.5, 60 + 36 * 1.5] as const;
+    await waitFor(() => expect(geometry()?.getPositionAtPoint?.(...point)).toEqual({ ...apis[0].getPositionAtPoint(...point)!,
+      sheetId: geometry()!.layout.sheetId, version: geometry()!.layout.version, layoutId: geometry()!.layout.id }));
+    const retained = geometry()!;
+    expect(retained.getPositionAtPoint!(...point)).toMatchObject({ sheet: 0, row: 1, col: 1 });
+    expect(retained.getPositionAtPoint!(39, 70)).toBeNull();
+    expect(retained.getPositionAtPoint!(Number.NaN, 70)).toBeNull();
+    await act(async () => { view.rerender(<XlsxEditor legacySyncApi file={file.slice()} experimentalWorkerOpen plugins={plugins} onReady={onReady} />); });
+    expect(apis[0].getPositionAtPoint(...point)).toBeNull();
+    expect(retained.getPositionAtPoint!(...point)).toBeNull();
   });
 
   it('clears a Ctrl+A sheet selection through its used cells', async () => {
@@ -5127,8 +5387,8 @@ describe('workbook worker editor', () => {
   for (const pending of ['drag', 'nudge', 'queued move'] as const) {
     it(`${pending === 'queued move' ? 'applies' : 'cancels'} a chart ${pending} across a readOnly flip`, async () => {
       const host = harness();
-      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, rect: { x: 192, y: 96, w: 192, h: 96 },
-        clip: { x: 192, y: 96, w: 192, h: 96 } });
+      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
+        rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
       const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
       await opened();
       const acknowledgment = deferred<void>();
@@ -5777,7 +6037,7 @@ describe('workbook worker editor', () => {
 
   it('rejects the pending cut payload and clipboard write when admission is refused', async () => {
     const host = harness();
-    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
       rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
     const hydration = deferred<WorkbookHandle>();
     host.hydrate.mockReturnValue(hydration.promise);
@@ -5965,7 +6225,7 @@ describe('workbook worker editor', () => {
 
   it('commits a chart drag through the ordered facade without waiting for animation frames', async () => {
     const host = harness();
-    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
       rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
     const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
     await opened();
@@ -5978,9 +6238,142 @@ describe('workbook worker editor', () => {
     expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(0px, 0px)');
   });
 
+  it('shows eight resize handles around a selected two-cell chart', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    const handles = view.getAllByTestId('xlsx-chart-resize-handle');
+    expect(handles.map((handle) => handle.getAttribute('data-handle')))
+      .toEqual(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']);
+    expect(handles.map((handle) => handle.style.cursor)).toEqual([
+      'nwse-resize', 'ns-resize', 'nesw-resize', 'ew-resize',
+      'nwse-resize', 'ns-resize', 'nesw-resize', 'ew-resize',
+    ]);
+    expect(handles.find((handle) => handle.getAttribute('data-handle') === 'se')!.style.left).toBe('300px');
+    expect(handles.find((handle) => handle.getAttribute('data-handle') === 'se')!.style.top).toBe('200px');
+    expect(handles.find((handle) => handle.getAttribute('data-handle') === 'nw')!.style.left).toBe('100px');
+  });
+
+  it('previews a south-east resize and commits it once on release', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.mouseDown(scroll, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!;
+    fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+    const selection = view.getByTestId('xlsx-chart-selection');
+    expect(selection.style.width).toBe('230px');
+    expect(selection.style.height).toBe('120px');
+    expect(view.queryByTestId('xlsx-selection')).toBeNull();
+    expect(view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!.style.left).toBe('330px');
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 330, clientY: 220, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.resizeChart.mock.calls).toEqual([
+      [0, 'chart:1', { left: 0, top: 0, right: 30, bottom: 20 }],
+    ]);
+    expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+  });
+
+  it('cancels a resize preview on Escape without mutating the chart', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.mouseDown(scroll, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 330, clientY: 220, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.resizeChart).not.toHaveBeenCalled();
+    expect(view.getByTestId('xlsx-chart-selection').style.width).toBe('200px');
+    expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8);
+  });
+
+  it('flushes a pending chart nudge before starting a resize', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.mouseDown(scroll, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!;
+    const clock = selectionWindow();
+    act(() => {
+      fireEvent.keyDown(scroll, { key: 'ArrowRight' });
+      expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+      fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+    });
+    await act(async () => {});
+    expect(host.editMethods.moveChart.mock.calls).toEqual([[0, 'chart:1', 1, 0]]);
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+    expect(view.getByTestId('xlsx-chart-selection').style.width).toBe('230px');
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 330, clientY: 220, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.resizeChart.mock.calls).toEqual([
+      [0, 'chart:1', { left: 0, top: 0, right: 30, bottom: 20 }],
+    ]);
+    expect(host.editMethods.moveChart).toHaveBeenCalledTimes(1);
+    await act(async () => { await clock.tick(300); });
+    expect(host.editMethods.moveChart).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows no resize handles for a chart that cannot be resized', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+  });
+
+  it('shows no resize handles for a placeholder chart', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true, placeholder: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+  });
+
+  it('shows no resize handles in a read-only editor', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen readOnly allowHostProposals
+      showToolbar={false} />);
+    await opened();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+  });
+
   it('keeps the origin sheet for a chart drag released after queued navigation', async () => {
     const host = harness();
-    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
       rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
     const hydration = deferred<WorkbookHandle>();
     host.hydrate.mockReturnValue(hydration.promise);
@@ -6006,7 +6399,7 @@ describe('workbook worker editor', () => {
 
   it('recovers an accepted chart nudge when the worker fails before its timer fires', async () => {
     const host = harness(true);
-    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
       rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
     host.peerMethods.save.mockImplementation(() => new TextEncoder().encode(JSON.stringify(host.charts[0].rect)));
     let api!: XlsxWorkerEditorApi;
@@ -6498,7 +6891,7 @@ for (const wait of ['hydration', 'ready'] as const) {
 it('drains a buffered chart nudge before its timer expires on disposal', async () => {
   const host = harness();
   host.charts.push({ id: 'chart', label: 'Chart', rect: { x: 192, y: 96, w: 192, h: 96 },
-    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true });
+    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true, resizable: false });
   const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
   await opened();
   fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
@@ -6574,7 +6967,7 @@ for (const mode of ['unsupported-cut', 'construct-cut', 'throw-cut', 'deny-cut',
 it('renders target-changed and gesture-active command refusals', async () => {
   const host = harness();
   host.charts.push({ id: 'chart', label: 'Chart', rect: { x: 192, y: 96, w: 192, h: 96 },
-    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true });
+    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true, resizable: false });
   let api!: XlsxWorkerEditorApi;
   const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
   await opened();
@@ -6595,6 +6988,31 @@ it('renders target-changed and gesture-active command refusals', async () => {
   reviewEdit(view, 'after refusal');
   await advance();
   expect(host.cells.get('0:0:0')).toBe('after refusal');
+});
+
+it('refuses Ctrl+S during an active chart resize as it does during a chart drag', async () => {
+  const host = harness();
+  host.charts.push({ id: 'chart', label: 'Chart', rect: { x: 192, y: 96, w: 192, h: 96 },
+    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true, resizable: true });
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+  await opened();
+  fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+  fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+  const southEast = view.getAllByTestId('xlsx-chart-resize-handle')
+    .find((handle) => handle.getAttribute('data-handle') === 'se')!;
+  fireEvent.pointerDown(southEast, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+  fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's', ctrlKey: true });
+  await advance();
+  expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('Finish moving the chart first.');
+  expect(host.editMethods.save).not.toHaveBeenCalled();
+  expect(api.failure).toBeNull();
+  fireEvent.pointerUp(window, { pointerId: 1, clientX: 404, clientY: 202, button: 0 });
+  await advance();
+  expect(host.editMethods.resizeChart.mock.calls).toEqual([
+    [0, 'chart', { left: 0, top: 0, right: 20, bottom: 10 }],
+  ]);
 });
 
 for (const route of ['cut', 'bold'] as const) {
@@ -8315,7 +8733,7 @@ describe('peerless keyboard navigation and proposal freshness', () => {
         expect(host.cellInputs).toHaveBeenLastCalledWith(0, reverse ? 'C4' : 'B2');
         expect(view.getByTestId('xlsx-selection').style.width).toBe('192px');
         expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
-        const outline = view.getByTestId('xlsx-overlay-host').children[1] as HTMLElement;
+        const outline = view.getByTestId('xlsx-focus') as HTMLElement;
         expect(outline.style.left).toBe(`${anchor.col * 96}px`);
         expect(outline.style.top).toBe(`${anchor.row * 24}px`);
         fireEvent.keyDown(scroll, { key: reverse ? 'ArrowDown' : 'ArrowUp', shiftKey: true });
@@ -8396,7 +8814,7 @@ describe('peerless keyboard navigation and proposal freshness', () => {
     host.frame.mockImplementation(async (...args) => ({ ...await frame(...args),
       mergedRanges: [{ start: { row: 0, col: 0 }, end: { row: 1, col: 1 } }] }));
     const view = await host.mount();
-    const outline = view.getByTestId('xlsx-overlay-host').children[1] as HTMLElement;
+    const outline = view.getByTestId('xlsx-focus') as HTMLElement;
     expect(outline.style.width).toBe('192px');
     expect(outline.style.height).toBe('48px');
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
@@ -8934,4 +9352,1594 @@ it('peerless shows the supplied indicator while the workbook opens', async () =>
   await act(async () => { pending.resolve(host.session); });
   await opened();
   await waitFor(() => expect(view.queryByText('Workbook opening')).toBeNull());
+});
+
+
+for (const range of [false, true]) it(`T18: XL ${range ? 'range' : 'cell'} selection settles once with its painted anchor`, async () => {
+  harness(true);
+  const clock = selectionWindow();
+  const events: XlsxPluginEvent[] = [];
+  const anchors: Array<XlsxAnchorGeometryResult | null> = [];
+  let settledAt = 0;
+  const plugin = defineXlsxPlugin({ id: 'matrix-legacy', createState: () => null,
+    onEvent(context, event) {
+      events.push(event);
+      if (event.type === 'selection-settle') {
+        settledAt = Date.now();
+        anchors.push(context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null);
+      }
+    } });
+  try {
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen plugins={[plugin]} showToolbar={false} />);
+    await opened(); await advance();
+    await act(async () => { await clock.tick(350); });
+    events.length = 0; anchors.length = 0;
+    const selectedAt = Date.now();
+    await act(async () => { fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown', shiftKey: range }); });
+    await advance();
+    expect(anchors).toEqual([]);
+    await waitFor(() => expect(anchors).toHaveLength(1));
+    expect(anchors).toMatchObject([{ ok: true }]);
+    expect(settledAt - selectedAt).toBeGreaterThanOrEqual(350);
+    expect(events.filter(event => event.type === 'selection-settle')).toMatchObject([{ source: 'keyboard' }]);
+    await act(async () => { await clock.tick(700); });
+    expect(anchors).toHaveLength(1);
+  } finally { cleanup(); }
+});
+
+for (const outcome of ['painted', 'never-paints'] as const) it(`${outcome === 'painted' ? 'T19' : 'T19c'}: XL settle ${outcome === 'painted' ? 'follows the pending paint with an ok anchor' : 'exits the bounded paint wait'}`, async () => {
+  const host = harness(true);
+  const clock = selectionWindow();
+  const gate = deferred<void>();
+  const anchors: Array<XlsxAnchorGeometryResult | null> = [];
+  let context: XlsxPluginContext<null> | undefined;
+  const plugin = defineXlsxPlugin({ id: 'matrix-paint', createState: () => null,
+    onEvent(next, event) {
+      context = next;
+      if (event.type === 'selection-settle') anchors.push(next.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null);
+    } });
+  try {
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen plugins={[plugin]} showToolbar={false} />);
+    await opened(); await advance();
+    await act(async () => { await clock.tick(350); });
+    anchors.length = 0;
+    const frame = host.sessionMethods.frame.getMockImplementation()!;
+    let held = false;
+    host.sessionMethods.frame.mockImplementation(async (...args) => {
+      const answer = await frame(...args); held = true; await gate.promise; return answer;
+    });
+    await act(async () => {
+      const scroll = view.getByTestId('xlsx-scroll');
+      fireEvent.keyDown(scroll, { key: 'ArrowDown', shiftKey: true });
+      scroll.scrollTop = 24; fireEvent.scroll(scroll);
+    });
+    await tick();
+    expect(held).toBe(true);
+    await act(async () => { await clock.tick(350); });
+    expect(anchors).toEqual([]);
+    expect(context!.snapshot.selectionSettled).toBe(false);
+    if (outcome === 'painted') {
+      await act(async () => { gate.resolve(); });
+      await advance();
+      expect(anchors).toMatchObject([{ ok: true }]);
+    } else {
+      await act(async () => { await clock.expire(() => anchors.length > 0); });
+      expect(anchors).toHaveLength(1);
+    }
+    expect(context!.snapshot.selectionSettled).toBe(true);
+    await act(async () => { await clock.tick(700); });
+    expect(anchors).toHaveLength(1);
+  } finally { gate.resolve(); cleanup(); }
+});
+
+
+it('T19b: XL offscreen selection settles with layout-unavailable', async () => {
+  harness(true);
+  const clock = selectionWindow();
+  const anchors: Array<XlsxAnchorGeometryResult | null> = [];
+  const plugin = defineXlsxPlugin({ id: 'matrix-offscreen', createState: () => null,
+    onEvent(context, event) {
+      if (event.type === 'selection-settle') anchors.push(context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null);
+    } });
+  try {
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen plugins={[plugin]} showToolbar={false} />);
+    await opened(); await advance();
+    await act(async () => { await clock.tick(350); });
+    anchors.length = 0;
+    await act(async () => { fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'PageDown' }); });
+    await advance();
+    await act(async () => { await clock.tick(350); });
+    expect(anchors).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+    await act(async () => { await clock.tick(700); });
+    expect(anchors).toHaveLength(1);
+  } finally { cleanup(); }
+});
+
+it('T20: XL chart selection settles with missing-target', async () => {
+  const host = harness(true);
+  host.charts.push({ id: 'chart', label: 'Chart', movable: false, resizable: false,
+    rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+  const clock = selectionWindow();
+  const anchors: Array<XlsxAnchorGeometryResult | null> = [];
+  let chartId: string | null | undefined;
+  const plugin = defineXlsxPlugin({ id: 'matrix-chart', createState: () => null,
+    onEvent(context, event) {
+      chartId = context.snapshot.selection?.chartId;
+      if (event.type === 'selection-settle') anchors.push(context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null);
+    } });
+  try {
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen plugins={[plugin]} showToolbar={false} />);
+    await opened(); await advance();
+    await act(async () => { await clock.tick(350); });
+    anchors.length = 0;
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 120, clientY: 120 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 120, clientY: 120 });
+    });
+    await advance();
+    await act(async () => { await clock.tick(350); });
+    expect(chartId).toBe('chart');
+    expect(anchors).toMatchObject([{ ok: false, failure: { code: 'missing-target' } }]);
+    await act(async () => { await clock.tick(700); });
+    expect(anchors).toHaveLength(1);
+  } finally { cleanup(); }
+});
+
+describe('workbook worker editor header interactions', () => {
+  const mountLegacy = async () => {
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} showSheetHeaders />);
+    await opened();
+    return view;
+  };
+  // the accessible mirror reports every selected cell the frame painted, so a
+  // whole-track selection is visible there however far past the window it reaches.
+  const selectedAddresses = (view: ReturnType<typeof render>) =>
+    Array.from(view.queryAllByRole('gridcell', { selected: true }) as Element[],
+      (cell) => (cell.textContent ?? '').split(',')[0]!.trim());
+
+  it('hides the header bands by default in the legacy editor', async () => {
+    harness();
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    expect(view.queryByTestId('xlsx-grid')).toBeNull();
+    expect(view.queryByTestId('xlsx-column-headers')).toBeNull();
+    expect(view.queryByTestId('xlsx-row-headers')).toBeNull();
+  });
+
+  it('hides the header bands by default in the peerless editor', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: undefined });
+    expect(view.queryByTestId('xlsx-grid')).toBeNull();
+    expect(view.queryByTestId('xlsx-column-headers')).toBeNull();
+    expect(view.queryByTestId('xlsx-row-headers')).toBeNull();
+  });
+
+  it('sends no ops when a whole-sheet row boundary is dragged in the peerless editor', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    await act(async () => { fireEvent.click(view.getByTestId('xlsx-grid-corner')); });
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    const band = view.getByTestId('xlsx-row-headers');
+    fireEvent.pointerDown(band, { button: 0, clientX: 20, clientY: 24, pointerId: 8 });
+    fireEvent.pointerMove(band, { clientX: 20, clientY: 56, pointerId: 8 });
+    fireEvent.pointerUp(band, { button: 0, clientX: 20, clientY: 56, pointerId: 8 });
+    await act(async () => {});
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([]);
+  });
+
+  it('sends no ops when a whole-sheet row boundary is dragged in the legacy editor', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    const view = await mountLegacy();
+    fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    const band = view.getByTestId('xlsx-row-headers');
+    fireEvent.pointerDown(band, { button: 0, clientX: 20, clientY: 24, pointerId: 8 });
+    fireEvent.pointerMove(band, { clientX: 20, clientY: 56, pointerId: 8 });
+    fireEvent.pointerUp(band, { clientX: 20, clientY: 56, pointerId: 8 });
+    expect(applyOps).not.toHaveBeenCalled();
+  });
+
+  it('selects the whole column from the column header', async () => {
+    harness();
+    const view = await mountLegacy();
+    fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+    await waitFor(() => expect(selectedAddresses(view).length).toBeGreaterThan(1));
+    expect(selectedAddresses(view).every((address) => address.startsWith('A'))).toBe(true);
+    expect(selectedAddresses(view)).toEqual(['A1', 'A2', 'A3', 'A4']);
+  });
+
+  it('selects the whole sheet from the corner above the row numbers', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult =>
+      ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    const view = await mountLegacy();
+    // the raw selection is what the accessible mirror receives, so its range is
+    // the sheet's own extent rather than the painted window's.
+    const a11y = spyOn(xlsx, 'buildA11yGrid');
+    restorers.push(() => a11y.mockRestore());
+    fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    const calls = a11y.mock.calls;
+    expect(calls[calls.length - 1]![1]).toEqual({
+      anchor: { row: 0, col: 0 },
+      focus: { row: 0, col: 0 },
+      range: { top: 0, left: 0, bottom: XLSX_MAX_ROWS - 1, right: XLSX_MAX_COLUMNS - 1 },
+    } satisfies Selection);
+    expect(applyOps).not.toHaveBeenCalled();
+  });
+
+  it('drops a dragged legacy chart and disarms its move when a column header is pressed', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = await mountLegacy();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseMove(view.getByTestId('xlsx-scroll'), { clientX: 150, clientY: 140, buttons: 1 });
+    expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(30px, 20px)');
+    fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+    fireEvent.mouseUp(window, { clientX: 150, clientY: 140, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+  });
+
+  it('drops a resizing legacy chart when the select-all corner is pressed', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const view = await mountLegacy();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+    expect(view.getByTestId('xlsx-chart-selection').style.width).toBe('230px');
+    fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 330, clientY: 220, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.resizeChart).not.toHaveBeenCalled();
+    expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+  });
+
+  for (const target of ['a column header', 'the select-all corner']) {
+    it(`drops a resizing peerless chart when ${target} is pressed`, async () => {
+      const host = peerlessHarness();
+      host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: true,
+        rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
+      const view = await host.mount(undefined, false, { showSheetHeaders: true });
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+      await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+      fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+        .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+      expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+      await act(async () => {
+        if (target === 'a column header') {
+          fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+        } else {
+          fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+        }
+      });
+      await waitFor(() => expect(view.queryByTestId('xlsx-chart-selection')).toBeNull());
+      expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+      fireEvent.pointerUp(window, { pointerId: 1, clientX: 404, clientY: 202, button: 0 });
+      await act(async () => {});
+      expect(host.sent.filter((command) => command.kind === 'resizeChart')).toEqual([]);
+    });
+
+    it(`disarms a dragged peerless chart move when ${target} is pressed`, async () => {
+      const host = peerlessHarness();
+      host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: true,
+        rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
+      const view = await host.mount(undefined, false, { showSheetHeaders: true });
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+      fireEvent.mouseMove(view.getByTestId('xlsx-scroll'), { clientX: 240, clientY: 130, buttons: 1 });
+      await act(async () => {
+        if (target === 'a column header') {
+          fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+        } else {
+          fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+        }
+      });
+      fireEvent.mouseUp(window, { clientX: 240, clientY: 130, button: 0 });
+      await act(async () => {});
+      expect(host.sent.filter((command) => command.kind === 'moveChart')).toEqual([]);
+      await act(async () => { for (const command of host.sent) host.ack(command); });
+      expect(await host.commands().execute('save', null))
+        .not.toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+    });
+
+    it(`ends a peerless chart resize when ${target} is pressed`, async () => {
+      const host = peerlessHarness();
+      host.charts.push({ id: 'chart', label: 'Chart', movable: true, resizable: true,
+        rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } });
+      const view = await host.mount(undefined, false, { showSheetHeaders: true });
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+      await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+      const width = view.getByTestId('xlsx-chart-selection').style.width;
+      fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+        .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+      await act(async () => {
+        if (target === 'a column header') {
+          fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+        } else {
+          fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+        }
+      });
+      await act(async () => { for (const command of host.sent) host.ack(command); });
+      expect(await host.commands().execute('save', null))
+        .not.toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+      // the chart is selected again, so a still-live resize would preview and commit on it.
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+      await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 444, clientY: 222 });
+      expect(view.getByTestId('xlsx-chart-selection').style.width).toBe(width);
+      fireEvent.pointerUp(window, { pointerId: 1, clientX: 444, clientY: 222, button: 0 });
+      await act(async () => {});
+      expect(host.sent.filter((command) => command.kind === 'resizeChart')).toEqual([]);
+    });
+
+    it(`ends a legacy chart resize when ${target} is pressed`, async () => {
+      const host = harness();
+      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+        rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+      let api!: XlsxWorkerEditorApi;
+      const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} showSheetHeaders
+        onReady={(value) => { api = value; }} />);
+      await opened();
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+      fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+        .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+      expect(view.getByTestId('xlsx-chart-selection').style.width).toBe('230px');
+      if (target === 'a column header') {
+        fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+      } else {
+        fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+      }
+      let saved!: unknown;
+      await act(async () => { saved = await api.commands.execute('save', null); });
+      expect(saved).not.toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+      fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+      fireEvent.pointerMove(window, { pointerId: 1, clientX: 360, clientY: 240 });
+      expect(view.getByTestId('xlsx-chart-selection').style.width).toBe('200px');
+      fireEvent.pointerUp(window, { pointerId: 1, clientX: 360, clientY: 240, button: 0 });
+      await act(async () => {});
+      expect(host.editMethods.resizeChart).not.toHaveBeenCalled();
+    });
+  }
+
+  const peerlessChart = { id: 'chart', label: 'Chart', movable: true, resizable: true,
+    rect: { x: 192, y: 96, w: 192, h: 96 }, clip: { x: 192, y: 96, w: 192, h: 96 } };
+  const legacyChart = { id: 'chart:1', label: 'Chart', movable: true, resizable: true,
+    rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } };
+
+  it('keeps a peerless chart deselected when the corner is clicked over a whole-sheet selection', async () => {
+    const host = peerlessHarness();
+    host.charts.push(peerlessChart);
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    await act(async () => { fireEvent.click(view.getByTestId('xlsx-grid-corner')); });
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+    await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+    await act(async () => { fireEvent.click(view.getByTestId('xlsx-grid-corner')); });
+    await waitFor(() => expect(view.queryByTestId('xlsx-chart-selection')).toBeNull());
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'Delete' });
+    await act(async () => {});
+    expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'applyOps', payload: { toolbar: { id: 'clear' } } });
+  });
+
+  it('drops a peerless chart at pointer down on the corner over a whole-sheet selection', async () => {
+    const host = peerlessHarness();
+    host.charts.push(peerlessChart);
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    await act(async () => { fireEvent.click(view.getByTestId('xlsx-grid-corner')); });
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+    await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+    await act(async () => { fireEvent.pointerDown(view.getByTestId('xlsx-grid-corner'), { pointerId: 2, button: 0 }); });
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    await act(async () => { fireEvent.click(view.getByTestId('xlsx-grid-corner')); });
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'Delete' });
+    await act(async () => {});
+    expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'applyOps', payload: { toolbar: { id: 'clear' } } });
+  });
+
+  it('drops a legacy chart at pointer down on the corner over a whole-sheet selection', async () => {
+    const host = harness();
+    host.charts.push(legacyChart);
+    const view = await mountLegacy();
+    fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+    fireEvent.pointerDown(view.getByTestId('xlsx-grid-corner'), { pointerId: 2, button: 0 });
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    fireEvent.click(view.getByTestId('xlsx-grid-corner'));
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+  });
+
+  it('ends a peerless chart resize at pointer down on the corner, before any release', async () => {
+    const host = peerlessHarness();
+    host.charts.push(peerlessChart);
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+    await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+    fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 384, clientY: 192, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 404, clientY: 202 });
+    await act(async () => { fireEvent.pointerDown(view.getByTestId('xlsx-grid-corner'), { pointerId: 2, button: 0 }); });
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    expect(await host.commands().execute('save', null))
+      .not.toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 404, clientY: 202, button: 0 });
+    await act(async () => {});
+    expect(host.sent.filter((command) => command.kind === 'resizeChart')).toEqual([]);
+  });
+
+  it('ends a legacy chart resize at pointer down on the corner, before any release', async () => {
+    const host = harness();
+    host.charts.push(legacyChart);
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} showSheetHeaders
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.pointerDown(view.getAllByTestId('xlsx-chart-resize-handle')
+      .find((handle) => handle.getAttribute('data-handle') === 'se')!, { pointerId: 1, clientX: 300, clientY: 200, button: 0 });
+    fireEvent.pointerMove(window, { pointerId: 1, clientX: 330, clientY: 220 });
+    fireEvent.pointerDown(view.getByTestId('xlsx-grid-corner'), { pointerId: 2, button: 0 });
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    let saved!: unknown;
+    await act(async () => { saved = await api.commands.execute('save', null); });
+    expect(saved).not.toMatchObject({ ok: false, failure: { code: 'gesture-active' } });
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 330, clientY: 220, button: 0 });
+    await act(async () => {});
+    expect(host.editMethods.resizeChart).not.toHaveBeenCalled();
+  });
+
+  it('drops a peerless chart at pointer down on a column resize edge and still resizes the column', async () => {
+    const host = peerlessHarness();
+    host.charts.push(peerlessChart);
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+    await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+    const band = view.getByTestId('xlsx-column-headers');
+    await act(async () => { fireEvent.pointerDown(band, { button: 0, clientX: 192, clientY: 0, pointerId: 4 }); });
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+    fireEvent.pointerMove(band, { clientX: 227, clientY: 0, pointerId: 4 });
+    fireEvent.pointerUp(band, { clientX: 227, clientY: 0, pointerId: 4 });
+    await waitFor(() => expect(host.sent.filter((command) => command.kind === 'applyOps')).toHaveLength(1));
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([
+      expect.objectContaining({ payload: { args: [[
+        { type: 'setColWidth', sheet: 0, col: 1, width: 18 },
+      ]] } }),
+    ]);
+    expect(host.sent.filter((command) => command.kind === 'resizeChart')).toEqual([]);
+  });
+
+  it('drops a legacy chart at pointer down on a column resize edge and still resizes the column', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    host.charts.push(legacyChart);
+    const view = await mountLegacy();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+    const band = view.getByTestId('xlsx-column-headers');
+    fireEvent.pointerDown(band, { button: 0, clientX: 192, clientY: 0, pointerId: 4 });
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+    fireEvent.pointerMove(band, { clientX: 227, clientY: 0, pointerId: 4 });
+    fireEvent.pointerUp(band, { clientX: 227, clientY: 0, pointerId: 4 });
+    expect(applyOps).toHaveBeenCalledTimes(1);
+    expect(applyOps.mock.calls[0]![0]).toEqual([{ type: 'setColWidth', sheet: 0, col: 1, width: 18 }]);
+    expect(host.editMethods.resizeChart).not.toHaveBeenCalled();
+  });
+
+  it('drops a peerless chart when the header menu opens on an already selected column', async () => {
+    const host = peerlessHarness();
+    host.charts.push(peerlessChart);
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    const header = view.getByTestId('xlsx-column-headers').querySelector('[data-col="1"]')!;
+    await act(async () => { fireEvent.mouseDown(header); });
+    await waitFor(() => expect(selectedAddresses(view).every((address) => address.startsWith('B'))).toBe(true));
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
+    await waitFor(() => expect(view.getAllByTestId('xlsx-chart-resize-handle')).toHaveLength(8));
+    fireEvent.contextMenu(header, { button: 2, clientX: 120, clientY: 8 });
+    await waitFor(() => view.getByTestId('xlsx-column-header-menu'));
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+  });
+
+  it('drops a legacy chart when the header menu opens on a column', async () => {
+    const host = harness();
+    host.charts.push(legacyChart);
+    const view = await mountLegacy();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy();
+    const header = view.getByTestId('xlsx-column-headers').querySelector('[data-col="1"]')!;
+    fireEvent.contextMenu(header, { button: 2, clientX: 120, clientY: 8 });
+    await waitFor(() => view.getByTestId('xlsx-column-header-menu'));
+    expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+    expect(view.queryAllByTestId('xlsx-chart-resize-handle')).toEqual([]);
+  });
+
+  for (const axis of ['col', 'row'] as const) {
+    const label = (view: ReturnType<typeof render>) => view.getByTestId(axis === 'col' ? 'xlsx-column-headers' : 'xlsx-row-headers')
+      .querySelector(axis === 'col' ? '[data-col="1"]' : '[data-row="1"]')!;
+    const menu = axis === 'col' ? 'xlsx-column-header-menu' : 'xlsx-row-header-menu';
+
+    it(`ends a peerless chart move at a right-button press on a ${axis} header, before its menu opens`, async () => {
+      const host = peerlessHarness();
+      host.charts.push(peerlessChart);
+      const view = await host.mount(undefined, false, { showSheetHeaders: true });
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+      await waitFor(() => expect(view.getByTestId('xlsx-chart-selection')).toBeTruthy());
+      fireEvent.mouseMove(view.getByTestId('xlsx-scroll'), { clientX: 240, clientY: 130, buttons: 1 });
+      await act(async () => { fireEvent.pointerDown(label(view), { pointerId: 2, button: 2 }); });
+      expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+      expect(view.queryByTestId(menu)).toBeNull();
+      fireEvent.contextMenu(label(view), { button: 2, clientX: 120, clientY: 30 });
+      await waitFor(() => view.getByTestId(menu));
+      fireEvent.mouseUp(window, { clientX: 240, clientY: 130, button: 0 });
+      await act(async () => {});
+      expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+      expect(host.sent.filter((command) => command.kind === 'moveChart')).toEqual([]);
+    });
+
+    it(`ends a legacy chart move at a right-button press on a ${axis} header, before its menu opens`, async () => {
+      const host = harness();
+      host.charts.push(legacyChart);
+      const view = await mountLegacy();
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+      fireEvent.mouseMove(view.getByTestId('xlsx-scroll'), { clientX: 150, clientY: 140, buttons: 1 });
+      expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(30px, 20px)');
+      fireEvent.pointerDown(label(view), { pointerId: 2, button: 2 });
+      expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+      expect(view.queryByTestId(menu)).toBeNull();
+      fireEvent.contextMenu(label(view), { button: 2, clientX: 120, clientY: 30 });
+      await waitFor(() => view.getByTestId(menu));
+      fireEvent.mouseUp(window, { clientX: 150, clientY: 140, button: 0 });
+      await act(async () => {});
+      expect(view.queryByTestId('xlsx-chart-selection')).toBeNull();
+      expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+    });
+  }
+
+  it('anchors a shifted column header on the pressed track, not on a merged cell', async () => {
+    const host = harness();
+    widen(host.sessionMethods.frame);
+    // B1:C1 is merged; C's header sits inside it.
+    Object.assign(host.peerMethods, { mergedRanges: () => [{ start: { row: 0, col: 1 }, end: { row: 0, col: 2 } }] });
+    const view = await mountLegacy();
+    // the harness paints 96px tracks, so C's label is the one holding C1.
+    fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="2"]')!);
+    await waitFor(() => expect(selectedAddresses(view)).toEqual(
+      ['C1', 'C2', 'C3', 'C4']));
+    // the anchor stays on C, so a shifted press on D grows C:D, never B:D.
+    fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="3"]')!,
+      { shiftKey: true });
+    await waitFor(() => expect(selectedAddresses(view)).toEqual(
+      ['C1', 'D1', 'C2', 'D2', 'C3', 'D3', 'C4', 'D4']));
+  });
+
+  it('opens the column header menu and inserts a column through the structural op helper', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    const view = await mountLegacy();
+    const header = view.getByTestId('xlsx-column-headers').querySelector('[data-col="1"]')!;
+    fireEvent.contextMenu(header, { button: 2, clientX: 120, clientY: 8 });
+    const menu = await waitFor(() => view.getByTestId('xlsx-column-header-menu'));
+    // the press selects the menu's own track, so the visible selection matches it.
+    await waitFor(() => expect(selectedAddresses(view).every((address) => address.startsWith('B'))).toBe(true));
+    expect(selectedAddresses(view)).toHaveLength(4);
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /Insert columns left/ }));
+    expect(applyOps).toHaveBeenCalledTimes(1);
+    expect(applyOps.mock.calls[0]![0]).toEqual([{ type: 'insertCols', sheet: 0, at: 1, count: 1 }]);
+  });
+
+  it('writes pending cell input before a header structural op applies', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => {
+      host.log.push('applyOps');
+      return { applied: true, sheetInfo: host.peerMethods.sheetInfo() };
+    });
+    Object.assign(host.editMethods, { applyOps });
+    const acknowledgment = deferred<void>();
+    workbookEditPeerInternals.get(host.edits)!.whenAcknowledged = () => acknowledgment.promise;
+    const view = await mountLegacy();
+    // a typed cell committed while its acknowledgement is still outstanding, so
+    // live input owns the coordinates when the header gesture starts.
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 't' });
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'pending text' } });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    fireEvent.contextMenu(view.getByTestId('xlsx-column-headers').querySelector('[data-col="1"]')!,
+      { button: 2, clientX: 120, clientY: 8 });
+    const menu = await waitFor(() => view.getByTestId('xlsx-column-header-menu'));
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /Insert columns left/ }));
+    // the op must queue behind the input instead of applying over the top.
+    expect(applyOps).not.toHaveBeenCalled();
+    await act(async () => acknowledgment.resolve());
+    await waitFor(() => expect(applyOps).toHaveBeenCalledTimes(1));
+    const written = host.log.indexOf('edit:0:0:0:pending text');
+    expect(written).toBeGreaterThanOrEqual(0);
+    expect(written).toBeLessThan(host.log.indexOf('applyOps'));
+  });
+
+  it('freezes the columns left of the header the menu opened on', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    const view = await mountLegacy();
+    const header = view.getByTestId('xlsx-column-headers').querySelector('[data-col="1"]')!;
+    fireEvent.contextMenu(header, { button: 2, clientX: 120, clientY: 8 });
+    const menu = await waitFor(() => view.getByTestId('xlsx-column-header-menu'));
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Freeze column A' }));
+    expect(applyOps).toHaveBeenCalledTimes(1);
+    expect(applyOps.mock.calls[0]![0]).toEqual([{ type: 'setFreezePane', sheet: 0,
+      pane: { rows: 0, cols: 1, top_left: { row: 0, col: 1 } } }]);
+  });
+
+  it('freezes from the header menu through the peerless applyOps command', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    const header = view.getByTestId('xlsx-column-headers').querySelector('[data-col="1"]')!;
+    fireEvent.contextMenu(header, { button: 2, clientX: 120, clientY: 8 });
+    const menu = await waitFor(() => view.getByTestId('xlsx-column-header-menu'));
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Freeze column A' }));
+    await waitFor(() => expect(host.sent.some((command) => command.kind === 'applyOps')).toBe(true));
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([
+      expect.objectContaining({ payload: { args: [[{ type: 'setFreezePane', sheet: 0,
+        pane: { rows: 0, cols: 1, top_left: { row: 0, col: 1 } } }]] } }),
+    ]);
+  });
+
+  // The run fixtures press a track the harness window stops short of, so the
+  // painted frame is widened on both axes.
+  const paintWideTracks = (frame: FrameMock) => {
+    const base = frame.getMockImplementation()!;
+    frame.mockImplementation(async (viewport, options) => {
+      const paintedFrame = await base(viewport, options);
+      const { grid } = paintedFrame.displayList;
+      if (!grid) return paintedFrame;
+      return { ...paintedFrame, displayList: { ...paintedFrame.displayList, grid: { ...grid,
+        colIndices: Array.from({ length: 9 }, (_, index) => index),
+        colOffsets: Array.from({ length: 10 }, (_, index) => index * 96),
+        rowIndices: Array.from({ length: 9 }, (_, index) => index),
+        rowOffsets: Array.from({ length: 10 }, (_, index) => index * 24) } } };
+    });
+  };
+  it('writes a dragged column width in characters, not pixels', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    const view = await mountLegacy();
+    // the harness paints 96px columns, so the A/B boundary sits at 96px.
+    const band = view.getByTestId('xlsx-column-headers');
+    fireEvent.pointerDown(band, { button: 0, clientX: 96, clientY: 0, pointerId: 1 });
+    fireEvent.pointerMove(band, { clientX: 131, clientY: 0, pointerId: 1 });
+    fireEvent.pointerUp(band, { clientX: 131, clientY: 0, pointerId: 1 });
+    expect(applyOps).toHaveBeenCalledTimes(1);
+    expect(applyOps.mock.calls[0]![0]).toEqual([{ type: 'setColWidth', sheet: 0, col: 0, width: 18 }]);
+  });
+
+  it('resizes the whole selected legacy column run in one edit', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    widen(host.sessionMethods.frame);
+    const view = await mountLegacy();
+    // B:D as whole columns: the anchor is B and the shift-press ends at D.
+    fireEvent.mouseDown(columnLabel(view, 1));
+    fireEvent.mouseDown(columnLabel(view, 3), { shiftKey: true });
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    const band = view.getByTestId('xlsx-column-headers');
+    // 96px tracks: the D/E boundary sits at 384px; 35px right is a 131px D.
+    fireEvent.pointerDown(band, { button: 0, clientX: 384, clientY: 12, pointerId: 3 });
+    fireEvent.pointerMove(band, { clientX: 419, clientY: 12, pointerId: 3 });
+    fireEvent.pointerUp(band, { clientX: 419, clientY: 12, pointerId: 3 });
+    // one applyOps call, so the whole-run drag is one undo step.
+    expect(applyOps).toHaveBeenCalledTimes(1);
+    expect(applyOps.mock.calls[0]![0]).toEqual([
+      { type: 'setColWidth', sheet: 0, col: 1, width: 18 },
+      { type: 'setColWidth', sheet: 0, col: 2, width: 18 },
+      { type: 'setColWidth', sheet: 0, col: 3, width: 18 },
+    ]);
+  });
+
+  it('resizes the whole selected peerless column run in one transaction', async () => {
+    const host = peerlessHarness();
+    widen(host.frame);
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    fireEvent.mouseDown(columnLabel(view, 1));
+    fireEvent.mouseDown(columnLabel(view, 3), { shiftKey: true });
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    const band = view.getByTestId('xlsx-column-headers');
+    fireEvent.pointerDown(band, { button: 0, clientX: 384, clientY: 12, pointerId: 3 });
+    fireEvent.pointerMove(band, { clientX: 419, clientY: 12, pointerId: 3 });
+    fireEvent.pointerUp(band, { button: 0, clientX: 419, clientY: 12, pointerId: 3 });
+    await waitFor(() => expect(host.sent.filter((command) => command.kind === 'applyOps')).toHaveLength(1));
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([
+      expect.objectContaining({ payload: { args: [[
+        { type: 'setColWidth', sheet: 0, col: 1, width: 18 },
+        { type: 'setColWidth', sheet: 0, col: 2, width: 18 },
+        { type: 'setColWidth', sheet: 0, col: 3, width: 18 },
+      ]] } }),
+    ]);
+  });
+
+  it('resizes a lone legacy column from its boundary with one op', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    const view = await mountLegacy();
+    // no whole-track selection: the B/C boundary widens B alone.
+    const band = view.getByTestId('xlsx-column-headers');
+    fireEvent.pointerDown(band, { button: 0, clientX: 192, clientY: 0, pointerId: 4 });
+    fireEvent.pointerMove(band, { clientX: 227, clientY: 0, pointerId: 4 });
+    fireEvent.pointerUp(band, { clientX: 227, clientY: 0, pointerId: 4 });
+    expect(applyOps).toHaveBeenCalledTimes(1);
+    expect(applyOps.mock.calls[0]![0]).toEqual([{ type: 'setColWidth', sheet: 0, col: 1, width: 18 }]);
+  });
+
+  it('resizes a lone peerless column from its boundary with one transaction', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    const band = view.getByTestId('xlsx-column-headers');
+    fireEvent.pointerDown(band, { button: 0, clientX: 192, clientY: 0, pointerId: 4 });
+    fireEvent.pointerMove(band, { clientX: 227, clientY: 0, pointerId: 4 });
+    fireEvent.pointerUp(band, { clientX: 227, clientY: 0, pointerId: 4 });
+    await waitFor(() => expect(host.sent.filter((command) => command.kind === 'applyOps')).toHaveLength(1));
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([
+      expect.objectContaining({ payload: { args: [[
+        { type: 'setColWidth', sheet: 0, col: 1, width: 18 },
+      ]] } }),
+    ]);
+  });
+
+  it('resizes the whole selected legacy row run in one edit', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    paintWideTracks(host.sessionMethods.frame);
+    const view = await mountLegacy();
+    // rows 2:4 as whole rows: the anchor is row 2 and the shift-press row 4.
+    fireEvent.mouseDown(rowLabel(view, 1));
+    fireEvent.mouseDown(rowLabel(view, 3), { shiftKey: true });
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(27));
+    const band = view.getByTestId('xlsx-row-headers');
+    // 24px rows: the row 4/5 boundary sits at 96px; 32px down is a 56px row.
+    fireEvent.pointerDown(band, { button: 0, clientX: 20, clientY: 96, pointerId: 5 });
+    fireEvent.pointerMove(band, { clientX: 20, clientY: 128, pointerId: 5 });
+    fireEvent.pointerUp(band, { clientX: 20, clientY: 128, pointerId: 5 });
+    expect(applyOps).toHaveBeenCalledTimes(1);
+    expect(applyOps.mock.calls[0]![0]).toEqual([
+      { type: 'setRowHeight', sheet: 0, row: 1, height: 42 },
+      { type: 'setRowHeight', sheet: 0, row: 2, height: 42 },
+      { type: 'setRowHeight', sheet: 0, row: 3, height: 42 },
+    ]);
+  });
+
+  it('resizes the whole selected peerless row run in one transaction', async () => {
+    const host = peerlessHarness();
+    paintWideTracks(host.frame);
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    fireEvent.mouseDown(rowLabel(view, 1));
+    fireEvent.mouseDown(rowLabel(view, 3), { shiftKey: true });
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(27));
+    const band = view.getByTestId('xlsx-row-headers');
+    fireEvent.pointerDown(band, { button: 0, clientX: 20, clientY: 96, pointerId: 5 });
+    fireEvent.pointerMove(band, { clientX: 20, clientY: 128, pointerId: 5 });
+    fireEvent.pointerUp(band, { button: 0, clientX: 20, clientY: 128, pointerId: 5 });
+    await waitFor(() => expect(host.sent.filter((command) => command.kind === 'applyOps')).toHaveLength(1));
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([
+      expect.objectContaining({ payload: { args: [[
+        { type: 'setRowHeight', sheet: 0, row: 1, height: 42 },
+        { type: 'setRowHeight', sheet: 0, row: 2, height: 42 },
+        { type: 'setRowHeight', sheet: 0, row: 3, height: 42 },
+      ]] } }),
+    ]);
+  });
+
+  it('dragging a selected column header sends no move op in the legacy editor', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    const view = await mountLegacy();
+    fireEvent.mouseDown(view.getByTestId('xlsx-column-headers').querySelector('[data-col="0"]')!);
+    await waitFor(() => expect(selectedAddresses(view)
+      .filter((address) => address.startsWith('A'))).toHaveLength(4));
+    // the harness paints 96px columns: A's label centre is at 48, and 150 is
+    // past B's midpoint (144).
+    const band = view.getByTestId('xlsx-column-headers');
+    fireEvent.pointerDown(band.querySelector('[data-col="0"]')!, {
+      button: 0, clientX: 48, clientY: 0, pointerId: 1 });
+    fireEvent.pointerMove(band, { clientX: 150, clientY: 0, pointerId: 1 });
+    fireEvent.pointerUp(band, { clientX: 150, clientY: 0, pointerId: 1 });
+    expect(applyOps).not.toHaveBeenCalled();
+  });
+
+  // The harness paints A:C, but the drag in these tests runs across D:F and
+  // lands in H, so the frame both the band and the a11y mirror read has to hold
+  // those tracks. Only the grid widens: the commands, and therefore the painted
+  // cells, stay as the rest of the file expects.
+  const wideGrid = (list: DisplayList): DisplayList => {
+    const { grid } = list;
+    if (!grid) return list;
+    return { ...list, grid: { ...grid,
+      colIndices: Array.from({ length: 8 }, (_, index) => index),
+      colOffsets: Array.from({ length: 9 }, (_, index) => index * 96) } };
+  };
+  type SessionFrame = (viewport: xlsx.Viewport, options?: { sheet?: number }) => Promise<xlsx.WorkbookFrame>;
+  interface FrameMock {
+    getMockImplementation(): SessionFrame | undefined;
+    mockImplementation(implementation: SessionFrame): unknown;
+  }
+  interface HeaderView {
+    getByTestId(id: string): HTMLElement;
+  }
+  const widen = (frame: FrameMock) => {
+    const base = frame.getMockImplementation()!;
+    frame.mockImplementation(async (viewport, options) => {
+      const paintedFrame = await base(viewport, options);
+      return { ...paintedFrame, displayList: wideGrid(paintedFrame.displayList) };
+    });
+  };
+  // 96px tracks, so every label centre sits 48px into its track and the band
+  // rect happy-dom reports starts at the origin.
+  const columnLabel = (view: HeaderView, index: number) =>
+    view.getByTestId('xlsx-column-headers').querySelector(`[data-col="${index}"]`)!;
+  const rowLabel = (view: HeaderView, index: number) =>
+    view.getByTestId('xlsx-row-headers').querySelector(`[data-row="${index}"]`)!;
+  // D:F with every painted row: the whole-track selection, as the a11y mirror sees it.
+  const selectedThroughF = ['D1', 'E1', 'F1', 'D2', 'E2', 'F2', 'D3', 'E3', 'F3', 'D4', 'E4', 'F4'];
+
+  it('extends the legacy header selection across a dragged column band without an edit', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    widen(host.sessionMethods.frame);
+    const view = await mountLegacy();
+    const band = view.getByTestId('xlsx-column-headers');
+    // the pointer press is what arms the drag; the label's own mousedown selects
+    // D and so sets the anchor the drag grows from.
+    fireEvent.pointerDown(columnLabel(view, 3), { button: 0, clientX: 336, clientY: 12, pointerId: 1 });
+    fireEvent.mouseDown(columnLabel(view, 3), {});
+    fireEvent.pointerMove(band, { clientX: 432, clientY: 12, pointerId: 1 });
+    fireEvent.pointerMove(band, { clientX: 528, clientY: 12, pointerId: 1 });
+    fireEvent.pointerUp(band, { clientX: 528, clientY: 12, pointerId: 1 });
+    await waitFor(() => expect(selectedAddresses(view)).toEqual(selectedThroughF));
+    expect(applyOps).not.toHaveBeenCalled();
+  });
+
+  it('dragging a header inside a selected run sends no move op in the legacy editor', async () => {
+    const host = harness();
+    const applyOps = mock((_ops: unknown[]): EditResult => ({ applied: true, sheetInfo: host.peerMethods.sheetInfo() }));
+    Object.assign(host.editMethods, { applyOps });
+    widen(host.sessionMethods.frame);
+    const view = await mountLegacy();
+    const band = view.getByTestId('xlsx-column-headers');
+    // A:C is a whole-column selection; every track in it is selected in full.
+    fireEvent.mouseDown(columnLabel(view, 0));
+    fireEvent.mouseDown(columnLabel(view, 2), { shiftKey: true });
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    fireEvent.pointerDown(columnLabel(view, 1), { button: 0, clientX: 144, clientY: 12, pointerId: 2 });
+    fireEvent.pointerMove(band, { clientX: 337, clientY: 12, pointerId: 2 });
+    fireEvent.pointerUp(band, { clientX: 337, clientY: 12, pointerId: 2 });
+    expect(applyOps).not.toHaveBeenCalled();
+  });
+
+  it('dragging a selected header past a merged range sends no move in the legacy editor', async () => {
+    const host = harness();
+    let api!: XlsxWorkerEditorApi;
+    const applyOps = mock((_ops: unknown[]): EditResult => {
+      throw new Error('cannot move sheet 0 tracks: merged range B1:C1 crosses the moved tracks');
+    });
+    Object.assign(host.editMethods, { applyOps });
+    // B1:C1 is merged, so the engine refuses to tear it when B moves past D.
+    Object.assign(host.peerMethods, { mergedRanges: () => [{ start: { row: 0, col: 1 }, end: { row: 0, col: 2 } }] });
+    widen(host.sessionMethods.frame);
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} showSheetHeaders
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    const band = view.getByTestId('xlsx-column-headers');
+    fireEvent.mouseDown(columnLabel(view, 1));
+    await waitFor(() => expect(selectedAddresses(view)).toEqual(['B1', 'B2', 'B3', 'B4']));
+    // B is a whole-column selection; 337px is just past D's midpoint, across B1:C1.
+    fireEvent.pointerDown(columnLabel(view, 1), { button: 0, clientX: 144, clientY: 12, pointerId: 7 });
+    fireEvent.pointerMove(band, { clientX: 337, clientY: 12, pointerId: 7 });
+    fireEvent.pointerUp(band, { clientX: 337, clientY: 12, pointerId: 7 });
+    expect(applyOps).not.toHaveBeenCalled();
+    expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+    expect(view.queryByTestId('xlsx-error')).toBeNull();
+    expect(api.failure).toBeNull();
+    const editing = api.editCellAsync(0, 0, 1, 'after refusal');
+    await advance();
+    await editing;
+    expect(host.cells.get('0:0:1')).toBe('after refusal');
+  });
+
+  it('dragging a header inside a selected run sends no move op in the peerless editor', async () => {
+    const host = peerlessHarness();
+    widen(host.frame);
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    const band = view.getByTestId('xlsx-column-headers');
+    fireEvent.mouseDown(columnLabel(view, 0));
+    fireEvent.mouseDown(columnLabel(view, 2), { shiftKey: true });
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([]);
+    fireEvent.pointerDown(columnLabel(view, 1), { button: 0, clientX: 144, clientY: 12, pointerId: 2 });
+    fireEvent.pointerMove(band, { clientX: 337, clientY: 12, pointerId: 2 });
+    fireEvent.pointerUp(band, { clientX: 337, clientY: 12, pointerId: 2 });
+    await act(async () => {});
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([]);
+  });
+
+  it('selects the whole sheet from the corner above the row numbers', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    await act(async () => { fireEvent.click(view.getByTestId('xlsx-grid-corner')); });
+    // the host hears the selection as one `select` whose range is the sheet's
+    // own extent, not the painted window's.
+    expect(host.sent[host.sent.length - 1]).toMatchObject({ kind: 'select', payload: { selection: {
+      sheetId: 'sheet:0',
+      range: { kind: 'rowCol', start: { row: 0, col: 0 },
+        end: { row: XLSX_MAX_ROWS - 1, col: XLSX_MAX_COLUMNS - 1 } },
+      activeCell: { row: 0, col: 0 },
+    } } });
+    expect(host.sent.filter((command) => command.kind === 'applyOps')).toEqual([]);
+    await waitFor(() => expect(selectedAddresses(view)).toHaveLength(12));
+  });
+
+  it('extends the legacy selection down a dragged row band', async () => {
+    const host = harness();
+    widen(host.sessionMethods.frame);
+    const view = await mountLegacy();
+    const band = view.getByTestId('xlsx-row-headers');
+    // rows are 24px: row 1's centre is 12 and row 3's is 60.
+    fireEvent.pointerDown(rowLabel(view, 0), { button: 0, clientX: 20, clientY: 12, pointerId: 1 });
+    fireEvent.mouseDown(rowLabel(view, 0), {});
+    fireEvent.pointerMove(band, { clientX: 20, clientY: 60, pointerId: 1 });
+    fireEvent.pointerUp(band, { clientX: 20, clientY: 60, pointerId: 1 });
+    // rows 1:3 across every painted column, read off the a11y grid.
+    await waitFor(() => expect(selectedAddresses(view)).toEqual(
+      [1, 2, 3].flatMap((row) => ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].map((column) => `${column}${row}`))));
+  });
+
+  // The marquee is an inset ring rather than an outline, on the snapped cell rect.
+  const expectEdgeMarquee = (marquee: HTMLElement, snapped = { x: 0, y: 0, w: 96, h: 24 }) => {
+    expect(marquee.style.boxShadow).toBe('inset 0 0 0 1px #217346');
+    expect(marquee.style.left).toBe(`${snapped.x}px`);
+    expect(marquee.style.top).toBe(`${snapped.y}px`);
+    expect(marquee.style.width).toBe(`${snapped.w}px`);
+    expect(marquee.style.height).toBe(`${snapped.h}px`);
+    expect(marquee.style.outline).toBe('');
+    expect(marquee.style.outlineOffset).toBe('');
+    expect(marquee.style.background).toBe('');
+    expect(marquee.style.backgroundColor).toBe('');
+  };
+  // The clear cell must not intersect any wash strip.
+  const expectClear = (fills: HTMLElement[], cell: { left: number; top: number; right: number; bottom: number }) => {
+    expect(fills.every((fill) => {
+      const left = Number.parseFloat(fill.style.left);
+      const top = Number.parseFloat(fill.style.top);
+      return left + Number.parseFloat(fill.style.width) <= cell.left ||
+        left >= cell.right || top + Number.parseFloat(fill.style.height) <= cell.top ||
+        top >= cell.bottom;
+    })).toBe(true);
+  };
+  const a1 = { left: 0, top: 0, right: 96, bottom: 24 };
+  const a3 = { left: 0, top: 48, right: 96, bottom: 72 };
+
+  it('draws the legacy worker marquee on the cell edge without a fill', async () => {
+    harness();
+    const view = await mountLegacy();
+    expectEdgeMarquee(view.getByTestId('xlsx-selection') as HTMLElement);
+    expect(view.queryAllByTestId('xlsx-selection-fill')).toHaveLength(0);
+  });
+
+  it('draws the peerless marquee on the cell edge without a fill', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    expectEdgeMarquee(await waitFor(() => view.getByTestId('xlsx-selection') as HTMLElement));
+    expect(view.queryAllByTestId('xlsx-selection-fill')).toHaveLength(0);
+  });
+
+  // Without headers the marquee keeps its bordered, washed box on the cell rect.
+  const untaggedOverlay = (view: ReturnType<typeof render>) => {
+    const boxes = Array.from(view.getByTestId('xlsx-overlay-host').children)
+      .filter((box) => !box.hasAttribute('data-testid'));
+    expect(boxes).toHaveLength(1);
+    return boxes[0] as HTMLElement;
+  };
+  const expectBorderedMarquee = (view: ReturnType<typeof render>, activeTestId?: string) => {
+    const marquee = view.getByTestId('xlsx-selection') as HTMLElement;
+    expect([marquee.style.border, marquee.style.background, marquee.style.boxShadow])
+      .toEqual(['1px solid #217346', 'rgba(33, 115, 70, 0.12)', '']);
+    expect([marquee.style.left, marquee.style.top, marquee.style.width, marquee.style.height])
+      .toEqual(['0px', '0px', '96px', '24px']);
+    expect(view.queryByTestId('xlsx-active-cell')).toBeNull();
+    const active = activeTestId ? view.getByTestId(activeTestId) as HTMLElement : untaggedOverlay(view);
+    expect([active.style.border, active.style.boxShadow, active.style.left, active.style.width, active.style.height])
+      .toEqual(['2px solid #217346', '', '0px', '96px', '24px']);
+    expect(view.queryAllByTestId('xlsx-selection-fill')).toHaveLength(0);
+  };
+
+  it('keeps the bordered legacy marquee without headers', async () => {
+    harness();
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    await waitFor(() => view.getByTestId('xlsx-selection'));
+    expectBorderedMarquee(view);
+  });
+
+  it('keeps the bordered peerless marquee without headers', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount();
+    await waitFor(() => view.getByTestId('xlsx-selection'));
+    expectBorderedMarquee(view, 'xlsx-focus');
+  });
+
+  for (const showSheetHeaders of [false, true]) {
+    it(`frames a selected legacy chart with ${showSheetHeaders ? 'an edge outline' : 'a border'}`, async () => {
+      const host = harness();
+      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, resizable: false,
+        rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+      const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+        showSheetHeaders={showSheetHeaders} />);
+      await opened();
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+      const box = view.getByTestId('xlsx-chart-selection');
+      expect([box.style.border, box.style.outlineOffset])
+        .toEqual(showSheetHeaders ? ['', '-1px'] : ['2px solid #217346', '']);
+      fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    });
+  }
+
+  it('washes the legacy range except its active cell', async () => {
+    harness();
+    const view = await mountLegacy();
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'ArrowDown', shiftKey: true });
+    fireEvent.keyDown(scroll, { key: 'ArrowDown', shiftKey: true });
+    // A1:A3, with the legacy surface's active box on the moved focus A3: the
+    // wash covers rows 1-2 only.
+    const fills = view.getAllByTestId('xlsx-selection-fill');
+    expect(fills.map((fill) => [fill.style.left, fill.style.top, fill.style.width, fill.style.height]))
+      .toEqual([['0px', '0px', '96px', '48px']]);
+    expect(fills.every((fill) => fill.style.background === 'rgba(33, 115, 70, 0.12)')).toBe(true);
+    expectClear(fills, a3);
+    expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
+    expect(view.getByTestId('xlsx-active-cell').style.height).toBe('26px');
+  });
+
+  it('washes the peerless range except its active cell', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', shiftKey: true }); });
+    await act(async () => { fireEvent.keyDown(scroll, { key: 'ArrowDown', shiftKey: true }); });
+    const fills = view.getAllByTestId('xlsx-selection-fill');
+    expect(fills.map((fill) => [fill.style.left, fill.style.top, fill.style.width, fill.style.height]))
+      .toEqual([['0px', '24px', '96px', '48px']]);
+    expect(fills.every((fill) => fill.style.background === 'rgba(33, 115, 70, 0.12)')).toBe(true);
+    expectClear(fills, a1);
+    expect(view.getByTestId('xlsx-selection').style.height).toBe('72px');
+    expect(view.getByTestId('xlsx-active-cell').style.height).toBe('26px');
+  });
+});
+
+describe('worker fill handle', () => {
+  function dragHandle(
+    view: RenderResult,
+    from: { clientX: number; clientY: number },
+    to: { clientX: number; clientY: number }
+  ) {
+    const handle = view.getByTestId('xlsx-fill-handle');
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 1, ...from });
+    fireEvent.pointerMove(handle, { pointerId: 1, ...to });
+    fireEvent.pointerUp(handle, { pointerId: 1, ...to });
+  }
+
+  it('sends one fillRange op through the legacy edit peer for a drag down', async () => {
+    const host = harness();
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} fillHandle
+      onReady={() => {}} />);
+    await opened();
+    await advance();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+
+    await act(async () => {
+      dragHandle(view, { clientX: 144, clientY: 12 }, { clientX: 144, clientY: 60 });
+    });
+    await advance();
+
+    expect(host.editMethods.fillRange).toHaveBeenCalledTimes(1);
+    expect(host.editMethods.fillRange).toHaveBeenCalledWith(0, 'B1', 'B1:B3');
+    expect(host.log).toContain('fill:0:B1:B1:B3');
+  });
+
+  it('previews and cancels a legacy worker drag on Escape without an engine op', async () => {
+    const host = harness();
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} fillHandle
+      onReady={() => {}} />);
+    await opened();
+    await advance();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    const handle = await waitFor(() => view.getByTestId('xlsx-fill-handle'));
+    const from = { clientX: 144, clientY: 12 };
+    const to = { clientX: 144, clientY: 60 };
+
+    await act(async () => {
+      fireEvent.pointerDown(handle, { button: 0, pointerId: 1, ...from });
+      fireEvent.pointerMove(handle, { pointerId: 1, ...to });
+    });
+    expect(view.getByTestId('xlsx-fill-preview')).toBeDefined();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(view.queryByTestId('xlsx-fill-preview')).toBeNull();
+    await act(async () => { fireEvent.pointerUp(handle, { pointerId: 1, ...to }); });
+    await advance();
+
+    expect(host.editMethods.fillRange).not.toHaveBeenCalled();
+  });
+
+  it('sends one fillRange command through the peerless coordinator for a drag right', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+
+    await act(async () => {
+      dragHandle(view, { clientX: 144, clientY: 12 }, { clientX: 250, clientY: 12 });
+    });
+    await waitFor(() => expect(host.sent.some((command) => command.kind === 'fillRange')).toBe(true));
+
+    expect(host.sent.find((command) => command.kind === 'fillRange')).toMatchObject({
+      kind: 'fillRange',
+      payload: {
+        args: [0, 'B1', 'B1:C1'],
+        target: { sheetId: 'sheet:0' },
+      },
+    });
+  });
+
+  it('does not render the handle in a worker editor by default', async () => {
+    harness();
+    const legacy = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={() => {}} />);
+    await opened();
+    await advance();
+    await act(async () => {
+      fireEvent.mouseDown(legacy.getByTestId('xlsx-scroll'), { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await waitFor(() => expect(legacy.getByTestId('xlsx-selection')).toBeDefined());
+    await advance();
+    expect(legacy.queryByTestId('xlsx-fill-handle')).toBeNull();
+    cleanup();
+    await advance();
+
+    const host = peerlessHarness();
+    const view = await host.mount();
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-selection')).toBeDefined());
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('reports a refused peerless fill without selecting past the source', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+
+    await act(async () => {
+      dragHandle(view, { clientX: 144, clientY: 12 }, { clientX: 144, clientY: 60 });
+    });
+    const fill = await waitFor(() => {
+      const command = host.sent.find((entry) => entry.kind === 'fillRange');
+      expect(command).toBeDefined();
+      return command!;
+    });
+    await act(async () => {
+      host.ack(fill, {
+        status: 'refused',
+        result: { failure: { code: 'unsupported', cause: 'table', message: 'fill cannot safely preserve Excel tables' } },
+      });
+    });
+
+    await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
+      .toBe("This edit can't be applied: a table uses cells it would move. The workbook is unchanged."));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+  });
+
+  it('reports a refused peerless fill over linked cells with the fill message', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+
+    await act(async () => {
+      dragHandle(view, { clientX: 144, clientY: 12 }, { clientX: 144, clientY: 60 });
+    });
+    const fill = await waitFor(() => {
+      const command = host.sent.find((entry) => entry.kind === 'fillRange');
+      expect(command).toBeDefined();
+      return command!;
+    });
+    await act(async () => {
+      host.ack(fill, {
+        status: 'refused',
+        result: { failure: { code: 'unsupported', cause: 'fill', message: 'fill cannot safely preserve hyperlinks' } },
+      });
+    });
+
+    await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent)
+      .toBe("This fill can't be applied: it would change cells with links, notes or rules. The workbook is unchanged."));
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+  });
+
+  type TrackKey = { key: string; ctrlKey?: boolean; shiftKey?: boolean };
+
+  async function peerlessHandleAt(clientX: number, clientY: number) {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX, clientY });
+      fireEvent.mouseUp(window, { button: 0, clientX, clientY });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+    const press = async (init: TrackKey) => {
+      const before = host.sent.length;
+      await act(async () => { fireEvent.keyDown(scroll, init); });
+      const sent = host.sent.slice(before);
+      await act(async () => {
+        for (const command of sent) host.ack(command);
+      });
+      await advance();
+      return sent.filter((command) => command.kind === 'select').pop();
+    };
+    return { view, press };
+  }
+
+  async function legacyHandleAt(clientX: number, clientY: number) {
+    harness();
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false} fillHandle
+      onReady={(ready) => { api = ready; }} />);
+    await opened();
+    await advance();
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX, clientY });
+      fireEvent.mouseUp(window, { button: 0, clientX, clientY });
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+    const press = async (init: TrackKey) => {
+      await act(async () => { fireEvent.keyDown(scroll, init); });
+      await advance();
+    };
+    return { view, press, size: () => api.commands.getState('merge').value };
+  }
+
+  it('does not render the peerless handle once Ctrl+A selects the whole sheet', async () => {
+    const { view, press } = await peerlessHandleAt(144, 12);
+
+    expect(await press({ key: 'a', ctrlKey: true })).toMatchObject({ kind: 'select', payload: { selection: {
+      range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 1_048_575, col: 16_383 } },
+    } } });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the peerless handle once Ctrl+Shift+Down selects a whole empty column', async () => {
+    const { view, press } = await peerlessHandleAt(144, 12);
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B1');
+
+    expect(await press({ key: 'ArrowDown', ctrlKey: true, shiftKey: true })).toMatchObject({ kind: 'select', payload: {
+      selection: { range: { kind: 'rowCol', start: { row: 0, col: 1 }, end: { row: 1_048_575, col: 1 } } },
+    } });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the peerless handle once Ctrl+Shift+Right selects a whole empty row', async () => {
+    const { view, press } = await peerlessHandleAt(48, 36);
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('A2');
+
+    expect(await press({ key: 'ArrowRight', ctrlKey: true, shiftKey: true })).toMatchObject({ kind: 'select', payload: {
+      selection: { range: { kind: 'rowCol', start: { row: 1, col: 0 }, end: { row: 1, col: 16_383 } } },
+    } });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once Ctrl+A selects the whole sheet', async () => {
+    const { view, press, size } = await legacyHandleAt(144, 12);
+
+    for (let attempt = 0; attempt < 2 && size()?.rows !== 1_048_576; attempt++) {
+      await press({ key: 'a', ctrlKey: true });
+    }
+
+    expect(size()).toEqual({ rows: 1_048_576, columns: 16_384 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once Ctrl+Shift+Down selects a whole empty column', async () => {
+    const { view, press, size } = await legacyHandleAt(144, 12);
+    expect(size()).toEqual({ rows: 1, columns: 1 });
+    expect(view.getByTestId('xlsx-fill-handle')).toBeDefined();
+
+    await press({ key: 'ArrowDown', ctrlKey: true, shiftKey: true });
+
+    expect(size()).toEqual({ rows: 1_048_576, columns: 1 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once Ctrl+Shift+Right selects a whole empty row', async () => {
+    const { view, press, size } = await legacyHandleAt(48, 36);
+    expect(size()).toEqual({ rows: 1, columns: 1 });
+    expect(view.getByTestId('xlsx-fill-handle')).toBeDefined();
+
+    await press({ key: 'ArrowRight', ctrlKey: true, shiftKey: true });
+
+    expect(size()).toEqual({ rows: 1, columns: 16_384 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+});
+
+describe('fill handle with sheet headers', () => {
+  it('renders no handle with headers and the fill handle both off', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: false, fillHandle: false });
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-selection')).toBeDefined());
+    expect(view.queryByTestId('xlsx-grid')).toBeNull();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+    expect(view.getByTestId('xlsx-focus')).toBeDefined();
+    expect(view.queryByTestId('xlsx-active-cell')).toBeNull();
+  });
+
+  it('renders no handle with headers on and the fill handle off', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true, fillHandle: false });
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 144, clientY: 12 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 144, clientY: 12 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-selection')).toBeDefined());
+    expect(view.getByTestId('xlsx-grid')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('anchors the handle on the range corner and fills B2:C3 down to B2:C4 with headers on', async () => {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true, fillHandle: true });
+    const scroll = view.getByTestId('xlsx-scroll');
+    await act(async () => {
+      fireEvent.mouseDown(scroll, { button: 0, clientX: 106, clientY: 34 });
+      fireEvent.mouseMove(scroll, { clientX: 202, clientY: 58 });
+      fireEvent.mouseUp(window);
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    const handle = await waitFor(() => view.getByTestId('xlsx-fill-handle'));
+    const marquee = view.getByTestId('xlsx-selection');
+    expect([marquee.style.left, marquee.style.top, marquee.style.width, marquee.style.height])
+      .toEqual(['96px', '24px', '192px', '48px']);
+    expect([handle.style.left, handle.style.top]).toEqual(['284px', '68px']);
+    expect(parseFloat(handle.style.left) + 4).toBe(parseFloat(marquee.style.left) + parseFloat(marquee.style.width));
+    expect(parseFloat(handle.style.top) + 4).toBe(parseFloat(marquee.style.top) + parseFloat(marquee.style.height));
+
+    await act(async () => {
+      fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 284, clientY: 68 });
+      fireEvent.pointerMove(handle, { pointerId: 1, clientX: 240, clientY: 84 });
+      fireEvent.pointerUp(handle, { pointerId: 1, clientX: 240, clientY: 84 });
+    });
+    await waitFor(() => expect(host.sent.some((command) => command.kind === 'fillRange')).toBe(true));
+
+    expect(host.sent.find((command) => command.kind === 'fillRange')).toMatchObject({
+      kind: 'fillRange',
+      payload: {
+        args: [0, 'B2:C3', 'B2:C4'],
+        target: { sheetId: 'sheet:0' },
+      },
+    });
+  });
+
+  async function peerlessHeaderHandle() {
+    const host = peerlessHarness();
+    const view = await host.mount(undefined, false, { showSheetHeaders: true, fillHandle: true });
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 106, clientY: 34 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 106, clientY: 34 });
+    });
+    await act(async () => {
+      for (const command of host.sent) host.ack(command);
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+    const gesture = async (fire: () => void) => {
+      const before = host.sent.length;
+      await act(async () => { fire(); });
+      const sent = host.sent.slice(before);
+      await act(async () => {
+        for (const command of sent) host.ack(command);
+      });
+      await advance();
+      return sent.filter((command) => command.kind === 'select').pop();
+    };
+    return { view, gesture };
+  }
+
+  async function legacyHeaderHandle() {
+    harness();
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor legacySyncApi file={file} experimentalWorkerOpen showToolbar={false}
+      showSheetHeaders fillHandle onReady={(ready) => { api = ready; }} />);
+    await opened();
+    await advance();
+    await act(async () => {
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 106, clientY: 34 });
+      fireEvent.mouseUp(window, { button: 0, clientX: 106, clientY: 34 });
+    });
+    await waitFor(() => expect(view.getByTestId('xlsx-fill-handle')).toBeDefined());
+    const size = () => api.commands.getState('merge').value;
+    expect(size()).toEqual({ rows: 1, columns: 1 });
+    const gesture = async (fire: () => void) => {
+      await act(async () => { fire(); });
+      await advance();
+    };
+    return { view, gesture, size };
+  }
+
+  const columnHeader = (view: ReturnType<typeof render>, index: number) =>
+    view.getByTestId('xlsx-column-headers').querySelector(`[data-col="${index}"]`)!;
+  const rowHeader = (view: ReturnType<typeof render>, index: number) =>
+    view.getByTestId('xlsx-row-headers').querySelector(`[data-row="${index}"]`)!;
+
+  it('does not render the peerless handle once a column header selects the whole column', async () => {
+    const { view, gesture } = await peerlessHeaderHandle();
+
+    expect(await gesture(() => fireEvent.mouseDown(columnHeader(view, 0)))).toMatchObject({ kind: 'select', payload: {
+      selection: { range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: XLSX_MAX_ROWS - 1, col: 0 } } },
+    } });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the peerless handle once a row header selects the whole row', async () => {
+    const { view, gesture } = await peerlessHeaderHandle();
+
+    expect(await gesture(() => fireEvent.mouseDown(rowHeader(view, 0)))).toMatchObject({ kind: 'select', payload: {
+      selection: { range: { kind: 'rowCol', start: { row: 0, col: 0 }, end: { row: 0, col: XLSX_MAX_COLUMNS - 1 } } },
+    } });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the peerless handle once the header corner selects the whole sheet', async () => {
+    const { view, gesture } = await peerlessHeaderHandle();
+
+    expect(await gesture(() => fireEvent.click(view.getByTestId('xlsx-grid-corner')))).toMatchObject({
+      kind: 'select', payload: { selection: { range: { kind: 'rowCol', start: { row: 0, col: 0 },
+        end: { row: XLSX_MAX_ROWS - 1, col: XLSX_MAX_COLUMNS - 1 } } } },
+    });
+
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once a column header selects the whole column', async () => {
+    const { view, gesture, size } = await legacyHeaderHandle();
+
+    await gesture(() => fireEvent.mouseDown(columnHeader(view, 0)));
+
+    expect(size()).toEqual({ rows: 1_048_576, columns: 1 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once a row header selects the whole row', async () => {
+    const { view, gesture, size } = await legacyHeaderHandle();
+
+    await gesture(() => fireEvent.mouseDown(rowHeader(view, 0)));
+
+    expect(size()).toEqual({ rows: 1, columns: 16_384 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
+
+  it('does not render the legacy worker handle once the header corner selects the whole sheet', async () => {
+    const { view, gesture, size } = await legacyHeaderHandle();
+
+    await gesture(() => fireEvent.click(view.getByTestId('xlsx-grid-corner')));
+
+    expect(size()).toEqual({ rows: 1_048_576, columns: 16_384 });
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+    expect(view.queryByTestId('xlsx-fill-handle')).toBeNull();
+  });
 });

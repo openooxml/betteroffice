@@ -438,12 +438,20 @@ impl JsonWindow<'_> {
         for (key, value) in [
             (b",\"bold\":".as_slice(), font.bold),
             (b",\"italic\":".as_slice(), font.italic),
-            (b",\"underline\":".as_slice(), font.underline),
-            (b",\"strike\":".as_slice(), font.strike),
+            (
+                b",\"underline\":".as_slice(),
+                font.underline != xlsx_model::RunUnderline::None,
+            ),
         ] {
             self.raw(key)?;
             self.small(&value)?;
         }
+        if let Some(style) = font.underline_style() {
+            self.raw(b",\"underline_style\":")?;
+            self.small(&style)?;
+        }
+        self.raw(b",\"strike\":")?;
+        self.small(&font.strike)?;
         self.raw(b",\"color\":")?;
         self.optional_color(font.color.as_ref())?;
         self.raw(b"},\"fill\":")?;
@@ -838,7 +846,7 @@ impl SnapshotValidation {
             let fingerprint = string(&fingerprint)?;
             let candidate = base
                 .fingerprints
-                .get(&self.version)
+                .get(&self.version.min(FINGERPRINT_SCHEMA_VERSION))
                 .and_then(|values| values.get(self.metadata_child))
                 .ok_or_else(invalid)?;
             allowance(128, budget, &mut self.unit_bytes)?;
@@ -1041,11 +1049,6 @@ impl SnapshotValidation {
                             }
                             FREEZE_PANE => {
                                 allowance(128, budget, &mut self.unit_bytes)?;
-                                if freeze_pane_from_any(&value).map_err(SnapshotError::new)?
-                                    != sheet.freeze_pane
-                                {
-                                    return Err(invalid());
-                                }
                             }
                             MERGES => {
                                 let values =
@@ -1194,14 +1197,21 @@ impl SnapshotValidation {
                 }
                 if self.field == required.len() + 2 {
                     allowance(128, budget, &mut self.unit_bytes)?;
-                    if self.version < FREEZE_PANE_SCHEMA_VERSION
-                        && base
+                    let stored = map
+                        .get(&txn, FREEZE_PANE)
+                        .filter(|_| self.version >= FREEZE_PANE_SCHEMA_VERSION);
+                    let pane = match stored {
+                        Some(Out::Any(value)) => {
+                            freeze_pane_from_any(&value).map_err(SnapshotError::new)?
+                        }
+                        Some(_) => return Err(invalid()),
+                        None => base
                             .freeze_panes
                             .get(base_sheet_index(&key).unwrap_or(usize::MAX))
                             .copied()
-                            .flatten()
-                            != sheet.freeze_pane
-                    {
+                            .flatten(),
+                    };
+                    if pane != sheet.freeze_pane {
                         return Err(invalid());
                     }
                     self.field += 1;
@@ -1251,7 +1261,7 @@ impl SnapshotValidation {
                 }
                 if (required.len() + 4..=required.len() + 5).contains(&self.field) {
                     let columns = self.field == required.len() + 4;
-                    if let Some(hidden) = (self.version < SCHEMA_VERSION)
+                    if let Some(hidden) = (self.version < CHARTS_SCHEMA_VERSION)
                         .then(|| {
                             base.hidden_dimensions
                                 .get(base_sheet_index(&key).unwrap_or(usize::MAX))
@@ -1481,7 +1491,7 @@ impl SnapshotValidation {
                                             )
                                             .map_err(SnapshotError::new)?;
                                         } else if key.starts_with(HYPERLINK_PREFIX) {
-                                            if self.version < SCHEMA_VERSION {
+                                            if self.version < CHARTS_SCHEMA_VERSION {
                                                 return Err(invalid());
                                             }
                                             if !self.collect_hyperlink_edit(
@@ -1792,7 +1802,7 @@ impl SnapshotValidation {
                         let actual = child
                             .get(&txn, &index.to_string())
                             .and_then(|value| value.cast::<f64>().ok());
-                        let fallback = if self.version < SCHEMA_VERSION {
+                        let fallback = if self.version < CHARTS_SCHEMA_VERSION {
                             base.hidden_dimensions
                                 .get(
                                     base_sheet_index(
@@ -2043,6 +2053,9 @@ impl SnapshotValidation {
                         .formats
                         .get(base_sheet_index(key).unwrap_or(usize::MAX))
                         .unwrap_or(&default);
+                    if left.hide_gridlines != sheet.format.hide_gridlines {
+                        return Err(invalid());
+                    }
                     if !equal_record(
                         left,
                         &sheet.format,

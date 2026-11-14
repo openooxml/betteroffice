@@ -162,11 +162,18 @@ fn save_model(
         .iter()
         .map(|(part, para_ids)| json!({"part": part, "paraIds": para_ids}))
         .collect();
+    let touched_parts: Vec<_> = doc
+        .paragraph_save_plan()
+        .touched_parts
+        .iter()
+        .map(|(part, touched)| json!({"part": part, "touched": touched}))
+        .collect();
     let request: S13SaveRequest = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2026-10-21T00:00:00.000Z"},
         "document": model, "options": {"updateModifiedDate": false},
         "paragraphIds": {
             "patchedParts": patched_parts,
+            "touchedParts": touched_parts,
             "splicedParts": entry.into_iter().collect::<Vec<_>>()
         }
     }))
@@ -268,6 +275,16 @@ fn strict_section_table_patch_rejection_refuses_model_fallback() {
             .contains("unsafe section paragraph splice"),
         "{error}"
     );
+}
+
+fn assert_reports_dropped(warnings: &[String], dropped: &[&str]) {
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let report = warnings[0]
+        .strip_prefix("DOCX_STRUCTURE_DROPPED ")
+        .expect("the drop is reported");
+    let report: Value = serde_json::from_str(report).unwrap();
+    assert_eq!(report[0]["part"], "word/document.xml");
+    assert_eq!(report[0]["dropped"], json!(dropped));
 }
 
 fn save_with_base_fallback(xml: &str, doc: &EditingDoc, model: Value) -> (String, Vec<String>) {
@@ -628,6 +645,52 @@ fn merging_vertical_columns_uses_the_base_story_fallback() {
     let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(output.contains(r#"<w:gridSpan w:val="2"/>"#));
+}
+
+#[test]
+fn a_whole_write_for_a_table_edit_reports_a_hyperlink_it_drops_from_an_untouched_cell() {
+    let link = concat!(
+        r#"<w:p w14:paraId="00000003"><w:hyperlink w:anchor="target">"#,
+        r#"<w:r><w:t>ghi</w:t></w:r></w:hyperlink></w:p>"#,
+    );
+    let restart = r#"<w:vMerge w:val="restart"/>"#;
+    let top = format!(
+        "{}{}{}",
+        table_cell(restart, &paragraph(1, "abc")),
+        table_cell(restart, &paragraph(2, "def")),
+        table_cell("", link),
+    );
+    let bottom = format!(
+        "{}{}{}",
+        table_cell("<w:vMerge/>", &paragraph(4, "")),
+        table_cell("<w:vMerge/>", &paragraph(5, "")),
+        table_cell("", &paragraph(6, "jkl")),
+    );
+    let xml = table_document(&format!("<w:tr>{top}</w:tr><w:tr>{bottom}</w:tr>"), 3);
+    let (doc, mut model) = open(&xml);
+    clear_continuations(&mut model);
+    doc.merge_cells(
+        &ctx(),
+        &TableRange::new(CellLoc::new("body", 0, 0, 0), CellLoc::new("body", 0, 1, 1)),
+    )
+    .unwrap();
+    for row in model["content"][0]["rows"].as_array_mut().unwrap() {
+        let cells = row["cells"].as_array_mut().unwrap();
+        let removed = cells.remove(1);
+        cells[0]["formatting"]["gridSpan"] = json!(2);
+        cells[0]["content"]
+            .as_array_mut()
+            .unwrap()
+            .extend(removed["content"].as_array().unwrap().iter().cloned());
+    }
+    model["content"][0]["rows"][0]["cells"][1]["content"][0]["content"] =
+        json!([{"type": "run", "content": [{"type": "text", "text": "ghi"}]}]);
+    let (_, warnings) = save_with_base_fallback(&xml, &doc, model);
+    assert_reports_dropped(&warnings, &["w:hyperlink"]);
+    assert!(
+        warnings[0].contains(r#""paraId":"00000003""#),
+        "{warnings:?}"
+    );
 }
 
 fn inserted_model_row(
@@ -1170,7 +1233,15 @@ fn merges_with_continuation_paragraphs_use_the_base_story_fallback() {
                 .extend(removed["content"].as_array().unwrap().iter().cloned());
         }
         let (output, warnings) = save_with_base_fallback(&xml, &doc, model);
-        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_reports_dropped(&warnings, &["w:p"]);
+        assert!(
+            warnings[0].contains(r#""text":"hidden one""#),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[0].contains(r#""text":"hidden two""#),
+            "{warnings:?}"
+        );
         if replace_row {
             assert!(output.contains(r#"w:fill="112233""#));
         }
@@ -1208,7 +1279,7 @@ fn continuation_markers_follow_the_base_story_fallback() {
             .unwrap()
             .push(inserted);
         let (_, warnings) = save_with_base_fallback(&xml, &doc, model);
-        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_reports_dropped(&warnings, &["w:p", "w:bookmarkStart", "w:bookmarkEnd"]);
     }
 }
 

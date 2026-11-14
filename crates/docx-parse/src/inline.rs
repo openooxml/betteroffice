@@ -338,15 +338,15 @@ fn parse_run_property_changes(
 ) -> Option<Vec<RunPropertyChange>> {
     let changes: Vec<_> = r_pr?
         .children_named("w", "rPrChange")
-        .filter_map(|change| {
+        .map(|change| {
             let previous = parse_inline_run_properties(change.child("w", "rPr"), theme);
             let current = current.cloned();
-            (previous.is_some() || current.is_some()).then(|| RunPropertyChange {
+            RunPropertyChange {
                 node_type: RunPropertyChangeType::RunPropertyChange,
                 info: parse_property_change_info(change),
                 previous_formatting: previous,
                 current_formatting: current,
-            })
+            }
         })
         .collect();
     (!changes.is_empty()).then_some(changes)
@@ -1866,7 +1866,10 @@ pub fn parse_sdt_properties(
                 properties.repeating_section_item = Some(true);
                 properties.sdt_type = "repeatingSectionItem".to_owned();
             }
-            "dataBinding" => {
+            "dataBinding"
+                if properties.data_binding.is_none()
+                    || element.matches_name("w", "dataBinding") =>
+            {
                 properties.data_binding = Some(SdtDataBinding {
                     xpath: sdt_attribute(element, "xpath").map(str::to_owned),
                     store_item_id: sdt_attribute(element, "storeItemID").map(str::to_owned),
@@ -2156,6 +2159,28 @@ pub(crate) fn instruction_run(run: &Run) -> Run {
     code
 }
 
+pub(crate) fn field_runs(node: &InlineNode) -> Vec<&Run> {
+    match node {
+        InlineNode::Run(run) => vec![run],
+        InlineNode::Hyperlink(link) => link
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                InlineNode::Run(run) => Some(run),
+                _ => None,
+            })
+            .collect(),
+        InlineNode::SimpleField(field) => field.content.iter().collect(),
+        InlineNode::BookmarkStart(_)
+        | InlineNode::BookmarkEnd(_)
+        | InlineNode::ComplexField(_)
+        | InlineNode::InlineSdt(_)
+        | InlineNode::Math(_)
+        | InlineNode::RawXml(_)
+        | InlineNode::Tracked(_) => Vec::new(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct OpenComplexField {
     instruction: String,
@@ -2214,7 +2239,8 @@ impl OpenComplexField {
     /// A node inside an open field joins the field's structure in place; its
     /// runs flatten into the run-level view consumers read for text. Pushing
     /// it to the paragraph instead would reorder it before the field on save.
-    pub(crate) fn absorb(&mut self, node: InlineNode, runs: Vec<Run>) {
+    pub(crate) fn absorb(&mut self, node: InlineNode) {
+        let runs = field_runs(&node).into_iter().cloned();
         match self.mode {
             FieldMode::Code => {
                 self.code_runs.extend(runs);
@@ -2232,7 +2258,7 @@ impl OpenComplexField {
     pub(crate) fn absorb_instruction(&mut self, run: &Run) {
         let code = instruction_run(run);
         self.instruction_runs.push(code.clone());
-        self.absorb(InlineNode::Run(code.clone()), vec![code]);
+        self.absorb(InlineNode::Run(code));
     }
 
     pub(crate) fn absorb_nested(&mut self, field: ComplexField) {
@@ -2245,7 +2271,7 @@ impl OpenComplexField {
                 display_mode: tree.display_mode.clone(),
             });
         }
-        self.absorb(InlineNode::ComplexField(Box::new(field)), Vec::new());
+        self.absorb(InlineNode::ComplexField(Box::new(field)));
     }
 
     pub(crate) fn finish(mut self) -> ComplexField {
@@ -2340,7 +2366,7 @@ pub(crate) fn absorb_beyond_field_nesting(
             _ => {}
         }
     }
-    active.absorb(InlineNode::Run(run.clone()), vec![run]);
+    active.absorb(InlineNode::Run(run));
     Ok(None)
 }
 
@@ -2453,7 +2479,7 @@ fn parse_inline_container_at_depth(
                         active.switch_to_result();
                     }
                     if !has_begin && !has_separate && !has_end {
-                        active.absorb(InlineNode::Run(run.clone()), vec![run]);
+                        active.absorb(InlineNode::Run(run));
                     }
                     if has_end {
                         let completed = fields.pop().unwrap().finish();
@@ -2479,15 +2505,7 @@ fn parse_inline_container_at_depth(
                     depth + 1,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs: Vec<Run> = hyperlink
-                        .children
-                        .iter()
-                        .filter_map(|node| match node {
-                            InlineNode::Run(run) => Some(run.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)), runs);
+                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)));
                 } else {
                     output.push(InlineNode::Hyperlink(Box::new(hyperlink)));
                 }
@@ -2498,7 +2516,7 @@ fn parse_inline_container_at_depth(
                 }
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(node),
                 }
             }
@@ -2508,7 +2526,7 @@ fn parse_inline_container_at_depth(
                 }
                 let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(node),
                 }
             }
@@ -2524,8 +2542,7 @@ fn parse_inline_container_at_depth(
                     depth + 1,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs = field.content.clone();
-                    active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
+                    active.absorb(InlineNode::SimpleField(Box::new(field)));
                 } else {
                     output.push(InlineNode::SimpleField(Box::new(field)));
                 }
@@ -3019,6 +3036,82 @@ mod tests {
             &projection.run.content[4],
             RunContent::Break { break_type: Some(kind), .. } if kind == "textWrapping"
         ));
+    }
+
+    #[test]
+    fn classic_and_w14_shadows_stay_apart() {
+        const MODERN: &str = r#"<w14:shadow w14:blurRad="38100" w14:dist="19050" w14:dir="2700000" w14:sx="100000" w14:sy="100000" w14:kx="0" w14:ky="0" w14:algn="tl"><w14:srgbClr w14:val="000000"><w14:alpha w14:val="60000"/></w14:srgbClr></w14:shadow>"#;
+        let formatting = |properties: &str| {
+            let run = root(&format!(
+                r#"<w:r><w:rPr>{properties}</w:rPr><w:t>A</w:t></w:r>"#
+            ));
+            parse_run(&run, None, None, None).run.formatting.unwrap()
+        };
+        let modern_shadow = TextShadow {
+            color: Some("#000000".to_owned()),
+            blur_radius: Some(4.0),
+            distance: Some(2.0),
+            direction: Some(45.0),
+        };
+
+        let classic = formatting("<w:shadow/>");
+        assert_eq!(classic.shadow, Some(true));
+        assert_eq!(classic.modern_effects, None);
+
+        let modern = formatting(MODERN);
+        assert_eq!(modern.shadow, None);
+        assert_eq!(
+            modern.modern_effects.unwrap().shadow,
+            Some(modern_shadow.clone())
+        );
+
+        let both = formatting(&format!("<w:shadow/>{MODERN}"));
+        assert_eq!(both.shadow, Some(true));
+        assert_eq!(both.modern_effects.unwrap().shadow, Some(modern_shadow));
+    }
+
+    #[test]
+    fn classic_and_w14_shadows_stay_apart_in_a_strict_part_declaring_strict_drawingml() {
+        let run = root(concat!(
+            r#"<w:r xmlns:w="http://purl.oclc.org/ooxml/wordprocessingml/main" "#,
+            r#"xmlns:a="http://purl.oclc.org/ooxml/drawingml/main" "#,
+            r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">"#,
+            r#"<w:rPr><w14:shadow w14:blurRad="38100"/></w:rPr><w:t>A</w:t></w:r>"#
+        ));
+        let formatting = parse_run(&run, None, None, None).run.formatting.unwrap();
+        assert_eq!(formatting.shadow, None);
+        assert_eq!(
+            formatting
+                .modern_effects
+                .unwrap()
+                .shadow
+                .unwrap()
+                .blur_radius,
+            Some(4.0)
+        );
+    }
+
+    #[test]
+    fn word_data_binding_wins_over_the_word_2013_binding() {
+        const WORD: &str = r#"<w:dataBinding w:xpath="/a" w:storeItemID="{1}"/>"#;
+        const WORD_2013: &str = r#"<w15:dataBinding w15:xpath="/b" w15:storeItemID="{2}"/>"#;
+        let binding = |properties: &str| {
+            let sdt = root(&format!(
+                r#"<w:sdt><w:sdtPr>{properties}</w:sdtPr></w:sdt>"#
+            ));
+            parse_sdt_properties(sdt.child("w", "sdtPr"), None, None)
+                .data_binding
+                .and_then(|binding| binding.xpath)
+        };
+        assert_eq!(
+            binding(&format!("{WORD}{WORD_2013}")).as_deref(),
+            Some("/a")
+        );
+        assert_eq!(
+            binding(&format!("{WORD_2013}{WORD}")).as_deref(),
+            Some("/a")
+        );
+        assert_eq!(binding(WORD_2013).as_deref(), Some("/b"));
     }
 
     #[test]

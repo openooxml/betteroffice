@@ -5,7 +5,7 @@ use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, AutoFilter, Border, BorderEdge,
     BorderStyle, ChartRef, ChartRefKind, ColStyle, Color, ConditionalFormatRule,
     ConditionalFormatting, DefinedName, DifferentialFormat, Fill, Font, HAlign, PatternType,
-    Protection, VAlign,
+    Protection, RunUnderline, Table, VAlign,
 };
 
 use super::*;
@@ -130,7 +130,13 @@ fn font() -> S<Font> {
         size_pt: opt(finite()),
         bold: any::<bool>(),
         italic: any::<bool>(),
-        underline: any::<bool>(),
+        underline: select(vec![
+            RunUnderline::None,
+            RunUnderline::Single,
+            RunUnderline::Double,
+            RunUnderline::SingleAccounting,
+            RunUnderline::DoubleAccounting,
+        ]),
         strike: any::<bool>(),
         color: opt(color()),
     })
@@ -467,6 +473,17 @@ fn defined_name() -> S<DefinedName> {
     })
 }
 
+fn table() -> S<Table> {
+    record!(Table {
+        name: text(),
+        sheet: sheet(),
+        range: range(),
+        header_rows: any::<u32>(),
+        totals_rows: any::<u32>(),
+        columns: prop::collection::vec(text(), 0..3)
+    })
+}
+
 fn op(tag: u8) -> S<Op> {
     match tag {
         0 => operation!(SetCell {
@@ -658,12 +675,39 @@ fn op(tag: u8) -> S<Op> {
             name: text(),
             formulas: prop::collection::vec((sheet(), at(), cell()), 0..4)
         }),
+        37 => operation!(SetTables {
+            tables: prop::collection::vec(table(), 0..3)
+        }),
+        38 => operation!(MoveCols {
+            sheet: sheet(),
+            col: any::<u32>(),
+            count: any::<u32>(),
+            before: any::<u32>()
+        }),
+        39 => operation!(MoveRows {
+            sheet: sheet(),
+            row: any::<u32>(),
+            count: any::<u32>(),
+            before: any::<u32>()
+        }),
+        40 => operation!(SetColsVisibility {
+            sheet: sheet(),
+            col: any::<u32>(),
+            count: any::<u32>(),
+            hidden: any::<bool>()
+        }),
+        41 => operation!(SetRowsVisibility {
+            sheet: sheet(),
+            row: any::<u32>(),
+            count: any::<u32>(),
+            hidden: any::<bool>()
+        }),
         _ => unreachable!(),
     }
 }
 
 fn all_ops() -> S<Vec<Op>> {
-    (0..37).fold(Just(Vec::new()).boxed(), |ops, tag| {
+    (0..42).fold(Just(Vec::new()).boxed(), |ops, tag| {
         (ops, op(tag))
             .prop_map(|(mut ops, op)| {
                 ops.push(op);
@@ -674,7 +718,7 @@ fn all_ops() -> S<Vec<Op>> {
 }
 
 fn any_op() -> S<Op> {
-    (0u8..37).prop_flat_map(op).boxed()
+    (0u8..40).prop_flat_map(op).boxed()
 }
 
 fn history() -> S<Vec<Vec<Op>>> {
@@ -698,6 +742,8 @@ fn preserved_history(count: usize) -> Vec<RecoveryPreservedHistory> {
                 state: 0,
                 axes: vec![None],
             },
+            proposals_before: None,
+            proposals_after: None,
         })
         .collect()
 }
@@ -711,6 +757,10 @@ proptest! {
             let bytes = encoded(&op);
             prop_assert_eq!(bytes[0], tag as u8);
             let mut reader = Reader::new(&bytes);
+            if cfg!(not(feature = "unstable-track-visibility")) && matches!(tag, 40 | 41) {
+                prop_assert!(Op::read(&mut reader).is_err());
+                continue;
+            }
             prop_assert_eq!(Op::read(&mut reader).unwrap(), op);
             prop_assert!(reader.finish().is_ok());
         }

@@ -3,6 +3,7 @@
 export {
   buildResidentRegionLayoutRequest,
   computeLayout,
+  documentRenderEnv,
   workerLayoutComputation,
   getLayoutKernelInputs,
 } from './computeLayout';

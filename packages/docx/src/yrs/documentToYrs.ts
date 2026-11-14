@@ -308,6 +308,12 @@ function formattingToMarks(formatting: TextFormatting | undefined): MarkDescript
     });
   }
   if (formatting.emboss) add('emboss');
+  if (formatting.ligatures != null || formatting.contextualAlternates != null) {
+    add('typography', {
+      ligatures: formatting.ligatures ?? null,
+      contextualAlternates: formatting.contextualAlternates ?? null,
+    });
+  }
   if (formatting.imprint) add('imprint');
   if (formatting.shadow) add('textShadow');
   if (formatting.emphasisMark && formatting.emphasisMark !== 'none') {
@@ -337,6 +343,8 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
       attrs[mark.name] = true;
     } else if (mark.name === 'snapToGrid') {
       attrs.snapToGrid = false;
+    } else if (mark.name === 'rPrChange') {
+      attrs.rPrChange = mark.attrs.changes;
     } else if (mark.name === 'highlight') {
       attrs.highlight = mark.attrs.color;
     } else if (mark.name === 'insertion' || mark.name === 'deletion') {
@@ -355,7 +363,7 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
 function marksKey(marks: readonly MarkDescriptor[]): string {
   return marks
     .filter((mark) => mark.name !== 'hyperlink' && mark.name !== 'comment')
-    .map((mark) => `${mark.name}:${JSON.stringify(mark.attrs)}`)
+    .map((mark) => `${mark.name}:${mark.name === 'rPrChange' ? stableStringify(mark.attrs) : JSON.stringify(mark.attrs)}`)
     .sort()
     .join('|');
 }
@@ -410,6 +418,15 @@ function runMarks(
         if (mark) mark.attrs.inheritedHyperlink = true;
       }
     }
+  }
+  if (run.propertyChanges?.length) {
+    const changes = run.propertyChanges.map(change => {
+      const previousStyle = change.previousFormatting?.styleId
+        ? styleResolver?.getRunStyleOwnProperties(change.previousFormatting.styleId) : undefined;
+      const previous = mergeTextFormatting(mergeStyleRunFormatting(styleFormatting, previousStyle), change.previousFormatting);
+      return { ...change, previousAttributes: marksToYrsAttrs(formattingToMarks(previous)) };
+    });
+    marks.push({ name: 'rPrChange', attrs: { changes } });
   }
   return marks;
 }

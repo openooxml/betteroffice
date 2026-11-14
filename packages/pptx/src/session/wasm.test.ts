@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { configureFontCdn } from '@betteroffice/fonts';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -7,6 +8,7 @@ import {
 } from 'typescript';
 import { engineKind } from '../wasm/engine';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import {
   mainThreadWasmSpies, sessionWasmFactory, type WasmTestWorker,
 } from '../../../../shared/office-session/testing/wasmWorker';
@@ -57,6 +59,23 @@ test('keeps worker URLs and options statically evaluable', () => {
 });
 
 describe.skipIf(engineKind === 'native')('presentation session wasm reuse', () => {
+  test('session opens forward only configured font CDN state', async () => {
+    const previous = getFontCdnConfiguration();
+    try {
+      for (const configured of [undefined, { baseUrl: 'https://session-fonts.example/', timeoutMs: 3456 },
+        { baseUrl: false, timeoutMs: 4567 }] as const) {
+        setFontCdnConfiguration(undefined);
+        if (configured) configureFontCdn(configured);
+        const h = factory();
+        const session = await h.client.openPresentationSession(new Uint8Array(), { wasm: h.module });
+        try {
+          if (configured) expect(input(h.workers[0])).toMatchObject({ fontCdn: configured });
+          else expect(input(h.workers[0])).not.toHaveProperty('fontCdn');
+        } finally { await session.dispose(); }
+      }
+    } finally { setFontCdnConfiguration(previous); }
+  });
+
   test('starts before open delivery and reuses the first worker module after disposal', async () => {
     const h = factory();
     const spies = mainThreadWasmSpies();

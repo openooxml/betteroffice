@@ -114,6 +114,14 @@
     "zoomPercent": "Zoom in percentuale",
     "apply": "Applica",
     "cancel": "Annulla",
+    "freezeColumn": "Blocca colonna {column}",
+    "freezeColumns": "Blocca colonne {first}–{last}",
+    "freezeRow": "Blocca riga {row}",
+    "freezeRows": "Blocca righe {first}–{last}",
+    "unfreezePanes": "Sblocca riquadri",
+    "unhideColumns": "Scopri colonne",
+    "unhideRows": "Scopri righe",
+    "selectAll": "Seleziona tutto",
     "reasons": {
       "editorUnavailable": "L'editor non è pronto.",
       "documentLoading": "Apertura della cartella di lavoro in corso.",
@@ -135,7 +143,15 @@
       "unsupportedCommand": "Non ancora supportato.",
       "invalidArguments": "Valore non valido.",
       "inputFailed": "Impossibile salvare l'immissione di cella precedente.",
+      "editUnsupported": "Questa modifica non può essere applicata qui. La cartella di lavoro non è cambiata.",
+      "editUnsupportedChart": "Questa modifica non può essere applicata: un grafico usa celle che sposterebbe. La cartella di lavoro non è cambiata.",
+      "editUnsupportedTable": "Questa modifica non può essere applicata: una tabella usa celle che sposterebbe. La cartella di lavoro non è cambiata.",
+      "editUnsupportedPivot": "Questa modifica non può essere applicata: una tabella pivot usa celle che sposterebbe. La cartella di lavoro non è cambiata.",
+      "editUnsupportedFill": "Questo riempimento non può essere applicato: modificherebbe celle con collegamenti, note o regole. La cartella di lavoro non è cambiata.",
       "sheetProtected": "Questa cella si trova in un foglio protetto.",
+      "hostRefused": "Questa modifica non è consentita.",
+      "tooManyToCheck": "Troppe celle da controllare per i plugin (limite {limit}).",
+      "hostStarting": "L’editor è ancora in fase di avvio. Riprova tra un momento.",
       "documentReplaced": "È stata aperta un'altra cartella di lavoro.",
       "targetChanged": "La selezione è cambiata.",
       "gestureActive": "Termina prima lo spostamento del grafico.",
@@ -144,10 +160,33 @@
       "commandFailed": "Impossibile applicare la modifica.",
       "commandRefused": "Il comando è stato rifiutato.",
       "permissionDenied": "L'applicazione host non ha consentito a questo plug-in di usare questo comando.",
-      "unsupportedPolicy": "I plug-in non possono ancora eseguire questo comando. Usa invece un batch di modifiche.",
+      "unsupportedPolicy": "Questo comando richiede un'azione dell'utente nell'interfaccia del plug-in stesso.",
       "pluginUnavailable": "Il plug-in non è più attivo.",
-      "aborted": "L'azione del plug-in è stata annullata prima dell'esecuzione del comando."
-    }
+      "aborted": "L'azione del plug-in è stata annullata prima dell'esecuzione del comando.",
+      "clipboardUnavailable": "Questo browser non consente di incollare da un menu. Usa la scelta rapida da tastiera.",
+      "lastSheet": "Una cartella di lavoro richiede almeno un foglio.",
+      "sheetAtEdge": "Il foglio non può essere spostato oltre.",
+      "sheetNameInvalid": "I nomi dei fogli richiedono da 1 a 31 caratteri, devono essere univoci e non possono contenere : \\ / ? * [ ].",
+      "clipboardDenied": "Il browser non ha consentito l’accesso agli appunti."
+    },
+    "cut": "Taglia",
+    "copy": "Copia",
+    "paste": "Incolla",
+    "pastePlainText": "Incolla come testo normale",
+    "clearContents": "Cancella contenuto",
+    "insert": "Inserisci",
+    "delete": "Elimina",
+    "insertRowsAbove": "Inserisci righe sopra",
+    "insertRowsBelow": "Inserisci righe sotto",
+    "insertColumnsLeft": "Inserisci colonne a sinistra",
+    "insertColumnsRight": "Inserisci colonne a destra",
+    "deleteRows": "Elimina righe",
+    "deleteColumns": "Elimina colonne",
+    "insertSheet": "Inserisci foglio",
+    "deleteSheet": "Elimina foglio",
+    "renameSheet": "Rinomina",
+    "moveSheetLeft": "Sposta a sinistra",
+    "moveSheetRight": "Sposta a destra"
   },
   "editor": {
     "appLabel": "Editor di fogli di calcolo",
@@ -162,7 +201,13 @@
     "showDetails": "Mostra dettagli",
     "openPrompt": "Apri un file XLSX",
     "sheetTabsLabel": "Fogli",
-    "clearExceedsLimit": "La cancellazione supera il limite di celle."
+    "clearExceedsLimit": "La cancellazione supera il limite di celle.",
+    "cellMenuLabel": "Menu cella",
+    "columnHeaderMenuLabel": "Menu intestazione colonna",
+    "rowHeaderMenuLabel": "Menu intestazione riga",
+    "sheetTabMenuLabel": "Menu della scheda del foglio",
+    "renameSheetLabel": "Rinomina foglio",
+    "sheetNamePrefix": "Foglio"
   },
   "presence": {
     "label": "Collaboratori",
@@ -178,6 +223,7 @@
     "accept": "Accetta",
     "reject": "Rifiuta",
     "forceApply": "Applica comunque",
+    "forceBlockedReason": "Questa proposta non può essere applicata dopo una modifica strutturale.",
     "staleWarning": "Celle modificate dopo la proposta: {cells}"
   },
   "a11y": {
@@ -187,12 +233,39 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, selezionata",
     "emptyCellLabel": "{address}, vuota",
-    "emptyCellLabelSelected": "{address}, vuota, selezionata"
+    "emptyCellLabelSelected": "{address}, vuota, selezionata",
+    "hasFormula": "{label}, contiene una formula",
+    "rangeSelected": "Da {start} a {end} selezionato, {rows, plural, one {# riga} many {# righe} other {# righe}} per {columns, plural, one {# colonna} many {# colonne} other {# colonne}}",
+    "sheetActivated": "{name}, foglio {index} di {count}",
+    "cellInputLabel": "Modifica cella {address}",
+    "gridRoleDescription": "foglio di lavoro",
+    "fillHandleLabel": "Maniglia di riempimento",
+    "chartResizeNw": "Ridimensiona il grafico dall'angolo superiore sinistro",
+    "chartResizeN": "Ridimensiona il grafico dal bordo superiore",
+    "chartResizeNe": "Ridimensiona il grafico dall'angolo superiore destro",
+    "chartResizeE": "Ridimensiona il grafico dal bordo destro",
+    "chartResizeSe": "Ridimensiona il grafico dall'angolo inferiore destro",
+    "chartResizeS": "Ridimensiona il grafico dal bordo inferiore",
+    "chartResizeSw": "Ridimensiona il grafico dall'angolo inferiore sinistro",
+    "chartResizeW": "Ridimensiona il grafico dal bordo sinistro",
+    "chartResizeHintBoth": "{label} (tasti freccia; tieni premuto Maiusc per 10 px)",
+    "chartResizeHintHorizontal": "{label} (frecce sinistra e destra; tieni premuto Maiusc per 10 px)",
+    "chartResizeHintVertical": "{label} (frecce su e giù; tieni premuto Maiusc per 10 px)"
   },
   "plugins": {
     "toolbarGroup": "Plugin",
     "panelTabs": "Pannelli del plug-in",
     "collapsePanel": "Comprimi {title}",
-    "expandPanel": "Espandi {title}"
+    "expandPanel": "Espandi {title}",
+    "rowGutter": "Indicatori di riga dei plugin"
+  },
+  "keys": {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Maiusc",
+    "del": "Canc",
+    "escape": "Esc",
+    "pageUp": "PagSu",
+    "pageDown": "PagGiù"
   }
 }

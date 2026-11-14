@@ -10,8 +10,8 @@ use xlsx_model::{CellRef, SheetId, Workbook};
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
-    attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path, utf8_bom_len,
-    xml_err,
+    attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
+    text_attribute, utf8_bom_len, xml_err,
 };
 use crate::{MAX_DEPTH, ParseError};
 
@@ -36,6 +36,8 @@ pub struct PreservedPackage {
     pub(crate) original_workbook: Workbook,
     pub(crate) active_sheet: SheetId,
     pub(crate) unpatchable_references: Vec<UnpatchableReference>,
+    /// Per source sheet, the drawings holding anchors no chart claims; read on first use.
+    pub(crate) drawing_anchors: Arc<OnceLock<Vec<Vec<crate::drawing_anchors::SheetDrawing>>>>,
     pub(crate) rich_shared_strings: BTreeSet<usize>,
     pub(crate) text_runs: Arc<OnceLock<crate::rich_text::RichTextIndex>>,
 }
@@ -190,6 +192,7 @@ impl PreservedPackage {
             original_workbook: workbook.clone(),
             active_sheet,
             unpatchable_references,
+            drawing_anchors: Arc::new(OnceLock::new()),
             rich_shared_strings,
             text_runs: Arc::new(OnceLock::new()),
         })
@@ -238,12 +241,75 @@ impl PreservedPackage {
         &self.unpatchable_references
     }
 
+    /// What a row or column `shift` on the source sheet `sheet` does to the pictures and shapes
+    /// of its drawings, with the sheet's rows and columns where `axes` says they are now: `Err`
+    /// names a drawing a save could not place, `Ok(true)` says something moves.
+    #[doc(hidden)]
+    pub fn drawings_after_shift(
+        &self,
+        sheet: usize,
+        axes: Option<&crate::SheetAxes>,
+        shift: crate::GridShift,
+    ) -> Result<bool, &str> {
+        let mut moves = false;
+        for drawing in self.sheet_drawings().get(sheet).into_iter().flatten() {
+            match crate::drawing_anchors::verdict(drawing, axes, shift) {
+                crate::drawing_anchors::Verdict::Refused => return Err(drawing.part.as_str()),
+                crate::drawing_anchors::Verdict::Moves => moves = true,
+                crate::drawing_anchors::Verdict::Still => {}
+            }
+        }
+        Ok(moves)
+    }
+
+    /// The first drawing of the source sheet `sheet` that holds pictures or shapes.
+    #[doc(hidden)]
+    pub fn drawing_part(&self, sheet: usize) -> Option<&str> {
+        self.sheet_drawings()
+            .get(sheet)?
+            .first()
+            .map(|drawing| drawing.part.as_str())
+    }
+
+    pub(crate) fn sheet_drawings(&self) -> &[Vec<crate::drawing_anchors::SheetDrawing>] {
+        self.drawing_anchors.get_or_init(|| {
+            let mut drawings = self
+                .sheets
+                .iter()
+                .map(|sheet| {
+                    crate::drawing_anchors::sheet_drawing_anchors(&self.parts, &sheet.path)
+                })
+                .collect::<Vec<_>>();
+            let mut owners: HashMap<String, usize> = HashMap::new();
+            for drawing in drawings.iter().flatten() {
+                *owners.entry(drawing.part.clone()).or_default() += 1;
+            }
+            for drawing in drawings.iter_mut().flatten() {
+                drawing.shared = owners.get(&drawing.part).is_some_and(|owners| *owners > 1);
+            }
+            drawings
+        })
+    }
+
     /// Returns a preserved part whose references cannot be patched.
     #[doc(hidden)]
     pub fn unpatchable_reference_part(&self) -> Option<&str> {
         self.unpatchable_references
             .first()
             .map(UnpatchableReference::part)
+    }
+
+    /// The formulas this package keeps as the file wrote them (data
+    /// validations and extension formulas) that cannot follow the sheet
+    /// renames `wb` holds since the package was read, sheets mapped by
+    /// `origins`.
+    #[doc(hidden)]
+    pub fn fragments_not_following_renames(
+        &self,
+        wb: &Workbook,
+        origins: &[Option<usize>],
+    ) -> Vec<crate::write::PreservedFragmentFailure> {
+        crate::write::preserved_fragment_failures(wb, self, origins)
     }
 
     /// Returns a preserved part that renaming, dropping or reordering `sheet`
@@ -363,6 +429,35 @@ impl PreservedPackage {
             }
         }
         None
+    }
+
+    /// What of source sheet `index` a fill cannot keep, if anything.
+    #[doc(hidden)]
+    pub fn fill_unsupported_feature(&self, index: usize, exact: bool) -> Option<&'static str> {
+        let sheet = self.sheets.get(index)?;
+        let Some(bytes) = find_part(&self.parts, &sheet.path).filter(|bytes| !bytes.contains(&0))
+        else {
+            return Some("data validations");
+        };
+        match source_fill_blocker(bytes, exact) {
+            Ok(None) => {}
+            Ok(Some(feature)) => return Some(feature),
+            Err(_) => return Some("data validations"),
+        }
+        let relationships = match find_part(&self.parts, &relationship_part_path(&sheet.path)) {
+            Some(bytes) if bytes.contains(&0) => return Some("comments"),
+            Some(bytes) => match parse_relationships(bytes) {
+                Ok(relationships) => relationships,
+                Err(_) => return Some("comments"),
+            },
+            None => return None,
+        };
+        relationships
+            .iter()
+            .any(|relationship| {
+                relationship.has_type("comments") || relationship.has_type("threadedComment")
+            })
+            .then_some("comments")
     }
 
     fn stranded(&self, disturbed: impl Fn(&UnpatchableReference) -> bool) -> Option<&str> {
@@ -577,6 +672,25 @@ fn comment_move_unsupported(
     }
 }
 
+/// The first worksheet element that refuses a fill, named as its feature.
+fn source_fill_blocker(bytes: &[u8], exact: bool) -> Result<Option<&'static str>, ParseError> {
+    let mut xml = reader(bytes);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    loop {
+        match next_event(&mut xml, &mut buffer, &mut depth)? {
+            Event::Start(start) => match local_name(&start).as_slice() {
+                b"dataValidations" | b"dataValidation" => return Ok(Some("data validations")),
+                b"extLst" | b"AlternateContent" => return Ok(Some("conditional formats")),
+                b"conditionalFormatting" if !exact => return Ok(Some("conditional formats")),
+                _ => {}
+            },
+            Event::Eof => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
 /// A sheet's `state` in the workbook part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SheetVisibility {
@@ -766,7 +880,7 @@ impl XmlTemplate {
                     }
                     let mut root = BytesStart::new(self.root_name.as_str());
                     for value in &values {
-                        root.push_attribute((value.name.as_str(), value.value.as_str()));
+                        root.push_attribute(text_attribute(&value.name, &value.value));
                     }
                     writer.write_event(Event::Start(root)).map_err(xml_err)?;
                     break;
@@ -1281,7 +1395,7 @@ impl XmlTemplate {
                     }
                     let mut root = BytesStart::new(self.root_name.as_str());
                     for attribute in &attributes {
-                        root.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+                        root.push_attribute(text_attribute(&attribute.name, &attribute.value));
                     }
                     let mut writer = Writer::new(Vec::new());
                     writer.write_event(Event::Start(root)).map_err(xml_err)?;

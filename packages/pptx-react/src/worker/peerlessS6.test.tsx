@@ -1,6 +1,7 @@
 import './peerlessTestCapabilities';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, expect, mock, spyOn } from 'bun:test';
+import { budgetedTest, budgetedWaitFor } from '../../../../shared/office-session/testing/loadBudget';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import type { TextBoxPrimitive } from '@betteroffice/pptx';
@@ -20,7 +21,9 @@ import * as i18n from '../i18n';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, createEvent, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, createEvent, fireEvent, render, waitFor: waitForCondition } = await import('@testing-library/react');
+const waitFor = budgetedWaitFor(waitForCondition);
+const test = budgetedTest();
 const restorers: (() => void)[] = [];
 let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];
@@ -356,11 +359,12 @@ test('drag_burst_does_not_render_slide_strip', async () => {
   await act(async () => { fireEvent.pointerDown(view.getByTestId('pptx-resize-se'), point()); });
   const before = stripRenders;
   const outline = view.getByTestId('pptx-shape-selection');
-  const transform = outline.style.transform;
+  const width = outline.style.width;
   for (let offset = 10; offset <= 60; offset += 10) {
     act(() => { fireEvent.pointerMove(stage, point(point().clientX + offset)); });
   }
-  expect(outline.style.transform).not.toBe(transform);
+  expect(outline.style.width).not.toBe(width);
+  expect(outline.style.transform).toBe('');
   expect(stripRenders).toBe(before);
   act(() => { fireEvent.pointerCancel(stage, point()); });
 });

@@ -1,3 +1,4 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { CollaborationError, type CollaborationTextInsertion } from '../collaboration/types';
 import { stateVectorClock } from '../collaboration/protocol';
 import { CollaborationProvider, providerArrival, providerLeave } from '../collaboration/provider';
@@ -71,7 +72,7 @@ export function createResidentCollaboration(engine: ResidentEngineSession, optio
         if (insertion) remember(insertion);
         return { applied: insertion };
       } catch (error) {
-        if (error instanceof WebAssembly.RuntimeError || engine.proposalEngine.version() !== before) throw error;
+        if (isEngineTrap(error) || engine.proposalEngine.version() !== before) throw error;
         return { failed: error };
       }
     },
@@ -105,8 +106,8 @@ export function createResidentCollaboration(engine: ResidentEngineSession, optio
             pipe.run(command.payload);
             if (engine.proposalEngine.version() === before) return { status: 'noop', ...state() };
             engine.markProjectionStories(engine.storiesChangedSince(since).stories);
-            hooks.afterRemoteMerge?.(context);
-            return { status: 'applied', ...state() };
+            const attribution = hooks.afterRemoteMerge?.(context);
+            return { status: 'applied', ...state(), cause: attribution ? attribution.cause : 'remote' };
           }
           try {
             if (command.kind === 'applyRemoteUpdateChunks') engine.applyUpdateChunks(command.payload.updates.map(update => new Uint8Array(update)));
@@ -118,10 +119,10 @@ export function createResidentCollaboration(engine: ResidentEngineSession, optio
               remember(insertion);
             }
             if (engine.proposalEngine.version() === before) return { status: 'noop', ...state() };
-            hooks.afterRemoteMerge?.(context);
-            return { status: 'applied', ...state() };
+            const attribution = hooks.afterRemoteMerge?.(context);
+            return { status: 'applied', ...state(), cause: attribution ? attribution.cause : 'remote' };
           } catch (error) {
-            if (error instanceof WebAssembly.RuntimeError || engine.proposalEngine.version() !== before) throw error;
+            if (isEngineTrap(error) || engine.proposalEngine.version() !== before) throw error;
             return { status: 'refused', reason: 'invalid-update', ...state() };
           }
         },

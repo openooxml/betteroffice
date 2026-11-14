@@ -118,10 +118,11 @@ fn resolve_inline_content(
             continue;
         };
         let mut child = child.as_ref().clone();
-        let attrs = match child.get("attrs") {
+        let mut attrs = match child.get("attrs") {
             Some(Any::Map(attrs)) => attrs.as_ref().clone(),
             _ => Default::default(),
         };
+        let original_attrs = attrs.clone();
         let ins = active_stamp(attrs.get(INS).cloned(), filter);
         let del = active_stamp(attrs.get(DEL).cloned(), filter);
         let remove = match mode {
@@ -130,6 +131,7 @@ fn resolve_inline_content(
         };
         if remove.is_some() {
             record(resolved, remove);
+            resolve_run_property_changes(&attrs.into_iter().collect(), mode, filter, resolved);
             continue;
         }
         let (key, keep) = match mode {
@@ -138,8 +140,25 @@ fn resolve_inline_content(
         };
         if keep.is_some() {
             record(resolved, keep);
-            let mut attrs = attrs;
             attrs.remove(key);
+        }
+        let patch = resolve_run_property_changes(
+            &attrs
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            mode,
+            filter,
+            resolved,
+        );
+        for (key, value) in patch {
+            if value == Any::Null {
+                attrs.remove(key.as_ref());
+            } else {
+                attrs.insert(key.to_string(), value);
+            }
+        }
+        if attrs != original_attrs {
             child.insert("attrs".to_owned(), Any::Map(Arc::new(attrs)));
         }
         if let Some(Any::Map(payload)) = child.get("payload")
@@ -153,6 +172,41 @@ fn resolve_inline_content(
         remaining.push(Any::Map(Arc::new(child)));
     }
     Any::Array(Arc::from(remaining))
+}
+
+fn resolve_run_property_changes(
+    attrs: &std::collections::BTreeMap<String, Any>,
+    mode: ResolveMode,
+    filter: Option<&str>,
+    resolved: &mut Vec<String>,
+) -> Attrs {
+    let mut patch = Attrs::new();
+    let Some(Any::Array(changes)) = attrs.get(crate::format::RPR_CHANGE) else {
+        return patch;
+    };
+    let mut remaining = Vec::new();
+    for change in changes.iter().rev() {
+        if active_stamp(Some(change.clone()), filter).is_some() {
+            record(resolved, Some(change));
+            if mode == ResolveMode::Reject {
+                patch.extend(crate::format::previous_run_properties(attrs, change));
+            }
+        } else {
+            remaining.push(change.clone());
+        }
+    }
+    if remaining.len() < changes.len() {
+        remaining.reverse();
+        patch.insert(
+            Arc::from(crate::format::RPR_CHANGE),
+            if remaining.is_empty() {
+                Any::Null
+            } else {
+                Any::Array(Arc::from(remaining))
+            },
+        );
+    }
+    patch
 }
 
 fn property_map<'a>(
@@ -373,6 +427,7 @@ fn resolve_story(
                     ResolveMode::Reject => ins.is_some(),
                 };
                 if remove {
+                    resolve_run_property_changes(&chunk.attrs, mode, filter, resolved);
                     match mode {
                         ResolveMode::Accept => record(resolved, del.as_ref()),
                         ResolveMode::Reject => record(resolved, ins.as_ref()),
@@ -394,6 +449,10 @@ fn resolve_story(
                         next_block_revisions = None;
                     }
                 } else {
+                    let patch = resolve_run_property_changes(&chunk.attrs, mode, filter, resolved);
+                    if !patch.is_empty() {
+                        story.format(txn, overlap_start, overlap_end - overlap_start, patch);
+                    }
                     if let ChunkKind::Embed(Some(map)) = &chunk.kind
                         && crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("sdt")
                         && let Some(Out::Any(content)) = map.get(txn, "content")
@@ -401,7 +460,9 @@ fn resolve_story(
                         let mut tracked = false;
                         crate::inline_content::visit(&content, &mut |child| {
                             if let Some(Any::Map(attrs)) = child.get("attrs") {
-                                tracked |= attrs.contains_key(INS) || attrs.contains_key(DEL);
+                                tracked |= attrs.contains_key(INS)
+                                    || attrs.contains_key(DEL)
+                                    || attrs.contains_key(crate::format::RPR_CHANGE);
                             }
                         });
                         if tracked {

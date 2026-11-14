@@ -1,6 +1,6 @@
 import {
-  CANVAS_PAGE_GAP_PX,
   CANVAS_PAGES_PADDING_PX,
+  canvasPageStack,
   type DisplayList,
   type DisplayListRect,
 } from '@betteroffice/docx/layout/render';
@@ -56,13 +56,11 @@ export function buildRemotePresencePageMetrics(
   const tops: number[] = [];
   const bottoms: number[] = [];
   const centers: number[] = [];
-  let top = CANVAS_PAGES_PADDING_PX;
-  for (const page of displayList.pages) {
-    const bottom = top + Math.max(0, page.height * safeZoom);
+  for (const { top, height } of canvasPageStack(displayList.pages, { zoom: safeZoom, padding: CANVAS_PAGES_PADDING_PX })) {
+    const bottom = top + height;
     tops.push(top);
     bottoms.push(bottom);
     centers.push((top + bottom) / 2);
-    top = bottom + CANVAS_PAGE_GAP_PX;
   }
   return { tops, bottoms, centers };
 }

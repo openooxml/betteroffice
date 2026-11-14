@@ -846,6 +846,7 @@ fn render_decimal_tokens(toks: &[Tok], mag: f64, apply_scaling: bool) -> Formatt
     };
 
     let (grouping, scale) = scan_commas(int_toks);
+    let scale = scale + scan_commas(frac_toks).1;
     let percent = toks.iter().filter(|t| matches!(t, Tok::Percent)).count() as i32;
 
     let mut v = mag;
@@ -1005,6 +1006,12 @@ fn best_fraction(value: f64, limit: u64) -> Option<(u64, u64)> {
 /// (whole, numerator, denominator) for `mag`, or `None` when one does not
 /// fit a u64 and the section shows general text instead.
 fn fraction_parts(mag: f64, pattern: FractionPattern) -> Option<(u64, u64, u64)> {
+    let mag = if mag > 0.0 && mag.is_finite() {
+        let (m, e) = fifteen_digits(mag);
+        format!("{m}e{e}").parse().unwrap_or(mag)
+    } else {
+        mag
+    };
     if !mag.is_finite() || mag >= u64::MAX as f64 {
         return None;
     }
@@ -1083,8 +1090,8 @@ fn render_fraction(sec: &Section, mag: f64, pattern: FractionPattern) -> Formatt
     out
 }
 
-/// classify integer-side commas: flanked by digits turns on thousands
-/// grouping; trailing ones scale the value down by 1000 each.
+/// classify the commas on one side of the decimal point: flanked by digits turns on thousands
+/// grouping; only the unbroken run of commas directly after the last digit scales by 1000 each.
 fn scan_commas(int_toks: &[Tok]) -> (bool, u32) {
     let digit_positions: Vec<usize> = int_toks
         .iter()
@@ -1092,8 +1099,10 @@ fn scan_commas(int_toks: &[Tok]) -> (bool, u32) {
         .filter(|(_, t)| matches!(t, Tok::Digit(_)))
         .map(|(i, _)| i)
         .collect();
+    let Some(&last) = digit_positions.last() else {
+        return (false, 0);
+    };
     let mut grouping = false;
-    let mut scale = 0u32;
     for (idx, t) in int_toks.iter().enumerate() {
         if !matches!(t, Tok::Comma) {
             continue;
@@ -1102,9 +1111,14 @@ fn scan_commas(int_toks: &[Tok]) -> (bool, u32) {
         let after = digit_positions.iter().any(|&p| p > idx);
         if before && after {
             grouping = true;
-        } else if before {
-            scale += 1;
         }
+    }
+    let mut scale = 0u32;
+    for t in &int_toks[last + 1..] {
+        if !matches!(t, Tok::Comma) {
+            break;
+        }
+        scale += 1;
     }
     (grouping, scale)
 }
@@ -1119,11 +1133,22 @@ fn digit_kinds(toks: &[Tok]) -> Vec<char> {
 }
 
 /// split a non-negative magnitude into (integer digits, fraction digits) after
-/// rounding half-away-from-zero (excel's display rule) to `frac_len` places.
+/// rounding its 15 significant digit value half away from zero to `frac_len`
+/// places (excel's display rule).
 fn split_digits(mag: f64, frac_len: usize) -> (String, String) {
-    let factor = fmath::powi(10.0, frac_len as i32);
-    let scaled = (mag * factor).round();
-    let mut s = format!("{scaled:.0}");
+    let mut s = if mag > 0.0 && mag.is_finite() {
+        let (m, e) = fifteen_digits(mag);
+        match e + frac_len as i64 {
+            shift @ 0.. => format!("{m}{}", "0".repeat(shift as usize)),
+            shift @ -15..=-1 => {
+                let unit = 10u64.pow(shift.unsigned_abs() as u32);
+                (m / unit + u64::from(2 * (m % unit) >= unit)).to_string()
+            }
+            _ => "0".to_string(),
+        }
+    } else {
+        format!("{mag:.0}")
+    };
     while s.len() < frac_len + 1 {
         s.insert(0, '0');
     }
@@ -1132,6 +1157,63 @@ fn split_digits(mag: f64, frac_len: usize) -> (String, String) {
     let frac_part = s[cut..].to_string();
     let int_trimmed = int_part.trim_start_matches('0');
     (int_trimmed.to_string(), frac_part)
+}
+
+/// `a` (finite, > 0) at 15 significant digits, half away from zero, exactly:
+/// `(m, e)` with `a ~ m * 10^e` and `m < 10^15`.
+pub fn fifteen_digits(a: f64) -> (u64, i64) {
+    use std::fmt::Write;
+    let mut text = DigitBuf::default();
+    let _ = write!(text, "{a:.15e}");
+    let (sixteen, exponent) = scientific(text.as_str());
+    let mut m = sixteen / 10;
+    let up = match sixteen % 10 {
+        0..=4 => false,
+        5 => format!("{a:.800e}").as_bytes()[16] >= b'5',
+        _ => true,
+    };
+    let mut e = exponent - 14;
+    if up {
+        m += 1;
+        if m == 1_000_000_000_000_000 {
+            m = 100_000_000_000_000;
+            e += 1;
+        }
+    }
+    (m, e)
+}
+
+/// mantissa digits and exponent of rust's `d.ddde[-]x` form.
+fn scientific(text: &str) -> (u64, i64) {
+    let (mantissa, exponent) = text.split_once('e').unwrap_or((text, "0"));
+    let digits = mantissa
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .fold(0u64, |acc, b| acc * 10 + u64::from(b - b'0'));
+    (digits, exponent.parse().unwrap_or(0))
+}
+
+/// stack buffer for one `{:.15e}` rendering.
+#[derive(Default)]
+struct DigitBuf {
+    bytes: [u8; 32],
+    len: usize,
+}
+
+impl DigitBuf {
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+    }
+}
+
+impl std::fmt::Write for DigitBuf {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let end = self.len + s.len();
+        let slot = self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?;
+        slot.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
 }
 
 fn build_int_number(kinds: &[char], int_digits: &str, grouping: bool) -> String {

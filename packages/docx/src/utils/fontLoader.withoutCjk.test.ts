@@ -71,7 +71,11 @@ beforeAll(() => {
   Object.assign(globalThis, { FontFace: FakeFontFace });
   Object.defineProperty(document, 'fonts', {
     configurable: true,
-    value: { add: (face: FakeFontFace) => added.push(face), delete() {}, dispatchEvent() {} },
+    value: {
+      add: (face: FakeFontFace) => face.family !== fontManager.BASE_LATIN_FAMILY && added.push(face),
+      delete() {},
+      dispatchEvent() {},
+    },
   });
   HTMLCanvasElement.prototype.getContext = (() => ({ measureText: () => ({ width: 60 }) })) as never;
   const appendChild = document.head.appendChild.bind(document.head);

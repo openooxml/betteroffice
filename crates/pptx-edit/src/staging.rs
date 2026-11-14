@@ -39,13 +39,15 @@ impl DeckSession {
     pub(crate) fn stage(&self) -> EditResult<DeckSession> {
         let doc = session_doc(self.client_id);
         hydrate_doc(&doc, &self.state_update_v1())?;
-        DeckSession::assemble(
+        let stage = DeckSession::assemble(
             doc,
             self.client_id,
             self.id_counter.load(Ordering::Relaxed),
             self.package.clone(),
             0,
-        )
+        )?;
+        stage.collaborative.set(self.is_collaborative());
+        Ok(stage)
     }
 
     pub(crate) fn validated_snapshot(&self) -> EditResult<DeckSnapshot> {
@@ -111,6 +113,14 @@ impl DeckSession {
         }
         .apply_update(update)
         .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        self.undo.borrow_mut().adopt_tables(&stage.undo.borrow());
+        for (shape_id, generations) in stage.table_edits.borrow().iter() {
+            self.table_edits
+                .borrow_mut()
+                .entry(shape_id.clone())
+                .or_default()
+                .extend(generations.iter().cloned());
+        }
         self.id_counter
             .store(stage.id_counter.load(Ordering::Relaxed), Ordering::Relaxed);
         boundary();

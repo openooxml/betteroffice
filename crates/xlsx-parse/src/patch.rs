@@ -17,7 +17,7 @@ use crate::write::{
     SharedStringPlan, cell_value_markup, col_runs, fmt_num, fragment, shared_string_index,
     write_cell, write_col_run, write_cols, write_row,
 };
-use crate::xml::{attr, xml_err};
+use crate::xml::{attr, text_attribute, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
 #[cfg(test)]
@@ -180,7 +180,7 @@ impl SheetPatch<'_> {
         let dirty = self.dirty_formulas(source, &rows)?;
         let mut out = Vec::with_capacity(source.len());
         out.extend_from_slice(&element.prefix);
-        let mut source_rows = rows
+        let mut source_rows: Vec<_> = rows
             .iter()
             .filter_map(|row| {
                 self.axes
@@ -188,7 +188,11 @@ impl SheetPatch<'_> {
                     .current(row.index)
                     .map(|current| (current, row))
             })
-            .peekable();
+            .collect();
+        // a move makes the map non-monotone; the element is written in current
+        // order, so the rows it reuses are visited in that order too
+        source_rows.sort_unstable_by_key(|(current, _)| *current);
+        let mut source_rows = source_rows.into_iter().peekable();
         let mut cells = self.sheet.iter_cells().peekable();
         let mut originals = SourceCellCursor::new(self.original, self.original.iter_cells());
         let mut heights = self.sheet.row_heights.keys().copied().peekable();
@@ -1126,7 +1130,7 @@ fn write_start_tag(
 ) -> Result<(), ParseError> {
     let mut element = BytesStart::new(name);
     for attribute in attributes {
-        element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+        element.push_attribute(text_attribute(&attribute.name, &attribute.value));
     }
     let mut writer = Writer::new(std::mem::take(out));
     let event = if empty {

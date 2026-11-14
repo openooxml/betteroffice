@@ -1,21 +1,34 @@
-import type { BundledFontScript } from '@betteroffice/fonts';
+import type { BundledFontLoader, BundledFontScript } from '@betteroffice/fonts';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { scriptFontFace } from './commandScriptFonts';
 import type { DefaultFontFace, DefaultFontLanding, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace } from '../wasm/loader';
+import { sessionFontDecoder } from './sessionFontDecoder';
+import type { createSlicedFontFaces } from './commandSlicedFonts';
 
 type FontRequest =
   | { kind: 'primary'; family: string; bold: boolean; italic: boolean }
   | { kind: 'coverage'; script: string; bold: boolean; italic: boolean };
 
+/** @internal */
+const DEFAULT_FONT_MAX_ATTEMPTS = 3;
+/** @internal */
+const DEFAULT_FONT_RETRY_DELAYS_MS = [2000, 8000];
+
 let decoderReady: Promise<unknown> = Promise.resolve();
 
-const sessionDecoder: typeof decodeFontFace = async (bytes, options) => {
+const sessionDecoder = sessionFontDecoder(async (bytes, options) => {
   await decoderReady.catch(() => {});
   return decodeFontFace(bytes, options);
-};
+});
 
 export const commandFontProvider = {
-  async load() { return (await import('@betteroffice/fonts')).createFontProvider(undefined, { decoder: sessionDecoder }); },
+  /** @internal */
+  async load(fontCdn?: FontCdnConfiguration) {
+    const fonts = await import('@betteroffice/fonts');
+    if (fontCdn) fonts.configureFontCdn(fontCdn);
+    return fonts.createFontProvider(undefined, { decoder: sessionDecoder });
+  },
 };
 
 /**
@@ -25,11 +38,18 @@ export const commandFontProvider = {
  */
 export function prefetchCoverageFaces(
   scripts: readonly string[], wasmReady: Promise<unknown>, provider: () => ReturnType<typeof commandFontProvider.load>,
+  sliced = false,
 ): void {
   decoderReady = wasmReady;
   if (!scripts.length) return;
-  void provider().then((source) => {
-    for (const script of scripts) void source.resolveScriptFallback(script as BundledFontScript, false, false)?.().catch(() => {});
+  void provider().then(async (source) => {
+    for (const script of scripts) {
+      const load = source.resolveScriptFallback(script as BundledFontScript, false, false);
+      if (load?.slices && sliced && (await import('./commandSlicedFonts')).slicedFacesSupported()) {
+        const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+        void openSlicedFace(load.slices).catch(() => {});
+      } else void load?.().catch(() => {});
+    }
   }).catch(() => {});
 }
 
@@ -41,9 +61,12 @@ export function createCommandDefaultFonts(
   install?: (faces: readonly DefaultFontFace[]) => Promise<readonly DefaultFontFace[]>,
   beforeRegister?: () => void,
   shared?: () => ReturnType<typeof commandFontProvider.load>,
+  sliced?: ReturnType<typeof createSlicedFontFaces>,
 ) {
   const families = new Set(supplied.map((face) => face.family.trim().toLowerCase()));
   const attempted = new Set<string>();
+  const attempts = new Map<string, number>();
+  const retryAt = new Map<string, number>();
   const pending = new Map<string, Promise<DefaultFontFace | undefined>>();
   const installations = new Map<string, Promise<boolean>>();
   const registered = new Set<string>();
@@ -55,12 +78,41 @@ export function createCommandDefaultFonts(
     face.kind === 'coverage' ? face.script : face.family.trim().toLowerCase(), face.bold, face.italic]);
   const suppliedFamily = (face: FontRequest) => face.kind === 'primary' && families.has(face.family.trim().toLowerCase());
 
+  const retryable = (id: string) => !attempted.has(id) ||
+    ((attempts.get(id) ?? 0) < DEFAULT_FONT_MAX_ATTEMPTS && Date.now() >= (retryAt.get(id) ?? Infinity));
+  const failed = (id: string) => retryAt.set(id,
+    Date.now() + (DEFAULT_FONT_RETRY_DELAYS_MS[(attempts.get(id) ?? 1) - 1] ?? Infinity));
+
+  function publish(wanted: FontRequest[], faces: (DefaultFontFace | undefined)[]): DefaultFontLanding[] {
+    if (disposed) return [];
+    const additions: DefaultFontLanding[] = [];
+    for (const [index, face] of faces.entries()) {
+      if (!face || suppliedFamily(wanted[index])) continue;
+      const registeredKey = JSON.stringify([face.kind ?? 'primary', face.family.trim().toLowerCase(), face.bold, face.italic]);
+      if (registered.has(registeredKey)) continue;
+      try {
+        if (!prepared) {
+          beforeRegister?.();
+          prepared = true;
+        }
+        register(face);
+        registered.add(registeredKey);
+        additions.push({ family: face.family, bold: face.bold, italic: face.italic,
+          ...(face.kind ? { kind: face.kind } : {}), ...(face.ownWeight ? { ownWeight: true } : {}) });
+      } catch { failed(key(wanted[index])); }
+    }
+    if (additions.length) settled(additions);
+    return additions;
+  }
+
   function request(face: FontRequest): Promise<DefaultFontFace | undefined> {
     const id = key(face);
     const existing = pending.get(id);
     if (existing) return existing;
-    if (attempted.has(id) || suppliedFamily(face)) return Promise.resolve(undefined);
+    if (!retryable(id) || suppliedFamily(face)) return Promise.resolve(undefined);
     attempted.add(id);
+    attempts.set(id, (attempts.get(id) ?? 0) + 1);
+    retryAt.delete(id);
     const task = new Promise<DefaultFontFace | undefined>((resolve) => {
       let finished = false;
       const finish = (value?: DefaultFontFace) => {
@@ -73,12 +125,16 @@ export function createCommandDefaultFonts(
       const cancel = () => finish();
       const timer = setTimeout(cancel, 5000);
       cancellations.add(cancel);
-      provider ??= shared ? shared() : commandFontProvider.load();
+      let available = false;
+      provider ??= Promise.resolve().then(() => shared ? shared() : commandFontProvider.load()).catch((error) => {
+        provider = undefined;
+        throw error;
+      });
       void provider.then(async (source) => {
-        if (disposed || finished) return undefined;
+        if (disposed) return undefined;
         let bold = face.bold;
         let italic = face.italic;
-        let load: (() => Promise<ArrayBuffer>) | undefined;
+        let load: BundledFontLoader | undefined;
         let light: (() => Promise<ArrayBuffer>) | undefined;
         if (face.kind === 'coverage') {
           load = source.resolveScriptFallback(face.script as BundledFontScript, bold, italic);
@@ -90,23 +146,52 @@ export function createCommandDefaultFonts(
         } else {
           const named = source.resolve(face.family, bold, italic) ?? source.resolveFamily(face.family, bold, italic);
           light = named ? undefined : source.resolveLightVariant?.(face.family, bold, italic);
-          load = named ?? light;
+          load = named ?? light ?? source.resolveLastResort(face.family, bold, italic, 'powerpoint');
         }
         if (!load) return undefined;
+        available = true;
+        if (load.slices && sliced?.supported()) {
+          try {
+            const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+            const opened = await openSlicedFace(load.slices);
+            if (disposed || suppliedFamily(face)) return undefined;
+            const skeleton = face.kind === 'coverage' ? await scriptFontFace(face.script, bold, italic, opened.bytes())
+              : { family: face.family, bold: face.bold, italic: face.italic, bytes: opened.bytes() };
+            if (skeleton && !families.has(skeleton.family.trim().toLowerCase())) {
+              sliced.add(skeleton.family, { get revision() { return opened.revision; }, bytes: () => opened.bytes(),
+                ensureText: (text) => opened.ensureText(text), prefetch: (text) => opened.prefetch(text),
+                chunksOf: (text) => opened.chunksOf(text), loadedChunks: () => opened.loadedChunks() }, load);
+              return disposed ? undefined : skeleton;
+            }
+          } catch {}
+        }
         const bytes = await load();
-        if (disposed || finished || suppliedFamily(face)) return undefined;
+        if (disposed || suppliedFamily(face)) return undefined;
         const loaded = face.kind === 'coverage'
           ? await scriptFontFace(face.script, bold, italic, bytes)
           : { family: face.family, bold: face.bold, italic: face.italic, bytes, ...(light ? { ownWeight: true } : {}) };
-        if (!loaded || disposed || finished) return undefined;
+        if (!loaded || disposed || suppliedFamily(face)) return undefined;
+        sliced?.plain(loaded.family, loaded.bold, loaded.italic);
         const identity = JSON.stringify([loaded.family.trim().toLowerCase(), loaded.bold, loaded.italic]);
         let installation = installations.get(identity);
         if (!installation) {
           installation = Promise.resolve().then(async () => !disposed && (!install || (await install([loaded])).length > 0));
           installations.set(identity, installation);
+          const current = installation;
+          const forget = () => { if (installations.get(identity) === current) installations.delete(identity); };
+          void installation.then((success) => { if (!success) forget(); }, forget);
         }
         return await installation && !disposed ? loaded : undefined;
-      }).then(finish, () => finish());
+      }).then((loaded) => {
+        pending.delete(id);
+        if (!loaded && available && !disposed && !suppliedFamily(face)) failed(id);
+        if (finished && loaded) publish([face], [loaded]);
+        else finish(loaded);
+      }, () => {
+        pending.delete(id);
+        if (!disposed && !suppliedFamily(face)) failed(id);
+        finish();
+      });
     });
     pending.set(id, task);
     return task;
@@ -125,7 +210,7 @@ export function createCommandDefaultFonts(
         }
       }
       return [...wanted.values()].filter((face) => !suppliedFamily(face) &&
-        (!attempted.has(key(face)) || pending.has(key(face))));
+        (retryable(key(face)) || pending.has(key(face))));
     } catch { return []; }
   }
 
@@ -135,28 +220,7 @@ export function createCommandDefaultFonts(
     load(slideId?: string): DefaultFontLanding[] | Promise<DefaultFontLanding[]> {
       const wanted = requests(slideId);
       if (!wanted.length) return [];
-      return Promise.all(wanted.map(request)).then((faces) => {
-        if (disposed) return [];
-        const additions: DefaultFontLanding[] = [];
-        for (const [index, face] of faces.entries()) {
-          pending.delete(key(wanted[index]));
-          if (!face || suppliedFamily(wanted[index])) continue;
-          const registeredKey = JSON.stringify([face.kind ?? 'primary', face.family.trim().toLowerCase(), face.bold, face.italic]);
-          if (registered.has(registeredKey)) continue;
-          try {
-            if (!prepared) {
-              beforeRegister?.();
-              prepared = true;
-            }
-            register(face);
-            registered.add(registeredKey);
-            additions.push({ family: face.family, bold: face.bold, italic: face.italic,
-              ...(face.kind ? { kind: face.kind } : {}), ...(face.ownWeight ? { ownWeight: true } : {}) });
-          } catch {}
-        }
-        if (additions.length) settled(additions);
-        return additions;
-      });
+      return Promise.all(wanted.map(request)).then((faces) => publish(wanted, faces));
     },
     supply(family: string): void { families.add(family.trim().toLowerCase()); },
     dispose(): void {

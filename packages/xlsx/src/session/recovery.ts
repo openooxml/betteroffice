@@ -24,6 +24,7 @@ interface RecoveryMetadata {
   statuses: [number, CommandStatus][];
   selection: WorkbookCommandSelection;
   readOnly: boolean;
+  allowHostProposals?: boolean;
   sheetIds: string[];
   nextSheetId: number;
   sheetRevision: number;
@@ -73,6 +74,7 @@ export function encodeWorkbookRecovery(engine: Uint8Array, state: WorkbookComman
     throughSeq: state.throughSeq, revision, engineVersion: versions.find(([version]) => version === revision)![1],
     versions, bases: [...state.bases], refusedSeqs, refusedRanges: ledger.refusedRanges ?? refusedRanges,
     refusedOutcomes: ledger.refusedOutcomes ?? [], statuses: [...state.statuses], selection: state.selection, readOnly: state.readOnly,
+    allowHostProposals: state.allowHostProposals === true,
     sheetIds: state.sheetIds, nextSheetId: state.nextSheetId, sheetRevision: state.sheetRevision,
     calculation: state.calculation, formats: [...state.formats], hostVersion: sessionState.version, dirty: sessionState.dirty,
     ...(ledger.historySelections ? { historySelections: ledger.historySelections } : {}) };
@@ -145,6 +147,7 @@ export function decodeWorkbookRecovery(bytes: Uint8Array): WorkbookRecovery {
   if (!value || !string(value.session) || !string(value.engineVersion) || !integer(value.epoch) || value.epoch === 0 ||
     ![value.throughSeq, value.revision, value.hostVersion, value.sheetRevision, value.nextSheetId].every(integer) ||
     typeof value.readOnly !== 'boolean' || typeof value.dirty !== 'boolean' ||
+    value.allowHostProposals !== undefined && typeof value.allowHostProposals !== 'boolean' ||
     !Array.isArray(value.sheetIds) || value.sheetIds.length === 0 || !value.sheetIds.every(string) ||
     new Set(value.sheetIds).size !== value.sheetIds.length ||
     value.sheetIds.some((id: string) => id.startsWith('command-sheet:') &&
@@ -182,7 +185,7 @@ export function decodeWorkbookRecovery(bytes: Uint8Array): WorkbookRecovery {
     engine.length === 0) invalid();
   if (value.calculation !== null && (!value.calculation || !Number.isFinite(value.calculation.nowSerial) ||
     !integer(value.calculation.randSeed) || value.calculation.randSeed > 0xffff_ffff)) invalid();
-  return { ...value, engine };
+  return { ...value, allowHostProposals: value.allowHostProposals === true, engine };
 }
 
 export function restoreWorkbookCommandState(handle: WorkbookHandle, recovery: WorkbookRecovery,
@@ -197,6 +200,7 @@ export function restoreWorkbookCommandState(handle: WorkbookHandle, recovery: Wo
     active.row < target.start.row || active.row > target.end.row ||
     active.col < target.start.col || active.col > target.end.col)) throw new TypeError('Invalid recovery selection');
   Object.assign(state, { throughSeq: recovery.throughSeq, readOnly: recovery.readOnly,
+    allowHostProposals: recovery.allowHostProposals === true,
     nextSheetId: recovery.nextSheetId, sheetRevision: recovery.sheetRevision,
     bases: new Map(recovery.bases), formats: new Map(recovery.formats), historyReset: recovery.historySelections === undefined,
     historySelections: structuredClone(recovery.historySelections ?? []).map((entry) => entry ?? undefined) });

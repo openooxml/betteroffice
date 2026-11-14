@@ -1,4 +1,21 @@
 import { test, expect, type Page } from 'playwright/test';
+import { selectionClock } from './selection-clock';
+import JSZip from 'jszip';
+
+type ProbeRect = { x: number; y: number; width: number; height: number };
+type ProbeEvent = { type: string; focused?: boolean; source?: string; viewport?: ProbeRect | null };
+type ProbeAnchor = { ok: true; rects: ProbeRect[] } | { ok: false; failure: { code: string } };
+interface DocxProbe {
+  editor: {
+    readParagraphs(request: unknown): Promise<{ ok: true; version: string; paragraphs: { paraId: string; text: string }[] } | { ok: false }>;
+    readSelectionInfo(): Promise<{ selectedText?: string } | null>;
+    flushPendingInput(): Promise<void>;
+  };
+  geometry: {
+    readAnchorGeometries(targets: unknown[]): Promise<ProbeAnchor[]>;
+    getAnchorGeometry(target: unknown): ProbeAnchor;
+  };
+}
 
 let peerless = false;
 
@@ -6,6 +23,12 @@ async function open(page: Page) {
   await page.goto(peerless ? '/?peerless=1' : '/');
   await expect(page.locator('canvas[data-page-index="0"]')).toBeVisible({ timeout: 120_000 });
   await expect(page.locator('[data-probe-page="0"]')).toBeAttached({ timeout: 60_000 });
+  if (await page.locator('.canvas-pages__column').count() === 0) return;
+  await expect(page.locator('[data-testid="probe-card"]').first()).toBeVisible({ timeout: 60_000 });
+  await expect.poll(() => page.evaluate(() => {
+    const column = document.querySelector<HTMLElement>('.canvas-pages__column')!;
+    return !!column.style.transform && column.getAnimations().length === 0;
+  }), { timeout: 10_000 }).toBe(true);
 }
 
 // Chromium's inspector holds an awaited promise weakly: a GC after it settles but before the reply
@@ -40,9 +63,281 @@ async function offsets(page: Page) {
   });
 }
 
+for (const engine of ['legacy', 'worker'] as const) {
+  test(`a plugin panel gesture clears formatting (${engine})`, async ({ page }) => {
+    await page.goto(engine === 'worker' ? '/?peerless=1' : '/?engine=legacy');
+    await expect(page.locator('canvas[data-page-index="0"]')).toBeVisible({ timeout: 120_000 });
+    await expect(page.locator('[data-probe-page="0"]')).toBeAttached({ timeout: 60_000 });
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+    zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+    zip.file('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Gesture text</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>');
+    const bytes = [...await zip.generateAsync({ type: 'uint8array' })];
+    type GestureProbe = { __probe: {
+      mutation: unknown;
+      nestedMutations: unknown[];
+      nativeClick: boolean | null;
+      runMutation(): Promise<unknown>;
+      editor: {
+        loadDocumentBuffer(buffer: ArrayBuffer): Promise<void>;
+        readParagraphs(request: { view: 'accepted' }): Promise<{ version: string }>;
+        commands: { getState(id: string): { active?: boolean | 'mixed' } };
+      };
+    } };
+    await operate(page, (data) => (window as unknown as GestureProbe).__probe.editor
+      .loadDocumentBuffer(Uint8Array.from(data).buffer), bytes);
+    const input = page.locator(engine === 'worker' ? '.paged-editor__input' : '[data-testid="yrs-input"]');
+    await input.focus();
+    await input.press('ControlOrMeta+Home');
+    await input.press('ControlOrMeta+Shift+ArrowRight');
+    const state = () => operate(page, async () => {
+      const editor = (window as unknown as GestureProbe).__probe.editor;
+      return { version: (await editor.readParagraphs({ view: 'accepted' })).version,
+        bold: editor.commands.getState('bold').active };
+    });
+    await expect.poll(async () => (await state()).bold).toBe(true);
+    const before = await state();
+    await expect(page.getByTestId('probe-mutation')).toHaveAttribute('data-version', before.version);
+    await page.getByTestId('probe-mutation').click();
+    await expect.poll(() => page.evaluate(() =>
+      (window as unknown as GestureProbe).__probe.mutation)).toMatchObject({ ok: true, status: 'executed' });
+    expect(await page.evaluate(() => (window as unknown as GestureProbe).__probe.nativeClick)).toBe(true);
+    await expect.poll(async () => (await state()).bold).toBe(false);
+    expect((await state()).version).not.toBe(before.version);
+    const after = await state();
+    expect(await operate(page, () => (window as unknown as GestureProbe).__probe.runMutation()))
+      .toMatchObject({ ok: false, failure: { code: 'unsupported-policy' } });
+    expect(await state()).toEqual(after);
+    await page.getByTestId('probe-nested-mutations').click();
+    await expect.poll(() => page.evaluate(() =>
+      (window as unknown as GestureProbe).__probe.nestedMutations)).toMatchObject([
+      { ok: false, failure: { code: 'unsupported-policy' } },
+      { ok: false, failure: { code: 'unsupported-policy' } },
+    ]);
+    expect(await state()).toEqual(after);
+    await page.getByTestId('probe-timer-mutation').click();
+    await expect.poll(() => page.evaluate(() =>
+      (window as unknown as GestureProbe).__probe.mutation)).toMatchObject({
+      ok: false, failure: { code: 'unsupported-policy' },
+    });
+    expect(await state()).toEqual(after);
+  });
+}
+
 for (const mode of ['hybrid', 'peerless'] as const) {
   test.describe(mode, () => {
     test.beforeEach(() => { peerless = mode === 'peerless'; });
+test('double-click settles once, preserves the word and anchors to its painted box', async ({ page }) => {
+  await open(page);
+  const word = await operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe }).__probe;
+    const read = await probe.editor.readParagraphs({ story: 'body', view: 'accepted' });
+    if (!read.ok) throw new Error('Paragraph read failed');
+    const paragraph = read.paragraphs.find((value) => /[A-Za-z]{3,}/.test(value.text))!;
+    const match = /[A-Za-z]{3,}/.exec(paragraph.text)!;
+    const [result] = await probe.geometry.readAnchorGeometries([{ kind: 'range', version: read.version,
+      range: { story: 'body', view: 'accepted', start: { paraId: paragraph.paraId, offset: match.index },
+        end: { paraId: paragraph.paraId, offset: match.index + match[0].length } } }]);
+    if (!result?.ok || !result.rects[0]) throw new Error('Word has no painted box');
+    const rect = result.rects[0];
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { text: match[0], x: layer.left + rect.x, y: layer.top + rect.y, width: rect.width, height: rect.height };
+  });
+  await page.waitForTimeout(400);
+  await page.evaluate(() => { (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = []; });
+  await page.mouse.dblclick(word.x + word.width / 2, word.y + word.height / 2);
+  const events = () => page.evaluate(() => (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+    .filter((event) => event.type === 'selection-settle'));
+  await expect.poll(async () => (await events()).length).toBe(1);
+  await page.waitForTimeout(400);
+  expect(await events()).toMatchObject([{ source: 'pointer' }]);
+  expect(await events()).toHaveLength(1);
+  const selected = await operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe }).__probe;
+    return (await probe.editor.readSelectionInfo())?.selectedText;
+  });
+  expect(selected?.trim()).toBe(word.text);
+  const rects = await page.evaluate(() => {
+    const geometry = (window as unknown as { __probe: DocxProbe }).__probe.geometry;
+    const result = geometry.getAnchorGeometry({ kind: 'selection' });
+    if (!result.ok) throw new Error(result.failure.code);
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return result.rects.map((rect) => ({ x: layer.left + rect.x, y: layer.top + rect.y, width: rect.width, height: rect.height }));
+  });
+  expect(rects.some((rect) => rect.x <= word.x + 1.5 && rect.y <= word.y + 1.5 &&
+    rect.x + rect.width >= word.x + word.width - 1.5 && rect.y + rect.height >= word.y + word.height - 1.5)).toBe(true);
+  const highlight = page.locator('[data-testid^="selection-rect-"], [data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246, 0.25)"]').first();
+  await expect(highlight).toBeVisible();
+  const painted = (await highlight.boundingBox())!;
+  expect(rects.some((rect) => rect.x <= painted.x + 1.5 && rect.y <= painted.y + 1.5 &&
+    rect.x + rect.width >= painted.x + painted.width - 1.5 && rect.y + rect.height >= painted.y + painted.height - 1.5)).toBe(true);
+});
+
+test('an in-thread range anchor matches the painted word from open through settle and relayout', async ({ page }) => {
+  await open(page);
+  const word = await operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe & { events: ProbeEvent[] } }).__probe;
+    const editor = (window as unknown as LooseProbe).__probe.editor;
+    const read = await probe.editor.readParagraphs({ story: 'body', view: 'accepted' });
+    if (!read.ok) throw new Error('Paragraph read failed');
+    const paragraph = read.paragraphs.find(value => /[A-Za-z]{3,}/.test(value.text))!;
+    const match = /[A-Za-z]{3,}/.exec(paragraph.text)!;
+    const target = { kind: 'range', version: read.version,
+      range: { story: 'body', view: 'accepted', start: { paraId: paragraph.paraId, offset: match.index },
+        end: { paraId: paragraph.paraId, offset: match.index + match[0].length } } };
+    const sample = async (label: string) => {
+      type Answer = Awaited<ReturnType<typeof probe.geometry.readAnchorGeometries>>[number] | undefined;
+      const deadline = performance.now() + 5_000;
+      let waitedFrames = 0;
+      let result: Answer;
+      for (;;) {
+        [result] = await probe.geometry.readAnchorGeometries([target]);
+        if (result?.ok || result?.failure.code !== 'layout-unavailable' || performance.now() > deadline) break;
+        waitedFrames += 1;
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      }
+      if (!result?.ok || !result.rects[0]) {
+        throw new Error(`${label}: word has no painted box (${result && !result.ok ? result.failure.code : 'no rect'})`);
+      }
+      const { layoutId, version } = result as typeof result & { layoutId: string; version: string };
+      return { label, rect: result.rects[0], layoutId, version, waitedFrames,
+        layoutEvents: probe.events.filter(event => event.type === 'layout-change').length };
+    };
+    const t0 = await sample('t0-open');
+    await document.fonts.ready;
+    await editor.whenLayoutComplete({ timeoutMs: 60_000 });
+    const t1 = await sample('t1-settled');
+    for (const zoom of [1.5, 1]) {
+      editor.setZoom(zoom);
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      await editor.whenLayoutComplete({ timeoutMs: 60_000 });
+    }
+    const t2 = await sample('t2-relayout');
+    return { text: match[0], reads: [t0, t1, t2] };
+  });
+  const point = await page.evaluate(rect => {
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { x: layer.left + rect.x, y: layer.top + rect.y + rect.height / 2, width: rect.width };
+  }, word.reads[2]!.rect);
+  await page.mouse.move(point.x + 0.1, point.y);
+  await page.mouse.down();
+  await page.mouse.move(point.x + point.width - 0.1, point.y, { steps: 8 });
+  await page.mouse.up();
+  const selected = await operate(page, async () => {
+    const { editor } = (window as unknown as { __probe: DocxProbe }).__probe;
+    await editor.flushPendingInput();
+    return (await editor.readSelectionInfo())?.selectedText;
+  });
+  const highlight = page.locator('[data-testid^="selection-rect-"], [data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246, 0.25)"]').first();
+  await highlight.waitFor({ state: 'visible' });
+  const painted = await highlight.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { x: rect.left - layer.left, y: rect.top - layer.top, width: rect.width, height: rect.height };
+  });
+  const coordinates = ['x', 'y', 'width', 'height'] as const;
+  const distance = (a: ProbeRect, b: ProbeRect) => Math.max(...coordinates.map(key => Math.abs(a[key] - b[key])));
+  console.log('ANCHOR-WAIT ' + JSON.stringify(word.reads.map(read => ({ label: read.label, waitedFrames: read.waitedFrames }))));
+  for (const read of word.reads) expect(read.waitedFrames, `${read.label} waited on a superseded context`).toBeLessThanOrEqual(6);
+  expect(distance(word.reads[0]!.rect, painted), JSON.stringify(word.reads)).toBeLessThanOrEqual(1);
+  expect(selected).toBe(word.text);
+  for (const read of word.reads.slice(1)) {
+    expect(distance(read.rect, painted), read.label).toBeLessThanOrEqual(1);
+  }
+  for (let index = 1; index < word.reads.length; index += 1) {
+    const previous = word.reads[index - 1]!;
+    const next = word.reads[index]!;
+    expect(distance(previous.rect, next.rect), `${previous.label} -> ${next.label}`).toBeLessThanOrEqual(1);
+    if (coordinates.some(key => previous.rect[key] !== next.rect[key])) {
+      expect(next.layoutId !== previous.layoutId || next.version !== previous.version,
+        JSON.stringify({ previous, next })).toBe(true);
+      expect(next.layoutEvents, JSON.stringify({ previous, next })).toBeGreaterThan(previous.layoutEvents);
+    }
+  }
+});
+
+test('T22: triple click then shift-arrow each settle once with current selection geometry', async ({ page }) => {
+  await page.addInitScript({ content: `window.__selectionClock = (${selectionClock.toString()})();` });
+  await open(page);
+  const tick = (ms: number) => page.evaluate(async value => {
+    await (window as unknown as { __selectionClock: { tick(ms: number): Promise<void> } }).__selectionClock.tick(value);
+  }, ms);
+  await tick(350);
+  await page.evaluate(() => { (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = []; });
+  const position = await operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe }).__probe;
+    const read = await probe.editor.readParagraphs({ story: 'body', view: 'accepted' });
+    if (!read.ok) throw new Error('Paragraph read failed');
+    const paragraph = read.paragraphs.find(candidate => candidate.text.length > 4)!;
+    const [result] = await probe.geometry.readAnchorGeometries([{ kind: 'range', version: read.version,
+      range: { story: 'body', view: 'accepted', start: { paraId: paragraph.paraId, offset: 0 }, end: { paraId: paragraph.paraId, offset: 4 } } }]);
+    if (!result?.ok || !result.rects[0]) throw new Error('No text box');
+    const box = result.rects[0];
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { x: layer.left + box.x + box.width / 2, y: layer.top + box.y + box.height / 2 };
+  });
+  await page.mouse.click(position.x, position.y, { clickCount: 3 });
+  const events = () => page.evaluate(() => (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events.filter(event => event.type === 'selection-settle'));
+  const ready = () => operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe }).__probe;
+    await probe.editor.flushPendingInput();
+    const [anchor] = await probe.geometry.readAnchorGeometries([{ kind: 'selection' }]);
+    return { anchor, text: (await probe.editor.readSelectionInfo())?.selectedText };
+  });
+  const triple = await ready();
+  expect(triple.anchor).toMatchObject({ ok: true });
+  expect(triple.text!.length).toBeGreaterThan(4);
+  await tick(349);
+  expect(await events()).toHaveLength(0);
+  await tick(1);
+  await expect.poll(async () => (await events()).length).toBe(1);
+  expect(await events()).toMatchObject([{ source: 'pointer' }]);
+  await page.evaluate(() => { (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = []; });
+  await page.keyboard.press('Shift+ArrowLeft');
+  const extended = await ready();
+  expect(extended.text).not.toBe(triple.text);
+  expect(extended.anchor).toMatchObject({ ok: true });
+  await tick(349);
+  expect(await events()).toHaveLength(0);
+  await tick(1);
+  await expect.poll(async () => (await events()).length).toBe(1);
+  expect(await events()).toMatchObject([{ source: 'keyboard' }]);
+  await tick(700);
+  expect(await events()).toHaveLength(1);
+});
+
+test('document focus excludes the plugin panel', async ({ page }) => {
+  await open(page);
+  const events = () => page.evaluate(() =>
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+      .filter((event) => event.type === 'focus-change'));
+  await page.getByTestId('probe-input').click();
+  await page.evaluate(() => {
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = [];
+  });
+  await page.locator('canvas[data-page-index="0"]').click({ position: { x: 100, y: 100 } });
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(true);
+  await page.getByTestId('probe-input').click();
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(false);
+  expect((await events()).map((event) => event.focused)).toEqual([true, false]);
+});
+
+test('scrolling moves the viewport in overlay pixels', async ({ page }) => {
+  await open(page);
+  const viewport = () => page.evaluate(() =>
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+      .filter((event) => event.type === 'viewport-change' && event.viewport !== null).at(-1));
+  await expect.poll(viewport).toMatchObject({ type: 'viewport-change' });
+  const before = (await viewport())!;
+  if (before.type !== 'viewport-change') throw new Error('Missing viewport');
+  const scroller = page.locator('.docx-editor__scroll-container');
+  await scroller.evaluate((element) => element.scrollBy(0, 180));
+  await expect.poll(async () => {
+    const next = await viewport();
+    return next?.type === 'viewport-change' ? next.viewport?.y : null;
+  }).toBeGreaterThan(before.viewport!.y);
+});
+
 test('managed overlays land on the rendered pages at every zoom', async ({ page }) => {
   await open(page);
   await expect(page.getByTestId('probe-card')).toBeVisible();
@@ -218,6 +513,37 @@ test('plugin toolbar commands work by pointer, shortcut and the keyboard overflo
   await expect.poll(marks).toBe(3);
 });
 
+test('the gesture wrapper adds no box around a sidebar card and keeps its size and scrolling', async ({ page }) => {
+  await open(page);
+  await expect(page.getByTestId('probe-card')).toBeVisible();
+  const layout = await page.getByTestId('probe-card').evaluate((button) => {
+    const wrapper = button.closest<HTMLElement>('[data-plugin-activation]')!;
+    const slot = wrapper.parentElement!;
+    const card = wrapper.firstElementChild as HTMLElement;
+    card.style.width = '100%';
+    card.style.boxSizing = 'border-box';
+    card.style.maxHeight = '40px';
+    card.style.overflow = 'auto';
+    const tall = document.createElement('div');
+    tall.style.height = '400px';
+    card.appendChild(tall);
+    card.scrollTop = 120;
+    return {
+      display: getComputedStyle(wrapper).display,
+      boxes: wrapper.getClientRects().length,
+      cardWidth: card.getBoundingClientRect().width,
+      slotWidth: slot.getBoundingClientRect().width,
+      cardHeight: card.getBoundingClientRect().height,
+      scrollTop: card.scrollTop,
+    };
+  });
+  expect(layout.display).toBe('contents');
+  expect(layout.boxes).toBe(0);
+  expect(layout.cardWidth).toBeCloseTo(layout.slotWidth, 1);
+  expect(layout.cardHeight).toBeLessThanOrEqual(40);
+  expect(layout.scrollTop).toBe(120);
+});
+
 test('sidebar cards make room for comments and start afresh after replacement', async ({
   page,
 }) => {
@@ -306,6 +632,9 @@ interface LooseProbe {
       layout: { version: string; pageCount: number };
       getPositionAtPoint(clientX: number, clientY: number): PointHit | null;
       readPositionAtPoint(clientX: number, clientY: number): Promise<PointHit | null>;
+      readAnchorGeometries(
+        targets: unknown[]
+      ): Promise<({ ok: true; rects: (ProbeRect & { pageIndex: number })[] } | { ok: false })[]>;
     };
   };
 }
@@ -403,7 +732,7 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
     await second.scrollIntoViewIfNeeded();
     await expect(second).toBeInViewport();
     const query = await operate(page, async (worker) => {
-      const { editor, geometry } = (window as unknown as LooseProbe).__probe;
+      const { editor } = (window as unknown as LooseProbe).__probe;
       const surface = document.querySelector('canvas[data-page-index="1"]')!;
       const canvas = surface.getBoundingClientRect();
       const session = worker ? null : editor.getEditorRef().getYrsSession();
@@ -412,8 +741,8 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
       let found: { x: number; y: number; hit: PointHit } | null = null;
       for (let fy = 0.1; fy < 0.9 && !found; fy += 0.01) {
         for (let fx = 0.15; fx < 0.8 && !found; fx += 0.02) {
-          const x = canvas.left + canvas.width * fx;
-          const y = canvas.top + canvas.height * fy;
+          const x = Math.trunc(canvas.left + canvas.width * fx);
+          const y = Math.trunc(canvas.top + canvas.height * fy);
           if (y < 0 || y > window.innerHeight) continue;
           if (document.elementFromPoint(x, y) !== surface) continue;
           const hit = worker ? await editor.readPositionAtPoint(x, y) : editor.getPositionAtPoint(x, y);
@@ -425,7 +754,10 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
       return {
         found,
         loc: found && (worker ? { paraId: found.hit.target.start.paraId, offset: found.hit.target.start.offset } : editor.getEditorRef().displayPositionToYrsLoc(found.hit)),
-        plugin: found && (worker ? await geometry.readPositionAtPoint(found.x, found.y) : geometry.getPositionAtPoint(found.x, found.y)),
+        plugin: found && await (async () => {
+          const current = (window as unknown as LooseProbe).__probe.geometry;
+          return worker ? current.readPositionAtPoint(found!.x, found!.y) : current.getPositionAtPoint(found!.x, found!.y);
+        })(),
         outside: worker ? await editor.readPositionAtPoint(canvas.left - 12, canvas.top + canvas.height / 2) : editor.getPositionAtPoint(canvas.left - 12, canvas.top + canvas.height / 2),
         unchanged:
           JSON.stringify(worker ? await editor.readSelectionInfo() : session!.selection()) === selection && document.activeElement === active,
@@ -436,6 +768,43 @@ test('a drop point on page 2 resolves like a caret click and inserts there at ev
     expect(query.outside).toBeNull();
     expect(query.unchanged).toBe(true);
     expect(query.plugin).toEqual({ ...hit, layoutId: expect.any(String) });
+
+    const fractional = await operate(page, async ({ worker, hit }: { worker: boolean; hit: PointHit }) => {
+      const { editor, geometry } = (window as unknown as LooseProbe).__probe;
+      const read = await editor.readParagraphs({ story: hit.target.story, view: 'accepted' });
+      const paragraph = read.paragraphs.find((value) => value.paraId === hit.target.start.paraId);
+      if (!paragraph) throw new Error(`Paragraph not found for paraId ${hit.target.start.paraId} in story ${hit.target.story}`);
+      const targets = Array.from({ length: paragraph.text.length }, (_, offset) => ({
+        kind: 'range',
+        version: read.version,
+        range: {
+          story: hit.target.story,
+          view: 'accepted',
+          start: { paraId: paragraph.paraId, offset },
+          end: { paraId: paragraph.paraId, offset: offset + 1 },
+        },
+      }));
+      const results = await geometry.readAnchorGeometries(targets);
+      const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+      let glyph: { offset: number; mid: number; y: number } | null = null;
+      for (let index = 0; index < results.length && !glyph; index += 1) {
+        const offset = (hit.target.start.offset + index) % results.length;
+        if (paragraph.text[offset] === ' ') continue;
+        const result = results[offset]!;
+        if (!result.ok) continue;
+        const rect = result.rects.find((value) => value.pageIndex === 1 && value.width >= 4);
+        if (rect) glyph = { offset, mid: layer.left + rect.x + rect.width / 2, y: layer.top + rect.y + rect.height / 2 };
+      }
+      if (!glyph) throw new Error('No glyph with a 4px advance on page 2');
+      const found = glyph;
+      const at = async (pointX: number) => {
+        const point = worker ? await editor.readPositionAtPoint(pointX, found.y) : editor.getPositionAtPoint(pointX, found.y);
+        return point ? { paraId: point.target.start.paraId, offset: point.target.start.offset } : null;
+      };
+      return { glyph: found, left: await at(found.mid - 0.25), right: await at(found.mid + 0.25) };
+    }, { worker: peerless, hit });
+    expect(fractional.left).toEqual({ paraId: hit.target.start.paraId, offset: fractional.glyph.offset });
+    expect(fractional.right).toEqual({ paraId: hit.target.start.paraId, offset: fractional.glyph.offset + 1 });
 
     await page.mouse.click(x, y);
     await expect

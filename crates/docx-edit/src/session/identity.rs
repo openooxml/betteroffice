@@ -170,6 +170,11 @@ impl EditSessionCore {
         }
     }
 
+    /// What the last [`Self::prime_save_seed_states_slice`] call charged against its `max_bytes`.
+    pub fn prime_last_slice_cost(&self) -> u64 {
+        self.engine.doc().prime_last_slice_cost()
+    }
+
     /// The paragraph IDs a save applies, as the package writer's
     /// `paragraphIds` request field: `{"assignments":[{"part","ordinal",
     /// "paraId"}],"patchedParts":[{"part","paraIds":[[ordinal,"ID"]]}]}`,
@@ -205,6 +210,7 @@ impl EditSessionCore {
                         "paragraphPatches": part.paragraph_patches,
                         "legacyParagraphs": part.legacy_paragraphs,
                         "tablePatches": part.table_patches,
+                        "formatOnly": part.format_only,
                         "inserted": part
                             .inserted
                             .iter()
@@ -217,6 +223,16 @@ impl EditSessionCore {
                     })
                 })
                 .collect::<Vec<_>>(),
+            "touchedParts": plan.touched_parts.iter().map(|(part, touched)| json!({
+                "part": part,
+                "touched": touched,
+            })).collect::<Vec<_>>(),
+            "wholeParts": plan.whole_parts.iter().map(|part| json!({
+                "part": part.part,
+                "sha256": part.sha256,
+                "paragraphs": part.paragraphs,
+                "changed": part.changed,
+            })).collect::<Vec<_>>(),
             "sectionSplicedParts": plan.section_spliced_parts.iter().map(|part| json!({
                 "part": part.part,
                 "sha256": part.sha256,
@@ -224,6 +240,7 @@ impl EditSessionCore {
                 "changed": part.changed,
                 "sectionOnly": part.section_only,
                 "tablePatches": part.table_patches,
+                "formatOnly": part.format_only,
                 "inserted": part.inserted.iter().map(|anchor| match anchor {
                     SpliceAnchor::Before(ordinal) => json!({ "before": ordinal }),
                     SpliceAnchor::After(ordinal) => json!({ "after": ordinal }),

@@ -319,16 +319,16 @@ pub(crate) fn analyze_keep_with_next_with_marks(
         let follower = if after_tail < measured.len()
             && !section_marks[after_tail]
             && !paragraph_breaks_before(&measured[after_tail].block)
-            && matches!(
-                measured[after_tail].block,
+            && match &measured[after_tail].block {
                 LayoutBlock::Paragraph(_)
-                    | LayoutBlock::Table(_)
-                    | LayoutBlock::Image(_)
-                    | LayoutBlock::Shape(_)
-                    | LayoutBlock::Chart(_)
-                    | LayoutBlock::TextBox(_)
-                    | LayoutBlock::Reserved(_)
-            ) {
+                | LayoutBlock::Table(_)
+                | LayoutBlock::Image(_)
+                | LayoutBlock::Shape(_)
+                | LayoutBlock::Chart(_)
+                | LayoutBlock::TextBox(_) => true,
+                LayoutBlock::Reserved(reserved) => !crate::endnote_flow::is_flowed(reserved),
+                _ => false,
+            } {
             Some(after_tail)
         } else {
             None

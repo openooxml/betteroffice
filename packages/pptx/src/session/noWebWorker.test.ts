@@ -26,16 +26,17 @@ test('worker sessions without a Web Worker name the in-thread API', async () => 
   expect(() => createPptxWorkerSession(new Uint8Array())).toThrow(message);
 });
 
-test('worker sessions without a Web Worker use worker_threads when available', async () => {
+test('a worker thread that fails to start fails the session with the thread error', async () => {
   const reached = new Error('Node adapter reached');
   let created = 0;
   Object.defineProperty(process, 'getBuiltinModule', { configurable: true, value: (name: string) => {
     expect(name).toBe('node:worker_threads');
     return { Worker: class { constructor() { created += 1; throw reached; } } };
   } });
-  await expect(openPresentationSession(new Uint8Array())).rejects.toBe(reached);
-  expect(() => createPptxWorkerEditorSession(new Uint8Array())).toThrow(reached.message);
-  expect(() => preparePresentationFontDecoder(new Uint8Array())).toThrow(reached.message);
-  expect(() => createPptxWorkerSession(new Uint8Array())).toThrow(reached.message);
+  await expect(openPresentationSession(new Uint8Array())).rejects.toThrow(reached.message);
+  await expect(createPptxWorkerEditorSession(new Uint8Array()).whenHydrated()).rejects.toThrow(reached.message);
+  const decoder = preparePresentationFontDecoder(new Uint8Array());
+  await expect(createPptxWorkerSession(new Uint8Array()).ready).rejects.toThrow(reached.message);
+  decoder.release();
   expect(created).toBe(4);
 });

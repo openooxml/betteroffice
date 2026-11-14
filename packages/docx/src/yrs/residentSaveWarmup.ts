@@ -1,3 +1,4 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { createEmptyDocx } from '../docx/rezip/createEmpty';
 import { createResidentSaveWarmupSession } from './residentEngineSession';
 
@@ -18,7 +19,7 @@ export async function warmResidentSave(yieldSave: () => Promise<void>): Promise<
     await yieldSave();
     await synthetic.save(source, hostJson, undefined, [], { full: false }, undefined, yieldSave);
   } catch (error) {
-    trapped = error instanceof WebAssembly.RuntimeError;
+    trapped = isEngineTrap(error);
     throw error;
   } finally {
     if (!trapped) synthetic.destroy();

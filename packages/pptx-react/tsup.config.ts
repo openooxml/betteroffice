@@ -1,8 +1,8 @@
-import { defineConfig } from 'tsup';
+import { defineConfig, type Options } from 'tsup';
 import { fileURLToPath } from 'node:url';
 import { packageBoundary } from '../../scripts/package-boundary';
 
-export default defineConfig({
+export const library: Options = {
   entry: { index: 'src/index.ts' },
   format: ['esm'],
   dts: true,
@@ -11,9 +11,11 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   minify: true,
-  external: ['react', 'react-dom', '@betteroffice/pptx'],
+  external: ['react', 'react-dom', '@betteroffice/pptx', '@betteroffice/fonts'],
   esbuildPlugins: [packageBoundary(fileURLToPath(new URL('.', import.meta.url)))],
   esbuildOptions(options) {
     options.chunkNames = 'chunk-[hash]';
   },
-});
+};
+
+export default defineConfig(library);

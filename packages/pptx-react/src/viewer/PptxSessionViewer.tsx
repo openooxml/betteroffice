@@ -1,3 +1,4 @@
+import type { ResolvedFontProps } from '../bundledFonts';
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
 import type { PresentationFrame } from '@betteroffice/pptx/worker';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -10,13 +11,14 @@ import type { PptxCommandEnvironment } from '../commands/evaluate';
 import { PptxCommandContext } from '../commands/PptxCommandProvider';
 import type { PptxCommandArgs, PptxCommandResult } from '../commands/types';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
+import { CLIPBOARD_IDS } from '../commands/shortcutKeys';
 import { EditorChromeContext } from '../components/EditorToolbarContext';
 import type { PptxZoom } from '../components/toolbarTypes';
 import { useTranslation } from '../i18n';
 import { currentContext } from './sessionPaint';
 import { useSessionPresentation, type ViewerSession } from './useSessionPresentation';
 
-export function PptxSessionViewer(props: PptxWorkerViewerProps) {
+export function PptxSessionViewer(props: ResolvedFontProps<PptxWorkerViewerProps>) {
   const { t } = useTranslation();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -86,7 +88,8 @@ export function PptxSessionViewer(props: PptxWorkerViewerProps) {
     return () => commands.detach(binding);
   }, [commands, binding]);
   useLayoutEffect(() => commands.refresh());
-  useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => false });
+  useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => false,
+    shortcuts: props.shortcuts, onShortcutIssue: props.onShortcutIssue, unsupported: CLIPBOARD_IDS });
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;

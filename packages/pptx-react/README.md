@@ -28,9 +28,20 @@ export function Presentation({ file, fontBytes }: {
 }
 ```
 
-`fonts` is required. Each entry is a family name and the bytes of a TTF or OTF file, for example
+`fonts` is required. Byte faces supply a family name and the bytes of a TTF or OTF file, for example
 fetched from your server or loaded with `loadBundledFontBytes` from
 [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts).
+You can also pass a bundled face from `@betteroffice/fonts` as a descriptor; the editor decodes it in its
+worker without loading the main-thread decoder. The face serves the font it substitutes
+(`face.metricCompatWith`, here Arial), or its own family when it substitutes none. `baseUrl` is where you self-host the font assets; omit it
+when your bundler emits the package's assets:
+
+```tsx
+import { resolveMetricCompatFace } from '@betteroffice/fonts';
+
+const arial = resolveMetricCompatFace('Arial', false, false)!;
+<PptxEditor file={file} fonts={[{ face: arial, baseUrl }]} />
+```
 
 ## Key options
 
@@ -40,7 +51,7 @@ optional except `fonts`.
 | prop | type | description |
 | --- | --- | --- |
 | `file` | `Uint8Array \| ArrayBuffer` | Presentation bytes to open. |
-| `fonts` | `ReadonlyArray<PptxFontFace>` | Font families and bytes for text layout. |
+| `fonts` | `ReadonlyArray<PptxFontFace \| PptxBundledFont>` | Font bytes or bundled face descriptors for text layout. |
 | `readOnly` | `boolean` | Block user edits while retaining navigation and selection. |
 | `initialSlide` | `number` | Initial slide, numbered from 1 and clamped to the deck. |
 | `fileName` | `string` | Download name; defaults to `presentation.pptx`. |
@@ -111,6 +122,29 @@ use `EditorToolbar` with `mode="commands"`.
 `pluginGrants`. This plugin API can change in minor releases.
 See [Host PPTX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-pptx-editor-plugins)
 for panels, overlays, lifecycle, permissions, and error handling.
+
+Plugins read `snapshot.focused` and `snapshot.locale`, and receive
+`focus-change` and `locale-change`. Focus covers the document surface; docked panels
+and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulting to `en`.
+`geometry.viewport` is the visible document area in overlay-layer pixels;
+`viewport-change` reports scroll, resize, or zoom changes, with `null` when no layout is shown.
+
+Granted mutating built-in commands require `document: "write"`. A trusted `click`, `keydown`,
+or `pointerup` in the plugin's own UI, including its contributed toolbar buttons, admits
+that plugin's mutating calls until the event finishes dispatching, including the handler
+and microtasks queued before it settles, whichever of the plugin's code paths makes them.
+Another plugin's calls and calls after the window closes refuse with `unsupported-policy`.
+
+`geometry.getAnchorGeometry(target)` accepts a `PptxGeometryTarget`: `selection`, or `range`
+with `version`, `slideId`, `shapeId`, `storyId`, `anchor`, and `focus` in UTF-16 story offsets.
+Selection anchors are live-only: a retained context whose selection has changed, including direction,
+returns `layout-unavailable`; use a range target to keep a position.
+Its `PptxAnchorGeometryResult` returns line rectangles, a focus-end anchor (a caret with
+empty `rects` when collapsed), and the slide's `pageRect` in overlay pixels, plus `version`
+and `layoutId`. Failures are `stale-version`, `missing-target`, or `layout-unavailable`.
+A layout that is no longer presented answers `layout-unavailable` before anything else; then a range from another version answers `stale-version`; then a missing selection answers `missing-target`, and a target on another slide or a slide without displayed bounds answers `layout-unavailable`.
+Shape and slide selections return their bounds. `readAnchorGeometries(targets)` returns
+the same answers in order as a promise, without pending results. Both APIs are experimental.
 
 ## Version-checked edit batches
 

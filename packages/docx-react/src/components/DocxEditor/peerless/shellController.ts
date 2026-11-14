@@ -19,6 +19,7 @@ import type { DocxCommandArgs, DocxCommandId, DocxCommandResult, DocxImageTransf
 import type { DocxCommentInsertion, DocxDocumentChange, DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import type { PeerlessViewSnapshot } from './viewStore';
+import { sameShellView } from './shellSnapshot';
 import { readWorkerSelection } from './clipboard';
 import type { PeerlessInputIntent } from './inputEvents';
 import { flushAdmittedInput, type PeerlessAdmissionResult, type PeerlessFormattingIntent } from './inputAdmission';
@@ -88,7 +89,7 @@ interface Options extends Pick<DocxEditorProps, 'i18n' | 'theme' | 'mode' | 'rea
   hostComments?: Comment[];
   commentsSidebar?: { open: boolean; control: DocxCommandEnvironment['sidebarControl']; toggle(): void };
   readPositionAtPoint?(x: number, y: number): Promise<import('../types').DocxPointPosition | null>;
-  perform?(id: DocxCommandId, args: unknown): Promise<DocxCommandResult>;
+  perform?(id: DocxCommandId, args: unknown, clipboardText?: Promise<string>): Promise<DocxCommandResult>;
   prepareFontFamily?(family: string): Promise<DocxFontEnvironment | void>;
   /** The worker accepted `environment` from {@link prepareFontFamily}. */
   fontEnvironmentApplied?(environment: DocxFontEnvironment): void;
@@ -106,6 +107,8 @@ export function createPeerlessShellController(initial: Options) {
   let snapshot: { status: 'empty' | 'opening' | 'ready' | 'failed'; view: PeerlessViewSnapshot | null; error: Error | null; mode: NonNullable<DocxEditorProps['mode']>; preview: ResidentEngineWorkerFrame | null; previewPainted: boolean } =
     { status: 'empty', view: null, error: null, mode: initial.mode ?? 'editing', preview: null, previewPainted: false };
   const listeners = new Set<() => void>();
+  let shellSnapshot = snapshot;
+  const shellListeners = new Set<() => void>();
   const waits = new Set<() => void>();
   let closed = false;
   const changes = new Set<(change: DocxDocumentChange) => void>();
@@ -161,8 +164,18 @@ export function createPeerlessShellController(initial: Options) {
     batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
     if (selected) selectionChanged(null);
   };
-  const publish = () => { snapshot = { ...snapshot, mode: mode() }; updateAuthor(); commands.refresh(); for (const listener of listeners) listener();
-    for (const wait of [...waits]) wait(); };
+  const publish = (frame = false) => {
+    snapshot = { ...snapshot, mode: mode() };
+    const shellChanged = !frame || shellSnapshot.status !== snapshot.status || shellSnapshot.error !== snapshot.error ||
+      shellSnapshot.mode !== snapshot.mode || shellSnapshot.preview !== snapshot.preview ||
+      shellSnapshot.previewPainted !== snapshot.previewPainted || !sameShellView(shellSnapshot.view, snapshot.view);
+    if (shellChanged) shellSnapshot = snapshot;
+    updateAuthor();
+    if (shellChanged) commands.refresh();
+    for (const listener of listeners) listener();
+    if (shellChanged) for (const listener of shellListeners) listener();
+    for (const wait of [...waits]) wait();
+  };
   const painted = () => { if (firstPainted) return; firstPainted = true; emit(options.onFirstPagePainted, undefined); };
   const reportMemory = () => {
     const stats = memoryStats();
@@ -181,7 +194,7 @@ export function createPeerlessShellController(initial: Options) {
       sidebarOpen: options.commentsSidebar?.open ?? false, sidebarControl: options.commentsSidebar?.control ?? 'fixed', zoom: options.zoom, zoomWhileOpening: true, tableGridlines: options.tableGridlines === true, canOpen: options.showFileOpen !== false, canReportIssue: options.showHelpMenu !== false,
       bodyStory: (view?.workerSelection?.focus.story ?? 'body') === 'body' || view?.workerSelection?.focus.story.startsWith('body:') === true, pendingInput: false,
       supportedCommands: new Set(['zoom', 'commentsSidebar', 'tableGridlines', 'open', 'save', 'print', 'reportIssue', 'undo', 'redo', 'find', 'replace', 'editingMode', 'pageSetup', 'paragraphSpacingDialog', 'watermark', 'imageProperties', 'imageWrap', 'imageTransform', 'insertTable', 'insertImage', 'tableAction',
-        'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', 'reviewAccept', 'reviewReject', 'reviewNext', 'reviewPrevious', ...FORMATTING_COMMANDS]),
+        'insertPageBreak', 'insertSectionBreakNextPage', 'insertSectionBreakContinuous', 'insertLink', 'reviewAccept', 'reviewReject', 'reviewNext', 'reviewPrevious', 'cut', 'copy', 'paste', 'pasteAsPlainText', 'selectAll', ...FORMATTING_COMMANDS]),
       tableActions: new Set(['selectTable', 'selectRow', 'selectColumn', 'addRowAbove', 'addRowBelow', 'addColumnLeft',
         'addColumnRight', 'deleteRow', 'deleteColumn', 'deleteTable', 'mergeCells', 'splitCell', 'cellFillColor',
         'borderAll', 'borderOutside', 'borderInside', 'borderNone', 'borderTop', 'borderBottom', 'borderLeft', 'borderRight',
@@ -405,7 +418,8 @@ export function createPeerlessShellController(initial: Options) {
       }
       return operation();
     },
-    async perform(id, args) {
+    readClipboardText: () => navigator.clipboard.readText(),
+    async perform(id, args, _env, clipboardText) {
       if (id === 'editingMode') {
         const next = (args as { mode: NonNullable<DocxEditorProps['mode']> }).mode;
         if (options.mode) { emit(options.onModeChange, next); return { ok: true, status: 'requested' }; }
@@ -592,7 +606,7 @@ export function createPeerlessShellController(initial: Options) {
         if (result && typeof result === 'object' && 'ok' in result) return result;
         return result === false ? { ok: false, failure: { code: 'command-failed', message: 'Image transform is unavailable.' } } : { ok: true, status: 'executed' };
       }
-      return options.perform?.(id, args) ?? { ok: false, failure: { code: 'unsupported-command', message: translate('commands.reasons.unsupportedCommand') } };
+      return options.perform?.(id, args, clipboardText) ?? { ok: false, failure: { code: 'unsupported-command', message: translate('commands.reasons.unsupportedCommand') } };
     },
     capture: (target) => {
       const current = capture();
@@ -983,6 +997,10 @@ export function createPeerlessShellController(initial: Options) {
     review: async () => readReview(await flush()),
     getSnapshot: () => snapshot,
     subscribe,
+    /** @internal Stable across frames that change only paint epochs or display page content. */
+    getShellSnapshot: () => shellSnapshot,
+    /** @internal Notifies when shell state changes; full frame consumers use subscribe. */
+    subscribeShell(listener: () => void) { shellListeners.add(listener); return () => { shellListeners.delete(listener); }; },
     update(next: Options) { options = next; translate = translation(next); syncBorderPen();
       if (snapshot.mode !== mode()) publish(); else { updateAuthor(); commands.refresh(); }
       reportMemory();
@@ -1065,7 +1083,7 @@ export function createPeerlessShellController(initial: Options) {
             emit(own.applied, view);
           }
         }
-        publish();
+        publish(true);
         if (ready && view.geometry?.pages.some(page => page.displayPage?.unbuilt !== true)) painted();
         if (previous && view.version !== previous.version) {
           const change = { version: String(view.version) };
@@ -1084,7 +1102,7 @@ export function createPeerlessShellController(initial: Options) {
       replace();
       reset('empty');
     },
-    dispose() { unsubscribe?.(); binding = null; batchResults.clear(); commentResults.clear(); appliedBatches.clear(); closed = true; publish(); commands.detach(commandBinding); listeners.clear(); changes.clear(); selections.clear(); },
+    dispose() { unsubscribe?.(); binding = null; batchResults.clear(); commentResults.clear(); appliedBatches.clear(); closed = true; publish(); commands.detach(commandBinding); listeners.clear(); shellListeners.clear(); changes.clear(); selections.clear(); },
   };
 }
 

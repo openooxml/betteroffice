@@ -1,10 +1,10 @@
 import { describe, expect, it, mock, spyOn } from 'bun:test';
 import { runInNewContext } from 'node:vm';
-import { createSessionClient } from './client';
-import { isHostMessage, type HostMessage } from './protocol';
+import { createSessionClient, supplyWasmFetch } from './client';
+import { isClientMessage, isHostMessage, type ClientMessage, type HostMessage } from './protocol';
+import { mainThreadWasmSpies } from './testing/wasmWorker';
 import type { SessionTransport } from './transport';
-import { compileWasm, createWorkerWasmInitializer } from './wasm';
-import { compileSessionWasm } from './nodeSessionScope';
+import { compileWasm, compileWasmAsset, createWorkerWasmInitializer } from './wasm';
 
 const WASM_BYTES = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
 const URL_INPUT = new URL('https://example.test/module.wasm');
@@ -277,7 +277,7 @@ describe('worker wasm compilation', () => {
       throw new Error(`Unexpected builtin ${name}`);
     } });
     try {
-      expect(await compileSessionWasm(url)).toBeInstanceOf(WebAssembly.Module);
+      expect(await compileWasmAsset(url)).toBeInstanceOf(WebAssembly.Module);
       expect(fileURLToPath).toHaveBeenCalledWith(url.href);
       expect(readFileSync).toHaveBeenCalledWith('/worker assets/module.wasm');
       expect(fetch).not.toHaveBeenCalled();
@@ -330,5 +330,184 @@ describe('worker wasm compilation', () => {
     } finally {
       for (const spy of [fetch, streaming, compile]) spy.mockRestore();
     }
+  });
+});
+
+describe('engine fetched by the client', () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
+  const engine = () => new Response(WASM_BYTES.slice(), { headers: { 'Content-Type': 'application/wasm' } });
+  function workerSide(compile = mock(async (_url: URL) => new WebAssembly.Module(WASM_BYTES))) {
+    const wire = transport([]);
+    const initialize = mock(async (_input: ArrayBuffer | WebAssembly.Module) => {});
+    const init = createWorkerWasmInitializer(wire, URL_INPUT, initialize, compile);
+    return { wire, initialize, init, compile };
+  }
+  const isModule = (value: unknown) => Object.prototype.toString.call(value) === '[object WebAssembly.Module]';
+
+  it('accepts an announced body, then compiles the stream or bytes without fetching', async () => {
+    for (const body of ['stream', 'bytes'] as const) {
+      const messages: HostMessage[] = [];
+      const wire = transport(messages);
+      const initialize = mock(async (_input: ArrayBuffer | WebAssembly.Module) => {});
+      const compile = mock(async (_url: URL) => new WebAssembly.Module(WASM_BYTES));
+      const init = createWorkerWasmInitializer(wire, URL_INPUT, initialize, compile);
+      wire.receive({ protocol: 1, kind: 'wasm-compile', pending: true });
+      expect(messages).toEqual([{ protocol: 1, kind: 'wasm-accept' }]);
+      const opening = init();
+      await settle();
+      expect(initialize).not.toHaveBeenCalled();
+      wire.receive(body === 'stream' ? { protocol: 1, kind: 'wasm-compile', stream: engine().body }
+        : { protocol: 1, kind: 'wasm-compile', bytes: WASM_BYTES.slice().buffer });
+      await opening;
+      expect(isModule(initialize.mock.calls[0]![0])).toBe(true);
+      expect(compile).not.toHaveBeenCalled();
+    }
+  });
+
+  it('compiles itself when the client gives up, and ignores a late body once compiling', async () => {
+    const fallback = workerSide();
+    fallback.wire.receive({ protocol: 1, kind: 'wasm-compile', pending: true });
+    const waiting = fallback.init();
+    fallback.wire.receive({ protocol: 1, kind: 'wasm-compile' });
+    await waiting;
+    expect(fallback.compile).toHaveBeenCalledTimes(1);
+    const late = workerSide();
+    late.wire.receive({ protocol: 1, kind: 'wasm-compile' });
+    const stream = engine().body!;
+    late.wire.receive({ protocol: 1, kind: 'wasm-compile', stream });
+    await late.init();
+    expect(late.compile).toHaveBeenCalledTimes(1);
+    await settle();
+    expect(stream.locked).toBe(false);
+  });
+
+  it('validates the new fields', () => {
+    expect(isClientMessage({ protocol: 1, kind: 'wasm-compile', pending: true })).toBe(true);
+    expect(isClientMessage({ protocol: 1, kind: 'wasm-compile', stream: engine().body })).toBe(true);
+    expect(isClientMessage({ protocol: 1, kind: 'wasm-compile', bytes: new ArrayBuffer(8) })).toBe(true);
+    expect(isClientMessage({ protocol: 1, kind: 'wasm-compile', pending: false })).toBe(false);
+    expect(isClientMessage({ protocol: 1, kind: 'wasm-compile', stream: {} })).toBe(false);
+    expect(isClientMessage({ protocol: 1, kind: 'wasm-compile', bytes: 'x' })).toBe(false);
+  });
+
+  function clientSide(cloneFails = false) {
+    const posted: { message: ClientMessage; transfer?: Transferable[] }[] = [];
+    const listeners = new Set<(message: unknown) => void>();
+    let closed = false;
+    const wire: SessionTransport = {
+      post: (message, transfer) => {
+        if (closed) throw new Error('closed');
+        if (cloneFails && transfer?.some((item) => item instanceof ReadableStream)) {
+          throw new DOMException('stream not transferable', 'DataCloneError');
+        }
+        posted.push({ message: message as ClientMessage, transfer });
+      },
+      listen: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+      onError: () => () => {}, close() { closed = true; },
+    };
+    const receive = (message: HostMessage) => { for (const listener of [...listeners]) listener(message); };
+    return { wire, posted, receive, accept: () => receive({ protocol: 1, kind: 'wasm-accept' }) };
+  }
+
+  it('hands the body over as a stream, or as bytes where streams cannot be transferred, never compiling here', async () => {
+    const spies = mainThreadWasmSpies();
+    const fetched = spyOn(globalThis, 'fetch').mockImplementation(async () => engine());
+    try {
+      const streaming = clientSide();
+      supplyWasmFetch(streaming.wire, new URL('https://example.test/stream.wasm'));
+      const copying = clientSide(true);
+      supplyWasmFetch(copying.wire, new URL('https://example.test/bytes.wasm'));
+      await settle();
+      expect(streaming.posted).toHaveLength(1);
+      streaming.accept();
+      copying.accept();
+      await settle();
+      expect(streaming.posted[0]!.message).toEqual({ protocol: 1, kind: 'wasm-compile', pending: true });
+      const stream = (streaming.posted[1]!.message as { stream?: ReadableStream }).stream;
+      expect(stream).toBeInstanceOf(ReadableStream);
+      expect(streaming.posted[1]!.transfer).toEqual([stream]);
+      const bytes = (copying.posted[1]!.message as { bytes?: ArrayBuffer }).bytes;
+      expect(bytes?.byteLength).toBe(WASM_BYTES.byteLength);
+      expect(copying.posted[1]!.transfer).toEqual([bytes]);
+      expect(fetched).toHaveBeenCalledTimes(2);
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      fetched.mockRestore();
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  it('never hands a body to a worker from before the handoff, and cancels it when that worker compiles its own', async () => {
+    const body = engine();
+    const cancelled = spyOn(body.body!, 'cancel');
+    const fetched = spyOn(globalThis, 'fetch').mockImplementation(async () => body);
+    try {
+      const old = clientSide();
+      supplyWasmFetch(old.wire, new URL('https://example.test/old-worker.wasm'));
+      await settle();
+      old.receive({ protocol: 1, kind: 'wasm-module', url: 'https://example.test/old-worker.wasm',
+        module: new WebAssembly.Module(WASM_BYTES) });
+      old.accept();
+      await settle();
+      expect(old.posted.map((entry) => entry.message)).toEqual([{ protocol: 1, kind: 'wasm-compile', pending: true }]);
+      expect(cancelled).toHaveBeenCalledTimes(1);
+    } finally { fetched.mockRestore(); }
+  });
+
+  it('aborts a fetch still waiting for headers when an old worker compiles first, and cancels a late body', async () => {
+    let signal: AbortSignal | undefined;
+    let deliver!: (response: Response) => void;
+    const fetched = spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve) => { deliver = resolve; });
+    });
+    try {
+      const old = clientSide();
+      supplyWasmFetch(old.wire, new URL('https://example.test/early-module.wasm'));
+      await settle();
+      old.receive({ protocol: 1, kind: 'wasm-module', url: 'https://example.test/early-module.wasm',
+        module: new WebAssembly.Module(WASM_BYTES) });
+      expect(signal?.aborted).toBe(true);
+      const late = engine();
+      const cancelled = spyOn(late.body!, 'cancel');
+      deliver(late);
+      await settle();
+      expect(cancelled).toHaveBeenCalledTimes(1);
+      expect(old.posted.map((entry) => entry.message)).toEqual([{ protocol: 1, kind: 'wasm-compile', pending: true }]);
+    } finally { fetched.mockRestore(); }
+  });
+
+  it('leaves the worker its own path after a failed fetch or off http(s), and stops on abort', async () => {
+    const unhandled = mock(() => {});
+    process.on('unhandledRejection', unhandled);
+    let signal: AbortSignal | undefined;
+    const fetched = spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (String(input).includes('missing')) return new Response('', { status: 404 });
+      if (String(input).includes('down')) throw new TypeError('network');
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      });
+    });
+    try {
+      const plain = [{ protocol: 1, kind: 'wasm-compile', pending: true }, { protocol: 1, kind: 'wasm-compile' }];
+      const missing = clientSide();
+      supplyWasmFetch(missing.wire, new URL('https://example.test/missing.wasm'));
+      const down = clientSide();
+      supplyWasmFetch(down.wire, new URL('https://example.test/down.wasm'));
+      const local = clientSide();
+      supplyWasmFetch(local.wire, new URL('file:///engine.wasm'));
+      const aborted = clientSide();
+      const abort = supplyWasmFetch(aborted.wire, new URL('https://example.test/slow.wasm'));
+      await settle();
+      abort();
+      await settle();
+      expect(missing.posted.map((entry) => entry.message)).toEqual(plain);
+      expect(down.posted.map((entry) => entry.message)).toEqual(plain);
+      expect(local.posted.map((entry) => entry.message)).toEqual([{ protocol: 1, kind: 'wasm-compile' }]);
+      expect(signal?.aborted).toBe(true);
+      expect(aborted.posted.map((entry) => entry.message)).toEqual([{ protocol: 1, kind: 'wasm-compile', pending: true }]);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally { fetched.mockRestore(); process.off('unhandledRejection', unhandled); }
   });
 });

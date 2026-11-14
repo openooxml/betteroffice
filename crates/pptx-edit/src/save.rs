@@ -61,7 +61,7 @@ impl DeckSession {
         }
         let autofit = resolve(&current, &baseline)?;
         let copy_origins = comment_copy_origins(&self.doc.transact())?;
-        let deck = deck_write(&current, &baseline, &self.package, &autofit, &copy_origins)?;
+        let deck = deck_write(&current, &baseline, self, &autofit, &copy_origins)?;
         pptx_parse::write_pptx_with_edits(&self.package, &deck)
             .map_err(|error| EditError::Write(error.to_string()))
     }
@@ -70,10 +70,11 @@ impl DeckSession {
 fn deck_write(
     current: &DeckSnapshot,
     baseline: &DeckSnapshot,
-    package: &PptxPackage,
+    session: &DeckSession,
     autofit: &HashMap<String, TextAutofit>,
     copy_origins: &HashMap<String, String>,
 ) -> EditResult<DeckWrite> {
+    let package = session.package();
     let baseline_slides: HashMap<&str, &SlideSnapshot> = baseline
         .slides
         .iter()
@@ -98,6 +99,7 @@ fn deck_write(
                     source_shapes(package, slide),
                     autofit,
                     &context,
+                    session,
                 )?,
                 background: background_write(slide, base),
                 layout_part_path: changed_layout(slide, base),
@@ -121,6 +123,7 @@ fn deck_write(
                         source_shapes(package, slide),
                         autofit,
                         &context,
+                        session,
                     )?,
                     background: background_write(slide, &base),
                     layout_part_path: changed_layout(slide, &base),
@@ -513,6 +516,7 @@ fn shape_writes(
     source: &[ShapeNode],
     autofit: &HashMap<String, TextAutofit>,
     context: &SlideParents<'_>,
+    session: &DeckSession,
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
         .iter()
@@ -535,6 +539,7 @@ fn shape_writes(
                         group_children(source, index),
                         autofit,
                         context,
+                        session,
                     )?),
                 }
             }
@@ -581,6 +586,7 @@ fn shape_patch(
     source_children: &[ShapeNode],
     autofit: &HashMap<String, TextAutofit>,
     context: &SlideParents<'_>,
+    session: &DeckSession,
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
     if shape.placeholder != base.placeholder {
@@ -689,6 +695,7 @@ fn shape_patch(
             source_children,
             autofit,
             context,
+            session,
         )?;
     }
     Ok(patch)
@@ -822,11 +829,13 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
             bold: run.style.bold,
             italic: run.style.italic,
             underline: run.style.underline.clone(),
+            strike: run.style.strike.clone(),
             caps: run.style.caps,
             font_family: run.style.font_family.clone(),
             color: run.style.color.as_deref().map(color_from_hex),
             language: None,
             hyperlink_relationship_id: None,
+            hyperlink_action: None,
             effects: None,
         },
     }
