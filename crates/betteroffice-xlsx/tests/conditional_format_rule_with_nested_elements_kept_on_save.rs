@@ -14,6 +14,7 @@ enum Placement {
     Direct,
     Ext,
     ExtWrapper,
+    ExtraFirst,
 }
 
 impl Placement {
@@ -22,8 +23,51 @@ impl Placement {
             Placement::Direct => "direct",
             Placement::Ext => "extLst/ext",
             Placement::ExtWrapper => "extLst/ext/wrapper",
+            Placement::ExtraFirst => "extLst/ext/extra-first",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Nested {
+    None,
+    Bare,
+    Dxf,
+}
+
+impl Nested {
+    fn label(self) -> &'static str {
+        match self {
+            Nested::None => "none",
+            Nested::Bare => "bare",
+            Nested::Dxf => "dxf",
+        }
+    }
+}
+
+struct Piece {
+    xml: String,
+    values: Vec<String>,
+    nested: bool,
+}
+
+fn markup(xml: &str) -> Piece {
+    Piece {
+        xml: xml.to_owned(),
+        values: Vec::new(),
+        nested: false,
+    }
+}
+
+fn values(parts: &[Piece]) -> Vec<String> {
+    parts.iter().flat_map(|part| part.values.clone()).collect()
+}
+
+// main_prefix: values up to the first nested closing tag; suffix: the values after it
+struct Fixture {
+    xml: String,
+    main_prefix: Vec<String>,
+    suffix: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -47,46 +91,109 @@ impl Edit {
     }
 }
 
-fn nested_element(prefixed: bool, children: bool, payload: bool) -> String {
+fn nested_element(prefixed: bool, nested: Nested, payload: bool) -> Piece {
     let p = if prefixed { "x14:" } else { "" };
+    if let Nested::None = nested {
+        return markup("");
+    }
     let mut inner = String::new();
+    let mut values = Vec::new();
     if payload {
         inner.push_str(&format!(
             r#"<{p}formula>$B$3&gt;0</{p}formula><{p}colorScale><{p}cfvo type="formula" val="$B$4"/></{p}colorScale>"#
         ));
+        values = vec!["$B$3>0".to_owned(), "$B$4".to_owned()];
     }
-    if children {
+    if let Nested::Dxf = nested {
         inner.push_str(&format!(r#"<{p}dxf><{p}font><{p}b/></{p}font></{p}dxf>"#));
     }
-    if inner.is_empty() {
+    let xml = if inner.is_empty() {
         format!(r#"<{p}cfRule type="expression" priority="9"/>"#)
     } else {
         format!(r#"<{p}cfRule type="expression" priority="9">{inner}</{p}cfRule>"#)
+    };
+    Piece {
+        xml,
+        values,
+        nested: true,
     }
 }
 
-fn nested_rule(placement: Placement, prefixed: bool, children: bool, payload: bool) -> String {
-    let nested = nested_element(prefixed, children, payload);
+fn nested_rule(placement: Placement, prefixed: bool, nested: Nested, payload: bool) -> Fixture {
+    let nested = nested_element(prefixed, nested, payload);
     // a formula and a formula cfvo below the rule's own children, inside its extLst
     let extra = if payload {
         r#"<x14:extra><x14:formula>$B$5</x14:formula><x14:cfvo type="formula" val="$B$6"/></x14:extra>"#
     } else {
         ""
     };
-    let body = match placement {
-        Placement::Direct => format!(
-            r#"{nested}<extLst><ext uri="urn:tail"><x14:tail v="KEEPME"/>{extra}</ext></extLst>"#
-        ),
-        Placement::Ext => format!(
-            r#"<extLst><ext uri="urn:nested">{nested}<x14:tail v="KEEPME"/>{extra}</ext></extLst>"#
-        ),
-        Placement::ExtWrapper => format!(
-            r#"<extLst><ext uri="urn:nested"><x14:wrapper>{nested}<x14:tail v="KEEPME"/></x14:wrapper>{extra}</ext></extLst>"#
-        ),
+    let extra = Piece {
+        xml: extra.to_owned(),
+        values: if payload {
+            vec!["$B$5".to_owned(), "$B$6".to_owned()]
+        } else {
+            Vec::new()
+        },
+        nested: false,
     };
-    format!(
-        r#"<cfRule type="expression" dxfId="0" priority="1"><formula>$B$1&gt;0</formula>{body}</cfRule>"#
-    )
+    let own = Piece {
+        xml: "<formula>$B$1&gt;0</formula>".to_owned(),
+        values: vec!["$B$1>0".to_owned()],
+        nested: false,
+    };
+    let (open, tail, close) = (
+        r#"<extLst><ext uri="urn:nested">"#,
+        r#"<x14:tail v="KEEPME"/>"#,
+        "</ext></extLst>",
+    );
+    let parts = match placement {
+        Placement::Direct => vec![
+            own,
+            nested,
+            markup(r#"<extLst><ext uri="urn:tail">"#),
+            markup(tail),
+            extra,
+            markup(close),
+        ],
+        Placement::Ext => vec![
+            own,
+            markup(open),
+            nested,
+            markup(tail),
+            extra,
+            markup(close),
+        ],
+        Placement::ExtWrapper => vec![
+            own,
+            markup(open),
+            markup("<x14:wrapper>"),
+            nested,
+            markup(tail),
+            markup("</x14:wrapper>"),
+            extra,
+            markup(close),
+        ],
+        Placement::ExtraFirst => vec![
+            own,
+            markup(open),
+            extra,
+            nested,
+            markup(tail),
+            markup(close),
+        ],
+    };
+    let split = parts
+        .iter()
+        .position(|part| part.nested)
+        .map_or(parts.len(), |at| at + 1);
+    let body: String = parts.iter().map(|part| part.xml.as_str()).collect();
+    Fixture {
+        xml: format!(
+            r#"<cfRule type="expression" dxfId="0" priority="1">{body}</cfRule>"#
+        ),
+        main_prefix: values(&parts[..split]),
+        suffix: values(&parts[split..]),
+    }
 }
 
 fn worksheet(groups: &str) -> String {
@@ -410,7 +517,17 @@ fn op_for(edit: Edit, wb: &Workbook) -> Result<Option<Op>, String> {
     }
 }
 
-fn run_case(case: &str, source_rule: &str, edit: Edit) -> Vec<String> {
+fn panic_text(panic: Box<dyn std::any::Any + Send>) -> String {
+    let text = panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .unwrap_or_default();
+    format!("panicked {text}")
+}
+
+fn run_case(case: &str, fixture: &Fixture, edit: Edit) -> Vec<String> {
+    let source_rule = fixture.xml.as_str();
     let mut problems = Vec::new();
     let mut wb = match Workbook::open(&package(&sheet(source_rule))) {
         Ok(wb) => wb,
@@ -420,6 +537,18 @@ fn run_case(case: &str, source_rule: &str, edit: Edit) -> Vec<String> {
         }
     };
     print_reading(case, &wb);
+    let expected: Vec<String> = fixture
+        .main_prefix
+        .iter()
+        .chain(&fixture.suffix)
+        .cloned()
+        .collect();
+    let read = wb.model().sheets[0]
+        .conditional_formats
+        .first()
+        .and_then(|group| group.rules.first())
+        .map(|rule| rule.formulas.clone());
+    assert_eq!(read, Some(expected), "case={case} rule=0.0 formulas");
     match op_for(edit, &wb) {
         Ok(None) => {}
         Ok(Some(op)) => {
@@ -457,6 +586,33 @@ fn run_case(case: &str, source_rule: &str, edit: Edit) -> Vec<String> {
     problems
 }
 
+fn grid_case(
+    placement: Placement,
+    prefixed: bool,
+    nested: Nested,
+    payload: bool,
+    edit: Edit,
+) -> Option<String> {
+    let fixture = nested_rule(placement, prefixed, nested, payload);
+    let case = format!(
+        "at={},prefix={},nested={},payload={},op={}",
+        placement.label(),
+        if prefixed { "x14" } else { "none" },
+        nested.label(),
+        if payload { "formula+cfvo" } else { "none" },
+        edit.id()
+    );
+    if !matches!(nested, Nested::None) {
+        println!(
+            "EXPECT case={case} main_prefix={:?} suffix={:?}",
+            fixture.main_prefix, fixture.suffix
+        );
+    }
+    let problems = std::panic::catch_unwind(|| run_case(&case, &fixture, edit))
+        .unwrap_or_else(|panic| vec![panic_text(panic)]);
+    (!problems.is_empty()).then(|| format!("{case}: {}", problems.join("; ")))
+}
+
 #[test]
 fn conditional_format_rule_with_nested_elements_is_kept_on_save() {
     let edits = [
@@ -470,29 +626,23 @@ fn conditional_format_rule_with_nested_elements_is_kept_on_save() {
     let mut failures = Vec::new();
     for placement in [Placement::Direct, Placement::Ext, Placement::ExtWrapper] {
         for prefixed in [false, true] {
-            for children in [false, true] {
+            for nested in [Nested::None, Nested::Bare, Nested::Dxf] {
                 for payload in [false, true] {
-                    let rule = nested_rule(placement, prefixed, children, payload);
                     for edit in edits {
                         total += 1;
-                        let case = format!(
-                            "at={},prefix={},nested={},payload={},op={}",
-                            placement.label(),
-                            if prefixed { "x14" } else { "none" },
-                            if children { "dxf" } else { "bare" },
-                            if payload { "formula+cfvo" } else { "none" },
-                            edit.id()
-                        );
-                        let problems = std::panic::catch_unwind(|| run_case(&case, &rule, edit))
-                            .unwrap_or_else(|_| vec!["panicked".to_owned()]);
-                        if !problems.is_empty() {
-                            failures.push(format!("{case}: {}", problems.join("; ")));
-                        }
+                        failures.extend(grid_case(placement, prefixed, nested, payload, edit));
                     }
                 }
             }
         }
     }
+    // extra values ahead of the nested element: main already reads every value
+    let first = nested_rule(Placement::ExtraFirst, true, Nested::Dxf, true);
+    let order = ["$B$1>0", "$B$5", "$B$6", "$B$3>0", "$B$4"];
+    assert_eq!(first.main_prefix, order.map(str::to_owned).to_vec());
+    assert!(first.suffix.is_empty(), "suffix {:?}", first.suffix);
+    total += 1;
+    failures.extend(grid_case(Placement::ExtraFirst, true, Nested::Dxf, true, Edit::None));
     failures.sort_by_key(String::len);
     let failed = failures.len();
     let shortest = failures.iter().take(10).cloned().collect::<Vec<_>>();
@@ -518,9 +668,13 @@ fn rule_formula_in_ext_list_is_rewritten_by_sheet_rename() {
         sheet: SheetId(1),
         name: "Info".into(),
     };
-    if let Err(error) = wb.apply_ops(vec![rename], CalculationOptions::default()) {
-        panic!("RenameSheet Data -> Info refused: {error:?}");
-    }
+    let result = wb.apply_ops(vec![rename], CalculationOptions::default());
+    assert!(
+        result.is_ok(),
+        "RenameSheet Data -> Info refused: {:?}",
+        result.as_ref().err()
+    );
+    result.unwrap();
     let renamed = vec!["Info!$A$1>0".to_owned(), "Info!$B$1".to_owned()];
     assert_eq!(rule_formulas(&wb), renamed);
     let saved = wb.save().unwrap();
