@@ -126,7 +126,9 @@ fn caret_anchor_resolves_to_none_once_its_slide_is_deleted() {
     let (session, story) = session_with_text("ABC");
     let anchor = session.anchor_caret(&story, 2).unwrap();
     let (slide, _) = story_home(&session, &story);
-    session.delete_slide(&EditCtx::local("test"), &slide).unwrap();
+    session
+        .delete_slide(&EditCtx::local("test"), &slide)
+        .unwrap();
     assert_eq!(session.resolve_caret_anchor(&anchor), None);
 }
 
@@ -135,7 +137,9 @@ fn caret_anchor_resolves_to_none_once_its_shape_is_removed() {
     let (session, story) = session_with_text("ABC");
     let anchor = session.anchor_caret(&story, 2).unwrap();
     let (slide, shape) = story_home(&session, &story);
-    session.remove_shape(&EditCtx::local("test"), &slide, &shape).unwrap();
+    session
+        .remove_shape(&EditCtx::local("test"), &slide, &shape)
+        .unwrap();
     assert_eq!(session.resolve_caret_anchor(&anchor), None);
 }
 
@@ -144,7 +148,9 @@ fn caret_anchor_resolves_again_after_its_slide_deletion_is_undone() {
     let (session, story) = session_with_text("ABC");
     let anchor = session.anchor_caret(&story, 2).unwrap();
     let (slide, _) = story_home(&session, &story);
-    session.delete_slide(&EditCtx::local("test"), &slide).unwrap();
+    session
+        .delete_slide(&EditCtx::local("test"), &slide)
+        .unwrap();
     assert!(session.undo());
     assert_eq!(session.resolve_caret_anchor(&anchor), Some(2));
 }
@@ -163,7 +169,9 @@ fn caret_anchor_on_a_remaining_slide_survives_another_slide_deletion() {
         .unwrap()
         .id
         .clone();
-    session.delete_slide(&EditCtx::local("test"), &other).unwrap();
+    session
+        .delete_slide(&EditCtx::local("test"), &other)
+        .unwrap();
     assert_eq!(session.resolve_caret_anchor(&anchor), Some(2));
 }
 
@@ -245,7 +253,9 @@ fn caret_anchor_in_a_group_child_survives_another_slide_deletion() {
         .clone();
     let anchor = session.anchor_caret(&story, 1).unwrap();
     let other = snapshot.slides[1].id.clone();
-    session.delete_slide(&EditCtx::local("test"), &other).unwrap();
+    session
+        .delete_slide(&EditCtx::local("test"), &other)
+        .unwrap();
     assert_eq!(session.resolve_caret_anchor(&anchor), Some(1));
 }
 
@@ -267,8 +277,12 @@ fn caret_anchor_resolves_to_none_once_its_table_row_is_deleted() {
         )
         .unwrap();
     session.add_undo_barrier();
-    let anchor = session.anchor_caret(&table_cell(&session, 1, 0), 1).unwrap();
-    session.delete_table_row(&context, &slide, &shape, 1).unwrap();
+    let anchor = session
+        .anchor_caret(&table_cell(&session, 1, 0), 1)
+        .unwrap();
+    session
+        .delete_table_row(&context, &slide, &shape, 1)
+        .unwrap();
     assert_eq!(session.resolve_caret_anchor(&anchor), None);
 }
 
@@ -280,7 +294,9 @@ fn an_anchor_taken_before_a_row_insert_resolves_to_none() {
     let shape = snapshot.slides[0].shapes[0].id.clone();
     let context = EditCtx::local("test");
     session.add_undo_barrier();
-    let anchor = session.anchor_caret(&table_cell(&session, 0, 0), 0).unwrap();
+    let anchor = session
+        .anchor_caret(&table_cell(&session, 0, 0), 0)
+        .unwrap();
     session
         .insert_table_row(
             &context,
@@ -312,8 +328,12 @@ fn an_anchor_in_another_row_taken_before_a_row_delete_resolves_to_none() {
         )
         .unwrap();
     session.add_undo_barrier();
-    let anchor = session.anchor_caret(&table_cell(&session, 0, 0), 0).unwrap();
-    session.delete_table_row(&context, &slide, &shape, 1).unwrap();
+    let anchor = session
+        .anchor_caret(&table_cell(&session, 0, 0), 0)
+        .unwrap();
+    session
+        .delete_table_row(&context, &slide, &shape, 1)
+        .unwrap();
     assert_eq!(session.resolve_caret_anchor(&anchor), None);
 }
 
@@ -345,7 +365,9 @@ fn caret_anchor_survives_moving_its_slide() {
     let (session, story) = session_with_text("ABC");
     let anchor = session.anchor_caret(&story, 2).unwrap();
     let (slide, _) = story_home(&session, &story);
-    session.move_slide(&EditCtx::local("test"), &slide, 1).unwrap();
+    session
+        .move_slide(&EditCtx::local("test"), &slide, 1)
+        .unwrap();
     assert_eq!(session.snapshot().unwrap().slides[1].id, slide);
     assert_eq!(session.resolve_caret_anchor(&anchor), Some(2));
 }
@@ -355,7 +377,9 @@ fn caret_anchor_follows_undo_and_redo_of_its_shape_removal() {
     let (session, story) = session_with_text("ABC");
     let anchor = session.anchor_caret(&story, 2).unwrap();
     let (slide, shape) = story_home(&session, &story);
-    session.remove_shape(&EditCtx::local("test"), &slide, &shape).unwrap();
+    session
+        .remove_shape(&EditCtx::local("test"), &slide, &shape)
+        .unwrap();
     session.add_undo_barrier();
     assert_eq!(session.resolve_caret_anchor(&anchor), None);
     assert!(session.undo());
