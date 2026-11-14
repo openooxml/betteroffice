@@ -202,21 +202,49 @@ fn one_page_per_paragraph_docx(pages: usize, first_attributes: &str) -> Vec<u8> 
 }
 
 fn docx_with_body(body: &str) -> Vec<u8> {
+    docx_with_header_and_body(None, body)
+}
+
+/// [`docx_with_body`] with a default header holding `header` when one is given.
+fn docx_with_header_and_body(header: Option<&str>, body: &str) -> Vec<u8> {
     let namespaces = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
+    let header_reference = if header.is_some() {
+        r#"<w:headerReference w:type="default" r:id="rIdHeader1"/>"#
+    } else {
+        ""
+    };
+    let header_override = if header.is_some() {
+        r#"<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>"#
+    } else {
+        ""
+    };
     let document = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {namespaces}><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>"#
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document {namespaces}><w:body>{body}<w:sectPr>{header_reference}<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>"#
     );
-    let parts = vec![
-        (
-            "[Content_Types].xml".to_owned(),
-            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
-        ),
+    let content_types = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>{header_override}</Types>"#
+    );
+    let mut parts = vec![
+        ("[Content_Types].xml".to_owned(), content_types.into_bytes()),
         (
             "_rels/.rels".to_owned(),
             br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
         ),
         ("word/document.xml".to_owned(), document.into_bytes()),
     ];
+    if let Some(header) = header {
+        parts.push((
+            "word/_rels/document.xml.rels".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#.to_vec(),
+        ));
+        parts.push((
+            "word/header1.xml".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr {namespaces}>{header}</w:hdr>"#
+            )
+            .into_bytes(),
+        ));
+    }
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
@@ -378,6 +406,88 @@ fn an_unreadable_paragraph_renders_as_the_saved_render_does() {
         format!("{:?}", fast.as_ref().err()),
         format!("{:?}", saved.as_ref().err())
     );
+}
+
+const UNREADABLE_INSERTION: &str = r#"<w:ins w:id="100000000000000000000" w:author="Author" w:date="2024-01-01T00:00:00Z"><w:r><w:t>Inserted</w:t></w:r></w:ins>"#;
+
+/// Asserts `page` renders through the save, with what the saved render returns.
+fn assert_renders_through_the_save(document: &Document, page: usize, label: &str) {
+    let target = PngTarget { page };
+    let options = RenderOptions::default();
+    let saved = document.render_png_saved(target, &options);
+    let before = model_renders();
+    let fast = document.render_png(target, &options);
+    assert_render_path(before, false, label);
+    match (&fast, &saved) {
+        (Ok(fast), Ok(saved)) => {
+            assert!(fast == saved, "{label}: the PNG differs from the saved render");
+        }
+        _ => assert_eq!(
+            format!("{:?}", fast.as_ref().err()),
+            format!("{:?}", saved.as_ref().err()),
+            "{label}"
+        ),
+    }
+}
+
+/// Three pages, the last holding an unreadable paragraph when `unreadable` is set.
+fn pages_before_an_unreadable_paragraph(unreadable: bool) -> Vec<u8> {
+    let mut body = concat!(
+        r#"<w:p w14:paraId="00000001" w14:textId="77777777"><w:r><w:t>Page 0</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000002" w14:textId="77777777"><w:r><w:br w:type="page"/></w:r><w:r><w:t>Page 1</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000003" w14:textId="77777777"><w:r><w:br w:type="page"/></w:r></w:p>"#,
+    )
+    .to_owned();
+    if unreadable {
+        body.push_str(&format!(
+            r#"<w:p w14:paraId="00000004" w14:textId="77777777">{UNREADABLE_INSERTION}</w:p>"#
+        ));
+    }
+    docx_with_body(&body)
+}
+
+#[test]
+fn a_resident_conversion_error_renders_as_the_saved_render_does() {
+    let header = format!(
+        r#"<w:p w14:paraId="00000010" w14:textId="77777777">{UNREADABLE_INSERTION}</w:p>"#
+    );
+    let document = open(&docx_with_header_and_body(
+        Some(&header),
+        r#"<w:p w14:paraId="00000001" w14:textId="77777777"><w:r><w:t>Body</w:t></w:r></w:p>"#,
+    ));
+    assert_renders_through_the_save(&document, 0, "an unreadable header");
+}
+
+#[test]
+fn a_page_without_the_unreadable_paragraph_renders_from_the_model() {
+    let document = open(&pages_before_an_unreadable_paragraph(true));
+    let readable = open(&pages_before_an_unreadable_paragraph(false));
+    let options = RenderOptions::default();
+    for page in [0, 1] {
+        let target = PngTarget { page };
+        let before = model_renders();
+        let rendered = document
+            .render_png(target, &options)
+            .unwrap_or_else(|error| panic!("page {page}: {error}"));
+        assert_render_path(before, true, &format!("page {page}"));
+        let expected = readable.render_png(target, &options).unwrap();
+        assert!(
+            rendered == expected,
+            "page {page}: the PNG differs from the document without the unreadable paragraph"
+        );
+    }
+}
+
+#[test]
+fn the_page_of_an_unreadable_paragraph_fails_as_the_saved_render_does() {
+    let document = open(&pages_before_an_unreadable_paragraph(true));
+    let saved = document.render_png_saved(PngTarget { page: 2 }, &RenderOptions::default());
+    assert!(
+        matches!(saved, Err(Error::Render(_))),
+        "unexpected saved render: {:?}",
+        saved.as_ref().err()
+    );
+    assert_renders_through_the_save(&document, 2, "the unreadable paragraph's page");
 }
 
 #[test]
