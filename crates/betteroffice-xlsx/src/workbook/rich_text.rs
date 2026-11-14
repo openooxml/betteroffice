@@ -1,3 +1,6 @@
+use std::cell::OnceCell;
+use std::collections::HashSet;
+
 use xlsx_model::{CellRef, CellValue, RichRun, SheetId};
 
 use super::Workbook;
@@ -47,7 +50,12 @@ impl Workbook {
 
     /// Whether a rewrite of `cell` could flatten source runs: `false` only when its text is
     /// known to be plain, in every session kind.
-    pub(super) fn cell_text_may_be_rich(&self, sheet: SheetId, cell: CellRef) -> bool {
+    pub(super) fn cell_text_may_be_rich(
+        &self,
+        sheet: SheetId,
+        cell: CellRef,
+        rich_texts: &OnceCell<HashSet<String>>,
+    ) -> bool {
         let Some(current) = self.model.sheet(sheet).and_then(|cells| cells.cell(cell)) else {
             return false;
         };
@@ -91,20 +99,22 @@ impl Workbook {
                 };
                 match source_cell {
                     Some(at) => facts.rich_inline.get(&(at.row, at.col)) == Some(value),
-                    None => {
-                        (0..package.source_sheet_count()).any(|index| {
-                            package.source_cell_facts(index).is_some_and(|facts| {
-                                facts.rich_inline.values().any(|rich| rich == value)
-                            })
-                        }) || package
-                                .original_workbook()
-                                .shared_strings
-                                .iter()
-                                .enumerate()
-                                .any(|(index, text)| {
-                                    package.shared_string_is_rich(index) && text == value
-                                })
-                    }
+                    None => rich_texts
+                        .get_or_init(|| {
+                            let shared = &package.original_workbook().shared_strings;
+                            (0..package.source_sheet_count())
+                                .filter_map(|index| package.source_cell_facts(index))
+                                .flat_map(|facts| facts.rich_inline.values().cloned())
+                                .chain(
+                                    shared
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(index, _)| package.shared_string_is_rich(*index))
+                                        .map(|(_, text)| text.clone()),
+                                )
+                                .collect()
+                        })
+                        .contains(value),
                 }
             }
         }

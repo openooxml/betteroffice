@@ -1074,6 +1074,7 @@ impl Workbook {
                 let sheet_ref = &self.model.sheets[resolved.sheet.0 as usize];
                 let mut states = Vec::new();
                 let mut stats = ReplaceStats::default();
+                let rich_texts = std::cell::OnceCell::new();
                 let searched = match within {
                     ReplaceWithin::Sheet => self.is_worksheet(resolved.sheet),
                     ReplaceWithin::Workbook => self.searched_by_default(resolved.sheet.0 as usize),
@@ -1149,7 +1150,7 @@ impl Workbook {
                         continue;
                     }
                     let place = format!("{}!{}", sheet_ref.name, cell.to_a1());
-                    if self.cell_text_may_be_rich(resolved.sheet, cell) {
+                    if self.cell_text_may_be_rich(resolved.sheet, cell, &rich_texts) {
                         let reason = if self
                             .cell_text_runs(resolved.sheet, cell)
                             .is_some_and(|runs| !runs.is_empty())
