@@ -18,7 +18,8 @@ export interface RowExpectation {
   /** Distinguishes a second row of the same method in test names. */
   name?: string;
   mutates?: boolean;
-  throws?: { name: string; reason: string };
+  /** `message`, when set, must be contained in (string) or match (RegExp) the error message. */
+  throws?: { name: string; reason: string; message?: string | RegExp };
   voidReason?: string;
 }
 
@@ -207,13 +208,26 @@ export async function runKnownDifference<T>(
   throw new Error(`${name}: both engines now agree; remove the knownDifferences entry`);
 }
 
+function freshPattern(pattern: RegExp): RegExp {
+  return new RegExp(pattern.source, pattern.flags);
+}
+
+function matchesAnyMessage(message: string | RegExp | undefined): boolean {
+  if (message === undefined) return false;
+  return typeof message === 'string' ? message === '' : freshPattern(message).test('');
+}
+
 /** An agreed outcome still has to be the declared one: an error needs `throws`, `undefined` needs `mutates` or `voidReason`. */
 export function expectDeclaredOutcome(row: RowExpectation, outcome: Outcome): void {
   const name = rowName(row);
   if ('error' in outcome) {
     const { error } = outcome;
     if (!row.throws) throw new Error(`${name}: both engines threw ${error.name}: ${error.message}`);
+    const { message } = row.throws;
+    if (matchesAnyMessage(message)) throw new Error(`${name}: throws message matches any error message`);
     expect(error.name, `${name} error`).toBe(row.throws.name);
+    if (typeof message === 'string') expect(error.message, `${name} error message`).toContain(message);
+    else if (message) expect(error.message, `${name} error message`).toMatch(freshPattern(message));
     return;
   }
   if (row.throws) throw new Error(`${name}: declares throws ${row.throws.name} but both engines returned a value`);
@@ -341,6 +355,7 @@ export function coverageProblems(surface: readonly string[], plan: CoveragePlan)
     if (names.has(name)) problems.push(`${name}: two rows share this name; give a variant its own name`);
     names.add(name);
     if (row.throws && row.throws.reason.trim() === '') problems.push(`${name}: throws needs a reason`);
+    if (matchesAnyMessage(row.throws?.message)) problems.push(`${name}: throws message matches any error message`);
     if (row.voidReason !== undefined && row.voidReason.trim() === '') problems.push(`${name}: voidReason is empty`);
   }
   return problems;
