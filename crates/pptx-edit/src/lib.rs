@@ -22,6 +22,8 @@ mod inherit;
 mod metafile;
 mod model;
 mod outline_gradients;
+#[cfg(test)]
+mod owner_lookup_tests;
 pub mod paragraph;
 mod peer;
 mod proposal_diff;
