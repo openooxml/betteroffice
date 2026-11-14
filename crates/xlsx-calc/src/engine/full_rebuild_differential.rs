@@ -538,6 +538,61 @@ fn a_full_rebuild_over_the_previous_graph_matches_a_fresh_build_after_each_edit(
 }
 
 #[test]
+fn a_full_rebuild_keeps_the_parsed_tree_of_an_unchanged_formula() {
+    let (sheet, at) = (SheetId(2), CellRef::new(0, 1));
+    let mut model = generated(1);
+    let mut before = model.render(&HashMap::new());
+    let (previous, _) =
+        rebuild_and_recalc_all_after(&mut before, None, Some(NOW_SERIAL), Some(RAND_SEED));
+    let source = before
+        .sheet(sheet)
+        .and_then(|s| s.cell(at))
+        .and_then(|c| c.formula.clone())
+        .expect("a formula at Calc!B1");
+    let kept = previous
+        .asts()
+        .lock()
+        .expect("parse cache poisoned")
+        .get(&source)
+        .cloned()
+        .expect("the previous graph parsed it");
+    let values = model.values(&before);
+    model.apply(Edit::Value);
+    let edited = model.render(&values);
+    let fresh = rebuild(edited.clone(), None);
+    let reused = rebuild(edited, Some(&previous));
+    let still = reused
+        .wb
+        .sheet(sheet)
+        .and_then(|s| s.cell(at))
+        .and_then(|c| c.formula.clone());
+    assert_eq!(still.as_deref(), Some(source.as_str()));
+    let cached = reused
+        .graph
+        .asts()
+        .lock()
+        .expect("parse cache poisoned")
+        .get(&source)
+        .cloned()
+        .expect("the rebuilt graph holds it");
+    assert!(Arc::ptr_eq(&kept, &cached));
+    let node = reused.graph.ast(sheet, at).expect("a formula node");
+    assert!(Arc::ptr_eq(&kept, &node));
+    let plain = DepGraph::build(&fresh.wb);
+    let parsed = plain
+        .asts()
+        .lock()
+        .expect("parse cache poisoned")
+        .get(&source)
+        .cloned()
+        .expect("a plain build parses it");
+    assert!(!Arc::ptr_eq(&kept, &parsed));
+    let node = plain.ast(sheet, at).expect("a formula node");
+    assert!(!Arc::ptr_eq(&kept, &node));
+    assert_same_rebuild(&reused, &fresh, "unchanged formula");
+}
+
+#[test]
 fn the_rebuild_comparison_reports_a_wrong_parse_in_the_cache() {
     let model = generated(1);
     let wb = model.render(&HashMap::new());
