@@ -78,6 +78,25 @@ fn live_text(session: &DeckSession, story: &str) -> Option<String> {
         .map(|text| text.plain_text())
 }
 
+fn unmerged_table_session(client_id: u64) -> DeckSession {
+    let mut parts = ooxml_opc::unzip_parts(TABLE).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "ppt/slides/slide1.xml")
+        .unwrap();
+    let mut xml = String::from_utf8(bytes.clone()).unwrap();
+    for attribute in [
+        "gridSpan=\"2\"",
+        "rowSpan=\"2\"",
+        "hMerge=\"1\"",
+        "vMerge=\"1\"",
+    ] {
+        xml = xml.replace(attribute, "");
+    }
+    *bytes = xml.into_bytes();
+    DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), client_id).unwrap()
+}
+
 fn table_cell(session: &DeckSession, row: usize, column: usize) -> String {
     let snapshot = session.snapshot().unwrap();
     let table = &snapshot.slides[0].shapes[0];
@@ -258,7 +277,7 @@ fn a_duplicated_slide_takes_writes_after_another_slide_is_deleted() {
 
 #[test]
 fn a_new_table_row_takes_writes_after_another_slide_is_deleted() {
-    let session = DeckSession::open(TABLE, 84203).unwrap();
+    let session = unmerged_table_session(84203);
     let snapshot = session.snapshot().unwrap();
     let slide = snapshot.slides[0].id.clone();
     let shape = snapshot.slides[0].shapes[0].id.clone();
