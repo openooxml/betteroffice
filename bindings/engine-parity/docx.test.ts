@@ -954,13 +954,10 @@ function onDisplay<T>(engine: DocxEngine, { display, handle }: OpenedDisplay, qu
   }
 }
 
-function issuedHandle(engine: DocxEngine, display: string, handle: number): number | 'issued' {
+function reopenedHandle(engine: DocxEngine, display: string): number {
   const again = engine.open_display_list(display);
   engine.close_display_list(again);
-  console.log(`DISPLAY-HANDLE-PROBE ${engineName(engine)} ${handle} ${again} same=${handle === again}`);
-  if (handle === again) return handle;
-  if (![handle, again].every((issued) => Number.isSafeInteger(issued) && issued > 0)) throw new Error(`open_display_list issued ${handle} and ${again}, not positive handles`);
-  return 'issued';
+  return again;
 }
 
 const HIT_POINTS: [number, number, number][] = [[0, 100, 100], [0, 100, 55], [0, 400, 900], [9, 100, 100]];
@@ -2013,7 +2010,8 @@ const rows: Row<Docx>[] = [
     method: 'open_display_list',
     setup: openedDisplay,
     call: ({ engine }, opened) => onDisplay(engine, opened, (display, handle) => ({
-      handle: issuedHandle(engine, display, handle),
+      handle,
+      reopened: reopenedHandle(engine, display),
       byHandle: handleAnswers(engine, handle),
       byJson: jsonAnswers(engine, display),
     })),
@@ -2030,7 +2028,8 @@ const rows: Row<Docx>[] = [
       }
     },
     call: ({ engine }, display) => onDisplay(engine, { display, handle: engine.open_display_list(display) }, (_, handle) => ({
-      handle: issuedHandle(engine, display, handle),
+      handle,
+      reopened: reopenedHandle(engine, display),
       ...handleAnswers(engine, handle),
     })),
   }),
