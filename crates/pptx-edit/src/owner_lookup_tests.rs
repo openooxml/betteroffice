@@ -1,15 +1,21 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use pptx_parse::GraphicFrameData;
 use yrs::{Any, Array, ArrayRef, Map, MapRef, Transact, TransactionMut};
 
 use crate::deck::{
-    live_shape_order, live_slide_ids, map_string_array, required_map, shape_ref, slide_ref,
-    slide_shape_order, string_array_ref,
+    live_shape_order, live_slide_ids, map_string, map_string_array, required_map, shape_ref,
+    slide_ref, slide_shape_order, string_array_ref,
 };
 use crate::proposal_diff::story_owner;
 use crate::story_owners::{LookupCounts, find_path};
-use crate::{DeckSession, EditCtx, EditError, SHAPES, ShapeDraft, ShapeRect, TextStyle};
+use crate::{
+    DeckSession, EditCtx, EditError, SHAPES, ShapeDraft, ShapeRect, TableInsertPosition,
+    TextStyle,
+};
+
+const TABLE_DECK: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/table-basic.pptx");
 
 struct SplitMix(u64);
 
@@ -35,10 +41,23 @@ impl SplitMix {
     }
 }
 
-fn empty_session(client_id: u64) -> DeckSession {
-    let mut package = pptx_parse::PptxPackage::default();
-    package.presentation.width_emu = 9_144_000;
-    package.presentation.height_emu = 6_858_000;
+fn table_session(client_id: u64) -> DeckSession {
+    let mut parts = ooxml_opc::unzip_parts(TABLE_DECK).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "ppt/slides/slide1.xml")
+        .unwrap();
+    let mut xml = String::from_utf8(bytes.clone()).unwrap();
+    for attribute in [
+        "gridSpan=\"2\"",
+        "rowSpan=\"2\"",
+        "hMerge=\"1\"",
+        "vMerge=\"1\"",
+    ] {
+        xml = xml.replace(attribute, "");
+    }
+    *bytes = xml.into_bytes();
+    let package = pptx_parse::parse_pptx(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
     DeckSession::from_package_with_fingerprint(package, "owner-lookup".to_owned(), client_id)
         .unwrap()
 }
@@ -226,9 +245,65 @@ fn move_out(session: &DeckSession, placed: &[Placed], rng: &mut SplitMix) {
     order.push_back(&mut txn, member.shape.as_str());
 }
 
+fn cell_stories(session: &DeckSession, shape: &str) -> Vec<String> {
+    let txn = session.doc.transact();
+    shape_ref(&txn, shape)
+        .ok()
+        .and_then(|map| map_string_array(&map, &txn, "textStories").ok())
+        .unwrap_or_default()
+}
+
+fn table_rows(session: &DeckSession, shape: &str) -> Option<usize> {
+    let txn = session.doc.transact();
+    let json = map_string(&shape_ref(&txn, shape).ok()?, &txn, "graphicJson")?;
+    match serde_json::from_str::<GraphicFrameData>(&json).ok()? {
+        GraphicFrameData::Table(table) => Some(table.rows.len()),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct Outcome {
+    grew: bool,
+    gone: Vec<String>,
+    fresh: Vec<String>,
+}
+
+fn edit_row(
+    session: &DeckSession,
+    placed: &[Placed],
+    rng: &mut SplitMix,
+    insert: bool,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let tables: Vec<(Placed, usize)> = placed
+        .iter()
+        .filter_map(|shape| Some((shape.clone(), table_rows(session, &shape.shape)?)))
+        .filter(|(_, rows)| (insert && *rows < MAX_ROWS) || (!insert && *rows > 1))
+        .collect();
+    let (table, rows) = rng.pick(&tables)?;
+    let context = EditCtx::local("test");
+    let index = rng.below(rows) as u32;
+    let before = cell_stories(session, &table.shape);
+    let edited = if insert {
+        session.insert_table_row(
+            &context,
+            &table.slide,
+            &table.shape,
+            index,
+            TableInsertPosition::After,
+            &["x".to_owned()],
+        )
+    } else {
+        session.delete_table_row(&context, &table.slide, &table.shape, index)
+    };
+    edited.ok()?;
+    Some((before, cell_stories(session, &table.shape)))
+}
+
 const MAX_SLIDES: usize = 8;
 const MAX_SHAPES: usize = 40;
-const STEADY: [usize; 7] = [0, 1, 5, 6, 7, 8, 9];
+const MAX_ROWS: usize = 6;
+const STEADY: [usize; 9] = [0, 1, 5, 6, 7, 8, 9, 11, 12];
 
 fn below_cap(slides: usize, shapes: usize) -> bool {
     slides < MAX_SLIDES && shapes < MAX_SHAPES
@@ -239,14 +314,23 @@ fn over_cap(session: &DeckSession) -> bool {
     slides > MAX_SLIDES || placed_shapes(session).len() > MAX_SHAPES
 }
 
-fn step(rng: &mut SplitMix, local: &DeckSession, peer: &DeckSession, stories: &[String]) -> bool {
+fn step(
+    rng: &mut SplitMix,
+    local: &DeckSession,
+    peer: &DeckSession,
+    stories: &[String],
+) -> Outcome {
     let context = EditCtx::local("test");
     let slides = live_slide_ids(&local.doc.transact()).unwrap();
     let placed = placed_shapes(local);
     let choice = if below_cap(slides.len(), placed.len()) {
-        rng.below(11)
+        rng.below(13)
     } else {
         rng.pick(&STEADY).unwrap()
+    };
+    let mut outcome = Outcome {
+        grew: matches!(choice, 4 | 10),
+        ..Outcome::default()
     };
     match choice {
         0 => {
@@ -307,6 +391,13 @@ fn step(rng: &mut SplitMix, local: &DeckSession, peer: &DeckSession, stories: &[
                 }
             }
         }
+        11 | 12 => {
+            if let Some((gone, fresh)) = edit_row(local, &placed, rng, choice == 11) {
+                outcome.grew = true;
+                outcome.gone = gone;
+                outcome.fresh = fresh;
+            }
+        }
         _ => {
             if let Some(slide) = rng.pick(&slides) {
                 add_box(local, &slide);
@@ -314,7 +405,7 @@ fn step(rng: &mut SplitMix, local: &DeckSession, peer: &DeckSession, stories: &[
         }
     }
     local.add_undo_barrier();
-    matches!(choice, 4 | 10)
+    outcome
 }
 
 fn discover(session: &DeckSession, seen: &mut BTreeSet<String>, stories: &mut Vec<String>) {
@@ -362,18 +453,49 @@ fn grouped_deck(session: &DeckSession) {
 fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
     let mut totals = LookupCounts::default();
     let mut checked = 0_usize;
+    let mut row_edits = 0_usize;
+    let mut gone_checked = 0_usize;
     for seed in 1..=50_u64 {
         let every_story = seed <= 5;
-        let local = empty_session(41);
-        let peer = empty_session(42);
+        let local = table_session(41);
+        let peer = table_session(42);
         let mut rng = SplitMix(seed);
         grouped_deck(&local);
         let mut seen = BTreeSet::new();
         let mut stories = Vec::new();
         discover(&local, &mut seen, &mut stories);
         for round in 0..200 {
-            if step(&mut rng, &local, &peer, &stories) {
+            let outcome = step(&mut rng, &local, &peer, &stories);
+            if outcome.grew {
                 discover(&local, &mut seen, &mut stories);
+            }
+            if !outcome.fresh.is_empty() {
+                row_edits += 1;
+            }
+            for story in &outcome.gone {
+                gone_checked += 1;
+                assert!(
+                    !walk_finds_owner(&local, story),
+                    "seed {seed} round {round} renamed cell {story} walk"
+                );
+                for lookup in ["first", "second"] {
+                    assert!(
+                        !resolves(&local, story),
+                        "seed {seed} round {round} renamed cell {story} {lookup} lookup"
+                    );
+                }
+            }
+            for story in &outcome.fresh {
+                assert!(
+                    walk_finds_owner(&local, story),
+                    "seed {seed} round {round} new cell {story} walk"
+                );
+                for lookup in ["first", "second"] {
+                    assert!(
+                        resolves(&local, story),
+                        "seed {seed} round {round} new cell {story} {lookup} lookup"
+                    );
+                }
             }
             let sample: Vec<String> = if every_story {
                 stories.clone()
@@ -397,7 +519,11 @@ fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
         totals.rejected += counts.rejected;
         totals.none += counts.none;
     }
-    println!("\nstories checked: {checked}, lookups: {totals:?}");
+    println!(
+        "\nstories checked: {checked}, lookups: {totals:?}, row edits: {row_edits}, renamed cells checked: {gone_checked}"
+    );
+    assert!(row_edits > 0);
+    assert!(gone_checked > 0);
     assert!(totals.hits > 0, "{totals:?}");
     assert!(totals.rejected > 0, "{totals:?}");
     assert!(totals.none > 0, "{totals:?}");
@@ -407,17 +533,49 @@ fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
 fn the_lookup_search_finds_the_strict_walk_owner_on_undamaged_generated_decks() {
     let mut compared = 0_usize;
     let mut owned = 0_usize;
+    let mut row_edits = 0_usize;
+    let mut gone_checked = 0_usize;
     for seed in 1..=50_u64 {
-        let local = empty_session(41);
-        let peer = empty_session(42);
+        let local = table_session(41);
+        let peer = table_session(42);
         let mut rng = SplitMix(seed);
         grouped_deck(&local);
         let mut seen = BTreeSet::new();
         let mut stories = Vec::new();
         discover(&local, &mut seen, &mut stories);
         for round in 1..=200 {
-            if step(&mut rng, &local, &peer, &stories) {
+            let outcome = step(&mut rng, &local, &peer, &stories);
+            if outcome.grew {
                 discover(&local, &mut seen, &mut stories);
+            }
+            if !outcome.fresh.is_empty() {
+                row_edits += 1;
+                let txn = local.doc.transact();
+                for story in &outcome.gone {
+                    gone_checked += 1;
+                    assert_eq!(
+                        story_owner(&txn, story).unwrap(),
+                        None,
+                        "seed {seed} round {round} renamed cell {story} walk"
+                    );
+                    assert_eq!(
+                        find_path(&txn, story).and_then(|path| path.owner()),
+                        None,
+                        "seed {seed} round {round} renamed cell {story} search"
+                    );
+                }
+                for story in &outcome.fresh {
+                    assert!(
+                        story_owner(&txn, story).unwrap().is_some(),
+                        "seed {seed} round {round} new cell {story} walk"
+                    );
+                    assert!(
+                        find_path(&txn, story)
+                            .and_then(|path| path.owner())
+                            .is_some(),
+                        "seed {seed} round {round} new cell {story} search"
+                    );
+                }
             }
             if seed > 5 && round % 20 != 0 {
                 continue;
@@ -432,6 +590,10 @@ fn the_lookup_search_finds_the_strict_walk_owner_on_undamaged_generated_decks() 
             }
         }
     }
-    println!("\nstories compared: {compared}, with an owner: {owned}");
+    println!(
+        "\nstories compared: {compared}, with an owner: {owned}, row edits: {row_edits}, renamed cells checked: {gone_checked}"
+    );
     assert!(owned > 0 && owned < compared);
+    assert!(row_edits > 0);
+    assert!(gone_checked > 0);
 }
