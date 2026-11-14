@@ -474,7 +474,13 @@ fn well_formed_and_bound(xml: &str) -> bool {
     }
 }
 
-fn prefix_case(name: &str, raw: &str, must_write: bool) {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Outcome {
+    Refused,
+    Written,
+}
+
+fn prefix_case(name: &str, raw: &str, expected: Outcome) {
     let source = fixture(&form_paragraph());
     let saved = save_edited(&source, Value::Null, |document| {
         assert_eq!(replace_raw_form_data(document, raw), 3);
@@ -482,11 +488,11 @@ fn prefix_case(name: &str, raw: &str, must_write: bool) {
     let bound = saved.as_ref().ok().map(|xml| well_formed_and_bound(xml));
     let shown = bound.map_or("na".to_owned(), |bound| bound.to_string());
     eprintln!("CASE {name} accepted={} bound={shown}", saved.is_ok());
-    if must_write {
-        let xml = saved.unwrap();
-        assert_eq!(bound, Some(true), "{xml}");
-    } else if let Ok(xml) = &saved {
-        assert_eq!(bound, Some(true), "{xml}");
+    match (expected, saved) {
+        (Outcome::Written, Ok(xml)) => assert_eq!(bound, Some(true), "{xml}"),
+        (Outcome::Written, Err(error)) => panic!("{name}: expected written, refused: {error}"),
+        (Outcome::Refused, Ok(xml)) => panic!("{name}: expected refused, written: {xml}"),
+        (Outcome::Refused, Err(error)) => assert!(error.contains("\"T\""), "{error}"),
     }
 }
 
@@ -495,7 +501,7 @@ fn p1a_wrapper_only_prefix() {
     prefix_case(
         "p1a_wrapper_only_prefix",
         r#"<w:ffData><w:name w:val="T"/><s11:foo/></w:ffData>"#,
-        false,
+        Outcome::Refused,
     );
 }
 
@@ -504,7 +510,7 @@ fn p1a_ctrl_fragment_decl() {
     prefix_case(
         "p1a_ctrl_fragment_decl",
         r#"<w:ffData xmlns:s11="urn:x-test:s11"><w:name w:val="T"/><s11:foo/></w:ffData>"#,
-        true,
+        Outcome::Written,
     );
 }
 
@@ -513,7 +519,28 @@ fn p1a_ctrl_root_decl() {
     prefix_case(
         "p1a_ctrl_root_decl",
         r#"<w:ffData><w:name w:val="T"/><w14:foo/></w:ffData>"#,
-        true,
+        Outcome::Written,
+    );
+}
+
+#[test]
+fn refuses_reserved_xml_prefix_declared_through_a_character_reference() {
+    prefix_case(
+        "refuses_reserved_xml_prefix_declared_through_a_character_reference",
+        r#"<w:ffData xmlns:xml="http&#58;//www.w3.org/XML/1998/namespace"><w:name w:val="T"/></w:ffData>"#,
+        Outcome::Refused,
+    );
+}
+
+#[test]
+fn refuses_form_field_data_with_more_than_256_namespace_declarations_on_one_element() {
+    let declarations: String = (0..257)
+        .map(|index| format!(r#" xmlns:p{index}="urn:x-test:p{index}""#))
+        .collect();
+    prefix_case(
+        "refuses_form_field_data_with_more_than_256_namespace_declarations_on_one_element",
+        &format!(r#"<w:ffData{declarations}><w:name w:val="T"/></w:ffData>"#),
+        Outcome::Refused,
     );
 }
 
