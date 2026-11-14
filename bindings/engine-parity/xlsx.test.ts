@@ -427,9 +427,9 @@ const rows: Row<Xlsx>[] = [
   {
     method: 'XlsxDocument.startUpdateObservation',
     call: ({ engine }) => scoped(collab(engine), (d) => {
-      d.startUpdateObservation();
+      const started = d.startUpdateObservation();
       editCell(d, 1, 1, '12');
-      return drainAll(d);
+      return { started, events: drainAll(d) };
     }),
   },
   {
@@ -445,8 +445,10 @@ const rows: Row<Xlsx>[] = [
     call: ({ engine }) => scoped(collab(engine), (d) => {
       d.startUpdateObservation();
       editCell(d, 1, 1, '12');
-      d.clearUpdateObservation();
-      return d.drainUpdateEvent();
+      const cleared = d.clearUpdateObservation();
+      const queued = d.drainUpdateEvent();
+      editCell(d, 2, 1, '8');
+      return { cleared, queued, afterEdit: d.drainUpdateEvent() };
     }),
   },
   { method: 'XlsxDocument.version', call: ({ engine }) => engine.XlsxDocument.version() },
@@ -595,9 +597,9 @@ const rows: Row<Xlsx>[] = [
     method: 'XlsxDocument.adoptPeerVersion',
     mutates: true,
     call: ({ doc }) => {
-      doc.adoptPeerVersion(ADOPTED);
+      const adopted = doc.adoptPeerVersion(ADOPTED);
       const version = doc.documentVersion();
-      return { version, utf8: new TextEncoder().encode(version) };
+      return { adopted, version, utf8: new TextEncoder().encode(version) };
     },
   },
   defineRow({
