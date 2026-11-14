@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Recalculating a whole xlsx workbook is faster and uses less memory when only cell values changed since the previous calculation.
+Full recalculation of an xlsx workbook can be faster and use less memory when its formulas, names, tables and sheets did not change since the previous calculation.
