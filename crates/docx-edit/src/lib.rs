@@ -1311,7 +1311,7 @@ impl EditingDoc {
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
-    #[cfg(all(test, feature = "wasm"))]
+    #[cfg(test)]
     pub(crate) fn forget_seeding(&self) {
         self.save_story_states.lock().unwrap().clear();
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
