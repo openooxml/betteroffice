@@ -165,13 +165,8 @@ fn wasm_host() -> Host {
 fn js_entropy() -> u64 {
     #[cfg(target_arch = "wasm32")]
     {
-        crate::identity::platform_random().map_or_else(
-            || {
-                ((js_sys::Math::random() * 9_007_199_254_740_992.0) as u64)
-                    ^ (js_sys::Date::now() as u64).rotate_left(21)
-            },
-            |[word]| word,
-        )
+        crate::identity::platform_random()
+            .map_or_else(crate::identity::fallback_draw, |[word]| word)
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

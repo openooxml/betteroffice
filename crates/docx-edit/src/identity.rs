@@ -68,13 +68,23 @@ fn fresh_generation() -> String {
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub(crate) fn entropy() -> [u64; 2] {
-    platform_random().unwrap_or_else(|| {
-        let draw = || (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
-        [draw() ^ ((js_sys::Date::now() as u64) << 11), draw()]
-    })
+    platform_random().unwrap_or_else(|| [fallback_draw(), fallback_draw()])
 }
 
-/// Full 64-bit words from `globalThis.crypto.getRandomValues`, or `None` when the host lacks it.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub(crate) fn fallback_draw() -> u64 {
+    combine_draws(js_sys::Math::random(), js_sys::Math::random())
+}
+
+/// One 64-bit word from two draws in `[0, 1)`: 32 high bits from `high`, 32 low bits from `low`.
+#[cfg_attr(not(all(feature = "wasm", target_arch = "wasm32")), allow(dead_code))]
+pub(crate) fn combine_draws(high: f64, low: f64) -> u64 {
+    let half = |draw: f64| (draw * 4_294_967_296.0).clamp(0.0, 4_294_967_295.0) as u64;
+    half(high) << 32 | half(low)
+}
+
+/// Full 64-bit words from `globalThis.crypto.getRandomValues`, or `None` when the host lacks it
+/// or its lookup or call fails.
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub(crate) fn platform_random<const N: usize>() -> Option<[u64; N]> {
     use wasm_bindgen::JsCast;
