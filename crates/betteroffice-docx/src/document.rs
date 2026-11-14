@@ -207,15 +207,19 @@ impl Document {
     }
 
     fn unique_paragraph(&self, para_id: &str) -> Result<&Paragraph> {
+        self.unique_located(Locator::Id(para_id), para_id)
+    }
+
+    fn unique_located(&self, locator: Locator<'_>, label: &str) -> Result<&Paragraph> {
         let mut matches = self
             .paragraphs()
             .into_iter()
-            .filter(|paragraph| paragraph.para_id.as_deref() == Some(para_id));
+            .filter(|paragraph| locator.matches(paragraph));
         let found = matches
             .next()
-            .ok_or_else(|| Error::ParagraphNotFound(para_id.to_owned()))?;
+            .ok_or_else(|| Error::ParagraphNotFound(label.to_owned()))?;
         match matches.next() {
-            Some(_) => Err(Error::AmbiguousParagraph(para_id.to_owned())),
+            Some(_) => Err(Error::AmbiguousParagraph(label.to_owned())),
             None => Ok(found),
         }
     }
@@ -244,11 +248,49 @@ impl Document {
         client_id: u64,
         context: &EditCtx,
     ) -> Result<Receipt> {
-        self.unique_paragraph(para_id)?;
-        let paragraph = find_paragraph_mut(&mut self.model.body.content, para_id)
-            .ok_or_else(|| Error::ParagraphNotFound(para_id.to_owned()))?;
+        self.replace_located_text(Locator::Id(para_id), para_id, text, client_id, context)
+    }
+
+    /// Replaces paragraph `index`'s text in [`Self::paragraphs`]; an ID-less one's key is no ID.
+    pub fn replace_paragraph_text_at(&mut self, index: usize, text: &str) -> Result<Receipt> {
+        let context = EditCtx::local("betteroffice-docx", DEFAULT_SERIALIZATION_TIME);
+        self.replace_paragraph_text_at_with(index, text, 1, &context)
+    }
+
+    /// [`Self::replace_paragraph_text_at`] with an explicit client ID and edit context.
+    pub fn replace_paragraph_text_at_with(
+        &mut self,
+        index: usize,
+        text: &str,
+        client_id: u64,
+        context: &EditCtx,
+    ) -> Result<Receipt> {
+        let paragraphs = self.paragraphs();
+        let len = paragraphs.len();
+        let paragraph = paragraphs
+            .get(index)
+            .ok_or(Error::ParagraphIndexOutOfRange { index, len })?;
+        let label = format!("at index {index}");
+        let ordinal = paragraph
+            .source_ordinal
+            .ok_or_else(|| Error::UnsupportedParagraphEdit(label.clone()))?;
+        self.replace_located_text(Locator::Ordinal(ordinal), &label, text, client_id, context)
+    }
+
+    fn replace_located_text(
+        &mut self,
+        locator: Locator<'_>,
+        label: &str,
+        text: &str,
+        client_id: u64,
+        context: &EditCtx,
+    ) -> Result<Receipt> {
+        self.unique_located(locator, label)?;
+        let paragraph = find_paragraph_mut(&mut self.model.body.content, locator)
+            .ok_or_else(|| Error::ParagraphNotFound(label.to_owned()))?;
         let template = plain_run_template(paragraph)
-            .ok_or_else(|| Error::UnsupportedParagraphEdit(para_id.to_owned()))?;
+            .ok_or_else(|| Error::UnsupportedParagraphEdit(label.to_owned()))?;
+        let edited_id = paragraph.para_id.clone();
         let current = get_paragraph_text(paragraph);
         let style = paragraph
             .formatting
@@ -261,7 +303,11 @@ impl Document {
             .and_then(|formatting| formatting.alignment.as_deref())
             .unwrap_or("left");
         let editor = EditingDoc::new(client_id);
-        editor.create_story_with_paragraph_id("body", para_id, &current, style, alignment)?;
+        match edited_id.as_deref() {
+            Some(para_id) => editor
+                .create_story_with_paragraph_id("body", para_id, &current, style, alignment)?,
+            None => editor.create_story("body", &current, style, alignment)?,
+        };
         let receipt = editor.replace_range(
             context,
             StoryRange::new("body", 0, utf16_len(&current)),
@@ -275,16 +321,17 @@ impl Document {
             .unwrap_or_default();
         replace_plain_run(paragraph, edited.clone(), template);
         let replacement = paragraph.clone();
-        replace_section_paragraphs(&mut self.model.body, para_id, &replacement);
+        replace_section_paragraphs(&mut self.model.body, locator, &replacement);
         if self.dirty == Dirty::Clean {
             self.dirty = Dirty::LoggedEdits;
         }
-        self.authored_ids.retain(|_, (fresh, _)| fresh != para_id);
+        self.authored_ids
+            .retain(|_, (fresh, _)| edited_id.as_ref() != Some(&*fresh));
         let mirrored = match (&mut self.session_baseline, replacement.source_ordinal) {
             (Some(baseline), Some(ordinal)) if context.suggesting.is_none() => baseline
-                .replace_text(para_id, &edited)
+                .replace_text(locator, &edited)
                 .then(|| SessionEdit {
-                    para_id: para_id.to_owned(),
+                    para_id: edited_id,
                     ordinal,
                     text: text.to_owned(),
                     expected: edited,
@@ -724,9 +771,9 @@ impl SavedFields {
             && self.numbering == model.numbering
     }
 
-    /// Replaces only the text of the paragraph with `para_id`, as the logged edit did.
-    fn replace_text(&mut self, para_id: &str, text: &str) -> bool {
-        let Some(paragraph) = find_paragraph_mut(&mut self.body.content, para_id) else {
+    /// Replaces only the text of the located paragraph, as the logged edit did.
+    fn replace_text(&mut self, locator: Locator<'_>, text: &str) -> bool {
+        let Some(paragraph) = find_paragraph_mut(&mut self.body.content, locator) else {
             return false;
         };
         let Some(template) = plain_run_template(paragraph) else {
@@ -734,7 +781,7 @@ impl SavedFields {
         };
         replace_plain_run(paragraph, text.to_owned(), template);
         let replacement = paragraph.clone();
-        replace_section_paragraphs(&mut self.body, para_id, &replacement);
+        replace_section_paragraphs(&mut self.body, locator, &replacement);
         true
     }
 
@@ -749,9 +796,25 @@ impl SavedFields {
     }
 }
 
+/// How an edit finds its body paragraph: by ID, or by source ordinal for one without an ID.
+#[derive(Clone, Copy)]
+enum Locator<'a> {
+    Id(&'a str),
+    Ordinal(u32),
+}
+
+impl Locator<'_> {
+    fn matches(self, paragraph: &Paragraph) -> bool {
+        match self {
+            Self::Id(para_id) => paragraph.para_id.as_deref() == Some(para_id),
+            Self::Ordinal(ordinal) => paragraph.source_ordinal == Some(ordinal),
+        }
+    }
+}
+
 /// A text replacement the save replays into the editing session.
 struct SessionEdit {
-    para_id: String,
+    para_id: Option<String>,
     /// The paragraph's `w:p` occurrence in the body part.
     ordinal: u32,
     text: String,
@@ -778,9 +841,9 @@ impl SessionEdit {
                 }
                 _ => None,
             })
-            .ok_or_else(|| Error::ParagraphNotFound(self.para_id.clone()))?;
+            .ok_or_else(|| Error::ParagraphNotFound(self.label()))?;
         let range = story_paragraph_range(session, story, key)?
-            .ok_or_else(|| Error::ParagraphNotFound(self.para_id.clone()))?;
+            .ok_or_else(|| Error::ParagraphNotFound(self.label()))?;
         session.replace_range(&self.context, range, &self.text)?;
         let replayed = session
             .paragraphs(story)?
@@ -788,9 +851,15 @@ impl SessionEdit {
             .find(|paragraph| paragraph.para_id == *key)
             .map(|paragraph| paragraph.text);
         if replayed.as_deref() != Some(self.expected.as_str()) {
-            return Err(Error::UnsupportedParagraphEdit(self.para_id.clone()));
+            return Err(Error::UnsupportedParagraphEdit(self.label()));
         }
         Ok(())
+    }
+
+    fn label(&self) -> String {
+        self.para_id
+            .clone()
+            .unwrap_or_else(|| format!("at source ordinal {}", self.ordinal))
     }
 }
 
@@ -996,9 +1065,13 @@ fn session_paragraph_ids(plan: ParagraphSavePlan) -> S13ParagraphIds {
     }
 }
 
-fn replace_section_paragraphs(body: &mut DocumentBody, para_id: &str, replacement: &Paragraph) {
+fn replace_section_paragraphs(
+    body: &mut DocumentBody,
+    locator: Locator<'_>,
+    replacement: &Paragraph,
+) {
     for section in body.sections.iter_mut().flatten() {
-        if let Some(paragraph) = find_paragraph_mut(&mut section.content, para_id) {
+        if let Some(paragraph) = find_paragraph_mut(&mut section.content, locator) {
             *paragraph = replacement.clone();
         }
     }
@@ -1217,18 +1290,18 @@ fn collect_tables<'a>(blocks: &'a [BlockContent], output: &mut Vec<&'a Table>) {
 
 fn find_paragraph_mut<'a>(
     blocks: &'a mut [BlockContent],
-    para_id: &str,
+    locator: Locator<'_>,
 ) -> Option<&'a mut Paragraph> {
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) if paragraph.para_id.as_deref() == Some(para_id) => {
+            BlockContent::Paragraph(paragraph) if locator.matches(paragraph) => {
                 return Some(Arc::make_mut(paragraph));
             }
             BlockContent::Paragraph(_) => {}
             BlockContent::Table(table) => {
                 for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
-                        if let Some(paragraph) = find_paragraph_mut(&mut cell.content, para_id) {
+                        if let Some(paragraph) = find_paragraph_mut(&mut cell.content, locator) {
                             return Some(paragraph);
                         }
                     }
@@ -1236,7 +1309,7 @@ fn find_paragraph_mut<'a>(
             }
             BlockContent::BlockSdt(sdt) => {
                 if let Some(paragraph) =
-                    find_paragraph_mut(&mut Arc::make_mut(sdt).content, para_id)
+                    find_paragraph_mut(&mut Arc::make_mut(sdt).content, locator)
                 {
                     return Some(paragraph);
                 }
@@ -1285,7 +1358,7 @@ fn has_floating_zones(
 #[cfg(test)]
 mod session_save_tests {
     use super::{
-        Document, EditCtx, InlineNode, Paragraph, ParagraphContent, SessionEdit,
+        Document, EditCtx, InlineNode, Locator, Paragraph, ParagraphContent, SessionEdit,
         find_paragraph_mut, get_paragraph_text, replace_plain_run, replace_section_paragraphs,
     };
 
@@ -1380,10 +1453,11 @@ mod session_save_tests {
 
     fn change_model(document: &mut Document, para_id: &str, change: impl FnOnce(&mut Paragraph)) {
         let body = &mut document.model_mut().body;
-        let paragraph = find_paragraph_mut(&mut body.content, para_id).unwrap();
+        let locator = Locator::Id(para_id);
+        let paragraph = find_paragraph_mut(&mut body.content, locator).unwrap();
         change(&mut *paragraph);
         let replacement = paragraph.clone();
-        replace_section_paragraphs(body, para_id, &replacement);
+        replace_section_paragraphs(body, locator, &replacement);
     }
 
     fn center(paragraph: &mut Paragraph) {
@@ -1452,7 +1526,7 @@ mod session_save_tests {
     fn logged(document: &Document, index: usize, text: &str) -> SessionEdit {
         let paragraph = document.paragraphs()[index];
         SessionEdit {
-            para_id: paragraph.para_id.clone().unwrap(),
+            para_id: paragraph.para_id.clone(),
             ordinal: paragraph.source_ordinal.unwrap(),
             text: text.to_owned(),
             expected: text.to_owned(),
@@ -1604,10 +1678,11 @@ mod session_save_tests {
             .replace_paragraph_text("0000000B", "Charlie edited")
             .unwrap();
         let body = &mut document.model_mut().body;
-        let paragraph = find_paragraph_mut(&mut body.content, "0000000C").unwrap();
+        let locator = Locator::Id("0000000C");
+        let paragraph = find_paragraph_mut(&mut body.content, locator).unwrap();
         replace_plain_run(paragraph, "Delta by model".to_owned(), None);
         let replacement = paragraph.clone();
-        replace_section_paragraphs(body, "0000000C", &replacement);
+        replace_section_paragraphs(body, locator, &replacement);
         assert!(document.session_save_plan().unwrap().is_none());
         let saved = main_part(&document);
         assert!(saved.contains("Charlie edited"), "{saved}");

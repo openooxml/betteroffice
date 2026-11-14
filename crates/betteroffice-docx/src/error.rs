@@ -14,6 +14,11 @@ pub enum Error {
     ParagraphNotFound(String),
     /// More than one body paragraph has the ID.
     AmbiguousParagraph(String),
+    /// No body paragraph has the index.
+    ParagraphIndexOutOfRange {
+        index: usize,
+        len: usize,
+    },
     UnsupportedParagraphEdit(String),
     Font(String),
     Image(String),
@@ -48,6 +53,10 @@ impl fmt::Display for Error {
             Self::AmbiguousParagraph(id) => {
                 write!(formatter, "more than one paragraph has the ID {id:?}")
             }
+            Self::ParagraphIndexOutOfRange { index, len } => write!(
+                formatter,
+                "paragraph index {index} is out of range for {len} paragraphs"
+            ),
             Self::UnsupportedParagraphEdit(id) => {
                 write!(
                     formatter,
@@ -89,6 +98,7 @@ impl std::error::Error for Error {
             | Self::DisplayList(_)
             | Self::ParagraphNotFound(_)
             | Self::AmbiguousParagraph(_)
+            | Self::ParagraphIndexOutOfRange { .. }
             | Self::UnsupportedParagraphEdit(_)
             | Self::Font(_)
             | Self::Image(_)

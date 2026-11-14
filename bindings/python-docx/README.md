@@ -204,6 +204,7 @@ is the gap this fills.
 | `document.paragraph_ids` / `text` | body IDs, and the whole text |
 | `document.warnings` / `template_variables` | what the parser found |
 | `document.replace_text(para_id, text)` | rewrite one paragraph |
+| `document.replace_text_at(index, text)` | rewrite one paragraph by index, ID or not |
 | `document.export_structured(...)` / `export_markdown(...)` | read-only structured content or Markdown |
 | `document.list_content_controls(...)` / `find_content_controls(query)` | the document's content controls |
 | `render_docx_markdown(content)` | render exported content as Markdown |

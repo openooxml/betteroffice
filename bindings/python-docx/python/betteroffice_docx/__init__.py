@@ -193,6 +193,14 @@ class Document:
         """Alias of ``replace_text``."""
         return self._inner.replace_paragraph_text(para_id, text)
 
+    def replace_text_at(self, index: int, text: str) -> Edit:
+        """Replace paragraph ``index``'s text; IndexError out of range, TypeError for a non-int."""
+        return self._inner.replace_text_at(index, text)
+
+    def replace_paragraph_text_at(self, index: int, text: str) -> Edit:
+        """Alias of ``replace_text_at``."""
+        return self._inner.replace_paragraph_text_at(index, text)
+
     def export_structured(
         self,
         *,

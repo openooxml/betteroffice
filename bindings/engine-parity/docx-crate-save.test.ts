@@ -40,7 +40,7 @@ type Parts = Record<string, string>;
 interface Case {
   name: string;
   parts: Parts;
-  edit: { paragraph: number; paraId: string };
+  edit: { paragraph: number; paraId?: string };
 }
 
 function contentTypes(overrides: Record<string, string>): string {
@@ -133,6 +133,11 @@ const CASES: Case[] = [
     parts: bodyOnly([p('1A000001', 'First paragraph.'), p('1A000001', 'Second paragraph, same id.'), p('1A000003', 'Third paragraph.')].join('')),
     edit: { paragraph: 2, paraId: '1A000003' },
   },
+  {
+    name: 'no-paragraph-id',
+    parts: bodyOnly(['First paragraph.', 'Second paragraph.', 'Third paragraph.'].map((text) => `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`).join('')),
+    edit: { paragraph: 1 },
+  },
 ];
 
 async function pack(parts: Parts): Promise<Uint8Array> {
@@ -142,18 +147,19 @@ async function pack(parts: Parts): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
-async function productSave(input: Uint8Array, edit?: { paraId: string; text: string }): Promise<Uint8Array> {
+async function productSave(input: Uint8Array, edit?: { paragraph: number; paraId?: string; text: string }): Promise<Uint8Array> {
   const session = await createYrsSession({ clientId: 1 });
   try {
     session.seedFromDocx(input.slice(), { generation: createHash('sha256').update(input).digest('hex').slice(0, 32) });
     if (edit) {
-      const identity = session.paragraphIdentities().paragraphs.find(
-        (entry) => entry.session?.story === 'body' && entry.ooxmlParaId?.toUpperCase() === edit.paraId,
-      );
-      if (!identity?.session) throw new Error(`no body paragraph saves with ${edit.paraId}`);
+      const body = session.paragraphIdentities().paragraphs.filter((entry) => entry.session?.story === 'body');
+      const identity = edit.paraId === undefined
+        ? body[edit.paragraph]
+        : body.find((entry) => entry.ooxmlParaId?.toUpperCase() === edit.paraId);
+      if (!identity?.session) throw new Error(`no body paragraph ${edit.paraId ?? edit.paragraph}`);
       const key = identity.session.paraId;
       const span = session.paragraphSpans('body').find((entry) => entry.paraId === key);
-      if (!span) throw new Error(`no span for ${edit.paraId}`);
+      if (!span) throw new Error(`no span for ${edit.paraId ?? edit.paragraph}`);
       session.replaceRange({ story: 'body', start: { paraId: key, offset: 0 }, end: { paraId: key, offset: span.length } }, edit.text);
       expect(session.paragraphs('body').find((paragraph) => paragraph.paraId === key)?.text).toBe(edit.text);
     }
@@ -182,7 +188,7 @@ describe('product save of generated documents for the crate', () => {
       writeFileSync(join(dir, 'input.docx'), input);
       writeFileSync(join(dir, 'edit.json'), JSON.stringify({ ...edit, text: NEW_TEXT }));
       writeFileSync(join(dir, 'unedited.xml'), await productSave(input));
-      writeFileSync(join(dir, 'edited.xml'), await productSave(input, { paraId: edit.paraId, text: NEW_TEXT }));
+      writeFileSync(join(dir, 'edited.xml'), await productSave(input, { ...edit, text: NEW_TEXT }));
     }, 30_000);
   }
 });

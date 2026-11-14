@@ -73,6 +73,19 @@ fn crate_save_matches_the_product_save() {
 
         let mut document = Document::open(&input).unwrap();
         let index = spec["paragraph"].as_u64().unwrap() as usize;
+        let text = spec["text"].as_str().unwrap();
+        if spec.get("paraId").is_none() {
+            if let Err(error) = document.replace_paragraph_text_at(index, text) {
+                failures.push(format!("{name} edited: {error}"));
+                continue;
+            }
+            failures.extend(mismatch(
+                &format!("{name} edited"),
+                &document_xml(&document.save().unwrap()),
+                &fs::read(case.join("edited.xml")).unwrap(),
+            ));
+            continue;
+        }
         let para_id = document.paragraphs()[index]
             .para_id
             .clone()
@@ -83,7 +96,7 @@ fn crate_save_matches_the_product_save() {
             "{name}: paragraph {index}"
         );
         document
-            .replace_paragraph_text(&para_id, spec["text"].as_str().unwrap())
+            .replace_paragraph_text(&para_id, text)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         let edited = document.save().unwrap();
         failures.extend(mismatch(
