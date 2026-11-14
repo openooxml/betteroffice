@@ -4,17 +4,23 @@ use std::collections::{HashMap, HashSet};
 use yrs::{Any, Array, ArrayRef, Map, MapRef, Out, ReadTxn};
 
 use crate::deck::{
-    live_shape_order, map_string_array, required_map, shape_ref, slide_ref, slide_shape_order,
+    live_shape_order, live_slide_ids, map_string_array, shape_ref, slide_ref, slide_shape_order,
 };
-use crate::proposal_diff::story_owner;
-use crate::{EditResult, SHAPES, SLIDE_ORDER};
+use crate::{EditResult, SLIDE_ORDER};
 
 /// The slide and the shape ids from a top-level shape down to the owner of a story, as last
-/// found by the full walk.
+/// found by `find_path`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct OwnerPath {
     slide_id: String,
     shape_ids: Vec<String>,
+}
+
+impl OwnerPath {
+    pub(crate) fn owner(&self) -> Option<(String, String)> {
+        let shape_id = self.shape_ids.last()?;
+        Some((self.slide_id.clone(), shape_id.clone()))
+    }
 }
 
 /// Per-session memo of story owners; an entry answers only after `path_holds` re-checks it
@@ -40,12 +46,11 @@ impl StoryOwners {
         txn: &T,
         story_id: &str,
     ) -> EditResult<Option<(String, String)>> {
-        let cached = self.paths.borrow().get(story_id).map(|path| {
-            path.shape_ids
-                .last()
-                .filter(|_| path_holds(txn, story_id, path))
-                .map(|shape_id| (path.slide_id.clone(), shape_id.clone()))
-        });
+        let cached = self
+            .paths
+            .borrow()
+            .get(story_id)
+            .map(|path| path.owner().filter(|_| path_holds(txn, story_id, path)));
         if let Some(Some(owner)) = cached {
             #[cfg(test)]
             self.note(|counts| counts.hits += 1);
@@ -55,23 +60,14 @@ impl StoryOwners {
         if cached.is_some() {
             self.note(|counts| counts.rejected += 1);
         }
-        let owner = story_owner(txn, story_id)?;
-        #[cfg(test)]
-        if owner.is_none() {
+        let Some(path) = find_path(txn, story_id) else {
+            #[cfg(test)]
             self.note(|counts| counts.none += 1);
-        }
-        let path = owner
-            .as_ref()
-            .and_then(|(slide_id, shape_id)| owner_path(txn, slide_id, shape_id));
-        let mut paths = self.paths.borrow_mut();
-        match path {
-            Some(path) => {
-                paths.insert(story_id.to_owned(), path);
-            }
-            None => {
-                paths.remove(story_id);
-            }
-        }
+            self.paths.borrow_mut().remove(story_id);
+            return Ok(None);
+        };
+        let owner = path.owner();
+        self.paths.borrow_mut().insert(story_id.to_owned(), path);
         Ok(owner)
     }
 
@@ -128,35 +124,47 @@ fn array_lists<T: ReadTxn>(map: &MapRef, txn: &T, key: &str, id: &str) -> bool {
     }
 }
 
-/// The first path to `shape_id` in the order `story_owner` walks the slide.
-fn owner_path<T: ReadTxn>(txn: &T, slide_id: &str, shape_id: &str) -> Option<OwnerPath> {
-    let slide = slide_ref(txn, slide_id).ok()?;
-    let shapes = required_map(txn, SHAPES).ok()?;
-    let order = slide_shape_order(&slide, txn).ok()?;
-    let mut pending: Vec<Vec<String>> = live_shape_order(&order, txn)
-        .ok()?
-        .into_iter()
-        .rev()
-        .map(|id| vec![id])
-        .collect();
-    let mut seen = HashSet::new();
-    while let Some(path) = pending.pop() {
-        let id = path.last()?.clone();
-        if id == shape_id {
-            return Some(OwnerPath {
-                slide_id: slide_id.to_owned(),
-                shape_ids: path,
-            });
-        }
-        if !seen.insert(id.clone()) {
+/// The first path to a live owner of `story_id`, in the order `story_owner` walks the deck,
+/// skipping any slide, shape or subtree that cannot be read instead of failing on it.
+pub(crate) fn find_path<T: ReadTxn>(txn: &T, story_id: &str) -> Option<OwnerPath> {
+    for slide_id in live_slide_ids(txn).ok()? {
+        let Some(top) = slide_ref(txn, &slide_id)
+            .and_then(|slide| slide_shape_order(&slide, txn))
+            .and_then(|order| live_shape_order(&order, txn))
+            .ok()
+        else {
             continue;
-        }
-        let shape = shapes.get(txn, &id)?.cast::<MapRef>().ok()?;
-        let children = map_string_array(&shape, txn, "children").ok()?;
-        for child in children.into_iter().rev() {
-            let mut next = path.clone();
-            next.push(child);
-            pending.push(next);
+        };
+        let mut pending: Vec<Vec<String>> = top.into_iter().rev().map(|id| vec![id]).collect();
+        let mut seen = HashSet::new();
+        while let Some(path) = pending.pop() {
+            let Some(id) = path.last() else {
+                continue;
+            };
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Ok(shape) = shape_ref(txn, id) else {
+                continue;
+            };
+            if array_lists(&shape, txn, "textStories", story_id) {
+                let found = OwnerPath {
+                    slide_id: slide_id.clone(),
+                    shape_ids: path,
+                };
+                if path_holds(txn, story_id, &found) {
+                    return Some(found);
+                }
+                continue;
+            }
+            let Ok(children) = map_string_array(&shape, txn, "children") else {
+                continue;
+            };
+            for child in children.into_iter().rev() {
+                let mut next = path.clone();
+                next.push(child);
+                pending.push(next);
+            }
         }
     }
     None
