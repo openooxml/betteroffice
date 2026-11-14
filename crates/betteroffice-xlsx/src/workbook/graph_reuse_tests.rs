@@ -539,3 +539,32 @@ fn a_defined_name_change_beside_a_table_and_a_spill_keeps_the_graph() {
         apply(workbook, op);
     });
 }
+
+#[test]
+fn a_refused_row_insert_leaves_the_graph_current() {
+    for seed in SEEDS {
+        let mut workbook = workbook(generated(seed, true));
+        let before = workbook.model().clone();
+        let epoch = workbook.model_epoch;
+        let op = Op::InsertRows {
+            sheet: SheetId(0),
+            at: 2,
+            count: 1,
+        };
+        let refused = workbook.apply_ops(vec![op], options());
+        assert!(
+            matches!(
+                refused,
+                Err(Error::Operation(OpError::FormulaNotRewritable { .. }))
+            ),
+            "seed {seed}: {refused:?}"
+        );
+        assert_eq!(workbook.model(), &before, "seed {seed}");
+        assert_eq!(workbook.model_epoch, epoch, "seed {seed}");
+        let label = format!("seed {seed}, refused");
+        assert_next_full_recalculation(&mut workbook, true, &label);
+        edit(&mut workbook, 0, "B3", "=A3*10");
+        let label = format!("seed {seed}, formula");
+        assert_next_full_recalculation(&mut workbook, false, &label);
+    }
+}
