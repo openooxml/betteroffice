@@ -433,6 +433,7 @@ jobs:
           cargo test -p betteroffice-docx --all-features
           cargo test -p betteroffice-pptx --all-features
           cargo test -p betteroffice-pptx-edit --features test-counters --test attach_scaling
+          cargo test -p betteroffice-pptx-parse --features test-counters --test splice_scaling
           cargo test -p betteroffice-vsdx-edit --features wasm
           cargo test -p betteroffice-docx-edit --features wasm --lib -- wasm:: wasm_memory::
           cargo test -p betteroffice-docx-layout --no-default-features --test without_base_latin
@@ -548,6 +549,8 @@ jobs:
     name: Native gate
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      DENO_VERSION: "2.9.0"
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -585,9 +588,15 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Restore the Deno binary
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ runner.tool_cache }}/deno/${{ env.DENO_VERSION }}
+          key: deno-${{ runner.os }}-${{ runner.arch }}-${{ env.DENO_VERSION }}
+
       - uses: denoland/setup-deno@v2
         with:
-          deno-version: "v2.9.0"
+          deno-version: ${{ env.DENO_VERSION }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -694,6 +703,13 @@ jobs:
         run: |
           bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts bindings/engine-parity/docx.test.ts bindings/engine-parity/xlsx.test.ts bindings/engine-parity/pptx.test.ts
           bun test bindings/raw-surface.test.ts
+
+      - name: Check the crate save against the product save
+        env:
+          DOCX_CRATE_PARITY_DIR: ${{ runner.temp }}/docx-crate-parity
+        run: |
+          bun test bindings/engine-parity/docx-crate-save.test.ts
+          cargo test --locked -p betteroffice-docx --test wasm_parity -- --ignored
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
