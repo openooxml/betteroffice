@@ -188,6 +188,50 @@ impl Case {
             axis.delete(at, count);
         }
     }
+
+    fn move_block(&mut self, rows: bool, at: u32, count: u32, before: u32) {
+        let end = at + count;
+        let index = |index: u32| {
+            if before > end && index >= at && index < end {
+                before - count + (index - at)
+            } else if before > end && index >= end && index < before {
+                index - count
+            } else if before < at && index >= at && index < end {
+                before + (index - at)
+            } else if before < at && index >= before && index < at {
+                index + count
+            } else {
+                index
+            }
+        };
+        let remap = |cell: CellRef| {
+            Some(if rows {
+                CellRef::new(index(cell.row), cell.col)
+            } else {
+                CellRef::new(cell.row, index(cell.col))
+            })
+        };
+        self.workbook.sheets[0].remap_cells(remap);
+        if rows {
+            let heights = std::mem::take(&mut self.workbook.sheets[0].row_heights);
+            self.workbook.sheets[0].row_heights = heights
+                .into_iter()
+                .map(|(row, height)| (index(row), height))
+                .collect();
+        }
+        self.retained = std::mem::take(&mut self.retained)
+            .into_iter()
+            .filter_map(|((row, col), value)| {
+                remap(CellRef::new(row, col)).map(|at| ((at.row, at.col), value))
+            })
+            .collect();
+        let axis = if rows {
+            &mut self.axes.rows
+        } else {
+            &mut self.axes.cols
+        };
+        axis.move_block(at, count, before);
+    }
 }
 
 fn number(value: f64) -> Cell {
@@ -376,6 +420,48 @@ fn structural_edits_match_oracle() {
                 case.compare();
             }
         }
+    }
+}
+
+#[test]
+fn shared_group_with_gap_after_insert_and_delete_matches_oracle() {
+    let by_col = concat!(
+        r#"<sheetData><row r="1"><c r="A1"><f t="shared" ref="A1:D1" si="0">A9</f><v>0</v></c>"#,
+        r#"<c r="B1"><f t="shared" si="0"/><v>0</v></c>"#,
+        r#"<c r="D1"><f t="shared" si="0"/><v>0</v></c></row></sheetData>"#,
+    );
+    let by_row = concat!(
+        r#"<sheetData><row r="1"><c r="A1"><f t="shared" ref="A1:A4" si="0">I1</f><v>0</v></c></row>"#,
+        r#"<row r="2"><c r="A2"><f t="shared" si="0"/><v>0</v></c></row>"#,
+        r#"<row r="4"><c r="A4"><f t="shared" si="0"/><v>0</v></c></row></sheetData>"#,
+    );
+    for (source, rows) in [(by_col, false), (by_row, true)] {
+        for shifts in [[(true, 1), (false, 3)], [(false, 2), (true, 1)]] {
+            let mut case = Case::new(source);
+            for (insert, at) in shifts {
+                case.shift(rows, insert, at, 1);
+            }
+            case.compare();
+        }
+    }
+}
+
+/// The writer and the oracle share the shared-group rule, so this agrees at the
+/// commit that keeps the moved group clean and only diverges once one side changes.
+#[test]
+fn shared_group_moved_past_its_ref_matches_oracle() {
+    let by_row = concat!(
+        r#"<sheetData><row r="1"><c r="A1"><f t="shared" ref="A1:A4" si="0">1</f><v>1</v></c></row>"#,
+        r#"<row r="2"><c r="A2"><f t="shared" si="0"/><v>1</v></c></row></sheetData>"#,
+    );
+    let by_col = concat!(
+        r#"<sheetData><row r="1"><c r="A1"><f t="shared" ref="A1:D1" si="0">1</f><v>1</v></c>"#,
+        r#"<c r="B1"><f t="shared" si="0"/><v>1</v></c></row></sheetData>"#,
+    );
+    for (source, rows) in [(by_row, true), (by_col, false)] {
+        let mut case = Case::new(source);
+        case.move_block(rows, 0, 2, 6);
+        case.compare();
     }
 }
 
