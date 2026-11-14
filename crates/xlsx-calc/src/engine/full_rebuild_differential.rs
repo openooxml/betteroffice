@@ -883,7 +883,12 @@ fn a_rebuild_over_stored_and_malformed_formula_text_matches_a_fresh_build() {
     assert!(edited.kept("A1+1"));
     assert!(edited.kept("SUM(A1:A2)*Scale"));
     assert!(!edited.cached.contains_key("SUM(A1"));
-    assert!(!edited.cached.contains_key("A2*"));
+    for rebuilt in [&edited.reused, &edited.fresh] {
+        let asts = rebuilt.graph.asts().lock().expect("parse cache poisoned");
+        assert!(!asts.contains_key("A2*"));
+        drop(asts);
+        assert_eq!(shown(&rebuilt.wb, s, "C2"), CellValue::Empty);
+    }
     let fresh = &edited.fresh.wb;
     assert_eq!(shown(fresh, s, "B1"), number(6.0));
     assert_eq!(shown(fresh, s, "B2"), number(6.0));
