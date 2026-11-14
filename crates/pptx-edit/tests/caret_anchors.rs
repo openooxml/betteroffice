@@ -195,69 +195,6 @@ fn caret_anchor_on_a_remaining_slide_survives_another_slide_deletion() {
 }
 
 #[test]
-fn caret_anchor_report_insert_into_story_of_deleted_slide() {
-    const MARK: &str = "ANCHORMARK";
-    let (session, story) = session_with_text("ABC");
-    let anchor = session.anchor_caret(&story, 2).unwrap();
-    let (slide, _) = story_home(&session, &story);
-    let events = std::rc::Rc::new(std::cell::Cell::new(0usize));
-    let counted = events.clone();
-    let _subscription = session.observe_update_v1(move |_| counted.set(counted.get() + 1));
-    println!();
-    match session.delete_slide(&EditCtx::local("test"), &slide) {
-        Ok(_) => println!("ANCHOR-REPORT delete_slide ok"),
-        Err(error) => println!("ANCHOR-REPORT delete_slide error: {error}"),
-    }
-    let after_delete = events.get();
-    let resolved = session.resolve_caret_anchor(&anchor);
-    println!("ANCHOR-REPORT resolve_caret_anchor after delete: {resolved:?}");
-    match resolved {
-        Some(index) => match session.insert_text(
-            &EditCtx::local("test"),
-            &story,
-            index,
-            MARK,
-            &TextStyle::default(),
-        ) {
-            Ok(receipt) => println!("ANCHOR-REPORT insert_text ok: {receipt:?}"),
-            Err(error) => println!("ANCHOR-REPORT insert_text error: {error}"),
-        },
-        None => println!("ANCHOR-REPORT insert_text skipped: anchor resolved to None"),
-    }
-    match session.story(&story) {
-        Ok(snapshot) => println!(
-            "ANCHOR-REPORT dead story contains marker: {} (text {:?})",
-            snapshot.plain_text().contains(MARK),
-            snapshot.plain_text()
-        ),
-        Err(error) => println!("ANCHOR-REPORT dead story read error: {error}"),
-    }
-    match session.save() {
-        Ok(bytes) => match ooxml_opc::unzip_parts(&bytes) {
-            Ok(parts) => {
-                let hits: Vec<&str> = parts
-                    .iter()
-                    .filter(|(name, _)| name.starts_with("ppt/slides/"))
-                    .filter(|(_, data)| String::from_utf8_lossy(data).contains(MARK))
-                    .map(|(name, _)| name.as_str())
-                    .collect();
-                println!(
-                    "ANCHOR-REPORT saved slide parts contain marker: {} {hits:?}",
-                    !hits.is_empty()
-                );
-            }
-            Err(error) => println!("ANCHOR-REPORT saved bytes unzip error: {error}"),
-        },
-        Err(error) => println!("ANCHOR-REPORT save error: {error}"),
-    }
-    println!(
-        "ANCHOR-REPORT update events: {} on delete, {} after insert",
-        after_delete,
-        events.get() - after_delete
-    );
-}
-
-#[test]
 fn caret_anchor_in_a_group_child_survives_another_slide_deletion() {
     let session = grouped_session();
     let snapshot = session.snapshot().unwrap();

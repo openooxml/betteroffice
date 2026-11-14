@@ -961,51 +961,6 @@ describe('host undo and comment controls', () => {
     } finally { deck.dispose(); }
   });
 
-  test('caret anchor report: typing into the story of a deleted slide', async () => {
-    const mark = 'ANCHORMARK';
-    const report = (line: string) => console.log(`\nANCHOR-REPORT ${line}`);
-    const guard = async (label: string, step: () => unknown) => {
-      try { return await step(); } catch (error) {
-        report(`${label} threw: ${error instanceof Error ? error.message : String(error)}`);
-        return undefined;
-      }
-    };
-    const deck = openPresentation(fixture, { clientId: 9988 });
-    try {
-      const { slide, story, anchor } = anchoredStory(deck);
-      const updates: string[] = [];
-      deck.onUpdate((_, origin) => updates.push(String(origin)));
-      await guard('deleteSlide', () => { deck.deleteSlide(slide.id); report('deleteSlide ok'); });
-      const onDelete = updates.length;
-      const resolved = await guard('resolveCaretAnchor', () => deck.resolveCaretAnchor(anchor)) as
-        number | null | undefined;
-      report(`resolveCaretAnchor after delete: ${String(resolved)}`);
-      if (typeof resolved === 'number') {
-        await guard('insertText', () => {
-          report(`insertText ok: ${JSON.stringify(deck.insertText(story.id, resolved, mark))}`);
-        });
-      } else {
-        report('insertText skipped: anchor did not resolve to an offset');
-      }
-      await guard('story', () => {
-        const text = deck.story(story.id).paragraphs
-          .map((paragraph) => paragraph.runs.map((run) => run.text).join('')).join('\n');
-        report(`dead story contains marker: ${text.includes(mark)} (text ${JSON.stringify(text)})`);
-      });
-      await guard('save', async () => {
-        const zip = await JSZip.loadAsync(deck.save());
-        const hits: string[] = [];
-        for (const entry of Object.values(zip.files)) {
-          if (entry.dir || !entry.name.startsWith('ppt/slides/')) continue;
-          if ((await entry.async('string')).includes(mark)) hits.push(entry.name);
-        }
-        report(`saved slide parts contain marker: ${hits.length > 0} ${JSON.stringify(hits)}`);
-      });
-      report(`update events: ${onDelete} on delete, ${updates.length - onDelete} after insert ` +
-        `${JSON.stringify(updates)}`);
-    } finally { deck.dispose(); }
-  });
-
   test('moves modern comments without losing their thread or exported position', async () => {
     const bytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/modern-comments.pptx'));
     const deck = openPresentation(bytes, { clientId: 9982 });
