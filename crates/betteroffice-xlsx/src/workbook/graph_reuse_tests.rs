@@ -466,3 +466,76 @@ fn a_type_change_under_a_criteria_range_keeps_the_graph() {
 fn a_value_read_by_a_defined_name_keeps_the_graph() {
     check(true, true, |workbook| edit(workbook, 1, "A2", "77"));
 }
+
+/// after `change`, the full recalculations following an undo and then a redo both keep the graph.
+fn check_history(change: impl Fn(&mut Workbook)) {
+    for seed in SEEDS {
+        let mut workbook = workbook(generated(seed, true));
+        change(&mut workbook);
+        workbook.recalculate_all(options());
+        workbook.undo(options()).unwrap();
+        assert_next_full_recalculation(&mut workbook, true, &format!("seed {seed}, undo"));
+        workbook.redo(options()).unwrap();
+        assert_next_full_recalculation(&mut workbook, true, &format!("seed {seed}, redo"));
+    }
+}
+
+fn apply(workbook: &mut Workbook, op: Op) {
+    workbook.apply_ops(vec![op], options()).unwrap();
+}
+
+#[test]
+fn undoing_and_redoing_a_formula_edit_keep_the_graph_their_recalculation_rebuilt() {
+    check_history(|workbook| edit(workbook, 0, "B3", "=A3*10"));
+}
+
+#[test]
+fn undoing_and_redoing_a_row_insert_keep_the_graph_their_recalculation_rebuilt() {
+    check_history(|workbook| {
+        edit(workbook, 3, "D1", "");
+        workbook.recalculate_all(options());
+        let sheet = SheetId(0);
+        apply(
+            workbook,
+            Op::InsertRows {
+                sheet,
+                at: 2,
+                count: 1,
+            },
+        );
+    });
+}
+
+#[test]
+fn a_row_insert_and_a_sheet_delete_beside_a_table_and_a_spill_keep_the_graph() {
+    for seed in SEEDS {
+        let mut workbook = workbook(generated(seed, true));
+        edit(&mut workbook, 3, "D1", "");
+        workbook.recalculate_all(options());
+        let sheet = SheetId(4);
+        apply(
+            &mut workbook,
+            Op::InsertRows {
+                sheet,
+                at: 0,
+                count: 1,
+            },
+        );
+        assert_next_full_recalculation(&mut workbook, true, &format!("seed {seed}, insert"));
+        apply(&mut workbook, Op::RemoveSheet { index: 1 });
+        assert_next_full_recalculation(&mut workbook, true, &format!("seed {seed}, delete"));
+    }
+}
+
+#[test]
+fn a_defined_name_change_beside_a_table_and_a_spill_keeps_the_graph() {
+    check(true, true, |workbook| {
+        let op = Op::SetDefinedName {
+            name: "Rate".into(),
+            refers_to: "Sheet1!$A$3".into(),
+            scope: None,
+            hidden: None,
+        };
+        apply(workbook, op);
+    });
+}
