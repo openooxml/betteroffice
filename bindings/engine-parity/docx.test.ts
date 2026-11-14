@@ -789,6 +789,8 @@ function tokenizedImage(fresh: () => Session): { f: Session; src: string } {
 
 const HEADER_ALIASES = JSON.stringify([{ isHeader: true, partPath: 'word/header1.xml', relationshipIds: ['rIdHeader', 'rIdHeaderAlias'] }]);
 const HEX_DIGEST = /^[0-9a-f]{16}$/;
+// Four 64-bit halves all fall below 2^53 with odds of 2^-44, so a miss means a narrowed generator.
+const FULL_RANGE_FLOOR = 1n << 53n;
 
 interface MediaSourcesWire { key: string[]; parts: [string, number][] }
 
@@ -806,6 +808,9 @@ function measuredSources(engine: DocxEngine, sources: MediaSourcesWire, other: M
   const drawn = (value: string, again: string | undefined): string | { generated: 'hex64' } => (value !== again ? { generated: 'hex64' } : value);
   const key = sources.key.map((half, index) => drawn(half, other.key[index]));
   console.log(`MEDIA-KEY-PROBE ${engineName(engine)} ${sources.key.join(',')} ${other.key.join(',')} drawn=${key.map((half) => typeof half !== 'string').join(',')}`);
+  if (![...sources.key, ...other.key].some((half) => BigInt(`0x${half}`) >= FULL_RANGE_FLOOR)) {
+    throw new Error(`${engineName(engine)} drew every media key half below 2^53, not from the full 64-bit range: ${sources.key.join(',')} ${other.key.join(',')}`);
+  }
   return {
     ...sources,
     key,
