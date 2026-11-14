@@ -22,7 +22,7 @@ test('one Dependabot cargo entry covers every Cargo lockfile, so a bump moves th
   expect([...cargo[0].directories].sort()).toEqual(lockfileDirectories());
 });
 
-test('major cargo bumps arrive as one pull request per dependency across those lockfiles', () => {
+test('cargo minor, patch and major bumps each arrive as one pull request per dependency across those lockfiles', () => {
   const groups = cargo[0].groups;
   expect(groups['cargo-minor-patch']).toEqual({ 'update-types': ['minor', 'patch'], 'group-by': 'dependency-name' });
   expect(groups['cargo-major']).toEqual({ 'update-types': ['major'], 'group-by': 'dependency-name' });
