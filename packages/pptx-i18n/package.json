@@ -138,7 +138,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "tsup": "^8.0.1",
+    "tsup": "^9.0.0",
     "typescript": "^6.0.3"
   },
   "keywords": [
