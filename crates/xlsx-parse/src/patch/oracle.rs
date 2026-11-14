@@ -492,8 +492,7 @@ impl SheetPatch<'_> {
                 arrays.insert((cell.at.row, cell.at.col));
             }
         }
-        let mut groups: HashMap<u32, (bool, Option<CellRange>, Option<(u32, u32)>)> =
-            HashMap::new();
+        let mut groups: HashMap<u32, SharedGroupEntry> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
             let Some(formula) = &cell.formula else {

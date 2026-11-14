@@ -36,6 +36,8 @@ mod style_match_tests;
 pub(crate) use style_match::{SourceStyles, StyleMatch, keeps_source_xf, retains_source_styles};
 pub use style_match::{keeps_source, keeps_source_conditional_formats};
 
+type SharedGroupEntry = (bool, Option<CellRange>, Option<(u32, u32)>);
+
 #[cfg(any(test, feature = "test-oracle"))]
 thread_local! {
     static EMISSION_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -776,8 +778,7 @@ impl SheetPatch<'_> {
     fn dirty_formulas(&self, data: &[u8], rows: &[SourceRow]) -> Result<DirtyFormulas, ParseError> {
         let mut changed = self.changed_source_cells();
         let mut arrays = BTreeSet::new();
-        let mut groups: HashMap<u32, (bool, Option<CellRange>, Option<(u32, u32)>)> =
-            HashMap::new();
+        let mut groups: HashMap<u32, SharedGroupEntry> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
             let Some(formula) = &cell.formula else {
