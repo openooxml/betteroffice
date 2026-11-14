@@ -1,7 +1,11 @@
 use super::*;
+
+use crate::parser::parse_formula;
+
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+
 use xlsx_model::{Cell, Sheet};
 
 const NOW_SERIAL: f64 = 45_000.25;
@@ -179,16 +183,11 @@ fn shift_pieces(
     shift: Shift,
 ) {
     for piece in pieces.iter_mut() {
-        let moved = match piece {
+        let moved = match &*piece {
             Piece::Ref { sheet, at, abs } if sheet.or(owner) == Some(slot) => {
-                Some(match shift_point(*at, axis, index, shift) {
-                    Some(at) => Piece::Ref {
-                        sheet: *sheet,
-                        at,
-                        abs: *abs,
-                    },
-                    None => Piece::Broken,
-                })
+                let (sheet, abs) = (*sheet, *abs);
+                let at = shift_point(*at, axis, index, shift);
+                at.map(|at| Piece::Ref { sheet, at, abs })
             }
             Piece::Range {
                 sheet,
@@ -196,21 +195,18 @@ fn shift_pieces(
                 end,
                 abs,
             } if sheet.or(owner) == Some(slot) => {
-                Some(match shift_range(*start, *end, axis, index, shift) {
-                    Some((start, end)) => Piece::Range {
-                        sheet: *sheet,
-                        start,
-                        end,
-                        abs: *abs,
-                    },
-                    None => Piece::Broken,
+                let (sheet, abs) = (*sheet, *abs);
+                let moved = shift_range(*start, *end, axis, index, shift);
+                moved.map(|(start, end)| Piece::Range {
+                    sheet,
+                    start,
+                    end,
+                    abs,
                 })
             }
-            _ => None,
+            _ => continue,
         };
-        if let Some(moved) = moved {
-            *piece = moved;
-        }
+        *piece = moved.unwrap_or(Piece::Broken);
     }
 }
 
@@ -256,11 +252,10 @@ impl Model {
                     end,
                     abs,
                 } => match self.prefix(*sheet) {
-                    Some(prefix) => out.push_str(&format!(
-                        "{prefix}{}:{}",
-                        address(*start, *abs),
-                        address(*end, *abs)
-                    )),
+                    Some(prefix) => {
+                        let (start, end) = (address(*start, *abs), address(*end, *abs));
+                        out.push_str(&format!("{prefix}{start}:{end}"));
+                    }
                     None => out.push_str("#REF!"),
                 },
             }
@@ -340,7 +335,10 @@ impl Model {
         match edit {
             Edit::Unchanged => {}
             Edit::Value => self.put(0, (1, 0), Content::Number(1000.0)),
-            Edit::Formula => self.put(0, (2, 1), formula(vec![relative(None, 2, 0), text("*10")])),
+            Edit::Formula => {
+                let edited = vec![relative(None, 2, 0), text("*10")];
+                self.put(0, (2, 1), formula(edited));
+            }
             Edit::RenameSheet => self.slots[1].0 = "Renamed Two".into(),
             Edit::AddSheet => {
                 self.slots.push(("Extra".into(), true));
@@ -354,9 +352,10 @@ impl Model {
                 self.order.retain(|&slot| slot != 1);
                 self.cells[1].clear();
             }
-            Edit::AddName => self
-                .names
-                .push(("Later".into(), vec![absolute(Some(0), 0, 0)])),
+            Edit::AddName => {
+                let later = vec![absolute(Some(0), 0, 0)];
+                self.names.push(("Later".into(), later));
+            }
             Edit::ChangeName => self.names[1].1 = vec![absolute(Some(0), 2, 0)],
             Edit::DeleteName => {
                 self.names.remove(0);
@@ -413,21 +412,24 @@ fn generated(seed: u64) -> Model {
                 absolute(None, 0, 0),
             ];
             model.put(slot, (row, 2), formula(repeated));
-            let chain = match row {
-                0 => vec![relative(None, 0, 1)],
-                _ => vec![relative(None, row - 1, 3), text("+"), relative(None, row, 1)],
-            };
+            let mut chain = vec![relative(None, row, 1)];
+            if row > 0 {
+                chain.push(text("+"));
+                chain.push(relative(None, row - 1, 3));
+            }
             model.put(slot, (row, 3), formula(chain));
         }
     }
     model.put(0, (0, 4), formula(vec![text("RAND()")]));
-    model.put(0, (1, 4), formula(vec![text("NOW()-NOW()+"), relative(None, 0, 0)]));
+    let now = vec![text("NOW()-NOW()+"), relative(None, 0, 0)];
+    model.put(0, (1, 4), formula(now));
     model.put(0, (2, 4), formula(vec![text("INDIRECT(\"A2\")+1")]));
     model.put(0, (0, 5), formula(vec![text("Later*2")]));
     model.put(0, (1, 5), formula(vec![text("Extra!A1+1")]));
     let calc_rows = 4 + draw(4) as u32;
     for row in 0..calc_rows {
-        let cross = vec![relative(Some(1), row, 1), text("+"), absolute(Some(0), 0, 2)];
+        let mut cross = vec![relative(Some(1), row, 1), text("+")];
+        cross.push(absolute(Some(0), 0, 2));
         model.put(2, (row, 0), formula(cross));
     }
     let range = Piece::Range {
@@ -439,8 +441,10 @@ fn generated(seed: u64) -> Model {
     model.put(2, (0, 1), formula(vec![text("SUM("), range, text(")")]));
     model.put(2, (1, 1), formula(vec![text("SUM(Total)*Rate")]));
     model.put(2, (2, 1), formula(vec![text("SUM(Total)*Rate")]));
-    model.put(2, (0, 5), formula(vec![relative(None, 0, 6), text("+1")]));
-    model.put(2, (0, 6), formula(vec![relative(None, 0, 5), text("+1")]));
+    let first = vec![relative(None, 0, 6), text("+1")];
+    model.put(2, (0, 5), formula(first));
+    let second = vec![relative(None, 0, 5), text("+1")];
+    model.put(2, (0, 6), formula(second));
     model.put(2, (0, 7), formula(vec![text("SUM(Big!A1:XFD1048576)")]));
     model.put(3, (1_048_575, 16_383), Content::Number(1.0));
     let total = Piece::Range {
@@ -450,7 +454,8 @@ fn generated(seed: u64) -> Model {
         abs: true,
     };
     model.names.push(("Total".into(), vec![total]));
-    model.names.push(("Rate".into(), vec![absolute(Some(1), 1, 0)]));
+    let rate = vec![absolute(Some(1), 1, 0)];
+    model.names.push(("Rate".into(), rate));
     model
 }
 
@@ -479,12 +484,14 @@ fn assert_same_rebuild(reused: &Rebuilt, fresh: &Rebuilt, label: &str) {
     }));
     assert!(graphs.is_ok(), "{label}: graphs differ");
     assert_eq!(
-        evaluation_order(&reused.graph),
-        evaluation_order(&fresh.graph),
+        evaluation_order(&reused.graph), evaluation_order(&fresh.graph),
         "{label}"
     );
     assert_eq!(reused.result.changed, fresh.result.changed, "{label}");
-    assert_eq!(reused.result.cycle_cells, fresh.result.cycle_cells, "{label}");
+    assert_eq!(
+        reused.result.cycle_cells, fresh.result.cycle_cells,
+        "{label}"
+    );
     assert_eq!(
         reused.result.limited_cells, fresh.result.limited_cells,
         "{label}"
@@ -546,7 +553,7 @@ fn the_rebuild_comparison_reports_a_wrong_parse_in_the_cache() {
         .and_then(|s| s.cell(CellRef::new(0, 1)))
         .and_then(|c| c.formula.clone())
         .expect("a formula at B1");
-    let wrong = crate::parser::parse_formula("12345").expect("a number parses");
+    let wrong = parse_formula("12345").expect("a number parses");
     reused
         .graph
         .asts()
