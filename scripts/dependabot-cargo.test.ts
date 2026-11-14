@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -46,4 +46,46 @@ test('every dependency edge in each cargo lockfile resolves to exactly one locke
     }
   }
   expect(problems).toEqual([]);
+});
+
+function workspaceMembers(directory: string): string[] | undefined {
+  const manifest = `${root}${`${directory}/Cargo.toml`.replace(/^\/+/, '')}`;
+  if (!existsSync(manifest)) return undefined;
+  return (Bun.TOML.parse(readFileSync(manifest, 'utf8')) as any).workspace?.members;
+}
+
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern
+    .split('*')
+    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[^/]*');
+  return new RegExp(`^${escaped}$`);
+}
+
+test('workspace member patterns can be listed by Dependabot', () => {
+  const problems: string[] = [];
+  for (const directory of [...cargo[0].directories].sort()) {
+    for (const pattern of workspaceMembers(directory) ?? []) {
+      const last = pattern.split('/').pop() ?? '';
+      if (last.includes('*') && !last.startsWith('*')) {
+        problems.push(`${directory}: member pattern "${pattern}" has text before a "*" in its last segment`);
+      }
+    }
+  }
+  expect(problems).toEqual([]);
+});
+
+test('every crate under bindings is a workspace member', () => {
+  const members = workspaceMembers('/bindings') ?? [];
+  const crates = readdirSync(`${root}bindings`, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .filter((name) => {
+      const manifest = `${root}bindings/${name}/Cargo.toml`;
+      return existsSync(manifest) && (Bun.TOML.parse(readFileSync(manifest, 'utf8')) as any).package !== undefined;
+    })
+    .sort();
+  expect(crates.length).toBeGreaterThan(0);
+  const unlisted = crates.filter((name) => !members.some((pattern) => globToRegExp(pattern).test(name)));
+  expect(unlisted).toEqual([]);
 });
