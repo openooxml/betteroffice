@@ -50,12 +50,14 @@ pub struct DifferentialFormat {
 }
 
 impl DifferentialFormat {
-    /// this format as releases before italic read it: no italic.
-    pub fn released_reading(&self) -> Self {
-        Self {
-            italic: None,
-            ..self.clone()
-        }
+    /// Whether this is `source` as an earlier release read it: releases before
+    /// italic read none, and releases before bare fills read no fill for a
+    /// `patternFill` without `patternType` and `fgColor` for a solid one.
+    pub fn is_released_reading_of(&self, source: &Self) -> bool {
+        self.font_color == source.font_color
+            && self.bold == source.bold
+            && (self.italic.is_none() || self.italic == source.italic)
+            && (self.fill.is_none() || source.fill.is_some())
     }
 }
 

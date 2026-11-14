@@ -271,16 +271,16 @@ fn parse_style_pools(
                     dxf_font_color = parse_color(&e)?;
                 }
                 b"patternFill" if dxf_fill && dxf.is_some() => {
-                    dxf_solid = attr(&e, b"patternType")?.as_deref() == Some("solid");
+                    dxf_solid = attr(&e, b"patternType")?.is_none_or(|pattern| pattern == "solid");
                 }
                 b"fgColor" if dxf_fill && dxf.is_some() => {
-                    if dxf_solid {
+                    if dxf_solid && dxf_fill_color.is_none() {
                         dxf_fill_color = parse_color(&e)?;
                     }
                 }
                 b"bgColor" if dxf_fill && dxf.is_some() => {
-                    if dxf_solid && dxf_fill_color.is_none() {
-                        dxf_fill_color = parse_color(&e)?;
+                    if dxf_solid && let Some(color) = parse_color(&e)? {
+                        dxf_fill_color = Some(color);
                     }
                 }
                 b"numFmt" if unfiltered || (section == Section::NumFmts && depth == 3) => {

@@ -1849,11 +1849,21 @@ fn format_facets_current_snapshot_saves_the_xfs_its_records_hold() {
 }
 
 /// A package whose conditional format paints bold italic text, and the same
-/// package as releases before italic read it. The format block carries an
-/// attribute the model does not hold, so only its source bytes keep it;
-/// `alternate` adds a second block inside an `mc:AlternateContent` branch,
-/// which a save cannot rewrite.
+/// package as releases before italic read it.
 fn released_italic(alternate: bool) -> (Vec<u8>, Vec<u8>) {
+    released_dxf(
+        alternate,
+        r#"<font><b/><i/><color rgb="FF9C0006"/></font>"#,
+        r#"<font><b/><color rgb="FF9C0006"/></font>"#,
+    )
+}
+
+/// A package whose conditional format paints with the dxf `source`, and the
+/// same package with the dxf `released`, as an earlier release read it. The
+/// format block carries an attribute the model does not hold, so only its
+/// source bytes keep it; `alternate` adds a second block inside an
+/// `mc:AlternateContent` branch, which a save cannot rewrite.
+fn released_dxf(alternate: bool, source: &str, released: &str) -> (Vec<u8>, Vec<u8>) {
     let block = concat!(
         r#"<conditionalFormatting sqref="A1:C1" pivot="0">"#,
         r#"<cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan">"#,
@@ -1879,16 +1889,14 @@ fn released_italic(alternate: bool) -> (Vec<u8>, Vec<u8>) {
         cells,
         false,
     );
-    let with = |font: &str| {
+    let with = |dxf: &str| {
         let mut parts = ooxml_opc::unzip_parts(&base).unwrap();
         for (name, bytes) in &mut parts {
             let text = String::from_utf8(bytes.clone()).unwrap();
             *bytes = match name.as_str() {
                 "xl/styles.xml" => text.replace(
                     "</cellStyles>",
-                    &format!(
-                        r#"</cellStyles><dxfs count="1"><dxf><font>{font}<color rgb="FF9C0006"/></font></dxf></dxfs>"#
-                    ),
+                    &format!(r#"</cellStyles><dxfs count="1"><dxf>{dxf}</dxf></dxfs>"#),
                 ),
                 "xl/worksheets/sheet1.xml" => {
                     text.replace("</sheetData>", &format!("</sheetData>{block}"))
@@ -1899,7 +1907,7 @@ fn released_italic(alternate: bool) -> (Vec<u8>, Vec<u8>) {
         }
         ooxml_opc::rezip_parts(&parts).unwrap()
     };
-    (with("<b/><i/>"), with("<b/>"))
+    (with(source), with(released))
 }
 
 #[test]
@@ -1931,6 +1939,51 @@ fn italic_released_snapshot_saves_the_source_italic() {
                 styles
             );
             let saved = reading().save().unwrap();
+            for name in ["xl/styles.xml", "xl/worksheets/sheet1.xml"] {
+                assert_eq!(part(&saved, name), part(&plain, name), "{name}");
+            }
+        }
+    }
+}
+
+#[test]
+fn released_fill_snapshot_and_state_keep_the_source_fill() {
+    let readings = [
+        (
+            r#"<fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill>"#,
+            "",
+            None,
+        ),
+        (
+            r#"<fill><patternFill patternType="solid"><fgColor rgb="FF111111"/><bgColor rgb="FFFFC7CE"/></patternFill></fill>"#,
+            r#"<fill><patternFill patternType="solid"><fgColor rgb="FF111111"/></patternFill></fill>"#,
+            Some("#111111"),
+        ),
+    ];
+    for ((source, released, reading), alternate) in readings
+        .into_iter()
+        .flat_map(|reading| [(reading, false), (reading, true)])
+    {
+        let (source, released) = released_dxf(alternate, source, released);
+        let budget = SnapshotBudget::new(1, 64 * 1024).unwrap();
+        let plain = Workbook::open(&source).unwrap().save().unwrap();
+        let worker = released_reading_of(&source, &released);
+        assert_eq!(worker.model().styles.dxfs[0].fill.as_deref(), reading);
+        let restored = restore(&released_snapshot(&worker, budget), budget);
+        let state = Workbook::open_collaborative(&released, 77)
+            .unwrap()
+            .encode_state_as_update_v1();
+        let mut peer = Workbook::open_collaborative(&source, 78).unwrap();
+        peer.apply_update_v1(&state, context()).unwrap();
+        assert_eq!(
+            peer.model().sheets[0].conditional_formats[0].rules[0]
+                .format
+                .fill
+                .as_deref(),
+            Some("#ffc7ce")
+        );
+        for workbook in [restored, peer] {
+            let saved = workbook.save().unwrap();
             for name in ["xl/styles.xml", "xl/worksheets/sheet1.xml"] {
                 assert_eq!(part(&saved, name), part(&plain, name), "{name}");
             }
