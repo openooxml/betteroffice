@@ -986,7 +986,7 @@ impl DepGraph {
 
 #[cfg(test)]
 impl DepGraph {
-    fn assert_matches(&self, other: &Self) {
+    pub(crate) fn assert_matches(&self, other: &Self) {
         let Self {
             names,
             defined_names,

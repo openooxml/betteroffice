@@ -5,6 +5,8 @@ mod order;
 
 #[cfg(test)]
 mod criteria_index_differential;
+#[cfg(test)]
+mod full_rebuild_differential;
 
 use order::{Step, topo_order};
 
