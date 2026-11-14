@@ -52,8 +52,8 @@ use xlsx_model::{
 use xlsx_ops::cell_state_for_input_no_eval;
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
-    NumberFormatMutation, Op, Proposal, ProposalGhost, ProposalSet, ProposedEdit, Provenance,
-    StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
+    NumberFormatMutation, Op, OpError, Proposal, ProposalGhost, ProposalSet, ProposedEdit,
+    Provenance, StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
     insertion_keeps_chart_anchor_on_grid,
 };
 use xlsx_parse::{
@@ -301,6 +301,15 @@ impl PreservedSheetState {
                 Op::DeleteRows { at, count, .. } => axes.rows.delete(at, count),
                 Op::InsertCols { at, count, .. } => axes.cols.insert(at, count),
                 Op::DeleteCols { at, count, .. } => axes.cols.delete(at, count),
+                // a move permutes tracks instead of shifting them; the map
+                // carries that permutation so the save still reads each source
+                // row and column (and every attribute it holds) back once
+                Op::MoveRows {
+                    row, count, before, ..
+                } => axes.rows.move_block(row, count, before),
+                Op::MoveCols {
+                    col, count, before, ..
+                } => axes.cols.move_block(col, count, before),
                 _ => {}
             }
         }
@@ -2564,6 +2573,9 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
+        for op in &ops {
+            xlsx_ops::ensure_op_available(op)?;
+        }
         if self.is_collaborative() {
             refuse_collaborative_structure(&ops, self.model.sheets.len())?;
         }
@@ -2587,6 +2599,8 @@ impl Workbook {
             }
             self.ensure_references_stay_valid(&names, op)?;
             drawings_move |= self.ensure_drawings_follow(&origins, &axes, op)?;
+
+            self.ensure_move_keeps_inline_text(&origins, op)?;
             validate_op(staged, op)?;
             validate_insert_capacity(staged, op)?;
             batch.apply(op)?;
@@ -3699,6 +3713,34 @@ impl Workbook {
             Op::InsertCols { sheet, at: col, .. } | Op::DeleteCols { sheet, at: col, .. } => {
                 package.reference_moved_by_cols(at(*sheet)?, *col)
             }
+            // a move relocates every track from the run or its destination,
+            // whichever comes first, so a preserved part naming a cell there
+            // is stranded just as an insert would strand it. A move whose
+            // destination falls inside the run keeps every track in place.
+            Op::MoveRows {
+                sheet,
+                row,
+                count,
+                before,
+            } => {
+                if move_is_noop(*row, *count, *before) {
+                    None
+                } else {
+                    package.reference_moved_by_rows(at(*sheet)?, (*row).min(*before))
+                }
+            }
+            Op::MoveCols {
+                sheet,
+                col,
+                count,
+                before,
+            } => {
+                if move_is_noop(*col, *count, *before) {
+                    None
+                } else {
+                    package.reference_moved_by_cols(at(*sheet)?, (*col).min(*before))
+                }
+            }
             _ => return Ok(()),
         };
         match stranded {
@@ -3758,6 +3800,63 @@ impl Workbook {
             Ok(moves) => Ok(moves),
         }
     }
+    /// A track move is a permutation, which `AxisMap` — monotone by
+    /// construction — cannot express, so the save drops the sheet's source
+    /// coordinates and reserializes its `sheetData` from the model. The model
+    /// keeps inline text but not its runs, and an undo can bring a source value
+    /// back after a content write hid its runs, so any inline run in the
+    /// sheet's source is at risk; a picture or shape is anchored to cells only
+    /// the source drawing holds. Refuse the move rather than drop either; the
+    /// applier already reports moves it cannot preserve this way.
+    fn ensure_move_keeps_inline_text(&self, origins: &[Option<usize>], op: &Op) -> Result<()> {
+        let sheet = match *op {
+            Op::MoveRows {
+                sheet,
+                row,
+                count,
+                before,
+            } => {
+                if move_is_noop(row, count, before) {
+                    return Ok(());
+                }
+                sheet
+            }
+            Op::MoveCols {
+                sheet,
+                col,
+                count,
+                before,
+            } => {
+                if move_is_noop(col, count, before) {
+                    return Ok(());
+                }
+                sheet
+            }
+            _ => return Ok(()),
+        };
+        let Some(package) = &self.source_package else {
+            return Ok(());
+        };
+        let Some(origin) = origins.get(sheet.0 as usize).copied().flatten() else {
+            return Ok(());
+        };
+        let package = package.materialize()?;
+        let holds_runs = package
+            .source_cell_facts(origin)
+            .is_some_and(|facts| !facts.rich_inline.is_empty());
+        if holds_runs {
+            return Err(Error::Operation(OpError::MoveNotSupported {
+                sheet,
+                reason: "the worksheet holds inline text with formatting runs, and a move \
+                         would make the save rewrite it as plain text"
+                    .into(),
+            }));
+        }
+        // pictures and shapes follow the move through the sheet's axes: a
+        // permutation is now part of the map, so their anchors keep naming the
+        // cells they were anchored to without a reserialized sheet
+        Ok(())
+    }
 
     fn sheet_names(&self) -> Vec<String> {
         self.model
@@ -3779,6 +3878,32 @@ impl Workbook {
             }
             Op::InsertCols { sheet, at, .. } | Op::DeleteCols { sheet, at, .. } => {
                 (sheet, at, false)
+            }
+            // a move disturbs every track from the run or its destination,
+            // whichever comes first, so the save has to rewrite the preserved
+            // references an insert or delete would make it rewrite. A move that
+            // keeps every track in place disturbs none of them.
+            Op::MoveRows {
+                sheet,
+                row,
+                count,
+                before,
+            } => {
+                if move_is_noop(row, count, before) {
+                    return false;
+                }
+                (sheet, row.min(before), true)
+            }
+            Op::MoveCols {
+                sheet,
+                col,
+                count,
+                before,
+            } => {
+                if move_is_noop(col, count, before) {
+                    return false;
+                }
+                (sheet, col.min(before), false)
             }
             _ => return false,
         };
@@ -4003,11 +4128,18 @@ impl Workbook {
                 | Op::DeleteRows { sheet, .. }
                 | Op::InsertCols { sheet, .. }
                 | Op::DeleteCols { sheet, .. }
+                // a move permutes the row heights and column widths the memo's
+                // content size is measured from, so the sheet's geometry has to
+                // be re-read even though its bounds did not change
+                | Op::MoveRows { sheet, .. }
+                | Op::MoveCols { sheet, .. }
                 | Op::SetColWidth { sheet, .. }
                 | Op::SetColVisibility { sheet, .. }
+                | Op::SetColsVisibility { sheet, .. }
                 | Op::RestoreColDimension { sheet, .. }
                 | Op::SetRowHeight { sheet, .. }
                 | Op::SetRowVisibility { sheet, .. }
+                | Op::SetRowsVisibility { sheet, .. }
                 | Op::RestoreRowDimension { sheet, .. }
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
@@ -4015,6 +4147,8 @@ impl Workbook {
                 | Op::RemoveHyperlink { sheet, .. }
                 | Op::RestoreColStyles { sheet, .. }
                 | Op::RestoreRowStyles { sheet, .. }
+                | Op::RestoreArrayFormula { sheet, .. }
+                | Op::ClipArrayFormula { sheet, .. }
                 | Op::MergeCells { sheet, .. }
                 | Op::UnmergeCells { sheet, .. }
                 | Op::PatchRangeStyle { sheet, .. }
@@ -4271,7 +4405,12 @@ impl Workbook {
                 Op::InsertRows { sheet, .. }
                 | Op::DeleteRows { sheet, .. }
                 | Op::InsertCols { sheet, .. }
-                | Op::DeleteCols { sheet, .. } => self.preserved.shift(sheet, op),
+                | Op::DeleteCols { sheet, .. }
+                // a move carries each cell's shared-string provenance to its new
+                // address the way an insert or delete does, and drops the
+                // sheet's source coordinates, which a permutation cannot express
+                | Op::MoveRows { sheet, .. }
+                | Op::MoveCols { sheet, .. } => self.preserved.shift(sheet, op),
                 _ => {}
             }
         }
@@ -4905,11 +5044,17 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::DeleteRows { sheet, .. }
         | Op::InsertCols { sheet, .. }
         | Op::DeleteCols { sheet, .. }
+        | Op::MoveRows { sheet, .. }
+        | Op::MoveCols { sheet, .. }
+        | Op::RestoreArrayFormula { sheet, .. }
+        | Op::ClipArrayFormula { sheet, .. }
         | Op::SetColWidth { sheet, .. }
         | Op::SetColVisibility { sheet, .. }
+        | Op::SetColsVisibility { sheet, .. }
         | Op::RestoreColDimension { sheet, .. }
         | Op::SetRowHeight { sheet, .. }
         | Op::SetRowVisibility { sheet, .. }
+        | Op::SetRowsVisibility { sheet, .. }
         | Op::RestoreRowDimension { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
@@ -4965,6 +5110,70 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
             require_sheet(model, *sheet)?;
             validate_axis("column", *at, *count, MAX_COLS)?;
         }
+        // a move is a structural track edit like an insert or delete, but its
+        // run and destination are both user coordinates, so both are checked
+        // here. `before` may name the gap after the last track, which is where
+        // a move past the end lands and the applier accepts. Whether the moved
+        // tracks can carry the sheet's merges and tables is the applier's
+        // call: `MoveNotSupported` from `apply`.
+        Op::MoveRows {
+            sheet,
+            row,
+            count,
+            before,
+        } => {
+            require_sheet(model, *sheet)?;
+            validate_axis("row", *row, *count, MAX_ROWS)?;
+            if *before > MAX_ROWS {
+                return Err(Error::InvalidOperation(format!(
+                    "row move destination {} is out of range",
+                    u64::from(*before) + 1
+                )));
+            }
+        }
+        Op::MoveCols {
+            sheet,
+            col,
+            count,
+            before,
+        } => {
+            require_sheet(model, *sheet)?;
+            validate_axis("column", *col, *count, MAX_COLS)?;
+            if *before > MAX_COLS {
+                return Err(Error::InvalidOperation(format!(
+                    "column move destination {} is out of range",
+                    u64::from(*before) + 1
+                )));
+            }
+        }
+        Op::RestoreArrayFormula {
+            sheet,
+            anchor,
+            spill,
+        } => {
+            require_sheet(model, *sheet)?;
+            validate_range(*spill)?;
+            validate_cell_ref(*anchor)?;
+            if !spill.contains(*anchor) {
+                return Err(Error::InvalidOperation(format!(
+                    "array formula anchor {anchor:?} is outside its restored range"
+                )));
+            }
+        }
+        Op::ClipArrayFormula {
+            sheet,
+            anchor,
+            spill,
+        } => {
+            require_sheet(model, *sheet)?;
+            validate_range(*spill)?;
+            validate_cell_ref(*anchor)?;
+            if !spill.contains(*anchor) {
+                return Err(Error::InvalidOperation(format!(
+                    "array formula anchor {anchor:?} is outside its clipped range"
+                )));
+            }
+        }
         Op::SetColWidth { sheet, col, width } => {
             require_sheet(model, *sheet)?;
             if *col >= MAX_COLS {
@@ -4989,6 +5198,21 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                     u64::from(*col) + 1
                 )));
             }
+        }
+        // a visibility range is refused the way an insert or delete of the
+        // same span is: a zero count or a span past the sheet edge is not a
+        // range the sheet can hold
+        Op::SetColsVisibility {
+            sheet, col, count, ..
+        } => {
+            require_sheet(model, *sheet)?;
+            validate_axis("column", *col, *count, MAX_COLS)?;
+        }
+        Op::SetRowsVisibility {
+            sheet, row, count, ..
+        } => {
+            require_sheet(model, *sheet)?;
+            validate_axis("row", *row, *count, MAX_ROWS)?;
         }
         Op::RestoreColDimension {
             sheet,
@@ -6215,6 +6439,14 @@ fn validate_axis(axis: &str, at: u32, count: u32, limit: u32) -> Result<()> {
     Ok(())
 }
 
+/// Whether a track move leaves every track where it was: no tracks to move, or
+/// a destination inside the run it would move, which is where the run already
+/// sits. Mirrors the applier's own test, so a no-op is not refused for moving
+/// references it never moves.
+fn move_is_noop(at: u32, count: u32, before: u32) -> bool {
+    count == 0 || (before >= at && before <= at.saturating_add(count))
+}
+
 /// Carries a sheet-name view across one op, so the next op in a batch resolves
 /// its sheet ids the way the model will.
 fn rename_sheet_view(names: &mut Vec<String>, op: &Op) {
@@ -6309,9 +6541,11 @@ impl CalculationScope {
             // a zero size hides a row or column, which hidden-aware functions read
             Op::SetColWidth { .. }
             | Op::SetColVisibility { .. }
+            | Op::SetColsVisibility { .. }
             | Op::RestoreColDimension { .. }
             | Op::SetRowHeight { .. }
             | Op::SetRowVisibility { .. }
+            | Op::SetRowsVisibility { .. }
             | Op::RestoreRowDimension { .. } => Self::Full,
             Op::SetDefinedNames { .. }
             | Op::SetTables { .. }
@@ -6323,7 +6557,16 @@ impl CalculationScope {
             | Op::InsertRows { .. }
             | Op::DeleteRows { .. }
             | Op::InsertCols { .. }
-            | Op::DeleteCols { .. } => Self::Full,
+            | Op::DeleteCols { .. }
+            // a move relocates cell values, formulas and their references the
+            // way an insert or delete does, so the engine's graph and answers
+            // are rebuilt rather than carried
+            | Op::MoveRows { .. }
+            | Op::MoveCols { .. }
+            // an array restore or clip rewrites the extent the engine spills
+            // from
+            | Op::RestoreArrayFormula { .. }
+            | Op::ClipArrayFormula { .. } => Self::Full,
         }
     }
 

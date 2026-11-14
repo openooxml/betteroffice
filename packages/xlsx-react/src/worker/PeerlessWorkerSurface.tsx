@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useSyncExternalStore } from 'react';
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react';
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import { buildA11yGrid, cellRect, normalizeRange, rangeRect } from '@betteroffice/xlsx';
 import type { CellAddr, CellRange, WorkbookSheetSummary } from '@betteroffice/xlsx';
 import type { CollaborationAwareness } from '@betteroffice/xlsx/collaboration';
@@ -16,8 +16,11 @@ import type { PeerlessWorkbookSession } from './usePeerlessSessionWorkbook';
 import type { WorkerDraftController } from './WorkerDraftController';
 import { WorkerPresentationStore, useWorkerPresentation } from './WorkerPresentationStore';
 import { PresenceStrip, RemoteSelections } from '../presence/Presence';
+import { ACTIVE_CELL_WIDTH, marqueeBox, marqueeFills, MARQUEE_COLOR, MARQUEE_WIDTH, SELECTION_FILL } from '../selectionOutline';
 import { usePeerlessPresence } from './usePeerlessPresence';
 import { A11yGridTable } from '../components/A11yGridCell';
+import { SheetGrid } from '../components/SheetGrid';
+import type { SheetGridHeaderHandlers } from '../components/SheetGrid';
 
 const selectSelection = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.selection;
 const selectPainted = (state: ReturnType<WorkerPresentationStore['getSnapshot']>) => state.painted;
@@ -27,6 +30,28 @@ const hidden: CSSProperties = {
   overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap',
 };
 
+/**
+ * The peerless paint lives in the presentation store, not in this shell's
+ * state. Subscribe here so the header bands advance with the same painted
+ * frame the canvas is showing instead of freezing at the first paint.
+ */
+export const PeerlessSheetGrid = memo(function PeerlessSheetGrid({ store, active, leadingInset = 0, headerHandlers, selectAllLabel, showSheetHeaders = false, children }: {
+  store: WorkerPresentationStore; active: number; leadingInset?: number;
+  showSheetHeaders?: boolean;
+  headerHandlers?: SheetGridHeaderHandlers;
+  selectAllLabel?: string; children: ReactNode;
+}) {
+  const painted = useWorkerPresentation(store, selectPainted);
+  // the headers follow the same gated sheet as the paint: a stale selection from
+  // the sheet just left must not light tracks on the one now shown.
+  const selection = useWorkerPresentation(store, selectSelection);
+  const paintedSheet = painted?.request.sheet === active ? active : null;
+  return <SheetGrid frame={painted?.request.sheet === active ? painted.displayList : null}
+    zoom={painted?.request.zoom ?? 1} leadingInset={leadingInset} showSheetHeaders={showSheetHeaders} headerHandlers={headerHandlers}
+    sheet={paintedSheet}
+    selectAllLabel={selectAllLabel}
+    selection={painted?.request.sheet === active ? selection : null}>{children}</SheetGrid>;
+});
 export const PeerlessWorkerExtent = memo(function PeerlessWorkerExtent({ store, zoom }: {
   store: WorkerPresentationStore; zoom: number;
 }) {
@@ -37,7 +62,7 @@ export const PeerlessWorkerExtent = memo(function PeerlessWorkerExtent({ store, 
 
 export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store, active, zoom, selectedChart,
   chartPreview, chartSheetExtent, onResizeStart, onResizeNudge, controller, disabled, run,
-  onFill, cellAt, fillHandle }: {
+  showSheetHeaders = false, onFill, cellAt, fillHandle }: {
   store: WorkerPresentationStore;
   active: number;
   zoom: number;
@@ -50,6 +75,7 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
   controller: WorkerDraftController;
   disabled: boolean;
   run: PeerlessWorkbookSession | null;
+  showSheetHeaders?: boolean;
   onFill?(source: CellRange, destination: CellRange): void;
   cellAt?(clientX: number, clientY: number): CellAddr | null;
   fillHandle?: boolean;
@@ -64,7 +90,7 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
   const scale = painted?.request.zoom ?? zoom;
   const visible = painted?.request.sheet === active ? selection : null;
   const grid = painted?.displayList.grid;
-  const expanded = visible ? expandRangeToMergedCells(normalizeRange(visible), painted?.mergedRanges ?? []) : null;
+  const expanded = visible ? expandRangeToMergedCells(normalizeRange(visible), painted?.mergedRanges ?? [], showSheetHeaders) : null;
   const selectionRect = grid && expanded ? rangeRect(grid, expanded) : null;
   const selectionBottomRight = grid && expanded ? cellRect(grid, expanded.bottom, expanded.right) : null;
   const fillHandleRect = fillHandleAnchor(
@@ -103,20 +129,42 @@ export const PeerlessWorkerOverlay = memo(function PeerlessWorkerOverlay({ store
     return { position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
       boxSizing: 'border-box', border, background };
   };
+  // With headers the chart box keeps an outline: it is a movable frame rather
+  // than a cell edge and has no snapped interior to straddle.
+  const edgeOutline = (bounds: NonNullable<typeof selectionRect>, color: string, width: 1 | 2 = 2): CSSProperties => {
+    const scaled = scaledRect(bounds, scale);
+    return { position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
+      outline: `${width}px solid ${color}`, outlineOffset: -width / 2 };
+  };
+  // Cell selections ride the same snapped pixel grid as the canvas gridlines:
+  // the range ring is one pixel on the snapped rect and the active-cell ring is
+  // two pixels straddling its boundaries, never an outline that rasterizes
+  // asymmetrically at a fractional zoom.
+  const marquee = (bounds: NonNullable<typeof selectionRect>, width = MARQUEE_WIDTH): CSSProperties => {
+    const box = marqueeBox(scaledRect(bounds, scale), width);
+    return { position: 'absolute', left: box.left, top: box.top, width: box.width, height: box.height,
+      boxShadow: `inset 0 0 0 ${width}px ${MARQUEE_COLOR}` };
+  };
+  const fills = showSheetHeaders && selectionRect && !selectedChart
+    ? marqueeFills(scaledRect(selectionRect, scale), focusRect ? scaledRect(focusRect, scale) : null) : [];
   return <div data-testid="xlsx-overlay-host"
     style={{ position: 'absolute', top: 0, left: 0, width: 0, height: 0, pointerEvents: 'none' }}>
+    {fills.map((fill, index) => <div key={index} data-testid="xlsx-selection-fill"
+      style={{ position: 'absolute', left: fill.x, top: fill.y, width: fill.w, height: fill.h,
+        background: SELECTION_FILL }} />)}
     {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
-      style={outline(selectionRect, '1px solid #217346', 'rgba(33, 115, 70, 0.12)')} />}
+      style={showSheetHeaders ? marquee(selectionRect) : outline(selectionRect, '1px solid #217346', 'rgba(33, 115, 70, 0.12)')} />}
     {fillHandle && !unavailable && !selectedChart && !drafting && fillHandleRect && expanded && onFill && cellAt &&
       !coversWholeTrack(expanded, deriveLimits(painted?.displayList ?? null, 0)) && (
       <FillHandle rect={fillHandleRect} source={expanded}
         rectForRange={fillRect} cellAt={cellAt} onFill={onFill}
         ariaLabel={t('a11y.fillHandleLabel')} />
     )}
-    {focusRect && !selectedChart && <div data-testid="xlsx-focus" style={outline(focusRect, '2px solid #217346')} />}
+    {focusRect && !selectedChart && <div data-testid={showSheetHeaders ? 'xlsx-active-cell' : 'xlsx-focus'}
+      style={showSheetHeaders ? marquee(focusRect, ACTIVE_CELL_WIDTH) : outline(focusRect, '2px solid #217346')} />}
     {shownChart && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart?.id} aria-hidden
-      style={{ ...outline(shownChart, '2px solid #217346'), ...(chartPreview?.kind === 'move'
-        ? { transform: `translate(${chartPreview.x}px, ${chartPreview.y}px)` } : {}) }} />}
+      style={{ ...(showSheetHeaders ? edgeOutline(shownChart, '#217346') : outline(shownChart, '2px solid #217346')),
+        ...(chartPreview?.kind === 'move' ? { transform: `translate(${chartPreview.x}px, ${chartPreview.y}px)` } : {}) }} />}
     {showHandles && scaledChart && <ChartResizeHandles rect={scaledChart}
       onStart={onResizeStart} onNudge={onResizeNudge} />}
     <PeerlessWorkerCellInput controller={controller} zoom={scale} disabled={unavailable} rect={rect} colors={colors} />

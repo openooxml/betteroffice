@@ -20,12 +20,16 @@ import { EditorChromeContext } from '../components/EditorToolbarContext';
 import { FormulaBarContext } from '../components/toolbar/FormulaBar';
 import type { FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import { useTranslation } from '../i18n';
+import { ACTIVE_CELL_WIDTH, MARQUEE_COLOR, MARQUEE_WIDTH, SELECTION_FILL, marqueeBox, marqueeFills } from '../selectionOutline';
+import type { PixelRect } from '../selectionOutline';
 import { cellInViewport, deriveLimits, expandRangeToMergedCells, laidOutCellRect, nearestCellScroll, positionAtPoint, scaledRect } from './sessionGeometry';
 import { useSessionWorkbook } from './useSessionWorkbook';
 import type { ViewerSession, ViewerSurface } from './useSessionWorkbook';
 import { WorkbookFailure } from '../components/WorkbookFailure';
 import { useDefaultFonts } from '../useDefaultFonts';
 import { A11yGridTable } from '../components/A11yGridCell';
+import { SheetGrid } from '../components/SheetGrid';
+import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '../sheetLimits';
 
 const BRAND = '#217346';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -442,7 +446,7 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
 
   const merged = painted?.frame.mergedRanges?.slice(0, 1024) ?? [];
   const grid = frame?.grid;
-  const selected = visibleSelection ? expandRangeToMergedCells(normalizeRange(visibleSelection), merged) : null;
+  const selected = visibleSelection ? expandRangeToMergedCells(normalizeRange(visibleSelection), merged, Boolean(props.showSheetHeaders)) : null;
   const focused = visibleSelection ? expandRangeToMergedCells({
     top: visibleSelection.focus.row, left: visibleSelection.focus.col,
     bottom: visibleSelection.focus.row, right: visibleSelection.focus.col,
@@ -457,6 +461,47 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
       cellLabelSelected: t('a11y.cellLabelSelected'), emptyCellLabel: t('a11y.emptyCellLabel'),
       emptyCellLabelSelected: t('a11y.emptyCellLabelSelected'),
     }) : null;
+  /**
+   * A header press selects the whole track. It writes the selection directly:
+   * cell navigation snaps anchors into merged cells, which would move the anchor
+   * off the pressed header, and the track's first cell is already on screen.
+   * `extend` grows the range from the anchor's track, which is what a shifted
+   * press and a drag across the header band both do.
+   */
+  const selectHeader = (axis: 'col' | 'row', index: number, extend: boolean) => {
+    const from = extend ? selection : null;
+    const first = axis === 'col' ? from?.anchor.col ?? index : from?.anchor.row ?? index;
+    const track = axis === 'col'
+      ? { top: 0, left: Math.min(first, index), bottom: XLSX_MAX_ROWS - 1, right: Math.max(first, index) }
+      : { top: Math.min(first, index), left: 0, bottom: Math.max(first, index), right: XLSX_MAX_COLUMNS - 1 };
+    const corner = axis === 'col' ? { row: 0, col: index } : { row: index, col: 0 };
+    run?.placeSelection(from ? { anchor: from.anchor, focus: corner, range: track } : { ...selectionAt(corner), range: track });
+  };
+  const onHeaderMouseDown = (axis: 'col' | 'row', index: number, event: MouseEvent) => {
+    if (event.button !== 0 || !run?.view || painted?.frame.sheet !== active) return;
+    selectHeader(axis, index, event.shiftKey);
+    setSelectedChart(null);
+    focus();
+  };
+  const onHeaderDragSelect = (axis: 'col' | 'row', index: number) => {
+    if (!run?.view || painted?.frame.sheet !== active) return;
+    selectHeader(axis, index, true);
+  };
+  /**
+   * The corner above the row numbers selects the whole sheet. A viewer only
+   * places the selection: there is no edit path behind it.
+   */
+  const onSelectAll = () => {
+    if (!run?.view || painted?.frame.sheet !== active) return;
+    run.placeSelection({
+      anchor: { row: 0, col: 0 },
+      focus: { row: 0, col: 0 },
+      range: { top: 0, left: 0, bottom: XLSX_MAX_ROWS - 1, right: XLSX_MAX_COLUMNS - 1 },
+    });
+    setSelectedChart(null);
+  };
+
+  const headers = Boolean(props.showSheetHeaders);
   const outline = (rect: NonNullable<typeof selectionRect>, border: string, background?: string): CSSProperties => {
     const scaled = scaledRect(rect, paintedZoom);
     return {
@@ -464,6 +509,31 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
       boxSizing: 'border-box', border, background,
     };
   };
+  // with headers, drawn on the cell edges, not inside them: an outline with a
+  // negative offset straddles the gridline and leaves the box sized like the range.
+  const edgeOutline = (rect: NonNullable<typeof selectionRect>, color: string, width: 1 | 2 = 2): CSSProperties => {
+    const scaled = scaledRect(rect, paintedZoom);
+    return {
+      position: 'absolute', left: scaled.x, top: scaled.y, width: scaled.w, height: scaled.h,
+      outline: `${width}px solid ${color}`, outlineOffset: -width / 2,
+    };
+  };
+
+  /**
+   * The selection marquee rides the same snapped pixel grid as the canvas
+   * gridlines: a one-pixel inset ring on the snapped rect, and a two-pixel ring
+   * on the active cell that covers one pixel either side of its boundaries.
+   */
+  const ring = (rect: PixelRect, width = MARQUEE_WIDTH): CSSProperties => {
+    const box = marqueeBox(rect, width);
+    return {
+      position: 'absolute', left: box.left, top: box.top, width: box.width, height: box.height,
+      boxShadow: `inset 0 0 0 ${width}px ${MARQUEE_COLOR}`,
+    };
+  };
+  // the wash stops at the active cell: only the first box of the selection stays clear.
+  const fills = headers && selectionRect && !selectedChart
+    ? marqueeFills(scaledRect(selectionRect, paintedZoom), focusRect ? scaledRect(focusRect, paintedZoom) : null) : [];
 
   return (
     <XlsxCommandContext.Provider value={commands.store}>
@@ -476,6 +546,9 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
             {toolbarContent != null && <div data-testid="xlsx-toolbar" style={{ flex: '0 0 auto' }}>{toolbarContent}</div>}
             <div data-testid="xlsx-workspace" style={{ position: 'relative', display: 'flex', flex: 1, minWidth: 0, minHeight: 0 }}>
               <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
+                <SheetGrid frame={frame} zoom={paintedZoom} showSheetHeaders={headers} headerHandlers={{ onHeaderMouseDown, onHeaderDragSelect, onSelectAll }} selection={selection}
+                  selectAllLabel={t('commands.selectAll')}
+                  sheet={painted?.frame.sheet}>
                 <div ref={scrollRef} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
                   onMouseDown={onMouseDown} onMouseMove={onMouseMove} onClick={onClick}
                   onMouseLeave={(event) => { event.currentTarget.style.cursor = 'default'; event.currentTarget.title = ''; }}
@@ -487,14 +560,22 @@ export function XlsxSessionViewer(props: Omit<XlsxWorkerViewerProps, 'file'> & {
                     <canvas ref={canvasRef} style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} />
                     <div data-testid="xlsx-overlay-host" style={{ position: 'absolute', top: 0, left: 0,
                       width: 0, height: 0, pointerEvents: 'none' }}>
+                      {fills.map((fill, index) => <div key={index} data-testid="xlsx-selection-fill"
+                        style={{ position: 'absolute', left: fill.x, top: fill.y,
+                          width: fill.w, height: fill.h, background: SELECTION_FILL }} />)}
                       {selectionRect && !selectedChart && <div data-testid="xlsx-selection"
-                        style={outline(selectionRect, `1px solid ${BRAND}`, 'rgba(33, 115, 70, 0.12)')} />}
-                      {focusRect && !selectedChart && <div style={outline(focusRect, `2px solid ${BRAND}`)} />}
+                        style={headers ? ring(scaledRect(selectionRect, paintedZoom))
+                          : outline(selectionRect, `1px solid ${BRAND}`, 'rgba(33, 115, 70, 0.12)')} />}
+                      {focusRect && !selectedChart && <div data-testid={headers ? 'xlsx-active-cell' : undefined}
+                        style={headers ? ring(scaledRect(focusRect, paintedZoom), ACTIVE_CELL_WIDTH)
+                          : outline(focusRect, `2px solid ${BRAND}`)} />}
                       {chartRect && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart} aria-hidden
-                        style={{ ...outline(chartRect, `2px solid ${BRAND}`, 'transparent'), boxShadow: '0 1px 6px rgba(0, 0, 0, 0.25)' }} />}
+                        style={{ ...(headers ? edgeOutline(chartRect, BRAND) : outline(chartRect, `2px solid ${BRAND}`, 'transparent')),
+                          boxShadow: '0 1px 6px rgba(0, 0, 0, 0.25)' }} />}
                     </div>
                   </div>
                 </div>
+                </SheetGrid>
               </div>
             </div>
             {a11yGrid && <>

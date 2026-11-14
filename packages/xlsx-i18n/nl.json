@@ -114,6 +114,14 @@
     "zoomPercent": "Zoomen in procenten",
     "apply": "Toepassen",
     "cancel": "Annuleren",
+    "freezeColumn": "Kolom {column} vastzetten",
+    "freezeColumns": "Kolommen {first}–{last} vastzetten",
+    "freezeRow": "Rij {row} vastzetten",
+    "freezeRows": "Rijen {first}–{last} vastzetten",
+    "unfreezePanes": "Blokkering van deelvensters opheffen",
+    "unhideColumns": "Kolommen zichtbaar maken",
+    "unhideRows": "Rijen zichtbaar maken",
+    "selectAll": "Alles selecteren",
     "reasons": {
       "editorUnavailable": "De editor is nog niet gereed.",
       "documentLoading": "De werkmap wordt nog geopend.",
@@ -195,6 +203,8 @@
     "sheetTabsLabel": "Werkbladen",
     "clearExceedsLimit": "Wissen overschrijdt de cellimiet.",
     "cellMenuLabel": "Celmenu",
+    "columnHeaderMenuLabel": "Menu van de kolomkop",
+    "rowHeaderMenuLabel": "Menu van de rijkop",
     "sheetTabMenuLabel": "Menu van het bladtabblad",
     "renameSheetLabel": "Naam van blad wijzigen",
     "sheetNamePrefix": "Werkblad"

@@ -11,6 +11,21 @@ pub(super) fn proposal_edit_is_stale(model: &WorkbookModel, edit: &ProposedEdit)
 }
 
 fn rebases_proposals(op: &Op) -> bool {
+    // a move relocates the cells a pending edit is written against, so its
+    // address and its formula have to move with them; a destination inside the
+    // run is the applier's no-op, which relocates nothing
+    if let Op::MoveRows {
+        row, count, before, ..
+    }
+    | Op::MoveCols {
+        col: row,
+        count,
+        before,
+        ..
+    } = op
+    {
+        return !super::move_is_noop(*row, *count, *before);
+    }
     matches!(
         op,
         Op::InsertRows { .. }
@@ -31,6 +46,11 @@ fn remap_address(sheet: &mut u32, row: &mut u32, col: &mut u32, op: &Op) -> bool
         | Op::DeleteRows { sheet: target, .. }
         | Op::InsertCols { sheet: target, .. }
         | Op::DeleteCols { sheet: target, .. }
+        // a move permutes addresses without dropping any, so an edit on its
+        // sheet follows the cell it was written against; `remap_ref` returns
+        // the moved address and the proposal never goes stale
+        | Op::MoveRows { sheet: target, .. }
+        | Op::MoveCols { sheet: target, .. }
             if *sheet == target.0 =>
         {
             let Some(at) = xlsx_ops::remap_ref(CellRef::new(*row, *col), op) else {

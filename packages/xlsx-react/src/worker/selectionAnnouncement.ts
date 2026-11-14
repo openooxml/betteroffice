@@ -1,5 +1,6 @@
 import { normalizeRange } from '@betteroffice/xlsx';
 import type { DisplayList, MergedRange, Selection } from '@betteroffice/xlsx';
+import { columnLetter } from '../columnLetter';
 
 export interface AnnouncementStrings {
   cellLabel: string;
@@ -14,12 +15,6 @@ export interface AnnouncedCell {
   text: string | null;
   /** Null while the cell input is still loading. */
   formula: boolean | null;
-}
-
-export function columnLetter(col: number): string {
-  let out = '';
-  for (let n = col; n >= 0; n = Math.floor(n / 26) - 1) out = String.fromCharCode(65 + (n % 26)) + out;
-  return out;
 }
 
 export function cellAddress(row: number, col: number): string {
