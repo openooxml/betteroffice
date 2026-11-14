@@ -479,9 +479,17 @@ fn write_docx_s13_parts_with_warnings(
         )? {
             Some(patched) => patched,
             None => {
-                let serialized = serialize_document_part(&request.document, &mut context)?;
-                build_patched_document_xml(&original, &serialized, &selective.changed_para_ids)
-                    .ok_or_else(|| save_error("selective document patch is unsafe"))?
+                context.begin_form_data_tokens(&original);
+                let serialized = serialize_document_part(&request.document, &mut context);
+                let deferred = context.end_form_data_tokens();
+                let patched = build_patched_document_xml(
+                    &original,
+                    &serialized?,
+                    &selective.changed_para_ids,
+                )
+                .ok_or_else(|| save_error("selective document patch is unsafe"))?;
+                super::paragraph::reject_form_data_tokens(&patched, &deferred)?;
+                patched
             }
         }
     } else {
@@ -1616,7 +1624,28 @@ impl StoryParts<'_> {
         });
     }
 
+    /// Fails when a form field whose `w:ffData` cannot be replayed was not kept as source bytes.
     fn splice(
+        source: Option<&str>,
+        part: &S13SplicedPart,
+        assignments: &BTreeMap<u32, String>,
+        strict: bool,
+        keeps: bool,
+        context: &mut SerializerContext,
+        serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
+    ) -> Result<StoryWrite, ParseError> {
+        if let Some(source) = source {
+            context.begin_form_data_tokens(source);
+        }
+        let written =
+            Self::splice_written(source, part, assignments, strict, keeps, context, serialize);
+        let deferred = context.end_form_data_tokens();
+        let written = written?;
+        super::paragraph::reject_form_data_tokens(&written.xml, &deferred)?;
+        Ok(written)
+    }
+
+    fn splice_written(
         source: Option<&str>,
         part: &S13SplicedPart,
         assignments: &BTreeMap<u32, String>,
