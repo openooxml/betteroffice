@@ -4314,9 +4314,8 @@ impl Workbook {
         self.bump_model_epoch();
         self.recalculated_since_open = true;
         self.calculations_since_open = self.calculations_since_open.saturating_add(1);
+        self.count_graph_reuse(keep);
         let result = if keep {
-            #[cfg(any(test, feature = "test-counters"))]
-            self.graph_reuse.keeps += 1;
             let graph = self.graph.as_mut().expect("graph initialized");
             #[cfg(test)]
             if CORRUPT_KEPT_EDGE.get() {
@@ -4329,8 +4328,6 @@ impl Workbook {
                 self.rand_seed,
             )
         } else {
-            #[cfg(any(test, feature = "test-counters"))]
-            self.graph_reuse.rebuilds += 1;
             let (graph, result) = rebuild_and_recalc_all_after(
                 &mut self.model,
                 self.graph.as_ref(),
@@ -4353,6 +4350,18 @@ impl Workbook {
         xlsx_model::progress::pulse();
         result
     }
+
+    #[cfg(any(test, feature = "test-counters"))]
+    fn count_graph_reuse(&mut self, kept: bool) {
+        if kept {
+            self.graph_reuse.keeps += 1;
+        } else {
+            self.graph_reuse.rebuilds += 1;
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-counters")))]
+    fn count_graph_reuse(&mut self, _kept: bool) {}
 
     fn graph_current(&self) -> bool {
         self.graph.is_some() && self.graph_reuse.current_at == Some(self.model_epoch)
