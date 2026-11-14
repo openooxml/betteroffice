@@ -13995,6 +13995,7 @@ fn resident_build_input_for(
             .flat_map(|page| page.fragments.iter().filter_map(fragment_block_key_ref))
             .collect()
     });
+    let mut first_unreadable = Vec::new();
     let measured = pagination
         .measured
         .iter()
@@ -14003,9 +14004,24 @@ fn resident_build_input_for(
                 resident_block_key(&measured.block).is_some_and(|key| keys.contains(key.as_ref()))
             })
         })
-        .filter_map(|measured| convert_measured_block(&mut transcoder, measured, &mut unreadable))
+        .filter_map(|measured| {
+            let block = convert_measured_block(&mut transcoder, measured, &mut unreadable);
+            if block.is_none() {
+                first_unreadable.extend(unreadable.last().cloned());
+            }
+            block
+        })
         .collect();
     drop(placed);
+    // A readable later copy of a key leaves an unreadable earlier one reported.
+    for entry in first_unreadable {
+        if !unreadable
+            .iter()
+            .any(|known| known.block == entry.block && known.page == entry.page)
+        {
+            unreadable.push(entry);
+        }
+    }
     let options = transcoder
         .convert(&pagination.options)
         .map_err(|e| format!("parse resident display input: {e}"))?;

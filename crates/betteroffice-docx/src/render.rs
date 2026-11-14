@@ -164,7 +164,7 @@ impl Document {
         rendered
     }
 
-    /// The page laid out from the model, or `None` when its conversion left content unpainted.
+    /// The page laid out from the model, or `None` when its conversion failed or omitted content.
     fn render_png_from_model(
         &self,
         target: PngTarget,
@@ -180,15 +180,16 @@ impl Document {
             self.source_bytes(),
         )
         .map_err(Error::Render)?;
-        let (display_list, unreadable) =
-            self.seeded_display_list(&engine, &package, |request, chains| {
-                engine
-                    .layout_document_with_regions_retained(request)
-                    .map_err(Error::Render)?;
-                engine
-                    .retained_page_display_list(chains, target.page)
-                    .map_err(Error::Render)
-            })?;
+        let converted = self.seeded_display_list(&engine, &package, |request, chains| {
+            engine
+                .layout_document_with_regions_retained(request)
+                .map_err(Error::Render)?;
+            Ok(engine.retained_page_display_list(chains, target.page).ok())
+        })?;
+        // A resident conversion error renders through the save.
+        let Some((display_list, unreadable)) = converted else {
+            return Ok(None);
+        };
         if !unreadable.is_empty() {
             return Ok(None);
         }
