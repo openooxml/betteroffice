@@ -31,7 +31,7 @@ use crate::vml::Watermark;
 use crate::xml::ParseError;
 
 use super::comment_references::{ParagraphLocation, normalize_comment_references};
-use super::context::SerializerContext;
+use super::context::{S13SaveReport, SerializerContext};
 use super::numbering::serialize_numbering_xml;
 use super::paragraph::serialize_paragraph;
 use super::paragraph_ids::{
@@ -160,7 +160,8 @@ pub fn write_docx_s13_with_warnings(
     original_docx: &[u8],
 ) -> Result<(Vec<u8>, Vec<String>), ParseError> {
     let original_parts = ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
-    write_docx_s13_parts_with_warnings(request, &original_parts, Some(original_docx))
+    write_docx_s13_parts_with_report(request, &original_parts, Some(original_docx))
+        .map(|(bytes, report)| (bytes, report.warnings))
 }
 
 /// [`write_docx_s13`] seeded from already-inflated parts. `source` is the
@@ -171,14 +172,15 @@ pub fn write_docx_s13_parts(
     original_parts: &[(String, Vec<u8>)],
     source: Option<&[u8]>,
 ) -> Result<Vec<u8>, ParseError> {
-    write_docx_s13_parts_with_warnings(request, original_parts, source).map(|(bytes, _)| bytes)
+    write_docx_s13_parts_with_report(request, original_parts, source).map(|(bytes, _)| bytes)
 }
 
-fn write_docx_s13_parts_with_warnings(
+/// [`write_docx_s13_parts`] returning the save's diagnostics beside its bytes.
+pub fn write_docx_s13_parts_with_report(
     mut request: S13SaveRequest,
     original_parts: &[(String, Vec<u8>)],
     source: Option<&[u8]>,
-) -> Result<(Vec<u8>, Vec<String>), ParseError> {
+) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     request.determinism.validate()?;
     let limits = crate::xml::ParseLimits::default();
     let mut budget = crate::xml::ParseBudget::new(&limits);
@@ -309,7 +311,7 @@ fn write_docx_s13_parts_with_warnings(
         package.set_text("word/document.xml", patched);
         update_core_part(&request.options, &mut package, context.now());
         let bytes = rezip_package(&package, source)?;
-        return Ok((bytes, context.take_warnings()));
+        return Ok((bytes, context.take_report()));
     }
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
     let reports_dropped = request.paragraph_ids.is_some();
@@ -675,7 +677,7 @@ fn write_docx_s13_parts_with_warnings(
     }
     update_core_part(&request.options, &mut package, context.now());
     let bytes = rezip_package(&package, source)?;
-    Ok((bytes, context.take_warnings()))
+    Ok((bytes, context.take_report()))
 }
 
 /// Authored chart placements in one story part, keyed by relationship id.
@@ -1908,7 +1910,7 @@ fn record_kept(
             .cloned()
             .or_else(|| occurrence.and_then(|occurrence| occurrence.para_id.clone())),
         text,
-        scope,
+        scope: scope.to_owned(),
         dropped,
     });
 }
