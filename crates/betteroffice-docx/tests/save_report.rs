@@ -66,13 +66,25 @@ fn open() -> Document {
 
 fn report_of(document: &Document) -> SaveReport {
     let report = document.save_report().unwrap();
-    assert_eq!(report.bytes, document.save().unwrap(), "report bytes differ from save");
+    assert_eq!(
+        report.bytes,
+        document.save().unwrap(),
+        "report bytes differ from save"
+    );
     report
 }
 
 fn assert_nothing_reported(report: &SaveReport) {
-    assert!(report.kept_unchanged.is_none(), "{:?}", report.kept_unchanged);
-    assert!(report.structure_dropped.is_none(), "{:?}", report.structure_dropped);
+    assert!(
+        report.kept_unchanged.is_none(),
+        "{:?}",
+        report.kept_unchanged
+    );
+    assert!(
+        report.structure_dropped.is_none(),
+        "{:?}",
+        report.structure_dropped
+    );
 }
 
 #[test]
@@ -166,7 +178,11 @@ fn a_whole_write_in_the_save_plan_reports_the_structure_it_drops() {
     let mut document = Document::open(&docx(STRUCTURE_DROPPED_DOCUMENT)).unwrap();
     document.replace_paragraph_text("0000000D", "aaa").unwrap();
     let report = report_of(&document);
-    assert!(report.kept_unchanged.is_none(), "{:?}", report.kept_unchanged);
+    assert!(
+        report.kept_unchanged.is_none(),
+        "{:?}",
+        report.kept_unchanged
+    );
     let dropped = report
         .structure_dropped
         .expect("the whole write's dropped structure is reported");

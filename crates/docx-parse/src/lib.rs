@@ -178,8 +178,8 @@ pub use serializer::{
     S10SerializeRequest, S10SerializeResponse, S11SerializeRequest, S11SerializeResponse,
     S12SerializeRequest, S12SerializeResponse, S13SaveOptions, S13SaveReport, S13SaveRequest,
     S13SelectiveSave, S13SourceParagraph, S13SourceParagraphs, SerializerDeterminism,
-    canonical_xml_events, element_span, serialize_s10_wire, serialize_s11_wire,
-    serialize_s12_wire, write_docx_s13, write_docx_s13_parts, write_docx_s13_parts_with_report,
+    canonical_xml_events, element_span, serialize_s10_wire, serialize_s11_wire, serialize_s12_wire,
+    write_docx_s13, write_docx_s13_parts, write_docx_s13_parts_with_report,
     write_docx_s13_with_warnings,
 };
 pub use settings::{

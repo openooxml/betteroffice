@@ -144,7 +144,10 @@ fn report_json(report: &betteroffice_docx::SaveReport) -> serde_json::Value {
                 })
             })
             .collect();
-        value.insert("structureDropped".to_owned(), serde_json::Value::Array(parts));
+        value.insert(
+            "structureDropped".to_owned(),
+            serde_json::Value::Array(parts),
+        );
     }
     serde_json::Value::Object(value)
 }

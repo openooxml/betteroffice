@@ -489,7 +489,8 @@ impl Document {
     }
 
     pub fn save_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
-        self.save_report_with_options(options).map(|report| report.bytes)
+        self.save_report_with_options(options)
+            .map(|report| report.bytes)
     }
 
     /// [`Document::save`] with what the save kept as source bytes or dropped.
