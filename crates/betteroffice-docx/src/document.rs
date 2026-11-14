@@ -38,7 +38,7 @@ use docx_parse::s9::{
 use docx_parse::serializer::paragraph_ids::{S13TouchedPart, S13WholePart};
 use docx_parse::serializer::{
     S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SaveOptions, S13SaveRequest,
-    S13SpliceAnchor, S13SplicedPart, SerializerDeterminism, write_docx_s13_parts,
+    S13SpliceAnchor, S13SplicedPart, SerializerDeterminism, write_docx_s13_parts_with_report,
 };
 use docx_parse::table::Table;
 use docx_parse::xml::ParseLimits;
@@ -46,7 +46,8 @@ use sha2::{Digest, Sha256};
 
 use crate::types::DEFAULT_SERIALIZATION_TIME;
 use crate::{
-    DocumentModel, DocumentStructure, Error, LayoutResult, OpenOptions, Result, SaveOptions,
+    DocumentModel, DocumentStructure, Error, KeptUnchanged, LayoutResult, OpenOptions, Result,
+    SaveOptions, SaveReport,
 };
 
 pub struct Document {
@@ -488,6 +489,16 @@ impl Document {
     }
 
     pub fn save_with_options(&self, options: SaveOptions) -> Result<Vec<u8>> {
+        self.save_report_with_options(options).map(|report| report.bytes)
+    }
+
+    /// [`Document::save`] with what the save kept as source bytes or dropped.
+    pub fn save_report(&self) -> Result<SaveReport> {
+        self.save_report_with_options(SaveOptions::default())
+    }
+
+    /// [`Document::save_with_options`] with what the save kept as source bytes or dropped.
+    pub fn save_report_with_options(&self, options: SaveOptions) -> Result<SaveReport> {
         let determinism = SerializerDeterminism {
             seed: self.seed.clone(),
             now: options.now,
@@ -497,7 +508,11 @@ impl Document {
             && options.modified_by.is_none()
         {
             determinism.validate()?;
-            return Ok(self.source.clone());
+            return Ok(SaveReport {
+                bytes: self.source.clone(),
+                kept_unchanged: None,
+                structure_dropped: None,
+            });
         }
         let request = S13SaveRequest {
             determinism,
@@ -519,7 +534,21 @@ impl Document {
         };
         #[cfg(test)]
         session_save_tests::count_package_write();
-        write_docx_s13_parts(request, &self.original_parts, None).map_err(Error::from)
+        let (bytes, report) =
+            write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
+        let structure = report
+            .kept_unchanged
+            .values()
+            .fold(0u32, |sum, count| sum.saturating_add(*count));
+        Ok(SaveReport {
+            bytes,
+            kept_unchanged: (structure > 0).then_some(KeptUnchanged {
+                structure,
+                paragraphs: report.kept_paragraphs,
+            }),
+            structure_dropped: (!report.structure_dropped.is_empty())
+                .then_some(report.structure_dropped),
+        })
     }
 
     /// The editing session's paragraph save plan for the current model, as the
