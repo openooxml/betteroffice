@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "खोजें और बदलें",
+    "find": "खोजें",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "बदलें",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{total} से अधिक में से {index}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "केस का मिलान करें",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "'इसमें खोजें' केवल खोज पर लागू होता है। बदलें हर सेल की प्रविष्टि को ऐसे संपादित करता है मानो उसे टाइप किया गया हो और सूत्रों की पुनर्गणना करता है।",
+    "preview": "Preview",
+    "replaceAll": "सभी बदलें",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "मेल खाने वाली तिथियाँ, TRUE/FALSE या त्रुटि मान नहीं बदले गए ({count}): {cells}"
+  },
   "_lang": "hi",
   "toolbar": {
     "actionsLabel": "स्प्रेडशीट क्रियाएँ",
@@ -103,6 +134,7 @@
     "redo": "पुनः करें"
   },
   "commands": {
+    "findReplace": "खोजें और बदलें",
     "fontSizeStep": "फ़ॉन्ट का आकार बदलें",
     "numberFormat": "संख्या प्रारूप",
     "decimalPlaces": "दशमलव स्थान बदलें",

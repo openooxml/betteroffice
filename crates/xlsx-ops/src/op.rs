@@ -184,6 +184,7 @@ define_ops! {
             at: ColId,
             count: u32,
         },
+        /// Stored column width in the format's character units, padding included.
         SetColWidth => "setColWidth" {
             sheet: SheetId,
             col: ColId,

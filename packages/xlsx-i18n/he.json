@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "חיפוש והחלפה",
+    "find": "חיפוש",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "החלף",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{index} מתוך יותר מ-{total}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "התאם רישיות",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "האפשרות 'חפש ב' חלה רק על חיפוש. החלפה עורכת את תוכן כל תא כאילו הוקלד ומחשבת מחדש את הנוסחאות.",
+    "preview": "Preview",
+    "replaceAll": "החלף הכל",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "תאריכים, ערכי TRUE/FALSE או ערכי שגיאה תואמים לא שונו ({count}): {cells}"
+  },
   "_lang": "he",
   "toolbar": {
     "actionsLabel": "פעולות בגיליון האלקטרוני",
@@ -103,6 +134,7 @@
     "redo": "בצע שוב"
   },
   "commands": {
+    "findReplace": "חיפוש והחלפה",
     "fontSizeStep": "שנה גודל גופן",
     "numberFormat": "תבנית מספר",
     "decimalPlaces": "שנה מקומות עשרוניים",

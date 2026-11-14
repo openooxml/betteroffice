@@ -16,7 +16,7 @@ use super::context::SerializerContext;
 use super::foundation::{
     BorderSide, serialize_conditional_format_style, serialize_table_grid, write_border,
 };
-use super::paragraph::is_safe_attribute_name;
+use super::paragraph::{is_safe_attribute_name, on_off};
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, write_shading,
 };
@@ -249,12 +249,8 @@ pub fn serialize_table_row_formatting(
         }
         write_measurement(&mut body, formatting.width_before.as_ref(), "w:wBefore");
         write_measurement(&mut body, formatting.width_after.as_ref(), "w:wAfter");
-        if formatting.cant_split == Some(true) {
-            body.start_element("w:cantSplit").end_element();
-        }
-        if formatting.header == Some(true) {
-            body.start_element("w:tblHeader").end_element();
-        }
+        on_off(&mut body, "w:cantSplit", formatting.cant_split);
+        on_off(&mut body, "w:tblHeader", formatting.header);
         if let Some(height) = formatting.height.as_ref() {
             body.start_element("w:trHeight")
                 .attribute("w:val", &int_attr(Some(height.value)));

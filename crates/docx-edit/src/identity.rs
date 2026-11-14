@@ -68,8 +68,40 @@ fn fresh_generation() -> String {
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 pub(crate) fn entropy() -> [u64; 2] {
-    let draw = || (js_sys::Math::random() * 9_007_199_254_740_992.0) as u64;
-    [draw() ^ ((js_sys::Date::now() as u64) << 11), draw()]
+    platform_random().unwrap_or_else(|| [fallback_draw(), fallback_draw()])
+}
+
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub(crate) fn fallback_draw() -> u64 {
+    combine_draws(js_sys::Math::random(), js_sys::Math::random())
+}
+
+/// One 64-bit word from two draws in `[0, 1)`: 32 high bits from `high`, 32 low bits from `low`.
+#[cfg_attr(not(all(feature = "wasm", target_arch = "wasm32")), allow(dead_code))]
+pub(crate) fn combine_draws(high: f64, low: f64) -> u64 {
+    let half = |draw: f64| (draw * 4_294_967_296.0).clamp(0.0, 4_294_967_295.0) as u64;
+    half(high) << 32 | half(low)
+}
+
+/// Full 64-bit words from `globalThis.crypto.getRandomValues`, or `None` when the host lacks it
+/// or its lookup or call fails.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub(crate) fn platform_random<const N: usize>() -> Option<[u64; N]> {
+    use wasm_bindgen::JsCast;
+    let crypto = js_sys::Reflect::get(&js_sys::global(), &"crypto".into()).ok()?;
+    let fill = js_sys::Reflect::get(&crypto, &"getRandomValues".into())
+        .ok()?
+        .dyn_into::<js_sys::Function>()
+        .ok()?;
+    let buffer = js_sys::Uint8Array::new_with_length((N * 8) as u32);
+    let target: &wasm_bindgen::JsValue = buffer.as_ref();
+    fill.call1(&crypto, target).ok()?;
+    let bytes = buffer.to_vec();
+    Some(std::array::from_fn(|index| {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&bytes[index * 8..index * 8 + 8]);
+        u64::from_le_bytes(word)
+    }))
 }
 
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
@@ -1760,6 +1792,11 @@ const PRIME_SLICE_SEGMENTS: usize = 512;
 /// `max_bytes`, beside the canonical bytes digested.
 const PRIME_STORY_COST: usize = 1024;
 const PRIME_SEGMENT_COST: usize = 64;
+/// The product worker's save seed caps (`residentEngineWorker.ts`).
+#[cfg_attr(not(test), allow(dead_code))]
+const SAVE_SEED_MAX_PARAGRAPHS: u32 = 4096;
+#[cfg_attr(not(test), allow(dead_code))]
+const SAVE_SEED_MAX_INFLATED_BYTES: u32 = 16 * 1024 * 1024;
 
 /// A save seed state prime in progress between slices.
 pub(crate) struct PrimeProgress {
@@ -5497,6 +5534,18 @@ mod tests {
     }
 
     #[test]
+    fn combined_draws_span_the_full_64_bit_range() {
+        assert!(combine_draws(0.999_999_999, 0.999_999_999) >= 1u64 << 53);
+        assert_eq!(combine_draws(0.0, 0.0), 0);
+        assert_eq!(combine_draws(0.5, 0.0), 1u64 << 63);
+        assert_eq!(combine_draws(0.0, 0.5), 1u64 << 31);
+        assert_eq!(
+            combine_draws(1.0 - f64::EPSILON, 1.0 - f64::EPSILON),
+            u64::MAX
+        );
+    }
+
+    #[test]
     fn cached_save_plans_match_fresh_states_across_edits_undo_and_remote_updates() {
         let doc = save_plan_doc();
         save_plans_agree(&doc);
@@ -6307,6 +6356,80 @@ mod tests {
         assert!(session.prime_save_seed_states(paragraphs, size));
         assert!(source.seed_states_initialized());
         assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    fn prime_at_product_caps(doc: &EditingDoc) -> bool {
+        doc.prime_save_seed_states(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES)
+    }
+
+    fn assert_primed_edit_plans_without_reseed(doc: &EditingDoc) {
+        assert!(doc.unchanged_since_seeded());
+        assert!(prime_at_product_caps(doc));
+        let source = doc.source_index().unwrap();
+        assert!(source.seed_states_initialized());
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "New ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        doc.paragraph_save_plan();
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_crate_seed_with_generation_primes_and_plans_an_edit_without_reseeding() {
+        let bytes = ooxml_opc::rezip_parts(&crate::seed::fixture::principal_parts()).unwrap();
+        let doc = EditingDoc::new(41);
+        crate::seed_from_docx_with_generation(&doc, &bytes, "crate").unwrap();
+        assert_primed_edit_plans_without_reseed(&doc);
+    }
+
+    #[test]
+    fn a_crate_seed_primes_and_plans_an_edit_without_reseeding() {
+        assert_primed_edit_plans_without_reseed(&save_plan_doc());
+    }
+
+    #[test]
+    fn a_crate_seed_primes_at_the_paragraph_cap_and_reseeds_once_past_it() {
+        use crate::seed::fixture;
+        for (paragraphs, primes) in [
+            (SAVE_SEED_MAX_PARAGRAPHS, true),
+            (SAVE_SEED_MAX_PARAGRAPHS + 1, false),
+        ] {
+            let body: String = (0..paragraphs)
+                .map(|index| {
+                    fixture::para(
+                        &format!("{:08X}", 0x0100_0000 + index),
+                        &fixture::run(&format!("Paragraph {index}")),
+                    )
+                })
+                .collect();
+            let doc = EditingDoc::new(41);
+            let bytes = fixture::Package::new(&body).bytes();
+            crate::seed_from_docx(&doc, &bytes).unwrap();
+            let source = doc.source_index().unwrap();
+            {
+                let txn = doc.yrs_doc().transact();
+                assert_eq!(doc.committed_scan(&txn).pilcrows.len() as u32, paragraphs);
+            }
+            assert!(doc.unchanged_since_seeded(), "{paragraphs}");
+            assert_eq!(prime_at_product_caps(&doc), primes, "{paragraphs}");
+            doc.insert_text(
+                &ctx(),
+                Position::new("body", 0),
+                "New ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+            doc.paragraph_save_plan();
+            assert_eq!(
+                source.reseed_calls.load(Ordering::Relaxed),
+                usize::from(!primes),
+                "{paragraphs}"
+            );
+        }
     }
 
     fn principal_session() -> crate::session::EditSessionCore {

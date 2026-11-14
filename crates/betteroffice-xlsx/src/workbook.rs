@@ -6222,6 +6222,44 @@ fn value_to_input(
     }
 }
 
+/// The formula bar's text for `stored`, split into the `'` that keeps text typed as text and the rest.
+fn entered_text(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    stored: &xlsx_model::Cell,
+    names: FormulaNames<'_>,
+) -> (&'static str, String) {
+    if let Some(formula) = &stored.formula {
+        return ("", format!("={}", display_formula(formula, names)));
+    }
+    let input = value_to_input(workbook, sheet, cell, &stored.value);
+    match input.strip_prefix('\'') {
+        Some(text) if matches!(stored.value, CellValue::Text { .. }) => ("'", text.to_owned()),
+        _ => ("", input),
+    }
+}
+
+/// Whether `input` typed into `cell` reads as a formula the engine cannot parse.
+fn typed_formula_fails(
+    workbook: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    input: &str,
+) -> bool {
+    let style = workbook
+        .sheet(sheet)
+        .and_then(|sheet| sheet.effective_style(cell));
+    let number_format = workbook
+        .styles
+        .resolved_format(Some(style.unwrap_or(0)))
+        .number_format;
+    matches!(
+        xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, None).0,
+        xlsx_ops::ParsedInput::Formula(source) if !xlsx_ops::is_formula_source(&source)
+    )
+}
+
 /// The largest unscaled extent within `extent` whose scaled, rounded-up pixel size stays within `cap`.
 fn capped_extent(extent: f32, cap: Option<u32>, scale: f32) -> f32 {
     let Some(cap) = cap else {

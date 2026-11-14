@@ -730,6 +730,15 @@ pub fn format_renders_number(code: &str, value: f64) -> bool {
     sec.has_date() || sec.fraction.is_some() || sec.has(|t| matches!(t, Tok::Digit(_)))
 }
 
+/// whether formatting `value` with `code` renders a date or time.
+pub fn format_renders_date(code: &str, value: f64) -> bool {
+    if code.trim().is_empty() {
+        return false;
+    }
+    let parsed = parsed_sections(code);
+    parsed[select(&parsed, value).0].has_date()
+}
+
 fn fraction_falls_back(sec: &Section, mag: f64) -> bool {
     let Some(pattern) = sec.fraction else {
         return false;

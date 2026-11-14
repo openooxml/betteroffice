@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "찾기 및 바꾸기",
+    "find": "찾기",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "바꾸기",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{total}개 이상 중 {index}번째",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "대/소문자 구분",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "'찾는 위치'는 찾기에만 적용됩니다. 바꾸기는 각 셀의 입력 내용을 직접 입력한 것처럼 편집하고 수식을 다시 계산합니다.",
+    "preview": "Preview",
+    "replaceAll": "모두 바꾸기",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "일치하는 날짜, TRUE/FALSE 또는 오류 값 {count}개는 변경되지 않았습니다: {cells}"
+  },
   "_lang": "ko",
   "toolbar": {
     "actionsLabel": "스프레드시트 작업",
@@ -103,6 +134,7 @@
     "redo": "다시 실행"
   },
   "commands": {
+    "findReplace": "찾기 및 바꾸기",
     "fontSizeStep": "글꼴 크기 변경",
     "numberFormat": "표시 형식",
     "decimalPlaces": "소수 자릿수 변경",

@@ -5,6 +5,8 @@ mod order;
 
 #[cfg(test)]
 mod criteria_index_differential;
+#[cfg(test)]
+mod full_rebuild_differential;
 
 use order::{Step, topo_order};
 
@@ -177,7 +179,10 @@ pub fn rebuild_and_recalc_all_after(
     now_serial: Option<f64>,
     rand_seed: Option<u32>,
 ) -> (DepGraph, RecalcResult) {
-    let mut graph = DepGraph::build(wb);
+    let mut graph = match previous {
+        Some(previous) => DepGraph::build_reusing(wb, previous),
+        None => DepGraph::build(wb),
+    };
     if let Some(previous) = previous {
         graph.adopt_answered(previous);
     }

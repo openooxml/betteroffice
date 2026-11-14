@@ -209,6 +209,22 @@ impl DepGraph {
         Self::build_with(wb, ParseCache::default())
     }
 
+    /// [`Self::build`], moving in the asts `previous` holds for `wb`'s formulas.
+    pub(crate) fn build_reusing(wb: &Workbook, previous: &DepGraph) -> Self {
+        let mut pool = std::mem::take(&mut *previous.asts.lock().expect("parse cache poisoned"));
+        if pool.is_empty() {
+            return Self::build(wb);
+        }
+        let mut asts = HashMap::new();
+        let cells = wb.sheets.iter().flat_map(|sheet| sheet.iter_cells());
+        for formula in cells.filter_map(|(_, cell)| cell.formula.as_deref()) {
+            if let Some((source, ast)) = pool.remove_entry(formula_source(formula)) {
+                asts.insert(source, ast);
+            }
+        }
+        Self::build_with(wb, std::sync::Mutex::new(asts))
+    }
+
     fn build_with(wb: &Workbook, asts: ParseCache) -> Self {
         let names = wb
             .sheets
@@ -986,7 +1002,7 @@ impl DepGraph {
 
 #[cfg(test)]
 impl DepGraph {
-    fn assert_matches(&self, other: &Self) {
+    pub(crate) fn assert_matches(&self, other: &Self) {
         let Self {
             names,
             defined_names,

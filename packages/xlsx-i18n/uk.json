@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "Знайти та замінити",
+    "find": "Знайти",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "Замінити",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{index} з понад {total}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "З урахуванням регістру",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "«Шукати в» діє лише для пошуку. Заміна змінює вміст кожної клітинки так, ніби його введено вручну, і перераховує формули.",
+    "preview": "Preview",
+    "replaceAll": "Замінити все",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "Збіжні дати, значення TRUE/FALSE або помилки не змінено ({count}): {cells}"
+  },
   "_lang": "uk",
   "toolbar": {
     "actionsLabel": "Дії з електронною таблицею",
@@ -103,6 +134,7 @@
     "redo": "Повторити"
   },
   "commands": {
+    "findReplace": "Знайти та замінити",
     "fontSizeStep": "Змінити розмір шрифту",
     "numberFormat": "Числовий формат",
     "decimalPlaces": "Змінити кількість десяткових знаків",

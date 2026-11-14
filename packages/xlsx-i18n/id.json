@@ -1,4 +1,35 @@
 {
+  "replaceDialog": {
+    "title": "Temukan dan Ganti",
+    "find": "Temukan",
+    "replaceWith": "Replace with",
+    "findPrevious": "Find previous",
+    "findNext": "Find next",
+    "replace": "Ganti",
+    "matchPosition": "{index} of {total}",
+    "matchPositionTruncated": "{index} dari lebih dari {total}",
+    "lookIn": "Look in",
+    "values": "Values",
+    "formulas": "Formulas",
+    "entireCell": "Match entire cell contents",
+    "matchCase": "Sesuaikan huruf besar/kecil",
+    "range": "Range: {range}",
+    "scope": "Search in",
+    "scopeSelection": "Selection",
+    "scopeSheet": "This sheet",
+    "scopeWorkbook": "All sheets",
+    "sheetScope": "Sheet: {sheet}",
+    "workbookScope": "All sheets ({count})",
+    "noRange": "Select a cell range first.",
+    "formulaWarning": "“Cari di” hanya berlaku untuk Cari. Ganti mengedit isi setiap sel seolah-olah diketik dan menghitung ulang rumus.",
+    "preview": "Preview",
+    "replaceAll": "Ganti Semua",
+    "working": "Checking…",
+    "noMatches": "No matches.",
+    "summary": "Matched {matched}, replaced {replaced}, skipped {formulas} formula results and {locked} locked cells.",
+    "refused": "Not replaced: {message}",
+    "skippedValues": "{count} tanggal, nilai TRUE/FALSE, atau nilai galat yang cocok tidak diubah: {cells}"
+  },
   "_lang": "id",
   "toolbar": {
     "actionsLabel": "Tindakan spreadsheet",
@@ -103,6 +134,7 @@
     "redo": "Ulangi"
   },
   "commands": {
+    "findReplace": "Temukan dan Ganti",
     "fontSizeStep": "Ubah ukuran font",
     "numberFormat": "Format Angka",
     "decimalPlaces": "Ubah tempat desimal",
