@@ -1,7 +1,7 @@
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use docx_parse::{S9ParseOptions, parse_docx_s9_wire};
 use quick_xml::events::Event;
-use quick_xml::name::{Namespace, ResolveResult};
+use quick_xml::name::{Namespace, QName, ResolveResult};
 use quick_xml::reader::NsReader;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -428,6 +428,123 @@ fn keeps_the_declaration_of_a_w_alias_an_attribute_value_of_the_form_field_data_
             "{xml}"
         );
     }
+}
+
+/// True when the part is well-formed and binds every name prefix and every xsi:type value prefix.
+fn well_formed_and_bound(xml: &str) -> bool {
+    let mut reader = NsReader::from_str(xml);
+    let mut depth = 0usize;
+    loop {
+        let Ok((resolved, event)) = reader.read_resolved_event() else {
+            return false;
+        };
+        if matches!(resolved, ResolveResult::Unknown(_)) {
+            return false;
+        }
+        let element = match &event {
+            Event::Start(element) => {
+                depth += 1;
+                element
+            }
+            Event::Empty(element) => element,
+            Event::End(_) => {
+                depth -= 1;
+                continue;
+            }
+            Event::Eof => return depth == 0,
+            _ => continue,
+        };
+        for attribute in element.attributes() {
+            let Ok(attribute) = attribute else {
+                return false;
+            };
+            let key = attribute.key.as_ref();
+            if key.starts_with(b"xmlns") || key.starts_with(b"xml:") {
+                continue;
+            }
+            let (resolved, local) = reader.resolver().resolve_attribute(attribute.key);
+            let is_type = match resolved {
+                ResolveResult::Unknown(_) => return false,
+                ResolveResult::Bound(Namespace(uri)) => {
+                    uri == XSI.as_bytes() && local.as_ref() == b"type"
+                }
+                ResolveResult::Unbound => false,
+            };
+            if is_type && attribute.value.contains(&b':') {
+                let (resolved, _) = reader.resolver().resolve_element(QName(&attribute.value));
+                if !matches!(resolved, ResolveResult::Bound(_)) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+fn prefix_case(name: &str, raw: &str, must_write: bool) {
+    let source = fixture(&form_paragraph());
+    let saved = save_edited(&source, Value::Null, |document| {
+        assert_eq!(replace_raw_form_data(document, raw), 3);
+    });
+    let bound = saved.as_ref().ok().map(|xml| well_formed_and_bound(xml));
+    let shown = bound.map_or("na".to_owned(), |bound| bound.to_string());
+    eprintln!("CASE {name} accepted={} bound={shown}", saved.is_ok());
+    if must_write {
+        let xml = saved.unwrap();
+        assert_eq!(bound, Some(true), "{xml}");
+    } else if let Ok(xml) = &saved {
+        assert_eq!(bound, Some(true), "{xml}");
+    }
+}
+
+#[test]
+fn p1a_wrapper_only_prefix() {
+    prefix_case(
+        "p1a_wrapper_only_prefix",
+        r#"<w:ffData><w:name w:val="T"/><s11:foo/></w:ffData>"#,
+        false,
+    );
+}
+
+#[test]
+fn p1a_ctrl_fragment_decl() {
+    prefix_case(
+        "p1a_ctrl_fragment_decl",
+        r#"<w:ffData xmlns:s11="urn:x-test:s11"><w:name w:val="T"/><s11:foo/></w:ffData>"#,
+        true,
+    );
+}
+
+#[test]
+fn p1a_ctrl_root_decl() {
+    prefix_case(
+        "p1a_ctrl_root_decl",
+        r#"<w:ffData><w:name w:val="T"/><w14:foo/></w:ffData>"#,
+        true,
+    );
+}
+
+#[test]
+fn p1b_value_prefix() {
+    let raw = format!(
+        r#"<w:ffData xmlns:xsi="{XSI}" xsi:type="q:CT_FFData"><w:name w:val="T"/></w:ffData>"#
+    );
+    prefix_case("p1b_value_prefix", &raw, false);
+}
+
+#[test]
+fn p1b_ctrl_fragment_decl() {
+    let raw = format!(
+        r#"<w:ffData xmlns:xsi="{XSI}" xmlns:q="urn:x-test:q" xsi:type="q:CT_FFData"><w:name w:val="T"/></w:ffData>"#
+    );
+    prefix_case("p1b_ctrl_fragment_decl", &raw, true);
+}
+
+#[test]
+fn p1b_ctrl_root_decl() {
+    let raw = format!(
+        r#"<w:ffData xmlns:xsi="{XSI}" xsi:type="w14:CT_FFData"><w:name w:val="T"/></w:ffData>"#
+    );
+    prefix_case("p1b_ctrl_root_decl", &raw, true);
 }
 
 const COMMENTED_DATA: &str = r#"<w:ffData><w:name w:val="Check1"/><!--bo-ffdata 0--></w:ffData>"#;
