@@ -212,6 +212,7 @@ function snapshotFields(chunk: Uint8Array): WireField[] {
       value += (byte & 0x7f) * scale;
       if (byte < 0x80) break;
     }
+    if (cursor - start > 1 && chunk[cursor - 1] === 0) throw new Error(`${name} at ${start} is not a canonical varint`);
     fields.push({ name, start, end: cursor, value });
     return value;
   };
