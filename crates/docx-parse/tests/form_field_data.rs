@@ -523,12 +523,76 @@ fn p1a_ctrl_root_decl() {
     );
 }
 
+fn xsi_refused(name: &str, raw: &str) {
+    let source = fixture(&form_paragraph());
+    let saved = save_edited(&source, Value::Null, |document| {
+        assert_eq!(replace_raw_form_data(document, raw), 3);
+    });
+    let bound = saved.as_ref().ok().map(|xml| well_formed_and_bound(xml));
+    let shown = bound.map_or("na".to_owned(), |bound| bound.to_string());
+    eprintln!("CASE {name} accepted={} bound={shown}", saved.is_ok());
+    let error = saved.unwrap_err();
+    assert!(error.contains("\"T\""), "{error}");
+    assert!(!error.contains("unbound prefix"), "{error}");
+}
+
 #[test]
 fn p1b_value_prefix() {
     let raw = format!(
         r#"<w:ffData xmlns:xsi="{XSI}" xsi:type="q:CT_FFData"><w:name w:val="T"/></w:ffData>"#
     );
-    prefix_case("p1b_value_prefix", &raw, false);
+    xsi_refused("p1b_value_prefix", &raw);
+}
+
+#[test]
+fn xsi_entity_colon_refused() {
+    let raw = format!(
+        r#"<w:ffData xmlns:xsi="{XSI}" xsi:type="q&#58;CT_FFData"><w:name w:val="T"/></w:ffData>"#
+    );
+    xsi_refused("xsi_entity_colon_refused", &raw);
+}
+
+#[test]
+fn xsi_entity_prefix_refused() {
+    let raw = format!(
+        r#"<w:ffData xmlns:xsi="{XSI}" xmlns:q="urn:x-test:q" xsi:type="&#113;:CT_FFData"><w:name w:val="T"/></w:ffData>"#
+    );
+    xsi_refused("xsi_entity_prefix_refused", &raw);
+}
+
+#[test]
+fn xsi_other_prefix_refused() {
+    let raw = format!(r#"<w:ffData xmlns:zz="{XSI}"><w:name w:val="T" zz:nil="1"/></w:ffData>"#);
+    xsi_refused("xsi_other_prefix_refused", &raw);
+}
+
+#[test]
+fn xsi_entity_uri_refused() {
+    let raw = r#"<w:ffData xmlns:xsi="http&#58;//www.w3.org/2001/XMLSchema-instance" xsi:type="w:CT_FFData"><w:name w:val="T"/></w:ffData>"#;
+    xsi_refused("xsi_entity_uri_refused", raw);
+}
+
+#[test]
+fn root_decls_value_prefix_unchanged() {
+    let root = format!(
+        r#"<w:document {NS} xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">"#
+    );
+    let body = format!(
+        r#"<w:body xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w:p><m:oMath xmlns:xsi="{XSI}" xsi:type="w15:CT_OMath"><m:r><m:t>x</m:t></m:r></m:oMath></w:p><w:sectPr/></w:body>"#
+    );
+    let saved = save(&package(format!("{root}{body}</w:document>")));
+    let bound = saved.as_ref().ok().map(|xml| well_formed_and_bound(xml));
+    let shown = bound.map_or("na".to_owned(), |bound| bound.to_string());
+    eprintln!(
+        "CASE root_decls_value_prefix_unchanged accepted={} bound={shown}",
+        saved.is_ok()
+    );
+    let xml = saved.unwrap();
+    assert!(xml.contains(r#"xsi:type="w15:CT_OMath""#), "{xml}");
+    let start = &xml[xml.find("<w:document").expect(&xml)..];
+    let tag = &start[..=start.find('>').unwrap()];
+    assert!(!tag.contains("xmlns:w15"), "{xml}");
+    assert_eq!(tag, root, "{xml}");
 }
 
 #[test]
@@ -544,7 +608,7 @@ fn p1b_ctrl_root_decl() {
     let raw = format!(
         r#"<w:ffData xmlns:xsi="{XSI}" xsi:type="w14:CT_FFData"><w:name w:val="T"/></w:ffData>"#
     );
-    prefix_case("p1b_ctrl_root_decl", &raw, true);
+    xsi_refused("p1b_ctrl_root_decl", &raw);
 }
 
 const COMMENTED_DATA: &str = r#"<w:ffData><w:name w:val="Check1"/><!--bo-ffdata 0--></w:ffData>"#;
