@@ -330,15 +330,17 @@ impl Document {
         self.authored_ids
             .retain(|_, (fresh, _)| edited_id.as_ref() != Some(&*fresh));
         let mirrored = match (&mut self.session_baseline, replacement.source_ordinal) {
-            (Some(baseline), Some(ordinal)) => baseline
-                .replace_text(locator, &edited)
-                .then(|| SessionEdit {
-                    para_id: edited_id,
-                    ordinal,
-                    text: text.to_owned(),
-                    expected: edited,
-                    context: context.clone(),
-                }),
+            (Some(baseline), Some(ordinal)) => {
+                baseline
+                    .replace_text(locator, &edited)
+                    .then(|| SessionEdit {
+                        para_id: edited_id,
+                        ordinal,
+                        text: text.to_owned(),
+                        expected: edited,
+                        context: context.clone(),
+                    })
+            }
             _ => None,
         };
         match mirrored {

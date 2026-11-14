@@ -1489,7 +1489,10 @@ fn a_suggesting_edit_by_id_is_refused() {
     let context =
         betteroffice_docx::EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z").suggesting();
     let result = document.replace_paragraph_text_with(W14_ID, "first edited", 1, &context);
-    assert!(matches!(result, Err(betteroffice_docx::Error::SuggestingEditUnsupported)));
+    assert!(matches!(
+        result,
+        Err(betteroffice_docx::Error::SuggestingEditUnsupported)
+    ));
     assert_eq!(document.save().unwrap(), before);
 }
 
@@ -1500,7 +1503,10 @@ fn a_suggesting_edit_by_index_is_refused() {
     let context =
         betteroffice_docx::EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z").suggesting();
     let result = document.replace_paragraph_text_at_with(1, "Rewritten middle", 1, &context);
-    assert!(matches!(result, Err(betteroffice_docx::Error::SuggestingEditUnsupported)));
+    assert!(matches!(
+        result,
+        Err(betteroffice_docx::Error::SuggestingEditUnsupported)
+    ));
     assert_eq!(document.save().unwrap(), before);
 }
 
