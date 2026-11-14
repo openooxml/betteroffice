@@ -1008,6 +1008,17 @@ fn parse_conditional_formats(
     Ok(groups)
 }
 
+/// The attribute `name` of the `<cfRule>` a rule's `raw_xml` holds.
+pub fn cf_rule_attribute(raw_xml: &str, name: &str) -> Option<String> {
+    let mut reader = reader(raw_xml.as_bytes());
+    let mut buf = Vec::new();
+    let mut depth = 0;
+    match next_event(&mut reader, &mut buf, &mut depth).ok()? {
+        Event::Start(e) if local_name(&e) == b"cfRule" => attr(&e, name.as_bytes()).ok()?,
+        _ => None,
+    }
+}
+
 /// the rectangle an `<f t="array" ref="...">` fills. anything malformed or
 /// larger than the spill limit is read as an ordinary formula.
 fn array_formula_range(

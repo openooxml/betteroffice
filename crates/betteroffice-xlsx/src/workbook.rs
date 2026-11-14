@@ -498,6 +498,7 @@ pub struct Workbook {
     committed_changes: u64,
     /// Chart plans by part path and resolutions by part path and owner sheet.
     chart_cache: Mutex<ChartCache>,
+    conditional_cache: Mutex<crate::conditional::Cache>,
     /// SHA-256 of retained source parts that exports have cited.
     source_part_hashes: Mutex<BTreeMap<String, String>>,
 }
@@ -1062,6 +1063,7 @@ impl Workbook {
             version_nonce,
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
+            conditional_cache: Mutex::new(crate::conditional::Cache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "fonts")]
             font_manager: betteroffice_fonts::FontManager::new(
@@ -3286,6 +3288,7 @@ impl Workbook {
             &geometry,
             Some(MAX_DISPLAY_CELLS),
             |chart| self.resolve_chart_space(&owner, chart),
+            |rows, cols| self.conditional_effects(sheet, rows, cols),
         )
         .map_err(Error::from)
     }
@@ -3596,6 +3599,7 @@ impl Workbook {
             &geometry,
             None,
             |chart| self.resolve_chart_space(&owner, chart),
+            |rows, cols| self.conditional_effects(sheet, rows, cols),
         )?;
         let display_list = if options.scale == 1.0 {
             display_list
@@ -6027,6 +6031,20 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
 
 impl Workbook {
     /// Resolves a chart against `owner`, revalidating its refresh value per epoch.
+    fn conditional_effects(
+        &self,
+        sheet: SheetId,
+        rows: &[std::ops::Range<u32>],
+        cols: &[std::ops::Range<u32>],
+    ) -> xlsx_render::CellFormats {
+        let rules = self
+            .conditional_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rules(self.model_epoch, &self.model, sheet);
+        crate::conditional::cell_formats(&self.model, sheet, &rules, rows, cols)
+    }
+
     fn resolve_chart_space(
         &self,
         owner: &str,
@@ -6654,6 +6672,7 @@ impl Workbook {
             version_nonce,
             committed_changes: 0,
             chart_cache: Mutex::new(ChartCache::default()),
+            conditional_cache: Mutex::new(crate::conditional::Cache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "fonts")]
             font_manager: betteroffice_fonts::FontManager::new(

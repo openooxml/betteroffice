@@ -55,7 +55,7 @@ pub use patch::{keeps_source, keeps_source_conditional_formats};
 #[doc(hidden)]
 pub use read::styles_part_name;
 pub use read::{
-    LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook,
+    LegacySheetDimensions, SharedStringCells, SourceCellFacts, cf_rule_attribute, parse_workbook,
     workbook_full_precision,
 };
 pub use reference::UnpatchableReference;

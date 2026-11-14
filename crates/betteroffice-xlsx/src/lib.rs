@@ -8,6 +8,7 @@ pub use fonts::OpenOptions;
 pub use open_options::OpenOptions;
 
 mod authority;
+mod conditional;
 mod error;
 mod fill;
 #[cfg(all(feature = "fonts", feature = "raster"))]
