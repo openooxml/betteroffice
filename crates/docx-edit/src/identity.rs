@@ -1792,6 +1792,11 @@ const PRIME_SLICE_SEGMENTS: usize = 512;
 /// `max_bytes`, beside the canonical bytes digested.
 const PRIME_STORY_COST: usize = 1024;
 const PRIME_SEGMENT_COST: usize = 64;
+/// The product worker's save seed caps (`residentEngineWorker.ts`).
+#[cfg_attr(not(test), allow(dead_code))]
+const SAVE_SEED_MAX_PARAGRAPHS: u32 = 4096;
+#[cfg_attr(not(test), allow(dead_code))]
+const SAVE_SEED_MAX_INFLATED_BYTES: u32 = 16 * 1024 * 1024;
 
 /// A save seed state prime in progress between slices.
 pub(crate) struct PrimeProgress {
@@ -6352,9 +6357,6 @@ mod tests {
         assert!(source.seed_states_initialized());
         assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
     }
-
-    const SAVE_SEED_MAX_PARAGRAPHS: u32 = 4096;
-    const SAVE_SEED_MAX_INFLATED_BYTES: u32 = 16 * 1024 * 1024;
 
     fn prime_at_product_caps(doc: &EditingDoc) -> bool {
         doc.prime_save_seed_states(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES)
