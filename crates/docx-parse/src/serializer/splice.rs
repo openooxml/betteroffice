@@ -426,12 +426,10 @@ fn subtract(
     total.retain(|_, count| *count != 0);
 }
 
-const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
-
-/// The prefixes `fragment` uses in names and `xsi:type` values outside its own declarations.
+/// The namespace prefixes `fragment` uses outside the scope of its own declarations of them.
 pub(crate) fn required_prefixes(fragment: &str) -> Option<BTreeSet<&str>> {
     let mut required = BTreeSet::new();
-    let mut scopes: Vec<Vec<(&str, &str)>> = Vec::new();
+    let mut scopes: Vec<Vec<&str>> = Vec::new();
     for tag in tags(fragment)? {
         if tag.end {
             scopes.pop();
@@ -440,33 +438,17 @@ pub(crate) fn required_prefixes(fragment: &str) -> Option<BTreeSet<&str>> {
         scopes.push(
             tag.attributes
                 .iter()
-                .filter_map(|(key, range)| {
-                    Some((key.strip_prefix("xmlns:")?, &fragment[range.clone()]))
-                })
+                .filter_map(|(key, _)| key.strip_prefix("xmlns:"))
                 .collect(),
         );
-        let bound = |prefix: &str| {
-            scopes
+        let names = std::iter::once(tag.name).chain(
+            tag.attributes
                 .iter()
-                .rev()
-                .find_map(|scope| scope.iter().rev().find(|(name, _)| *name == prefix))
-                .map(|(_, uri)| uri.trim())
-        };
-        let attributes = tag
-            .attributes
-            .iter()
-            .filter(|(key, _)| *key != "xmlns" && !key.starts_with("xmlns:"));
-        let values = attributes.clone().filter_map(|(key, range)| {
-            let (prefix, local) = key.split_once(':')?;
-            let typed = local == "type"
-                && bound(prefix).map_or(prefix == "xsi", |uri| uri == XSI_NAMESPACE);
-            typed.then(|| fragment[range.clone()].trim())
-        });
-        let names = std::iter::once(tag.name)
-            .chain(attributes.map(|(key, _)| *key))
-            .chain(values);
+                .map(|(key, _)| *key)
+                .filter(|key| *key != "xmlns" && !key.starts_with("xmlns:")),
+        );
         for prefix in names.filter_map(|name| name.split_once(':').map(|(prefix, _)| prefix)) {
-            if prefix != "xml" && bound(prefix).is_none() {
+            if prefix != "xml" && !scopes.iter().any(|scope| scope.contains(&prefix)) {
                 required.insert(prefix);
             }
         }

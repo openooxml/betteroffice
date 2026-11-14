@@ -1,6 +1,12 @@
 //! Validation for the narrowly allowed lossless XML replay fields.
 
+use quick_xml::NsReader;
+use quick_xml::events::Event;
+use quick_xml::name::{Namespace, ResolveResult};
+
 use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml_strict};
+
+const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
 
 /// Complete namespace context used by WordprocessingML content fragments.
 /// The wrapper is never emitted; it only makes captured prefixed subtrees
@@ -77,12 +83,45 @@ pub(crate) fn validate_form_field_data(xml: &str) -> Result<(), ParseError> {
     let used = super::splice::required_prefixes(xml).ok_or_else(|| {
         ParseError::Canonical("validated XML fragment is not well-formed".to_owned())
     })?;
-    match used
+    if let Some(prefix) = used
         .into_iter()
         .find(|prefix| !super::parts::is_story_root_prefix(prefix))
     {
-        Some(prefix) => Err(ParseError::Canonical(format!("unbound prefix {prefix}"))),
-        None => Ok(()),
+        return Err(ParseError::Canonical(format!("unbound prefix {prefix}")));
+    }
+    if carries_schema_instance_attribute(xml) {
+        return Err(ParseError::Canonical(
+            "schema instance attributes are not supported".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// True when an attribute of `xml` is in the schema instance namespace.
+fn carries_schema_instance_attribute(xml: &str) -> bool {
+    let source = format!("<root {}>{xml}</root>", super::parts::DOCUMENT_NAMESPACES);
+    let mut reader = NsReader::from_str(&source);
+    loop {
+        let element = match reader.read_resolved_event() {
+            Ok((_, Event::Start(element) | Event::Empty(element))) => element,
+            Ok((_, Event::Eof)) => return false,
+            Ok(_) => continue,
+            Err(_) => return true,
+        };
+        for attribute in element.attributes() {
+            let Ok(attribute) = attribute else {
+                return true;
+            };
+            if let (ResolveResult::Bound(Namespace(uri)), _) =
+                reader.resolver().resolve_attribute(attribute.key)
+                && std::str::from_utf8(uri)
+                    .ok()
+                    .and_then(|uri| quick_xml::escape::unescape(uri).ok())
+                    .is_none_or(|uri| uri == XSI_NAMESPACE)
+            {
+                return true;
+            }
+        }
     }
 }
 
