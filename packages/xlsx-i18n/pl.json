@@ -114,6 +114,14 @@
     "zoomPercent": "Powiększenie w procentach",
     "apply": "Zastosuj",
     "cancel": "Anuluj",
+    "freezeColumn": "Zablokuj kolumnę {column}",
+    "freezeColumns": "Zablokuj kolumny {first}–{last}",
+    "freezeRow": "Zablokuj wiersz {row}",
+    "freezeRows": "Zablokuj wiersze {first}–{last}",
+    "unfreezePanes": "Odblokuj okienka",
+    "unhideColumns": "Pokaż kolumny",
+    "unhideRows": "Pokaż wiersze",
+    "selectAll": "Zaznacz wszystko",
     "reasons": {
       "editorUnavailable": "Edytor nie jest gotowy.",
       "documentLoading": "Skoroszyt jest jeszcze otwierany.",
@@ -195,6 +203,8 @@
     "sheetTabsLabel": "Arkusze",
     "clearExceedsLimit": "Czyszczenie przekracza limit komórek.",
     "cellMenuLabel": "Menu komórki",
+    "columnHeaderMenuLabel": "Menu nagłówka kolumny",
+    "rowHeaderMenuLabel": "Menu nagłówka wiersza",
     "sheetTabMenuLabel": "Menu karty arkusza",
     "renameSheetLabel": "Zmień nazwę arkusza",
     "sheetNamePrefix": "Arkusz"

@@ -114,6 +114,14 @@
     "zoomPercent": "Zoom en pourcentage",
     "apply": "Appliquer",
     "cancel": "Annuler",
+    "freezeColumn": "Figer la colonne {column}",
+    "freezeColumns": "Figer les colonnes {first}–{last}",
+    "freezeRow": "Figer la ligne {row}",
+    "freezeRows": "Figer les lignes {first}–{last}",
+    "unfreezePanes": "Annuler le figement",
+    "unhideColumns": "Afficher les colonnes",
+    "unhideRows": "Afficher les lignes",
+    "selectAll": "Tout sélectionner",
     "reasons": {
       "editorUnavailable": "L’éditeur n’est pas prêt.",
       "documentLoading": "Le classeur est encore en cours d’ouverture.",
@@ -195,6 +203,8 @@
     "sheetTabsLabel": "Feuilles",
     "clearExceedsLimit": "L’effacement dépasse la limite de cellules.",
     "cellMenuLabel": "Menu de la cellule",
+    "columnHeaderMenuLabel": "Menu de l’en-tête de colonne",
+    "rowHeaderMenuLabel": "Menu de l’en-tête de ligne",
     "sheetTabMenuLabel": "Menu de l’onglet de feuille",
     "renameSheetLabel": "Renommer la feuille",
     "sheetNamePrefix": "Feuille"
