@@ -284,13 +284,23 @@ const sessionsWithoutSource: [string, () => Promise<YrsSession>][] = [
 ];
 
 describe('YrsSession.renderPng source bytes', () => {
-  test('exports a session opened from bytes without materializing it', async () => {
+  test.skipIf(engineKind !== 'native')('exports a session opened from bytes without materializing it on the native engine', async () => {
     stubBrowser();
     const session = await opened();
     try {
       const materialize = spyOn(session, 'materializeDocx');
       await session.renderPng({ page: 0 });
       expect(materialize).toHaveBeenCalledTimes(0);
+    } finally { session.destroy(); }
+  });
+
+  test.skipIf(engineKind !== 'wasm')('exports a session opened from bytes by materializing it on the wasm engine', async () => {
+    stubBrowser();
+    const session = await opened();
+    try {
+      const materialize = spyOn(session, 'materializeDocx');
+      await session.renderPng({ page: 0 });
+      expect(materialize).toHaveBeenCalledTimes(1);
     } finally { session.destroy(); }
   });
 
