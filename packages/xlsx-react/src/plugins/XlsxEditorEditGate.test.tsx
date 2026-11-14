@@ -281,9 +281,12 @@ function mountClock() {
         return settled;
       } catch (error) {
         const ms = lap(phase);
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`${message}\nmount stalled in ${phase} after ${ms} ms `
-          + `(setup ${spent.setup} ms, ready ${spent.ready} ms, plugins ${spent.plugins} ms)`);
+        const plugins = phase === 'ready' ? 'plugins not run' : `plugins ${spent.plugins} ms`;
+        if (error instanceof Error) {
+          error.message += `\nmount stalled in ${phase} after ${ms} ms `
+            + `(setup ${spent.setup} ms, ready ${spent.ready} ms, ${plugins})`;
+        }
+        throw error;
       }
     },
   };
@@ -291,9 +294,9 @@ function mountClock() {
 
 async function mountGated(
   editor: Editor, gates: Record<string, Gate>,
-  { protectedSheet = false, sparse = false, starting = 0 } = {}
+  { protectedSheet = false, sparse = false, starting = 0, nameStall = false } = {}
 ): Promise<Book> {
-  const clock = mountClock();
+  const clock = nameStall ? mountClock() : null;
   const errors: XlsxPluginError[] = [];
   const log: GateLog = { loaded: new Set<string>(), cleanups: [], contexts: {} };
   const plugins = Object.entries(gates).map(([key, gate]) => gatePlugin(gate.id ?? key, gate, log));
@@ -311,10 +314,15 @@ async function mountGated(
     const onReady = (ready: XlsxEditorApi) => { api = ready; };
     const element = (next: XlsxPlugin[]) => <XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file}
       plugins={next} onPluginError={onPluginError} onReady={onReady} />;
-    clock.lap('setup');
     const view = render(element(plugins));
-    await clock.wait('ready', () => waitFor(() => expect(api).toBeDefined(), MOUNTED));
-    await clock.wait('plugins', () => waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED));
+    if (clock) {
+      clock.lap('setup');
+      await clock.wait('ready', () => waitFor(() => expect(api).toBeDefined(), MOUNTED));
+      await clock.wait('plugins', () => waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED));
+    } else {
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
+      await waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED);
+    }
     const base = common(view);
     return {
       ...base,
@@ -364,10 +372,15 @@ async function mountGated(
   const ready = mock((_api: XlsxAsyncEditorApi) => {});
   const element = (next: XlsxPlugin[]) => <XlsxWorkerEditor backend="peerless" file={file} plugins={next}
     onPluginError={onPluginError} onReady={ready} />;
-  clock.lap('setup');
   const view = render(element(plugins));
-  await clock.wait('ready', () => waitFor(async () => { await pump(); expect(ready).toHaveBeenCalledTimes(1); }, MOUNTED));
-  await clock.wait('plugins', () => waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED));
+  if (clock) {
+    clock.lap('setup');
+    await clock.wait('ready', () => waitFor(async () => { await pump(); expect(ready).toHaveBeenCalledTimes(1); }, MOUNTED));
+    await clock.wait('plugins', () => waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED));
+  } else {
+    await waitFor(async () => { await pump(); expect(ready).toHaveBeenCalledTimes(1); }, MOUNTED);
+    await waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED);
+  }
   const api = ready.mock.calls[0][0];
   const base = common(view);
   return {
@@ -499,7 +512,8 @@ for (const editor of ['in-thread', 'peerless'] as const) {
 
     it('after a refused commit and Escape, retyping the cell writes the new input', async () => {
       const book = await mountGated(editor, { numbers: { beforeCellCommit: (commit) =>
-        /^\d+$/.test(commit.input) ? { action: 'accept' } : { action: 'refuse', message: 'Numbers only' } } });
+        /^\d+$/.test(commit.input) ? { action: 'accept' } : { action: 'refuse', message: 'Numbers only' } } },
+      { nameStall: true });
       await book.select(0);
       await book.type('abc');
       await waitFor(() => expect(book.refusal()).toBe('Numbers only'));
