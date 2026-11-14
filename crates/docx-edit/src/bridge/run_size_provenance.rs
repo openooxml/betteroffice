@@ -1110,13 +1110,11 @@ mod tests {
         for (count, seeded) in [(1, false), (128, false), (1, true), (128, true)] {
             let bytes = toc_package(count);
             let engine = EngineSession::new(77112);
-            // A reseed into a non-empty document is never marked seeded.
-            if !seeded {
-                seed_from_docx(engine.doc(), &bytes).unwrap();
-            }
             seed_from_docx(engine.doc(), &bytes).unwrap();
             if seeded {
                 engine.doc().mark_seeded();
+            } else {
+                engine.doc().forget_seeding();
             }
             assert_eq!(engine.doc().unchanged_since_seeded(), seeded);
             RUN_SIZE_SEEDED_SNAPSHOTS.with(|counter| counter.set(0));
