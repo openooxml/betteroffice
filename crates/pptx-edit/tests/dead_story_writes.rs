@@ -136,7 +136,7 @@ fn refused<T: std::fmt::Debug>(method: &str, result: EditResult<T>) {
 
 fn assert_every_write_refused(removal: Removal) {
     let (session, story) = dead_story(removal);
-    let before = session.story(&story).ok();
+    let before = session.story(&story).unwrap();
     let ctx = EditCtx::local("test");
     let style = TextStyle::default();
     let emphasis = TextStylePatch {
@@ -179,7 +179,7 @@ fn assert_every_write_refused(removal: Removal) {
         "set_story_paragraphs removing a paragraph",
         session.set_story_paragraphs(&ctx, &story, &shrunk),
     );
-    assert_eq!(session.story(&story).ok(), before);
+    assert_eq!(session.story(&story).unwrap(), before);
 }
 
 #[test]
@@ -297,4 +297,30 @@ fn a_remote_slide_deletion_applies_on_a_peer_holding_an_anchor_in_it() {
     let snapshot = sync(&local, &peer);
     assert!(!snapshot.slides.iter().any(|next| next.id == slide));
     assert_eq!(peer.resolve_caret_anchor(&anchor), None);
+}
+
+#[test]
+fn a_text_box_added_to_a_slide_a_peer_deleted_concurrently_takes_no_writes() {
+    let adder = DeckSession::open(DEMO, 84206).unwrap();
+    let deleter = DeckSession::open(DEMO, 84207).unwrap();
+    let slide = adder.snapshot().unwrap().slides[0].id.clone();
+    let ctx = EditCtx::local("test");
+    let story = text_box(&adder, &slide, "ABC");
+    adder
+        .insert_text(&ctx, &story, 3, "D", &TextStyle::default())
+        .unwrap();
+    let anchor = adder.anchor_caret(&story, 2).unwrap();
+    assert_eq!(adder.resolve_caret_anchor(&anchor), Some(2));
+    deleter.delete_slide(&ctx, &slide).unwrap();
+    sync(&adder, &deleter);
+    sync(&deleter, &adder);
+    for peer in [&adder, &deleter] {
+        let snapshot = peer.snapshot().unwrap();
+        assert!(!snapshot.slides.iter().any(|next| next.id == slide));
+        assert_eq!(peer.resolve_caret_anchor(&anchor), None);
+        refused(
+            "insert_text",
+            peer.insert_text(&ctx, &story, 1, "X", &TextStyle::default()),
+        );
+    }
 }
