@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use pptx_edit::{DeckSession, EditCtx, ShapeDraft, ShapeRect, TextStyle};
+use pptx_edit::{DeckSession, EditCtx, EditError, ShapeDraft, ShapeRect, TextStyle};
 use yrs::{Any, Array, ArrayRef, Map, MapRef, Out, ReadTxn, Transact};
 
 const DEMO: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
@@ -138,6 +138,7 @@ fn order_index<T: ReadTxn>(txn: &T, order: &ArrayRef, id: &str) -> u32 {
         .unwrap() as u32
 }
 
+// No grouping API exists, so ungroup and move_out_of_group edit the document directly.
 fn ungroup(session: &DeckSession, slide: &str, group: &str) {
     let mut txn = session.yrs_doc().transact_mut();
     let order = slide_order(&txn, slide);
@@ -333,4 +334,34 @@ fn a_story_two_groups_deep_resolves_until_its_outer_group_is_removed() {
         .remove_shape(&EditCtx::local("test"), &grouped.slide, inner)
         .unwrap();
     assert_eq!(session.resolve_caret_anchor(&anchor), None);
+}
+
+#[test]
+fn a_resolved_story_outlives_unrelated_damage_that_a_fresh_session_reports() {
+    let warm = DeckSession::open(DEMO, 84311).unwrap();
+    let fresh = DeckSession::open(DEMO, 84312).unwrap();
+    let slides = warm.snapshot().unwrap().slides;
+    let story = text_box(&warm, &slides[1].id, "ABC");
+    sync(&warm, &fresh);
+    let anchor = warm.anchor_caret(&story, 2).unwrap();
+    assert_eq!(warm.resolve_caret_anchor(&anchor), Some(2));
+    let damaged = slides[0].shapes[0].id.clone();
+    for session in [&warm, &fresh] {
+        let mut txn = session.yrs_doc().transact_mut();
+        let entry = shape_entry(&txn, &damaged);
+        entry.insert(&mut txn, "children", string_list(&["missing-shape".to_owned()]));
+    }
+    assert_eq!(warm.resolve_caret_anchor(&anchor), Some(2));
+    assert_eq!(fresh.resolve_caret_anchor(&anchor), None);
+    let written = fresh.insert_text(
+        &EditCtx::local("test"),
+        &story,
+        0,
+        "X",
+        &TextStyle::default(),
+    );
+    assert!(
+        matches!(written, Err(EditError::InvalidState(_))),
+        "{written:?}"
+    );
 }
