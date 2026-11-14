@@ -3022,6 +3022,7 @@ const rows: Row<Docx>[] = [
     throws: { name: 'string', reason: 'a unit index past the last unit is refused' },
     call: ({ session: s }) => s.story_segment_units('body', Uint32Array.from([9_999])),
   },
+  { method: 'EditSession.story_segment_unit_digests', call: ({ session: s }) => s.story_segment_unit_digests('body') },
   {
     method: 'EditSession.resident_caret_snapshot_json',
     call: ({ session: s }) => {
@@ -3093,7 +3094,6 @@ const notYetCovered: string[] = [
   'EditSession.set_local_lowering',
   'EditSession.set_windowed_incremental_builds',
   'EditSession.start_update_event_observation',
-  'EditSession.story_segment_unit_digests',
   'EditSession.update_measure_font_outlines', 'EditSession.yrs_blocks_for_story',
   'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.provisional',
   'clear_measure_fonts', 'close_display_list', 'decodeFontFace', 'decodeTiffPng',
@@ -3131,7 +3131,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(60);
+    expect(notYetCovered.length).toBe(59);
   });
 
   for (const row of rows) {
