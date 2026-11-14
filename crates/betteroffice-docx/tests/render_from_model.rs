@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use betteroffice_docx::{
-    BlockContent, Document, ParseLimits, PngTarget, RenderOptions, RenderedPage, get_paragraph_text,
+    BlockContent, Document, Error, ParseLimits, PngTarget, RenderOptions, RenderedPage,
+    get_paragraph_text,
 };
 
 const CARLITO: &[u8] = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
@@ -164,17 +165,17 @@ fn mark_formatted_empty_paragraph_docx() -> Vec<u8> {
     ))
 }
 
-/// One page per paragraph, each after the first behind a page break.
-fn one_page_per_paragraph_docx(pages: usize) -> Vec<u8> {
+/// One page per paragraph, each after the first behind a page break, the first with `first_attributes` too.
+fn one_page_per_paragraph_docx(pages: usize, first_attributes: &str) -> Vec<u8> {
     let body: String = (0..pages)
         .map(|page| {
-            let page_break = if page == 0 {
-                ""
+            let (page_break, attributes) = if page == 0 {
+                ("", first_attributes)
             } else {
-                r#"<w:r><w:br w:type="page"/></w:r>"#
+                (r#"<w:r><w:br w:type="page"/></w:r>"#, "")
             };
             format!(
-                r#"<w:p w14:paraId="{:08X}" w14:textId="77777777">{page_break}<w:r><w:t>Page {page}</w:t></w:r></w:p>"#,
+                r#"<w:p w14:paraId="{:08X}" w14:textId="77777777"{attributes}>{page_break}<w:r><w:t>Page {page}</w:t></w:r></w:p>"#,
                 page + 1
             )
         })
@@ -276,7 +277,7 @@ fn assert_every_page_renders(document: &Document, label: &str, from_model: bool)
 #[test]
 fn a_document_opened_under_raised_limits_renders() {
     let pages = 3;
-    let bytes = one_page_per_paragraph_docx(pages);
+    let bytes = one_page_per_paragraph_docx(pages, "");
     let Err(error) = Document::open_with_limits(&bytes, &paragraph_limits(pages - 1)) else {
         panic!("a {pages}-paragraph document opened under a {}-paragraph budget", pages - 1);
     };
@@ -293,6 +294,43 @@ fn a_document_opened_under_raised_limits_renders() {
     assert!(edit_a_body_paragraph(&mut document));
     assert_eq!(
         assert_every_page_renders(&document, "raised limits edited", false),
+        pages
+    );
+}
+
+#[test]
+fn a_document_one_attribute_past_the_default_limit_renders_from_the_model() {
+    let pages = 3;
+    let limit = ParseLimits::default().max_attributes_per_element;
+    let attributes: String = std::iter::once(r#" xmlns:x="urn:betteroffice:test""#.to_owned())
+        .chain((3..=limit).map(|index| format!(r#" x:a{index}="""#)))
+        .collect();
+    assert_eq!(attributes.matches('=').count() + 2, limit + 1);
+    let bytes = one_page_per_paragraph_docx(pages, &attributes);
+    let over_the_limit = |error: &Error| {
+        matches!(
+            error,
+            Error::Parse(docx_parse::ParseError::ResourceLimit {
+                kind: "attributesPerElement",
+                ..
+            })
+        )
+    };
+    let Err(error) = Document::open(&bytes) else {
+        panic!("a paragraph with {} attributes opened under the default limit", limit + 1);
+    };
+    assert!(over_the_limit(&error), "unexpected error: {error:?}");
+    let raised = ParseLimits {
+        max_attributes_per_element: limit + 1,
+        ..ParseLimits::default()
+    };
+    let document = with_fonts(Document::open_with_limits(&bytes, &raised).unwrap());
+    let saved = document
+        .render_png_saved(PngTarget { page: 0 }, &RenderOptions::default())
+        .unwrap_err();
+    assert!(over_the_limit(&saved), "unexpected error: {saved:?}");
+    assert_eq!(
+        assert_every_page_renders(&document, "one attribute past the limit", true),
         pages
     );
 }
