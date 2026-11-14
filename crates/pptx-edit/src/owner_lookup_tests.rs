@@ -450,6 +450,7 @@ fn discover(session: &DeckSession, seen: &mut BTreeSet<String>, stories: &mut Ve
             stories.push(story);
         }
     }
+    stories.sort();
 }
 
 fn resolves(session: &DeckSession, story: &str) -> bool {
