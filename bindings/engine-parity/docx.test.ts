@@ -798,9 +798,14 @@ function measuredSources(engine: DocxEngine, sources: MediaSourcesWire, other: M
   if (sources.key.length !== other.key.length || sources.parts.length !== other.parts.length) {
     throw new Error(`two openings drew differently shaped media sources: ${JSON.stringify(sources)} then ${JSON.stringify(other)}`);
   }
-  const drawn = (value: string, again: string | undefined) => (value !== again && HEX_DIGEST.test(value) && HEX_DIGEST.test(again ?? '') ? 'drawn' : value);
+  for (const [label, wire] of [['first', sources], ['second', other]] as const) {
+    for (const value of [...wire.key, ...wire.parts.map(([digest]) => digest)]) {
+      if (typeof value !== 'string' || !HEX_DIGEST.test(value)) throw new Error(`${engineName(engine)} ${label} opening drew ${JSON.stringify(value)}, not 16 lowercase hex digits: ${JSON.stringify(wire)}`);
+    }
+  }
+  const drawn = (value: string, again: string | undefined): string | { generated: 'hex64' } => (value !== again ? { generated: 'hex64' } : value);
   const key = sources.key.map((half, index) => drawn(half, other.key[index]));
-  console.log(`MEDIA-KEY-PROBE ${engineName(engine)} ${sources.key.join(',')} ${other.key.join(',')} drawn=${key.map((half) => half === 'drawn').join(',')}`);
+  console.log(`MEDIA-KEY-PROBE ${engineName(engine)} ${sources.key.join(',')} ${other.key.join(',')} drawn=${key.map((half) => typeof half !== 'string').join(',')}`);
   return {
     ...sources,
     key,
