@@ -565,3 +565,55 @@ fn the_rebuild_comparison_reports_a_wrong_parse_in_the_cache() {
     }));
     assert!(compared.is_err());
 }
+
+#[test]
+fn a_graph_whose_parse_cache_was_taken_still_matches_a_fresh_build() {
+    let (sheet, at) = (SheetId(0), CellRef::new(2, 1));
+    let dirty = [(sheet, CellRef::new(1, 0)), (sheet, at)];
+    for seed in 1..=6 {
+        let label = format!("seed {seed}");
+        let mut model = generated(seed);
+        let before = model.render(&HashMap::new());
+        let mut fresh = rebuild(before.clone(), None);
+        let mut taken = rebuild(before, None);
+        drop(DepGraph::build_reusing(&taken.wb, &taken.graph));
+        let asts = taken.graph.asts().lock().expect("parse cache poisoned");
+        assert!(asts.is_empty(), "{label}");
+        drop(asts);
+        let values = model.values(&taken.wb);
+        model.apply(Edit::Value);
+        model.apply(Edit::Formula);
+        let edited = model.render(&values);
+        let source = edited
+            .sheet(sheet)
+            .and_then(|s| s.cell(at))
+            .and_then(|c| c.formula.clone());
+        for rebuilt in [&mut taken, &mut fresh] {
+            rebuilt.wb = edited.clone();
+            rebuilt.graph.set_formula(sheet, at, source.as_deref());
+            rebuilt.result = recalc_after_with_seed(
+                &mut rebuilt.wb,
+                &mut rebuilt.graph,
+                &dirty,
+                Some(NOW_SERIAL),
+                Some(RAND_SEED),
+            );
+        }
+        let kept: HashSet<String> = {
+            let asts = taken.graph.asts().lock().expect("parse cache poisoned");
+            asts.keys().cloned().collect()
+        };
+        fresh
+            .graph
+            .asts()
+            .lock()
+            .expect("parse cache poisoned")
+            .retain(|parsed, _| kept.contains(parsed));
+        assert_same_rebuild(&taken, &fresh, &label);
+        let label = format!("{label}, full rebuild");
+        let reused = rebuild(taken.wb.clone(), Some(&taken.graph));
+        let rebuilt = rebuild(taken.wb, None);
+        assert!(!rebuilt.result.cycle_cells.is_empty(), "{label}");
+        assert_same_rebuild(&reused, &rebuilt, &label);
+    }
+}
