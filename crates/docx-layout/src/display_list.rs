@@ -13995,6 +13995,7 @@ fn resident_build_input_for(
             .flat_map(|page| page.fragments.iter().filter_map(fragment_block_key_ref))
             .collect()
     });
+    let mut first_unreadable = Vec::new();
     let measured = pagination
         .measured
         .iter()
@@ -14003,9 +14004,24 @@ fn resident_build_input_for(
                 resident_block_key(&measured.block).is_some_and(|key| keys.contains(key.as_ref()))
             })
         })
-        .filter_map(|measured| convert_measured_block(&mut transcoder, measured, &mut unreadable))
+        .filter_map(|measured| {
+            let block = convert_measured_block(&mut transcoder, measured, &mut unreadable);
+            if block.is_none() {
+                first_unreadable.extend(unreadable.last().cloned());
+            }
+            block
+        })
         .collect();
     drop(placed);
+    // A readable later copy of a key leaves an unreadable earlier one reported.
+    for entry in first_unreadable {
+        if !unreadable
+            .iter()
+            .any(|known| known.block == entry.block && known.page == entry.page)
+        {
+            unreadable.push(entry);
+        }
+    }
     let options = transcoder
         .convert(&pagination.options)
         .map_err(|e| format!("parse resident display input: {e}"))?;
@@ -18519,6 +18535,45 @@ mod tests {
         .expect("one unreadable block must not fail the page");
         assert!(!paints_block(&list.pages[0], "intro"));
         assert_eq!(series_rects(&list.pages[0]), rects);
+        assert_eq!(unreadable(&resident), [("intro".to_owned(), None)]);
+    }
+
+    #[test]
+    fn a_readable_copy_of_a_key_keeps_an_earlier_unreadable_copy_reported() {
+        let fonts = ooxml_text::FontStore::default();
+        let (mut pagination, layout) = charted_page(serde_json::json!([2, 1, 3]));
+        let copy = pagination.measured[0].clone();
+        pagination.measured.push(copy);
+        let crate::types::BlockExtent::Paragraph(extent) = &mut pagination.measured[0].measure
+        else {
+            unreachable!()
+        };
+        extent.lines[0].width = f64::NAN;
+        let unreadable = |resident: &ResidentDisplayInput| {
+            resident
+                .unreadable()
+                .iter()
+                .map(|entry| (entry.block.clone(), entry.page))
+                .collect::<Vec<_>>()
+        };
+        let (resident, _) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(unreadable(&resident), [("intro".to_owned(), None)]);
+        let (resident, _) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|index| index == 0,
+            &mut || {},
+        )
+        .unwrap();
         assert_eq!(unreadable(&resident), [("intro".to_owned(), None)]);
     }
 

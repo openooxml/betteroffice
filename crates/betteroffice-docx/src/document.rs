@@ -68,6 +68,8 @@ pub struct Document {
     session_baseline: Option<SavedFields>,
     session_edits: Vec<SessionEdit>,
     dirty: Dirty,
+    #[cfg(feature = "raster")]
+    default_limits: bool,
     #[cfg(any(feature = "fonts", feature = "raster"))]
     pub(crate) fonts: Mutex<crate::font::FontRegistry>,
     #[cfg(feature = "fonts")]
@@ -133,6 +135,8 @@ impl Document {
             session_baseline: Some(SavedFields::of(&model)),
             session_edits: Vec::new(),
             dirty: Dirty::Clean,
+            #[cfg(feature = "raster")]
+            default_limits: *limits == ParseLimits::default(),
             model,
             opened_ids: authored_ids.clone(),
             authored_ids,
@@ -168,6 +172,17 @@ impl Document {
 
     pub fn into_model(self) -> DocumentModel {
         self.model
+    }
+
+    /// Whether the model is unchanged since an open under the default limits.
+    #[cfg(feature = "raster")]
+    pub(crate) fn renders_from_model(&self) -> bool {
+        self.dirty == Dirty::Clean && self.default_limits
+    }
+
+    #[cfg(feature = "raster")]
+    pub(crate) fn source_bytes(&self) -> &[u8] {
+        &self.source
     }
 
     pub fn body(&self) -> &DocumentBody {
@@ -349,7 +364,7 @@ impl Document {
     }
 
     /// The current model as the parsed package seeding reads.
-    fn envelope(&self) -> S9WireEnvelope {
+    pub(crate) fn envelope(&self) -> S9WireEnvelope {
         let model = self.model.clone();
         S9WireEnvelope {
             wire_version: 1,
