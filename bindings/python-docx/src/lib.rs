@@ -2,12 +2,14 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyInt};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyString};
 use python_common::map_io_error;
 
 use betteroffice_docx::{
@@ -778,23 +780,35 @@ fn offset_repr(offset: Option<u32>) -> String {
     frozen,
     from_py_object
 )]
-#[derive(Clone)]
 pub struct PyDisplayList {
     inner: DisplayList,
-    payload: String,
+    payload: OnceLock<Py<PyString>>,
     #[pyo3(get)]
     contract_version: Option<u32>,
 }
 
+impl Clone for PyDisplayList {
+    fn clone(&self) -> Self {
+        Self::new(self.inner.clone())
+    }
+}
+
 impl PyDisplayList {
-    fn new(inner: DisplayList) -> PyResult<Self> {
-        let payload = serde_json::to_string(&inner)
-            .map_err(|error| LayoutError::new_err(error.to_string()))?;
-        Ok(Self {
+    fn new(inner: DisplayList) -> Self {
+        Self {
             contract_version: inner.contract_version,
             inner,
-            payload,
-        })
+            payload: OnceLock::new(),
+        }
+    }
+
+    fn payload<'py>(&self, py: Python<'py>) -> Result<Bound<'py, PyString>, serde_json::Error> {
+        if let Some(text) = self.payload.get() {
+            return Ok(text.bind(py).clone());
+        }
+        let text = py.detach(|| serde_json::to_string(&self.inner))?;
+        let text = PyString::new(py, &text).unbind();
+        Ok(self.payload.get_or_init(|| text).bind(py).clone())
     }
 }
 
@@ -805,12 +819,13 @@ impl PyDisplayList {
     fn from_json(text: &str) -> PyResult<Self> {
         let inner: DisplayList = serde_json::from_str(text)
             .map_err(|error| PyValueError::new_err(format!("invalid display list: {error}")))?;
-        Self::new(inner)
+        Ok(Self::new(inner))
     }
 
     #[getter]
-    fn json(&self) -> &str {
-        &self.payload
+    fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyString>> {
+        self.payload(py)
+            .map_err(|error| LayoutError::new_err(error.to_string()))
     }
 
     #[getter]
@@ -823,12 +838,17 @@ impl PyDisplayList {
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        py.import("json")?
-            .call_method1("loads", (self.payload.as_str(),))
+        let payload = self.json(py)?;
+        py.import("json")?.call_method1("loads", (payload,))
     }
 
     fn write(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
-        py.detach(|| fs::write(&path, self.payload.as_bytes()))
+        let payload = self
+            .payload(py)
+            .map_err(|error| map_io_error(&io::Error::from(error), &path))?;
+        let bytes = payload.encode_utf8()?;
+        let bytes = bytes.as_bytes();
+        py.detach(|| fs::write(&path, bytes))
             .map_err(|error| map_io_error(&error, &path))
     }
 
@@ -851,12 +871,16 @@ pub struct PyLayout {
     payload: String,
     #[pyo3(get)]
     pages: usize,
-    #[pyo3(get)]
-    display_list: PyDisplayList,
+    display_list: Py<PyDisplayList>,
 }
 
 #[pymethods]
 impl PyLayout {
+    #[getter]
+    fn display_list(&self, py: Python<'_>) -> Py<PyDisplayList> {
+        self.display_list.clone_ref(py)
+    }
+
     #[getter]
     fn json(&self) -> &str {
         &self.payload
@@ -1324,7 +1348,7 @@ impl PyDocument {
         Ok(PyLayout {
             payload,
             pages: result.layout.pages.len(),
-            display_list: PyDisplayList::new(result.display_list)?,
+            display_list: Py::new(py, PyDisplayList::new(result.display_list))?,
         })
     }
 
