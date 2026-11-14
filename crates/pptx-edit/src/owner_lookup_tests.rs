@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use pptx_parse::GraphicFrameData;
-use yrs::{Any, Array, ArrayRef, Map, MapRef, Transact, TransactionMut};
+use yrs::{Any, Array, ArrayRef, Map, MapRef, ReadTxn, StateVector, Transact, TransactionMut};
 
 use crate::deck::{
     live_shape_order, live_slide_ids, map_string, map_string_array, required_map, shape_ref,
@@ -11,7 +11,8 @@ use crate::deck::{
 use crate::proposal_diff::story_owner;
 use crate::story_owners::{LookupCounts, find_path};
 use crate::{
-    DeckSession, EditCtx, EditError, SHAPES, ShapeDraft, ShapeRect, TableInsertPosition, TextStyle,
+    CaretAnchor, DeckSession, EditCtx, EditError, SHAPES, ShapeDraft, ShapeRect,
+    TableInsertPosition, TextStyle, UndoCaptureMode,
 };
 
 const TABLE_DECK: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/table-basic.pptx");
@@ -261,19 +262,45 @@ fn table_rows(session: &DeckSession, shape: &str) -> Option<usize> {
     }
 }
 
+fn document_state(session: &DeckSession) -> Vec<u8> {
+    session
+        .doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default())
+}
+
+fn caret_at_first_paragraph_end(session: &DeckSession, story: &str) -> (CaretAnchor, u32) {
+    let offset = session
+        .story(story)
+        .unwrap()
+        .paragraphs
+        .first()
+        .map_or(0, |paragraph| {
+            paragraph
+                .runs
+                .iter()
+                .map(|run| run.text.encode_utf16().count() as u32)
+                .sum()
+        });
+    (session.anchor_caret(story, offset).unwrap(), offset)
+}
+
 #[derive(Default)]
 struct Outcome {
     grew: bool,
     gone: Vec<String>,
+    gone_anchors: Vec<CaretAnchor>,
     fresh: Vec<String>,
 }
+
+type RowEdit = (Vec<String>, Vec<CaretAnchor>, Vec<String>);
 
 fn edit_row(
     session: &DeckSession,
     placed: &[Placed],
     rng: &mut SplitMix,
     insert: bool,
-) -> Option<(Vec<String>, Vec<String>)> {
+) -> Option<RowEdit> {
     let tables: Vec<(Placed, usize)> = placed
         .iter()
         .filter_map(|shape| Some((shape.clone(), table_rows(session, &shape.shape)?)))
@@ -283,6 +310,10 @@ fn edit_row(
     let context = EditCtx::local("test");
     let index = rng.below(rows) as u32;
     let before = cell_stories(session, &table.shape);
+    let anchors: Vec<CaretAnchor> = before
+        .iter()
+        .map(|story| caret_at_first_paragraph_end(session, story).0)
+        .collect();
     let edited = if insert {
         session.insert_table_row(
             &context,
@@ -296,7 +327,7 @@ fn edit_row(
         session.delete_table_row(&context, &table.slide, &table.shape, index)
     };
     edited.ok()?;
-    Some((before, cell_stories(session, &table.shape)))
+    Some((before, anchors, cell_stories(session, &table.shape)))
 }
 
 const MAX_SLIDES: usize = 8;
@@ -386,13 +417,14 @@ fn step(
             if let Some(story) = rng.pick(stories) {
                 let owned = walk_finds_owner(local, &story);
                 let before = (!owned).then(|| local.snapshot().unwrap());
+                let state = (!owned).then(|| document_state(local));
                 let written = local.insert_text(&context, &story, 0, "x", &TextStyle::default());
                 assert_eq!(
                     written.is_ok(),
                     owned,
                     "write to {story}: {written:?} seed={seed} step={round}"
                 );
-                if let Some(before) = before {
+                if let (Some(before), Some(state)) = (before, state) {
                     assert!(
                         matches!(
                             written,
@@ -405,13 +437,18 @@ fn step(
                         before,
                         "write to a story with no owner changed the deck: id={story} seed={seed} step={round}"
                     );
+                    assert!(
+                        document_state(local) == state,
+                        "write to a story with no owner changed the document: id={story} seed={seed} step={round}"
+                    );
                 }
             }
         }
         11 | 12 => {
-            if let Some((gone, fresh)) = edit_row(local, &placed, rng, choice == 11) {
+            if let Some((gone, anchors, fresh)) = edit_row(local, &placed, rng, choice == 11) {
                 outcome.grew = true;
                 outcome.gone = gone;
+                outcome.gone_anchors = anchors;
                 outcome.fresh = fresh;
             }
         }
@@ -443,28 +480,62 @@ fn discover(session: &DeckSession, seen: &mut BTreeSet<String>, stories: &mut Ve
     stories.sort();
 }
 
-fn resolves(session: &DeckSession, story: &str) -> bool {
-    session
-        .anchor_caret(story, 0)
-        .ok()
-        .and_then(|anchor| session.resolve_caret_anchor(&anchor))
-        .is_some()
+fn retired_anchors_find_nothing(
+    session: &DeckSession,
+    outcome: &Outcome,
+    seed: u64,
+    turn: u32,
+) -> usize {
+    assert_eq!(outcome.gone_anchors.len(), outcome.gone.len());
+    let mut calls = 0;
+    for (story, anchor) in outcome.gone.iter().zip(&outcome.gone_anchors) {
+        for lookup in ["first", "second"] {
+            calls += 1;
+            assert_eq!(
+                session.resolve_caret_anchor(anchor),
+                None,
+                "seed {seed} step {turn} renamed cell {story} {lookup} anchor"
+            );
+        }
+    }
+    calls
+}
+
+fn fresh_anchors_land(session: &DeckSession, outcome: &Outcome, seed: u64, turn: u32) {
+    for story in &outcome.fresh {
+        let (anchor, offset) = caret_at_first_paragraph_end(session, story);
+        for lookup in ["first", "second"] {
+            assert_eq!(
+                session.resolve_caret_anchor(&anchor),
+                Some(offset),
+                "seed {seed} step {turn} new cell {story} {lookup} anchor"
+            );
+        }
+    }
 }
 
 fn grouped_deck(session: &DeckSession) {
     let context = EditCtx::local("test");
+    session.set_undo_capture_mode(UndoCaptureMode::Manual);
     for index in 0..3 {
         let slide = session
             .insert_slide(&context, index, None)
             .unwrap()
             .slide_id;
-        let boxes: Vec<String> = (0..3).map(|_| add_box(session, &slide)).collect();
+        session.add_undo_barrier();
+        let boxes: Vec<String> = (0..3)
+            .map(|_| {
+                let shape = add_box(session, &slide);
+                session.add_undo_barrier();
+                shape
+            })
+            .collect();
         if index == 2 {
             nest(session, &slide, &boxes[1], &boxes[2]);
         }
         nest(session, &slide, &boxes[0], &boxes[1]);
+        session.add_undo_barrier();
     }
-    session.add_undo_barrier();
 }
 
 #[test]
@@ -473,6 +544,7 @@ fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
     let mut checked = 0_usize;
     let mut row_edits = 0_usize;
     let mut gone_checked = 0_usize;
+    let mut retired_lookups = 0_usize;
     for seed in 1..=50_u64 {
         let every_story = seed <= 5;
         let local = table_session(41);
@@ -496,25 +568,15 @@ fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
                     !walk_finds_owner(&local, story),
                     "seed {seed} round {round} renamed cell {story} walk"
                 );
-                for lookup in ["first", "second"] {
-                    assert!(
-                        !resolves(&local, story),
-                        "seed {seed} round {round} renamed cell {story} {lookup} lookup"
-                    );
-                }
             }
+            retired_lookups += retired_anchors_find_nothing(&local, &outcome, seed, round);
             for story in &outcome.fresh {
                 assert!(
                     walk_finds_owner(&local, story),
                     "seed {seed} round {round} new cell {story} walk"
                 );
-                for lookup in ["first", "second"] {
-                    assert!(
-                        resolves(&local, story),
-                        "seed {seed} round {round} new cell {story} {lookup} lookup"
-                    );
-                }
             }
+            fresh_anchors_land(&local, &outcome, seed, round);
             let sample: Vec<String> = if every_story {
                 stories.clone()
             } else {
@@ -523,12 +585,20 @@ fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
             for story in sample {
                 checked += 1;
                 let owned = walk_finds_owner(&local, &story);
-                for lookup in ["first", "second"] {
-                    assert_eq!(
-                        resolves(&local, &story),
-                        owned,
-                        "seed {seed} round {round} story {story} {lookup} lookup"
-                    );
+                match local.anchor_caret(&story, 0) {
+                    Ok(anchor) => {
+                        for lookup in ["first", "second"] {
+                            assert_eq!(
+                                local.resolve_caret_anchor(&anchor),
+                                owned.then_some(0),
+                                "seed {seed} round {round} story {story} {lookup} lookup"
+                            );
+                        }
+                    }
+                    Err(error) => assert!(
+                        !owned,
+                        "seed {seed} step {round} story {story} with an owner: {error:?}"
+                    ),
                 }
             }
         }
@@ -542,6 +612,7 @@ fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
     );
     assert!(row_edits > 0);
     assert!(gone_checked > 0);
+    assert!(retired_lookups > 0);
     assert!(totals.hits > 0, "{totals:?}");
     assert!(totals.rejected > 0, "{totals:?}");
     assert!(totals.none > 0, "{totals:?}");
@@ -553,6 +624,7 @@ fn the_lookup_search_finds_the_strict_walk_owner_on_undamaged_generated_decks() 
     let mut owned = 0_usize;
     let mut row_edits = 0_usize;
     let mut gone_checked = 0_usize;
+    let mut retired_lookups = 0_usize;
     for seed in 1..=50_u64 {
         let local = table_session(41);
         let peer = table_session(42);
@@ -583,17 +655,20 @@ fn the_lookup_search_finds_the_strict_walk_owner_on_undamaged_generated_decks() 
                     );
                 }
                 for story in &outcome.fresh {
+                    let walked = story_owner(&txn, story).unwrap();
                     assert!(
-                        story_owner(&txn, story).unwrap().is_some(),
+                        walked.is_some(),
                         "seed {seed} round {round} new cell {story} walk"
                     );
-                    assert!(
-                        find_path(&txn, story)
-                            .and_then(|path| path.owner())
-                            .is_some(),
+                    assert_eq!(
+                        find_path(&txn, story).and_then(|path| path.owner()),
+                        walked,
                         "seed {seed} round {round} new cell {story} search"
                     );
                 }
+                drop(txn);
+                retired_lookups += retired_anchors_find_nothing(&local, &outcome, seed, round);
+                fresh_anchors_land(&local, &outcome, seed, round);
             }
             if seed > 5 && round % 20 != 0 {
                 continue;
@@ -614,4 +689,20 @@ fn the_lookup_search_finds_the_strict_walk_owner_on_undamaged_generated_decks() 
     assert!(owned > 0 && owned < compared);
     assert!(row_edits > 0);
     assert!(gone_checked > 0);
+    assert!(retired_lookups > 0);
+}
+
+#[test]
+fn the_encoded_document_state_changes_after_a_successful_story_write() {
+    let session = table_session(43);
+    let slide = live_slide_ids(&session.doc.transact()).unwrap()[0].clone();
+    let shape = add_box(&session, &slide);
+    let story = cell_stories(&session, &shape)[0].clone();
+    let context = EditCtx::local("test");
+    let before = document_state(&session);
+    assert_eq!(document_state(&session), before);
+    session
+        .insert_text(&context, &story, 0, "x", &TextStyle::default())
+        .unwrap();
+    assert_ne!(document_state(&session), before);
 }

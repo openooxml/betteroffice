@@ -2,6 +2,8 @@ use pptx_edit::{
     DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, ShapeDraft, ShapeRect,
     TableInsertPosition, TextParagraphDraft, TextRunDraft, TextStyle, TextStylePatch,
 };
+use pptx_parse::GraphicFrameData;
+use yrs::{ReadTxn, StateVector, Transact};
 
 const DEMO: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const TABLE: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/table-basic.pptx");
@@ -142,12 +144,59 @@ fn remove(session: &DeckSession, slide: &str, shape: &str, removal: Removal) {
     }
 }
 
+fn document_state(session: &DeckSession) -> Vec<u8> {
+    session
+        .yrs_doc()
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default())
+}
+
+fn paragraph_count(session: &DeckSession, story: &str) -> usize {
+    session.story(story).unwrap().paragraphs.len()
+}
+
+fn slide_is_live(deck: &DeckSnapshot, slide: &str) -> bool {
+    deck.slides.iter().any(|candidate| candidate.id == slide)
+}
+
+fn slide_placing(deck: &DeckSnapshot, shape: &str) -> Option<String> {
+    deck.slides
+        .iter()
+        .find(|slide| slide.shapes.iter().any(|placed| placed.id == shape))
+        .map(|slide| slide.id.clone())
+}
+
+fn table_row_count(deck: &DeckSnapshot, shape: &str) -> usize {
+    let placed = deck
+        .slides
+        .iter()
+        .flat_map(|slide| &slide.shapes)
+        .find(|placed| placed.id == shape)
+        .unwrap();
+    match &placed.graphic {
+        Some(GraphicFrameData::Table(table)) => table.rows.len(),
+        _ => panic!("{shape} is not a table"),
+    }
+}
+
+fn table_of(story: &str) -> Option<&str> {
+    story
+        .strip_prefix("story:")
+        .and_then(|id| id.split_once(":table:"))
+        .map(|(shape, _)| shape)
+}
+
 fn dead_story(removal: Removal) -> (DeckSession, String) {
     let (session, story) = session_with_text("ABC");
     let ctx = EditCtx::local("test");
     session.insert_paragraph_break(&ctx, &story, 1).unwrap();
+    assert_eq!(paragraph_count(&session, &story), 2);
     let (slide, shape) = story_home(&session, &story);
+    let slide_removed = matches!(removal, Removal::Slide);
     remove(&session, &slide, &shape, removal);
+    let deck = session.snapshot().unwrap();
+    assert_eq!(slide_is_live(&deck, &slide), !slide_removed);
+    assert_eq!(slide_placing(&deck, &shape), None);
     (session, story)
 }
 
@@ -156,7 +205,12 @@ fn ownerless_cell(client_id: u64, retire: bool, removal: Option<Removal>) -> (De
     let snapshot = session.snapshot().unwrap();
     let slide = snapshot.slides[0].id.clone();
     let shape = snapshot.slides[0].shapes[0].id.clone();
+    let rows = table_row_count(&snapshot, &shape);
     let cell = table_cell(&session, 1, 1);
+    session
+        .insert_paragraph_break(&EditCtx::local("test"), &cell, 0)
+        .unwrap();
+    assert_eq!(paragraph_count(&session, &cell), 2);
     if retire {
         session
             .insert_table_row(
@@ -170,8 +224,28 @@ fn ownerless_cell(client_id: u64, retire: bool, removal: Option<Removal>) -> (De
             .unwrap();
         assert_eq!(live_text(&session, &cell), None);
     }
+    let slide_removed = matches!(removal, Some(Removal::Slide));
+    let table_removed = removal.is_some();
     if let Some(removal) = removal {
         remove(&session, &slide, &shape, removal);
+    }
+    let deck = session.snapshot().unwrap();
+    assert_eq!(slide_is_live(&deck, &slide), !slide_removed);
+    if table_removed {
+        assert_eq!(slide_placing(&deck, &shape), None);
+        assert!(
+            matches!(session.story(&cell), Err(EditError::ShapeNotFound(id)) if id == shape),
+            "{:?}",
+            session.story(&cell)
+        );
+    } else {
+        assert_eq!(slide_placing(&deck, &shape), Some(slide));
+        assert_eq!(table_row_count(&deck, &shape), rows + 1);
+        assert!(
+            matches!(session.story(&cell), Err(EditError::StoryNotFound(id)) if id == cell),
+            "{:?}",
+            session.story(&cell)
+        );
     }
     (session, cell)
 }
@@ -181,12 +255,27 @@ enum Refusal {
     MissingShape,
 }
 
-fn refused<T: std::fmt::Debug>(method: &str, expected: &Refusal, result: EditResult<T>) {
-    let named = match expected {
-        Refusal::MissingStory => matches!(result, Err(EditError::StoryNotFound(_))),
-        Refusal::MissingShape => matches!(result, Err(EditError::ShapeNotFound(_))),
+fn refused<T: std::fmt::Debug>(
+    session: &DeckSession,
+    method: &str,
+    expected: &Refusal,
+    story: &str,
+    write: impl FnOnce() -> EditResult<T>,
+) {
+    let state = document_state(session);
+    let result = write();
+    let named = match (expected, &result) {
+        (Refusal::MissingStory, Err(EditError::StoryNotFound(id))) => id == story,
+        (Refusal::MissingShape, Err(EditError::ShapeNotFound(id))) => {
+            Some(id.as_str()) == table_of(story)
+        }
+        _ => false,
     };
     assert!(named, "{method}: {result:?}");
+    assert!(
+        document_state(session) == state,
+        "{method} changed the document"
+    );
 }
 
 fn assert_every_write_refused(session: &DeckSession, story: &str, expected: Refusal) {
@@ -201,50 +290,62 @@ fn assert_every_write_refused(session: &DeckSession, story: &str, expected: Refu
     let center = Some("ctr");
     let grown = drafts(&["A", "BC", "D"]);
     let shrunk = drafts(&["ABC"]);
+    if let Some(text) = &text {
+        assert!(text.paragraphs.len() > shrunk.len(), "{text:?}");
+    }
+    let insert_text = || session.insert_text(&ctx, story, 1, "X", &style);
+    let delete_text = || session.delete_text(&ctx, story, 0, 1);
+    let join = || session.delete_text_joining_paragraphs(&ctx, story, 1, 2);
+    let format_text = || session.format_text(&ctx, story, 0, 1, &emphasis);
+    let set_alignment = || session.set_paragraph_alignment(&ctx, story, 0, 1, center);
+    let insert_break = || session.insert_paragraph_break(&ctx, story, 1);
+    let delete_break = || session.delete_paragraph_break(&ctx, story, 1);
+    let grow = || session.set_story_paragraphs(&ctx, story, &grown);
+    let shrink = || session.set_story_paragraphs(&ctx, story, &shrunk);
+    refused(session, "insert_text", &expected, story, insert_text);
+    refused(session, "delete_text", &expected, story, delete_text);
     refused(
-        "insert_text",
-        &expected,
-        session.insert_text(&ctx, story, 1, "X", &style),
-    );
-    refused(
-        "delete_text",
-        &expected,
-        session.delete_text(&ctx, story, 0, 1),
-    );
-    refused(
+        session,
         "delete_text_joining_paragraphs",
         &expected,
-        session.delete_text_joining_paragraphs(&ctx, story, 1, 2),
+        story,
+        join,
     );
+    refused(session, "format_text", &expected, story, format_text);
     refused(
-        "format_text",
-        &expected,
-        session.format_text(&ctx, story, 0, 1, &emphasis),
-    );
-    refused(
+        session,
         "set_paragraph_alignment",
         &expected,
-        session.set_paragraph_alignment(&ctx, story, 0, 1, center),
+        story,
+        set_alignment,
     );
     refused(
+        session,
         "insert_paragraph_break",
         &expected,
-        session.insert_paragraph_break(&ctx, story, 1),
+        story,
+        insert_break,
     );
     refused(
+        session,
         "delete_paragraph_break",
         &expected,
-        session.delete_paragraph_break(&ctx, story, 1),
+        story,
+        delete_break,
     );
     refused(
+        session,
         "set_story_paragraphs adding a paragraph",
         &expected,
-        session.set_story_paragraphs(&ctx, story, &grown),
+        story,
+        grow,
     );
     refused(
+        session,
         "set_story_paragraphs removing a paragraph",
         &expected,
-        session.set_story_paragraphs(&ctx, story, &shrunk),
+        story,
+        shrink,
     );
     assert_eq!(session.snapshot().unwrap(), deck);
     assert_eq!(session.story(story).ok(), text);
@@ -300,12 +401,16 @@ fn every_write_to_a_cell_of_a_live_table_on_no_slide_is_refused_as_a_missing_sto
     let slide = snapshot.slides[0].id.clone();
     let shape = snapshot.slides[0].shapes[0].id.clone();
     let cell = table_cell(&local, 1, 1);
+    local
+        .insert_paragraph_break(&EditCtx::local("test"), &cell, 0)
+        .unwrap();
+    assert_eq!(paragraph_count(&local, &cell), 2);
     local.add_undo_barrier();
     remove(&local, &slide, &shape, Removal::Shape);
     local.add_undo_barrier();
     assert!(matches!(
         local.story(&cell),
-        Err(EditError::ShapeNotFound(_))
+        Err(EditError::ShapeNotFound(id)) if id == shape
     ));
     sync(&local, &peer);
     peer.delete_slide(&EditCtx::local("test"), &slide).unwrap();
@@ -321,8 +426,21 @@ fn every_write_to_a_cell_of_a_live_table_on_no_slide_is_refused_as_a_missing_sto
             .any(|placed| placed.id == shape)
     );
     assert!(local.story(&cell).is_ok());
+    assert_eq!(paragraph_count(&local, &cell), 2);
     assert_eq!(live_text(&local, &cell), None);
     assert_every_write_refused(&local, &cell, Refusal::MissingStory);
+}
+
+#[test]
+fn the_encoded_document_state_changes_after_a_successful_story_write() {
+    let (session, story) = session_with_text("ABC");
+    let ctx = EditCtx::local("test");
+    let before = document_state(&session);
+    assert_eq!(document_state(&session), before);
+    session
+        .insert_text(&ctx, &story, 1, "X", &TextStyle::default())
+        .unwrap();
+    assert_ne!(document_state(&session), before);
 }
 
 #[test]
@@ -451,10 +569,13 @@ fn a_text_box_added_to_a_slide_a_peer_deleted_concurrently_takes_no_writes() {
         let snapshot = peer.snapshot().unwrap();
         assert!(!snapshot.slides.iter().any(|next| next.id == slide));
         assert_eq!(peer.resolve_caret_anchor(&anchor), None);
+        let insert_text = || peer.insert_text(&ctx, &story, 1, "X", &TextStyle::default());
         refused(
+            peer,
             "insert_text",
             &Refusal::MissingStory,
-            peer.insert_text(&ctx, &story, 1, "X", &TextStyle::default()),
+            &story,
+            insert_text,
         );
     }
 }
