@@ -113,6 +113,10 @@ export type DocxDocumentRead = {
     target: ResidentPropertyTarget;
 } | {
     kind: 'sectionProperties';
+    paragraphs?: {
+        story: string;
+        paraId: string;
+    }[];
 } | {
     kind: 'exportStructuredWithPages';
     options: DocxPageExportOptions;

@@ -125,7 +125,7 @@ export type DocxDocumentRead =
   | { kind: 'partSnapshot' }
   | { kind: 'fontOutlinesInstalled' }
   | { kind: 'properties'; target: ResidentPropertyTarget }
-  | { kind: 'sectionProperties' }
+  | { kind: 'sectionProperties'; paragraphs?: { story: string; paraId: string }[] }
   | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string; workerFonts?: boolean }
   | { kind: 'listContentControls'; options: DocxContentControlsOptions }
   | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
