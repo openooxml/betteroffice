@@ -114,6 +114,14 @@
     "zoomPercent": "التكبير بالنسبة المئوية",
     "apply": "تطبيق",
     "cancel": "إلغاء",
+    "freezeColumn": "تجميد العمود {column}",
+    "freezeColumns": "تجميد الأعمدة {first}–{last}",
+    "freezeRow": "تجميد الصف {row}",
+    "freezeRows": "تجميد الصفوف {first}–{last}",
+    "unfreezePanes": "إلغاء تجميد الأجزاء",
+    "unhideColumns": "إظهار الأعمدة",
+    "unhideRows": "إظهار الصفوف",
+    "selectAll": "تحديد الكل",
     "reasons": {
       "editorUnavailable": "المحرر غير جاهز.",
       "documentLoading": "ما زال المصنف يُفتح.",
@@ -195,6 +203,8 @@
     "sheetTabsLabel": "الأوراق",
     "clearExceedsLimit": "المسح يتجاوز حد الخلايا",
     "cellMenuLabel": "قائمة الخلية",
+    "columnHeaderMenuLabel": "قائمة رأس العمود",
+    "rowHeaderMenuLabel": "قائمة رأس الصف",
     "sheetTabMenuLabel": "قائمة علامة تبويب الورقة",
     "renameSheetLabel": "إعادة تسمية الورقة",
     "sheetNamePrefix": "ورقة عمل"

@@ -114,6 +114,14 @@
     "zoomPercent": "Thu phóng theo phần trăm",
     "apply": "Áp dụng",
     "cancel": "Hủy",
+    "freezeColumn": "Cố định cột {column}",
+    "freezeColumns": "Cố định các cột {first}–{last}",
+    "freezeRow": "Cố định hàng {row}",
+    "freezeRows": "Cố định các hàng {first}–{last}",
+    "unfreezePanes": "Bỏ cố định ngăn",
+    "unhideColumns": "Hiện cột",
+    "unhideRows": "Hiện hàng",
+    "selectAll": "Chọn tất cả",
     "reasons": {
       "editorUnavailable": "Trình chỉnh sửa chưa sẵn sàng.",
       "documentLoading": "Sổ làm việc vẫn đang mở.",
@@ -195,6 +203,8 @@
     "sheetTabsLabel": "Trang tính",
     "clearExceedsLimit": "Xóa vượt quá giới hạn ô",
     "cellMenuLabel": "Menu ô",
+    "columnHeaderMenuLabel": "Menu tiêu đề cột",
+    "rowHeaderMenuLabel": "Menu tiêu đề hàng",
     "sheetTabMenuLabel": "Menu tab trang tính",
     "renameSheetLabel": "Đổi tên trang tính",
     "sheetNamePrefix": "Trang tính"

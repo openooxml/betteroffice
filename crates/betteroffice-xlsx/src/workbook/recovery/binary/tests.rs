@@ -320,16 +320,101 @@ fn all_ops() -> Vec<Op> {
                 columns: vec!["Year".into()],
             }],
         },
+        Op::MoveCols {
+            sheet,
+            col: 2,
+            count: 3,
+            before: 6,
+        },
+        Op::MoveRows {
+            sheet,
+            row: 2,
+            count: 3,
+            before: 6,
+        },
+        Op::SetColsVisibility {
+            sheet,
+            col: 4,
+            count: 16_380,
+            hidden: false,
+        },
+        Op::SetRowsVisibility {
+            sheet,
+            row: 7,
+            count: 5,
+            hidden: true,
+        },
+        Op::RestoreArrayFormula {
+            sheet,
+            anchor: at,
+            spill: range,
+        },
+        Op::ClipArrayFormula {
+            sheet,
+            anchor: at,
+            spill: range,
+        },
     ]
+}
+
+fn refused_on_recovery(op: &Op) -> bool {
+    cfg!(not(feature = "unstable-track-visibility"))
+        && matches!(
+            op,
+            Op::SetColsVisibility { .. } | Op::SetRowsVisibility { .. }
+        )
+}
+
+fn recoverable_ops() -> Vec<Op> {
+    let mut ops = all_ops();
+    ops.retain(|op| !refused_on_recovery(op));
+    ops
 }
 
 #[test]
 fn every_op_has_a_fixed_tag_and_round_trips() {
     let ops = all_ops();
-    assert_eq!(ops.len(), 38);
+    assert_eq!(ops.len(), 44);
     for (tag, op) in ops.into_iter().enumerate() {
         assert_eq!(encoded(&op)[0], tag as u8);
-        round_trip(op);
+        if refused_on_recovery(&op) {
+            assert!(Op::read(&mut Reader::new(&encoded(&op))).is_err());
+        } else {
+            round_trip(op);
+        }
+    }
+}
+
+#[cfg(not(feature = "unstable-track-visibility"))]
+#[test]
+fn a_recovery_checkpoint_holding_a_visibility_range_is_refused() {
+    const REFUSAL: &str = "cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet";
+    for range in all_ops().into_iter().filter(refused_on_recovery) {
+        assert_eq!(
+            Op::read(&mut Reader::new(&encoded(&range)))
+                .unwrap_err()
+                .to_string(),
+            REFUSAL
+        );
+        let mut workbook = Workbook::from_model(WorkbookModel {
+            sheets: vec![Sheet::new("Data")],
+            ..WorkbookModel::default()
+        })
+        .unwrap();
+        let options = CalculationOptions::default();
+        for row in 0..2 {
+            workbook
+                .edit_cell(SheetId(0), CellRef::new(row, 0), "1", options)
+                .unwrap();
+        }
+        workbook.undo(options).unwrap();
+        workbook.undo =
+            UndoStack::from_recovery_stacks(vec![vec![range.clone()]], vec![vec![range]]);
+        let bytes = workbook
+            .recovery_checkpoint_with_history(1, None, true)
+            .unwrap();
+        let error = Workbook::restore_recovery_checkpoint(&bytes).err().unwrap();
+        assert_eq!(error.to_string(), format!("malformed request: {REFUSAL}"));
     }
 }
 
@@ -357,7 +442,7 @@ fn checkpoint_round_trips_every_op_and_calculation_and_proposal_fields() {
             .unwrap();
     }
     workbook.undo(options).unwrap();
-    let ops = all_ops();
+    let ops = recoverable_ops();
     workbook.undo = UndoStack::from_recovery_stacks(vec![ops.clone()], vec![ops]);
     let sheet = &mut workbook.model.sheets[0];
     sheet.set_cell(CellRef::new(8, 0), xlsx_model::Cell::default());
@@ -555,7 +640,7 @@ fn enum_fields_round_trip_every_tag() {
         },
     ] {
         round_trip(Transaction {
-            ops: all_ops(),
+            ops: recoverable_ops(),
             author,
             proposed: true,
         });

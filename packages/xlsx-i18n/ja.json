@@ -114,6 +114,14 @@
     "zoomPercent": "パーセント単位のズーム",
     "apply": "適用",
     "cancel": "キャンセル",
+    "freezeColumn": "列 {column} を固定",
+    "freezeColumns": "列 {first}–{last} を固定",
+    "freezeRow": "行 {row} を固定",
+    "freezeRows": "行 {first}–{last} を固定",
+    "unfreezePanes": "ウィンドウ枠の固定を解除",
+    "unhideColumns": "列の再表示",
+    "unhideRows": "行の再表示",
+    "selectAll": "すべて選択",
     "reasons": {
       "editorUnavailable": "エディターの準備ができていません。",
       "documentLoading": "ブックを開いています。",
@@ -195,6 +203,8 @@
     "sheetTabsLabel": "シート",
     "clearExceedsLimit": "クリアがセルの上限を超えています",
     "cellMenuLabel": "セル メニュー",
+    "columnHeaderMenuLabel": "列見出しメニュー",
+    "rowHeaderMenuLabel": "行見出しメニュー",
     "sheetTabMenuLabel": "シート見出しメニュー",
     "renameSheetLabel": "シート名の変更",
     "sheetNamePrefix": "シート"
