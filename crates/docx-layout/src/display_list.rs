@@ -18523,6 +18523,45 @@ mod tests {
     }
 
     #[test]
+    fn a_readable_copy_of_a_key_keeps_an_earlier_unreadable_copy_reported() {
+        let fonts = ooxml_text::FontStore::default();
+        let (mut pagination, layout) = charted_page(serde_json::json!([2, 1, 3]));
+        let copy = pagination.measured[0].clone();
+        pagination.measured.push(copy);
+        let crate::types::BlockExtent::Paragraph(extent) = &mut pagination.measured[0].measure
+        else {
+            unreachable!()
+        };
+        extent.lines[0].width = f64::NAN;
+        let unreadable = |resident: &ResidentDisplayInput| {
+            resident
+                .unreadable()
+                .iter()
+                .map(|entry| (entry.block.clone(), entry.page))
+                .collect::<Vec<_>>()
+        };
+        let (resident, _) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(unreadable(&resident), [("intro".to_owned(), None)]);
+        let (resident, _) = build_resident_display_list_partial_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &|index| index == 0,
+            &mut || {},
+        )
+        .unwrap();
+        assert_eq!(unreadable(&resident), [("intro".to_owned(), None)]);
+    }
+
+    #[test]
     fn a_refresh_tracks_a_block_turning_unreadable_and_readable_again() {
         let fonts = ooxml_text::FontStore::default();
         let (clean, layout) = charted_page(serde_json::json!([2, 1, 3]));
