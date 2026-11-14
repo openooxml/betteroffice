@@ -303,7 +303,10 @@ fn every_write_to_a_cell_of_a_live_table_on_no_slide_is_refused_as_a_missing_sto
     local.add_undo_barrier();
     remove(&local, &slide, &shape, Removal::Shape);
     local.add_undo_barrier();
-    assert!(matches!(local.story(&cell), Err(EditError::ShapeNotFound(_))));
+    assert!(matches!(
+        local.story(&cell),
+        Err(EditError::ShapeNotFound(_))
+    ));
     sync(&local, &peer);
     peer.delete_slide(&EditCtx::local("test"), &slide).unwrap();
     sync(&peer, &local);
