@@ -762,6 +762,29 @@ impl DepGraph {
         self.volatile.iter().map(|k| (k.sheet, k.cell()))
     }
 
+    /// removes the last edge of the lowest node that has one, from both indexes.
+    #[cfg(feature = "test-counters")]
+    #[doc(hidden)]
+    pub fn drop_one_edge(&mut self) -> bool {
+        let Some((&key, entry)) = self
+            .deps
+            .iter_mut()
+            .filter(|(_, entry)| !entry.edges.is_empty())
+            .min_by_key(|(key, _)| **key)
+        else {
+            return false;
+        };
+        let Some((sheet, range)) = entry.edges.pop() else {
+            return false;
+        };
+        if let Some(readers) = self.by_sheet.get_mut(&sheet)
+            && let Some(index) = readers.iter().position(|&read| read == (range, key))
+        {
+            readers.remove(index);
+        }
+        true
+    }
+
     /// the first part differing from `other`, parse cache and unevaluated list aside.
     #[doc(hidden)]
     pub fn structural_difference(&self, other: &Self) -> Option<&'static str> {

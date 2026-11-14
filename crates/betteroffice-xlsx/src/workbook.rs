@@ -650,18 +650,8 @@ fn eager_authority() -> bool {
 
 #[cfg(test)]
 thread_local! {
-    /// Marks the graph current after formula edits too, which it is not.
-    pub(crate) static RESTAMP_FORMULA_EDITS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-fn restamps_formula_edits() -> bool {
-    RESTAMP_FORMULA_EDITS.get()
-}
-
-#[cfg(not(test))]
-fn restamps_formula_edits() -> bool {
-    false
+    /// Removes one edge from a kept graph before it recalculates.
+    pub(crate) static CORRUPT_KEPT_EDGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn missing_authority() -> Error {
@@ -4324,6 +4314,10 @@ impl Workbook {
         let result = if keep {
             self.graph_reuse.keeps += 1;
             let graph = self.graph.as_mut().expect("graph initialized");
+            #[cfg(test)]
+            if CORRUPT_KEPT_EDGE.get() {
+                assert!(graph.drop_one_edge());
+            }
             xlsx_calc::engine::recalc_all_kept(
                 &mut self.model,
                 graph,
@@ -4370,9 +4364,7 @@ impl Workbook {
                     .formula
                     .is_none()
         });
-        self.graph_current()
-            && !self.is_collaborative()
-            && (values_only || restamps_formula_edits())
+        self.graph_current() && !self.is_collaborative() && values_only
     }
 
     /// Full recalculations that kept the dependency graph, and those that rebuilt it.

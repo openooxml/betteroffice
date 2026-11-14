@@ -360,38 +360,57 @@ fn a_remote_update_keeps_the_graph_its_install_built() {
     }
 }
 
-/// marks the graph current after formula edits too until dropped.
-struct RestampingFormulaEdits;
+/// removes one edge from every kept graph until dropped.
+struct CorruptingKeptEdges;
 
-impl RestampingFormulaEdits {
+impl CorruptingKeptEdges {
     fn on() -> Self {
-        RESTAMP_FORMULA_EDITS.set(true);
+        CORRUPT_KEPT_EDGE.set(true);
         Self
     }
 }
 
-impl Drop for RestampingFormulaEdits {
+impl Drop for CorruptingKeptEdges {
     fn drop(&mut self) {
-        RESTAMP_FORMULA_EDITS.set(false);
+        CORRUPT_KEPT_EDGE.set(false);
+    }
+}
+
+const MISSING_EDGE: &str =
+    "a kept dependency graph diverged from a fresh build: the graphs differ in their nodes";
+
+#[test]
+fn a_kept_graph_missing_one_edge_differs_from_a_fresh_build() {
+    for seed in SEEDS {
+        let mut workbook = workbook(generated(seed, true));
+        let corrupting = CorruptingKeptEdges::on();
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            workbook.recalculate_all_beside_fresh(options())
+        }));
+        drop(corrupting);
+        let message = outcome
+            .err()
+            .and_then(|panic| panic.downcast_ref::<String>().cloned());
+        assert_eq!(message.as_deref(), Some(MISSING_EDGE), "seed {seed}");
     }
 }
 
 #[test]
-fn a_graph_wrongly_kept_after_a_formula_edit_differs_from_a_fresh_build() {
-    for seed in SEEDS {
-        let mut workbook = workbook(generated(seed, true));
-        let restamping = RestampingFormulaEdits::on();
-        edit(&mut workbook, 0, "A1", "=B2+1");
-        let outcome = catch_unwind(AssertUnwindSafe(|| {
-            workbook.recalculate_all_beside_fresh(options())
-        }));
-        drop(restamping);
-        let reported = match outcome {
-            Ok(difference) => difference,
-            Err(panic) => panic.downcast_ref::<String>().cloned(),
-        };
-        assert!(reported.is_some(), "seed {seed}: no difference reported");
+fn an_unseeded_volatile_spill_recalculates_in_full_without_a_divergence() {
+    let mut sheet = Sheet::new("Draws");
+    sheet.set_cell(at("A1"), formula("_xlfn.SEQUENCE(RANDBETWEEN(1,100))"));
+    sheet.set_array_formula(at("A1"), CellRange::new(at("A1"), at("A1")));
+    sheet.set_cell(at("C1"), number(1.0));
+    sheet.set_cell(at("D1"), formula("SUM(A1:A100)+C1"));
+    let mut model = WorkbookModel::default();
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    for round in 0..4 {
+        workbook.recalculate_all(options());
+        edit(&mut workbook, 0, "C1", &format!("{round}"));
     }
+    workbook.recalculate_all(options());
+    assert_eq!(workbook.graph_reuse_counts(), (5, 0));
 }
 
 /// edits that enter formulas, recalculated once with a rebuild, before the value edits under test.
