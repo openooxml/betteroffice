@@ -335,7 +335,7 @@ pub fn write_docx_s13_parts_with_report(
                 .ok_or_else(|| save_error("unsafe section XML patch"))?;
             package.set_text("word/document.xml", patched);
             update_core_part(&request.options, &mut package, &request.determinism.now);
-            return Ok((rezip_package(&package, source)?, Vec::new()));
+            return Ok((rezip_package(&package, source)?, S13SaveReport::default()));
         }
     }
     apply_paragraph_id_assignments(&mut request, &paragraph_ids, &relationships, &package)?;
