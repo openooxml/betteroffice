@@ -14,14 +14,14 @@ const KEPT_PARAGRAPH_LIMIT: usize = 200;
 /// A paragraph a save wrote as its source bytes because writing it would have dropped structure.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct KeptParagraph {
+pub struct KeptParagraph {
     pub part: String,
     pub ordinal: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub para_id: Option<String>,
     pub text: String,
     /// `"paragraph"`, or `"part"` when no safe splice applied and the whole part was kept.
-    pub scope: &'static str,
+    pub scope: String,
     pub dropped: Vec<String>,
 }
 
@@ -29,7 +29,7 @@ pub(crate) struct KeptParagraph {
 /// source.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct DroppedParagraph {
+pub struct DroppedParagraph {
     pub ordinal: u32,
     pub para_id: String,
     pub text: String,
@@ -40,10 +40,21 @@ pub(crate) struct DroppedParagraph {
 /// account for them, as a deleted table row does.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct DroppedStructure {
+pub struct DroppedStructure {
     pub part: String,
     pub dropped: Vec<String>,
     pub paragraphs: Vec<DroppedParagraph>,
+}
+
+/// A save's diagnostics: the text warnings and the typed values the save reports.
+#[derive(Clone, Debug, Default)]
+pub struct S13SaveReport {
+    /// Every diagnostic as text, as [`super::write_docx_s13_with_warnings`] returns them.
+    pub warnings: Vec<String>,
+    /// Paragraphs kept as their source bytes, counted per part.
+    pub kept_unchanged: BTreeMap<String, u32>,
+    pub kept_paragraphs: Vec<KeptParagraph>,
+    pub structure_dropped: Vec<DroppedStructure>,
 }
 
 /// Per-serialization state. Generated identities are taken only from the
@@ -226,6 +237,19 @@ impl SerializerContext {
             ));
         }
         std::mem::take(&mut self.warnings)
+    }
+
+    /// Drains the diagnostics recorded so far, typed beside their text.
+    pub(crate) fn take_report(&mut self) -> S13SaveReport {
+        let kept_unchanged = self.kept_unchanged.clone();
+        let kept_paragraphs = self.kept_paragraphs.clone();
+        let structure_dropped = self.structure_dropped.clone();
+        S13SaveReport {
+            warnings: self.take_warnings(),
+            kept_unchanged,
+            kept_paragraphs,
+            structure_dropped,
+        }
     }
 
     pub fn allocate_hex_id(&mut self) -> String {

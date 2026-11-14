@@ -94,3 +94,124 @@ fn crate_save_matches_the_product_save() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The crate's report in the shape of the product's `report.json`, omitted fields absent.
+fn report_json(report: &betteroffice_docx::SaveReport) -> serde_json::Value {
+    let mut value = serde_json::Map::new();
+    if let Some(kept) = &report.kept_unchanged {
+        let paragraphs: Vec<serde_json::Value> = kept
+            .paragraphs
+            .iter()
+            .map(|paragraph| {
+                let mut entry = serde_json::json!({
+                    "part": paragraph.part,
+                    "ordinal": paragraph.ordinal,
+                    "text": paragraph.text,
+                    "scope": paragraph.scope,
+                    "dropped": paragraph.dropped,
+                });
+                if let Some(para_id) = &paragraph.para_id {
+                    entry["paraId"] = serde_json::json!(para_id);
+                }
+                entry
+            })
+            .collect();
+        value.insert(
+            "keptUnchanged".to_owned(),
+            serde_json::json!({ "structure": kept.structure, "paragraphs": paragraphs }),
+        );
+    }
+    if let Some(dropped) = &report.structure_dropped {
+        let parts: Vec<serde_json::Value> = dropped
+            .iter()
+            .map(|structure| {
+                let paragraphs: Vec<serde_json::Value> = structure
+                    .paragraphs
+                    .iter()
+                    .map(|paragraph| {
+                        serde_json::json!({
+                            "ordinal": paragraph.ordinal,
+                            "paraId": paragraph.para_id,
+                            "text": paragraph.text,
+                            "dropped": paragraph.dropped,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "part": structure.part,
+                    "dropped": structure.dropped,
+                    "paragraphs": paragraphs,
+                })
+            })
+            .collect();
+        value.insert(
+            "structureDropped".to_owned(),
+            serde_json::Value::Array(parts),
+        );
+    }
+    serde_json::Value::Object(value)
+}
+
+/// The product's report with each kept paragraph's session key read as its Word paragraph ID.
+fn with_word_ids(mut product: serde_json::Value, ids: &serde_json::Value) -> serde_json::Value {
+    let paragraphs = product
+        .pointer_mut("/keptUnchanged/paragraphs")
+        .and_then(serde_json::Value::as_array_mut);
+    for paragraph in paragraphs.into_iter().flatten() {
+        let word = paragraph
+            .get("paraId")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|key| ids.get(key))
+            .cloned();
+        if let Some(word) = word {
+            paragraph["paraId"] = word;
+        }
+    }
+    product
+}
+
+#[test]
+#[ignore = "reads the product's save reports from DOCX_CRATE_PARITY_DIR; CI runs it with --ignored"]
+fn crate_save_report_matches_the_product_save() {
+    let dir = PathBuf::from(
+        std::env::var_os("DOCX_CRATE_PARITY_DIR").expect("DOCX_CRATE_PARITY_DIR is not set"),
+    )
+    .join("report");
+    let cases = cases(&dir);
+    assert!(!cases.is_empty(), "no cases in {}", dir.display());
+
+    let mut failures = Vec::new();
+    for case in &cases {
+        let name = case.file_name().unwrap().to_string_lossy().into_owned();
+        let input = fs::read(case.join("input.docx")).unwrap();
+        let spec: serde_json::Value =
+            serde_json::from_slice(&fs::read(case.join("edit.json")).unwrap()).unwrap();
+        let read = |file: &str| -> serde_json::Value {
+            serde_json::from_slice(&fs::read(case.join(file)).unwrap()).unwrap()
+        };
+
+        let mut document = Document::open(&input).unwrap();
+        if let Some(para_id) = spec.get("paraId").and_then(serde_json::Value::as_str) {
+            document
+                .replace_paragraph_text(para_id, spec["text"].as_str().unwrap())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+        let report = document
+            .save_report()
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        if report.bytes != document.save().unwrap() {
+            failures.push(format!("{name}: save_report bytes differ from save"));
+        }
+        let crate_report = report_json(&report);
+        let product = with_word_ids(read("report.json"), &read("ids.json"));
+        if name == "structure-dropped" && product.get("structureDropped").is_none() {
+            failures.push(format!("{name}: the product reports no dropped structure"));
+        }
+        if crate_report != product {
+            failures.push(format!(
+                "{name}: save report differs\n  crate:   {crate_report}\n  product: {product}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

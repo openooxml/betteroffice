@@ -14,9 +14,10 @@ use python_common::map_io_error;
 
 use betteroffice_docx::{
     BlockContent, ContentControlQuery, ContentControlsOptions, DisplayList,
-    Document as CoreDocument, DocxStructuredContent, EditCtx, EditOrigin, Error as CoreError,
-    ExportOptions, HeaderFooter, ImageScope, InlineNode, LayoutInput, MarkdownOptions, NoteKind,
-    Paragraph, ParagraphContent, ParseLimits, Receipt, RevisionView, Run, RunContent, SaveOptions,
+    Document as CoreDocument, DocxStructuredContent, DroppedParagraph, DroppedStructure, EditCtx,
+    EditOrigin, Error as CoreError, ExportOptions, HeaderFooter, ImageScope, InlineNode,
+    KeptParagraph, KeptUnchanged, LayoutInput, MarkdownOptions, NoteKind, Paragraph,
+    ParagraphContent, ParseLimits, Receipt, RevisionView, Run, RunContent, SaveOptions, SaveReport,
     Section, StorySelection, Table, get_paragraph_text,
 };
 
@@ -942,6 +943,175 @@ impl PyPng {
     }
 }
 
+/// The bytes a save writes and the structure it kept or dropped.
+#[pyclass(module = "betteroffice_docx", name = "SaveReport", frozen)]
+pub struct PySaveReport {
+    data: Vec<u8>,
+    #[pyo3(get)]
+    kept_unchanged: Option<PyKeptUnchanged>,
+    #[pyo3(get)]
+    structure_dropped: Option<Vec<PyDroppedStructure>>,
+}
+
+impl PySaveReport {
+    fn from_core(report: SaveReport) -> Self {
+        Self {
+            data: report.bytes,
+            kept_unchanged: report.kept_unchanged.map(PyKeptUnchanged::from_core),
+            structure_dropped: report.structure_dropped.map(|structures| {
+                structures
+                    .into_iter()
+                    .map(PyDroppedStructure::from_core)
+                    .collect()
+            }),
+        }
+    }
+}
+
+#[pymethods]
+impl PySaveReport {
+    #[getter]
+    fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.data)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SaveReport(bytes={}, kept_unchanged={}, structure_dropped={})",
+            self.data.len(),
+            self.kept_unchanged
+                .as_ref()
+                .map_or(0, |kept| kept.structure),
+            self.structure_dropped.as_ref().map_or(0, Vec::len)
+        )
+    }
+}
+
+/// Paragraphs a save wrote as their source bytes, counted, with the first ones described.
+#[pyclass(
+    module = "betteroffice_docx",
+    name = "KeptUnchanged",
+    frozen,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyKeptUnchanged {
+    #[pyo3(get)]
+    structure: u32,
+    #[pyo3(get)]
+    paragraphs: Vec<PyKeptParagraph>,
+}
+
+impl PyKeptUnchanged {
+    fn from_core(kept: KeptUnchanged) -> Self {
+        Self {
+            structure: kept.structure,
+            paragraphs: kept
+                .paragraphs
+                .into_iter()
+                .map(PyKeptParagraph::from_core)
+                .collect(),
+        }
+    }
+}
+
+/// A paragraph a save wrote as its source bytes because writing it would have dropped structure.
+#[pyclass(
+    module = "betteroffice_docx",
+    name = "KeptParagraph",
+    frozen,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyKeptParagraph {
+    #[pyo3(get)]
+    part: String,
+    #[pyo3(get)]
+    ordinal: u32,
+    #[pyo3(get)]
+    para_id: Option<String>,
+    #[pyo3(get)]
+    text: String,
+    #[pyo3(get)]
+    scope: String,
+    #[pyo3(get)]
+    dropped: Vec<String>,
+}
+
+impl PyKeptParagraph {
+    fn from_core(paragraph: KeptParagraph) -> Self {
+        Self {
+            part: paragraph.part,
+            ordinal: paragraph.ordinal,
+            para_id: paragraph.para_id,
+            text: paragraph.text,
+            scope: paragraph.scope,
+            dropped: paragraph.dropped,
+        }
+    }
+}
+
+/// A story part written whole with fewer structural elements than its source.
+#[pyclass(
+    module = "betteroffice_docx",
+    name = "DroppedStructure",
+    frozen,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyDroppedStructure {
+    #[pyo3(get)]
+    part: String,
+    #[pyo3(get)]
+    dropped: Vec<String>,
+    #[pyo3(get)]
+    paragraphs: Vec<PyDroppedParagraph>,
+}
+
+impl PyDroppedStructure {
+    fn from_core(structure: DroppedStructure) -> Self {
+        Self {
+            part: structure.part,
+            dropped: structure.dropped,
+            paragraphs: structure
+                .paragraphs
+                .into_iter()
+                .map(PyDroppedParagraph::from_core)
+                .collect(),
+        }
+    }
+}
+
+/// A paragraph of a part written whole that holds fewer structural elements than its source.
+#[pyclass(
+    module = "betteroffice_docx",
+    name = "DroppedParagraph",
+    frozen,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyDroppedParagraph {
+    #[pyo3(get)]
+    ordinal: u32,
+    #[pyo3(get)]
+    para_id: String,
+    #[pyo3(get)]
+    text: String,
+    #[pyo3(get)]
+    dropped: Vec<String>,
+}
+
+impl PyDroppedParagraph {
+    fn from_core(paragraph: DroppedParagraph) -> Self {
+        Self {
+            ordinal: paragraph.ordinal,
+            para_id: paragraph.para_id,
+            text: paragraph.text,
+            dropped: paragraph.dropped,
+        }
+    }
+}
+
 #[pyclass(module = "betteroffice_docx", name = "Document")]
 pub struct PyDocument {
     inner: CoreDocument,
@@ -1432,6 +1602,21 @@ impl PyDocument {
         Ok(PyBytes::new(py, &bytes))
     }
 
+    #[pyo3(signature = (*, now = None, update_modified_date = false, modified_by = None))]
+    fn save_report(
+        &self,
+        py: Python<'_>,
+        now: Option<String>,
+        update_modified_date: bool,
+        modified_by: Option<String>,
+    ) -> PyResult<PySaveReport> {
+        let options = self.save_options(now, update_modified_date, modified_by);
+        let report = py
+            .detach(|| self.inner.save_report_with_options(options))
+            .map_err(map_error)?;
+        Ok(PySaveReport::from_core(report))
+    }
+
     #[pyo3(signature = (path, *, now = None, update_modified_date = false, modified_by = None))]
     fn save_path(
         &self,
@@ -1497,6 +1682,11 @@ fn _betteroffice_docx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLayout>()?;
     module.add_class::<PyDisplayList>()?;
     module.add_class::<PyPng>()?;
+    module.add_class::<PySaveReport>()?;
+    module.add_class::<PyKeptUnchanged>()?;
+    module.add_class::<PyKeptParagraph>()?;
+    module.add_class::<PyDroppedStructure>()?;
+    module.add_class::<PyDroppedParagraph>()?;
     module.add("DocxError", py.get_type::<DocxError>())?;
     module.add("ParseError", py.get_type::<ParseError>())?;
     module.add("EditError", py.get_type::<EditError>())?;
