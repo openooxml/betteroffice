@@ -3563,7 +3563,10 @@ fn tracked_to_units_in_control(
             );
             units.extend(linked);
         } else if in_control
-            || string(field(Some(child), "type")) == Some("inlineSdt")
+            || matches!(
+                string(field(Some(child), "type")),
+                Some("inlineSdt" | "complexField")
+            )
             || has_tracked_control(child, false, true)
         {
             let inherited = marks_to_attrs(std::slice::from_ref(&marker));

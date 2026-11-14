@@ -1312,6 +1312,8 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   } else if (item.kind === 'embed' && item.embedKind === 'sdt') child = inlineSdtFromPayload(item.payload, recovery, format);
   else if (item.kind === 'embed' && item.embedKind === 'image') child = imageRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'tab') child = tabRun(item.attributes, format);
+  else if (item.kind === 'embed' && item.embedKind === 'field' && item.payload.modelKind !== 'commentReference')
+    child = fieldFromPayload(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
     child = horizontalRuleRun(item.payload, item.attributes, format);
   else if (item.kind === 'embed' && item.embedKind === 'shape')

@@ -983,7 +983,12 @@ function trackedToUnits(
       opaqueSequences.push(...hyperlinkSequenceNames(child));
       const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences, [mark]);
       units.push(...linked);
-    } else if (inControl || child.type === 'inlineSdt' || hasTrackedControlContent(child)) {
+    } else if (
+      inControl ||
+      child.type === 'inlineSdt' ||
+      child.type === 'complexField' ||
+      hasTrackedControlContent(child)
+    ) {
       const nested = inlineContainerUnits(child, styleFormatting, styleResolver, opaqueSequences, inControl);
       const attrs = marksToYrsAttrs([mark]);
       units.push(...nested.map((unit) => ({

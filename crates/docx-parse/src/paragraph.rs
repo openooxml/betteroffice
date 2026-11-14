@@ -737,6 +737,7 @@ fn parse_paragraph_contents(
                             ParagraphContent::Inline(
                                 node @ (InlineNode::Run(_)
                                 | InlineNode::Hyperlink(_)
+                                | InlineNode::ComplexField(_)
                                 | InlineNode::InlineSdt(_)),
                             ) => Some(node),
                             ParagraphContent::Tracked(change) => {
