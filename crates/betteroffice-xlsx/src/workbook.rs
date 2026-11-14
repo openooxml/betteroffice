@@ -472,7 +472,9 @@ fn on_used_edge(bounds: Option<CellRange>, at: CellRef) -> bool {
 struct GraphReuse {
     /// The model epoch at which the graph last matched a build over the model.
     current_at: Option<u64>,
+    #[cfg(any(test, feature = "test-counters"))]
     keeps: u64,
+    #[cfg(any(test, feature = "test-counters"))]
     rebuilds: u64,
 }
 
@@ -4313,6 +4315,7 @@ impl Workbook {
         self.recalculated_since_open = true;
         self.calculations_since_open = self.calculations_since_open.saturating_add(1);
         let result = if keep {
+            #[cfg(any(test, feature = "test-counters"))]
             self.graph_reuse.keeps += 1;
             let graph = self.graph.as_mut().expect("graph initialized");
             #[cfg(test)]
@@ -4326,6 +4329,7 @@ impl Workbook {
                 self.rand_seed,
             )
         } else {
+            #[cfg(any(test, feature = "test-counters"))]
             self.graph_reuse.rebuilds += 1;
             let (graph, result) = rebuild_and_recalc_all_after(
                 &mut self.model,
@@ -4371,6 +4375,7 @@ impl Workbook {
 
     /// Full recalculations that kept the dependency graph, and those that rebuilt it.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-counters"))]
     pub fn graph_reuse_counts(&self) -> (u64, u64) {
         (self.graph_reuse.keeps, self.graph_reuse.rebuilds)
     }
