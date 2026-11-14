@@ -497,34 +497,20 @@ impl Track {
     }
 
     fn apply(&mut self, step: Step) {
+        for slot in &mut self.members {
+            *slot = slot.and_then(|p| map_line(step, p));
+        }
         let (insert, q) = match step {
             Step::Insert(q) => (true, q),
             Step::Delete(q) => (false, q),
             #[cfg(feature = "unstable-track-moves")]
-            Step::Move { at, count, before } => {
-                for p in self.members.iter_mut().flatten() {
-                    if *p >= at && *p < at + count {
-                        *p = before - count + (*p - at);
-                    } else if *p >= at + count && *p < before {
-                        *p -= count;
-                    } else if *p >= before && *p < at {
-                        *p += count;
-                    }
-                }
+            Step::Move { .. } => {
                 let current = self.current();
                 self.start = current.iter().copied().min().unwrap_or(self.start);
                 self.end = current.iter().copied().max().unwrap_or(self.end);
                 return;
             }
         };
-        for slot in &mut self.members {
-            *slot = match *slot {
-                Some(p) if insert && p >= q => Some(p + 1),
-                Some(p) if !insert && p == q => None,
-                Some(p) if !insert && p > q => Some(p - 1),
-                other => other,
-            };
-        }
         if insert {
             if self.start >= q {
                 self.start += 1;
@@ -541,6 +527,97 @@ impl Track {
             }
         }
     }
+}
+
+/// Where line `p` lands after `step`, or `None` when the step deletes it.
+fn map_line(step: Step, p: u32) -> Option<u32> {
+    match step {
+        Step::Insert(q) => Some(if p >= q { p + 1 } else { p }),
+        Step::Delete(q) if p == q => None,
+        Step::Delete(q) => Some(if p > q { p - 1 } else { p }),
+        #[cfg(feature = "unstable-track-moves")]
+        Step::Move { at, count, before } => Some(move_line(p, at, count, before)),
+    }
+}
+
+/// Mirrors `move_axis` in crates/xlsx-ops/src/apply.rs: `before` is a pre-move gap.
+#[cfg(feature = "unstable-track-moves")]
+fn move_line(p: u32, at: u32, count: u32, before: u32) -> u32 {
+    let end = at + count;
+    if count == 0 || (at..=end).contains(&before) {
+        p
+    } else if before > end {
+        if (at..end).contains(&p) {
+            p + (before - count - at)
+        } else if (end..before).contains(&p) {
+            p - count
+        } else {
+            p
+        }
+    } else if (before..at).contains(&p) {
+        p + count
+    } else if (at..end).contains(&p) {
+        p - at + before
+    } else {
+        p
+    }
+}
+
+#[cfg(feature = "unstable-track-moves")]
+const PLAIN_LINES: u32 = 40;
+
+/// The first line whose plain value the engine puts elsewhere than the model.
+#[cfg(feature = "unstable-track-moves")]
+fn plain_mismatch(orient: Orient, steps: &[Step]) -> Result<Option<String>, String> {
+    let value = |line: u32| f64::from(1000 + line).to_string();
+    let cell = |line: u32| {
+        let a1 = orient.member(line);
+        format!(r#"<c r="{a1}"><v>{}</v></c>"#, value(line))
+    };
+    let mut rows = String::new();
+    for line in 1..=PLAIN_LINES {
+        match orient {
+            Orient::Column => rows.push_str(&format!(r#"<row r="{line}">{}</row>"#, cell(line))),
+            Orient::Row => rows.push_str(&cell(line)),
+        }
+    }
+    if orient == Orient::Row {
+        rows = format!(r#"<row r="2">{rows}</row>"#);
+    }
+    let sheet = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="{MAIN}"><sheetData>{rows}</sheetData></worksheet>"#
+    );
+    let source = package(sheet)?;
+    let opened = Workbook::open(&source);
+    let mut workbook = opened.map_err(|e| format!("open {e:?}"))?;
+    for &step in steps {
+        workbook
+            .apply_ops(vec![orient.op(step)], CalculationOptions::default())
+            .map_err(|e| format!("apply {e:?}"))?;
+    }
+    let mut found = BTreeMap::new();
+    if let Some(sheet) = workbook.model().sheets.first() {
+        for (at, stored) in sheet.iter_cells() {
+            if let CellValue::Number { value: number } = stored.value {
+                found.insert(number.to_string(), at.to_a1());
+            }
+        }
+    }
+    for line in 1..=PLAIN_LINES {
+        let model = steps
+            .iter()
+            .try_fold(line, |p, &step| map_line(step, p))
+            .map(|p| orient.member(p));
+        let engine = found.get(&value(line)).cloned();
+        if model != engine {
+            return Ok(Some(format!(
+                "line {line}: model={} engine={}",
+                model.as_deref().unwrap_or("absent"),
+                engine.as_deref().unwrap_or("absent")
+            )));
+        }
+    }
+    Ok(None)
 }
 
 type Snapshot = BTreeMap<(u32, u32), (String, Option<String>)>;
@@ -574,6 +651,9 @@ enum Outcome {
         model: String,
         reopened: String,
     },
+    /// The model disagrees with the engine on plain values, so the case is not graded.
+    #[cfg(feature = "unstable-track-moves")]
+    ModelMismatch(String),
 }
 
 fn broken(stage: &str, error: String) -> Outcome {
@@ -584,27 +664,75 @@ fn broken(stage: &str, error: String) -> Outcome {
     }
 }
 
-fn run_case(
-    (shape, orient, master_at, span): Config,
+fn run_case(config: Config, edits: &[Edit], audit: &mut Audit) -> (String, Outcome) {
+    let (case, planned) = plan(config, edits);
+    let outcome = match planned {
+        Ok(steps) => guarded(config, &steps, &case, audit),
+        Err(outcome) => outcome,
+    };
+    (case, outcome)
+}
+
+#[cfg(feature = "unstable-track-moves")]
+fn run_sweep_case(
+    config: Config,
     edits: &[Edit],
+    offset: i32,
     audit: &mut Audit,
 ) -> (String, Outcome) {
+    let (case, planned) = plan(config, edits);
+    let steps = match planned {
+        Ok(steps) => steps,
+        Err(outcome) => return (case, outcome),
+    };
+    let checked = catch_unwind(AssertUnwindSafe(|| plain_mismatch(config.1, &steps)));
+    let outcome = match checked {
+        Ok(Ok(None)) => guarded(config, &steps, &case, audit),
+        Ok(Ok(Some(detail))) => Outcome::ModelMismatch(format!("offset={offset} {detail}")),
+        Ok(Err(e)) => broken("plain", e),
+        Err(_) => broken("plain", "panic".to_owned()),
+    };
+    (case, outcome)
+}
+
+fn guarded(config: Config, steps: &[Step], case: &str, audit: &mut Audit) -> Outcome {
+    let run = AssertUnwindSafe(|| execute(config, steps, case, audit));
+    match catch_unwind(run) {
+        Ok(outcome) => outcome,
+        Err(_) => broken("run", "panic".to_owned()),
+    }
+}
+
+/// The case name and the model's steps, or the outcome that settles the case first.
+fn plan(
+    (shape, orient, master_at, span): Config,
+    edits: &[Edit],
+) -> (String, Result<Vec<Step>, Outcome>) {
     let mut track = Track::new(shape, master_at, span);
     let mut steps = Vec::new();
     let mut words = Vec::new();
-    let mut missing = None;
+    let mut ended = None;
     for &edit in edits {
-        match track.resolve(edit) {
-            Ok(step) => {
+        let attempt = || -> Result<Step, &'static str> {
+            let step = track.resolve(edit)?;
+            track.apply(step);
+            Ok(step)
+        };
+        match catch_unwind(AssertUnwindSafe(attempt)) {
+            Ok(Ok(step)) => {
                 words.push(format!("{} {}", edit.name(), orient.describe(step)));
-                track.apply(step);
                 steps.push(step);
             }
-            Err(reason) => {
+            Ok(Err(reason)) => {
                 words.push(format!("{} n/a", edit.name()));
-                if missing.is_none() {
-                    missing = Some(reason);
+                if ended.is_none() {
+                    ended = Some(Outcome::NotApplicable(reason));
                 }
+            }
+            Err(_) => {
+                words.push(format!("{} model-panic", edit.name()));
+                ended = Some(broken("model", "panic".to_owned()));
+                break;
             }
         }
     }
@@ -616,16 +744,7 @@ fn run_case(
         span.suffix(),
         words.join(" then ")
     );
-    if let Some(reason) = missing {
-        return (case, Outcome::NotApplicable(reason));
-    }
-    let config = (shape, orient, master_at, span);
-    let run = AssertUnwindSafe(|| execute(config, &steps, &case, audit));
-    let outcome = match catch_unwind(run) {
-        Ok(outcome) => outcome,
-        Err(_) => broken("run", "panic".to_owned()),
-    };
-    (case, outcome)
+    (case, ended.map_or(Ok(steps), Err))
 }
 
 fn execute(
@@ -695,6 +814,7 @@ fn finish(workbook: &Workbook, case: &str, audit: &mut Audit) -> Outcome {
 #[derive(Default)]
 struct Tally {
     cases: usize,
+    model_mismatch: usize,
     failed: usize,
     skipped: usize,
 }
@@ -716,6 +836,11 @@ impl Tally {
                 self.failed += 1;
                 println!("FAIL {case}: cell={cell} model={model} reopened={reopened}");
             }
+            #[cfg(feature = "unstable-track-moves")]
+            Outcome::ModelMismatch(detail) => {
+                self.model_mismatch += 1;
+                println!("MODEL-MISMATCH {case} {detail}");
+            }
         }
     }
 }
@@ -723,6 +848,7 @@ impl Tally {
 impl Tally {
     fn add(&mut self, other: &Tally) {
         self.cases += other.cases;
+        self.model_mismatch += other.model_mismatch;
         self.failed += other.failed;
         self.skipped += other.skipped;
     }
@@ -954,6 +1080,7 @@ fn shared_group_moved_past_its_ref_reopens_with_model_formulas() {
             model,
             reopened,
         } => panic!("cell={cell} model={model} reopened={reopened}"),
+        Outcome::ModelMismatch(detail) => panic!("model mismatch: {detail}"),
     }
     assert!(audit.violations.is_empty(), "INVARIANT violations");
 }
@@ -977,7 +1104,7 @@ fn shared_formula_members_moved_around_their_ref_reopen_with_model_formulas() {
                     runs.push(vec![extra, sweep]);
                 }
                 for edits in runs {
-                    let (case, outcome) = run_case(config, &edits, &mut audit);
+                    let (case, outcome) = run_sweep_case(config, &edits, offset, &mut audit);
                     if matches!(outcome, Outcome::Fail { .. }) {
                         red.insert(offset);
                     }
@@ -988,9 +1115,10 @@ fn shared_formula_members_moved_around_their_ref_reopen_with_model_formulas() {
         let reds: Vec<String> = red.iter().map(i32::to_string).collect();
         let reds = reds.join(",");
         println!(
-            "\nSWEEP tail={} cases={} failed={} skipped={}",
+            "\nSWEEP tail={} cases={} model_mismatch={} failed={} skipped={}",
             span.name(),
             tally.cases,
+            tally.model_mismatch,
             tally.failed,
             tally.skipped
         );
@@ -998,6 +1126,7 @@ fn shared_formula_members_moved_around_their_ref_reopen_with_model_formulas() {
         total.add(&tally);
     }
     audit.report();
+    assert_eq!(total.model_mismatch, 0, "SWEEP model mismatches");
     assert_eq!(total.failed, 0, "SWEEP failures");
     assert_eq!(audit.violations.len(), 0, "INVARIANT violations");
 }
