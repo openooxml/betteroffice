@@ -380,6 +380,29 @@ fn structural_edits_match_oracle() {
 }
 
 #[test]
+fn shared_group_with_gap_after_insert_and_delete_matches_oracle() {
+    let by_col = concat!(
+        r#"<sheetData><row r="1"><c r="A1"><f t="shared" ref="A1:D1" si="0">A9</f><v>0</v></c>"#,
+        r#"<c r="B1"><f t="shared" si="0"/><v>0</v></c>"#,
+        r#"<c r="D1"><f t="shared" si="0"/><v>0</v></c></row></sheetData>"#,
+    );
+    let by_row = concat!(
+        r#"<sheetData><row r="1"><c r="A1"><f t="shared" ref="A1:A4" si="0">I1</f><v>0</v></c></row>"#,
+        r#"<row r="2"><c r="A2"><f t="shared" si="0"/><v>0</v></c></row>"#,
+        r#"<row r="4"><c r="A4"><f t="shared" si="0"/><v>0</v></c></row></sheetData>"#,
+    );
+    for (source, rows) in [(by_col, false), (by_row, true)] {
+        for shifts in [[(true, 1), (false, 3)], [(false, 2), (true, 1)]] {
+            let mut case = Case::new(source);
+            for (insert, at) in shifts {
+                case.shift(rows, insert, at, 1);
+            }
+            case.compare();
+        }
+    }
+}
+
+#[test]
 fn detector_records_source_changes_without_coordinate_dirtiness() {
     let source = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="3"><c r="C3"><v>3</v></c></row></sheetData>"#;
     let mut case = Case::new(source);
