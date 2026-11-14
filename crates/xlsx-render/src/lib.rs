@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod hit;
 pub mod number_format;
 pub mod region;
+mod table_style;
 pub mod wrap;
 
 pub use ooxml_drawingml::GeometryPathCommand;
@@ -26,8 +27,11 @@ use xlsx_model::styles::{BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{
-    CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId, VAlign, Workbook,
+    CellRange, CellRef, DifferentialFormat, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId,
+    Table, VAlign, Workbook,
 };
+
+use table_style::SheetTables;
 
 pub use chart::{
     AnchorError, ChartResize, MAX_CHART_OPS_PER_FRAME, MIN_CHART_EXTENT_PX, RenderError,
@@ -776,7 +780,7 @@ where
             .into()
     });
     let indent_step = geometry::indent_step_px(styles, print.map(|(m, _)| m));
-    let mut fx = FrameStyles::new(styles, sheet_ref);
+    let mut fx = FrameStyles::new(styles, sheet_ref, &wb.tables, sheet);
     let geom = geometry.expect("sheet geometry initialized");
     let (rows, cols, frozen_rows, frozen_cols) =
         viewport_axes(sheet_ref, viewport, geom, print.is_some(), max_cells);
@@ -1455,7 +1459,11 @@ fn emit_inherited_fills(
     xlsx_model::open_timing! {
         let _timing = xlsx_model::open_timing::span("style_fills");
     }
-    if sheet.col_styles.is_empty() && sheet.row_styles.is_empty() && fx.xf(None).fill.is_none() {
+    if sheet.col_styles.is_empty()
+        && sheet.row_styles.is_empty()
+        && fx.tables.is_empty()
+        && fx.xf(None).fill.is_none()
+    {
         return;
     }
     xlsx_model::open_timing! {
@@ -1984,6 +1992,7 @@ fn cell_box(
 }
 
 /// everything the frame resolves once per xf id instead of once per cell.
+#[derive(Clone)]
 struct ResolvedXf {
     format_code: Arc<str>,
     font: Option<ResolvedFont>,
@@ -1996,6 +2005,33 @@ struct ResolvedXf {
     wrap_or_shrink: bool,
     wrap: bool,
     text_rotation: Option<u16>,
+}
+
+impl ResolvedXf {
+    /// This xf over a table style: each fill and font facet the cell leaves as
+    /// the normal style has takes the table's.
+    fn under_table(&self, table: &DifferentialFormat, normal: &ResolvedFont) -> Self {
+        let mut xf = self.clone();
+        if xf.fill.is_none() {
+            xf.fill = table
+                .fill
+                .as_deref()
+                .map(|color| ResolvedFill::Solid(color.into()));
+        }
+        let font = xf.font.get_or_insert_with(ResolvedFont::default);
+        if (font.color.is_none() || font.color == normal.color)
+            && let Some(color) = &table.font_color
+        {
+            font.color = Some(color.as_str().into());
+        }
+        if font.bold == normal.bold {
+            font.bold = table.bold.unwrap_or(font.bold);
+        }
+        if font.italic == normal.italic {
+            font.italic = table.italic.unwrap_or(font.italic);
+        }
+        xf
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -2058,6 +2094,7 @@ impl ResolvedFill {
     }
 }
 
+#[derive(Clone, Default)]
 struct ResolvedFont {
     size_pt: Option<f64>,
     family: Option<Arc<str>>,
@@ -2069,6 +2106,7 @@ struct ResolvedFont {
     color: Option<Arc<str>>,
 }
 
+#[derive(Clone)]
 struct ResolvedBorder {
     top: Option<ResolvedBorderEdge>,
     left: Option<ResolvedBorderEdge>,
@@ -2076,6 +2114,7 @@ struct ResolvedBorder {
     right: Option<ResolvedBorderEdge>,
 }
 
+#[derive(Clone)]
 struct ResolvedBorderEdge {
     width: f32,
     style: Option<Arc<str>>,
@@ -2088,21 +2127,36 @@ struct FrameStyles<'a> {
     styles: &'a Stylesheet,
     xfs: HashMap<u32, Arc<ResolvedXf>>,
     defaults: ColumnDefaults<'a>,
+    tables: SheetTables<'a>,
+    table_xfs: HashMap<(u32, usize, u16), Arc<ResolvedXf>>,
 }
 
 impl<'a> FrameStyles<'a> {
-    fn new(styles: &'a Stylesheet, sheet: &'a Sheet) -> Self {
+    fn new(styles: &'a Stylesheet, sheet: &'a Sheet, tables: &'a [Table], id: SheetId) -> Self {
         FrameStyles {
             styles,
             xfs: HashMap::new(),
             defaults: ColumnDefaults::new(sheet),
+            tables: SheetTables::new(tables, id),
+            table_xfs: HashMap::new(),
         }
     }
 
-    /// The xf a cell renders with: its own, or its row's or column's default.
+    /// The xf a cell renders with: its own, or its row's or column's default,
+    /// over the style of a table covering it.
     fn xf_at(&mut self, at: CellRef) -> &Arc<ResolvedXf> {
         let style = self.defaults.effective_style(at);
-        self.xf(style)
+        let Some((table, mask)) = self.tables.locate(at) else {
+            return self.xf(style);
+        };
+        let key = (style.unwrap_or(0), table, mask);
+        if !self.table_xfs.contains_key(&key) {
+            let format = self.tables.format(table, mask);
+            let normal = self.xf(Some(0)).font.clone().unwrap_or_default();
+            let xf = self.xf(style).under_table(&format, &normal);
+            self.table_xfs.insert(key, Arc::new(xf));
+        }
+        &self.table_xfs[&key]
     }
 
     fn xf(&mut self, style: Option<u32>) -> &Arc<ResolvedXf> {

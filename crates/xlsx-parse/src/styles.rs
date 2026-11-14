@@ -271,7 +271,8 @@ fn parse_style_pools(
                     dxf_font_color = parse_color(&e)?;
                 }
                 b"patternFill" if dxf_fill && dxf.is_some() => {
-                    dxf_solid = attr(&e, b"patternType")?.as_deref() == Some("solid");
+                    dxf_solid =
+                        matches!(attr(&e, b"patternType")?.as_deref(), None | Some("solid"));
                 }
                 b"fgColor" if dxf_fill && dxf.is_some() => {
                     if dxf_solid {

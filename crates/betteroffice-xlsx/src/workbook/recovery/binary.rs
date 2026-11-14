@@ -1,4 +1,4 @@
-use crate::authority::snapshot::{Codec, EditedChart, edited_charts};
+use crate::authority::snapshot::{Codec, EditedChart, StyledTable, edited_charts, styled_table};
 use crate::snapshot::SnapshotError;
 use xlsx_model::{CellFormat, Color, ErrorValue, Font, NumberFormat};
 use xlsx_ops::{BorderPatch, KeptFacets, PreservedCellFormat, StyleProperty};
@@ -624,9 +624,17 @@ impl Codec for Op {
                 name.write(w);
                 formulas.write(w);
             }
-            Self::SetTables { tables } => {
+            Self::SetTables { tables } if tables.iter().all(|table| table.style.is_empty()) => {
                 w.u8(37);
                 tables.write(w);
+            }
+            Self::SetTables { tables } => {
+                w.u8(38);
+                tables
+                    .iter()
+                    .map(|table| (table.clone(), table.style.clone()))
+                    .collect::<Vec<StyledTable>>()
+                    .write(w);
             }
         }
     }
@@ -807,6 +815,12 @@ impl Codec for Op {
             },
             37 => Self::SetTables {
                 tables: Codec::read(r)?,
+            },
+            38 => Self::SetTables {
+                tables: Vec::<StyledTable>::read(r)?
+                    .into_iter()
+                    .map(styled_table)
+                    .collect(),
             },
             _ => return Err(SnapshotError::new("invalid recovery Op")),
         })

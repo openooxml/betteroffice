@@ -644,6 +644,7 @@ fn goldens() -> Vec<Golden> {
                     header_rows: 1,
                     totals_rows: 0,
                     columns: vec!["Year".into(), "Price".into()],
+                    style: Vec::new(),
                 }],
             },
             json: concat!(

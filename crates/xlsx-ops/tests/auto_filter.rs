@@ -104,6 +104,7 @@ fn unsafe_ranges_and_duplicate_sources_refuse_without_changes() {
                 header_rows: 1,
                 totals_rows: 0,
                 columns: vec!["A".into(), "B".into()],
+                style: Vec::new(),
             });
         }
         let before = workbook.clone();
