@@ -6367,8 +6367,13 @@ mod tests {
         assert!(prime_at_product_caps(doc));
         let source = doc.source_index().unwrap();
         assert!(source.seed_states_initialized());
-        doc.insert_text(&ctx(), Position::new("body", 0), "New ", FormatPolicy::Plain)
-            .unwrap();
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", 0),
+            "New ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
         doc.paragraph_save_plan();
         assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
     }
@@ -6411,8 +6416,13 @@ mod tests {
             }
             assert!(doc.unchanged_since_seeded(), "{paragraphs}");
             assert_eq!(prime_at_product_caps(&doc), primes, "{paragraphs}");
-            doc.insert_text(&ctx(), Position::new("body", 0), "New ", FormatPolicy::Plain)
-                .unwrap();
+            doc.insert_text(
+                &ctx(),
+                Position::new("body", 0),
+                "New ",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
             doc.paragraph_save_plan();
             assert_eq!(
                 source.reseed_calls.load(Ordering::Relaxed),
