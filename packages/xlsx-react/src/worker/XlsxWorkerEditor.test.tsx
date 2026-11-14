@@ -3336,10 +3336,11 @@ describe('peerless workbook worker editor', () => {
     const real = performance.now.bind(performance);
     let last = 0;
     let held: number | undefined;
-    const clock = spyOn(performance, 'now').mockImplementation(() => (last = held ?? real()));
-    restorers.push(() => clock.mockRestore());
     host.frame.mockImplementation(async (viewport, options) => {
-      if (options?.sheet === 1 && !neighborDelay) held ??= last;
+      if (options?.sheet === 1 && !neighborDelay && held === undefined) {
+        held = last;
+        setTimeout(() => { held = undefined; }, 0);
+      }
       if (options?.sheet === 1 && neighborDelay) await new Promise((resolve) => setTimeout(resolve, neighborDelay));
       return {
         ...sample, viewport, sheet: options?.sheet ?? 0,
@@ -3348,15 +3349,18 @@ describe('peerless workbook worker editor', () => {
           : sample.displayList.commands },
       };
     });
-    const view = await host.mount();
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1500)); });
-    clock.mockRestore();
-    expect(host.frame.mock.calls.some(([, options]) => options?.sheet === 1)).toBe(true);
-    const settled = host.frame.mock.calls.length;
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
-    expect(host.frame.mock.calls.length).toBe(settled);
-    const canvas = () => view.container.querySelector('canvas')!;
-    return { host, view, canvas };
+    const clock = spyOn(performance, 'now').mockImplementation(() => (last = held ?? real()));
+    restorers.push(() => clock.mockRestore());
+    try {
+      const view = await host.mount();
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1500)); });
+      expect(host.frame.mock.calls.some(([, options]) => options?.sheet === 1)).toBe(true);
+      const settled = host.frame.mock.calls.length;
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+      expect(host.frame.mock.calls.length).toBe(settled);
+      const canvas = () => view.container.querySelector('canvas')!;
+      return { host, view, canvas };
+    } finally { clock.mockRestore(); }
   };
 
   it('a sheet tab switch paints the prefetched neighbor frame before the worker replies', async () => {
