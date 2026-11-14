@@ -8,6 +8,7 @@ use crate::deck::{
     slide_shape_order, string_array_ref,
 };
 use crate::proposal_diff::story_owner;
+use crate::story_owners::LookupCounts;
 use crate::{DeckSession, EditCtx, EditError, SHAPES, ShapeDraft, ShapeRect, TextStyle};
 
 struct SplitMix(u64);
@@ -42,7 +43,7 @@ fn empty_session(client_id: u64) -> DeckSession {
         .unwrap()
 }
 
-fn add_box(session: &DeckSession, slide: &str) {
+fn add_box(session: &DeckSession, slide: &str) -> String {
     session
         .add_text_box(
             &EditCtx::local("test"),
@@ -59,7 +60,8 @@ fn add_box(session: &DeckSession, slide: &str) {
                 style: TextStyle::default(),
             },
         )
-        .unwrap();
+        .unwrap()
+        .shape_id
 }
 
 fn sync(from: &DeckSession, to: &DeckSession) {
@@ -161,12 +163,17 @@ fn group_into(session: &DeckSession, placed: &[Placed], rng: &mut SplitMix) {
     let Some(member) = rng.pick(&members) else {
         return;
     };
+    nest(session, &container.slide, &container.shape, &member.shape);
+}
+
+// No grouping API exists, so nest, group_into, ungroup and move_out edit the document directly.
+fn nest(session: &DeckSession, slide: &str, container: &str, member: &str) {
     let mut txn = session.transact_for(&EditCtx::local("test"));
-    let order = order_of(&txn, &container.slide);
-    remove_entries(&order, &mut txn, &member.shape);
-    let mut children = container.children.clone();
-    children.push(member.shape);
-    let shape = shape_ref(&txn, &container.shape).unwrap();
+    let order = order_of(&txn, slide);
+    remove_entries(&order, &mut txn, member);
+    let shape = shape_ref(&txn, container).unwrap();
+    let mut children = map_string_array(&shape, &txn, "children").unwrap();
+    children.push(member.to_owned());
     set_children(&shape, &mut txn, &children);
 }
 
@@ -219,11 +226,17 @@ fn move_out(session: &DeckSession, placed: &[Placed], rng: &mut SplitMix) {
     order.push_back(&mut txn, member.shape.as_str());
 }
 
-fn step(rng: &mut SplitMix, local: &DeckSession, peer: &DeckSession, stories: &[String]) {
+fn step(
+    rng: &mut SplitMix,
+    local: &DeckSession,
+    peer: &DeckSession,
+    stories: &[String],
+) -> bool {
     let context = EditCtx::local("test");
     let slides = live_slide_ids(&local.doc.transact()).unwrap();
     let placed = placed_shapes(local);
-    match rng.below(11) {
+    let choice = rng.below(11);
+    match choice {
         0 => {
             if let Some(slide) = rng.pick(&slides) {
                 local.delete_slide(&context, &slide).unwrap();
@@ -248,7 +261,9 @@ fn step(rng: &mut SplitMix, local: &DeckSession, peer: &DeckSession, stories: &[
             local.redo();
         }
         4 => {
-            if let Some(slide) = rng.pick(&slides) {
+            if let Some(slide) = rng.pick(&slides)
+                && placed.len() < 24
+            {
                 local
                     .duplicate_slide(&context, &slide, slides.len() as u32)
                     .unwrap();
@@ -283,6 +298,7 @@ fn step(rng: &mut SplitMix, local: &DeckSession, peer: &DeckSession, stories: &[
         }
     }
     local.add_undo_barrier();
+    matches!(choice, 4 | 10)
 }
 
 fn discover(session: &DeckSession, seen: &mut BTreeSet<String>, stories: &mut Vec<String>) {
@@ -310,38 +326,54 @@ fn resolves(session: &DeckSession, story: &str) -> bool {
         .is_some()
 }
 
+fn grouped_deck(session: &DeckSession) {
+    let context = EditCtx::local("test");
+    for index in 0..3 {
+        let slide = session.insert_slide(&context, index, None).unwrap().slide_id;
+        let boxes: Vec<String> = (0..3).map(|_| add_box(session, &slide)).collect();
+        if index == 2 {
+            nest(session, &slide, &boxes[1], &boxes[2]);
+        }
+        nest(session, &slide, &boxes[0], &boxes[1]);
+    }
+    session.add_undo_barrier();
+}
+
 #[test]
 fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
-    for seed in [1_u64, 2, 3] {
+    let mut totals = LookupCounts::default();
+    for seed in 1..=50_u64 {
         let local = empty_session(41);
         let peer = empty_session(42);
-        let context = EditCtx::local("test");
         let mut rng = SplitMix(seed);
-        for index in 0..3 {
-            let slide = local.insert_slide(&context, index, None).unwrap().slide_id;
-            for _ in 0..3 {
-                add_box(&local, &slide);
-            }
-        }
-        local.add_undo_barrier();
+        grouped_deck(&local);
         let mut seen = BTreeSet::new();
         let mut stories = Vec::new();
-        for round in 0..60 {
-            discover(&local, &mut seen, &mut stories);
-            for story in &stories {
-                let owned = walk_finds_owner(&local, story);
-                assert_eq!(
-                    resolves(&local, story),
-                    owned,
-                    "seed {seed} round {round} story {story}"
-                );
-                assert_eq!(
-                    resolves(&local, story),
-                    owned,
-                    "seed {seed} round {round} story {story} on a second lookup"
-                );
+        discover(&local, &mut seen, &mut stories);
+        for round in 0..200 {
+            for _ in 0..2 {
+                let Some(story) = rng.pick(&stories) else {
+                    break;
+                };
+                let owned = walk_finds_owner(&local, &story);
+                for lookup in ["first", "second"] {
+                    assert_eq!(
+                        resolves(&local, &story),
+                        owned,
+                        "seed {seed} round {round} story {story} {lookup} lookup"
+                    );
+                }
             }
-            step(&mut rng, &local, &peer, &stories);
+            if step(&mut rng, &local, &peer, &stories) {
+                discover(&local, &mut seen, &mut stories);
+            }
         }
+        let counts = local.story_owners.counts.get();
+        totals.hits += counts.hits;
+        totals.rejected += counts.rejected;
+        totals.none += counts.none;
     }
+    assert!(totals.hits > 0, "{totals:?}");
+    assert!(totals.rejected > 0, "{totals:?}");
+    assert!(totals.none > 0, "{totals:?}");
 }

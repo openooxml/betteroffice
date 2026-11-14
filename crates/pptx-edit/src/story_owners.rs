@@ -22,6 +22,16 @@ pub(crate) struct OwnerPath {
 #[derive(Default)]
 pub(crate) struct StoryOwners {
     paths: RefCell<HashMap<String, OwnerPath>>,
+    #[cfg(test)]
+    pub(crate) counts: std::cell::Cell<LookupCounts>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LookupCounts {
+    pub(crate) hits: usize,
+    pub(crate) rejected: usize,
+    pub(crate) none: usize,
 }
 
 impl StoryOwners {
@@ -30,13 +40,26 @@ impl StoryOwners {
         txn: &T,
         story_id: &str,
     ) -> EditResult<Option<(String, String)>> {
-        if let Some(path) = self.paths.borrow().get(story_id)
-            && path_holds(txn, story_id, path)
-            && let Some(shape_id) = path.shape_ids.last()
-        {
-            return Ok(Some((path.slide_id.clone(), shape_id.clone())));
+        let cached = self.paths.borrow().get(story_id).map(|path| {
+            path.shape_ids
+                .last()
+                .filter(|_| path_holds(txn, story_id, path))
+                .map(|shape_id| (path.slide_id.clone(), shape_id.clone()))
+        });
+        if let Some(Some(owner)) = cached {
+            #[cfg(test)]
+            self.note(|counts| counts.hits += 1);
+            return Ok(Some(owner));
+        }
+        #[cfg(test)]
+        if cached.is_some() {
+            self.note(|counts| counts.rejected += 1);
         }
         let owner = story_owner(txn, story_id)?;
+        #[cfg(test)]
+        if owner.is_none() {
+            self.note(|counts| counts.none += 1);
+        }
         let path = owner
             .as_ref()
             .and_then(|(slide_id, shape_id)| owner_path(txn, slide_id, shape_id));
@@ -50,6 +73,13 @@ impl StoryOwners {
             }
         }
         Ok(owner)
+    }
+
+    #[cfg(test)]
+    fn note(&self, change: fn(&mut LookupCounts)) {
+        let mut counts = self.counts.get();
+        change(&mut counts);
+        self.counts.set(counts);
     }
 }
 
