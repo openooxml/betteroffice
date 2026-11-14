@@ -120,6 +120,7 @@ let compareRevised: Uint8Array;
 let repeatingFixture: Uint8Array;
 let effectFixture: Uint8Array;
 let embeddedFontFixture: Uint8Array;
+let pageTotalFixture: Uint8Array;
 
 const SECOND_RUN = '<w:r><w:t xml:space="preserve">Second body paragraph, alpha again.</w:t></w:r>';
 
@@ -171,6 +172,12 @@ function effectParts(): Record<string, string> {
   return { 'word/document.xml': patched('word/document.xml', FINAL_RUN, '<w:r><w:rPr><w:effect w:val="shimmer"/></w:rPr><w:t>Final paragraph.</w:t></w:r>') };
 }
 
+const PAGE_FIELD = '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>';
+
+function pageTotalParts(): Record<string, string> {
+  return { 'word/document.xml': patched('word/document.xml', PAGE_FIELD, `${PAGE_FIELD}<w:r><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple>`) };
+}
+
 const EMBEDDED_FAMILY = 'Embedded Sans';
 const FONT_KEY = '{00112233-4455-6677-8899-AABBCCDDEEFF}';
 const NORMAL_NAME = '<w:name w:val="Normal"/></w:style>';
@@ -199,6 +206,7 @@ beforeAll(async () => {
   repeatingFixture = await buildFixture(repeatingParts());
   effectFixture = await buildFixture(effectParts());
   embeddedFontFixture = await buildFixture(embeddedFontParts());
+  pageTotalFixture = await buildFixture(pageTotalParts());
 });
 
 // version() is "{nonce:016x}-{epoch}"; mint_nonce in crates/docx-edit/src/batch.rs mixes host entropy and the clock.
@@ -2531,12 +2539,22 @@ const rows: Row<Docx>[] = [
   },
   {
     method: 'EditSession.set_partial_document',
-    call: ({ session: s }) => {
-      const whole = layout(s).layout;
-      const marked = s.set_partial_document(true);
-      const partial = layout(s).layout;
-      const unmarked = s.set_partial_document(false);
-      return { whole, marked, partial, unmarked, restored: layout(s).layout };
+    call: ({ fresh }) => {
+      const f = fresh();
+      f.open_docx(pageTotalFixture, true, GENERATION);
+      const read = () => ({ layout: layout(f).layout, texts: f.page_texts_json(Uint32Array.from([0])) });
+      const flagged = (json: string) => (JSON.parse(json) as { layout: { partial?: boolean } }).layout.partial;
+      const whole = read();
+      const marked = f.set_partial_document(true);
+      const partial = read();
+      const unmarked = f.set_partial_document(false);
+      const restored = read();
+      if (flagged(whole.layout) !== undefined || flagged(partial.layout) !== true) throw new Error('the layout does not carry the partial flag as set');
+      if (!/Page 1 of \d/.test(whole.texts) || /Page 1 of \d/.test(partial.texts) || !partial.texts.includes('Page 1 of ')) {
+        throw new Error(`NUMPAGES does not go blank while the document is partial: ${whole.texts} then ${partial.texts}`);
+      }
+      if (restored.texts !== whole.texts) throw new Error(`clearing the flag did not restore the page total: ${restored.texts}`);
+      return { whole, marked, partial, unmarked, restored };
     },
   },
   {
