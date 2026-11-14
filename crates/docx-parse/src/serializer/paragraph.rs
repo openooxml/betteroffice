@@ -1224,7 +1224,7 @@ fn write_paragraph_cnf_style(writer: &mut XmlWriter, style: Option<&ParagraphCnf
     writer.end_element();
 }
 
-fn on_off(writer: &mut XmlWriter, name: &'static str, value: Option<bool>) {
+pub(super) fn on_off(writer: &mut XmlWriter, name: &'static str, value: Option<bool>) {
     match value {
         Some(true) => {
             writer.start_element(name).end_element();

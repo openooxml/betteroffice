@@ -6,7 +6,7 @@ use crate::block::BlockContent;
 use crate::borders::{Borders, parse_border_spec};
 use crate::formatting::{
     CellMargins, ConditionalFormatStyle, FloatingTableProperties, TableCellFormatting,
-    TableFormatting, TableLook, TableMeasurement, TableRowFormatting,
+    TableFormatting, TableLook, TableMeasurement, TableRowFormatting, boolean_child,
 };
 use crate::inline::{InlineNode, RunContent};
 use crate::paragraph::{ParagraphContent, RawAttribute, TrackedChangeInfo};
@@ -477,8 +477,8 @@ pub fn parse_document_table_row_properties(
             .filter(|value| matches!(*value, "auto" | "atLeast" | "exact"))
             .map(str::to_owned);
     }
-    formatting.header = true_child(element, "tblHeader");
-    formatting.cant_split = true_child(element, "cantSplit");
+    formatting.header = boolean_child(element, "tblHeader");
+    formatting.cant_split = boolean_child(element, "cantSplit");
     formatting.justification =
         child_attribute_in(element, "jc", "val", &["left", "center", "right"]);
     formatting.hidden = true_child(element, "hidden");

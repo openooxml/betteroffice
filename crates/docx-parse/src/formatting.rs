@@ -1372,7 +1372,7 @@ pub fn merge_cell_formatting(
     }
 }
 
-fn boolean_child(parent: &XmlElement, name: &str) -> Option<bool> {
+pub(crate) fn boolean_child(parent: &XmlElement, name: &str) -> Option<bool> {
     parent
         .child("w", name)
         .map(|element| element.parse_boolean("w"))
