@@ -29,6 +29,15 @@ enum MasterAt {
     Middle,
 }
 
+/// Where the group's `ref` lies relative to its members.
+#[derive(Clone, Copy, PartialEq)]
+enum Span {
+    Exact,
+    Tail1,
+    Tail2,
+    Lead1,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Edit {
     InsertBefore,
@@ -64,6 +73,7 @@ const FEATURES: &str = if cfg!(feature = "unstable-track-moves") {
 const SHAPES: [Shape; 3] = [Shape::Contiguous, Shape::OneGap, Shape::TwoGaps];
 const ORIENTS: [Orient; 2] = [Orient::Column, Orient::Row];
 const MASTERS: [MasterAt; 2] = [MasterAt::First, MasterAt::Middle];
+const SPANS: [Span; 4] = [Span::Exact, Span::Tail1, Span::Tail2, Span::Lead1];
 const EDITS: [Edit; 5] = [
     Edit::InsertBefore,
     Edit::InsertInside,
@@ -102,6 +112,37 @@ impl Shape {
             (MasterAt::First, _) => START,
             (MasterAt::Middle, Shape::Contiguous) => 11,
             (MasterAt::Middle, _) => 12,
+        }
+    }
+}
+
+impl Span {
+    fn name(self) -> &'static str {
+        match self {
+            Span::Exact => "0",
+            Span::Tail1 => "1",
+            Span::Tail2 => "2",
+            Span::Lead1 => "lead",
+        }
+    }
+
+    fn lead(self) -> u32 {
+        u32::from(self == Span::Lead1)
+    }
+
+    fn tail(self) -> u32 {
+        match self {
+            Span::Tail1 => 1,
+            Span::Tail2 => 2,
+            Span::Exact | Span::Lead1 => 0,
+        }
+    }
+
+    fn suffix(self) -> String {
+        match self {
+            Span::Exact => String::new(),
+            Span::Lead1 => " lead=1".to_owned(),
+            _ => format!(" tail={}", self.tail()),
         }
     }
 }
@@ -227,11 +268,11 @@ fn formula(orient: Orient, pos: u32) -> String {
     format!("{}*2", orient.data(pos - LAG))
 }
 
-fn sheet_xml(shape: Shape, orient: Orient, master_at: MasterAt) -> String {
+fn sheet_xml(shape: Shape, orient: Orient, master_at: MasterAt, span: Span) -> String {
     let members = shape.members();
     let master = shape.master(master_at);
-    let end = *members.last().unwrap_or(&START);
-    let reference = format!("{}:{}", orient.member(START), orient.member(end));
+    let end = *members.last().unwrap_or(&START) + span.tail();
+    let reference = format!("{}:{}", orient.member(START - span.lead()), orient.member(end));
     let member_cell = |pos: u32| {
         let f = if pos == master {
             format!(
@@ -352,15 +393,15 @@ struct Track {
 }
 
 impl Track {
-    fn new(shape: Shape, master_at: MasterAt) -> Self {
+    fn new(shape: Shape, master_at: MasterAt, span: Span) -> Self {
         let members = shape.members();
         let master_pos = shape.master(master_at);
         Track {
             shape,
             members: members.iter().map(|&p| Some(p)).collect(),
             master: members.iter().position(|&p| p == master_pos).unwrap_or(0),
-            start: START,
-            end: *members.last().unwrap_or(&START),
+            start: START - span.lead(),
+            end: *members.last().unwrap_or(&START) + span.tail(),
         }
     }
 
@@ -514,13 +555,11 @@ fn broken(stage: &str, error: String) -> Outcome {
 }
 
 fn run_case(
-    shape: Shape,
-    orient: Orient,
-    master_at: MasterAt,
+    (shape, orient, master_at, span): Config,
     edits: &[Edit],
     audit: &mut Audit,
 ) -> (String, Outcome) {
-    let mut track = Track::new(shape, master_at);
+    let mut track = Track::new(shape, master_at, span);
     let mut steps = Vec::new();
     let mut words = Vec::new();
     let mut missing = None;
@@ -540,16 +579,18 @@ fn run_case(
         }
     }
     let case = format!(
-        "{} {} master-{}: {}",
+        "{} {} master-{}{}: {}",
         shape.name(),
         orient.name(),
         master_at.name(),
+        span.suffix(),
         words.join(" then ")
     );
     if let Some(reason) = missing {
         return (case, Outcome::NotApplicable(reason));
     }
-    let run = AssertUnwindSafe(|| execute(shape, orient, master_at, &steps, &case, audit));
+    let config = (shape, orient, master_at, span);
+    let run = AssertUnwindSafe(|| execute(config, &steps, &case, audit));
     let outcome = match catch_unwind(run) {
         Ok(outcome) => outcome,
         Err(_) => broken("run", "panic".to_owned()),
@@ -558,14 +599,12 @@ fn run_case(
 }
 
 fn execute(
-    shape: Shape,
-    orient: Orient,
-    master_at: MasterAt,
+    (shape, orient, master_at, span): Config,
     steps: &[Step],
     case: &str,
     audit: &mut Audit,
 ) -> Outcome {
-    let source = match package(sheet_xml(shape, orient, master_at)) {
+    let source = match package(sheet_xml(shape, orient, master_at, span)) {
         Ok(source) => source,
         Err(e) => return broken("build", e),
     };
@@ -651,12 +690,22 @@ impl Tally {
     }
 }
 
-fn configs() -> Vec<(Shape, Orient, MasterAt)> {
+impl Tally {
+    fn add(&mut self, other: &Tally) {
+        self.cases += other.cases;
+        self.failed += other.failed;
+        self.skipped += other.skipped;
+    }
+}
+
+type Config = (Shape, Orient, MasterAt, Span);
+
+fn configs(span: Span) -> Vec<Config> {
     let mut out = Vec::new();
     for shape in SHAPES {
         for orient in ORIENTS {
             for master_at in MASTERS {
-                out.push((shape, orient, master_at));
+                out.push((shape, orient, master_at, span));
             }
         }
     }
@@ -693,7 +742,7 @@ impl Audit {
 
     fn report(&self) {
         let (parts, violations) = (self.parts, self.violations.len());
-        println!("INVARIANT parts={parts} violations={violations}");
+        println!("\nINVARIANT parts={parts} violations={violations}");
         for violation in self.violations.iter().take(3) {
             println!("VIOLATION {violation}");
         }
@@ -880,47 +929,66 @@ fn shared_group_moved_past_its_ref_reopens_with_model_formulas() {
 fn shared_formulas_keep_their_formula_after_structural_edits() {
     let mut audit = Audit::default();
     let mut grid = Tally::default();
-    let edits = grid_edits();
-    for (shape, orient, master_at) in configs() {
-        for &only in &edits {
-            let (case, outcome) = run_case(shape, orient, master_at, &[only], &mut audit);
-            grid.record(&case, outcome);
-        }
-        for &first in &edits {
-            for &second in &edits {
-                let (case, outcome) =
-                    run_case(shape, orient, master_at, &[first, second], &mut audit);
-                grid.record(&case, outcome);
-            }
-        }
-    }
-    println!(
-        "GRID features={FEATURES} cases={} failed={} skipped={}",
-        grid.cases, grid.failed, grid.skipped
-    );
-
     let mut triples = Tally::default();
+    let edits = grid_edits();
     let pairs = [
         [Edit::InsertInside, Edit::DeleteGap],
         [Edit::DeleteGap, Edit::InsertInside],
     ];
-    for (shape, orient, master_at) in configs() {
-        if shape == Shape::Contiguous {
-            continue;
-        }
-        for pair in pairs {
-            for extra in EDITS {
-                for slot in 0..=2 {
-                    let mut edits = pair.to_vec();
-                    edits.insert(slot, extra);
-                    let (case, outcome) = run_case(shape, orient, master_at, &edits, &mut audit);
-                    triples.record(&case, outcome);
+    for span in SPANS {
+        let mut tally = Tally::default();
+        for config in configs(span) {
+            for &only in &edits {
+                let (case, outcome) = run_case(config, &[only], &mut audit);
+                tally.record(&case, outcome);
+            }
+            for &first in &edits {
+                for &second in &edits {
+                    let (case, outcome) = run_case(config, &[first, second], &mut audit);
+                    tally.record(&case, outcome);
                 }
             }
         }
+        println!(
+            "\nGRID tail={} cases={} failed={} skipped={}",
+            span.name(),
+            tally.cases,
+            tally.failed,
+            tally.skipped
+        );
+        grid.add(&tally);
+
+        let mut tally = Tally::default();
+        for config in configs(span) {
+            if config.0 == Shape::Contiguous && span == Span::Exact {
+                continue;
+            }
+            for pair in pairs {
+                for extra in EDITS {
+                    for slot in 0..=2 {
+                        let mut edits = pair.to_vec();
+                        edits.insert(slot, extra);
+                        let (case, outcome) = run_case(config, &edits, &mut audit);
+                        tally.record(&case, outcome);
+                    }
+                }
+            }
+        }
+        println!(
+            "\nTRIPLES tail={} cases={} failed={} skipped={}",
+            span.name(),
+            tally.cases,
+            tally.failed,
+            tally.skipped
+        );
+        triples.add(&tally);
     }
     println!(
-        "TRIPLES cases={} failed={} skipped={}",
+        "\nGRID features={FEATURES} cases={} failed={} skipped={}",
+        grid.cases, grid.failed, grid.skipped
+    );
+    println!(
+        "\nTRIPLES cases={} failed={} skipped={}",
         triples.cases, triples.failed, triples.skipped
     );
     audit.report();
