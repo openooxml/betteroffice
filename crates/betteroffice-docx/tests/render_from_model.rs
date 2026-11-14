@@ -358,6 +358,29 @@ fn a_document_one_attribute_past_the_default_limit_renders_as_the_saved_render_d
 }
 
 #[test]
+fn an_unreadable_paragraph_renders_as_the_saved_render_does() {
+    let document = open(&docx_with_body(concat!(
+        r#"<w:p w14:paraId="00000001" w14:textId="77777777"><w:r><w:t>Before</w:t></w:r></w:p>"#,
+        r#"<w:p w14:paraId="00000002" w14:textId="77777777"><w:ins w:id="100000000000000000000" w:author="Author" w:date="2024-01-01T00:00:00Z"><w:r><w:t>Inserted</w:t></w:r></w:ins></w:p>"#,
+    )));
+    let target = PngTarget { page: 0 };
+    let options = RenderOptions::default();
+    let saved = document.render_png_saved(target, &options);
+    assert!(
+        matches!(saved, Err(Error::Render(_))),
+        "unexpected saved render: {:?}",
+        saved.as_ref().err()
+    );
+    let before = model_renders();
+    let fast = document.render_png(target, &options);
+    assert_render_path(before, false, "an unreadable paragraph");
+    assert_eq!(
+        format!("{:?}", fast.as_ref().err()),
+        format!("{:?}", saved.as_ref().err())
+    );
+}
+
+#[test]
 fn an_out_of_range_page_fails_as_the_saved_render_does() {
     let mut document = open(&one_page_per_paragraph_docx(3, ""));
     for edited in [false, true] {
