@@ -50,8 +50,7 @@ enum Shift {
     Delete,
 }
 
-/// a slice of formula text; references name a sheet slot, so renames,
-/// deletions and row or column shifts rewrite them as the workbook would.
+/// a slice of formula text whose references name a sheet slot.
 #[derive(Debug, Clone)]
 enum Piece {
     Text(String),
@@ -263,8 +262,7 @@ impl Model {
         out
     }
 
-    /// the workbook this model describes; formula cells carry the value
-    /// `values` holds for their identity, as an edited workbook keeps them.
+    /// the workbook this model describes, formula cells carrying their `values` entry.
     fn render(&self, values: &HashMap<usize, CellValue>) -> Workbook {
         let mut wb = Workbook::default();
         for &slot in &self.order {
@@ -311,8 +309,7 @@ impl Model {
         values
     }
 
-    /// inserts or deletes row or column `index` of `slot`: cells there move,
-    /// and every reference into it moves, grows, shrinks or breaks.
+    /// inserts or deletes row or column `index` of `slot`, moving cells and references.
     fn shift(&mut self, slot: usize, axis: usize, index: u32, shift: Shift) {
         let cells = std::mem::take(&mut self.cells[slot]);
         self.cells[slot] = cells
@@ -368,10 +365,7 @@ impl Model {
     }
 }
 
-/// a workbook over four sheets whose shape and constants vary with `seed`:
-/// columns of shifted relative formulas, columns repeating one absolute
-/// text, chains, cross-sheet references and ranges, defined names, volatile
-/// calls, a cycle and a formula over the per-formula cap.
+/// a four-sheet workbook whose shape and constants vary with `seed`.
 fn generated(seed: u64) -> Model {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut draw = |bound: u64| -> u64 {
@@ -476,8 +470,7 @@ fn evaluation_order(graph: &DepGraph) -> Vec<Step> {
     topo_order(graph, &every)
 }
 
-/// panics unless both rebuilds hold the same graph, parse cache, evaluation
-/// order, recalc lists and workbook values.
+/// panics unless both rebuilds hold the same graph, caches, order and values.
 fn assert_same_rebuild(reused: &Rebuilt, fresh: &Rebuilt, label: &str) {
     let graphs = catch_unwind(AssertUnwindSafe(|| {
         reused.graph.assert_matches(&fresh.graph);
@@ -721,8 +714,7 @@ struct Edited {
 }
 
 impl Edited {
-    /// whether the reusing rebuild holds the very tree the previous graph
-    /// parsed for `source`.
+    /// whether the reusing rebuild holds the previous graph's tree for `source`.
     fn kept(&self, source: &str) -> bool {
         let asts = self
             .reused
@@ -737,8 +729,7 @@ impl Edited {
     }
 }
 
-/// recalculates `before`, applies `edit`, and rebuilds the result over the
-/// previous graph and from scratch, which must agree.
+/// rebuilds `before` after `edit` both over the previous graph and from scratch.
 fn rebuild_after(mut before: Workbook, edit: impl FnOnce(&mut Workbook), label: &str) -> Edited {
     let (previous, _) =
         rebuild_and_recalc_all_after(&mut before, None, Some(NOW_SERIAL), Some(RAND_SEED));
