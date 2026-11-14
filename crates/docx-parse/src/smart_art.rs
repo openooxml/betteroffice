@@ -303,7 +303,12 @@ fn collect_scene_shapes(
                 shape.geometry_path =
                     preset_geometry_to_path("straightConnector1", &HashMap::new(), 1.0);
             }
-            let paragraphs = parse_drawing_text_body(source.child_by_local_name("txBody"));
+            let font_color = source
+                .child_by_local_name("style")
+                .and_then(|style| style.child_by_local_name("fontRef"))
+                .and_then(|reference| crate::drawingml::parse_color_element(Some(reference)));
+            let paragraphs =
+                parse_drawing_text_body(source.child_by_local_name("txBody"), font_color.as_ref());
             if !paragraphs.is_empty() {
                 shape.text_body = Some(ShapeTextBody {
                     vertical: None,
@@ -325,25 +330,34 @@ fn collect_scene_shapes(
     }
 }
 
-fn parse_drawing_text_body(text_body: Option<&XmlElement>) -> Vec<serde_json::Value> {
+fn parse_drawing_text_body(
+    text_body: Option<&XmlElement>,
+    font_color: Option<&ColorValue>,
+) -> Vec<serde_json::Value> {
     let Some(text_body) = text_body else {
         return Vec::new();
     };
     text_body
         .child_elements()
         .filter(|child| child.local_name() == "p")
-        .filter_map(parse_drawing_text_paragraph)
+        .filter_map(|paragraph| parse_drawing_text_paragraph(paragraph, font_color))
         .collect()
 }
 
-fn parse_drawing_text_paragraph(paragraph: &XmlElement) -> Option<serde_json::Value> {
+fn parse_drawing_text_paragraph(
+    paragraph: &XmlElement,
+    font_color: Option<&ColorValue>,
+) -> Option<serde_json::Value> {
     let mut runs = Vec::new();
     for child in paragraph.child_elements() {
         match child.local_name() {
             "r" | "fld" => {
                 let text = collect_drawing_text(child, 0);
                 if !text.is_empty() {
-                    runs.push(drawing_run(&text, parse_drawing_run_formatting(child)));
+                    runs.push(drawing_run(
+                        &text,
+                        parse_drawing_run_formatting(child, font_color),
+                    ));
                 }
             }
             "br" => runs.push(drawing_run("\n", None)),
@@ -397,10 +411,18 @@ fn collect_drawing_text(parent: &XmlElement, depth: usize) -> String {
     text
 }
 
-fn parse_drawing_run_formatting(run: &XmlElement) -> Option<serde_json::Value> {
-    let properties = run.child_by_local_name("rPr")?;
+fn parse_drawing_run_formatting(
+    run: &XmlElement,
+    font_color: Option<&ColorValue>,
+) -> Option<serde_json::Value> {
     let mut formatting = serde_json::Map::new();
-    let mut property_count = 0;
+    if let Some(color) = font_color.and_then(|color| serde_json::to_value(color).ok()) {
+        formatting.insert("color".to_owned(), color);
+    }
+    let Some(properties) = run.child_by_local_name("rPr") else {
+        return (!formatting.is_empty()).then_some(serde_json::Value::Object(formatting));
+    };
+    let mut property_count = usize::from(!formatting.is_empty());
     if properties.parse_boolean_attribute(None, "b") == Some(true) {
         formatting.insert("bold".to_owned(), serde_json::json!(true));
         property_count += 1;
@@ -847,6 +869,51 @@ mod tests {
         .root()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn run_text_defaults_to_the_shape_style_font_color() {
+        let mut context = SmartArtContext::default();
+        context.parts.insert(
+            "word/diagrams/drawing1.xml".to_owned(),
+            br#"<dsp:drawing xmlns:dsp="dsp" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dsp:spTree><dsp:sp modelId="1"><dsp:nvSpPr><dsp:cNvPr id="1" name=""/><dsp:cNvSpPr/></dsp:nvSpPr><dsp:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm><a:prstGeom prst="rect"/></dsp:spPr><dsp:style><a:lnRef idx="0"><a:scrgbClr r="0" g="0" b="0"/></a:lnRef><a:fillRef idx="1"><a:scrgbClr r="0" g="0" b="0"/></a:fillRef><a:effectRef idx="0"><a:scrgbClr r="0" g="0" b="0"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></dsp:style><dsp:txBody><a:bodyPr/><a:p><a:r><a:rPr sz="2300"/><a:t>Styled</a:t></a:r><a:r><a:t>Bare</a:t></a:r><a:r><a:rPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:rPr><a:t>Own</a:t></a:r></a:p></dsp:txBody></dsp:sp></dsp:spTree></dsp:drawing>"#.to_vec(),
+        );
+        let relationships = RelationshipMap::from([(
+            "rId1".to_owned(),
+            Relationship {
+                id: "rId1".to_owned(),
+                relationship_type: "diagramData".to_owned(),
+                target: "diagrams/data1.xml".to_owned(),
+                target_mode: None,
+            },
+        )]);
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let shape = parse_smart_art_from_drawing(
+            &drawing(),
+            Some(&relationships),
+            Some(&MediaMap::new()),
+            Some(&mut context),
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+        let children = shape.children.unwrap();
+        let text_body = children[0].text_body.as_ref().unwrap();
+        let colors: Vec<_> = text_body.content[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|run| run["formatting"]["color"].clone())
+            .collect();
+        assert_eq!(
+            colors,
+            [
+                serde_json::json!({"themeColor": "lt1"}),
+                serde_json::json!({"themeColor": "lt1"}),
+                serde_json::json!({"rgb": "FF0000"}),
+            ]
+        );
     }
 
     #[test]
