@@ -24,11 +24,19 @@ pub(crate) struct FontRegistry {
     #[cfg(feature = "fonts")]
     resolved: HashSet<(String, Vec<String>)>,
     #[cfg(feature = "fonts")]
+    pub(crate) cjk_fallbacks: bool,
     views: HashMap<(ooxml_text::FontId, String), ooxml_text::FontId>,
     registrations: usize,
 }
 
 impl FontRegistry {
+    /// Ordered face chains keyed `family|bold|italic`, exactly as layout
+    /// resolved them. PDF text painting follows this order so application and
+    /// embedded aliases keep their priority over bundled faces.
+    pub(crate) fn chains(&self) -> &HashMap<String, Vec<ooxml_text::FontId>> {
+        &self.chains
+    }
+
     fn register(
         &mut self,
         family: &str,
@@ -41,6 +49,31 @@ impl FontRegistry {
             return Err(Error::Font("font family is empty".into()));
         }
         self.register_keyed(chain_key(family, bold, italic), bytes, priority)
+    }
+
+    /// Registers a provider fallback face for export without adding a chain.
+    ///
+    /// Applies the same per-font, registration-count, and distinct-face limits
+    /// as [`Self::register_keyed`], so a provider cannot bypass the facade's
+    /// resource contract through PDF export.
+    #[cfg(feature = "fonts")]
+    pub(crate) fn register_export_fallback(&mut self, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err(Error::ResourceLimit("font exceeds 33554432 bytes".into()));
+        }
+        if self.registrations >= 4_096 {
+            return Err(Error::ResourceLimit(
+                "more than 4096 font registrations".into(),
+            ));
+        }
+        if self.store.face_count() >= 256 && self.store.find_face(bytes).is_none() {
+            return Err(Error::ResourceLimit("more than 256 font faces".into()));
+        }
+        self.store
+            .register_slice(bytes)
+            .map_err(|error| Error::Font(error.to_string()))?;
+        self.registrations += 1;
+        Ok(())
     }
 
     /// Registers `bytes` into the chain under `key`, ahead of bundled faces for

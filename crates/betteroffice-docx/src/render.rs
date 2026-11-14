@@ -94,6 +94,19 @@ impl Document {
         if !options.scale.is_finite() || options.scale <= 0.0 {
             return Err(Error::Render("scale must be finite and positive".into()));
         }
+        let (display_list, fonts) = self.layout_display_list()?;
+        drop(fonts);
+        self.render_display_list_scaled(&display_list, target.page, options.scale)
+    }
+
+    /// Lays out the complete document and returns both the display list and the
+    /// locked font registry that produced its glyph runs.
+    pub(crate) fn layout_display_list(
+        &self,
+    ) -> Result<(
+        DisplayList,
+        std::sync::MutexGuard<'_, crate::font::FontRegistry>,
+    )> {
         let bytes = self.save()?;
         let package = docx_parse::parse_docx_s9_wire(
             &bytes,
@@ -151,8 +164,18 @@ impl Document {
             output["fontChains"] = serde_json::json!(chains);
             docx_layout::build_display_list_value(&output.to_string()).map_err(Error::Render)
         })?;
-        drop(fonts);
-        self.render_display_list_scaled(&display_list, target.page, options.scale)
+        Ok((display_list, fonts))
+    }
+
+    /// Image bytes registered by scoped relationship key. The key keeps the
+    /// owning part (`word/document.xml`, a header/footer part, or a notes part)
+    /// so a reused `rId5` never resolves to another part's media.
+    pub(crate) fn scoped_image_bytes(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+        self.images
+            .entries
+            .iter()
+            .map(|(key, bytes)| (key.clone(), bytes.clone()))
+            .collect()
     }
 
     /// Supplies bytes for one relationship id the display list left
