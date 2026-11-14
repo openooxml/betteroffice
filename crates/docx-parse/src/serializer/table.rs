@@ -1,5 +1,7 @@
 //! Table, row, cell, and table-property serializers.
 
+use std::collections::BTreeSet;
+
 use crate::borders::Borders;
 use crate::formatting::{
     CellMargins, FloatingTableProperties, TableCellFormatting, TableFormatting, TableLook,
@@ -38,9 +40,9 @@ pub fn serialize_table(
         writer.start_element("w:tblPr").end_element();
     }
     append_generated(&mut writer, &grid);
-    for row in &table.rows {
+    for (row, covered) in table.rows.iter().zip(covered_continuations(table)) {
         append_generated(&mut writer, &bookmarks(row.leading_bookmarks.as_deref())?);
-        append_generated(&mut writer, &serialize_table_row(row, context)?);
+        append_generated(&mut writer, &write_row(row, &covered, context)?);
     }
     append_generated(
         &mut writer,
@@ -48,6 +50,60 @@ pub fn serialize_table(
     );
     writer.end_element();
     Ok(writer.finish())
+}
+
+/// Per row, whether each cell continues a vertical merge restarted above its start column.
+fn covered_continuations(table: &Table) -> Vec<Vec<bool>> {
+    let mut active = BTreeSet::new();
+    table
+        .rows
+        .iter()
+        .map(|row| {
+            let mut column = row
+                .formatting
+                .as_ref()
+                .and_then(|formatting| formatting.grid_before)
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.0)
+                .clamp(0.0, f64::from(u16::MAX)) as usize;
+            let cells: Vec<_> = row
+                .cells
+                .iter()
+                .map(|cell| {
+                    let start = column;
+                    let formatting = cell.formatting.as_ref();
+                    let span = formatting.and_then(|formatting| formatting.grid_span);
+                    column = column.saturating_add(span.unwrap_or(1.0) as usize);
+                    let merge = formatting.and_then(|formatting| formatting.v_merge.as_deref());
+                    (start, merge)
+                })
+                .collect();
+            if !cells.is_empty()
+                && cells
+                    .iter()
+                    .all(|(start, merge)| *merge == Some("continue") && active.contains(start))
+            {
+                for (start, _) in &cells {
+                    active.remove(start);
+                }
+                return vec![false; cells.len()];
+            }
+            cells
+                .into_iter()
+                .map(|(start, merge)| match merge {
+                    Some("restart") => {
+                        active.insert(start);
+                        false
+                    }
+                    Some("continue") => active.contains(&start),
+                    _ => {
+                        active.remove(&start);
+                        false
+                    }
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Replays table-level bookmark boundaries, rejecting anything that is not one.
@@ -204,15 +260,24 @@ pub fn serialize_table_row(
     row: &TableRow,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    write_row(row, &[], context)
+}
+
+fn write_row(
+    row: &TableRow,
+    covered: &[bool],
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
     let properties = serialize_table_row_formatting(
         row.formatting.as_ref(),
         row.property_changes.as_deref(),
         row.structural_change.as_ref(),
     );
     let mut content = properties;
-    for cell in &row.cells {
+    for (index, cell) in row.cells.iter().enumerate() {
         content.push_str(&bookmarks(cell.leading_bookmarks.as_deref())?);
-        content.push_str(&serialize_table_cell(cell, context)?);
+        let covered = covered.get(index).copied().unwrap_or(false);
+        content.push_str(&write_cell(cell, covered, context)?);
     }
     content.push_str(&bookmarks(row.trailing_bookmarks.as_deref())?);
     let attributes = row_attributes(
@@ -286,6 +351,14 @@ pub fn serialize_table_cell(
     cell: &TableCell,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    write_cell(cell, false, context)
+}
+
+fn write_cell(
+    cell: &TableCell,
+    covered: bool,
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
     let properties = serialize_table_cell_formatting(
         cell.formatting.as_ref(),
         cell.property_changes.as_deref(),
@@ -294,17 +367,12 @@ pub fn serialize_table_cell(
     let mut writer = XmlWriter::with_capacity(512);
     writer.start_element("w:tc");
     append_generated(&mut writer, &properties);
-    let continuation = cell
-        .formatting
-        .as_ref()
-        .and_then(|formatting| formatting.v_merge.as_deref())
-        == Some("continue");
-    context.vmerge_continuation += u32::from(continuation);
+    context.vmerge_continuation += u32::from(covered);
     let content = cell.content.iter().try_for_each(|block| {
         append_generated(&mut writer, &serialize_block_content(block, context)?);
         Ok::<_, ParseError>(())
     });
-    context.vmerge_continuation -= u32::from(continuation);
+    context.vmerge_continuation -= u32::from(covered);
     content?;
     if cell.content.iter().all(crate::block::is_bookmark_block) {
         context.record_placeholder();
