@@ -898,6 +898,67 @@ mod tests {
         assert!(context.end_splice().unwrap().conflict);
     }
 
+    fn row_with_cell(formatting: serde_json::Value, ordinals: &[u32]) -> TableRow {
+        let content: Vec<_> = ordinals
+            .iter()
+            .map(|ordinal| {
+                serde_json::json!({"type": "paragraph", "sourceOrdinal": ordinal, "content": []})
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "type": "tableRow",
+            "cells": [
+                {"type": "tableCell", "formatting": formatting, "content": content},
+                {"type": "tableCell", "content": [
+                    {"type": "paragraph", "sourceOrdinal": 1, "content": []}
+                ]}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_planned_paragraph_in_a_merge_continuation_cell_is_still_recorded() {
+        let row = row_with_cell(serde_json::json!({"vMerge": "continue"}), &[7, 8]);
+        let mut context = context();
+        context.begin_splice([1, 7], None);
+        serialize_table_row(&row, &mut context).unwrap();
+        let recorded = context.end_splice().unwrap();
+        assert!(!recorded.conflict, "continuation cell set the splice conflict");
+        assert!(recorded.written.contains_key(&7), "planned paragraph not recorded");
+        assert!(recorded.written.contains_key(&1));
+        assert!(!recorded.written.contains_key(&8));
+        assert_eq!(recorded.order, [Some(7), Some(1)]);
+    }
+
+    #[test]
+    fn an_unplanned_paragraph_in_a_horizontally_spanned_cell_still_conflicts() {
+        let row = row_with_cell(serde_json::json!({"gridSpan": 2}), &[7]);
+        assert!(splice_conflict(&row), "gridSpan cell was exempt");
+    }
+
+    #[test]
+    fn a_parsed_merge_restart_cell_is_not_exempt_from_the_conflict() {
+        let limits = crate::xml::ParseLimits::default();
+        let properties = crate::xml::parse_xml(
+            br#"<w:tcPr xmlns:w="w"><w:vMerge w:val="restart"/></w:tcPr>"#,
+            "table.xml",
+            &mut crate::xml::ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let mut row = row_with_cell(serde_json::Value::Null, &[7]);
+        row.cells[0].formatting =
+            crate::table::parse_document_table_cell_properties(properties.root());
+        assert_eq!(
+            row.cells[0]
+                .formatting
+                .as_ref()
+                .and_then(|formatting| formatting.v_merge.as_deref()),
+            Some("restart")
+        );
+        assert!(splice_conflict(&row), "restart cell was exempt");
+    }
+
     #[test]
     fn row_grid_offsets_and_their_widths_survive_serialization() {
         let formatting = TableRowFormatting {

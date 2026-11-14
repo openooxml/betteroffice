@@ -236,6 +236,85 @@ fn editing_before_a_vertically_merged_cell_keeps_the_body_bytes() {
     assert_bytes_kept_around(&source, &saved, "0000004E", "New text");
 }
 
+fn assert_edit_before_table_keeps_the_body_bytes(table: &str) {
+    let source = main_part(
+        &[
+            paragraph("0000004E", &run("Old text")),
+            table.to_owned(),
+            paragraph("0000004D", &run("After.")),
+        ]
+        .concat(),
+    );
+    let saved = edit_and_save(&source, "0000004E", "New text");
+    assert_bytes_kept_around(&source, &saved, "0000004E", "New text");
+}
+
+#[test]
+fn editing_before_an_orphan_merge_continuation_keeps_its_paragraph_and_the_body_bytes() {
+    let rows = [
+        [
+            cell("<w:vMerge/>", &paragraph("0000005A", &run("Orphan"))),
+            cell(
+                r#"<w:vMerge w:val="restart"/>"#,
+                &paragraph("0000005B", &run("Top")),
+            ),
+        ]
+        .concat(),
+        [
+            cell("", &paragraph("0000005C", &run("Left"))),
+            cell("<w:vMerge/>", &paragraph("0000005D", &run("Covered"))),
+        ]
+        .concat(),
+    ];
+    assert_edit_before_table_keeps_the_body_bytes(&table(2, &rows));
+}
+
+#[test]
+fn editing_before_a_nested_table_in_a_merge_continuation_keeps_the_body_bytes() {
+    let nested = table(1, &[cell("", &paragraph("0000006A", &run("Inner")))]);
+    let rows = [
+        [
+            cell(
+                r#"<w:vMerge w:val="restart"/>"#,
+                &paragraph("0000006B", &run("Top")),
+            ),
+            cell("", &paragraph("0000006C", &run("B"))),
+        ]
+        .concat(),
+        [
+            cell(
+                "<w:vMerge/>",
+                &format!("{nested}{}", paragraph("0000006D", &run("Below"))),
+            ),
+            cell("", &paragraph("0000006E", &run("D"))),
+        ]
+        .concat(),
+    ];
+    assert_edit_before_table_keeps_the_body_bytes(&table(2, &rows));
+}
+
+#[test]
+fn explicit_and_bare_merge_continuations_both_keep_the_body_bytes() {
+    for merge in [r#"<w:vMerge w:val="continue"/>"#, "<w:vMerge/>"] {
+        let rows = [
+            [
+                cell(
+                    r#"<w:vMerge w:val="restart"/>"#,
+                    &paragraph("0000007A", &run("Top")),
+                ),
+                cell("", &paragraph("0000007B", &run("B"))),
+            ]
+            .concat(),
+            [
+                cell(merge, &paragraph("0000007C", &run("Covered"))),
+                cell("", &paragraph("0000007D", &run("D"))),
+            ]
+            .concat(),
+        ];
+        assert_edit_before_table_keeps_the_body_bytes(&table(2, &rows));
+    }
+}
+
 struct Generator(u64);
 
 impl Generator {
