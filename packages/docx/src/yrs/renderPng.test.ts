@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as enginePng from '../wasm/enginePng';
+import * as rustParse from '../docx/rustParseFacade';
 import { engineKind } from '../wasm/enginePng';
 import { resolveCompleteFontProvider } from '../layout/measure';
 import { createYrsSession, type YrsSession } from './index';
@@ -350,27 +351,28 @@ describe('YrsSession.renderPng source bytes', () => {
     try {
       session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'Quixotically ');
       await session.renderPng({ page: 0 });
+      const first = structuredClone(drawing.mock.calls[0]![0].page.primitives);
       await session.renderPng({ page: 0 });
       expect(drawing).toHaveBeenCalledTimes(2);
-      const [first, second] = drawing.mock.calls.map(([input]) => input.page.primitives);
-      expect(first!.length).toBeGreaterThan(0);
+      expect(first.length).toBeGreaterThan(0);
       expect(drawnText(first)).toContain('Quixotically');
-      expect(second).toEqual(first);
+      expect(drawing.mock.calls[1]![0].page.primitives).toEqual(first);
     } finally { drawing.mockRestore(); session.destroy(); }
   });
 
-  test('a package that cannot be opened leaves no source, and its export is refused', async () => {
+  test('a reopen that fails after the engine switched documents leaves an export that is refused', async () => {
     stubBrowser();
-    const session = await createYrsSession();
+    const session = await opened();
+    const decode = spyOn(rustParse, 'decodeS9EnvelopeValue');
     try {
-      const archive = new Uint8Array(rezipPartsToArrayBuffer(new Map([['readme.txt', toBytes('Archive contents')]])));
-      expect(() => session.openDocx(archive, true)).toThrow();
-      const materialize = spyOn(session, 'materializeDocx');
+      decode.mockImplementationOnce(() => { throw new TypeError('host decode failed'); });
+      expect(() => session.openDocx(scriptDocument(), true)).toThrow('host decode failed');
+      decode.mockRestore();
       const refused = await session.renderPng({ page: 0 }).then(() => undefined, (error: unknown) => error);
       expect(refused).toBeInstanceOf(Error);
-      expect((refused as Error).name).toBe('Error');
-      expect((refused as Error).message).toContain('renderPng needs a session opened from DOCX bytes');
-      expect(materialize).toHaveBeenCalledTimes(1);
-    } finally { session.destroy(); }
+      expect((refused as Error).name).toBe('PeerMetadataError');
+      expect((refused as Error & { code?: string }).code).toBe('source-mismatch');
+      expect((refused as Error).message).toContain('peer metadata retained source mismatch');
+    } finally { decode.mockRestore(); session.destroy(); }
   });
 });
