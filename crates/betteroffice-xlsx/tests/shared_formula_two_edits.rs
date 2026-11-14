@@ -36,7 +36,30 @@ enum Edit {
     DeleteGap,
     DeleteFollower,
     DeleteMaster,
+    #[cfg(feature = "unstable-track-moves")]
+    MoveHeadPastEnd,
+    #[cfg(feature = "unstable-track-moves")]
+    MoveGroupPastEnd,
 }
+
+/// One structural edit in 1-based lines along the edited axis.
+#[derive(Clone, Copy)]
+enum Step {
+    Insert(u32),
+    Delete(u32),
+    #[cfg(feature = "unstable-track-moves")]
+    Move {
+        at: u32,
+        count: u32,
+        before: u32,
+    },
+}
+
+const FEATURES: &str = if cfg!(feature = "unstable-track-moves") {
+    "moves"
+} else {
+    "default"
+};
 
 const SHAPES: [Shape; 3] = [Shape::Contiguous, Shape::OneGap, Shape::TwoGaps];
 const ORIENTS: [Orient; 2] = [Orient::Column, Orient::Row];
@@ -48,6 +71,14 @@ const EDITS: [Edit; 5] = [
     Edit::DeleteFollower,
     Edit::DeleteMaster,
 ];
+
+fn grid_edits() -> Vec<Edit> {
+    #[allow(unused_mut)]
+    let mut edits = EDITS.to_vec();
+    #[cfg(feature = "unstable-track-moves")]
+    edits.extend([Edit::MoveHeadPastEnd, Edit::MoveGroupPastEnd]);
+    edits
+}
 
 impl Shape {
     fn members(self) -> &'static [u32] {
@@ -104,15 +135,54 @@ impl Orient {
         }
     }
 
-    fn op(self, insert: bool, pos: u32) -> Op {
+    fn op(self, step: Step) -> Op {
         let sheet = SheetId(0);
-        let at = pos - 1;
         let count = 1;
-        match (self, insert) {
-            (Orient::Column, true) => Op::InsertRows { sheet, at, count },
-            (Orient::Column, false) => Op::DeleteRows { sheet, at, count },
-            (Orient::Row, true) => Op::InsertCols { sheet, at, count },
-            (Orient::Row, false) => Op::DeleteCols { sheet, at, count },
+        match (self, step) {
+            (Orient::Column, Step::Insert(pos)) => Op::InsertRows {
+                sheet,
+                at: pos - 1,
+                count,
+            },
+            (Orient::Column, Step::Delete(pos)) => Op::DeleteRows {
+                sheet,
+                at: pos - 1,
+                count,
+            },
+            (Orient::Row, Step::Insert(pos)) => Op::InsertCols {
+                sheet,
+                at: pos - 1,
+                count,
+            },
+            (Orient::Row, Step::Delete(pos)) => Op::DeleteCols {
+                sheet,
+                at: pos - 1,
+                count,
+            },
+            #[cfg(feature = "unstable-track-moves")]
+            (Orient::Column, Step::Move { at, count, before }) => Op::MoveRows {
+                sheet,
+                row: at - 1,
+                count,
+                before: before - 1,
+            },
+            #[cfg(feature = "unstable-track-moves")]
+            (Orient::Row, Step::Move { at, count, before }) => Op::MoveCols {
+                sheet,
+                col: at - 1,
+                count,
+                before: before - 1,
+            },
+        }
+    }
+
+    fn describe(self, step: Step) -> String {
+        match step {
+            Step::Insert(pos) | Step::Delete(pos) => self.line(pos),
+            #[cfg(feature = "unstable-track-moves")]
+            Step::Move { at, count, before } => {
+                format!("{} x{count} before {}", self.line(at), self.line(before))
+            }
         }
     }
 }
@@ -134,6 +204,10 @@ impl Edit {
             Edit::DeleteGap => "delete-gap",
             Edit::DeleteFollower => "delete-follower",
             Edit::DeleteMaster => "delete-master",
+            #[cfg(feature = "unstable-track-moves")]
+            Edit::MoveHeadPastEnd => "move-head-past-end",
+            #[cfg(feature = "unstable-track-moves")]
+            Edit::MoveGroupPastEnd => "move-group-past-end",
         }
     }
 }
@@ -294,8 +368,8 @@ impl Track {
         self.members.iter().flatten().copied().collect()
     }
 
-    /// The edit's line as `(insert, position)`, or why it does not apply now.
-    fn resolve(&self, edit: Edit) -> Result<(bool, u32), &'static str> {
+    /// The edit as a step on the current lines, or why it does not apply now.
+    fn resolve(&self, edit: Edit) -> Result<Step, &'static str> {
         let current = self.current();
         let master = self.members[self.master];
         let followers: Vec<u32> = self
@@ -306,12 +380,12 @@ impl Track {
             .filter_map(|(_, p)| *p)
             .collect();
         match edit {
-            Edit::InsertBefore => Ok((true, self.start)),
+            Edit::InsertBefore => Ok(Step::Insert(self.start)),
             Edit::InsertInside => current
                 .last()
                 .copied()
                 .filter(|&last| last > self.start)
-                .map(|last| (true, last))
+                .map(Step::Insert)
                 .ok_or("the range has a single line left"),
             Edit::DeleteGap => {
                 let reason = if self.shape == Shape::Contiguous {
@@ -321,7 +395,7 @@ impl Track {
                 };
                 (self.start..=self.end)
                     .find(|p| !current.contains(p))
-                    .map(|p| (false, p))
+                    .map(Step::Delete)
                     .ok_or(reason)
             }
             Edit::DeleteFollower => {
@@ -333,15 +407,45 @@ impl Track {
                         .or_else(|| followers.iter().copied().rev().find(|&p| p < m)),
                     None => followers.first().copied(),
                 };
-                pick.map(|p| (false, p)).ok_or("no follower left")
+                pick.map(Step::Delete).ok_or("no follower left")
             }
             Edit::DeleteMaster => master
-                .map(|p| (false, p))
+                .map(Step::Delete)
                 .ok_or("an earlier edit deleted the master"),
+            #[cfg(feature = "unstable-track-moves")]
+            Edit::MoveHeadPastEnd => Ok(Step::Move {
+                at: self.start,
+                count: 2,
+                before: self.end + 3,
+            }),
+            #[cfg(feature = "unstable-track-moves")]
+            Edit::MoveGroupPastEnd => Ok(Step::Move {
+                at: self.start,
+                count: self.end - self.start + 1,
+                before: self.end + 3,
+            }),
         }
     }
 
-    fn apply(&mut self, insert: bool, q: u32) {
+    fn apply(&mut self, step: Step) {
+        let (insert, q) = match step {
+            Step::Insert(q) => (true, q),
+            Step::Delete(q) => (false, q),
+            #[cfg(feature = "unstable-track-moves")]
+            Step::Move { at, count, before } => {
+                for p in self.members.iter_mut().flatten() {
+                    if *p >= at && *p < at + count {
+                        *p = before - count + (*p - at);
+                    } else if *p >= at + count && *p < before {
+                        *p -= count;
+                    }
+                }
+                let current = self.current();
+                self.start = current.iter().copied().min().unwrap_or(self.start);
+                self.end = current.iter().copied().max().unwrap_or(self.end);
+                return;
+            }
+        };
         for slot in &mut self.members {
             *slot = match *slot {
                 Some(p) if insert && p >= q => Some(p + 1),
@@ -414,6 +518,7 @@ fn run_case(
     orient: Orient,
     master_at: MasterAt,
     edits: &[Edit],
+    audit: &mut Audit,
 ) -> (String, Outcome) {
     let mut track = Track::new(shape, master_at);
     let mut steps = Vec::new();
@@ -421,10 +526,10 @@ fn run_case(
     let mut missing = None;
     for &edit in edits {
         match track.resolve(edit) {
-            Ok((insert, q)) => {
-                words.push(format!("{} {}", edit.name(), orient.line(q)));
-                track.apply(insert, q);
-                steps.push((insert, q));
+            Ok(step) => {
+                words.push(format!("{} {}", edit.name(), orient.describe(step)));
+                track.apply(step);
+                steps.push(step);
             }
             Err(reason) => {
                 words.push(format!("{} n/a", edit.name()));
@@ -444,7 +549,7 @@ fn run_case(
     if let Some(reason) = missing {
         return (case, Outcome::NotApplicable(reason));
     }
-    let run = AssertUnwindSafe(|| execute(shape, orient, master_at, &steps));
+    let run = AssertUnwindSafe(|| execute(shape, orient, master_at, &steps, &case, audit));
     let outcome = match catch_unwind(run) {
         Ok(outcome) => outcome,
         Err(_) => broken("run", "panic".to_owned()),
@@ -452,7 +557,14 @@ fn run_case(
     (case, outcome)
 }
 
-fn execute(shape: Shape, orient: Orient, master_at: MasterAt, steps: &[(bool, u32)]) -> Outcome {
+fn execute(
+    shape: Shape,
+    orient: Orient,
+    master_at: MasterAt,
+    steps: &[Step],
+    case: &str,
+    audit: &mut Audit,
+) -> Outcome {
     let source = match package(sheet_xml(shape, orient, master_at)) {
         Ok(source) => source,
         Err(e) => return broken("build", e),
@@ -475,17 +587,23 @@ fn execute(shape: Shape, orient: Orient, master_at: MasterAt, steps: &[(bool, u3
             };
         }
     }
-    for &(insert, q) in steps {
-        let op = orient.op(insert, q);
+    for &step in steps {
+        let op = orient.op(step);
         if let Err(e) = workbook.apply_ops(vec![op], CalculationOptions::default()) {
             return broken("apply", format!("{e:?}"));
         }
     }
-    let model = snapshot(&workbook);
+    finish(&workbook, case, audit)
+}
+
+/// Saves, audits the saved worksheets, reopens and compares every formula with the model.
+fn finish(workbook: &Workbook, case: &str, audit: &mut Audit) -> Outcome {
+    let model = snapshot(workbook);
     let saved = match workbook.save() {
         Ok(saved) => saved,
         Err(e) => return broken("save", format!("{e:?}")),
     };
+    audit.check(case, &saved);
     let reopened = match Workbook::open(&saved) {
         Ok(reopened) => snapshot(&reopened),
         Err(e) => return broken("reopen", format!("{e:?}")),
@@ -545,19 +663,239 @@ fn configs() -> Vec<(Shape, Orient, MasterAt)> {
     out
 }
 
+/// Every saved worksheet part checked so far and the shared-group violations found in them.
+#[derive(Default)]
+struct Audit {
+    parts: usize,
+    violations: Vec<String>,
+}
+
+impl Audit {
+    fn check(&mut self, case: &str, saved: &[u8]) {
+        let parts = match ooxml_opc::unzip_parts(saved) {
+            Ok(parts) => parts,
+            Err(e) => {
+                self.violations.push(format!("{case}: unzip {e}"));
+                return;
+            }
+        };
+        for (path, bytes) in parts {
+            if !path.starts_with("xl/worksheets/") || !path.ends_with(".xml") {
+                continue;
+            }
+            self.parts += 1;
+            let xml = String::from_utf8_lossy(&bytes);
+            for violation in shared_formula_violations(&xml) {
+                self.violations.push(format!("{case} {path}: {violation}"));
+            }
+        }
+    }
+
+    fn report(&self) {
+        let (parts, violations) = (self.parts, self.violations.len());
+        println!("INVARIANT parts={parts} violations={violations}");
+        for violation in self.violations.iter().take(3) {
+            println!("VIOLATION {violation}");
+        }
+    }
+}
+
+/// Every `<c>` whose `<f t="shared">` names an `si` must find exactly one master `<f>` with
+/// that `si` and a `ref`, and its own `r` must lie inside that `ref`.
+pub fn shared_formula_violations(xml: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut masters: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut members: Vec<(Option<String>, String)> = Vec::new();
+    let mut rest = xml;
+    while let Some((cell, body, after)) = next_element(rest, "c") {
+        rest = after;
+        let Some((formula, _, _)) = body.and_then(|body| next_element(body, "f")) else {
+            continue;
+        };
+        if attribute(formula, "t").as_deref() != Some("shared") {
+            continue;
+        }
+        let r = attribute(cell, "r");
+        let Some(si) = attribute(formula, "si") else {
+            violations.push(format!("{}: shared formula without si", show_r(&r)));
+            continue;
+        };
+        if let Some(reference) = attribute(formula, "ref") {
+            masters.entry(si.clone()).or_default().push(reference);
+        }
+        members.push((r, si));
+    }
+    for (r, si) in members {
+        let shown = show_r(&r);
+        let refs = masters.get(&si).map(Vec::as_slice).unwrap_or_default();
+        let [reference] = refs else {
+            violations.push(format!("{shown} si={si}: {} masters with a ref", refs.len()));
+            continue;
+        };
+        let Some(at) = r.as_deref().and_then(parse_a1) else {
+            violations.push(format!("{shown} si={si}: unreadable r"));
+            continue;
+        };
+        let Some((from, to)) = parse_range(reference) else {
+            violations.push(format!("{shown} si={si}: unreadable ref {reference}"));
+            continue;
+        };
+        let cols = from.0.min(to.0)..=from.0.max(to.0);
+        let rows = from.1.min(to.1)..=from.1.max(to.1);
+        if !cols.contains(&at.0) || !rows.contains(&at.1) {
+            violations.push(format!("{shown} si={si}: outside ref {reference}"));
+        }
+    }
+    violations
+}
+
+fn show_r(r: &Option<String>) -> String {
+    r.clone().unwrap_or_else(|| "<no r>".to_owned())
+}
+
+/// The next `<name ...>` element as (start-tag attributes, body if not self-closing, rest).
+fn next_element<'a>(text: &'a str, name: &str) -> Option<(&'a str, Option<&'a str>, &'a str)> {
+    let open = format!("<{name}");
+    let mut from = 0;
+    loop {
+        let start = from + text[from..].find(&open)?;
+        let after_name = start + open.len();
+        let next = text[after_name..].chars().next()?;
+        if !(next.is_ascii_whitespace() || next == '>' || next == '/') {
+            from = after_name;
+            continue;
+        }
+        let mut quote = None;
+        let mut tag_end = None;
+        for (i, ch) in text[after_name..].char_indices() {
+            match (quote, ch) {
+                (None, '"' | '\'') => quote = Some(ch),
+                (Some(q), _) if ch == q => quote = None,
+                (None, '>') => {
+                    tag_end = Some(after_name + i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let tag_end = tag_end?;
+        let tag = &text[after_name..tag_end];
+        if let Some(attrs) = tag.strip_suffix('/') {
+            return Some((attrs, None, &text[tag_end + 1..]));
+        }
+        let close = format!("</{name}>");
+        let body_start = tag_end + 1;
+        let body_end = body_start + text[body_start..].find(&close)?;
+        let body = &text[body_start..body_end];
+        return Some((tag, Some(body), &text[body_end + close.len()..]));
+    }
+}
+
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let mut rest = tag;
+    loop {
+        rest = rest.trim_start();
+        let eq = rest.find('=')?;
+        let key = rest[..eq].trim();
+        let value = rest[eq + 1..].trim_start();
+        let quote = value.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            return None;
+        }
+        let close = value[1..].find(quote)?;
+        if key == name {
+            return Some(value[1..1 + close].to_owned());
+        }
+        rest = &value[close + 2..];
+    }
+}
+
+/// `A1`-style address as 1-based (column, row), ignoring `$`.
+fn parse_a1(text: &str) -> Option<(u32, u32)> {
+    let text: String = text.chars().filter(|c| *c != '$').collect();
+    let split = text.find(|c: char| c.is_ascii_digit())?;
+    let (letters, digits) = text.split_at(split);
+    if letters.is_empty() || !letters.chars().all(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    let col = letters
+        .bytes()
+        .fold(0u32, |acc, b| acc * 26 + u32::from(b - b'A' + 1));
+    Some((col, digits.parse().ok()?))
+}
+
+fn parse_range(text: &str) -> Option<((u32, u32), (u32, u32))> {
+    match text.split_once(':') {
+        Some((from, to)) => Some((parse_a1(from)?, parse_a1(to)?)),
+        None => parse_a1(text).map(|at| (at, at)),
+    }
+}
+
+#[test]
+fn shared_formula_violations_flag_a_member_outside_its_ref() {
+    let inside = r#"<sheetData><row r="1"><c r="A1"><f t="shared" ref="A1:A4" si="0">1</f></c></row><row r="2"><c r="A2"><f t="shared" si="0"/></c></row><cols/></sheetData>"#;
+    assert!(shared_formula_violations(inside).is_empty());
+    let outside = r#"<c r="A2"><f t="shared" ref="A2:A5" si="0">1</f></c><c r="A6"><f t="shared" si="0"/></c><c r="B1"><f t="shared" si="1"/></c>"#;
+    assert_eq!(shared_formula_violations(outside).len(), 2);
+}
+
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn shared_group_moved_past_its_ref_reopens_with_model_formulas() {
+    let sheet = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="{main}"><sheetData>"#,
+            r#"<row r="1"><c r="A1"><f t="shared" ref="A1:A4" si="0">1</f><v>1</v></c></row>"#,
+            r#"<row r="2"><c r="A2"><f t="shared" si="0"/><v>1</v></c></row>"#,
+            r#"</sheetData></worksheet>"#,
+        ),
+        main = MAIN,
+    );
+    let mut workbook = Workbook::open(&package(sheet).unwrap()).unwrap();
+    let op = Op::MoveRows {
+        sheet: SheetId(0),
+        row: 0,
+        count: 2,
+        before: 6,
+    };
+    workbook
+        .apply_ops(vec![op], CalculationOptions::default())
+        .unwrap();
+    let mut audit = Audit::default();
+    let outcome = finish(&workbook, "move rows 1..2 before 7", &mut audit);
+    audit.report();
+    match outcome {
+        Outcome::Pass => {}
+        Outcome::NotApplicable(reason) => panic!("not applicable: {reason}"),
+        Outcome::Fail {
+            cell,
+            model,
+            reopened,
+        } => panic!("cell={cell} model={model} reopened={reopened}"),
+    }
+    assert!(audit.violations.is_empty(), "INVARIANT violations");
+}
+
 #[test]
 fn shared_formulas_keep_their_formula_after_structural_edits() {
+    let mut audit = Audit::default();
     let mut grid = Tally::default();
+    let edits = grid_edits();
     for (shape, orient, master_at) in configs() {
-        for first in EDITS {
-            for second in EDITS {
-                let (case, outcome) = run_case(shape, orient, master_at, &[first, second]);
+        for &only in &edits {
+            let (case, outcome) = run_case(shape, orient, master_at, &[only], &mut audit);
+            grid.record(&case, outcome);
+        }
+        for &first in &edits {
+            for &second in &edits {
+                let (case, outcome) =
+                    run_case(shape, orient, master_at, &[first, second], &mut audit);
                 grid.record(&case, outcome);
             }
         }
     }
     println!(
-        "GRID cases={} failed={} skipped={}",
+        "GRID features={FEATURES} cases={} failed={} skipped={}",
         grid.cases, grid.failed, grid.skipped
     );
 
@@ -575,7 +913,7 @@ fn shared_formulas_keep_their_formula_after_structural_edits() {
                 for slot in 0..=2 {
                     let mut edits = pair.to_vec();
                     edits.insert(slot, extra);
-                    let (case, outcome) = run_case(shape, orient, master_at, &edits);
+                    let (case, outcome) = run_case(shape, orient, master_at, &edits, &mut audit);
                     triples.record(&case, outcome);
                 }
             }
@@ -585,7 +923,9 @@ fn shared_formulas_keep_their_formula_after_structural_edits() {
         "TRIPLES cases={} failed={} skipped={}",
         triples.cases, triples.failed, triples.skipped
     );
+    audit.report();
 
     assert_eq!(grid.failed, 0, "GRID failures");
     assert_eq!(triples.failed, 0, "TRIPLES failures");
+    assert_eq!(audit.violations.len(), 0, "INVARIANT violations");
 }
