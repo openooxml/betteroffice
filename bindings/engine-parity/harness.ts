@@ -21,6 +21,15 @@ export interface RowExpectation {
   /** `message`, when set, must be contained in (string) or match (RegExp) the error message. */
   throws?: { name: string; reason: string; message?: string | RegExp };
   voidReason?: string;
+  /** Values each engine generates itself, compared by shape instead of by value. */
+  masked?: readonly MaskedPath[];
+}
+
+export interface MaskedPath {
+  /** Dotted keys into the returned value. */
+  path: string;
+  /** Throws when the value has the wrong shape; returns the part both engines must still agree on. */
+  shape: (value: unknown) => unknown;
 }
 
 export interface Row<T> extends RowExpectation {
@@ -123,6 +132,31 @@ interface Observation {
   saved?: Outcome;
 }
 
+function replaceAt(value: unknown, keys: readonly string[], replace: (leaf: unknown) => unknown, where: string): unknown {
+  if (keys.length === 0) return replace(value);
+  const [key, ...rest] = keys as [string, ...string[]];
+  if (value === null || typeof value !== 'object' || !Object.hasOwn(value, key)) throw new Error(`${where}: no value at the masked path`);
+  const copy: Record<string, unknown> = Array.isArray(value) ? [...value] as unknown as Record<string, unknown> : { ...value };
+  copy[key] = replaceAt((value as Record<string, unknown>)[key], rest, replace, where);
+  return copy;
+}
+
+function maskedOutcome(row: RowExpectation, side: string, outcome: unknown): unknown {
+  if (!row.masked || outcome === null || typeof outcome !== 'object' || !('value' in outcome)) return outcome;
+  let { value } = outcome;
+  for (const { path, shape } of row.masked) {
+    const where = `${rowName(row)}: ${side} ${path}`;
+    value = replaceAt(value, path.split('.'), (leaf) => {
+      try {
+        return { masked: path, kept: shape(leaf) };
+      } catch (error) {
+        throw new Error(`${where}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }, where);
+  }
+  return { value };
+}
+
 async function observe<T>(row: Row<T>, engine: EngineHandle<T>, side: string): Promise<Observation> {
   try {
     const setup = await capture(() => row.setup?.(engine.target));
@@ -130,9 +164,10 @@ async function observe<T>(row: Row<T>, engine: EngineHandle<T>, side: string): P
     const before = engine.generated();
     const outcome = await capture(() => row.call(engine.target, setup.value as never));
     const generated = [...before, ...engine.generated()];
-    if (!row.mutates) return { outcome: await normalized(outcome, generated) };
+    const observed = maskedOutcome(row, side, await normalized(outcome, generated));
+    if (!row.mutates) return { outcome: observed };
     const saved = await capture(() => engine.save());
-    return { outcome: await normalized(outcome, generated), saved: await normalized(saved, generated) as Outcome };
+    return { outcome: observed, saved: await normalized(saved, generated) as Outcome };
   } finally {
     engine.free();
   }
