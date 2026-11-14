@@ -8,7 +8,7 @@ use crate::deck::{
     slide_shape_order, string_array_ref,
 };
 use crate::proposal_diff::story_owner;
-use crate::story_owners::LookupCounts;
+use crate::story_owners::{LookupCounts, find_path};
 use crate::{DeckSession, EditCtx, EditError, SHAPES, ShapeDraft, ShapeRect, TextStyle};
 
 struct SplitMix(u64);
@@ -401,4 +401,37 @@ fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
     assert!(totals.hits > 0, "{totals:?}");
     assert!(totals.rejected > 0, "{totals:?}");
     assert!(totals.none > 0, "{totals:?}");
+}
+
+#[test]
+fn the_lookup_search_finds_the_strict_walk_owner_on_undamaged_generated_decks() {
+    let mut compared = 0_usize;
+    let mut owned = 0_usize;
+    for seed in 1..=50_u64 {
+        let local = empty_session(41);
+        let peer = empty_session(42);
+        let mut rng = SplitMix(seed);
+        grouped_deck(&local);
+        let mut seen = BTreeSet::new();
+        let mut stories = Vec::new();
+        discover(&local, &mut seen, &mut stories);
+        for round in 1..=200 {
+            if step(&mut rng, &local, &peer, &stories) {
+                discover(&local, &mut seen, &mut stories);
+            }
+            if round % 20 != 0 {
+                continue;
+            }
+            let txn = local.doc.transact();
+            for story in &stories {
+                let walked = story_owner(&txn, story).unwrap();
+                let searched = find_path(&txn, story).and_then(|path| path.owner());
+                assert_eq!(searched, walked, "seed {seed} round {round} story {story}");
+                compared += 1;
+                owned += usize::from(walked.is_some());
+            }
+        }
+    }
+    println!("\nstories compared: {compared}, with an owner: {owned}");
+    assert!(owned > 0 && owned < compared);
 }
