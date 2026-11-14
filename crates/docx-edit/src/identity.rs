@@ -5519,6 +5519,15 @@ mod tests {
     }
 
     #[test]
+    fn combined_draws_span_the_full_64_bit_range() {
+        assert!(combine_draws(0.999_999_999, 0.999_999_999) >= 1u64 << 53);
+        assert_eq!(combine_draws(0.0, 0.0), 0);
+        assert_eq!(combine_draws(0.5, 0.0), 1u64 << 63);
+        assert_eq!(combine_draws(0.0, 0.5), 1u64 << 31);
+        assert_eq!(combine_draws(1.0 - f64::EPSILON, 1.0 - f64::EPSILON), u64::MAX);
+    }
+
+    #[test]
     fn cached_save_plans_match_fresh_states_across_edits_undo_and_remote_updates() {
         let doc = save_plan_doc();
         save_plans_agree(&doc);
