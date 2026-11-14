@@ -7,7 +7,8 @@ const SHEET_PART: &str = "xl/worksheets/sheet1.xml";
 const OTHER_SQREF: &str = "C1:C5";
 const OTHER_GROUP: &str = r#"<conditionalFormatting sqref="C1:C5"><cfRule type="expression" dxfId="0" priority="2"><formula>Data!$B$2&gt;0</formula></cfRule></conditionalFormatting>"#;
 const EXT_FORMULA_RULE: &str = r#"<cfRule type="expression" dxfId="0" priority="1"><formula>Data!$A$1&gt;0</formula><extLst><ext uri="{X}"><y:formula>Data!$B$1</y:formula></ext></extLst></cfRule>"#;
-const SECOND_RULE: &str = r#"<cfRule type="expression" dxfId="0" priority="3"><formula>$A$1&gt;1</formula></cfRule>"#;
+const SECOND_RULE: &str =
+    r#"<cfRule type="expression" dxfId="0" priority="3"><formula>$A$1&gt;1</formula></cfRule>"#;
 
 #[derive(Clone, Copy, Debug)]
 enum Placement {
@@ -188,9 +189,7 @@ fn nested_rule(placement: Placement, prefixed: bool, nested: Nested, payload: bo
         .map_or(parts.len(), |at| at + 1);
     let body: String = parts.iter().map(|part| part.xml.as_str()).collect();
     Fixture {
-        xml: format!(
-            r#"<cfRule type="expression" dxfId="0" priority="1">{body}</cfRule>"#
-        ),
+        xml: format!(r#"<cfRule type="expression" dxfId="0" priority="1">{body}</cfRule>"#),
         main_prefix: values(&parts[..split]),
         suffix: values(&parts[split..]),
     }
@@ -453,7 +452,11 @@ fn rule_formulas(wb: &Workbook) -> Vec<String> {
 // one line per rule the model read, compared across trees outside the test
 fn print_reading(case: &str, wb: &Workbook) {
     let groups = &wb.model().sheets[0].conditional_formats;
-    println!("READ case={case} groups={} rules={}", groups.len(), model_rule_count(wb));
+    println!(
+        "READ case={case} groups={} rules={}",
+        groups.len(),
+        model_rule_count(wb)
+    );
     for (g, group) in groups.iter().enumerate() {
         for (r, rule) in group.rules.iter().enumerate() {
             println!(
@@ -642,7 +645,13 @@ fn conditional_format_rule_with_nested_elements_is_kept_on_save() {
     assert_eq!(first.main_prefix, order.map(str::to_owned).to_vec());
     assert!(first.suffix.is_empty(), "suffix {:?}", first.suffix);
     total += 1;
-    failures.extend(grid_case(Placement::ExtraFirst, true, Nested::Dxf, true, Edit::None));
+    failures.extend(grid_case(
+        Placement::ExtraFirst,
+        true,
+        Nested::Dxf,
+        true,
+        Edit::None,
+    ));
     failures.sort_by_key(String::len);
     let failed = failures.len();
     let shortest = failures.iter().take(10).cloned().collect::<Vec<_>>();
@@ -710,7 +719,10 @@ fn nested_group_case(case: &str, first: &str, second: &str) -> Vec<String> {
         .and_then(|group| group.rules.first())
         .and_then(|rule| rule.raw_xml.clone());
     if raw.as_deref() != Some(first) {
-        problems.push(format!("rule 1 raw xml read as {:?}", raw.map(|text| trim(&text))));
+        problems.push(format!(
+            "rule 1 raw xml read as {:?}",
+            raw.map(|text| trim(&text))
+        ));
     }
     if let Err(error) = wb.apply_ops(vec![add("E1:E5")], CalculationOptions::default()) {
         problems.push(format!("op refused {}", trim(&format!("{error:?}"))));
@@ -733,7 +745,9 @@ fn nested_group_case(case: &str, first: &str, second: &str) -> Vec<String> {
     }
     let (count, texts) = outer_rules(&part);
     if model != 4 || count != model {
-        problems.push(format!("model rules={model} saved cfRule={count}, expected 4"));
+        problems.push(format!(
+            "model rules={model} saved cfRule={count}, expected 4"
+        ));
     }
     if !texts.contains(&first) {
         problems.push("rule 1 not saved byte-equal".to_owned());
@@ -760,7 +774,10 @@ fn nested_conditional_formatting_tag_in_a_rule_keeps_the_group_open() {
         let first = format!(
             r#"<cfRule type="expression" dxfId="0" priority="1"><formula>$B$1&gt;0</formula><extLst><ext uri="{{X}}"><{p}conditionalFormatting/></ext></extLst></cfRule>"#
         );
-        let case = format!("nested-group,prefix={}", if prefixed { "x14" } else { "none" });
+        let case = format!(
+            "nested-group,prefix={}",
+            if prefixed { "x14" } else { "none" }
+        );
         let problems = std::panic::catch_unwind(|| nested_group_case(&case, &first, SECOND_RULE))
             .unwrap_or_else(|_| vec!["panicked".to_owned()]);
         if !problems.is_empty() {
