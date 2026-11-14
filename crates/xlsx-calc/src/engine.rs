@@ -221,6 +221,7 @@ pub fn recalc_all_kept(
 }
 
 /// [`rebuild_and_recalc_all_after`] leaving `previous` intact and recording no evaluations.
+#[cfg(feature = "test-counters")]
 #[doc(hidden)]
 pub fn rebuild_and_recalc_all_beside(
     wb: &mut Workbook,
@@ -228,7 +229,7 @@ pub fn rebuild_and_recalc_all_beside(
     now_serial: Option<f64>,
     rand_seed: Option<u32>,
 ) -> (DepGraph, RecalcResult) {
-    let tracked = pause_evaluation_tracking();
+    let tracked = EVALUATED_FORMULAS.with(|cells| cells.borrow_mut().take());
     let mut graph = DepGraph::build(wb);
     if let Some(previous) = previous {
         graph.adopt_answered(previous);
@@ -240,27 +241,28 @@ pub fn rebuild_and_recalc_all_beside(
     };
     let result = run_recalc(wb, &graph, recompute, context, None);
     graph.refresh_spills(wb);
-    resume_evaluation_tracking(tracked);
+    EVALUATED_FORMULAS.with(|cells| *cells.borrow_mut() = tracked);
     (graph, result)
 }
 
-/// how full recalculations over `kept` and a fresh build differ: graph, order, and cells by bits.
+/// how full recalculations over `kept` and a fresh build differ; `evaluated` adds what runs decide.
+#[cfg(feature = "test-counters")]
 #[doc(hidden)]
 pub fn full_recalculation_difference(
     kept: (&Workbook, &DepGraph),
     fresh: (&Workbook, &DepGraph),
-    values: bool,
+    evaluated: bool,
 ) -> Option<String> {
     let ((kept_wb, kept), (fresh_wb, fresh)) = (kept, fresh);
-    if let Some(part) = kept.structural_difference(fresh) {
+    if let Some(part) = kept.structural_difference(fresh, evaluated) {
         return Some(format!("the graphs differ in their {part}"));
+    }
+    if !evaluated {
+        return None;
     }
     let every: HashSet<Key> = kept.formula_cells().map(|(s, c)| key(s, c)).collect();
     if topo_order(kept, &every) != topo_order(fresh, &every) {
         return Some("the evaluation orders differ".to_owned());
-    }
-    if !values {
-        return None;
     }
     if kept_wb.sheets.len() != fresh_wb.sheets.len() {
         return Some("the sheet counts differ".to_owned());
@@ -286,6 +288,7 @@ pub fn full_recalculation_difference(
     None
 }
 
+#[cfg(feature = "test-counters")]
 fn same_cell(left: &xlsx_model::Cell, right: &xlsx_model::Cell) -> bool {
     let value = match (&left.value, &right.value) {
         (CellValue::Number { value: left }, CellValue::Number { value: right }) => {
@@ -295,24 +298,6 @@ fn same_cell(left: &xlsx_model::Cell, right: &xlsx_model::Cell) -> bool {
     };
     value && left.formula == right.formula
 }
-
-#[cfg(feature = "test-counters")]
-fn pause_evaluation_tracking() -> Option<Vec<(SheetId, CellRef)>> {
-    EVALUATED_FORMULAS.with(|cells| cells.borrow_mut().take())
-}
-
-#[cfg(not(feature = "test-counters"))]
-fn pause_evaluation_tracking() -> Option<Vec<(SheetId, CellRef)>> {
-    None
-}
-
-#[cfg(feature = "test-counters")]
-fn resume_evaluation_tracking(tracked: Option<Vec<(SheetId, CellRef)>>) {
-    EVALUATED_FORMULAS.with(|cells| *cells.borrow_mut() = tracked);
-}
-
-#[cfg(not(feature = "test-counters"))]
-fn resume_evaluation_tracking(_tracked: Option<Vec<(SheetId, CellRef)>>) {}
 
 /// marks what a recalculation would leave unevaluated on a graph built over
 /// values no recalculation over it produced, writing nothing: each formula

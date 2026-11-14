@@ -477,6 +477,7 @@ struct GraphReuse {
 }
 
 /// A full recalculation of a copy of the model over a graph built afresh.
+#[cfg(test)]
 struct FreshRecalculation {
     model: WorkbookModel,
     graph: DepGraph,
@@ -4303,11 +4304,11 @@ impl Workbook {
         result
     }
 
-    /// Keeps a current graph; debug builds check a kept one against a fresh build.
+    /// Keeps a current graph; tests check a kept one against a fresh build.
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
         let keep = self.graph_current();
-        let fresh = (keep && cfg!(any(test, debug_assertions)))
-            .then(|| self.fresh_full_recalculation(options));
+        #[cfg(test)]
+        let fresh = keep.then(|| self.fresh_full_recalculation(options));
         self.bump_model_epoch();
         self.recalculated_since_open = true;
         self.calculations_since_open = self.calculations_since_open.saturating_add(1);
@@ -4338,6 +4339,7 @@ impl Workbook {
         self.mark_graph_current();
         self.dirty_geometry_cells(&result.changed);
         let result = calculation_result(&result);
+        #[cfg(test)]
         if let Some(fresh) = &fresh
             && let Some(difference) = self.fresh_difference(fresh, &result, options)
         {
@@ -4384,6 +4386,7 @@ impl Workbook {
         self.fresh_difference(&fresh, &result, options)
     }
 
+    #[cfg(test)]
     fn fresh_full_recalculation(&self, options: CalculationOptions) -> FreshRecalculation {
         let mut model = self.model.clone();
         let (graph, result) = xlsx_calc::engine::rebuild_and_recalc_all_beside(
@@ -4399,7 +4402,8 @@ impl Workbook {
         }
     }
 
-    /// Values and result lists count only when no clock or random draw tells the runs apart.
+    /// What evaluation decides counts only when no clock or random draw tells the runs apart.
+    #[cfg(test)]
     fn fresh_difference(
         &self,
         fresh: &FreshRecalculation,
@@ -4407,15 +4411,15 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Option<String> {
         let graph = self.graph.as_ref()?;
-        let values = (options.now_serial.is_some() && self.rand_seed.is_some())
+        let evaluated = (options.now_serial.is_some() && self.rand_seed.is_some())
             || graph.volatile_cells().next().is_none();
         xlsx_calc::engine::full_recalculation_difference(
             (&self.model, graph),
             (&fresh.model, &fresh.graph),
-            values,
+            evaluated,
         )
         .or_else(|| {
-            (values && calculation_result(&fresh.result) != *result)
+            (evaluated && calculation_result(&fresh.result) != *result)
                 .then(|| "the result lists differ".to_owned())
         })
     }

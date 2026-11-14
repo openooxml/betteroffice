@@ -785,9 +785,10 @@ impl DepGraph {
         true
     }
 
-    /// the first part differing from `other`, parse cache and unevaluated list aside.
+    /// the first part differing from `other`; spills, answers and currency only when `evaluated`.
+    #[cfg(feature = "test-counters")]
     #[doc(hidden)]
-    pub fn structural_difference(&self, other: &Self) -> Option<&'static str> {
+    pub fn structural_difference(&self, other: &Self, evaluated: bool) -> Option<&'static str> {
         let nodes = self.deps.len() != other.deps.len()
             || self.deps.iter().any(|(key, entry)| {
                 other
@@ -818,10 +819,12 @@ impl DepGraph {
             ("volatile cells", self.volatile != other.volatile),
             (
                 "spills",
-                self.spills != other.spills || self.spills_by_sheet != other.spills_by_sheet,
+                evaluated
+                    && (self.spills != other.spills
+                        || self.spills_by_sheet != other.spills_by_sheet),
             ),
-            ("answers", answers),
-            ("currency evidence", currency),
+            ("answers", evaluated && answers),
+            ("currency evidence", evaluated && currency),
         ]
         .into_iter()
         .find_map(|(part, differs)| differs.then_some(part))
