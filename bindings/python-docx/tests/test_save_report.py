@@ -149,7 +149,7 @@ def test_the_report_bytes_are_the_save_bytes_with_options(
     if edit is not None:
         document.replace_text(edit, "Edited")
     options = {
-        "now": "2026-01-02T03:04:05Z",
+        "now": "2026-01-02T03:04:05.000Z",
         "update_modified_date": True,
         "modified_by": "Reviewer",
     }

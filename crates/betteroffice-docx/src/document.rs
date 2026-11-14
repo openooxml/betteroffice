@@ -37,7 +37,7 @@ use docx_parse::s9::{
 };
 use docx_parse::serializer::paragraph_ids::{S13TouchedPart, S13WholePart};
 use docx_parse::serializer::{
-    S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SaveOptions, S13SaveRequest,
+    S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SaveOptions, S13SaveReport, S13SaveRequest,
     S13SpliceAnchor, S13SplicedPart, SerializerDeterminism, write_docx_s13_parts_with_report,
 };
 use docx_parse::table::Table;
@@ -536,19 +536,7 @@ impl Document {
         session_save_tests::count_package_write();
         let (bytes, report) =
             write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
-        let structure = report
-            .kept_unchanged
-            .values()
-            .fold(0u32, |sum, count| sum.saturating_add(*count));
-        Ok(SaveReport {
-            bytes,
-            kept_unchanged: (structure > 0).then_some(KeptUnchanged {
-                structure,
-                paragraphs: report.kept_paragraphs,
-            }),
-            structure_dropped: (!report.structure_dropped.is_empty())
-                .then_some(report.structure_dropped),
-        })
+        Ok(save_report(bytes, report))
     }
 
     /// The editing session's paragraph save plan for the current model, as the
@@ -1273,6 +1261,106 @@ fn find_paragraph_mut<'a>(
 
 fn utf16_len(text: &str) -> u32 {
     text.encode_utf16().count() as u32
+}
+
+fn save_report(bytes: Vec<u8>, report: S13SaveReport) -> SaveReport {
+    let structure = report
+        .kept_unchanged
+        .values()
+        .fold(0u32, |sum, count| sum.saturating_add(*count));
+    SaveReport {
+        bytes,
+        kept_unchanged: (structure > 0).then_some(KeptUnchanged {
+            structure,
+            paragraphs: report.kept_paragraphs,
+        }),
+        structure_dropped: (!report.structure_dropped.is_empty())
+            .then_some(report.structure_dropped),
+    }
+}
+
+#[cfg(test)]
+mod save_report_tests {
+    use std::collections::BTreeMap;
+
+    use docx_parse::serializer::{DroppedStructure, KeptParagraph, S13SaveReport};
+
+    use super::save_report;
+
+    fn kept(part: &str, ordinal: u32) -> KeptParagraph {
+        KeptParagraph {
+            part: part.to_owned(),
+            ordinal,
+            para_id: None,
+            text: format!("{part} {ordinal}"),
+            scope: "paragraph".to_owned(),
+            dropped: vec!["w:smartTag".to_owned()],
+        }
+    }
+
+    fn dropped(part: &str) -> DroppedStructure {
+        DroppedStructure {
+            part: part.to_owned(),
+            dropped: vec!["w:customXml".to_owned()],
+            paragraphs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn kept_counts_of_every_part_are_summed_and_paragraphs_keep_their_order() {
+        let report = save_report(
+            vec![1, 2, 3],
+            S13SaveReport {
+                warnings: vec!["ignored".to_owned()],
+                kept_unchanged: BTreeMap::from([
+                    ("word/document.xml".to_owned(), 3),
+                    ("word/header1.xml".to_owned(), 2),
+                ]),
+                kept_paragraphs: vec![
+                    kept("word/header1.xml", 4),
+                    kept("word/document.xml", 0),
+                    kept("word/document.xml", 7),
+                ],
+                structure_dropped: vec![dropped("word/footer1.xml"), dropped("word/document.xml")],
+            },
+        );
+        assert_eq!(report.bytes, [1, 2, 3]);
+        let kept_unchanged = report.kept_unchanged.expect("kept is reported");
+        assert_eq!(kept_unchanged.structure, 5);
+        let order: Vec<_> = kept_unchanged
+            .paragraphs
+            .iter()
+            .map(|paragraph| (paragraph.part.as_str(), paragraph.ordinal))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("word/header1.xml", 4),
+                ("word/document.xml", 0),
+                ("word/document.xml", 7),
+            ]
+        );
+        let parts: Vec<_> = report
+            .structure_dropped
+            .expect("dropped structure is reported")
+            .into_iter()
+            .map(|structure| structure.part)
+            .collect();
+        assert_eq!(parts, ["word/footer1.xml", "word/document.xml"]);
+    }
+
+    #[test]
+    fn nothing_kept_or_dropped_is_none() {
+        let report = save_report(
+            Vec::new(),
+            S13SaveReport {
+                kept_unchanged: BTreeMap::from([("word/document.xml".to_owned(), 0)]),
+                ..S13SaveReport::default()
+            },
+        );
+        assert!(report.kept_unchanged.is_none());
+        assert!(report.structure_dropped.is_none());
+    }
 }
 
 #[cfg(feature = "fonts")]

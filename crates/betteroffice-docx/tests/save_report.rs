@@ -1,7 +1,4 @@
-use betteroffice_docx::{
-    Document, DroppedParagraph, DroppedStructure, KeptParagraph, KeptUnchanged, SaveOptions,
-    SaveReport,
-};
+use betteroffice_docx::{Document, DroppedStructure, SaveOptions, SaveReport};
 
 const DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n";
 const NAMESPACES: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
@@ -121,7 +118,7 @@ fn one_edited_paragraph_with_options_reports_the_bytes_save_with_options_writes(
         .replace_paragraph_text("0000000D", "Delta edited.")
         .unwrap();
     let options = SaveOptions {
-        now: "2026-01-02T03:04:05Z".to_owned(),
+        now: "2026-01-02T03:04:05.000Z".to_owned(),
         ..SaveOptions::default()
     };
     let report = document.save_report_with_options(options.clone()).unwrap();
@@ -143,7 +140,7 @@ fn a_whole_write_with_options_reports_the_bytes_save_with_options_writes() {
     let mut document = open();
     document.replace_paragraph_text("0000000E", "X").unwrap();
     let options = SaveOptions {
-        now: "2026-01-02T03:04:05Z".to_owned(),
+        now: "2026-01-02T03:04:05.000Z".to_owned(),
         update_modified_date: true,
         modified_by: None,
     };
@@ -201,38 +198,4 @@ fn a_whole_write_in_the_save_plan_reports_the_structure_it_drops() {
             (1, "0000000B", "Tagged", &custom_xml[..]),
         ]
     );
-}
-
-#[test]
-fn the_report_types_carry_the_wasm_fields() {
-    let kept = KeptUnchanged {
-        structure: 1,
-        paragraphs: vec![KeptParagraph {
-            part: MAIN.to_owned(),
-            ordinal: 1,
-            para_id: Some("0000000B".to_owned()),
-            text: "Near Ancient".to_owned(),
-            scope: "paragraph".to_owned(),
-            dropped: vec!["w:smartTag".to_owned()],
-        }],
-    };
-    let dropped = DroppedStructure {
-        part: MAIN.to_owned(),
-        dropped: vec!["w:smartTag".to_owned()],
-        paragraphs: vec![DroppedParagraph {
-            ordinal: 1,
-            para_id: "0000000B".to_owned(),
-            text: "Near Ancient".to_owned(),
-            dropped: vec!["w:smartTag".to_owned()],
-        }],
-    };
-    let report = SaveReport {
-        bytes: Vec::new(),
-        kept_unchanged: Some(kept),
-        structure_dropped: Some(vec![dropped]),
-    };
-    let kept = report.kept_unchanged.as_ref().unwrap();
-    assert_eq!(kept.structure, 1u32);
-    assert_eq!(kept.paragraphs[0].scope, "paragraph");
-    assert_eq!(report.structure_dropped.as_ref().unwrap()[0].paragraphs[0].ordinal, 1u32);
 }
