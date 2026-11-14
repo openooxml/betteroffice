@@ -1065,8 +1065,7 @@ mod tests {
         assert_eq!(halves, ["Ent", "ry 1"]);
     }
 
-    #[test]
-    fn ordinary_body_typing_checks_only_toc_paragraph_sizes() {
+    fn toc_package(count: usize) -> Vec<u8> {
         let styles = concat!(
             r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
             r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="20"/></w:rPr>"#,
@@ -1077,35 +1076,49 @@ mod tests {
             r#"<w:style w:type="character" w:styleId="Hyperlink">"#,
             r#"<w:rPr><w:sz w:val="28"/></w:rPr></w:style></w:styles>"#,
         );
-        let env = RenderEnv {
+        let mut body = para(
+            "10000001",
+            concat!(
+                r#"<w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
+                r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
+                r#"<w:rStyle w:val="Hyperlink"/></w:rPr>"#,
+                r#"<w:t>Entry one</w:t></w:r></w:hyperlink>"#,
+            ),
+        );
+        for index in 0..count {
+            body.push_str(&para(&format!("{:08X}", 0x20000000 + index), &run("Body")));
+        }
+        body.push_str(&para("30000001", &image("rIdImage", "inline")));
+        Package::new(&body)
+            .styles(styles)
+            .rel("rIdImage", "image", "media/image1.png")
+            .bytes()
+    }
+
+    fn toc_env() -> RenderEnv {
+        RenderEnv {
             paragraph_style_font_sizes: BTreeMap::from([("TOC1".to_owned(), 10.0)]),
             hyperlink_style_font_sizes: BTreeMap::from([("Hyperlink".to_owned(), 14.0)]),
             doc_default_font_size: Some(10.0),
             ..Default::default()
-        };
+        }
+    }
+
+    #[test]
+    fn ordinary_body_typing_checks_only_toc_paragraph_sizes() {
+        let env = toc_env();
         for (count, seeded) in [(1, false), (128, false), (1, true), (128, true)] {
-            let mut body = para(
-                "10000001",
-                concat!(
-                    r#"<w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
-                    r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
-                    r#"<w:rStyle w:val="Hyperlink"/></w:rPr>"#,
-                    r#"<w:t>Entry one</w:t></w:r></w:hyperlink>"#,
-                ),
-            );
-            for index in 0..count {
-                body.push_str(&para(&format!("{:08X}", 0x20000000 + index), &run("Body")));
-            }
-            body.push_str(&para("30000001", &image("rIdImage", "inline")));
-            let bytes = Package::new(&body)
-                .styles(styles)
-                .rel("rIdImage", "image", "media/image1.png")
-                .bytes();
+            let bytes = toc_package(count);
             let engine = EngineSession::new(77112);
+            // A reseed into a non-empty document is never marked seeded.
+            if !seeded {
+                seed_from_docx(engine.doc(), &bytes).unwrap();
+            }
             seed_from_docx(engine.doc(), &bytes).unwrap();
             if seeded {
                 engine.doc().mark_seeded();
             }
+            assert_eq!(engine.doc().unchanged_since_seeded(), seeded);
             RUN_SIZE_SEEDED_SNAPSHOTS.with(|counter| counter.set(0));
             engine
                 .with_lowered_story("body", &env, |blocks| {
@@ -1140,5 +1153,28 @@ mod tests {
                 RUN_SIZE_SEEDED_SNAPSHOTS.with(|counter| assert_eq!(counter.get(), 0));
             }
         }
+    }
+
+    #[test]
+    fn a_crate_seed_into_an_empty_document_takes_no_seeded_snapshot() {
+        let env = toc_env();
+        let engine = EngineSession::new(77112);
+        seed_from_docx(engine.doc(), &toc_package(1)).unwrap();
+        RUN_SIZE_SEEDED_SNAPSHOTS.with(|counter| counter.set(0));
+        engine.with_lowered_story("body", &env, |_| ()).unwrap();
+        for text in ["x", "y"] {
+            engine
+                .doc()
+                .insert_text(
+                    &EditCtx::local("", ""),
+                    Position::new("body", 12),
+                    text,
+                    FormatPolicy::Inherit,
+                )
+                .unwrap();
+            engine.with_lowered_story("body", &env, |_| ()).unwrap();
+            yrs_doc_to_layout_blocks(engine.doc(), "body", &env).unwrap();
+        }
+        RUN_SIZE_SEEDED_SNAPSHOTS.with(|counter| assert_eq!(counter.get(), 0));
     }
 }
