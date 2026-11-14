@@ -114,6 +114,14 @@
     "zoomPercent": "גודל תצוגה באחוזים",
     "apply": "החל",
     "cancel": "ביטול",
+    "freezeColumn": "הקפאת העמודה {column}",
+    "freezeColumns": "הקפאת העמודות {first}–{last}",
+    "freezeRow": "הקפאת השורה {row}",
+    "freezeRows": "הקפאת השורות {first}–{last}",
+    "unfreezePanes": "ביטול הקפאת החלונות",
+    "unhideColumns": "הצגת העמודות",
+    "unhideRows": "הצגת השורות",
+    "selectAll": "בחר הכל",
     "reasons": {
       "editorUnavailable": "העורך אינו מוכן.",
       "documentLoading": "חוברת העבודה עדיין נפתחת.",
@@ -195,6 +203,8 @@
     "sheetTabsLabel": "גיליונות",
     "clearExceedsLimit": "הניקוי חורג ממגבלת התאים",
     "cellMenuLabel": "תפריט תא",
+    "columnHeaderMenuLabel": "תפריט כותרת עמודה",
+    "rowHeaderMenuLabel": "תפריט כותרת שורה",
     "sheetTabMenuLabel": "תפריט לשונית הגיליון",
     "renameSheetLabel": "שנה את שם הגיליון",
     "sheetNamePrefix": "גיליון"

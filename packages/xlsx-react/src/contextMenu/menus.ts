@@ -1,12 +1,13 @@
 import type { TranslationKey } from '@betteroffice/xlsx-i18n';
 import { commandMenuItem, menuSections } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
+import { columnLetter } from '../columnLetter';
 import { commandLabelKey } from '../commands/descriptors';
 import { storeAriaShortcut, storeShortcutLabel } from '../commands/shortcuts';
 import type { XlsxCommandArgs, XlsxCommandId, XlsxCommandStore } from '../commands/types';
 
 /** What a context menu opened on. */
-export type XlsxContextMenuTarget = 'cell' | 'sheetTab';
+export type XlsxContextMenuTarget = 'cell' | 'columnHeader' | 'rowHeader' | 'sheetTab';
 
 /** A named group of a built-in menu, so later additions can join one by name. */
 export interface XlsxContextMenuSection {
@@ -14,7 +15,61 @@ export interface XlsxContextMenuSection {
   entries: OverflowMenuEntry[];
 }
 
-type Translate = (key: TranslationKey) => string;
+/** The frozen panes a header menu can change, and the track it opened on. */
+export interface XlsxContextFreezeTarget {
+  /** Frozen track counts currently painted for the sheet. */
+  rows: number;
+  cols: number;
+  /** The 0-based sheet column (columnHeader) or row (rowHeader) the menu opened on. */
+  index: number;
+  /** Apply a split: rows above and columns left of the given counts; 0/0 clears. */
+  apply(rows: number, cols: number): void;
+}
+
+type Translate = (key: TranslationKey, vars?: Record<string, string | number>) => string;
+
+/** The view entries freezing to the pressed header or clearing the split. */
+function freezeEntries(
+  columns: boolean,
+  t: Translate,
+  freeze: XlsxContextFreezeTarget
+): OverflowMenuEntry[] {
+  const entries: OverflowMenuEntry[] = [];
+  if (columns) {
+    const left = freeze.index;
+    if (left > 0 && freeze.cols !== left) {
+      entries.push(commandMenuItem({
+        id: `freezeColumns:${left}`,
+        label: left === 1
+          ? t('commands.freezeColumn', { column: columnLetter(0) })
+          : t('commands.freezeColumns', { first: columnLetter(0), last: columnLetter(left - 1) }),
+        state: { enabled: true },
+        run: () => freeze.apply(freeze.rows, left),
+      }));
+    }
+  } else {
+    const above = freeze.index;
+    if (above > 0 && freeze.rows !== above) {
+      entries.push(commandMenuItem({
+        id: `freezeRows:${above}`,
+        label: above === 1
+          ? t('commands.freezeRow', { row: 1 })
+          : t('commands.freezeRows', { first: 1, last: above }),
+        state: { enabled: true },
+        run: () => freeze.apply(above, freeze.cols),
+      }));
+    }
+  }
+  if (freeze.rows > 0 || freeze.cols > 0) {
+    entries.push(commandMenuItem({
+      id: 'unfreezePanes',
+      label: t('commands.unfreezePanes'),
+      state: { enabled: true },
+      run: () => freeze.apply(0, 0),
+    }));
+  }
+  return entries;
+}
 
 function item<K extends XlsxCommandId>(
   store: XlsxCommandStore,
@@ -42,7 +97,8 @@ function submenu(id: string, label: string, entries: OverflowMenuEntry[]): Overf
 export function xlsxContextMenuSections(
   target: XlsxContextMenuTarget,
   store: XlsxCommandStore,
-  t: Translate
+  t: Translate,
+  freeze?: XlsxContextFreezeTarget
 ): XlsxContextMenuSection[] {
   if (target === 'sheetTab') {
     return [
@@ -56,6 +112,24 @@ export function xlsxContextMenuSections(
         item(store, t, 'moveSheet', { direction: 'right' }),
       ] },
     ];
+  }
+  if (target === 'columnHeader' || target === 'rowHeader') {
+    const columns = target === 'columnHeader';
+    const sections: XlsxContextMenuSection[] = [
+      { id: 'cells', entries: columns ? [
+        item(store, t, 'insertColumns', { position: 'left' }),
+        item(store, t, 'insertColumns', { position: 'right' }),
+      ] : [
+        item(store, t, 'insertRows', { position: 'above' }),
+        item(store, t, 'insertRows', { position: 'below' }),
+      ] },
+      { id: 'delete', entries: [
+        columns ? item(store, t, 'deleteColumns', null) : item(store, t, 'deleteRows', null),
+      ] },
+    ];
+    const view = freeze ? freezeEntries(columns, t, freeze) : [];
+    if (view.length > 0) sections.push({ id: 'view', entries: view });
+    return sections;
   }
   const numberFormat = store.getState('numberFormat');
   return [
@@ -94,7 +168,8 @@ export function xlsxContextMenuSections(
 export function xlsxContextMenuEntries(
   target: XlsxContextMenuTarget,
   store: XlsxCommandStore,
-  t: Translate
+  t: Translate,
+  freeze?: XlsxContextFreezeTarget
 ): OverflowMenuEntry[] {
-  return menuSections(xlsxContextMenuSections(target, store, t).map((section) => section.entries));
+  return menuSections(xlsxContextMenuSections(target, store, t, freeze).map((section) => section.entries));
 }

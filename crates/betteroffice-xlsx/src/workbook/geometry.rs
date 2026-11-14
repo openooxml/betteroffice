@@ -38,6 +38,28 @@ impl Workbook {
                 | Op::RestoreColDimension { sheet, col, .. } => {
                     delta.sheets.entry(*sheet).or_default().columns.insert(*col);
                 }
+                // a range op reports its whole span, so every track it can
+                // reach is a cached width or height the delta must rewrite
+                Op::SetColsVisibility {
+                    sheet, col, count, ..
+                } => {
+                    delta
+                        .sheets
+                        .entry(*sheet)
+                        .or_default()
+                        .columns
+                        .extend((*col).min(MAX_COLS)..col.saturating_add(*count).min(MAX_COLS));
+                }
+                Op::SetRowsVisibility {
+                    sheet, row, count, ..
+                } => {
+                    delta
+                        .sheets
+                        .entry(*sheet)
+                        .or_default()
+                        .rows
+                        .extend((*row).min(MAX_ROWS)..row.saturating_add(*count).min(MAX_ROWS));
+                }
                 Op::PatchRangeStyle { sheet, range, .. }
                 | Op::SetRangeNumberFormat { sheet, range, .. }
                 | Op::ApplyRangeFormat { sheet, range, .. } => {
@@ -66,7 +88,9 @@ impl Workbook {
                 Op::RestoreRowStyles { sheet, .. } => {
                     delta.sheets.entry(*sheet).or_default().full = true
                 }
-                Op::RestoreColStyles { .. } => {}
+                Op::RestoreColStyles { .. }
+                | Op::RestoreArrayFormula { .. }
+                | Op::ClipArrayFormula { .. } => {}
                 Op::SetFreezePane { .. }
                 | Op::SetHyperlinks { .. }
                 | Op::SetHyperlink { .. }
@@ -82,12 +106,15 @@ impl Workbook {
                 | Op::DeleteDefinedName { .. }
                 | Op::SetDefinedNames { .. }
                 | Op::SetTables { .. } => {}
+                // a move reorders tracks rather than shifting them, so every
+                // cached row height, column width and extent on the sheet is
+                // suspect; only a full rebuild of its geometry is exact
                 Op::InsertRows { sheet, .. }
                 | Op::DeleteRows { sheet, .. }
                 | Op::InsertCols { sheet, .. }
-                | Op::DeleteCols { sheet, .. } => {
-                    delta.sheets.entry(*sheet).or_default().full = true
-                }
+                | Op::DeleteCols { sheet, .. }
+                | Op::MoveRows { sheet, .. }
+                | Op::MoveCols { sheet, .. } => delta.sheets.entry(*sheet).or_default().full = true,
                 Op::AddSheet { .. }
                 | Op::RemoveSheet { .. }
                 | Op::MoveSheet { .. }
