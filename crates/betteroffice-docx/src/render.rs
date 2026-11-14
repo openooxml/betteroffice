@@ -156,6 +156,7 @@ impl Document {
         if !self.renders_from_model() {
             return self.render_png_saved(target, options);
         }
+        validate_scale(options)?;
         let Some(rendered) = self.render_png_from_model(target, options).transpose() else {
             return self.render_png_saved(target, options);
         };
@@ -170,7 +171,6 @@ impl Document {
         target: PngTarget,
         options: &RenderOptions,
     ) -> Result<Option<RenderedPage>> {
-        validate_scale(options)?;
         let package = layout_package(self.model())?;
         let engine = docx_edit::EngineSession::new(1);
         docx_edit::seed_from_parsed_docx(
@@ -186,14 +186,14 @@ impl Document {
                 .map_err(Error::Render)?;
             Ok(engine.retained_page_display_list(chains, target.page).ok())
         })?;
-        // A resident conversion error renders through the save.
         let Some((display_list, unreadable)) = converted else {
             return Ok(None);
         };
         if !unreadable.is_empty() {
             return Ok(None);
         }
-        self.render_display_list_scaled(&display_list, target.page, options.scale).map(Some)
+        self.render_display_list_scaled(&display_list, target.page, options.scale)
+            .map(Some)
     }
 
     /// [`Document::render_png`] through a save and a parse of the saved bytes, in every state.
@@ -278,8 +278,9 @@ impl Document {
             .collect();
         request["measurement"]["fontChains"] = json!(chains);
         let request = request.to_string();
-        let display_list =
-            docx_layout::with_measure_font_store(&mut fonts.store, || layout(request.as_str(), &chains));
+        let display_list = docx_layout::with_measure_font_store(&mut fonts.store, || {
+            layout(request.as_str(), &chains)
+        });
         drop(fonts);
         display_list
     }

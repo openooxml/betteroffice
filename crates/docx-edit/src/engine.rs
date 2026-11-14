@@ -11960,7 +11960,13 @@ impl EngineSession {
         &self,
         font_chains: &BTreeMap<String, Vec<u32>>,
         page: usize,
-    ) -> Result<(DisplayList, Vec<docx_layout::display_list::UnreadableDisplayInput>), String> {
+    ) -> Result<
+        (
+            DisplayList,
+            Vec<docx_layout::display_list::UnreadableDisplayInput>,
+        ),
+        String,
+    > {
         let pagination = self.pagination.borrow();
         let input = pagination
             .input

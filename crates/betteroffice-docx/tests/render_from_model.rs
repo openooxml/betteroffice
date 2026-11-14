@@ -420,7 +420,10 @@ fn assert_renders_through_the_save(document: &Document, page: usize, label: &str
     assert_render_path(before, false, label);
     match (&fast, &saved) {
         (Ok(fast), Ok(saved)) => {
-            assert!(fast == saved, "{label}: the PNG differs from the saved render");
+            assert!(
+                fast == saved,
+                "{label}: the PNG differs from the saved render"
+            );
         }
         _ => assert_eq!(
             format!("{:?}", fast.as_ref().err()),
@@ -448,9 +451,8 @@ fn pages_before_an_unreadable_paragraph(unreadable: bool) -> Vec<u8> {
 
 #[test]
 fn a_resident_conversion_error_renders_as_the_saved_render_does() {
-    let header = format!(
-        r#"<w:p w14:paraId="00000010" w14:textId="77777777">{UNREADABLE_INSERTION}</w:p>"#
-    );
+    let header =
+        format!(r#"<w:p w14:paraId="00000010" w14:textId="77777777">{UNREADABLE_INSERTION}</w:p>"#);
     let document = open(&docx_with_header_and_body(
         Some(&header),
         r#"<w:p w14:paraId="00000001" w14:textId="77777777"><w:r><w:t>Body</w:t></w:r></w:p>"#,
