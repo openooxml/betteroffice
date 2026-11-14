@@ -239,12 +239,7 @@ fn over_cap(session: &DeckSession) -> bool {
     slides > MAX_SLIDES || placed_shapes(session).len() > MAX_SHAPES
 }
 
-fn step(
-    rng: &mut SplitMix,
-    local: &DeckSession,
-    peer: &DeckSession,
-    stories: &[String],
-) -> bool {
+fn step(rng: &mut SplitMix, local: &DeckSession, peer: &DeckSession, stories: &[String]) -> bool {
     let context = EditCtx::local("test");
     let slides = live_slide_ids(&local.doc.transact()).unwrap();
     let placed = placed_shapes(local);
@@ -305,8 +300,7 @@ fn step(
         9 => {
             if let Some(story) = rng.pick(stories) {
                 let owned = walk_finds_owner(local, &story);
-                let written =
-                    local.insert_text(&context, &story, 0, "x", &TextStyle::default());
+                let written = local.insert_text(&context, &story, 0, "x", &TextStyle::default());
                 assert_eq!(written.is_ok(), owned, "write to {story}: {written:?}");
                 if !owned {
                     assert!(matches!(written, Err(EditError::StoryNotFound(_))));
@@ -351,7 +345,10 @@ fn resolves(session: &DeckSession, story: &str) -> bool {
 fn grouped_deck(session: &DeckSession) {
     let context = EditCtx::local("test");
     for index in 0..3 {
-        let slide = session.insert_slide(&context, index, None).unwrap().slide_id;
+        let slide = session
+            .insert_slide(&context, index, None)
+            .unwrap()
+            .slide_id;
         let boxes: Vec<String> = (0..3).map(|_| add_box(session, &slide)).collect();
         if index == 2 {
             nest(session, &slide, &boxes[1], &boxes[2]);

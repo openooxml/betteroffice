@@ -175,9 +175,7 @@ fn a_cached_owner_does_not_outlive_a_remote_slide_delete() {
     let anchor = peer.anchor_caret(&story, 2).unwrap();
     assert_eq!(peer.resolve_caret_anchor(&anchor), Some(2));
     assert_eq!(peer.resolve_caret_anchor(&anchor), Some(2));
-    local
-        .delete_slide(&EditCtx::local("test"), &slide)
-        .unwrap();
+    local.delete_slide(&EditCtx::local("test"), &slide).unwrap();
     sync(&local, &peer);
     assert_eq!(peer.resolve_caret_anchor(&anchor), None);
 }
@@ -349,7 +347,11 @@ fn a_resolved_story_outlives_unrelated_damage_that_a_fresh_session_reports() {
     for session in [&warm, &fresh] {
         let mut txn = session.yrs_doc().transact_mut();
         let entry = shape_entry(&txn, &damaged);
-        entry.insert(&mut txn, "children", string_list(&["missing-shape".to_owned()]));
+        entry.insert(
+            &mut txn,
+            "children",
+            string_list(&["missing-shape".to_owned()]),
+        );
     }
     assert_eq!(warm.resolve_caret_anchor(&anchor), Some(2));
     assert_eq!(fresh.resolve_caret_anchor(&anchor), None);
