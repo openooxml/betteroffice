@@ -220,24 +220,24 @@ fn an_unedited_document_renders_from_the_model_as_saved() {
 }
 
 #[test]
-fn a_logged_edit_renders_from_the_model_as_saved() {
+fn a_logged_edit_renders_through_the_save() {
     for (name, bytes) in fixtures() {
         let mut document = open(&bytes);
         assert!(
             edit_a_body_paragraph(&mut document),
             "{name}: no paragraph takes a logged edit"
         );
-        assert_renders_as_saved(&document, &format!("{name} edited"), true);
+        assert_renders_as_saved(&document, &format!("{name} edited"), false);
     }
 }
 
 #[test]
-fn a_logged_edit_the_save_writes_in_full_renders_from_the_model_as_saved() {
+fn a_logged_edit_the_save_writes_in_full_renders_through_the_save() {
     let mut document = open(&mark_formatted_empty_paragraph_docx());
     document.replace_paragraph_text("0000000E", "X").unwrap();
     let saved = saved_main_part(&document);
     assert!(!saved.contains("w:proofErr"), "{saved}");
-    assert_renders_as_saved(&document, "mark-formatted empty paragraph", true);
+    assert_renders_as_saved(&document, "mark-formatted empty paragraph", false);
 }
 
 #[test]
@@ -251,8 +251,8 @@ fn a_model_change_renders_through_the_save() {
     }
 }
 
-/// The page count, once every page renders from the model and the next is out of range.
-fn assert_every_page_renders_from_the_model(document: &Document, label: &str) -> usize {
+/// The page count, once every page renders through the path `from_model` names and the next is out of range.
+fn assert_every_page_renders(document: &Document, label: &str, from_model: bool) -> usize {
     let mut page = 0;
     loop {
         let before = model_renders();
@@ -264,11 +264,11 @@ fn assert_every_page_renders_from_the_model(document: &Document, label: &str) ->
                     format!("page ordinal {page} is out of range"),
                     "{label} page {page}"
                 );
-                assert_render_path(before, true, &format!("{label} page {page}"));
+                assert_render_path(before, from_model, &format!("{label} page {page}"));
                 return page;
             }
         }
-        assert_render_path(before, true, &format!("{label} page {}", page - 1));
+        assert_render_path(before, from_model, &format!("{label} page {}", page - 1));
         assert!(page <= PAGE_CAP, "{label}: more than {PAGE_CAP} pages");
     }
 }
@@ -287,12 +287,12 @@ fn a_document_opened_under_raised_limits_renders() {
     let mut document =
         with_fonts(Document::open_with_limits(&bytes, &paragraph_limits(pages * 2)).unwrap());
     assert_eq!(
-        assert_every_page_renders_from_the_model(&document, "raised limits"),
+        assert_every_page_renders(&document, "raised limits", true),
         pages
     );
     assert!(edit_a_body_paragraph(&mut document));
     assert_eq!(
-        assert_every_page_renders_from_the_model(&document, "raised limits edited"),
+        assert_every_page_renders(&document, "raised limits edited", false),
         pages
     );
 }
@@ -311,7 +311,7 @@ fn an_out_of_range_page_fails_as_the_saved_render_does() {
             let options = RenderOptions::default();
             let before = model_renders();
             let fast = document.render_png(target, &options).unwrap_err();
-            assert_render_path(before, true, &format!("page {page}"));
+            assert_render_path(before, !edited, &format!("page {page}"));
             let saved = document.render_png_saved(target, &options).unwrap_err();
             assert_eq!(format!("{fast:?}"), format!("{saved:?}"), "page {page}");
             assert_eq!(

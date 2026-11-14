@@ -166,10 +166,10 @@ impl Document {
         self.model
     }
 
-    /// Whether a save writes the model as it opened or as the logged edits left it.
+    /// Whether the model is unchanged since open.
     #[cfg(feature = "raster")]
     pub(crate) fn renders_from_model(&self) -> bool {
-        self.dirty != Dirty::ModelChanged
+        self.dirty == Dirty::Clean
     }
 
     #[cfg(feature = "raster")]
