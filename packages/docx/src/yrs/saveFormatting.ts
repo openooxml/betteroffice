@@ -336,7 +336,7 @@ export function tableRowAttrsToFormatting(
     if (attrs.heightRule !== (orig.heightRule || undefined)) {
       result.heightRule = (attrs.heightRule as 'auto' | 'atLeast' | 'exact') || undefined;
     }
-    if (attrs.isHeader !== (orig.header || undefined)) {
+    if (!!attrs.isHeader !== !!orig.header) {
       result.header = attrs.isHeader || undefined;
     }
     return result;
