@@ -6,6 +6,8 @@ import JSZip from 'jszip';
 import { preloadEditWasm } from '../../packages/docx/src/wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../../packages/docx/src/wasm/opc';
 import { createYrsSession, saveYrsDocx } from '../../packages/docx/src/yrs';
+import type { YrsSession } from '../../packages/docx/src/yrs';
+import { leadingBlockCount } from '../../packages/docx/src/yrs/sectionBreak';
 
 const OUT = process.env.DOCX_CRATE_PARITY_DIR ?? '';
 if (OUT === '') throw new Error('DOCX_CRATE_PARITY_DIR is not set');
@@ -226,6 +228,16 @@ const REPORT_CASES: ReportCase[] = [
   },
 ];
 
+/** Replaces a body paragraph's text from its first character, past the tables and other blocks leading it. */
+function replaceParagraphText(session: YrsSession, key: string, text: string) {
+  const spans = session.paragraphSpans('body');
+  const index = spans.findIndex((entry) => entry.paraId === key);
+  const span = spans[index];
+  if (!span) throw new Error(`no span for ${key}`);
+  const start = leadingBlockCount(session.storySegmentUnits('body', [index])[0] ?? []);
+  session.replaceRange({ story: 'body', start: { paraId: key, offset: start }, end: { paraId: key, offset: span.length } }, text);
+}
+
 /** The product save's report, and each session paragraph key's Word paragraph ID. */
 async function productReport(input: Uint8Array, edit?: { paraId: string; text: string }) {
   const session = await createYrsSession({ clientId: 1 });
@@ -238,9 +250,7 @@ async function productReport(input: Uint8Array, edit?: { paraId: string; text: s
       );
       if (!identity?.session) throw new Error(`no body paragraph saves with ${edit.paraId}`);
       const key = identity.session.paraId;
-      const span = session.paragraphSpans('body').find((entry) => entry.paraId === key);
-      if (!span) throw new Error(`no span for ${edit.paraId}`);
-      session.replaceRange({ story: 'body', start: { paraId: key, offset: 0 }, end: { paraId: key, offset: span.length } }, edit.text);
+      replaceParagraphText(session, key, edit.text);
       expect(session.paragraphs('body').find((paragraph) => paragraph.paraId === key)?.text).toBe(edit.text);
     }
     const { keptUnchanged, structureDropped } = await saveYrsDocx(session, { updateModifiedDate: false });
