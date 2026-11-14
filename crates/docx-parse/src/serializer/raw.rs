@@ -71,11 +71,16 @@ pub(crate) fn validate_raw_subtree(
 
 /// Validates a kept `w:ffData` whose prefixes are each declared in it or by every story root.
 pub(crate) fn validate_form_field_data(xml: &str) -> Result<(), ParseError> {
-    with_raw_subtree(xml, BARE_FRAGMENT_PREFIX, |_, child| require_name(child, "w", "ffData"))?;
+    with_raw_subtree(xml, BARE_FRAGMENT_PREFIX, |_, child| {
+        require_name(child, "w", "ffData")
+    })?;
     let used = super::splice::required_prefixes(xml).ok_or_else(|| {
         ParseError::Canonical("validated XML fragment is not well-formed".to_owned())
     })?;
-    match used.into_iter().find(|prefix| !super::parts::is_story_root_prefix(prefix)) {
+    match used
+        .into_iter()
+        .find(|prefix| !super::parts::is_story_root_prefix(prefix))
+    {
         Some(prefix) => Err(ParseError::Canonical(format!("unbound prefix {prefix}"))),
         None => Ok(()),
     }
