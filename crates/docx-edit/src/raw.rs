@@ -15,6 +15,7 @@ use docx_parse::paragraph_identity::parse_paragraph_id;
 use crate::control_values::{guard_embed_insert, guard_embed_write};
 use crate::identity::{OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC};
 use crate::op::{OpError, OpResult};
+use crate::seed::SeedAttrs;
 use crate::sticky_positions::sticky_index;
 use crate::{
     COMMENTS, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PILCROW_KIND, anchor_value, is_pilcrow,
@@ -139,7 +140,14 @@ impl EditingDoc {
             })
             .collect();
         let mut rekeyed = Vec::new();
-        let _ = apply_raw_ops_to_story(&mut txn, story_id, ops, false, &mut rekeyed)?;
+        let _ = apply_raw_ops_to_story(
+            &mut txn,
+            story_id,
+            ops,
+            false,
+            &mut rekeyed,
+            &mut SeedAttrs::default(),
+        )?;
         if !reanchored.is_empty() {
             crate::comment_references::reconcile(&mut txn, &reanchored, true);
         }
@@ -171,9 +179,16 @@ impl EditingDoc {
         let mut ranges = HashMap::new();
         {
             let mut txn = self.transact_for(ctx);
+            let mut shared = SeedAttrs::for_seed();
             for (story_id, ops) in batches {
-                let range =
-                    apply_raw_ops_to_story(&mut txn, &story_id, ops, true, &mut Vec::new())?;
+                let range = apply_raw_ops_to_story(
+                    &mut txn,
+                    &story_id,
+                    ops,
+                    true,
+                    &mut Vec::new(),
+                    &mut shared,
+                )?;
                 ranges
                     .entry(story_id)
                     .and_modify(|range| *range = None)
@@ -248,7 +263,12 @@ impl InsertRun {
         }
     }
 
-    fn flush(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>) -> OpResult<()> {
+    fn flush(
+        &mut self,
+        story: &TextRef,
+        txn: &mut TransactionMut<'_>,
+        shared: &mut SeedAttrs,
+    ) -> OpResult<()> {
         if !self.deltas.is_empty() {
             let range = if self.seed_candidate && story.len(txn) == 0 {
                 let len = self.deltas.iter().try_fold(0u32, |len, delta| {
@@ -281,7 +301,7 @@ impl InsertRun {
             self.seed_candidate = false;
         }
         if self.deterministic {
-            self.hydrate_embeds(story, txn)?;
+            self.hydrate_embeds(story, txn, shared)?;
             self.apply_formats(story, txn);
         }
         self.cursor = None;
@@ -374,7 +394,12 @@ impl InsertRun {
         }
     }
 
-    fn hydrate_embeds(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>) -> OpResult<()> {
+    fn hydrate_embeds(
+        &mut self,
+        story: &TextRef,
+        txn: &mut TransactionMut<'_>,
+        shared: &mut SeedAttrs,
+    ) -> OpResult<()> {
         if self.embeds.is_empty() {
             return Ok(());
         }
@@ -403,9 +428,13 @@ impl InsertRun {
             });
         }
         for (map, embed) in targets.into_iter().zip(embeds) {
-            map.insert(txn, KIND_KEY, embed.kind);
+            map.insert(
+                txn,
+                shared.text(KIND_KEY.to_owned()),
+                Any::String(shared.text(embed.kind)),
+            );
             for (key, value) in embed.payload {
-                map.insert(txn, key, value);
+                map.insert(txn, shared.text(key), value);
             }
         }
         Ok(())
@@ -480,6 +509,7 @@ fn apply_raw_ops_to_story(
     ops: Vec<RawOp>,
     deterministic: bool,
     rekeyed: &mut Vec<MapRef>,
+    shared: &mut SeedAttrs,
 ) -> OpResult<Option<SeedRange>> {
     let story = story_ref(txn, story_id).map_err(OpError::from)?;
     let mut run = InsertRun::new(deterministic);
@@ -523,7 +553,7 @@ fn apply_raw_ops_to_story(
                 run.insert_embed(index, kind, payload, attrs);
             }
             op => {
-                run.flush(&story, txn)?;
+                run.flush(&story, txn, shared)?;
                 match &op {
                     RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {}
                     RawOp::Insert { .. } | RawOp::InsertEmbed { .. } => {
@@ -544,7 +574,7 @@ fn apply_raw_ops_to_story(
             }
         }
     }
-    run.flush(&story, txn)?;
+    run.flush(&story, txn, shared)?;
     Ok(run.seed_range)
 }
 

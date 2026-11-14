@@ -114,6 +114,14 @@
     "zoomPercent": "Масштаб у відсотках",
     "apply": "Застосувати",
     "cancel": "Скасувати",
+    "freezeColumn": "Закріпити стовпець {column}",
+    "freezeColumns": "Закріпити стовпці {first}–{last}",
+    "freezeRow": "Закріпити рядок {row}",
+    "freezeRows": "Закріпити рядки {first}–{last}",
+    "unfreezePanes": "Зняти закріплення областей",
+    "unhideColumns": "Показати стовпці",
+    "unhideRows": "Показати рядки",
+    "selectAll": "Виділити все",
     "reasons": {
       "editorUnavailable": "Редактор ще не готовий.",
       "documentLoading": "Книга ще відкривається.",
@@ -195,6 +203,8 @@
     "sheetTabsLabel": "Аркуші",
     "clearExceedsLimit": "Очищення перевищує ліміт клітинок.",
     "cellMenuLabel": "Меню клітинки",
+    "columnHeaderMenuLabel": "Меню заголовка стовпця",
+    "rowHeaderMenuLabel": "Меню заголовка рядка",
     "sheetTabMenuLabel": "Меню ярлика аркуша",
     "renameSheetLabel": "Перейменувати аркуш",
     "sheetNamePrefix": "Аркуш"

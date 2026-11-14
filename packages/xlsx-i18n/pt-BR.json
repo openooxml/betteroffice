@@ -114,6 +114,14 @@
     "zoomPercent": "Zoom em porcentagem",
     "apply": "Aplicar",
     "cancel": "Cancelar",
+    "freezeColumn": "Congelar coluna {column}",
+    "freezeColumns": "Congelar colunas {first}–{last}",
+    "freezeRow": "Congelar linha {row}",
+    "freezeRows": "Congelar linhas {first}–{last}",
+    "unfreezePanes": "Descongelar painéis",
+    "unhideColumns": "Reexibir colunas",
+    "unhideRows": "Reexibir linhas",
+    "selectAll": "Selecionar tudo",
     "reasons": {
       "editorUnavailable": "O editor não está pronto.",
       "documentLoading": "A pasta de trabalho ainda está sendo aberta.",
@@ -195,6 +203,8 @@
     "sheetTabsLabel": "Planilhas",
     "clearExceedsLimit": "Limpar excede o limite de células.",
     "cellMenuLabel": "Menu da célula",
+    "columnHeaderMenuLabel": "Menu do cabeçalho de coluna",
+    "rowHeaderMenuLabel": "Menu do cabeçalho de linha",
     "sheetTabMenuLabel": "Menu da guia da planilha",
     "renameSheetLabel": "Renomear planilha",
     "sheetNamePrefix": "Planilha"
