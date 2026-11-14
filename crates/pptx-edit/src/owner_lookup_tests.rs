@@ -138,7 +138,11 @@ fn ownerless_write_refusal(session: &DeckSession, story: &str) -> EditError {
         .and_then(|id| id.split_once(":table:"))
         .map(|(shape, _)| shape);
     match table {
-        Some(shape) if !placed_shapes(session).iter().any(|live| live.shape == shape) => {
+        Some(shape)
+            if !placed_shapes(session)
+                .iter()
+                .any(|live| live.shape == shape) =>
+        {
             EditError::ShapeNotFound(shape.to_owned())
         }
         _ => EditError::StoryNotFound(story.to_owned()),
