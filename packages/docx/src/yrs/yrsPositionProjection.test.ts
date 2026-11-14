@@ -151,4 +151,51 @@ describe('YrsPositionProjection', () => {
     });
     expect(projection.positionForLoc(loc!)).toBe(12);
   });
+
+  test('resolves every position to the deepest story holding it, as a scan of all stories does', () => {
+    const text = (value: string): YrsStorySegment => ({ kind: 'text', text: value, attributes: {} });
+    const pilcrow = (paraId: string): YrsStorySegment => ({ kind: 'pilcrow', paraId, properties: {}, attributes: {} });
+    const table = (cells: string[][]): YrsStorySegment => ({
+      kind: 'embed',
+      embedKind: 'table',
+      payload: { tblPr: {}, grid: [100, 100], rows: cells.map((row) => ({ cells: row.map((story) => ({ story, tcPr: {} })) })) },
+      attributes: {},
+    });
+    const nested: Record<string, YrsStorySegment[]> = {
+      body: [
+        text('before'), pilcrow('p0'),
+        table([['c00', 'c01'], ['c10', 'c11']]),
+        { kind: 'embed', embedKind: 'blockSdt', payload: { story: 'sdt' }, attributes: {} },
+        table([['d00']]),
+        text('after'), pilcrow('p1'),
+      ],
+      c00: [text('a'), pilcrow('c00p')],
+      // a cell opening with a table, so a story starts where its parent's content does
+      c01: [table([['e00', 'e01']]), text('tail'), pilcrow('c01p')],
+      c10: [pilcrow('c10p')],
+      c11: [text('xy'), pilcrow('c11p0'), text('z'), pilcrow('c11p1')],
+      e00: [table([['f00']]), pilcrow('e00p')],
+      e01: [text('deep'), pilcrow('e01p')],
+      f00: [text('deepest'), pilcrow('f00p')],
+      sdt: [text('control'), pilcrow('sdtp'), table([['g00']])],
+      g00: [text('g'), pilcrow('g00p')],
+      d00: [text('last'), pilcrow('d00p')],
+    };
+    const projection = new YrsPositionProjection(
+      { storySegments: (story: string) => nested[story] ?? [] } as unknown as YrsSession,
+      'body'
+    );
+    type Story = { story: string; contentStart: number; size: number; depth: number };
+    const stories = [...(projection as unknown as { stories: Map<string, Story> }).stories.values()];
+    expect(stories.length).toBe(Object.keys(nested).length);
+    for (let position = -1; position <= projection.size + 1; position += 1) {
+      let expected = stories.find((story) => story.story === 'body')!;
+      for (const story of stories) {
+        if (position >= story.contentStart && position <= story.contentStart + story.size && story.depth > expected.depth) {
+          expected = story;
+        }
+      }
+      expect([position, projection.targetAt(position).story]).toEqual([position, expected.story]);
+    }
+  });
 });
