@@ -2548,6 +2548,64 @@ test('a queued key after deleting its own slide is refused as a bad target', asy
   } finally { await session.dispose(); }
 });
 
+const deadStoryCommands: Array<[string, (story: PptxStoryText) => PresentationCommandIntent]> = [
+  ['a backward delete', (story) => ({ kind: 'deleteBackward', payload: { ...input,
+    at: { source: 'confirmed', selection: selection(story, 2) }, unit: 'codePoint' } })],
+  ['a format', (story) => ({ kind: 'formatText', payload: { ...input,
+    at: { source: 'confirmed', selection: selection(story, 0, 4) }, patch: { bold: true } } })],
+  ['a paragraph alignment', (story) => ({ kind: 'setParagraphAlignment', payload: { ...input,
+    at: { source: 'confirmed', selection: selection(story, 0, 4) }, alignment: 'ctr' } })],
+];
+
+for (const [name, intent] of deadStoryCommands) {
+  test(`${name} on a story whose slide a collaborator deleted is refused as a bad target`, async () => {
+    await wasm.initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
+    const { PptxDocument: Document } = await import('../wasm/engine');
+    const bytes = await deck(['alpha', 'beta']);
+    const author = Document.openCollaborative(bytes, 9001);
+    const seed = author.encodeStateAsUpdate();
+    const [live, removed] = content(JSON.parse(author.readContentJson('{}')) as PptxReadResult).stories;
+    if (!live || !removed) throw new Error('Missing stories');
+    const vector = author.encodeStateVector();
+    author.deleteSlideJson(JSON.stringify({ slideId: removed.slideId }));
+    const update = author.encodeDiff(vector);
+    author.free();
+    const host = await engineHost();
+    const rpc: Rpc = createSessionClient<PresentationCommandMethods, PresentationCommandEvents>(host.transport, { methods: PRESENTATION_COMMAND_METHODS });
+    try {
+      const state = await rpc.call.openCommandEditor(new Uint8Array(bytes).buffer,
+        { ...host.options, initialUpdate: seed }) as unknown as PresentationCommandAck;
+      const applied = await rpc.call.command(envelope(state, 1,
+        { kind: 'applyRemoteUpdate', payload: { ...input, undoGroup: 'remote', bytes: [update.slice().buffer] } }));
+      expect(applied.outcomes).toEqual([expect.objectContaining({ seq: 1, status: 'applied', committed: true })]);
+      const refused = await rpc.call.command(envelope(applied, 2, intent(removed)));
+      expect(refused.outcomes).toEqual([{ seq: 2, status: 'refused', reason: 'bad-target', committed: false }]);
+      expect(refused.editState.readOnly).toBe(false);
+      const typed = await rpc.call.command(envelope(refused, 3, insert(selection(live), 'y')));
+      expect(typed.outcomes).toEqual([{ seq: 3, status: 'applied', committed: true }]);
+      expect(content((await rpc.call.readEditor({ ...identity, seq: 3 })).result).stories.map((story) => story.text))
+        .toEqual(['yalpha']);
+    } finally {
+      try { await rpc.dispose(); } finally { host.dispose(); }
+    }
+  });
+
+  test(`${name} on a story whose slide left the deck outside the command queue is refused as a bad target`, async () => {
+    const session = await open(['alpha', 'beta']);
+    try {
+      const [live, removed] = (await session.read()).stories;
+      if (!live || !removed) throw new Error('Missing stories');
+      session.handle().deleteSlide(removed.slideId);
+      const refused = await session.rpc.call.command(envelope(session.state, 1, intent(removed)));
+      expect(refused.outcomes).toEqual([{ seq: 1, status: 'refused', reason: 'bad-target', committed: false }]);
+      expect(refused.editState.readOnly).toBe(false);
+      const typed = await session.rpc.call.command(envelope(refused, 2, insert(selection(live), 'y')));
+      expect(typed.outcomes).toEqual([{ seq: 2, status: 'applied', committed: true }]);
+      expect((await session.read(2)).stories.map((story) => story.text)).toEqual(['yalpha']);
+    } finally { await session.dispose(); }
+  });
+}
+
 test('recovery update leaves client state and can be taken only once', async () => {
   const host = await engineHost();
   let client: PresentationCommandClient | undefined;
