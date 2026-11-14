@@ -962,8 +962,8 @@ describe('host undo and comment controls', () => {
   });
 
   test('caret anchor report: typing into the story of a deleted slide', async () => {
-    const mark = 'G31MARK';
-    const report = (line: string) => console.log(`\nG31-REPORT ${line}`);
+    const mark = 'ANCHORMARK';
+    const report = (line: string) => console.log(`\nANCHOR-REPORT ${line}`);
     const guard = async (label: string, step: () => unknown) => {
       try { return await step(); } catch (error) {
         report(`${label} threw: ${error instanceof Error ? error.message : String(error)}`);

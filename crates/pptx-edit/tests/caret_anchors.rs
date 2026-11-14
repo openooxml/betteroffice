@@ -134,7 +134,7 @@ fn caret_anchor_on_a_remaining_slide_survives_another_slide_deletion() {
 
 #[test]
 fn caret_anchor_report_insert_into_story_of_deleted_slide() {
-    const MARK: &str = "G31MARK";
+    const MARK: &str = "ANCHORMARK";
     let (session, story) = session_with_text("ABC");
     let anchor = session.anchor_caret(&story, 2).unwrap();
     let (slide, _) = story_home(&session, &story);
@@ -143,12 +143,12 @@ fn caret_anchor_report_insert_into_story_of_deleted_slide() {
     let _subscription = session.observe_update_v1(move |_| counted.set(counted.get() + 1));
     println!();
     match session.delete_slide(&EditCtx::local("test"), &slide) {
-        Ok(_) => println!("G31-REPORT delete_slide ok"),
-        Err(error) => println!("G31-REPORT delete_slide error: {error}"),
+        Ok(_) => println!("ANCHOR-REPORT delete_slide ok"),
+        Err(error) => println!("ANCHOR-REPORT delete_slide error: {error}"),
     }
     let after_delete = events.get();
     let resolved = session.resolve_caret_anchor(&anchor);
-    println!("G31-REPORT resolve_caret_anchor after delete: {resolved:?}");
+    println!("ANCHOR-REPORT resolve_caret_anchor after delete: {resolved:?}");
     match resolved {
         Some(index) => match session.insert_text(
             &EditCtx::local("test"),
@@ -157,18 +157,18 @@ fn caret_anchor_report_insert_into_story_of_deleted_slide() {
             MARK,
             &TextStyle::default(),
         ) {
-            Ok(receipt) => println!("G31-REPORT insert_text ok: {receipt:?}"),
-            Err(error) => println!("G31-REPORT insert_text error: {error}"),
+            Ok(receipt) => println!("ANCHOR-REPORT insert_text ok: {receipt:?}"),
+            Err(error) => println!("ANCHOR-REPORT insert_text error: {error}"),
         },
-        None => println!("G31-REPORT insert_text skipped: anchor resolved to None"),
+        None => println!("ANCHOR-REPORT insert_text skipped: anchor resolved to None"),
     }
     match session.story(&story) {
         Ok(snapshot) => println!(
-            "G31-REPORT dead story contains marker: {} (text {:?})",
+            "ANCHOR-REPORT dead story contains marker: {} (text {:?})",
             snapshot.plain_text().contains(MARK),
             snapshot.plain_text()
         ),
-        Err(error) => println!("G31-REPORT dead story read error: {error}"),
+        Err(error) => println!("ANCHOR-REPORT dead story read error: {error}"),
     }
     match session.save() {
         Ok(bytes) => match ooxml_opc::unzip_parts(&bytes) {
@@ -180,16 +180,16 @@ fn caret_anchor_report_insert_into_story_of_deleted_slide() {
                     .map(|(name, _)| name.as_str())
                     .collect();
                 println!(
-                    "G31-REPORT saved slide parts contain marker: {} {hits:?}",
+                    "ANCHOR-REPORT saved slide parts contain marker: {} {hits:?}",
                     !hits.is_empty()
                 );
             }
-            Err(error) => println!("G31-REPORT saved bytes unzip error: {error}"),
+            Err(error) => println!("ANCHOR-REPORT saved bytes unzip error: {error}"),
         },
-        Err(error) => println!("G31-REPORT save error: {error}"),
+        Err(error) => println!("ANCHOR-REPORT save error: {error}"),
     }
     println!(
-        "G31-REPORT update events: {} on delete, {} after insert",
+        "ANCHOR-REPORT update events: {} on delete, {} after insert",
         after_delete,
         events.get() - after_delete
     );
