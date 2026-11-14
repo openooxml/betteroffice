@@ -21,6 +21,15 @@ export interface RowExpectation {
   /** `message`, when set, must be contained in (string) or match (RegExp) the error message. */
   throws?: { name: string; reason: string; message?: string | RegExp };
   voidReason?: string;
+  /** Values each engine generates itself, compared by shape instead of by value. */
+  masked?: readonly MaskedPath[];
+}
+
+export interface MaskedPath {
+  /** Dotted keys into the returned value. */
+  path: string;
+  /** Throws when the value has the wrong shape; returns the part both engines must still agree on. */
+  shape: (value: unknown) => unknown;
 }
 
 export interface Row<T> extends RowExpectation {
@@ -123,6 +132,31 @@ interface Observation {
   saved?: Outcome;
 }
 
+function replaceAt(value: unknown, keys: readonly string[], replace: (leaf: unknown) => unknown, where: string): unknown {
+  if (keys.length === 0) return replace(value);
+  const [key, ...rest] = keys as [string, ...string[]];
+  if (value === null || typeof value !== 'object' || !Object.hasOwn(value, key)) throw new Error(`${where}: no value at the masked path`);
+  const copy: Record<string, unknown> = Array.isArray(value) ? [...value] as unknown as Record<string, unknown> : { ...value };
+  copy[key] = replaceAt((value as Record<string, unknown>)[key], rest, replace, where);
+  return copy;
+}
+
+function maskedOutcome(row: RowExpectation, side: string, outcome: unknown): unknown {
+  if (!row.masked || outcome === null || typeof outcome !== 'object' || !('value' in outcome)) return outcome;
+  let { value } = outcome;
+  for (const { path, shape } of row.masked) {
+    const where = `${rowName(row)}: ${side} ${path}`;
+    value = replaceAt(value, path.split('.'), (leaf) => {
+      try {
+        return { masked: path, kept: shape(leaf) };
+      } catch (error) {
+        throw new Error(`${where}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }, where);
+  }
+  return { value };
+}
+
 async function observe<T>(row: Row<T>, engine: EngineHandle<T>, side: string): Promise<Observation> {
   try {
     const setup = await capture(() => row.setup?.(engine.target));
@@ -130,9 +164,10 @@ async function observe<T>(row: Row<T>, engine: EngineHandle<T>, side: string): P
     const before = engine.generated();
     const outcome = await capture(() => row.call(engine.target, setup.value as never));
     const generated = [...before, ...engine.generated()];
-    if (!row.mutates) return { outcome: await normalized(outcome, generated) };
+    const observed = maskedOutcome(row, side, await normalized(outcome, generated));
+    if (!row.mutates) return { outcome: observed };
     const saved = await capture(() => engine.save());
-    return { outcome: await normalized(outcome, generated), saved: await normalized(saved, generated) as Outcome };
+    return { outcome: observed, saved: await normalized(saved, generated) as Outcome };
   } finally {
     engine.free();
   }
@@ -359,4 +394,32 @@ export function coverageProblems(surface: readonly string[], plan: CoveragePlan)
     if (row.voidReason !== undefined && row.voidReason.trim() === '') problems.push(`${name}: voidReason is empty`);
   }
   return problems;
+}
+
+const HEX_DIGEST = /^[0-9a-f]{16}$/;
+// Four 64-bit halves all fall below 2^53 with odds of 2^-44, so a miss means a narrowed generator.
+const FULL_RANGE_FLOOR = 1n << 53n;
+
+export interface MediaSourcesWire { key: string[]; parts: [string, number][] }
+
+export function measuredSources(engine: EngineSide, sources: MediaSourcesWire, other: MediaSourcesWire) {
+  if (sources.key.length !== other.key.length || sources.parts.length !== other.parts.length) {
+    throw new Error(`two openings drew differently shaped media sources: ${JSON.stringify(sources)} then ${JSON.stringify(other)}`);
+  }
+  for (const [label, wire] of [['first', sources], ['second', other]] as const) {
+    for (const value of [...wire.key, ...wire.parts.map(([digest]) => digest)]) {
+      if (typeof value !== 'string' || !HEX_DIGEST.test(value)) throw new Error(`${engine} ${label} opening drew ${JSON.stringify(value)}, not 16 lowercase hex digits: ${JSON.stringify(wire)}`);
+    }
+  }
+  const drawn = (value: string, again: string | undefined): string | { generated: 'hex64' } => (value !== again ? { generated: 'hex64' } : value);
+  const key = sources.key.map((half, index) => drawn(half, other.key[index]));
+  console.log(`MEDIA-KEY-PROBE ${engine} ${sources.key.join(',')} ${other.key.join(',')} drawn=${key.map((half) => typeof half !== 'string').join(',')}`);
+  if (![...sources.key, ...other.key].some((half) => BigInt(`0x${half}`) >= FULL_RANGE_FLOOR)) {
+    throw new Error(`${engine} drew every media key half below 2^53, not from the full 64-bit range: ${sources.key.join(',')} ${other.key.join(',')}`);
+  }
+  return {
+    ...sources,
+    key,
+    parts: sources.parts.map(([digest, ...entry], index) => [drawn(digest, other.parts[index]?.[0]), ...entry]),
+  };
 }
