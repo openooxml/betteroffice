@@ -6353,6 +6353,73 @@ mod tests {
         assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
     }
 
+    const SAVE_SEED_MAX_PARAGRAPHS: u32 = 4096;
+    const SAVE_SEED_MAX_INFLATED_BYTES: u32 = 16 * 1024 * 1024;
+
+    fn prime_at_product_caps(doc: &EditingDoc) -> bool {
+        doc.prime_save_seed_states(SAVE_SEED_MAX_PARAGRAPHS, SAVE_SEED_MAX_INFLATED_BYTES)
+    }
+
+    fn assert_primed_edit_plans_without_reseed(doc: &EditingDoc) {
+        assert!(doc.unchanged_since_seeded());
+        assert!(prime_at_product_caps(doc));
+        let source = doc.source_index().unwrap();
+        assert!(source.seed_states_initialized());
+        doc.insert_text(&ctx(), Position::new("body", 0), "New ", FormatPolicy::Plain)
+            .unwrap();
+        doc.paragraph_save_plan();
+        assert_eq!(source.reseed_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_crate_seed_with_generation_primes_and_plans_an_edit_without_reseeding() {
+        let bytes = ooxml_opc::rezip_parts(&crate::seed::fixture::principal_parts()).unwrap();
+        let doc = EditingDoc::new(41);
+        crate::seed_from_docx_with_generation(&doc, &bytes, "crate").unwrap();
+        assert_primed_edit_plans_without_reseed(&doc);
+    }
+
+    #[test]
+    fn a_crate_seed_primes_and_plans_an_edit_without_reseeding() {
+        assert_primed_edit_plans_without_reseed(&save_plan_doc());
+    }
+
+    #[test]
+    fn a_crate_seed_primes_at_the_paragraph_cap_and_reseeds_once_past_it() {
+        use crate::seed::fixture;
+        for (paragraphs, primes) in [
+            (SAVE_SEED_MAX_PARAGRAPHS, true),
+            (SAVE_SEED_MAX_PARAGRAPHS + 1, false),
+        ] {
+            let body: String = (0..paragraphs)
+                .map(|index| {
+                    fixture::para(
+                        &format!("{:08X}", 0x0100_0000 + index),
+                        &fixture::run(&format!("Paragraph {index}")),
+                    )
+                })
+                .collect();
+            let doc = EditingDoc::new(41);
+            let bytes = fixture::Package::new(&body).bytes();
+            crate::seed_from_docx(&doc, &bytes).unwrap();
+            let source = doc.source_index().unwrap();
+            {
+                let txn = doc.yrs_doc().transact();
+                assert_eq!(doc.committed_scan(&txn).pilcrows.len() as u32, paragraphs);
+            }
+            assert!(doc.unchanged_since_seeded(), "{paragraphs}");
+            assert_eq!(prime_at_product_caps(&doc), primes, "{paragraphs}");
+            doc.insert_text(&ctx(), Position::new("body", 0), "New ", FormatPolicy::Plain)
+                .unwrap();
+            doc.paragraph_save_plan();
+            assert_eq!(
+                source.reseed_calls.load(Ordering::Relaxed),
+                usize::from(!primes),
+                "{paragraphs}"
+            );
+        }
+    }
+
     fn principal_session() -> crate::session::EditSessionCore {
         let bytes = ooxml_opc::rezip_parts(&crate::seed::fixture::principal_parts()).unwrap();
         let session =
