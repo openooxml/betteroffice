@@ -3333,7 +3333,13 @@ describe('peerless workbook worker editor', () => {
     const host = peerlessHarness();
     const sample = await host.frame({ x: 0, y: 0, width: 800, height: 600 });
     host.frame.mockClear();
+    const real = performance.now.bind(performance);
+    let last = 0;
+    let held: number | undefined;
+    const clock = spyOn(performance, 'now').mockImplementation(() => (last = held ?? real()));
+    restorers.push(() => clock.mockRestore());
     host.frame.mockImplementation(async (viewport, options) => {
+      if (options?.sheet === 1 && !neighborDelay) held ??= last;
       if (options?.sheet === 1 && neighborDelay) await new Promise((resolve) => setTimeout(resolve, neighborDelay));
       return {
         ...sample, viewport, sheet: options?.sheet ?? 0,
@@ -3344,6 +3350,7 @@ describe('peerless workbook worker editor', () => {
     });
     const view = await host.mount();
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1500)); });
+    clock.mockRestore();
     expect(host.frame.mock.calls.some(([, options]) => options?.sheet === 1)).toBe(true);
     const settled = host.frame.mock.calls.length;
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
