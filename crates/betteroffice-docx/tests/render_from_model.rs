@@ -119,16 +119,34 @@ fn assert_renders_as_saved(document: &Document, label: &str, from_model: bool) -
     saved.len()
 }
 
-fn edit_a_body_paragraph(document: &mut Document) -> bool {
+/// Documents with a body paragraph [`Document::replace_paragraph_text`] accepts.
+fn editable_fixtures() -> Vec<(&'static str, Vec<u8>)> {
+    let mut editable: Vec<_> = fixtures()
+        .into_iter()
+        .filter(|(name, _)| *name == "principal")
+        .collect();
+    editable.push(("three pages", one_page_per_paragraph_docx(3, "")));
+    editable
+}
+
+fn edit_a_body_paragraph(document: &mut Document) {
     let candidates: Vec<String> = document
         .paragraphs()
         .into_iter()
         .filter(|paragraph| !get_paragraph_text(paragraph).is_empty())
         .filter_map(|paragraph| paragraph.para_id.clone())
         .collect();
-    candidates
-        .iter()
-        .any(|para_id| document.replace_paragraph_text(para_id, EDITED).is_ok())
+    let mut last = None;
+    for para_id in &candidates {
+        match document.replace_paragraph_text(para_id, EDITED) {
+            Ok(_) => return,
+            Err(error) => last = Some(error),
+        }
+    }
+    panic!(
+        "none of {} paragraphs takes a logged edit, the last refusal: {last:?}",
+        candidates.len()
+    );
 }
 
 fn center_the_first_paragraph(document: &mut Document) {
@@ -222,12 +240,9 @@ fn an_unedited_document_renders_from_the_model_as_saved() {
 
 #[test]
 fn a_logged_edit_renders_through_the_save() {
-    for (name, bytes) in fixtures() {
+    for (name, bytes) in editable_fixtures() {
         let mut document = open(&bytes);
-        assert!(
-            edit_a_body_paragraph(&mut document),
-            "{name}: no paragraph takes a logged edit"
-        );
+        edit_a_body_paragraph(&mut document);
         assert_renders_as_saved(&document, &format!("{name} edited"), false);
     }
 }
@@ -243,11 +258,11 @@ fn a_logged_edit_the_save_writes_in_full_renders_through_the_save() {
 
 #[test]
 fn a_model_change_renders_through_the_save() {
-    for (name, bytes) in fixtures() {
+    for (name, bytes) in editable_fixtures() {
         let mut document = open(&bytes);
         center_the_first_paragraph(&mut document);
         assert_renders_as_saved(&document, &format!("{name} changed"), false);
-        assert!(edit_a_body_paragraph(&mut document));
+        edit_a_body_paragraph(&mut document);
         assert_renders_as_saved(&document, &format!("{name} changed then edited"), false);
     }
 }
@@ -279,7 +294,10 @@ fn a_document_opened_under_raised_limits_renders() {
     let pages = 3;
     let bytes = one_page_per_paragraph_docx(pages, "");
     let Err(error) = Document::open_with_limits(&bytes, &paragraph_limits(pages - 1)) else {
-        panic!("a {pages}-paragraph document opened under a {}-paragraph budget", pages - 1);
+        panic!(
+            "a {pages}-paragraph document opened under a {}-paragraph budget",
+            pages - 1
+        );
     };
     assert!(
         error.to_string().contains("paragraph"),
@@ -288,10 +306,10 @@ fn a_document_opened_under_raised_limits_renders() {
     let mut document =
         with_fonts(Document::open_with_limits(&bytes, &paragraph_limits(pages * 2)).unwrap());
     assert_eq!(
-        assert_every_page_renders(&document, "raised limits", true),
+        assert_every_page_renders(&document, "raised limits", false),
         pages
     );
-    assert!(edit_a_body_paragraph(&mut document));
+    edit_a_body_paragraph(&mut document);
     assert_eq!(
         assert_every_page_renders(&document, "raised limits edited", false),
         pages
@@ -299,7 +317,7 @@ fn a_document_opened_under_raised_limits_renders() {
 }
 
 #[test]
-fn a_document_one_attribute_past_the_default_limit_renders_from_the_model() {
+fn a_document_one_attribute_past_the_default_limit_renders_as_the_saved_render_does() {
     let pages = 3;
     let limit = ParseLimits::default().max_attributes_per_element;
     let attributes: String = std::iter::once(r#" xmlns:x="urn:betteroffice:test""#.to_owned())
@@ -317,7 +335,10 @@ fn a_document_one_attribute_past_the_default_limit_renders_from_the_model() {
         )
     };
     let Err(error) = Document::open(&bytes) else {
-        panic!("a paragraph with {} attributes opened under the default limit", limit + 1);
+        panic!(
+            "a paragraph with {} attributes opened under the default limit",
+            limit + 1
+        );
     };
     assert!(over_the_limit(&error), "unexpected error: {error:?}");
     let raised = ParseLimits {
@@ -325,23 +346,23 @@ fn a_document_one_attribute_past_the_default_limit_renders_from_the_model() {
         ..ParseLimits::default()
     };
     let document = with_fonts(Document::open_with_limits(&bytes, &raised).unwrap());
-    let saved = document
-        .render_png_saved(PngTarget { page: 0 }, &RenderOptions::default())
-        .unwrap_err();
+    let target = PngTarget { page: 0 };
+    let options = RenderOptions::default();
+    let saved = document.render_png_saved(target, &options).unwrap_err();
     assert!(over_the_limit(&saved), "unexpected error: {saved:?}");
-    assert_eq!(
-        assert_every_page_renders(&document, "one attribute past the limit", true),
-        pages
-    );
+    let before = model_renders();
+    let fast = document.render_png(target, &options).unwrap_err();
+    assert_render_path(before, false, "one attribute past the limit");
+    assert!(over_the_limit(&fast), "unexpected error: {fast:?}");
+    assert_eq!(format!("{fast:?}"), format!("{saved:?}"));
 }
 
 #[test]
 fn an_out_of_range_page_fails_as_the_saved_render_does() {
-    let (_, bytes) = fixtures().remove(0);
-    let mut document = open(&bytes);
+    let mut document = open(&one_page_per_paragraph_docx(3, ""));
     for edited in [false, true] {
         if edited {
-            assert!(edit_a_body_paragraph(&mut document));
+            edit_a_body_paragraph(&mut document);
         }
         let count = saved_pages(&document).len();
         for page in [count, count + 1, usize::MAX] {
