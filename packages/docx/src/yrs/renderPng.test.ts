@@ -277,7 +277,8 @@ const sessionsWithoutSource: [string, () => Promise<YrsSession>][] = [
   }],
   ['opened as a preview', async () => {
     const session = await createYrsSession();
-    session.openDocxPreview(deck, 3);
+    expect(session.openDocxPreview(deck, 3)).not.toBeNull();
+    expect(session.isDisplayOnly()).toBe(true);
     return session;
   }],
 ];
@@ -342,13 +343,34 @@ describe('YrsSession.renderPng source bytes', () => {
     } finally { drawing.mockRestore(); session.destroy(); }
   });
 
-  test('an edited session exports the same bytes twice', async () => {
+  test('an edited session draws the same page content on each export', async () => {
     stubBrowser();
     const session = await opened();
+    const drawing = spyOn(enginePng, 'renderPng');
     try {
       session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'Quixotically ');
-      const first = await session.renderPng({ page: 0 });
-      expect(await session.renderPng({ page: 0 })).toEqual(first);
+      await session.renderPng({ page: 0 });
+      await session.renderPng({ page: 0 });
+      expect(drawing).toHaveBeenCalledTimes(2);
+      const [first, second] = drawing.mock.calls.map(([input]) => input.page.primitives);
+      expect(first!.length).toBeGreaterThan(0);
+      expect(drawnText(first)).toContain('Quixotically');
+      expect(second).toEqual(first);
+    } finally { drawing.mockRestore(); session.destroy(); }
+  });
+
+  test('a package that cannot be opened leaves no source, and its export is refused', async () => {
+    stubBrowser();
+    const session = await createYrsSession();
+    try {
+      const archive = new Uint8Array(rezipPartsToArrayBuffer(new Map([['readme.txt', toBytes('Archive contents')]])));
+      expect(() => session.openDocx(archive, true)).toThrow();
+      const materialize = spyOn(session, 'materializeDocx');
+      const refused = await session.renderPng({ page: 0 }).then(() => undefined, (error: unknown) => error);
+      expect(refused).toBeInstanceOf(Error);
+      expect((refused as Error).name).toBe('Error');
+      expect((refused as Error).message).toContain('renderPng needs a session opened from DOCX bytes');
+      expect(materialize).toHaveBeenCalledTimes(1);
     } finally { session.destroy(); }
   });
 });
