@@ -779,6 +779,7 @@ impl SheetPatch<'_> {
         let mut changed = self.changed_source_cells();
         let mut arrays = BTreeSet::new();
         let mut groups: HashMap<u32, SharedGroupEntry> = HashMap::new();
+        let mut members: HashMap<u32, Vec<CellRef>> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
             let Some(formula) = &cell.formula else {
@@ -810,6 +811,7 @@ impl SheetPatch<'_> {
                             at.col.wrapping_sub(cell.at.col),
                         );
                         entry.0 |= *entry.2.get_or_insert(shift) != shift;
+                        members.entry(group).or_default().push(at);
                     }
                     if !entry.0
                         && formula.reference.is_some()
@@ -833,8 +835,13 @@ impl SheetPatch<'_> {
         Ok(DirtyFormulas {
             groups: groups
                 .into_iter()
-                .filter(|(_, (dirty, master, _))| {
-                    *dirty || !master.is_some_and(|reference| self.moves_uniformly(reference))
+                .filter(|(group, (dirty, master, _))| {
+                    let members = members.get(group).map_or(&[][..], Vec::as_slice);
+                    *dirty
+                        || !master
+                            .filter(|&reference| self.moves_uniformly(reference))
+                            .and_then(|reference| self.remap_range(reference))
+                            .is_some_and(|written| members.iter().all(|&at| written.contains(at)))
                 })
                 .map(|(group, _)| group)
                 .collect(),
