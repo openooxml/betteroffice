@@ -1,5 +1,6 @@
 ---
 '@betteroffice/rust-crates': patch
+'@betteroffice/python-docx': patch
 ---
 
-An edit made through the Rust crate on a document with a vertically merged table cell no longer rewrites the whole body. Untouched body bytes are kept.
+Editing a paragraph in a Word document whose tables have vertically merged cells no longer rewrites the whole document body when saved through the Rust crate or the Python package; the bytes outside the edit are kept.
