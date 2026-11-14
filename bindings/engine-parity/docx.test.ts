@@ -1020,6 +1020,29 @@ function residentLoc(session: Session, prefix: string, index: number) {
   return { story: 'body', paraId: paraId(session, prefix), offset: textAt(session, prefix, index) };
 }
 
+function settled<T>(read: () => T): { value: T } | { refused: string } {
+  try {
+    return { value: read() };
+  } catch (error) {
+    return { refused: String(error) };
+  }
+}
+
+// FrameDelta v1 keeps its flags at byte 12, bit 0 marking a full frame.
+const fullFrame = (frame: Uint8Array) => (new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(12, true) & 1) === 1;
+
+interface ListedPage { pageIndex: number; width: number; height: number }
+
+// Opened the way displayListQueries.ts opens a store: page slots and sizes, no primitives yet.
+function placeholderDisplay({ engine, session }: Docx) {
+  const list = JSON.parse(displayList(session)) as { contractVersion?: number; pages: ListedPage[] };
+  const contract = list.contractVersion === undefined ? {} : { contractVersion: list.contractVersion };
+  const pages = list.pages.map(({ pageIndex, width, height }) => ({ pageIndex, width, height, primitives: [] }));
+  return { list, contract, handle: engine.open_display_list(JSON.stringify({ ...contract, pages })) };
+}
+
+const KEEPS_EQUAL = 'keeps results equal';
+
 const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
 
 const rows: Row<Docx>[] = [
@@ -3075,8 +3098,11 @@ const rows: Row<Docx>[] = [
     setup: ({ session: s }: Docx) => s.set_direct_batches(true),
     call: ({ session: s }) => {
       const initial = s.direct_batches_applied();
-      const edit = s.apply_edits_json(editRequest(s));
-      return { initial, edit, applied: s.direct_batches_applied() };
+      const request = JSON.parse(editRequest(s)) as Record<string, unknown>;
+      const edit = s.apply_edits_json(JSON.stringify({ ...request, history: 'none' }));
+      const applied = s.direct_batches_applied();
+      if (applied === initial) throw new Error('the edit took the replica path, so the count did not move');
+      return { initial, edit, applied };
     },
   }),
   { method: 'EditSession.decode_font', call: ({ session: s }) => s.decode_font(fontBytes) },
@@ -3277,6 +3303,198 @@ const rows: Row<Docx>[] = [
     method: 'parse_relationships_xml',
     call: ({ engine }) => engine.parse_relationships_xml(fixtureEntries['word/_rels/document.xml.rels']!, 'word/_rels/document.xml.rels'),
   },
+  defineRow({
+    method: 'EditSession.apply_host_update',
+    mutates: true,
+    setup: (docx: Docx) => trackedRemote(docx, remoteUpdate),
+    call: ({ session: s }, update) => notUndoable(s, () => s.apply_host_update(update)),
+  }),
+  {
+    method: 'EditSession.apply_seed_raw_ops',
+    call: ({ session: s }) => {
+      const result = s.apply_seed_raw_ops('body', JSON.stringify([{ op: 'insert', index: 0, text: 'Seed ' }, { op: 'format', index: 0, len: 4, attrs: { bold: true } }]));
+      return { result, after: s.story_segments('body') };
+    },
+  },
+  {
+    method: 'EditSession.bootstrap_peer',
+    call: ({ fresh }) => {
+      const worker = fresh();
+      worker.open_docx(fixture, true, GENERATION);
+      const peer = fresh();
+      const result = peer.bootstrap_peer(worker.encode_state(), worker.encode_peer_metadata(), fixture);
+      return { result, segments: peer.story_segments('body'), stories: peer.list_stories_json(), comments: peer.list_comments() };
+    },
+  },
+  {
+    method: 'EditSession.clear_measure_fonts',
+    call: ({ session: s }) => {
+      const before = [s.register_measure_font(fontBytes), s.register_measure_font(fontBytes)];
+      const result = s.clear_measure_fonts();
+      return { before, result, after: s.register_measure_font(fontBytes) };
+    },
+  },
+  defineRow({
+    method: 'clear_measure_fonts',
+    setup: ({ engine }: Docx) => moduleFont(engine),
+    call: ({ engine }, first) => {
+      const before = [first, engine.register_measure_font(fontBytes)];
+      const result = engine.clear_measure_fonts();
+      return { before, result, after: engine.register_measure_font(fontBytes) };
+    },
+  }),
+  {
+    method: 'EditSession.start_update_event_observation',
+    call: ({ session: s }) => {
+      const result = s.start_update_event_observation();
+      peerEdit(s, 'First body', 'Observed ');
+      const events = drainEvents(s);
+      if (events.length === 0) throw new Error('the observed edit queued no update event');
+      return { result, events };
+    },
+  },
+  defineRow({
+    method: 'EditSession.clear_update_event_observation',
+    setup: ({ session: s }: Docx) => s.start_update_event_observation(),
+    call: ({ session: s }) => {
+      peerEdit(s, 'First body', 'Queued ');
+      const queued = drainEvents(s);
+      if (queued.length === 0) throw new Error('the observed edit queued no update event');
+      peerEdit(s, 'Second body', 'Dropped ');
+      const result = s.clear_update_event_observation();
+      const dropped = s.drain_update_event();
+      peerEdit(s, 'Final', 'Unobserved ');
+      return { queued, result, dropped, after: s.drain_update_event() };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.reset_frame_base',
+    setup: ({ session: s }: Docx) => layout(s).fontChains,
+    call: ({ session: s }, fontChains) => {
+      s.build_display_list_frame(frameExtras(fontChains), 0);
+      const delta = s.build_display_list_frame(frameExtras(fontChains), frameEpoch(s));
+      const result = s.reset_frame_base();
+      const full = s.build_display_list_frame(frameExtras(fontChains), frameEpoch(s));
+      if (fullFrame(delta) || !fullFrame(full)) throw new Error(`expected a delta before the reset and a full frame after it, got full=${fullFrame(delta)} then full=${fullFrame(full)}`);
+      return { delta, result, full };
+    },
+  }),
+  {
+    method: 'EditSession.set_direct_batches',
+    call: ({ session: s }) => {
+      const initial = s.direct_batches_applied();
+      const result = s.set_direct_batches(true);
+      const request = JSON.parse(editRequest(s)) as Record<string, unknown>;
+      const edit = s.apply_edits_json(JSON.stringify({ ...request, history: 'none' }));
+      const applied = s.direct_batches_applied();
+      if (applied === initial) throw new Error('the edit took the replica path, so the count does not show the setting');
+      return { initial, result, edit, applied };
+    },
+  },
+  {
+    method: 'EditSession.set_header_footer_aliases',
+    call: ({ session: s }) => {
+      const result = s.set_header_footer_aliases(HEADER_ALIASES);
+      const aliases = s.header_footer_aliases_json();
+      if ((JSON.parse(aliases) as Record<string, string>).rIdHeaderAlias !== 'rIdHeader') throw new Error(`the header alias is not active: ${aliases}`);
+      return { result, aliases };
+    },
+  },
+  {
+    method: 'EditSession.seed_opaque_sequences',
+    call: ({ session: s }) => {
+      const before = s.encode_state();
+      const result = s.seed_opaque_sequences(JSON.stringify(['Figure']));
+      const after = s.encode_state();
+      if (Buffer.compare(Buffer.from(before), Buffer.from(after)) === 0) throw new Error('seeding a sequence name left the document state unchanged');
+      return { result, after };
+    },
+  },
+  defineRow({
+    method: 'close_display_list',
+    setup: openedDisplay,
+    call: ({ engine }, { handle }) => {
+      const before = engine.range_rects_by_handle(handle, 1, 6);
+      const result = engine.close_display_list(handle);
+      const after = settled(() => engine.range_rects_by_handle(handle, 1, 6));
+      if (!('refused' in after)) throw new Error('a closed handle still answered');
+      return { before, result, after };
+    },
+  }),
+  defineRow({
+    method: 'update_display_list',
+    setup: placeholderDisplay,
+    call: ({ engine }, { list, contract, handle }) => {
+      try {
+        const before = settled(() => handleAnswers(engine, handle));
+        const update = { total: list.pages.length, ...contract, keep: true, replace: list.pages.map((page, index) => [index, page]) };
+        const result = engine.update_display_list(handle, JSON.stringify(update));
+        const after = handleAnswers(engine, handle);
+        if (JSON.stringify(before) === JSON.stringify({ value: after })) throw new Error('the loaded pages answer as the placeholders did');
+        return { before, result, after };
+      } finally {
+        engine.close_display_list(handle);
+      }
+    },
+  }),
+  // These toggles change how the engine reaches its results, so their rows show equal results, not an effect.
+  {
+    method: 'EditSession.begin_shared_reads',
+    name: `EditSession.begin_shared_reads ${KEEPS_EQUAL}`,
+    call: ({ session: s }) => {
+      const result = s.begin_shared_reads();
+      try {
+        return { result, segments: s.story_segments('body'), paragraphs: s.paragraphs('body'), blocks: s.yrs_blocks_for_story('body', '{}') };
+      } finally {
+        s.end_shared_reads();
+      }
+    },
+  },
+  defineRow({
+    method: 'EditSession.end_shared_reads',
+    name: `EditSession.end_shared_reads ${KEEPS_EQUAL}`,
+    setup: ({ session: s }: Docx) => s.begin_shared_reads(),
+    call: ({ session: s }) => {
+      const shared = s.paragraphs('body');
+      const result = s.end_shared_reads();
+      peerEdit(s, 'Second body', 'Later ');
+      return { shared, result, after: s.paragraphs('body') };
+    },
+  }),
+  {
+    method: 'EditSession.set_local_lowering',
+    name: `EditSession.set_local_lowering ${KEEPS_EQUAL}`,
+    call: ({ session: s }) => {
+      const result = s.set_local_lowering(true);
+      const epoch = residentFrame(s);
+      caretIn(s, 'Second body', 6);
+      return { result, frame: s.apply_input('X', epoch), after: s.paragraphs('body') };
+    },
+  },
+  defineRow({
+    method: 'EditSession.set_windowed_incremental_builds',
+    name: `EditSession.set_windowed_incremental_builds ${KEEPS_EQUAL}`,
+    setup: ({ session: s }: Docx) => layout(s).fontChains,
+    call: ({ session: s }, fontChains) => {
+      const result = s.set_windowed_incremental_builds(true);
+      s.set_display_window(0, 1);
+      const first = s.build_display_list_frame(frameExtras(fontChains), 0);
+      caretIn(s, 'Second body', 6);
+      return { result, first, typed: s.apply_input('X', frameEpoch(s)), after: s.paragraphs('body') };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.set_display_retain_built_pages',
+    name: `EditSession.set_display_retain_built_pages ${KEEPS_EQUAL}`,
+    setup: ({ session: s }: Docx) => layout(s).fontChains,
+    call: ({ session: s }, fontChains) => {
+      const result = s.set_display_retain_built_pages(true);
+      s.set_display_window(1, 2);
+      const first = s.build_display_list_frame(frameExtras(fontChains), 0);
+      const pages = s.build_display_pages_frame(Uint32Array.from([0]), frameEpoch(s));
+      return { result, first, pages, again: s.build_display_list_frame(frameExtras(fontChains), frameEpoch(s)) };
+    },
+  }),
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
@@ -3304,23 +3522,9 @@ const exclusions: Exclusion[] = [
 const knownDifferences: KnownDifference[] = [];
 
 const notYetCovered: string[] = [
-  'EditSession.apply_host_update',
-  'EditSession.apply_seed_raw_ops',
-  'EditSession.begin_shared_reads',
-  'EditSession.bootstrap_peer',
-  'EditSession.clear_measure_fonts', 'EditSession.clear_update_event_observation',
   'EditSession.encode_peer_metadata',
-  'EditSession.end_shared_reads',
-  'EditSession.reset_frame_base',
-  'EditSession.seed_opaque_sequences',
-  'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages',
-  'EditSession.set_header_footer_aliases',
-  'EditSession.set_local_lowering',
-  'EditSession.set_windowed_incremental_builds',
-  'EditSession.start_update_event_observation',
   'EditSession.update_measure_font_outlines',
-  'clear_measure_fonts', 'close_display_list', 'decodeFontFace', 'decodeTiffPng',
-  'update_display_list',
+  'decodeFontFace', 'decodeTiffPng',
 ];
 
 const NO_RASTERIZER = 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/docx/src/wasm/enginePng.ts';
@@ -3351,7 +3555,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(22);
+    expect(notYetCovered.length).toBe(4);
   });
 
   for (const row of rows) {
