@@ -146,6 +146,14 @@
     "zoomPercent": "縮放百分比",
     "apply": "套用",
     "cancel": "取消",
+    "freezeColumn": "凍結 {column} 欄",
+    "freezeColumns": "凍結 {first}–{last} 欄",
+    "freezeRow": "凍結第 {row} 列",
+    "freezeRows": "凍結第 {first}–{last} 列",
+    "unfreezePanes": "取消凍結窗格",
+    "unhideColumns": "取消隱藏欄",
+    "unhideRows": "取消隱藏列",
+    "selectAll": "全選",
     "reasons": {
       "editorUnavailable": "編輯器尚未就緒。",
       "documentLoading": "活頁簿仍在開啟中。",
@@ -227,6 +235,8 @@
     "sheetTabsLabel": "工作表",
     "clearExceedsLimit": "清除超過儲存格限制",
     "cellMenuLabel": "儲存格功能表",
+    "columnHeaderMenuLabel": "欄標題功能表",
+    "rowHeaderMenuLabel": "列標題功能表",
     "sheetTabMenuLabel": "工作表索引標籤功能表",
     "renameSheetLabel": "重新命名工作表",
     "sheetNamePrefix": "工作表"

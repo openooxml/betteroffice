@@ -146,6 +146,14 @@
     "zoomPercent": "Zoom dalam persen",
     "apply": "Terapkan",
     "cancel": "Batal",
+    "freezeColumn": "Bekukan kolom {column}",
+    "freezeColumns": "Bekukan kolom {first}–{last}",
+    "freezeRow": "Bekukan baris {row}",
+    "freezeRows": "Bekukan baris {first}–{last}",
+    "unfreezePanes": "Batalkan pembekuan panel",
+    "unhideColumns": "Perlihatkan kolom",
+    "unhideRows": "Perlihatkan baris",
+    "selectAll": "Pilih semua",
     "reasons": {
       "editorUnavailable": "Editor belum siap.",
       "documentLoading": "Buku kerja masih dibuka.",
@@ -227,6 +235,8 @@
     "sheetTabsLabel": "Lembar",
     "clearExceedsLimit": "Penghapusan melebihi batas sel",
     "cellMenuLabel": "Menu sel",
+    "columnHeaderMenuLabel": "Menu kepala kolom",
+    "rowHeaderMenuLabel": "Menu kepala baris",
     "sheetTabMenuLabel": "Menu tab lembar",
     "renameSheetLabel": "Ganti nama lembar",
     "sheetNamePrefix": "Lembar"

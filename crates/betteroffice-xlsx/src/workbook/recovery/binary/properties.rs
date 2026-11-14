@@ -678,12 +678,36 @@ fn op(tag: u8) -> S<Op> {
         37 => operation!(SetTables {
             tables: prop::collection::vec(table(), 0..3)
         }),
+        38 => operation!(MoveCols {
+            sheet: sheet(),
+            col: any::<u32>(),
+            count: any::<u32>(),
+            before: any::<u32>()
+        }),
+        39 => operation!(MoveRows {
+            sheet: sheet(),
+            row: any::<u32>(),
+            count: any::<u32>(),
+            before: any::<u32>()
+        }),
+        40 => operation!(SetColsVisibility {
+            sheet: sheet(),
+            col: any::<u32>(),
+            count: any::<u32>(),
+            hidden: any::<bool>()
+        }),
+        41 => operation!(SetRowsVisibility {
+            sheet: sheet(),
+            row: any::<u32>(),
+            count: any::<u32>(),
+            hidden: any::<bool>()
+        }),
         _ => unreachable!(),
     }
 }
 
 fn all_ops() -> S<Vec<Op>> {
-    (0..38).fold(Just(Vec::new()).boxed(), |ops, tag| {
+    (0..42).fold(Just(Vec::new()).boxed(), |ops, tag| {
         (ops, op(tag))
             .prop_map(|(mut ops, op)| {
                 ops.push(op);
@@ -694,7 +718,7 @@ fn all_ops() -> S<Vec<Op>> {
 }
 
 fn any_op() -> S<Op> {
-    (0u8..38).prop_flat_map(op).boxed()
+    (0u8..40).prop_flat_map(op).boxed()
 }
 
 fn history() -> S<Vec<Vec<Op>>> {
@@ -733,6 +757,10 @@ proptest! {
             let bytes = encoded(&op);
             prop_assert_eq!(bytes[0], tag as u8);
             let mut reader = Reader::new(&bytes);
+            if cfg!(not(feature = "unstable-track-visibility")) && matches!(tag, 40 | 41) {
+                prop_assert!(Op::read(&mut reader).is_err());
+                continue;
+            }
             prop_assert_eq!(Op::read(&mut reader).unwrap(), op);
             prop_assert!(reader.finish().is_ok());
         }

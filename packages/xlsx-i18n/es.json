@@ -146,6 +146,14 @@
     "zoomPercent": "Zoom en porcentaje",
     "apply": "Aplicar",
     "cancel": "Cancelar",
+    "freezeColumn": "Inmovilizar columna {column}",
+    "freezeColumns": "Inmovilizar columnas {first}–{last}",
+    "freezeRow": "Inmovilizar fila {row}",
+    "freezeRows": "Inmovilizar filas {first}–{last}",
+    "unfreezePanes": "Desmovilizar paneles",
+    "unhideColumns": "Mostrar columnas",
+    "unhideRows": "Mostrar filas",
+    "selectAll": "Seleccionar todo",
     "reasons": {
       "editorUnavailable": "El editor no está listo.",
       "documentLoading": "El libro aún se está abriendo.",
@@ -227,6 +235,8 @@
     "sheetTabsLabel": "Hojas",
     "clearExceedsLimit": "Borrar supera el límite de celdas.",
     "cellMenuLabel": "Menú de celda",
+    "columnHeaderMenuLabel": "Menú del encabezado de columna",
+    "rowHeaderMenuLabel": "Menú del encabezado de fila",
     "sheetTabMenuLabel": "Menú de la pestaña de hoja",
     "renameSheetLabel": "Cambiar nombre de la hoja",
     "sheetNamePrefix": "Hoja"

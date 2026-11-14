@@ -146,6 +146,14 @@
     "zoomPercent": "Zoom in percent",
     "apply": "Apply",
     "cancel": "Cancel",
+    "freezeColumn": "Freeze column {column}",
+    "freezeColumns": "Freeze columns {first}–{last}",
+    "freezeRow": "Freeze row {row}",
+    "freezeRows": "Freeze rows {first}–{last}",
+    "unfreezePanes": "Unfreeze panes",
+    "unhideColumns": "Unhide columns",
+    "unhideRows": "Unhide rows",
+    "selectAll": "Select all",
     "reasons": {
       "editorUnavailable": "The editor is not ready.",
       "documentLoading": "The workbook is still opening.",
@@ -227,6 +235,8 @@
     "sheetTabsLabel": "Sheets",
     "clearExceedsLimit": "Clear exceeds the cell limit",
     "cellMenuLabel": "Cell menu",
+    "columnHeaderMenuLabel": "Column header menu",
+    "rowHeaderMenuLabel": "Row header menu",
     "sheetTabMenuLabel": "Sheet tab menu",
     "renameSheetLabel": "Rename sheet",
     "sheetNamePrefix": "Sheet"
