@@ -226,6 +226,19 @@ fn move_out(session: &DeckSession, placed: &[Placed], rng: &mut SplitMix) {
     order.push_back(&mut txn, member.shape.as_str());
 }
 
+const MAX_SLIDES: usize = 8;
+const MAX_SHAPES: usize = 40;
+const STEADY: [usize; 7] = [0, 1, 5, 6, 7, 8, 9];
+
+fn below_cap(slides: usize, shapes: usize) -> bool {
+    slides < MAX_SLIDES && shapes < MAX_SHAPES
+}
+
+fn over_cap(session: &DeckSession) -> bool {
+    let slides = live_slide_ids(&session.doc.transact()).unwrap().len();
+    slides > MAX_SLIDES || placed_shapes(session).len() > MAX_SHAPES
+}
+
 fn step(
     rng: &mut SplitMix,
     local: &DeckSession,
@@ -235,7 +248,11 @@ fn step(
     let context = EditCtx::local("test");
     let slides = live_slide_ids(&local.doc.transact()).unwrap();
     let placed = placed_shapes(local);
-    let choice = rng.below(11);
+    let choice = if below_cap(slides.len(), placed.len()) {
+        rng.below(11)
+    } else {
+        rng.pick(&STEADY).unwrap()
+    };
     match choice {
         0 => {
             if let Some(slide) = rng.pick(&slides) {
@@ -255,14 +272,19 @@ fn step(
             }
         }
         2 => {
-            local.undo();
+            if local.undo() && over_cap(local) {
+                local.redo();
+            }
         }
         3 => {
-            local.redo();
+            if local.redo() && over_cap(local) {
+                local.undo();
+            }
         }
         4 => {
             if let Some(slide) = rng.pick(&slides)
-                && placed.len() < 24
+                && placed.len() + placed.iter().filter(|shape| shape.slide == slide).count()
+                    <= MAX_SHAPES
             {
                 local
                     .duplicate_slide(&context, &slide, slides.len() as u32)
@@ -342,7 +364,9 @@ fn grouped_deck(session: &DeckSession) {
 #[test]
 fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
     let mut totals = LookupCounts::default();
+    let mut checked = 0_usize;
     for seed in 1..=50_u64 {
+        let every_story = seed <= 5;
         let local = empty_session(41);
         let peer = empty_session(42);
         let mut rng = SplitMix(seed);
@@ -351,10 +375,16 @@ fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
         let mut stories = Vec::new();
         discover(&local, &mut seen, &mut stories);
         for round in 0..200 {
-            for _ in 0..2 {
-                let Some(story) = rng.pick(&stories) else {
-                    break;
-                };
+            if step(&mut rng, &local, &peer, &stories) {
+                discover(&local, &mut seen, &mut stories);
+            }
+            let sample: Vec<String> = if every_story {
+                stories.clone()
+            } else {
+                (0..2).filter_map(|_| rng.pick(&stories)).collect()
+            };
+            for story in sample {
+                checked += 1;
                 let owned = walk_finds_owner(&local, &story);
                 for lookup in ["first", "second"] {
                     assert_eq!(
@@ -364,15 +394,13 @@ fn resolving_a_story_agrees_with_the_full_walk_after_every_generated_edit() {
                     );
                 }
             }
-            if step(&mut rng, &local, &peer, &stories) {
-                discover(&local, &mut seen, &mut stories);
-            }
         }
         let counts = local.story_owners.counts.get();
         totals.hits += counts.hits;
         totals.rejected += counts.rejected;
         totals.none += counts.none;
     }
+    println!("\nstories checked: {checked}, lookups: {totals:?}");
     assert!(totals.hits > 0, "{totals:?}");
     assert!(totals.rejected > 0, "{totals:?}");
     assert!(totals.none > 0, "{totals:?}");
