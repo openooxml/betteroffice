@@ -403,7 +403,7 @@ fn refuses_model_form_field_data_with_an_unbound_prefix_naming_the_field_and_the
 const XSI: &str = "http://www.w3.org/2001/XMLSchema-instance";
 
 #[test]
-fn keeps_the_declaration_of_a_w_alias_an_attribute_value_of_the_form_field_data_names() {
+fn refuses_to_write_form_field_data_carrying_a_schema_instance_type_naming_the_field() {
     let w = lossy(W_URI);
     let own = format!(
         r#"<w:ffData xmlns:q="{w}" xmlns:xsi="{XSI}" xsi:type="q:CT_FFData"><q:name q:val="T"/></w:ffData>"#
@@ -418,15 +418,9 @@ fn keeps_the_declaration_of_a_w_alias_an_attribute_value_of_the_form_field_data_
             text("Label "),
             text("Ada"),
         );
-        let xml = saved_document(&fixture(&body));
-        let data = &xml[xml.find("<w:ffData").expect(&xml)..];
-        let tag = &data[..data.find('>').unwrap()];
-        assert!(tag.contains(&format!(r#"xmlns:q="{w}""#)), "{xml}");
-        assert!(tag.contains(r#"xsi:type="q:CT_FFData""#), "{xml}");
-        assert!(
-            data.starts_with(&format!(r#"{tag}><w:name w:val="T"/></w:ffData>"#)),
-            "{xml}"
-        );
+        let error = save(&fixture(&body)).unwrap_err();
+        assert!(error.contains("\"T\""), "{error}");
+        assert!(!error.contains("unbound prefix"), "{error}");
     }
 }
 
@@ -600,7 +594,7 @@ fn p1b_ctrl_fragment_decl() {
     let raw = format!(
         r#"<w:ffData xmlns:xsi="{XSI}" xmlns:q="urn:x-test:q" xsi:type="q:CT_FFData"><w:name w:val="T"/></w:ffData>"#
     );
-    prefix_case("p1b_ctrl_fragment_decl", &raw, true);
+    xsi_refused("p1b_ctrl_fragment_decl", &raw);
 }
 
 #[test]
