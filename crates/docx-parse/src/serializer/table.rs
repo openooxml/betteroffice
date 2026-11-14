@@ -294,9 +294,18 @@ pub fn serialize_table_cell(
     let mut writer = XmlWriter::with_capacity(512);
     writer.start_element("w:tc");
     append_generated(&mut writer, &properties);
-    for block in &cell.content {
+    let continuation = cell
+        .formatting
+        .as_ref()
+        .and_then(|formatting| formatting.v_merge.as_deref())
+        == Some("continue");
+    context.vmerge_continuation += u32::from(continuation);
+    let content = cell.content.iter().try_for_each(|block| {
         append_generated(&mut writer, &serialize_block_content(block, context)?);
-    }
+        Ok::<_, ParseError>(())
+    });
+    context.vmerge_continuation -= u32::from(continuation);
+    content?;
     if cell.content.iter().all(crate::block::is_bookmark_block) {
         context.record_placeholder();
         writer.start_element("w:p").end_element();
