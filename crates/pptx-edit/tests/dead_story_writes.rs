@@ -130,32 +130,68 @@ fn sync(from: &DeckSession, to: &DeckSession) -> DeckSnapshot {
     to.apply_update_v1(&diff).unwrap()
 }
 
+fn remove(session: &DeckSession, slide: &str, shape: &str, removal: Removal) {
+    let ctx = EditCtx::local("test");
+    match removal {
+        Removal::Slide => {
+            session.delete_slide(&ctx, slide).unwrap();
+        }
+        Removal::Shape => {
+            session.remove_shape(&ctx, slide, shape).unwrap();
+        }
+    }
+}
+
 fn dead_story(removal: Removal) -> (DeckSession, String) {
     let (session, story) = session_with_text("ABC");
     let ctx = EditCtx::local("test");
     session.insert_paragraph_break(&ctx, &story, 1).unwrap();
     let (slide, shape) = story_home(&session, &story);
-    match removal {
-        Removal::Slide => {
-            session.delete_slide(&ctx, &slide).unwrap();
-        }
-        Removal::Shape => {
-            session.remove_shape(&ctx, &slide, &shape).unwrap();
-        }
-    }
+    remove(&session, &slide, &shape, removal);
     (session, story)
 }
 
-fn refused<T: std::fmt::Debug>(method: &str, result: EditResult<T>) {
-    assert!(
-        matches!(result, Err(EditError::StoryNotFound(_))),
-        "{method}: {result:?}"
-    );
+fn ownerless_cell(client_id: u64, retire: bool, removal: Option<Removal>) -> (DeckSession, String) {
+    let session = unmerged_table_session(client_id);
+    let snapshot = session.snapshot().unwrap();
+    let slide = snapshot.slides[0].id.clone();
+    let shape = snapshot.slides[0].shapes[0].id.clone();
+    let cell = table_cell(&session, 1, 1);
+    if retire {
+        session
+            .insert_table_row(
+                &EditCtx::local("test"),
+                &slide,
+                &shape,
+                0,
+                TableInsertPosition::After,
+                &["XY".to_owned()],
+            )
+            .unwrap();
+        assert_eq!(live_text(&session, &cell), None);
+    }
+    if let Some(removal) = removal {
+        remove(&session, &slide, &shape, removal);
+    }
+    (session, cell)
 }
 
-fn assert_every_write_refused(removal: Removal) {
-    let (session, story) = dead_story(removal);
-    let before = session.story(&story).unwrap();
+enum Refusal {
+    MissingStory,
+    MissingShape,
+}
+
+fn refused<T: std::fmt::Debug>(method: &str, expected: &Refusal, result: EditResult<T>) {
+    let named = match expected {
+        Refusal::MissingStory => matches!(result, Err(EditError::StoryNotFound(_))),
+        Refusal::MissingShape => matches!(result, Err(EditError::ShapeNotFound(_))),
+    };
+    assert!(named, "{method}: {result:?}");
+}
+
+fn assert_every_write_refused(session: &DeckSession, story: &str, expected: Refusal) {
+    let deck = session.snapshot().unwrap();
+    let text = session.story(story).ok();
     let ctx = EditCtx::local("test");
     let style = TextStyle::default();
     let emphasis = TextStylePatch {
@@ -167,48 +203,93 @@ fn assert_every_write_refused(removal: Removal) {
     let shrunk = drafts(&["ABC"]);
     refused(
         "insert_text",
-        session.insert_text(&ctx, &story, 1, "X", &style),
+        &expected,
+        session.insert_text(&ctx, story, 1, "X", &style),
     );
-    refused("delete_text", session.delete_text(&ctx, &story, 0, 1));
+    refused(
+        "delete_text",
+        &expected,
+        session.delete_text(&ctx, story, 0, 1),
+    );
     refused(
         "delete_text_joining_paragraphs",
-        session.delete_text_joining_paragraphs(&ctx, &story, 1, 2),
+        &expected,
+        session.delete_text_joining_paragraphs(&ctx, story, 1, 2),
     );
     refused(
         "format_text",
-        session.format_text(&ctx, &story, 0, 1, &emphasis),
+        &expected,
+        session.format_text(&ctx, story, 0, 1, &emphasis),
     );
     refused(
         "set_paragraph_alignment",
-        session.set_paragraph_alignment(&ctx, &story, 0, 1, center),
+        &expected,
+        session.set_paragraph_alignment(&ctx, story, 0, 1, center),
     );
     refused(
         "insert_paragraph_break",
-        session.insert_paragraph_break(&ctx, &story, 1),
+        &expected,
+        session.insert_paragraph_break(&ctx, story, 1),
     );
     refused(
         "delete_paragraph_break",
-        session.delete_paragraph_break(&ctx, &story, 1),
+        &expected,
+        session.delete_paragraph_break(&ctx, story, 1),
     );
     refused(
         "set_story_paragraphs adding a paragraph",
-        session.set_story_paragraphs(&ctx, &story, &grown),
+        &expected,
+        session.set_story_paragraphs(&ctx, story, &grown),
     );
     refused(
         "set_story_paragraphs removing a paragraph",
-        session.set_story_paragraphs(&ctx, &story, &shrunk),
+        &expected,
+        session.set_story_paragraphs(&ctx, story, &shrunk),
     );
-    assert_eq!(session.story(&story).unwrap(), before);
+    assert_eq!(session.snapshot().unwrap(), deck);
+    assert_eq!(session.story(story).ok(), text);
 }
 
 #[test]
 fn every_story_write_is_refused_once_its_slide_is_deleted() {
-    assert_every_write_refused(Removal::Slide);
+    let (session, story) = dead_story(Removal::Slide);
+    assert_every_write_refused(&session, &story, Refusal::MissingStory);
 }
 
 #[test]
 fn every_story_write_is_refused_once_its_shape_is_removed() {
-    assert_every_write_refused(Removal::Shape);
+    let (session, story) = dead_story(Removal::Shape);
+    assert_every_write_refused(&session, &story, Refusal::MissingStory);
+}
+
+#[test]
+fn every_cell_write_is_refused_as_a_missing_shape_once_its_table_is_removed() {
+    let (session, cell) = ownerless_cell(84208, false, Some(Removal::Shape));
+    assert_every_write_refused(&session, &cell, Refusal::MissingShape);
+}
+
+#[test]
+fn every_cell_write_is_refused_as_a_missing_shape_once_its_slide_is_deleted() {
+    let (session, cell) = ownerless_cell(84209, false, Some(Removal::Slide));
+    assert_every_write_refused(&session, &cell, Refusal::MissingShape);
+}
+
+#[test]
+fn every_write_to_a_cell_id_retired_by_a_row_insert_is_refused_as_a_missing_story() {
+    let (session, cell) = ownerless_cell(84210, true, None);
+    assert_every_write_refused(&session, &cell, Refusal::MissingStory);
+}
+
+#[test]
+fn every_write_to_a_retired_cell_id_is_refused_as_a_missing_shape_once_its_table_is_removed() {
+    let (session, cell) = ownerless_cell(84211, true, Some(Removal::Shape));
+    assert_every_write_refused(&session, &cell, Refusal::MissingShape);
+}
+
+#[test]
+fn every_write_to_a_retired_cell_id_is_refused_as_a_missing_shape_once_its_slide_is_deleted() {
+    let (session, cell) = ownerless_cell(84212, true, Some(Removal::Slide));
+    assert_every_write_refused(&session, &cell, Refusal::MissingShape);
 }
 
 #[test]
@@ -339,6 +420,7 @@ fn a_text_box_added_to_a_slide_a_peer_deleted_concurrently_takes_no_writes() {
         assert_eq!(peer.resolve_caret_anchor(&anchor), None);
         refused(
             "insert_text",
+            &Refusal::MissingStory,
             peer.insert_text(&ctx, &story, 1, "X", &TextStyle::default()),
         );
     }
