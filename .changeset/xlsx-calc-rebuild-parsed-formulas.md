@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-A full recalculation reuses the formulas the previous dependency graph already parsed instead of parsing every formula again. Over 208 public workbooks the total recalculation time fell by 12 to 14 percent.
+Full recalculation of an xlsx workbook is faster: formulas that did not change since the previous calculation are no longer parsed again.
