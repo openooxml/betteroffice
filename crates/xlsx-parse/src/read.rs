@@ -954,13 +954,11 @@ fn parse_conditional_formats(
                 });
                 next_id += 1;
             }
-            Event::Start(e) if local_name(&e) == b"formula" && depth == 4 && rule.is_some() => {
+            Event::Start(e) if local_name(&e) == b"formula" && rule.is_some() => {
                 formula = Some(String::new());
                 let _ = e;
             }
-            Event::Start(e) | Event::Empty(e)
-                if local_name(&e) == b"cfvo" && depth == 5 && rule.is_some() =>
-            {
+            Event::Start(e) | Event::Empty(e) if local_name(&e) == b"cfvo" && rule.is_some() => {
                 if attr(&e, b"type")?.as_deref() == Some("formula")
                     && let Some(value) = attr(&e, b"val")?
                 {
@@ -1001,6 +999,7 @@ fn parse_conditional_formats(
             }
             Event::End(e)
                 if e.name().local_name().as_ref() == b"conditionalFormatting"
+                    && depth == 1
                     && group.is_some() =>
             {
                 groups.push(group.take().unwrap());
