@@ -1010,15 +1010,6 @@ const AUTHORED_IDS: [(&str, &[&str]); 2] = [
     ("word/header1.xml", &["0C000001"]),
 ];
 
-/// A suggested edit, which the save takes through the full write.
-fn suggest_an_edit(document: &mut Document) {
-    let context =
-        betteroffice_docx::EditCtx::local("Reviewer", "2026-01-02T03:04:05.000Z").suggesting();
-    document
-        .replace_paragraph_text_with(W14_ID, "first edited", 1, &context)
-        .unwrap();
-}
-
 /// `text` with its character references written out.
 fn decoded(text: &str) -> String {
     let mut written = String::new();
@@ -1045,38 +1036,6 @@ fn decoded_ids(xml: &str) -> Vec<String> {
 }
 
 #[test]
-fn a_full_write_keeps_every_other_part_and_every_authored_paragraph_id() {
-    let input = word_docx(|_| {});
-    let mut document = Document::open(&input).unwrap();
-    let ids = paragraph_ids(&document);
-    for id in &ids {
-        assert_eq!(document.paragraph(id).unwrap().para_id.as_ref(), Some(id));
-    }
-
-    suggest_an_edit(&mut document);
-    let saved = document.save().unwrap();
-    let (before, after) = (
-        ooxml_opc::unzip_parts(&input).unwrap(),
-        ooxml_opc::unzip_parts(&saved).unwrap(),
-    );
-    assert_eq!(
-        before.iter().map(|(name, _)| name).collect::<Vec<_>>(),
-        after.iter().map(|(name, _)| name).collect::<Vec<_>>()
-    );
-    for ((name, source), (_, written)) in before.iter().zip(&after) {
-        match AUTHORED_IDS.iter().find(|(part, _)| part == name) {
-            Some((_, authored)) => assert_eq!(
-                written_ids(&String::from_utf8_lossy(written)),
-                *authored,
-                "{name}"
-            ),
-            None => assert_eq!(written, source, "{name}"),
-        }
-    }
-    assert!(!ids[1..].contains(&W14_ID.to_owned()));
-}
-
-#[test]
 fn an_unedited_save_keeps_every_part_and_every_authored_paragraph_id() {
     let input = word_docx(|_| {});
     let saved = Document::open(&input).unwrap().save().unwrap();
@@ -1098,58 +1057,6 @@ fn an_unedited_save_keeps_every_part_and_every_authored_paragraph_id() {
         }
         assert_eq!(written, source, "{name}");
     }
-}
-
-/// An unchanged model, taken for change, that the save takes through the full write.
-fn touch_the_model(document: &mut Document) {
-    document.model_mut();
-    document.replace_paragraph_text(W14_ID, "first").unwrap();
-}
-
-#[test]
-fn a_full_write_keeps_repeated_ids_addressable_across_save_and_reopen_cycles() {
-    let input = word_docx(|_| {});
-    let ids = paragraph_ids(&Document::open(&input).unwrap());
-    assert_eq!(
-        ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
-        6
-    );
-
-    let mut opened = Document::open(&input).unwrap();
-    touch_the_model(&mut opened);
-    let first = opened.save().unwrap();
-    let mut reopened = Document::open(&first).unwrap();
-    assert_eq!(paragraph_ids(&reopened), ids);
-    touch_the_model(&mut reopened);
-    assert_eq!(reopened.save().unwrap(), first);
-
-    let mut cycled = input;
-    for (index, text) in [(2, "nested edit"), (4, "control edit"), (1, "second edit")] {
-        let mut document = Document::open(&cycled).unwrap();
-        assert_eq!(paragraph_ids(&document), ids);
-        document.replace_paragraph_text(&ids[index], text).unwrap();
-        touch_the_model(&mut document);
-        cycled = document.save().unwrap();
-    }
-    let mut reopened = Document::open(&cycled).unwrap();
-    touch_the_model(&mut reopened);
-    assert_eq!(
-        identified_texts(&reopened),
-        [
-            (W14_ID, "first"),
-            (ids[1].as_str(), "second edit"),
-            (ids[2].as_str(), "nested edit"),
-            ("0B000002", ""),
-            (ids[4].as_str(), "control edit"),
-            ("0B000003", "third"),
-        ]
-        .map(|(id, text)| (id.to_owned(), text.to_owned()))
-    );
-    assert_eq!(reopened.save().unwrap(), cycled);
-    assert_eq!(
-        written_ids(&package_part(&cycled, "word/document.xml")),
-        ids
-    );
 }
 
 #[test]
@@ -1256,43 +1163,6 @@ fn escaped_id_variants(reference: &str) -> [(&'static str, PartsEdit<'_>); 3] {
             }),
         ),
     ]
-}
-
-#[test]
-fn a_full_write_gives_fresh_ids_that_avoid_escaped_ids_in_every_part() {
-    let taken = paragraph_ids(&Document::open(&word_docx(|_| {})).unwrap())[1].clone();
-    let reference = escaped(&taken);
-    let variants = escaped_id_variants(&reference);
-    for (holder, edit) in &variants {
-        let mut document = Document::open(&word_docx(edit)).unwrap();
-        suggest_an_edit(&mut document);
-        let ids = paragraph_ids(&document);
-        assert!(!ids[1..5].contains(&taken), "{holder}: {ids:?}");
-        assert_eq!(
-            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
-            6,
-            "{holder}"
-        );
-        if *holder == "a later body paragraph" {
-            assert_eq!(ids[5], taken);
-            let mut authored = AUTHORED_IDS[0].1.to_vec();
-            authored[5] = &taken;
-            assert_eq!(
-                written_ids(&package_part(
-                    &document.save().unwrap(),
-                    "word/document.xml"
-                )),
-                authored
-            );
-        }
-        document.replace_paragraph_text(&ids[1], "edited").unwrap();
-        let reopened = Document::open(&document.save().unwrap()).unwrap();
-        assert_eq!(paragraph_ids(&reopened), ids, "{holder}");
-        assert_eq!(
-            get_paragraph_text(reopened.paragraph(&ids[1]).unwrap()),
-            "edited"
-        );
-    }
 }
 
 #[test]

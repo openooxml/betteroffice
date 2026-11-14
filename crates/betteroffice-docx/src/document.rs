@@ -1818,6 +1818,327 @@ mod session_save_tests {
             "X"
         );
     }
+
+    const W14_ID: &str = "1A2B3C4D";
+    const MARK_ID: &str = "0E000001";
+    const WORD_NAMESPACES: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w14 w15""#;
+    const XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n";
+
+    const AUTHORED_IDS: [(&str, &[&str]); 2] = [
+        (
+            "word/document.xml",
+            &[W14_ID, W14_ID, W14_ID, "0B000002", W14_ID, "0B000003"],
+        ),
+        ("word/header1.xml", &["0C000001"]),
+    ];
+
+    fn word_paragraph(id: &str, text: &str) -> String {
+        format!(
+            r#"<w:p w14:paraId="{id}" w14:textId="77777777"><w:r><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    }
+
+    fn word_docx(edit: impl FnOnce(&mut Vec<(String, String)>)) -> Vec<u8> {
+        const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let cell = |content: String| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>{content}</w:tc></w:tr></w:tbl>"#
+            )
+        };
+        let body = [
+            word_paragraph(W14_ID, "first"),
+            word_paragraph(W14_ID, "second"),
+            cell(cell(word_paragraph(W14_ID, "nested")) + &word_paragraph("0B000002", "")),
+            format!(
+                r#"<w:sdt><w:sdtPr><w:alias w:val="Clause"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+                word_paragraph(W14_ID, "control")
+            ),
+            word_paragraph("0B00000&#x33;", "third"),
+        ]
+        .concat();
+        let mut parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                format!(
+                    r#"{XML_DECLARATION}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#
+                ),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                format!(
+                    r#"{XML_DECLARATION}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{REL}/officeDocument" Target="word/document.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "word/_rels/document.xml.rels".to_owned(),
+                format!(
+                    r#"{XML_DECLARATION}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="{REL}/header" Target="header1.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "word/document.xml".to_owned(),
+                format!(
+                    r#"{XML_DECLARATION}<w:document {WORD_NAMESPACES}><w:body>{body}<w:sectPr><w:headerReference w:type="default" r:id="rId2"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#
+                ),
+            ),
+            (
+                "word/header1.xml".to_owned(),
+                format!(
+                    "{XML_DECLARATION}<w:hdr {WORD_NAMESPACES}>{}</w:hdr>",
+                    word_paragraph("0C000001", "header")
+                ),
+            ),
+            (
+                "customXml/item1.xml".to_owned(),
+                format!("{XML_DECLARATION}<data xmlns=\"urn:custom\">kept</data>"),
+            ),
+        ];
+        edit(&mut parts);
+        let parts: Vec<(String, Vec<u8>)> = parts
+            .into_iter()
+            .map(|(name, xml)| (name, xml.into_bytes()))
+            .collect();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn marked_docx(edit: impl FnOnce(&mut Vec<(String, String)>)) -> Vec<u8> {
+        word_docx(|parts| {
+            edit(parts);
+            let mark = format!(
+                r#"<w:p w14:paraId="{MARK_ID}" w14:textId="77777777"><w:pPr><w:rPr><w:b/></w:rPr></w:pPr></w:p><w:sectPr>"#
+            );
+            replace_in(parts, "word/document.xml", "<w:sectPr>", &mark);
+        })
+    }
+
+    fn marked_authored_ids() -> Vec<(&'static str, Vec<&'static str>)> {
+        AUTHORED_IDS
+            .iter()
+            .map(|(part, ids)| {
+                let mut ids = ids.to_vec();
+                if *part == "word/document.xml" {
+                    ids.push(MARK_ID);
+                }
+                (*part, ids)
+            })
+            .collect()
+    }
+
+    fn written_ids(xml: &str) -> Vec<String> {
+        xml.match_indices("<w:p")
+            .filter(|(at, _)| matches!(xml.as_bytes()[at + 4], b' ' | b'>' | b'/'))
+            .map(|(at, _)| {
+                let tag = &xml[at..at + xml[at..].find('>').unwrap()];
+                tag.split(r#"w14:paraId=""#)
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn package_part(package: &[u8], path: &str) -> String {
+        let parts = ooxml_opc::unzip_parts(package).unwrap();
+        let (_, bytes) = parts.into_iter().find(|(name, _)| name == path).unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn identified_texts(document: &Document) -> Vec<(String, String)> {
+        document
+            .paragraphs()
+            .into_iter()
+            .map(|paragraph| {
+                (
+                    paragraph.para_id.clone().unwrap_or_default(),
+                    get_paragraph_text(paragraph),
+                )
+            })
+            .collect()
+    }
+
+    fn paragraph_ids(document: &Document) -> Vec<String> {
+        identified_texts(document)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    fn escaped(id: &str) -> String {
+        let (head, last) = id.split_at(7);
+        format!("{head}&#x{:X};", last.as_bytes()[0])
+    }
+
+    type PartsEdit<'a> = Box<dyn Fn(&mut Vec<(String, String)>) + 'a>;
+
+    fn replace_in(parts: &mut [(String, String)], name: &str, from: &str, to: &str) {
+        let (_, xml) = parts.iter_mut().find(|(part, _)| part == name).unwrap();
+        assert!(xml.contains(from), "{name} lacks {from}");
+        *xml = xml.replacen(from, to, 1);
+    }
+
+    fn escaped_id_variants(reference: &str) -> [(&'static str, PartsEdit<'_>); 3] {
+        [
+            (
+                "a later body paragraph",
+                Box::new(move |parts| {
+                    replace_in(parts, "word/document.xml", "0B00000&#x33;", reference)
+                }),
+            ),
+            (
+                "a header paragraph",
+                Box::new(move |parts| replace_in(parts, "word/header1.xml", "0C000001", reference)),
+            ),
+            (
+                "a comment companion reference",
+                Box::new(move |parts| {
+                    parts.push((
+                        "word/comments.xml".to_owned(),
+                        format!(
+                            r#"{XML_DECLARATION}<w:comments {WORD_NAMESPACES}><w:comment w:id="0" w:author="Ada">{}</w:comment></w:comments>"#,
+                            word_paragraph("0D000001", "note")
+                        ),
+                    ));
+                    parts.push((
+                        "word/commentsExtended.xml".to_owned(),
+                        format!(
+                            r#"{XML_DECLARATION}<w15:commentsEx {WORD_NAMESPACES}><w15:commentEx w15:paraId="0D000001" w15:paraIdParent="{reference}" w15:done="0"/></w15:commentsEx>"#
+                        ),
+                    ));
+                }),
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_full_write_keeps_every_other_part_and_every_authored_paragraph_id() {
+        let input = marked_docx(|_| {});
+        let mut document = Document::open(&input).unwrap();
+        let ids = paragraph_ids(&document);
+        for id in &ids {
+            assert_eq!(document.paragraph(id).unwrap().para_id.as_ref(), Some(id));
+        }
+
+        document.replace_paragraph_text(MARK_ID, "X").unwrap();
+        assert!(document.session_save_plan().unwrap().is_none());
+        let saved = document.save().unwrap();
+        let (before, after) = (
+            ooxml_opc::unzip_parts(&input).unwrap(),
+            ooxml_opc::unzip_parts(&saved).unwrap(),
+        );
+        assert_eq!(
+            before.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            after.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        );
+        let authored_ids = marked_authored_ids();
+        for ((name, source), (_, written)) in before.iter().zip(&after) {
+            match authored_ids.iter().find(|(part, _)| part == name) {
+                Some((_, authored)) => assert_eq!(
+                    written_ids(&String::from_utf8_lossy(written)),
+                    *authored,
+                    "{name}"
+                ),
+                None => assert_eq!(written, source, "{name}"),
+            }
+        }
+        assert!(!ids[1..].contains(&W14_ID.to_owned()));
+    }
+
+    #[test]
+    fn a_full_write_gives_fresh_ids_that_avoid_escaped_ids_in_every_part() {
+        let marked = Document::open(&marked_docx(|_| {})).unwrap();
+        let taken = paragraph_ids(&marked)[1].clone();
+        let reference = escaped(&taken);
+        let variants = escaped_id_variants(&reference);
+        let authored_ids = marked_authored_ids();
+        for (holder, edit) in &variants {
+            let mut document = Document::open(&marked_docx(edit)).unwrap();
+            document.replace_paragraph_text(MARK_ID, "X").unwrap();
+            assert!(document.session_save_plan().unwrap().is_none());
+            let ids = paragraph_ids(&document);
+            assert!(!ids[1..5].contains(&taken), "{holder}: {ids:?}");
+            assert_eq!(
+                ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+                authored_ids[0].1.len(),
+                "{holder}"
+            );
+            if *holder == "a later body paragraph" {
+                assert_eq!(ids[5], taken);
+                let mut authored = authored_ids[0].1.to_vec();
+                authored[5] = &taken;
+                assert_eq!(
+                    written_ids(&package_part(
+                        &document.save().unwrap(),
+                        "word/document.xml"
+                    )),
+                    authored
+                );
+            }
+            document.replace_paragraph_text(&ids[1], "edited").unwrap();
+            let reopened = Document::open(&document.save().unwrap()).unwrap();
+            assert_eq!(paragraph_ids(&reopened), ids, "{holder}");
+            assert_eq!(
+                get_paragraph_text(reopened.paragraph(&ids[1]).unwrap()),
+                "edited"
+            );
+        }
+    }
+
+    fn drop_the_baseline(document: &mut Document) {
+        document.replace_paragraph_text(W14_ID, "first").unwrap();
+        document.session_baseline = None;
+        assert!(document.session_save_plan().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_full_write_keeps_repeated_ids_addressable_across_save_and_reopen_cycles() {
+        let input = word_docx(|_| {});
+        let ids = paragraph_ids(&Document::open(&input).unwrap());
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            6
+        );
+
+        let mut opened = Document::open(&input).unwrap();
+        drop_the_baseline(&mut opened);
+        let first = opened.save().unwrap();
+        assert_eq!(
+            written_ids(&package_part(&first, "word/document.xml")),
+            AUTHORED_IDS[0].1
+        );
+        let mut reopened = Document::open(&first).unwrap();
+        assert_eq!(paragraph_ids(&reopened), ids);
+        drop_the_baseline(&mut reopened);
+        assert_eq!(reopened.save().unwrap(), first);
+
+        let mut cycled = input;
+        for (index, text) in [(2, "nested edit"), (4, "control edit"), (1, "second edit")] {
+            let mut document = Document::open(&cycled).unwrap();
+            assert_eq!(paragraph_ids(&document), ids);
+            document.replace_paragraph_text(&ids[index], text).unwrap();
+            drop_the_baseline(&mut document);
+            cycled = document.save().unwrap();
+        }
+        let mut reopened = Document::open(&cycled).unwrap();
+        drop_the_baseline(&mut reopened);
+        assert_eq!(
+            identified_texts(&reopened),
+            [
+                (W14_ID, "first"),
+                (ids[1].as_str(), "second edit"),
+                (ids[2].as_str(), "nested edit"),
+                ("0B000002", ""),
+                (ids[4].as_str(), "control edit"),
+                ("0B000003", "third"),
+            ]
+            .map(|(id, text)| (id.to_owned(), text.to_owned()))
+        );
+        assert_eq!(reopened.save().unwrap(), cycled);
+        assert_eq!(
+            written_ids(&package_part(&cycled, "word/document.xml")),
+            ids
+        );
+    }
 }
 
 #[cfg(all(test, feature = "fonts"))]
