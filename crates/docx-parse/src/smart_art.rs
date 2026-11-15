@@ -609,6 +609,8 @@ fn parse_drawing_text_paragraph(
     font_color: Option<&ColorValue>,
     numbering: &mut HashMap<u32, usize>,
 ) -> Option<serde_json::Value> {
+    let properties = paragraph.child_by_local_name("pPr");
+    let defaults = properties.and_then(|properties| properties.child_by_local_name("defRPr"));
     let mut runs = Vec::new();
     let mut first_run = None;
     for child in paragraph.child_elements() {
@@ -619,7 +621,7 @@ fn parse_drawing_text_paragraph(
                     first_run.get_or_insert(child);
                     runs.push(drawing_run(
                         &text,
-                        parse_drawing_run_formatting(child, font_color),
+                        parse_drawing_run_formatting(child, font_color, defaults),
                     ));
                 }
             }
@@ -630,7 +632,6 @@ fn parse_drawing_text_paragraph(
     if runs.is_empty() {
         return None;
     }
-    let properties = paragraph.child_by_local_name("pPr");
     let attribute = |name| properties.and_then(|properties| properties.attribute(None, name));
     let number = |name| {
         properties
@@ -694,8 +695,8 @@ fn parse_drawing_text_paragraph(
     numbering.retain(|deeper, _| *deeper <= level);
     if let Some(bullet) = bullet_text(properties, level, numbering) {
         let mut marker = first_run
-            .map(|run| parse_drawing_run_formatting(run, font_color))
-            .unwrap_or_else(|| parse_drawing_run_formatting(paragraph, font_color))
+            .map(|run| parse_drawing_run_formatting(run, font_color, defaults))
+            .unwrap_or_else(|| parse_drawing_run_formatting(paragraph, font_color, defaults))
             .unwrap_or_else(|| serde_json::json!({}));
         if let Some(typeface) = properties
             .and_then(|properties| properties.child_by_local_name("buFont"))
@@ -825,22 +826,28 @@ fn collect_drawing_text(parent: &XmlElement, depth: usize) -> String {
 fn parse_drawing_run_formatting(
     run: &XmlElement,
     font_color: Option<&ColorValue>,
+    defaults: Option<&XmlElement>,
 ) -> Option<serde_json::Value> {
     let mut formatting = serde_json::Map::new();
     if let Some(color) = font_color.and_then(|color| serde_json::to_value(color).ok()) {
         formatting.insert("color".to_owned(), color);
     }
-    let Some(properties) = run.child_by_local_name("rPr") else {
-        return (!formatting.is_empty()).then_some(serde_json::Value::Object(formatting));
-    };
-    let mut property_count = usize::from(!formatting.is_empty());
-    if properties.parse_boolean_attribute(None, "b") == Some(true) {
-        formatting.insert("bold".to_owned(), serde_json::json!(true));
-        property_count += 1;
+    for properties in defaults.into_iter().chain(run.child_by_local_name("rPr")) {
+        apply_run_properties(properties, &mut formatting);
     }
-    if properties.parse_boolean_attribute(None, "i") == Some(true) {
-        formatting.insert("italic".to_owned(), serde_json::json!(true));
-        property_count += 1;
+    (!formatting.is_empty()).then_some(serde_json::Value::Object(formatting))
+}
+
+/// Lays `a:rPr` or `a:defRPr` over `formatting`.
+fn apply_run_properties(
+    properties: &XmlElement,
+    formatting: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if let Some(bold) = properties.parse_boolean_attribute(None, "b") {
+        formatting.insert("bold".to_owned(), serde_json::json!(bold));
+    }
+    if let Some(italic) = properties.parse_boolean_attribute(None, "i") {
+        formatting.insert("italic".to_owned(), serde_json::json!(italic));
     }
     if properties
         .attribute(None, "u")
@@ -850,23 +857,19 @@ fn parse_drawing_run_formatting(
             "underline".to_owned(),
             serde_json::json!({"style": "single"}),
         );
-        property_count += 1;
     }
     if properties
         .attribute(None, "strike")
         .is_some_and(|strike| strike != "noStrike")
     {
         formatting.insert("strike".to_owned(), serde_json::json!(true));
-        property_count += 1;
     }
     match properties.attribute(None, "cap") {
         Some("all") => {
             formatting.insert("allCaps".to_owned(), serde_json::json!(true));
-            property_count += 1;
         }
         Some("small") => {
             formatting.insert("smallCaps".to_owned(), serde_json::json!(true));
-            property_count += 1;
         }
         _ => {}
     }
@@ -875,7 +878,6 @@ fn parse_drawing_run_formatting(
         .filter(safe_number)
     {
         formatting.insert("fontSize".to_owned(), serde_json::json!(size / 50.0));
-        property_count += 1;
     }
     let latin = properties
         .child_by_local_name("latin")
@@ -899,17 +901,14 @@ fn parse_drawing_run_formatting(
             family.insert("cs".to_owned(), serde_json::json!(complex));
         }
         formatting.insert("fontFamily".to_owned(), serde_json::Value::Object(family));
-        property_count += 1;
     }
     if let Some(language) = properties.attribute(None, "lang") {
         formatting.insert(
             "language".to_owned(),
             serde_json::json!({"latin": language}),
         );
-        property_count += 1;
     }
     if let Some(solid) = properties.child_by_full_name("a:solidFill") {
-        property_count += 1;
         if let Some(color) = crate::drawingml::parse_color_element(Some(solid)) {
             formatting.insert(
                 "color".to_owned(),
@@ -919,7 +918,6 @@ fn parse_drawing_run_formatting(
             );
         }
     }
-    (property_count > 0).then_some(serde_json::Value::Object(formatting))
 }
 
 fn get_drawing_extent(drawing: &XmlElement) -> ImageSize {
@@ -1357,7 +1355,7 @@ mod tests {
 
     #[test]
     fn cached_text_takes_its_frame_paragraphs_and_text_point_color() {
-        let paragraphs = r#"<a:p><a:pPr algn="ctr"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPct val="10000"/></a:spcBef><a:spcAft><a:spcPct val="35000"/></a:spcAft><a:buNone/></a:pPr><a:r><a:rPr sz="2800" u="sng"/><a:t>Alpha</a:t></a:r></a:p><a:p><a:pPr marL="228600" lvl="1" indent="-228600"><a:spcAft><a:spcPct val="15000"/></a:spcAft><a:buChar char="•"/></a:pPr><a:r><a:rPr sz="2200"/><a:t>one</a:t></a:r></a:p>"#;
+        let paragraphs = r#"<a:p><a:pPr algn="ctr"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPct val="10000"/></a:spcBef><a:spcAft><a:spcPct val="35000"/></a:spcAft><a:buNone/></a:pPr><a:r><a:rPr sz="2800" u="sng"/><a:t>Alpha</a:t></a:r></a:p><a:p><a:pPr marL="228600" lvl="1" indent="-228600"><a:spcAft><a:spcPct val="15000"/></a:spcAft><a:buChar char="•"/><a:defRPr b="1" i="1"/></a:pPr><a:r><a:rPr sz="2200" i="0"/><a:t>one</a:t></a:r></a:p>"#;
         let drawing = format!(
             r#"<dsp:drawing xmlns:dsp="dsp" xmlns:a="a"><dsp:spTree><dsp:grpSpPr/><dsp:sp modelId="shape"><dsp:nvSpPr><dsp:cNvPr id="0" name=""/><dsp:cNvSpPr/></dsp:nvSpPr><dsp:spPr><a:xfrm rot="10800000"><a:off x="0" y="0"/><a:ext cx="4000" cy="2000"/></a:xfrm><a:prstGeom prst="trapezoid"/></dsp:spPr><dsp:style><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></dsp:style><dsp:txBody><a:bodyPr anchor="ctr"/>{paragraphs}</dsp:txBody><dsp:txXfrm rot="10800000"><a:off x="1000" y="500"/><a:ext cx="2000" cy="1000"/></dsp:txXfrm></dsp:sp></dsp:spTree></dsp:drawing>"#
         );
@@ -1440,6 +1438,11 @@ mod tests {
         );
         let bullet = &content[1];
         assert_eq!(bullet["formatting"]["spaceAfter"], 0.0);
+        let item = &bullet["content"][1]["formatting"];
+        assert_eq!(
+            (&item["bold"], &item["italic"]),
+            (&serde_json::json!(true), &serde_json::json!(false))
+        );
         assert_eq!(bullet["formatting"]["indentLeft"], 360.0);
         assert_eq!(bullet["formatting"]["hangingIndent"], true);
         assert_eq!(bullet["formatting"]["tabs"][0]["position"], 360.0);

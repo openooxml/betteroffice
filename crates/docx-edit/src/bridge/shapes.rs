@@ -478,6 +478,14 @@ fn shape_stroke(shape: &Value, env: &RenderEnv) -> Option<Value> {
         stroke.insert("width".to_owned(), Value::from(emu_to_pixels(width)));
     }
     insert_clone(&mut stroke, "dash", outline.get("style"));
+    for key in ["headEnd", "tailEnd"] {
+        if let Some(end) = outline
+            .get(key)
+            .filter(|end| string(end, "type").is_some_and(|kind| kind != "none"))
+        {
+            stroke.insert(key.to_owned(), end.clone());
+        }
+    }
     Some(Value::Object(stroke))
 }
 
@@ -1903,13 +1911,20 @@ mod tests {
             "shapeType": "round1Rect",
             "size": {"width": 1905000, "height": 952500},
             "fill": {"type": "solid", "color": translucent("44546A", 0.5)},
-            "outline": {"color": translucent("FFFFFF", 1.0), "width": 12700},
+            "outline": {"color": translucent("FFFFFF", 1.0), "width": 12700,
+                "headEnd": {"type": "none"}, "tailEnd": {"type": "triangle", "width": "sm"}},
             "effects": [{"kind": "outerShadow", "blurRadius": 38100, "distance": 19050,
                 "direction": 90.0, "color": translucent("000000", 0.35)}]
         });
         let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
         assert_eq!(block.fill.unwrap()["color"], "#44546A80");
-        assert_eq!(block.stroke.unwrap()["color"], "#FFFFFF");
+        let stroke = block.stroke.unwrap();
+        assert_eq!(stroke["color"], "#FFFFFF");
+        assert_eq!(stroke.get("headEnd"), None);
+        assert_eq!(
+            stroke["tailEnd"],
+            json!({"type": "triangle", "width": "sm"})
+        );
         assert_eq!(
             block.effects.unwrap()[0],
             json!({"kind": "outerShadow", "blurRadius": 4.0, "distance": 2.0,
