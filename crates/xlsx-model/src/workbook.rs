@@ -781,6 +781,19 @@ impl Sheet {
         self.hyperlinks.iter().find(|link| link.range.contains(at))
     }
 
+    /// the last row [`Sheet::used_range`] covers, without visiting every
+    /// cell: the cell map is ordered by row, so its last key holds the
+    /// largest row.
+    fn last_used_row(&self) -> Option<RowId> {
+        let cells = self.cells.last_key_value().map(|(&(row, _), _)| row);
+        self.hyperlinks
+            .iter()
+            .map(|link| link.range.end.row)
+            .chain(self.merges.iter().map(|range| range.end.row))
+            .chain(cells)
+            .max()
+    }
+
     pub fn used_range(&self) -> Option<CellRange> {
         #[cfg(feature = "test-counters")]
         USED_RANGE_SCANS.set(USED_RANGE_SCANS.get().wrapping_add(1));
@@ -1072,8 +1085,8 @@ impl CellProvider for Workbook {
 
     fn used_rows(&self, sheet: SheetId) -> RowId {
         self.sheet(sheet)
-            .and_then(Sheet::used_range)
-            .map_or(0, |range| range.end.row.saturating_add(1))
+            .and_then(Sheet::last_used_row)
+            .map_or(0, |row| row.saturating_add(1))
     }
 
     fn used_cols(&self, sheet: SheetId) -> ColId {
