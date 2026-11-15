@@ -97,7 +97,10 @@ fn page_side_shape_with_inline_picture() -> Vec<u8> {
         "{}{}{}{}{section}",
         first_section(),
         para("00002900", &format!("{}{INSIDE_SHAPE}", run("Anchor "))),
-        para("00002901", &format!("{}{}", run("Inline "), image("image", "inline"))),
+        para(
+            "00002901",
+            &format!("{}{}", run("Inline "), image("image", "inline"))
+        ),
         filler_paragraphs(0x2A00, 12),
     );
     Package::new(&body)
