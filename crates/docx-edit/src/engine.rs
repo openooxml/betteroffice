@@ -2436,6 +2436,9 @@ pub struct EngineSession {
     /// [`Self::split_resident_paragraph`] produced.
     split_epoch: Cell<Option<u64>>,
     typing_preserves_seeds: Cell<bool>,
+    /// Whether the last resident keystroke was the first since a layout and
+    /// landed in a body paragraph whose seed an earlier edit dropped.
+    typing_reseeds: Cell<bool>,
     #[cfg(test)]
     force_legacy_lowering: Cell<bool>,
     certified_measurement_epoch: Cell<Option<u64>>,
@@ -5026,6 +5029,7 @@ impl EngineSession {
             typing_epoch: Cell::new(None),
             split_epoch: Cell::new(None),
             typing_preserves_seeds: Cell::new(false),
+            typing_reseeds: Cell::new(false),
             #[cfg(test)]
             force_legacy_lowering: Cell::new(false),
             certified_measurement_epoch: Cell::new(None),
@@ -5538,10 +5542,24 @@ impl EngineSession {
             && preview_plain
             && receipt.new_para_ids.is_empty()
             && receipt.revision_ids.is_empty();
+        self.typing_reseeds.set(false);
         if let Some(lowered) = render.stories.get_mut(&range.story) {
-            if seed_epoch_valid && lowered.doc_epoch != before {
+            let first_since_layout = lowered.doc_epoch == before;
+            if seed_epoch_valid && !first_since_layout {
                 lowered.local.suspend();
             }
+            // The first keystroke after a layout into a paragraph whose seed
+            // an earlier edit dropped records it again. Keys that outpace
+            // layout leave the seeds to the keystroke after them.
+            self.typing_reseeds.set(
+                eligible
+                    && first_since_layout
+                    && range.story == "body"
+                    && receipt
+                        .range
+                        .as_ref()
+                        .is_some_and(|range| lowered.local.dropped(&range.start.para)),
+            );
             let inserted = text.map_or(0, |text| text.encode_utf16().count() as u32);
             lowered.preview_edit = (preview_plain
                 && lowered.doc_epoch == before
@@ -6011,7 +6029,22 @@ impl EngineSession {
             } else {
                 None
             };
-        let fallback = typing;
+        // Legacy seeds need every block of the body to shift. Over a picture
+        // or a break they block, and the lowering keeps the seeds it had,
+        // without the one an earlier edit dropped: every keystroke in that
+        // paragraph would lower the whole body again. The first one after a
+        // layout records seeds as the lowering on open does.
+        let fallback = typing
+            && !(story == "body"
+                && self.typing_reseeds.get()
+                && self
+                    .render
+                    .borrow()
+                    .stories
+                    .get(story)
+                    .is_some_and(|lowered| {
+                        !crate::bridge::local::legacy_seeds_hold(lowered.blocks.shared())
+                    }));
         #[cfg(test)]
         let fallback = fallback || self.force_legacy_lowering.get();
         let mut local = if fallback {
@@ -19689,9 +19722,25 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             engine.stats().lower_cache_misses,
             before.lower_cache_misses + 1
         );
-        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+        // The first keystroke after a layout into the paragraph typed ahead
+        // records its seed again, so the next one there patches.
+        TYPING_EXTRA_WORK.with(|work| assert!(work.get().seeds > 0));
         SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
+        assert!(
+            engine.render.borrow().stories["body"]
+                .local
+                .has_seed(pending_id)
+        );
         assert_certified_float_cold(&engine, &request, &mut retained);
+        measurement_patch_type(&engine, certified_float_offset(&engine, 17), "w");
+        assert!(engine.measurement_patch().is_some());
+        let dirty = certified_float_dirty_segment(&engine);
+        assert_eq!(
+            certified_float_layout(&engine, &request, RelayoutTrigger::Interactive),
+            (dirty, 0),
+        );
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
         measurement_patch_type(&engine, certified_float_offset(&engine, 18), "z");
         assert!(engine.measurement_patch().is_some());
         let dirty = certified_float_dirty_segment(&engine);
