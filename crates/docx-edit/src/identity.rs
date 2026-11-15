@@ -449,6 +449,8 @@ pub(crate) struct SourceIndex {
     #[serde(skip)]
     render_theme: OnceLock<docx_parse::Theme>,
     #[serde(skip)]
+    revision_authors: OnceLock<Vec<String>>,
+    #[serde(skip)]
     run_size_sources: Mutex<BTreeMap<String, Option<Arc<ParagraphSizes>>>>,
     #[serde(skip)]
     run_size_paragraphs: Mutex<BTreeMap<usize, BTreeMap<u32, docx_parse::xml::XmlElement>>>,
@@ -551,6 +553,25 @@ impl SourceIndex {
                 .as_ref()
                 .and_then(crate::bridge::package_font_theme)
                 .unwrap_or_default()
+        })
+    }
+
+    /// The package's revision authors in first-appearance order, body first.
+    pub(crate) fn revision_authors(&self) -> &[String] {
+        self.revision_authors.get_or_init(|| {
+            let Ok(package) = ooxml_opc::RetainedPackage::from_bytes(self.bytes()) else {
+                return Vec::new();
+            };
+            let mut parts: Vec<&SourcePart> = self.parts.iter().collect();
+            parts.sort_by_key(|part| part.kind != SourceStoryKind::Body);
+            let xml: Vec<Vec<u8>> = parts
+                .into_iter()
+                .filter_map(|part| {
+                    let position = package.parts().position(|(path, _)| path == part.path())?;
+                    package.read(position).ok()
+                })
+                .collect();
+            docx_parse::revision_authors::revision_authors(xml.iter().map(Vec::as_slice))
         })
     }
 
@@ -785,6 +806,7 @@ impl SourceIndex {
             own_digest: OnceLock::new(),
             group_pictures: OnceLock::new(),
             render_theme: OnceLock::new(),
+            revision_authors: OnceLock::new(),
             run_size_sources: Mutex::new(BTreeMap::new()),
             run_size_paragraphs: Mutex::new(BTreeMap::new()),
             run_size_seeded: OnceLock::new(),

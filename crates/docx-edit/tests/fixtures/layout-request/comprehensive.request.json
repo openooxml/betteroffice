@@ -236,6 +236,10 @@
       "Normal": 11,
       "Title": 28
     },
+    "revisionAuthors": [
+      "Reviewer A",
+      "Reviewer B"
+    ],
     "showHiddenText": false,
     "themeColors": {
       "accent1": "4472C4",

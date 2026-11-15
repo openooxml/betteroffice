@@ -363,7 +363,16 @@ export interface DocAttrs {
    * note's mirror element (W17 backlinks).
    */
   noteRef?: DisplayNoteRef;
-  revision?: { author: string; date: string; revisionId: string; kind: 'ins' | 'del' | 'format' };
+  revision?: {
+    author: string;
+    date: string;
+    revisionId: string;
+    kind: 'ins' | 'del' | 'format';
+    /** Word's paint color for the revision's marks. */
+    color?: string;
+    /** The revision is half of a move. */
+    isMove?: boolean;
+  };
   /** Synthetic numbering glyph for the first line of a list paragraph. */
   listMarker?: boolean;
   /** The marker is a number or label a reader needs, not a bullet. */

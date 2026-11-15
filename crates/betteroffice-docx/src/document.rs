@@ -321,6 +321,7 @@ impl Document {
                     relationship_entries: model.relationships,
                     media_entries: Vec::new(),
                     chart_entries: model.charts,
+                    revision_authors: Vec::new(),
                 },
                 template_variables: None,
                 warnings: (!model.warnings.is_empty()).then_some(model.warnings),
@@ -607,6 +608,7 @@ fn model_from_package(
         relationship_entries,
         media_entries,
         chart_entries,
+        revision_authors: _,
     } = package;
     DocumentModel {
         body: body_from_wire(document),

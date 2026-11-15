@@ -741,8 +741,7 @@ fn parse_paragraph_contents(
                                 | InlineNode::InlineSdt(_)),
                             ) => Some(node),
                             ParagraphContent::Tracked(change) => {
-                                let node = InlineNode::Tracked(Box::new(change));
-                                node.has_tracked_control(false, true).then_some(node)
+                                Some(InlineNode::Tracked(Box::new(change)))
                             }
                             _ => None,
                         })

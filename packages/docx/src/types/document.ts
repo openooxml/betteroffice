@@ -280,6 +280,8 @@ export interface DocxPackage {
   media?: Map<string, MediaFile>;
   /** Parsed DrawingML chart parts keyed by normalized package path. */
   charts?: Map<string, Chart>;
+  /** Revision authors in the order Word first meets them, which picks each one's color. */
+  revisionAuthors?: string[];
   /** Exact document-wide bookmark ranges. Undefined = derive from markers. */
   bookmarkRanges?: BookmarkRange[];
   /** Document page background (`w:document/w:background`). Undefined = transparent/white host default. */

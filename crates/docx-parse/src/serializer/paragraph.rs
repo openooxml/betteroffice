@@ -631,15 +631,23 @@ fn serialize_complex_field(
         }
     }
     if in_place.is_none() && field.field_code.is_empty() {
+        let element = if context.deletion {
+            "w:delInstrText"
+        } else {
+            "w:instrText"
+        };
         output.push_str("<w:r>");
         output.push_str(&properties);
-        output.push_str("<w:instrText");
+        output.push('<');
+        output.push_str(element);
         if needs_preserve(&field.instruction) {
             output.push_str(" xml:space=\"preserve\"");
         }
         output.push('>');
         output.push_str(&super::xml_writer::escape_xml(&field.instruction));
-        output.push_str("</w:instrText></w:r>");
+        output.push_str("</");
+        output.push_str(element);
+        output.push_str("></w:r>");
     } else if in_place.is_none() {
         for run in &field.field_code {
             output.push_str(&serialize_context_run(run, context)?);
@@ -808,7 +816,7 @@ fn serialize_tracked_change(
     let (element, deletion) = match change.node_type.as_str() {
         "insertion" => ("w:ins", false),
         "deletion" => ("w:del", true),
-        "moveFrom" => ("w:moveFrom", true),
+        "moveFrom" => ("w:moveFrom", false),
         "moveTo" => ("w:moveTo", false),
         _ => return Ok(String::new()),
     };
@@ -839,15 +847,13 @@ fn serialize_tracked_change(
                 }
             }
             InlineNode::Hyperlink(link) => serialize_hyperlink(link, context)?,
-            InlineNode::InlineSdt(_) => {
+            InlineNode::InlineSdt(_) | InlineNode::ComplexField(_) => {
                 context.deletion = deletion;
                 let result = serialize_inline_node(item, context);
                 context.deletion = false;
                 result?
             }
-            InlineNode::Tracked(_) if item.has_tracked_control(false, true) => {
-                serialize_inline_node(item, context)?
-            }
+            InlineNode::Tracked(_) => serialize_inline_node(item, context)?,
             _ => return Ok(()),
         };
         append_generated(&mut writer, &xml);

@@ -156,11 +156,26 @@ pub struct RenderEnv {
     /// View-only layout space and hidden ranges, by host key. Never saved.
     #[serde(skip_serializing_if = "Reservations::is_empty")]
     pub reservations: Reservations,
+    /// Revision authors in the order they first appear, which picks each one's Word color.
+    /// Lowering takes the retained package's when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub revision_authors: Vec<String>,
     #[serde(skip)]
     pub group_pictures: GroupPictureSources,
     /// Package style context for display-only shape text.
     #[serde(skip)]
     pub shape_styles: ShapeStyles,
+}
+
+/// `env`'s revision authors, or the retained package's when it names none.
+pub(crate) fn revision_authors(env: &RenderEnv, doc: &EditingDoc) -> Vec<String> {
+    if env.revision_authors.is_empty() {
+        doc.source_index()
+            .map(|index| index.revision_authors().to_vec())
+            .unwrap_or_default()
+    } else {
+        env.revision_authors.clone()
+    }
 }
 
 pub(crate) fn package_font_theme(
@@ -503,6 +518,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             .map(|index| index.group_picture_sources())
             .unwrap_or_else(|| env.group_pictures.clone()),
         shape_styles: shapes::ShapeStyles::new(doc),
+        revision_authors: revision_authors(env, doc),
         ..env.clone()
     };
     local.shape_styles = with_sources.shape_styles.clone();
@@ -1699,6 +1715,7 @@ fn walk_story_chunks<T: ReadTxn>(
                         change_author: formatting.change_author.clone(),
                         change_date: formatting.change_date.clone(),
                         change_revision_id: formatting.change_revision_id,
+                        revision_paint: formatting.revision_paint.clone(),
                         pm_start: None,
                         pm_end: None,
                     };
@@ -2861,6 +2878,7 @@ fn lower_image_values(
         change_author: formatting.change_author.clone(),
         change_date: formatting.change_date.clone(),
         change_revision_id: formatting.change_revision_id,
+        revision_paint: formatting.revision_paint.clone(),
         pm_start: None,
         pm_end: None,
     }
@@ -3414,9 +3432,11 @@ fn inherit_inline_revision(runs: &mut [RawRun], attrs: Option<&Attrs>, env: &Ren
             run.formatting.change_revision_id = inherited.change_revision_id;
             run.formatting.change_author = inherited.change_author.clone();
             run.formatting.change_date = inherited.change_date.clone();
+            run.formatting.revision_paint = inherited.revision_paint.clone();
             if let RawRunKind::Image(image) = &mut run.kind {
                 image.is_insertion = inherited.is_insertion;
                 image.is_deletion = inherited.is_deletion;
+                image.revision_paint = inherited.revision_paint.clone();
                 image.change_revision_id = inherited.change_revision_id;
                 image.change_author = inherited.change_author.clone();
                 image.change_date = inherited.change_date.clone();
@@ -3633,6 +3653,7 @@ fn lower_inline_sdt_values(
                         is_insertion: formatting.is_insertion,
                         is_deletion: formatting.is_deletion,
                         change_revision_id: formatting.change_revision_id,
+                        revision_paint: formatting.revision_paint.clone(),
                         change_author: formatting.change_author,
                         change_date: formatting.change_date,
                         ..RunFormatting::default()
@@ -4348,6 +4369,7 @@ fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun 
         change_author: formatting.change_author.clone(),
         change_date: formatting.change_date.clone(),
         change_revision_id: formatting.change_revision_id,
+        revision_paint: formatting.revision_paint.clone(),
         pm_start: None,
         pm_end: None,
     };
@@ -5205,6 +5227,8 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
                             author,
                             date,
                             kind: docx_layout::display_list::RevisionKind::Format,
+                            color: None,
+                            is_move: false,
                         });
                     }
                 }
@@ -5476,6 +5500,7 @@ struct RevisionMeta {
     id: f64,
     author: Option<String>,
     date: Option<String>,
+    is_move: bool,
 }
 
 fn revision_meta(value: &Any, env: &RenderEnv) -> Option<RevisionMeta> {
@@ -5491,7 +5516,20 @@ fn revision_meta(value: &Any, env: &RenderEnv) -> Option<RevisionMeta> {
         id,
         author: map_string(map, "author"),
         date: map_string(map, "date"),
+        is_move: matches!(map.get("isMovePair"), Some(Any::Bool(true))),
     })
+}
+
+fn revision_color(revision: &RevisionMeta, env: &RenderEnv) -> String {
+    if revision.is_move {
+        docx_layout::revision_colors::MOVE_COLOR.to_owned()
+    } else {
+        docx_layout::revision_colors::author_color(
+            &env.revision_authors,
+            revision.author.as_deref(),
+        )
+        .to_owned()
+    }
 }
 
 fn lower_revisions(attributes: Option<&Attrs>, env: &RenderEnv, result: &mut RunFormatting) {
@@ -5507,6 +5545,18 @@ fn lower_revisions(attributes: Option<&Attrs>, env: &RenderEnv, result: &mut Run
     }
     if deletion.is_some() {
         result.is_deletion = Some(true);
+    }
+    if insertion.is_some() || deletion.is_some() {
+        result.revision_paint = Some(docx_layout::types::RevisionPaint {
+            insertion_color: insertion
+                .as_ref()
+                .map(|revision| revision_color(revision, env)),
+            deletion_color: deletion
+                .as_ref()
+                .map(|revision| revision_color(revision, env)),
+            insertion_move: insertion.as_ref().is_some_and(|revision| revision.is_move),
+            deletion_move: deletion.as_ref().is_some_and(|revision| revision.is_move),
+        });
     }
     // The layout contract has one metadata triple even when both flags are present. Preserve the
     // insertion triple in the nested ins+del case; use deletion metadata when it is the only site.
@@ -5592,7 +5642,84 @@ fn lower_paragraph_attrs(
             ilvl: map_number(num_pr, "ilvl"),
         });
     }
-    result.list_marker = compute_list_marker(values, list_state);
+    result.p_pr_ins = values
+        .get("pPrIns")
+        .filter(|value| !is_nullish(value))
+        .and_then(|value| paragraph_revision_value(value, env))
+        .or_else(|| {
+            attribute(pilcrow_attributes, INS)
+                .and_then(|value| paragraph_revision_value(value, env))
+        });
+    result.p_pr_del = values
+        .get("pPrDel")
+        .filter(|value| !is_nullish(value))
+        .and_then(|value| paragraph_revision_value(value, env))
+        .or_else(|| {
+            attribute(pilcrow_attributes, DEL)
+                .and_then(|value| paragraph_revision_value(value, env))
+        });
+    let property_changes = match values.get("pPrChange") {
+        Some(Any::Array(changes)) => &changes[..],
+        _ => &[],
+    };
+    result.p_pr_change = (!property_changes.is_empty()).then_some(true);
+    if result.num_pr.is_some() {
+        let numbering_added = property_changes.iter().find(|change| {
+            let Some(change) = any_map(change) else {
+                return true;
+            };
+            let Some(previous) = change.get("previousFormatting").and_then(any_map) else {
+                return true;
+            };
+            previous.get("numPr").is_none_or(is_nullish)
+        });
+        let author_color = |author: Option<&str>| {
+            docx_layout::revision_colors::author_color(&env.revision_authors, author).to_owned()
+        };
+        let mark_author = |mark: &Option<Value>| {
+            mark.as_ref()
+                .map(|mark| author_color(mark.get("author").and_then(Value::as_str)))
+        };
+        (
+            result.list_marker_revision,
+            result.list_marker_revision_color,
+        ) = if result.p_pr_del.is_some() {
+            (Some("del".to_owned()), mark_author(&result.p_pr_del))
+        } else if result.p_pr_ins.is_some() {
+            (Some("ins".to_owned()), mark_author(&result.p_pr_ins))
+        } else if let Some(change) = numbering_added {
+            let author = any_map(change).and_then(|change| {
+                map_string(change, "author").or_else(|| {
+                    change
+                        .get("info")
+                        .and_then(any_map)
+                        .and_then(|info| map_string(info, "author"))
+                })
+            });
+            (
+                Some("ins".to_owned()),
+                Some(author_color(author.as_deref())),
+            )
+        } else {
+            (None, None)
+        };
+        let inserted = result.p_pr_ins.is_some() || numbering_added.is_some();
+        let (marker, previous) = crate::list_marker::tracked_list_marker(
+            values,
+            list_state,
+            inserted,
+            result.p_pr_del.is_some(),
+        );
+        result.list_marker = marker;
+        if previous.is_some() {
+            result.list_marker_previous_len = previous;
+            result.list_marker_revision_color = Some(
+                docx_layout::revision_colors::renumbering_color(&env.revision_authors).to_owned(),
+            );
+        }
+    } else {
+        result.list_marker = compute_list_marker(values, list_state);
+    }
     result.list_is_bullet = values.get("listIsBullet").and_then(any_bool);
     result.list_marker_hidden = true_property(values, "listMarkerHidden");
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
@@ -5647,46 +5774,6 @@ fn lower_paragraph_attrs(
     result.list_marker_suffix = value_string(values.get("listMarkerSuffix"));
     result.default_tab_stop_twips = env.default_tab_stop_twips;
     lower_paragraph_defaults(values, &mut result, env);
-
-    result.p_pr_ins = values
-        .get("pPrIns")
-        .filter(|value| !is_nullish(value))
-        .and_then(|value| paragraph_revision_value(value, env))
-        .or_else(|| {
-            attribute(pilcrow_attributes, INS)
-                .and_then(|value| paragraph_revision_value(value, env))
-        });
-    result.p_pr_del = values
-        .get("pPrDel")
-        .filter(|value| !is_nullish(value))
-        .and_then(|value| paragraph_revision_value(value, env))
-        .or_else(|| {
-            attribute(pilcrow_attributes, DEL)
-                .and_then(|value| paragraph_revision_value(value, env))
-        });
-    if result.num_pr.is_some() {
-        let numbering_added = values.get("pPrChange").is_some_and(|changes| {
-            let Any::Array(changes) = changes else {
-                return false;
-            };
-            changes.iter().any(|change| {
-                let Some(change) = any_map(change) else {
-                    return true;
-                };
-                let Some(previous) = change.get("previousFormatting").and_then(any_map) else {
-                    return true;
-                };
-                previous.get("numPr").is_none_or(is_nullish)
-            })
-        });
-        result.list_marker_revision = if result.p_pr_del.is_some() {
-            Some("del".to_owned())
-        } else if result.p_pr_ins.is_some() || numbering_added {
-            Some("ins".to_owned())
-        } else {
-            None
-        };
-    }
 
     result
 }
@@ -8792,6 +8879,7 @@ mod tests {
                     "numPr": { "numId": 7.0, "ilvl": 1.0 },
                     "listMarker": "1.",
                     "listMarkerRevision": "ins",
+                    "listMarkerRevisionColor": "#D13438",
                     "defaultTabStopTwips": 720.0,
                     "defaultFontSize": 10.0,
                     "pPrIns": { "revisionId": 2.0, "author": "Bob", "date": DATE }
@@ -8813,6 +8901,7 @@ mod tests {
                         "fontSlots": { "ascii": "Courier New", "hAnsi": "Courier New" },
                         "fontSize": 10.0, "isInsertion": true, "changeAuthor": "Alice",
                         "changeDate": DATE, "changeRevisionId": 3.0,
+                        "revisionPaint": { "insertionColor": "#498205" },
                         "logicalOrder": 1, "pmStart": 14.0, "pmEnd": 17.0
                     },
                     {

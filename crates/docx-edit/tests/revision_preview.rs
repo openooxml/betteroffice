@@ -313,6 +313,7 @@ fn decided_runs_keep_their_formatting_and_lose_only_the_markup() {
             "changeAuthor",
             "changeDate",
             "changeRevisionId",
+            "revisionPaint",
             "logicalOrder",
         ] {
             run.as_object_mut().unwrap().remove(key);

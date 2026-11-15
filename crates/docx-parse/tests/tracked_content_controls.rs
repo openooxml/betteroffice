@@ -90,19 +90,17 @@ fn round_trip(tag: &str, kind: &str, outer_control: bool, mixed: bool) {
     assert_content(&model, kind, outer_control, mixed);
     let saved = repack(&original, model);
     assert_content(&parse(&saved), kind, outer_control, mixed);
-    if matches!(tag, "del" | "moveFrom") {
-        let xml = ooxml_opc::unzip_parts(&saved)
-            .unwrap()
-            .into_iter()
-            .find(|(path, _)| path == "word/document.xml")
-            .unwrap()
-            .1;
-        assert!(
-            String::from_utf8(xml)
-                .unwrap()
-                .contains("<w:delText>Inserted</w:delText>")
-        );
-    }
+    let expected = match tag {
+        "del" => "<w:delText>Inserted</w:delText>",
+        _ => "<w:t>Inserted</w:t>",
+    };
+    let xml = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap()
+        .1;
+    assert!(String::from_utf8(xml).unwrap().contains(expected), "{tag}");
 }
 
 fn repack(original: &[u8], model: Value) -> Vec<u8> {

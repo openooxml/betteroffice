@@ -125,6 +125,7 @@ function decodeS9Package(value: unknown): DocxPackage {
     'endnotes',
     'footnoteSeparators',
     'endnoteSeparators',
+    'revisionAuthors',
   ];
   exactKeys(
     wirePackage,
@@ -144,6 +145,7 @@ function decodeS9Package(value: unknown): DocxPackage {
       'relationshipEntries',
       'mediaEntries',
       'chartEntries',
+      'revisionAuthors',
     ],
     'wire.document.package',
     optional
@@ -175,6 +177,11 @@ function decodeS9Package(value: unknown): DocxPackage {
       (entry, path) => objectAt(entry, path) as unknown as Chart
     ),
   };
+  if (Array.isArray(wirePackage.revisionAuthors)) {
+    pkg.revisionAuthors = wirePackage.revisionAuthors.filter(
+      (author): author is string => typeof author === 'string'
+    );
+  }
   if (wirePackage.styles !== undefined) {
     pkg.styles = objectAt(
       wirePackage.styles,

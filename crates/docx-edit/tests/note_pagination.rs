@@ -62,7 +62,20 @@ fn bulk_edit(engine: &EngineSession, step: Value) {
 
 /// Lays out and displays `engine`'s document in a fresh session with `request`.
 fn fresh(engine: &EngineSession, request: &str, client_id: u64) -> (String, Value) {
+    fresh_retaining(engine, None, request, client_id)
+}
+
+/// [`fresh`] retaining the package `engine` was seeded from, as a hydrated peer does.
+fn fresh_retaining(
+    engine: &EngineSession,
+    source: Option<&[u8]>,
+    request: &str,
+    client_id: u64,
+) -> (String, Value) {
     let fresh = EngineSession::new(client_id);
+    if let Some(source) = source {
+        fresh.doc().retain_source_docx(source.to_vec());
+    }
     fresh
         .doc()
         .apply_update_v1(&engine.doc().encode_state_as_update_v1())
@@ -105,7 +118,8 @@ fn synthetic_note_sections_typing_and_preview_toggles_match_cold_bytes() {
         .build_display_list_frame(&extras(&request.to_string()), 0)
         .unwrap();
     let assert_cold = |request: &Value| {
-        let (cold, cold_display) = fresh(&engine, &request.to_string(), 9381);
+        let (cold, cold_display) =
+            fresh_retaining(&engine, Some(&bytes), &request.to_string(), 9381);
         let cold: Value = serde_json::from_str(&cold).unwrap();
         let retained: Value =
             serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap();

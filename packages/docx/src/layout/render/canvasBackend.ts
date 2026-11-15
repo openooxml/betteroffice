@@ -49,6 +49,7 @@ export interface DrawPageOptions {
 /** What a picture that cannot be drawn paints for PNG export: a light box with a border, no text. */
 const PLACEHOLDER_FILL = 'rgb(242, 242, 242)';
 const PLACEHOLDER_BORDER = 'rgb(191, 191, 191)';
+const IMAGE_REVISION_UNDERLINE_GAP = 3;
 
 /** Paints the placeholder; `inside` keeps a frame's border within it, a shape's border is centred on its outline. */
 function paintPicturePlaceholder(ctx: CanvasRenderingContext2D, trace: () => void, inside: boolean): void {
@@ -1525,17 +1526,17 @@ async function drawImagePrimitive(
     drawCroppedImage(ctx, source, frame, image.crop);
   }
   drawImageBorder(ctx, image, frame);
-  if (image.revision) {
-    ctx.strokeStyle = image.revision.kind === 'ins' ? 'rgb(46, 125, 50)' : 'rgb(198, 40, 40)';
-    ctx.lineWidth = 2;
+  if (image.revision && image.revision.kind !== 'format') {
+    // Word underlines an inserted picture and strikes a deleted one through its middle.
+    const inserted = image.revision.kind === 'ins';
+    const y = inserted ? frame.y + frame.h + IMAGE_REVISION_UNDERLINE_GAP : frame.y + frame.h / 2;
+    ctx.strokeStyle = image.revision.color ?? '#D13438';
+    ctx.lineWidth = inserted ? 1 : 2;
     ctx.setLineDash([]);
-    ctx.strokeRect(frame.x, frame.y, frame.w, frame.h);
-    if (image.revision.kind === 'del') {
-      ctx.beginPath();
-      ctx.moveTo(frame.x, frame.y + frame.h);
-      ctx.lineTo(frame.x + frame.w, frame.y);
-      ctx.stroke();
-    }
+    ctx.beginPath();
+    ctx.moveTo(frame.x, y);
+    ctx.lineTo(frame.x + frame.w, y);
+    ctx.stroke();
   }
   ctx.restore();
 }

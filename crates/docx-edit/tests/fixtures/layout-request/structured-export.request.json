@@ -148,6 +148,11 @@
       "Normal": 10,
       "Title": 10
     },
+    "revisionAuthors": [
+      "Ann",
+      "Bob",
+      "Cy"
+    ],
     "showHiddenText": false,
     "themeColors": {
       "accent1": "4472C4",

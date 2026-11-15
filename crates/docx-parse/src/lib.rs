@@ -49,6 +49,7 @@ pub mod paragraph;
 pub mod paragraph_identity;
 pub mod paragraph_patch;
 pub mod relationships;
+pub mod revision_authors;
 pub mod s2;
 pub mod s3;
 pub mod s4;

@@ -2453,17 +2453,21 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
                     .map(|(_, value)| value.clone())
                     .unwrap_or(Value::Null)
             };
+            let mut revision = drop_nulls(json!({
+                "id": get("revisionId"),
+                "author": get("author"),
+                "date": get("date")
+            }));
+            if get("isMovePair") == Value::Bool(true) {
+                revision["isMovePair"] = Value::Bool(true);
+            }
             attrs.insert(
                 if mark.name == "insertion" {
                     "ins".to_owned()
                 } else {
                     "del".to_owned()
                 },
-                drop_nulls(json!({
-                    "id": get("revisionId"),
-                    "author": get("author"),
-                    "date": get("date")
-                })),
+                revision,
             );
         } else {
             attrs.insert(mark.name.clone(), drop_nulls(mark_attrs(mark)));
@@ -3565,7 +3569,9 @@ fn tracked_to_units_in_control(
         } else if in_control
             || matches!(
                 string(field(Some(child), "type")),
-                Some("inlineSdt" | "complexField")
+                Some(
+                    "inlineSdt" | "complexField" | "insertion" | "deletion" | "moveFrom" | "moveTo"
+                )
             )
             || has_tracked_control(child, false, true)
         {

@@ -4,4 +4,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Fields such as hyperlinks inside tracked insertions, deletions and moves now show their result text with the revision's markup, instead of disappearing.
+Tracked changes now paint as Word does: per-author colors, solid underlines and strikes, double green marks for moves, margin change bars and renumbered list markers. Fields and nested revisions inside tracked changes keep their text when shown and saved.

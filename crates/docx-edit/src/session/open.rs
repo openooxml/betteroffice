@@ -97,6 +97,7 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
                 relationship_entries: package.relationship_entries.clone(),
                 media_entries: Vec::new(),
                 chart_entries: Vec::new(),
+                revision_authors: package.revision_authors.clone(),
             },
             template_variables: None,
             warnings: envelope.document.warnings.clone(),

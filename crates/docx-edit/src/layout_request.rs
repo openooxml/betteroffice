@@ -150,6 +150,7 @@ fn render_environment(package: &Value) -> Value {
         package["settings"]["defaultTabStop"].clone(),
     );
     env.insert("numericIds".into(), json!({}));
+    copy_field(&mut env, package, "revisionAuthors");
     env.insert("showHiddenText".into(), json!(false));
     let mut toc_ids = Vec::new();
     if let Some(definitions) = package.get("styles").filter(|value| !value.is_null()) {
