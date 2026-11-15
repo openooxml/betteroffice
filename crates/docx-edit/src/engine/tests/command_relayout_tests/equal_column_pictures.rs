@@ -236,3 +236,22 @@ fn picture_below_a_side_margin_change_keeps_its_layout() {
         (MARGIN_CHANGE_PAGES, MARGIN_CHANGE_DIGEST)
     );
 }
+
+#[test]
+fn wrapping_that_reaches_the_phase_limit_without_repeating_fails() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let bytes = equal_columns(3, 60);
+    let engine = seeded_engine(9805, &bytes);
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    engine.set_local_lowering(true);
+    crate::engine::WRAP_PHASE_LIMIT.with(|limit| limit.set(Some(1)));
+    let laid_out = engine.layout_document_with_regions_retained(&request);
+    crate::engine::WRAP_PHASE_LIMIT.with(|limit| limit.set(None));
+    assert!(
+        laid_out
+            .unwrap_err()
+            .contains("anchored shape wrapping did not converge")
+    );
+}

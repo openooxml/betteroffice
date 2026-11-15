@@ -374,6 +374,7 @@ thread_local! {
     static CERTIFIED_FLOAT_WORK: RefCell<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())) };
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static PREVIEW_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    static WRAP_PHASE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
     static REGION_WORK_COUNTS: Cell<RegionWorkCounts> = const { Cell::new(RegionWorkCounts {
         certification: 0,
         placement: 0,
@@ -1528,12 +1529,31 @@ where
     } else {
         Vec::new()
     };
+    let pictures = if has_continuous_floats {
+        input
+            .measured
+            .iter()
+            .enumerate()
+            .filter_map(|(index, measured)| match &measured.block {
+                LayoutBlock::Paragraph(paragraph)
+                    if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_))) =>
+                {
+                    Some((index, measured.block.clone(), measured.measure.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let mut touched = false;
     let max_phases = if has_unequal || has_continuous_floats {
         32 + input.measured.len()
     } else {
         shapes.len() + 2
     };
+    #[cfg(test)]
+    let max_phases = WRAP_PHASE_LIMIT.with(Cell::get).unwrap_or(max_phases);
     for phase in 0..max_phases {
         let (layout, recorded) = if has_unequal {
             docx_layout::place::layout_document_with_column_widths(input)?
@@ -1608,6 +1628,17 @@ where
                 });
         let accept =
             has_unequal && !frames_changed && (repeated.is_some() || phase + 1 == max_phases);
+        if let Some(first) = repeated.filter(|_| has_continuous_floats && !accept) {
+            let cycle = &visited[first..];
+            for (index, block, measure) in &pictures {
+                let start = &cycle[0].3[*index];
+                if cycle.iter().any(|(_, _, _, frames)| frames[*index] != *start) {
+                    input.measured[*index].block = block.clone();
+                    input.measured[*index].measure = measure.clone();
+                }
+            }
+            return Ok(true);
+        }
         if accept {
             for (index, unequal) in unequal.iter().enumerate() {
                 if !unequal {
