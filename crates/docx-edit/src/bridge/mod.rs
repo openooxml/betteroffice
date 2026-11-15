@@ -2642,8 +2642,8 @@ fn resolve_auto_text_color(
 fn automatic_text_needs_white(color: &str) -> bool {
     let Some(value) = color
         .strip_prefix('#')
-        .filter(|value| value.len() == 6)
-        .and_then(|value| u32::from_str_radix(value, 16).ok())
+        .filter(|value| matches!(value.len(), 6 | 8))
+        .and_then(|value| u32::from_str_radix(&value[..6], 16).ok())
     else {
         return false;
     };

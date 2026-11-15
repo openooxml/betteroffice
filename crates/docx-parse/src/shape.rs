@@ -1531,6 +1531,26 @@ fn group_matrix(parent: Matrix, transform: Option<&XmlElement>) -> Matrix {
     local = Matrix::translate(x + center_x, y + center_y).multiply(local);
     parent.multiply(local)
 }
+/// A top-level scene node for `shape`, whose offset, size and rotation are
+/// authored like any `a:xfrm`, normalised the way parsed shapes are.
+pub(crate) fn placed_scene_node(mut shape: Shape) -> DrawingSceneNode {
+    let transform = matrix_contract(
+        local_shape_matrix(Matrix::IDENTITY, &shape),
+        Some(shape.size.width),
+        Some(shape.size.height),
+    );
+    shape.offset = Some(ShapeOffset {
+        x: transform.offset_x.unwrap_or(0.0),
+        y: transform.offset_y.unwrap_or(0.0),
+    });
+    DrawingSceneNode {
+        kind: Some("shape".into()),
+        shape: Some(Box::new(shape)),
+        transform: Some(transform),
+        ..DrawingSceneNode::default()
+    }
+}
+
 fn matrix_contract(matrix: Matrix, width: Option<f64>, height: Option<f64>) -> SceneTransform {
     let origin = matrix.apply(0.0, 0.0);
     let scale_x = fmath::hypot(matrix.a, matrix.b);

@@ -13,7 +13,7 @@ use crate::relationships::{
 use crate::scalars::ColorValue;
 use crate::shape::{
     DrawingScene, DrawingSceneNode, Shape, ShapeOffset, ShapeTextBody,
-    parse_drawing_scene_with_sources, resolve_shape_fill_pictures,
+    parse_drawing_scene_with_sources, placed_scene_node, resolve_shape_fill_pictures,
 };
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
@@ -73,7 +73,23 @@ pub fn parse_smart_art_from_drawing(
         .as_deref()
         .and_then(|path| find_pre_rendered_drawing(path, context))
     {
-        let parsed = parse_diagram_drawing_scene(drawing_xml, "SmartArt drawing", budget)?;
+        let colors_path = relationship_ids
+            .attribute(Some("r"), "cs")
+            .and_then(|id| relationships.get(id))
+            .and_then(|relationship| resolve_internal_target(Some(&relationship.target)));
+        let text_colors = match (
+            data_path
+                .as_deref()
+                .and_then(|path| context.parts.get(path)),
+            colors_path
+                .as_deref()
+                .and_then(|path| context.parts.get(path)),
+        ) {
+            (Some(data), Some(colors)) => style_text_colors(data, colors, drawing_xml, budget),
+            _ => HashMap::new(),
+        };
+        let parsed =
+            parse_styled_drawing_scene(drawing_xml, "SmartArt drawing", &text_colors, budget)?;
         if !parsed.shapes.is_empty() {
             let mut shape = diagram_group(size, parsed.shapes, parsed.scene);
             if memchr::memmem::find(drawing_xml, b"blip").is_some() {
@@ -235,6 +251,15 @@ pub fn parse_diagram_drawing_scene(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<DiagramDrawing, ParseError> {
+    parse_styled_drawing_scene(xml, part, &HashMap::new(), budget)
+}
+
+fn parse_styled_drawing_scene(
+    xml: &[u8],
+    part: &str,
+    text_colors: &HashMap<String, ColorValue>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<DiagramDrawing, ParseError> {
     let document = parse_xml(xml, part, budget)?;
     let Some(root) = document.root() else {
         return Ok(DiagramDrawing {
@@ -249,7 +274,18 @@ pub fn parse_diagram_drawing_scene(
     };
     let (mut scene, sources) = parse_drawing_scene_with_sources(source);
     let mut shapes = Vec::new();
-    collect_scene_shapes(scene.root.as_mut(), &mut shapes, &mut sources.into_iter());
+    if let Some(frame) = collect_scene_shapes(
+        scene.root.as_mut(),
+        &mut shapes,
+        &mut sources.into_iter(),
+        text_colors,
+    ) {
+        scene.root = Some(DrawingSceneNode {
+            kind: Some("canvas".into()),
+            children: Some(scene.root.take().into_iter().chain([frame]).collect()),
+            ..DrawingSceneNode::default()
+        });
+    }
     Ok(DiagramDrawing {
         scene: Some(scene),
         shapes,
@@ -264,12 +300,15 @@ pub fn parse_diagram_drawing_shapes(
     Ok(parse_diagram_drawing_scene(xml, part, budget)?.shapes)
 }
 
+/// Collects the scene's shapes in order, returning the text frame node to
+/// place after `node` when its text sits in a box of its own.
 fn collect_scene_shapes<'a>(
     node: Option<&mut DrawingSceneNode>,
     shapes: &mut Vec<Shape>,
     sources: &mut impl Iterator<Item = &'a XmlElement>,
-) {
-    let Some(node) = node else { return };
+    text_colors: &HashMap<String, ColorValue>,
+) -> Option<DrawingSceneNode> {
+    let node = node?;
     if node.kind.as_deref() == Some("shape")
         && let Some(shape) = node.shape.as_deref_mut()
     {
@@ -280,13 +319,21 @@ fn collect_scene_shapes<'a>(
                     preset_geometry_to_path("straightConnector1", &HashMap::new(), 1.0);
             }
             let font_color = source
-                .child_by_local_name("style")
-                .and_then(|style| style.child_by_local_name("fontRef"))
-                .and_then(|reference| crate::drawingml::parse_color_element(Some(reference)));
+                .attribute(None, "modelId")
+                .and_then(|id| text_colors.get(id))
+                .cloned()
+                .or_else(|| {
+                    source
+                        .child_by_local_name("style")
+                        .and_then(|style| style.child_by_local_name("fontRef"))
+                        .and_then(|reference| {
+                            crate::drawingml::parse_color_element(Some(reference))
+                        })
+                });
             let paragraphs =
                 parse_drawing_text_body(source.child_by_local_name("txBody"), font_color.as_ref());
             if !paragraphs.is_empty() {
-                shape.text_body = Some(ShapeTextBody {
+                let body = ShapeTextBody {
                     vertical: None,
                     rotation: None,
                     anchor: None,
@@ -294,16 +341,234 @@ fn collect_scene_shapes<'a>(
                     auto_fit: None,
                     margins: None,
                     content: paragraphs,
-                });
+                };
+                match text_frame(source, shape) {
+                    Some(mut frame) => {
+                        shape.text_body = None;
+                        frame.text_body = Some(body);
+                        let node = placed_scene_node(frame);
+                        shapes.push(shape.clone());
+                        shapes.extend(node.shape.as_deref().cloned());
+                        return Some(node);
+                    }
+                    None => shape.text_body = Some(body),
+                }
             }
         }
         shapes.push(shape.clone());
     }
     if let Some(children) = &mut node.children {
-        for child in children {
-            collect_scene_shapes(Some(child), shapes, sources);
+        let mut index = 0;
+        while index < children.len() {
+            if let Some(frame) =
+                collect_scene_shapes(children.get_mut(index), shapes, sources, text_colors)
+            {
+                index += 1;
+                children.insert(index, frame);
+            }
+            index += 1;
         }
     }
+    None
+}
+
+/// The text box `dsp:txXfrm` places apart from its shape. Its rotation adds to
+/// the shape's, so a layout-flipped shape keeps upright text.
+fn text_frame(source: &XmlElement, shape: &Shape) -> Option<Shape> {
+    let frame = source.child_by_local_name("txXfrm")?;
+    let number = |element: Option<&XmlElement>, name| {
+        element
+            .and_then(|element| element.parse_numeric_attribute(None, name, 1.0))
+            .filter(safe_number)
+    };
+    let offset = frame.child_by_local_name("off");
+    let extent = frame.child_by_local_name("ext");
+    let mut text = Shape::empty(
+        "rect".to_owned(),
+        ImageSize {
+            width: number(extent, "cx")?,
+            height: number(extent, "cy")?,
+        },
+    );
+    text.offset = Some(ShapeOffset {
+        x: number(offset, "x")?,
+        y: number(offset, "y")?,
+    });
+    let rotation = shape
+        .transform
+        .as_ref()
+        .and_then(|transform| transform.rotation)
+        .unwrap_or(0.0)
+        + frame
+            .parse_numeric_attribute(None, "rot", 1.0)
+            .filter(safe_number)
+            .map_or(0.0, |rot| rot / 60_000.0);
+    text.transform = Some(crate::drawingml::Transform2D {
+        rotation: Some(rotation.rem_euclid(360.0)),
+        flip_h: None,
+        flip_v: None,
+    });
+    text.geometry_path = preset_geometry_to_path("rect", &HashMap::new(), 1.0);
+    text.fill = Some(ShapeFill {
+        fill_type: "none".to_owned(),
+        color: None,
+        gradient: None,
+    });
+    text.outline = Some(ShapeOutline {
+        width: Some(0.0),
+        ..ShapeOutline::default()
+    });
+    text.text_body_properties = shape.text_body_properties.clone();
+    Some(text)
+}
+
+/// Each drawn shape's text colour from the colour definition's
+/// `txFillClrLst`, which Word applies over the cached drawing's `fontRef`.
+/// A shape showing the text of an undrawn text-only point, found through the
+/// data node its text starts with, takes that point's colour.
+fn style_text_colors(
+    data_xml: &[u8],
+    colors_xml: &[u8],
+    drawing_xml: &[u8],
+    budget: &mut ParseBudget<'_>,
+) -> HashMap<String, ColorValue> {
+    let mut colors = HashMap::new();
+    let (Ok(data), Ok(definitions), Ok(drawing)) = (
+        parse_xml(data_xml, "SmartArt data", budget),
+        parse_xml(colors_xml, "SmartArt colors", budget),
+        parse_xml(drawing_xml, "SmartArt drawing", budget),
+    ) else {
+        return colors;
+    };
+    let (Some(data), Some(definitions), Some(drawing)) =
+        (data.root(), definitions.root(), drawing.root())
+    else {
+        return colors;
+    };
+    let mut drawn = Vec::new();
+    collect_model_ids(drawing, &mut drawn, 0);
+    let labels: HashMap<&str, &XmlElement> = definitions
+        .children_by_local_name("styleLbl")
+        .filter_map(|label| Some((label.attribute(None, "name")?, label)))
+        .collect();
+    let points: HashMap<&str, &XmlElement> = data
+        .child_by_local_name("ptLst")
+        .into_iter()
+        .flat_map(|list| list.children_by_local_name("pt"))
+        .filter_map(|point| {
+            Some((
+                point.attribute(None, "modelId")?,
+                point.child_by_local_name("prSet")?,
+            ))
+        })
+        .collect();
+    let mut shown_by: HashMap<&str, Vec<&str>> = HashMap::new();
+    for connection in data
+        .child_by_local_name("cxnLst")
+        .into_iter()
+        .flat_map(|list| list.children_by_local_name("cxn"))
+        .filter(|connection| connection.attribute(None, "type") == Some("presOf"))
+    {
+        if let (Some(node), Some(point)) = (
+            connection.attribute(None, "srcId"),
+            connection.attribute(None, "destId"),
+        ) {
+            shown_by.entry(node).or_default().push(point);
+        }
+    }
+    let color = |id: &str| {
+        let properties = points.get(id)?;
+        let list = labels
+            .get(properties.attribute(None, "presStyleLbl")?)?
+            .child_by_local_name("txFillClrLst")?;
+        let entries: Vec<ColorValue> = list
+            .child_elements()
+            .filter_map(crate::drawingml::parse_color)
+            .collect();
+        let index = properties
+            .parse_numeric_attribute(None, "presStyleIdx", 1.0)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(0.0) as usize;
+        let count = properties
+            .parse_numeric_attribute(None, "presStyleCnt", 1.0)
+            .filter(|value| value.is_finite() && *value >= 1.0)
+            .unwrap_or(1.0) as usize;
+        let last = entries.len().checked_sub(1)?;
+        let pick = match list.attribute(None, "meth") {
+            Some("cycle") => index % entries.len(),
+            Some("repeat") => index.min(last),
+            _ if count > 1 => (index.min(count - 1) * last + (count - 1) / 2) / (count - 1),
+            _ => 0,
+        };
+        Some(entries[pick].clone())
+    };
+    let mut nodes_by_text: HashMap<String, Vec<&str>> = HashMap::new();
+    for point in data
+        .child_by_local_name("ptLst")
+        .into_iter()
+        .flat_map(|list| list.children_by_local_name("pt"))
+        .filter(|point| matches!(point.attribute(None, "type"), None | Some("node")))
+    {
+        if let (Some(id), Some(text)) = (
+            point.attribute(None, "modelId"),
+            point
+                .child_by_local_name("t")
+                .and_then(first_paragraph_text),
+        ) {
+            nodes_by_text.entry(text).or_default().push(id);
+        }
+    }
+    let drawn_ids: Vec<&str> = drawn.iter().map(|(id, _)| *id).collect();
+    for (id, text) in &drawn {
+        let nodes = text.as_ref().and_then(|text| nodes_by_text.get(text));
+        let node = nodes.and_then(|nodes| {
+            nodes
+                .iter()
+                .find(|node| shown_by.get(**node).is_some_and(|shown| shown.contains(id)))
+                .or_else(|| nodes.first())
+        });
+        let text_point = node.and_then(|node| shown_by.get(node)).and_then(|shown| {
+            shown
+                .iter()
+                .find(|point| **point != *id && !drawn_ids.contains(point))
+        });
+        if let Some(value) = text_point
+            .and_then(|point| color(point))
+            .or_else(|| color(id))
+        {
+            colors.insert((*id).to_owned(), value);
+        }
+    }
+    colors
+}
+
+/// Each drawn shape's model id with the text of its first paragraph.
+fn collect_model_ids<'a>(
+    element: &'a XmlElement,
+    ids: &mut Vec<(&'a str, Option<String>)>,
+    depth: usize,
+) {
+    if depth > MAX_DIAGRAM_DEPTH || ids.len() >= MAX_DIAGRAM_SHAPES {
+        return;
+    }
+    if element.local_name() == "sp"
+        && let Some(id) = element.attribute(None, "modelId")
+    {
+        let text = element
+            .child_by_local_name("txBody")
+            .and_then(first_paragraph_text);
+        ids.push((id, text));
+        return;
+    }
+    for child in element.child_elements() {
+        collect_model_ids(child, ids, depth + 1);
+    }
+}
+
+fn first_paragraph_text(body: &XmlElement) -> Option<String> {
+    body.children_by_local_name("p")
+        .map(|paragraph| collect_drawing_text(paragraph, 0))
+        .find(|text| !text.is_empty())
 }
 
 fn parse_drawing_text_body(
@@ -313,23 +578,45 @@ fn parse_drawing_text_body(
     let Some(text_body) = text_body else {
         return Vec::new();
     };
-    text_body
+    let mut numbering = HashMap::new();
+    let mut paragraphs: Vec<serde_json::Value> = text_body
         .child_elements()
         .filter(|child| child.local_name() == "p")
-        .filter_map(|paragraph| parse_drawing_text_paragraph(paragraph, font_color))
-        .collect()
+        .filter_map(|paragraph| parse_drawing_text_paragraph(paragraph, font_color, &mut numbering))
+        .collect();
+    let outer_spacing = text_body
+        .child_by_local_name("bodyPr")
+        .and_then(|properties| properties.parse_boolean_attribute(None, "spcFirstLastPara"))
+        == Some(true);
+    if !outer_spacing {
+        if let Some(first) = paragraphs.first_mut() {
+            first["formatting"]["spaceBefore"] = serde_json::json!(0.0);
+        }
+        if let Some(last) = paragraphs.last_mut() {
+            last["formatting"]["spaceAfter"] = serde_json::json!(0.0);
+        }
+    }
+    paragraphs
 }
+
+/// EMU per twip.
+const EMU_PER_TWIP: f64 = 635.0;
+/// DrawingML text's default size, in hundredths of a point.
+const DEFAULT_TEXT_SIZE: f64 = 1800.0;
 
 fn parse_drawing_text_paragraph(
     paragraph: &XmlElement,
     font_color: Option<&ColorValue>,
+    numbering: &mut HashMap<u32, usize>,
 ) -> Option<serde_json::Value> {
     let mut runs = Vec::new();
+    let mut first_run = None;
     for child in paragraph.child_elements() {
         match child.local_name() {
             "r" | "fld" => {
                 let text = collect_drawing_text(child, 0);
                 if !text.is_empty() {
+                    first_run.get_or_insert(child);
                     runs.push(drawing_run(
                         &text,
                         parse_drawing_run_formatting(child, font_color),
@@ -343,20 +630,168 @@ fn parse_drawing_text_paragraph(
     if runs.is_empty() {
         return None;
     }
-    let alignment = match paragraph
-        .child_by_local_name("pPr")
-        .and_then(|properties| properties.attribute(None, "algn"))
-    {
+    let properties = paragraph.child_by_local_name("pPr");
+    let attribute = |name| properties.and_then(|properties| properties.attribute(None, name));
+    let number = |name| {
+        properties
+            .and_then(|properties| properties.parse_numeric_attribute(None, name, 1.0))
+            .filter(safe_number)
+    };
+    let alignment = match attribute("algn") {
         Some("ctr") => "center",
         Some("r") => "right",
-        Some("just") => "both",
+        Some("just" | "dist") => "both",
         _ => "left",
     };
+    let size = first_run
+        .and_then(|run| run.child_by_local_name("rPr"))
+        .and_then(|properties| properties.parse_numeric_attribute(None, "sz", 1.0))
+        .filter(safe_number)
+        .unwrap_or(DEFAULT_TEXT_SIZE);
+    let spacing = |name| {
+        let spacing = properties?.child_by_local_name(name)?;
+        if let Some(points) = spacing.child_by_local_name("spcPts") {
+            return points
+                .parse_numeric_attribute(None, "val", 1.0)
+                .filter(safe_number)
+                .map(|value| value / 5.0);
+        }
+        spacing
+            .child_by_local_name("spcPct")?
+            .parse_numeric_attribute(None, "val", 1.0)
+            .filter(safe_number)
+            .map(|value| value / 100_000.0 * size * 1.2 / 5.0)
+    };
+    let (line, line_rule) = properties
+        .and_then(|properties| properties.child_by_local_name("lnSpc"))
+        .and_then(|spacing| {
+            if let Some(points) = spacing.child_by_local_name("spcPts") {
+                let value = points
+                    .parse_numeric_attribute(None, "val", 1.0)
+                    .filter(safe_number)?;
+                return Some((value / 5.0, "exact"));
+            }
+            let value = spacing
+                .child_by_local_name("spcPct")?
+                .parse_numeric_attribute(None, "val", 1.0)
+                .filter(safe_number)?;
+            Some((value / 100_000.0 * 240.0, "auto"))
+        })
+        .unwrap_or((240.0, "auto"));
+    let left = number("marL").unwrap_or(0.0) / EMU_PER_TWIP;
+    let first_line = number("indent").unwrap_or(0.0) / EMU_PER_TWIP;
+    let mut formatting = serde_json::json!({
+        "alignment": alignment,
+        "spaceBefore": spacing("spcBef").unwrap_or(0.0),
+        "spaceAfter": spacing("spcAft").unwrap_or(0.0),
+        "lineSpacing": line,
+        "lineSpacingRule": line_rule,
+        "indentLeft": left,
+        "indentFirstLine": first_line.abs(),
+        "hangingIndent": first_line < 0.0,
+    });
+    let level = number("lvl").unwrap_or(0.0).clamp(0.0, 8.0) as u32;
+    numbering.retain(|deeper, _| *deeper <= level);
+    if let Some(bullet) = bullet_text(properties, level, numbering) {
+        let mut marker = first_run
+            .map(|run| parse_drawing_run_formatting(run, font_color))
+            .unwrap_or_else(|| parse_drawing_run_formatting(paragraph, font_color))
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(typeface) = properties
+            .and_then(|properties| properties.child_by_local_name("buFont"))
+            .and_then(|font| font.attribute(None, "typeface"))
+            .filter(|typeface| !typeface.starts_with('+'))
+        {
+            marker["fontFamily"] = serde_json::json!({"ascii": typeface, "hAnsi": typeface});
+        }
+        formatting["tabs"] = serde_json::json!([{"alignment": "left", "position": left}]);
+        let mut run = drawing_run(&bullet, Some(marker));
+        if let Some(content) = run["content"].as_array_mut() {
+            content.push(serde_json::json!({"type": "tab"}));
+        }
+        runs.insert(0, run);
+    } else {
+        numbering.remove(&level);
+    }
     Some(serde_json::json!({
         "type": "paragraph",
-        "formatting": { "alignment": alignment },
+        "formatting": formatting,
         "content": runs,
     }))
+}
+
+/// The marker a `buChar` or `buAutoNum` paragraph starts with.
+fn bullet_text(
+    properties: Option<&XmlElement>,
+    level: u32,
+    numbering: &mut HashMap<u32, usize>,
+) -> Option<String> {
+    let properties = properties?;
+    if let Some(character) = properties.child_by_local_name("buChar") {
+        return character.attribute(None, "char").map(str::to_owned);
+    }
+    let scheme = properties.child_by_local_name("buAutoNum")?;
+    let start = scheme
+        .parse_numeric_attribute(None, "startAt", 1.0)
+        .filter(|value| value.is_finite() && *value >= 1.0)
+        .unwrap_or(1.0) as usize;
+    let count = numbering.entry(level).or_insert(0);
+    *count += 1;
+    let value = start + *count - 1;
+    let kind = scheme.attribute(None, "type").unwrap_or("arabicPeriod");
+    let (body, suffix) = kind
+        .find(|character: char| character.is_ascii_uppercase())
+        .map_or((kind, ""), |split| kind.split_at(split));
+    let label = match body {
+        "alphaLc" => alphabetic(value).to_ascii_lowercase(),
+        "alphaUc" => alphabetic(value),
+        "romanLc" => roman(value).to_ascii_lowercase(),
+        "romanUc" => roman(value),
+        _ => value.to_string(),
+    };
+    Some(match suffix {
+        "ParenBoth" => format!("({label})"),
+        "ParenR" => format!("{label})"),
+        "Plain" => label,
+        _ => format!("{label}."),
+    })
+}
+
+fn alphabetic(mut value: usize) -> String {
+    let mut label = Vec::new();
+    while value > 0 {
+        value -= 1;
+        label.push(b'A' + (value % 26) as u8);
+        value /= 26;
+    }
+    label.reverse();
+    String::from_utf8(label).unwrap_or_default()
+}
+
+fn roman(mut value: usize) -> String {
+    const NUMERALS: [(usize, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut label = String::new();
+    for (amount, numeral) in NUMERALS {
+        while value >= amount {
+            label.push_str(numeral);
+            value -= amount;
+        }
+    }
+    label
 }
 
 fn drawing_run(text: &str, formatting: Option<serde_json::Value>) -> serde_json::Value {
@@ -406,6 +841,34 @@ fn parse_drawing_run_formatting(
     if properties.parse_boolean_attribute(None, "i") == Some(true) {
         formatting.insert("italic".to_owned(), serde_json::json!(true));
         property_count += 1;
+    }
+    if properties
+        .attribute(None, "u")
+        .is_some_and(|underline| underline != "none")
+    {
+        formatting.insert(
+            "underline".to_owned(),
+            serde_json::json!({"style": "single"}),
+        );
+        property_count += 1;
+    }
+    if properties
+        .attribute(None, "strike")
+        .is_some_and(|strike| strike != "noStrike")
+    {
+        formatting.insert("strike".to_owned(), serde_json::json!(true));
+        property_count += 1;
+    }
+    match properties.attribute(None, "cap") {
+        Some("all") => {
+            formatting.insert("allCaps".to_owned(), serde_json::json!(true));
+            property_count += 1;
+        }
+        Some("small") => {
+            formatting.insert("smallCaps".to_owned(), serde_json::json!(true));
+            property_count += 1;
+        }
+        _ => {}
     }
     if let Some(size) = properties
         .parse_numeric_attribute(None, "sz", 1.0)
@@ -889,6 +1352,100 @@ mod tests {
                 serde_json::json!({"themeColor": "lt1"}),
                 serde_json::json!({"rgb": "FF0000"}),
             ]
+        );
+    }
+
+    #[test]
+    fn cached_text_takes_its_frame_paragraphs_and_text_point_color() {
+        let paragraphs = r#"<a:p><a:pPr algn="ctr"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:spcBef><a:spcPct val="10000"/></a:spcBef><a:spcAft><a:spcPct val="35000"/></a:spcAft><a:buNone/></a:pPr><a:r><a:rPr sz="2800" u="sng"/><a:t>Alpha</a:t></a:r></a:p><a:p><a:pPr marL="228600" lvl="1" indent="-228600"><a:spcAft><a:spcPct val="15000"/></a:spcAft><a:buChar char="•"/></a:pPr><a:r><a:rPr sz="2200"/><a:t>one</a:t></a:r></a:p>"#;
+        let drawing = format!(
+            r#"<dsp:drawing xmlns:dsp="dsp" xmlns:a="a"><dsp:spTree><dsp:grpSpPr/><dsp:sp modelId="shape"><dsp:nvSpPr><dsp:cNvPr id="0" name=""/><dsp:cNvSpPr/></dsp:nvSpPr><dsp:spPr><a:xfrm rot="10800000"><a:off x="0" y="0"/><a:ext cx="4000" cy="2000"/></a:xfrm><a:prstGeom prst="trapezoid"/></dsp:spPr><dsp:style><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></dsp:style><dsp:txBody><a:bodyPr anchor="ctr"/>{paragraphs}</dsp:txBody><dsp:txXfrm rot="10800000"><a:off x="1000" y="500"/><a:ext cx="2000" cy="1000"/></dsp:txXfrm></dsp:sp></dsp:spTree></dsp:drawing>"#
+        );
+        let mut context = SmartArtContext::default();
+        context.parts.insert(
+            "word/diagrams/drawing1.xml".to_owned(),
+            drawing.into_bytes(),
+        );
+        context.parts.insert(
+            "word/diagrams/data1.xml".to_owned(),
+            br#"<dgm:dataModel xmlns:dgm="d" xmlns:a="a"><dgm:ptLst><dgm:pt modelId="node"><dgm:prSet/><dgm:t><a:p><a:r><a:t>Alpha</a:t></a:r></a:p></dgm:t></dgm:pt><dgm:pt modelId="shape" type="pres"><dgm:prSet presAssocID="node" presStyleLbl="node1" presStyleIdx="0" presStyleCnt="1"/></dgm:pt><dgm:pt modelId="text" type="pres"><dgm:prSet presAssocID="node" presStyleLbl="revTx" presStyleIdx="0" presStyleCnt="1"/></dgm:pt></dgm:ptLst><dgm:cxnLst><dgm:cxn modelId="c1" type="presOf" srcId="node" destId="shape"/><dgm:cxn modelId="c2" type="presOf" srcId="node" destId="text"/></dgm:cxnLst></dgm:dataModel>"#.to_vec(),
+        );
+        context.parts.insert(
+            "word/diagrams/colors1.xml".to_owned(),
+            br#"<dgm:colorsDef xmlns:dgm="d" xmlns:a="a"><dgm:styleLbl name="node1"><dgm:txFillClrLst meth="repeat"><a:schemeClr val="lt1"/></dgm:txFillClrLst></dgm:styleLbl><dgm:styleLbl name="revTx"><dgm:txFillClrLst meth="repeat"><a:schemeClr val="dk1"/></dgm:txFillClrLst></dgm:styleLbl></dgm:colorsDef>"#.to_vec(),
+        );
+        let relationship = |id: &str, target: &str| {
+            (
+                id.to_owned(),
+                Relationship {
+                    id: id.to_owned(),
+                    relationship_type: "diagram".to_owned(),
+                    target: target.to_owned(),
+                    target_mode: None,
+                },
+            )
+        };
+        let relationships = RelationshipMap::from([
+            relationship("rId1", "diagrams/data1.xml"),
+            relationship("rId4", "diagrams/colors1.xml"),
+        ]);
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let drawing = parse_xml(
+            br#"<w:drawing xmlns:w="w" xmlns:wp="wp" xmlns:dgm="dgm" xmlns:r="r"><wp:inline><wp:extent cx="4000" cy="2000"/><dgm:relIds r:dm="rId1" r:lo="rId2" r:cs="rId4"/></wp:inline></w:drawing>"#,
+            "drawing",
+            &mut budget,
+        )
+        .unwrap()
+        .root()
+        .unwrap()
+        .clone();
+        let shape = parse_smart_art_from_drawing(
+            &drawing,
+            Some(&relationships),
+            Some(&MediaMap::new()),
+            Some(&mut context),
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+        let scene_nodes = shape.scene.as_ref().unwrap().root.as_ref().unwrap();
+        assert_eq!(scene_nodes.children.as_ref().map(Vec::len), Some(2));
+        let children = shape.children.unwrap();
+        let [trapezoid, frame] = children.as_slice() else {
+            panic!("expected the shape and its text frame");
+        };
+        assert!(trapezoid.text_body.is_none());
+        assert_eq!(
+            frame.transform.as_ref().and_then(|value| value.rotation),
+            Some(0.0)
+        );
+        assert_eq!(
+            (frame.offset.as_ref().unwrap().x, frame.size.width),
+            (1000.0, 2000.0)
+        );
+        let content = &frame.text_body.as_ref().unwrap().content;
+        let title = &content[0];
+        assert_eq!(title["formatting"]["alignment"], "center");
+        assert_eq!(title["formatting"]["spaceBefore"], 0.0);
+        assert_eq!(title["formatting"]["spaceAfter"], 0.35 * 2800.0 * 1.2 / 5.0);
+        assert_eq!(title["formatting"]["lineSpacing"], 216.0);
+        assert_eq!(
+            title["content"][0]["formatting"]["color"]["themeColor"],
+            "dk1"
+        );
+        assert_eq!(
+            title["content"][0]["formatting"]["underline"]["style"],
+            "single"
+        );
+        let bullet = &content[1];
+        assert_eq!(bullet["formatting"]["spaceAfter"], 0.0);
+        assert_eq!(bullet["formatting"]["indentLeft"], 360.0);
+        assert_eq!(bullet["formatting"]["hangingIndent"], true);
+        assert_eq!(bullet["formatting"]["tabs"][0]["position"], 360.0);
+        assert_eq!(
+            bullet["content"][0]["content"],
+            serde_json::json!([{"type": "text", "text": "•"}, {"type": "tab"}])
         );
     }
 

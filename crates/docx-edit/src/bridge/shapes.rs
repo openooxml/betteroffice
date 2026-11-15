@@ -7,6 +7,7 @@ use docx_layout::types::{
     ParagraphBlock, Run, RunFormatting, ShapeBlock, TabRun, TextRun,
 };
 use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
+use ooxml_drawingml::ColorTransform;
 use serde_json::{Map, Value, json};
 
 use super::RenderEnv;
@@ -185,8 +186,8 @@ fn lower_shape(
     let geometry_path = array(shape, "geometryPath")
         .filter(|path| !path.is_empty())
         .cloned()
+        .or_else(|| shared_preset_geometry(&shape_type, shape))
         .or_else(|| preset_geometry(&shape_type))
-        .or_else(|| shared_plus_geometry(&shape_type, shape))
         .or_else(|| {
             object(shape, "position")
                 .is_some()
@@ -249,7 +250,7 @@ fn lower_shape(
         inner_measures: None,
         children,
         scene: field(shape, "scene").cloned(),
-        effects: array(shape, "effects").cloned(),
+        effects: shape_effects(shape, env),
         text_body_properties: field(shape, "textBodyProperties")
             .or_else(|| field(shape, "textBody"))
             .map(text_body_in_pixels),
@@ -439,7 +440,7 @@ fn shape_fill(shape: &Value, env: &RenderEnv) -> Option<Value> {
                                 insert_clone(&mut output, "position", stop.get("position"));
                                 output.insert(
                                     "color".to_owned(),
-                                    resolve_shape_color(stop.get("color"), env)
+                                    resolve_shape_paint(stop.get("color"), env)
                                         .map(Value::String)
                                         .unwrap_or_else(|| Value::String("#000000".to_owned())),
                                 );
@@ -478,6 +479,33 @@ fn shape_stroke(shape: &Value, env: &RenderEnv) -> Option<Value> {
     }
     insert_clone(&mut stroke, "dash", outline.get("style"));
     Some(Value::Object(stroke))
+}
+
+/// Effects with their lengths in page pixels and their colour resolved, as the painters read them.
+fn shape_effects(shape: &Value, env: &RenderEnv) -> Option<Vec<Value>> {
+    let effects = array(shape, "effects")?;
+    Some(
+        effects
+            .iter()
+            .map(|effect| {
+                let mut effect = effect.clone();
+                if let Some(map) = effect.as_object_mut() {
+                    for key in ["blurRadius", "distance", "size"] {
+                        if let Some(emu) = map.get(key).and_then(Value::as_f64) {
+                            map.insert(key.to_owned(), Value::from(emu_to_pixels(emu)));
+                        }
+                    }
+                    if map.get("color").is_some_and(Value::is_object) {
+                        match resolve_shape_paint(map.get("color"), env) {
+                            Some(color) => map.insert("color".to_owned(), Value::String(color)),
+                            None => map.remove("color"),
+                        };
+                    }
+                }
+                effect
+            })
+            .collect(),
+    )
 }
 
 fn shape_transform(shape: &Value) -> Option<Value> {
@@ -618,6 +646,7 @@ fn shape_paragraph(
     };
     super::lower_paragraph_spacing(&values, &mut attrs, env, false);
     super::lower_paragraph_indent(&values, &mut attrs);
+    super::lower_paragraph_tabs(&values, &mut attrs);
     if env.shape_styles.0.is_some() {
         let styled = super::lower_paragraph_attrs(
             &values,
@@ -1064,13 +1093,35 @@ fn shape_base_color(value: &Map<String, Value>, env: &RenderEnv) -> Option<Strin
     Some(format!("#{}", color.trim_start_matches('#')))
 }
 
+/// A fill or line colour, with an `#RRGGBBAA` alpha byte when its transforms make it translucent.
+fn resolve_shape_paint(value: Option<&Value>, env: &RenderEnv) -> Option<String> {
+    let color = resolve_shape_color(value, env)?;
+    let transforms: Vec<ColorTransform> = value
+        .and_then(|value| value.get("transforms"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    let alpha = transforms
+        .iter()
+        .fold(1.0_f64, |alpha, transform| match transform {
+            ColorTransform::Alpha(value) => *value,
+            ColorTransform::AlphaMod(value) => alpha * value,
+            ColorTransform::AlphaOff(value) => alpha + value,
+            _ => alpha,
+        })
+        .clamp(0.0, 1.0);
+    if color.len() != 7 || alpha >= 1.0 {
+        return Some(color);
+    }
+    Some(format!("{color}{:02X}", (alpha * 255.0).round() as u8))
+}
+
 fn insert_color(
     output: &mut Map<String, Value>,
     key: &str,
     value: Option<&Value>,
     env: &RenderEnv,
 ) {
-    if let Some(color) = resolve_shape_color(value, env) {
+    if let Some(color) = resolve_shape_paint(value, env) {
         output.insert(key.to_owned(), Value::String(color));
     }
 }
@@ -1294,7 +1345,6 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
         | "flowChartPredefinedProcess"
         | "flowChartInternalStorage"
         | "flowChartPreparation"
-        | "flowChartManualOperation"
         | "flowChartMagneticTape"
         | "flowChartMagneticDisk"
         | "flowChartMagneticDrum"
@@ -1456,10 +1506,7 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
     })
 }
 
-fn shared_plus_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
-    if shape_type != "plus" {
-        return None;
-    }
+fn shared_preset_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
     let size = object(shape, "size");
     let width = size
         .and_then(|value| number_in(value, "width"))
@@ -1472,7 +1519,7 @@ fn shared_plus_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
     } else {
         1.0
     };
-    let path = docx_parse::drawingml::preset_geometry_to_path("plus", &HashMap::new(), aspect)?;
+    let path = docx_parse::drawingml::preset_outline(shape_type, &HashMap::new(), aspect)?;
     path.into_iter()
         .map(|p| {
             serde_json::to_string(&p)
@@ -1847,6 +1894,34 @@ mod tests {
         let paragraphs = shape.inner_text.unwrap();
         assert_eq!(paragraphs.len(), 3);
         assert!(paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()));
+    }
+
+    #[test]
+    fn translucent_paint_effects_and_shared_presets_lower_for_the_painters() {
+        let translucent = |rgb: &str, alpha: f64| json!({"rgb": rgb, "transforms": [{"kind": "alpha", "value": alpha}]});
+        let shape = json!({
+            "shapeType": "round1Rect",
+            "size": {"width": 1905000, "height": 952500},
+            "fill": {"type": "solid", "color": translucent("44546A", 0.5)},
+            "outline": {"color": translucent("FFFFFF", 1.0), "width": 12700},
+            "effects": [{"kind": "outerShadow", "blurRadius": 38100, "distance": 19050,
+                "direction": 90.0, "color": translucent("000000", 0.35)}]
+        });
+        let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+        assert_eq!(block.fill.unwrap()["color"], "#44546A80");
+        assert_eq!(block.stroke.unwrap()["color"], "#FFFFFF");
+        assert_eq!(
+            block.effects.unwrap()[0],
+            json!({"kind": "outerShadow", "blurRadius": 4.0, "distance": 2.0,
+                "direction": 90.0, "color": "#00000059"})
+        );
+        assert!(block.geometry_path.len() > 5);
+        let manual = json!({"shapeType": "flowChartManualOperation"});
+        let block = lower_shape_json(&manual, 1, &RenderEnv::default()).unwrap();
+        assert_eq!(
+            block.geometry_path[2],
+            json!({"type": "line", "x": 0.8, "y": 1.0})
+        );
     }
 
     #[test]
