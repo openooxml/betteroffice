@@ -20,8 +20,8 @@ interface DocxProbe {
 
 let peerless = false;
 
-async function open(page: Page) {
-  await page.goto(peerless ? '/?peerless=1' : '/');
+async function open(page: Page, query = peerless ? '/?peerless=1' : '/') {
+  await page.goto(query);
   await expect(page.locator('canvas[data-page-index="0"]')).toBeVisible({ timeout: 120_000 });
   await expect(page.locator('[data-probe-page="0"]')).toBeAttached({ timeout: 60_000 });
   if (await page.locator('.canvas-pages__column').count() === 0) return;
@@ -878,7 +878,9 @@ test('a header anchor has a rect in the header band of every page at 100% and 15
 
 test('a selection placement follows the selection to a new zoom on the in-thread editor', async ({ page }) => {
   peerless = false;
-  await open(page);
+  const messages: string[] = [];
+  page.on('console', (message) => messages.push(message.text()));
+  await open(page, '/?engine=in-thread');
   const word = await operate(page, async () => {
     const probe = (window as unknown as { __probe: DocxProbe }).__probe;
     const read = await probe.editor.readParagraphs({ story: 'body', view: 'accepted' });
@@ -928,4 +930,5 @@ test('a selection placement follows the selection to a new zoom on the in-thread
     { timeout: 30_000 }).toBeLessThanOrEqual(1);
   const after = (await sample())!;
   expect(Math.abs(after.anchor.width - before.anchor.width * 1.5), JSON.stringify({ before, after })).toBeLessThanOrEqual(1);
+  expect(messages.filter((text) => text.includes('hybrid synchronous API'))).toEqual([]);
 });

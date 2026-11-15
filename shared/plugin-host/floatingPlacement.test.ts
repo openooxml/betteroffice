@@ -95,4 +95,16 @@ describe('placeFloating', () => {
     expect(placeFloating({ anchor: { x: 400, y: 300, width: 0, height: 18 }, size, viewport }))
       .toMatchObject({ x: 300, y: 252, hidden: false, clamped: false });
   });
+
+  test('an anchor that only touches the viewport edge is hidden', () => {
+    expect(placeFloating({ anchor: { x: 300, y: 600, width: 100, height: 20 }, size, viewport })).toMatchObject({ hidden: true });
+    expect(placeFloating({ anchor: { x: 800, y: 300, width: 100, height: 20 }, size, viewport })).toMatchObject({ hidden: true });
+  });
+
+  test('a collapsed caret on the viewport edge stays visible', () => {
+    expect(placeFloating({ anchor: { x: 0, y: 300, width: 0, height: 18 }, size, viewport }))
+      .toMatchObject({ x: 8, y: 252, hidden: false });
+    expect(placeFloating({ anchor: { x: 800, y: 300, width: 0, height: 18 }, size, viewport, page: { x: 0, y: 0, width: 800, height: 1000 } }))
+      .toMatchObject({ x: 592, y: 252, hidden: false });
+  });
 });

@@ -4614,23 +4614,33 @@ for (const engine of ['DI', 'DP'] as const) describe(`selection placement ${engi
       await h.quiet();
       const box = selectionBox(h.anchor());
       await until(() => JSON.stringify(recorder.last()?.anchor) === JSON.stringify(box));
-      const kept = recorder.last()!;
       const held = h.holdDisplayRange();
       const from = recorder.placed.length;
       await act(async () => { h.ref.current!.setZoom(1.5); });
       await until(() => recorder.placed.slice(from).some(entry => entry.zoom === 1.5 && entry.range === null));
       await h.host.notificationsIdle();
       expect(h.context().snapshot.selection.displayRange).toBeNull();
+      const edited = h.remote(peer => {
+        const paragraph = peer.paragraphs('body').find(candidate => candidate.paraId !== h.first.paraId)!;
+        peer.insertText({ story: 'body', paraId: paragraph.paraId, offset: paragraph.text.length }, 'remote');
+      });
+      await until(() => recorder.placed.slice(from).some(entry => entry.placement?.kept === true));
       const during = recorder.placed.slice(from);
       expect(during.filter(entry => entry.placement === null)).toEqual([]);
-      for (const { placement } of during.filter(entry => entry.zoom === 1.5 && entry.range === null)) {
-        if (placement!.kept) expect(placement!.anchor).toEqual(kept.anchor);
+      expect(during.filter(entry => entry.placement!.kept).length).toBeGreaterThan(0);
+      let placed = recorder.placed[from - 1]!.placement!.anchor;
+      for (const { placement } of during) {
+        if (placement!.kept) expect(placement!.anchor).toEqual(placed);
+        else placed = placement!.anchor;
       }
+      held.release();
+      await edited;
 
+      const again = h.holdDisplayRange();
       await h.selection('body', h.first.paraId, 0, 2, false);
       await until(() => recorder.placed.at(-1)?.placement === null);
       expect(h.context().snapshot.selection.displayRange).toBeNull();
-      held.release();
+      again.release();
     } finally { h.dispose(); }
   });
 });

@@ -90,4 +90,17 @@ describe('createDocxSelectionPlacement', () => {
     expect(two(frame('a', pending), size)).toBeNull();
     expect(one(frame('a', pending), size)).toMatchObject({ kept: true });
   });
+
+  test.each(['stale-version', 'layout-unavailable'] as const)('keeps the last box while the geometry is %s', (code) => {
+    const place = createDocxSelectionPlacement();
+    const first = place(frame('a', placed([{ x: 100, y: 200, width: 300, height: 20, pageIndex: 0 }])), size)!;
+    expect(place(frame('a', { ok: false, failure: { code, message: 'not shown' } }), size)).toEqual({ ...first, kept: true });
+  });
+
+  test.each(['missing-target', 'unsupported', 'read-failed'] as const)('a %s answer drops the last box', (code) => {
+    const place = createDocxSelectionPlacement();
+    place(frame('a', placed([{ x: 100, y: 200, width: 300, height: 20, pageIndex: 0 }])), size);
+    expect(place(frame('a', { ok: false, failure: { code, message: 'failed' } }), size)).toBeNull();
+    expect(place(frame('a', pending), size)).toBeNull();
+  });
 });
