@@ -503,9 +503,7 @@ const ON_OFF_RUN_PROPERTIES = new Set<string>([
 ]);
 
 const SOURCE_RUN_PROPERTIES = [
-  'bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily',
-  'allCaps', 'smallCaps', 'strike', 'doubleStrike', 'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl',
-  'cs', 'snapToGrid',
+  'bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily', 'snapToGrid',
 ] as const;
 
 const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
@@ -560,12 +558,12 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
     if (key === 'fontFamily') continue;
     const value = source?.[key];
     if (value === undefined) continue;
-    const live = key === 'cs' ? attributes.complexScript
-      : key === 'snapToGrid' ? attributes.snapToGrid !== false
-        : ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
+    // Only an explicit off is seeded for snapToGrid, so the source on is never written back.
+    if (key === 'snapToGrid' && value !== false) continue;
+    const live = key === 'snapToGrid' ? attributes.snapToGrid
+      : ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
     if ((key === 'language' && attributes.language === undefined) || sameJson(value, live) ||
-      ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined) ||
-      (key === 'cs' && attributes.complexScript === undefined)) {
+      ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined)) {
       result[key] = value;
     }
   }
