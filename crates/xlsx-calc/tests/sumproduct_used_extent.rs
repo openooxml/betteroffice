@@ -10,7 +10,9 @@
 use std::fmt::Write as _;
 
 use xlsx_calc::{EvalContext, evaluate, parse_formula, rebuild_and_recalc_all};
-use xlsx_model::{Cell, CellRange, CellRef, CellValue, ErrorValue, Sheet, SheetId, Workbook};
+use xlsx_model::{
+    Cell, CellProvider, CellRange, CellRef, CellValue, ErrorValue, Sheet, SheetId, Workbook,
+};
 
 const CHUNK: usize = 120;
 
@@ -115,7 +117,15 @@ const LOCAL: &[&str] = &[
     "SUMPRODUCT(A:A,F:F)",
     "SUMPRODUCT(F1:F30,G25:G54)",
     "SUMPRODUCT(G:G)+SUMPRODUCT(A60:A70)",
+    "SUMPRODUCT(G300:G424)",
+    "SUMPRODUCT((G:G>50)*G:G)",
+    "SUMPRODUCT(A1:A1000,G1:G1000)",
 ];
+
+/// the rows of the spill layout's data sheet before its spills land: the
+/// lower copy of the local formulas ends there, above where the G25 spill
+/// ends (row 424).
+const SPILL_ROWS_BEFORE: u32 = 299 + LOCAL.len() as u32;
 
 const LAYOUTS: &[&str] = &[
     "dense", "short", "empty", "sparse", "below", "merged", "spill", "wide",
@@ -273,7 +283,7 @@ fn data_sheet(layout: &str) -> Sheet {
             fill(&mut sheet, 0..5, 0..2);
             for (address, formula) in [
                 ("F1", "_xlfn.SEQUENCE(30)"),
-                ("G25", "_xlfn.SEQUENCE(40,1,0.5,0.25)"),
+                ("G25", "_xlfn.SEQUENCE(400,1,0.5,0.25)"),
             ] {
                 put_formula(&mut sheet, a1(address), formula, true);
             }
@@ -321,7 +331,14 @@ fn run_chunk(layout: &str, chunk: usize, first: usize, formulas: &[String], out:
     workbook.sheets.push(before);
     workbook.sheets.push(data_sheet(layout));
     workbook.sheets.push(after);
+    let rows_before = workbook.used_rows(SheetId(1));
     let (_graph, result) = rebuild_and_recalc_all(&mut workbook, None);
+    let rows_after = workbook.used_rows(SheetId(1));
+    if layout == "spill" {
+        assert_eq!(rows_before, SPILL_ROWS_BEFORE, "spill layout before recalc");
+        assert_eq!(rows_after, 424, "the G25 spill ends below every cell");
+        writeln!(out, "{layout}\tused_rows\t{rows_before}\t{rows_after}").unwrap();
+    }
     writeln!(
         out,
         "{layout}\tchunk{chunk}\tbudget_exhausted={}\tlimited={}\tcycles={}\tunevaluated={}",
@@ -367,7 +384,7 @@ fn run_chunk(layout: &str, chunk: usize, first: usize, formulas: &[String], out:
             )
             .unwrap();
         }
-        for address in ["F30", "F31", "G64", "G65"] {
+        for address in ["F30", "F31", "G424", "G425"] {
             let value = stored(&workbook, 1, a1(address));
             writeln!(out, "{layout}\t{address}\t{value}").unwrap();
         }
