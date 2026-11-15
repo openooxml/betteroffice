@@ -264,6 +264,45 @@ export declare function load(): string | null
     expect(compareSurfaces(expected, actual, ["Example"])).toEqual([]);
   });
 
+  test.each([
+    [
+      "method",
+      "export class Example {\n  read(): string | null;\n}\n",
+      "export declare class Example {\n  read(): null | string\n}\n",
+    ],
+    [
+      "getter",
+      "export class Example {\n  readonly size: string | null;\n}\n",
+      "export declare class Example {\n  get size(): null | string\n}\n",
+    ],
+    [
+      "function",
+      "export function load(): string | null;\n",
+      "export declare function load(): null | string\n",
+    ],
+    [
+      "multi-member union",
+      "export class Example {\n  read(): number | string | null;\n}\n",
+      "export declare class Example {\n  read(): null | string | number\n}\n",
+    ],
+  ])("a return union in another order on a %s is not reported", (_, expected, actual) => {
+    const classes = expected.includes("class Example") ? ["Example"] : [];
+    expect(compareSurfaces(parseSurface(expected), parseSurface(actual), classes)).toEqual([]);
+  });
+
+  test.each([
+    ["null | string", "string"],
+    ["number | string | null", "null | number"],
+  ])("a reordered return union %s against %s is still reported", (wasmReturn, nativeReturn) => {
+    const problems = compareSurfaces(
+      parseSurface(`export class Example {\n  read(): ${wasmReturn};\n}\n`),
+      parseSurface(`export declare class Example {\n  read(): ${nativeReturn}\n}\n`),
+      ["Example"],
+    );
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("Example.read: return type mismatch");
+  });
+
   test("return types keep null and still map Buffer", () => {
     expect(normalizeReturnType("string | null")).toBe("string | null");
     expect(normalizeReturnType("Buffer | null | null")).toBe("Uint8Array | null");
