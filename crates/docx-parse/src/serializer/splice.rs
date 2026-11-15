@@ -353,9 +353,21 @@ fn marks(xml: &str) -> Option<Marks> {
     Some(marks)
 }
 
+/// Each source ordinal written directly before the next source ordinal.
+fn written_neighbours(order: &[Option<u32>]) -> BTreeSet<u32> {
+    order
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [Some(first), Some(second)] if first.checked_add(1) == Some(*second) => Some(*first),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Source and wanted marks by ordinal, with written trailing comment ends moved to the next head.
 fn paragraph_marks<'x>(
     paragraphs: impl IntoIterator<Item = (u32, &'x str, &'x str)>,
+    neighbours: &BTreeSet<u32>,
     breaks: bool,
 ) -> Option<BTreeMap<u32, (Marks, Marks)>> {
     let mut all = BTreeMap::new();
@@ -365,6 +377,9 @@ fn paragraph_marks<'x>(
     let same = |a: &(String, String, usize), b: &(String, String, usize)| a.0 == b.0 && a.1 == b.1;
     let mut moves = BTreeMap::new();
     for (&ordinal, (source, written)) in &all {
+        if !neighbours.contains(&ordinal) {
+            continue;
+        }
         let Some((next, _)) = ordinal.checked_add(1).and_then(|next| all.get(&next)) else {
             continue;
         };
@@ -1906,6 +1921,7 @@ fn splice_story_part_inner(
             .iter()
             .filter(|(ordinal, _)| !changed.contains(*ordinal))
             .map(|(&ordinal, xml)| (ordinal, &source[spans[&ordinal].clone()], xml.as_str())),
+        &written_neighbours(&recorded.order),
         breaks,
     )?;
     for (&ordinal, xml) in written {
@@ -2417,7 +2433,7 @@ pub(crate) fn replace_story_part(
             unchanged.push((ordinal, &source[span(ordinal)?], xml.as_str()));
         }
     }
-    let kept_marks = paragraph_marks(unchanged, breaks)?;
+    let kept_marks = paragraph_marks(unchanged, &written_neighbours(&recorded.order), breaks)?;
     for (&ordinal, xml) in &recorded.written {
         if rows.removed.contains(&ordinal) {
             continue;
