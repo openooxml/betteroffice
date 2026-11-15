@@ -212,3 +212,48 @@ describe("check-engine-surface parser", () => {
     ])).toEqual([]);
   });
 });
+
+describe("check-engine-surface nullable returns", () => {
+  test.each([
+    [
+      "method nullable natively",
+      "export class Example {\n  read(): string;\n}\n",
+      "export declare class Example {\n  read(): string | null\n}\n",
+      "Example.read: return type mismatch (read(): string vs read(): string | null)",
+    ],
+    [
+      "getter nullable on wasm",
+      "export class Example {\n  readonly size: number | null;\n}\n",
+      "export declare class Example {\n  get size(): number\n}\n",
+      "Example.size: return type mismatch (get size(): number | null vs get size(): number)",
+    ],
+    [
+      "function nullable natively",
+      "export function load(): Uint8Array;\n",
+      "export declare function load(): Buffer | null\n",
+      "function load: return type mismatch (load(): Uint8Array vs load(): Uint8Array | null)",
+    ],
+  ])("a %s only is reported", (_, expected, actual, problem) => {
+    const classes = expected.includes("class Example") ? ["Example"] : [];
+    const problems = compareSurfaces(parseSurface(expected), parseSurface(actual), classes);
+    expect(problems).toEqual([problem]);
+  });
+
+  test("returns nullable on both engines are not reported", () => {
+    const expected = parseSurface(`export class Example {
+  read(): Uint8Array | null;
+  readonly size: number | null;
+}
+export function load(): string | null;
+`);
+    const actual = parseSurface(`export declare class Example {
+  read(): Buffer | null
+  get size(): number | null
+}
+export declare function load(): string | null
+`);
+    expect(expected.functions.has("load")).toBe(true);
+    expect(actual.functions.has("load")).toBe(true);
+    expect(compareSurfaces(expected, actual, ["Example"])).toEqual([]);
+  });
+});
