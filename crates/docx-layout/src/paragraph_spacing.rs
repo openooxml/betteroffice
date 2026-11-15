@@ -345,7 +345,9 @@ pub fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
     }
 }
 
-pub(crate) fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
+/// Zeroes the spacing that contextual, list and break rules suppress, as placement
+/// does before it reads any spacing. Applying it again changes nothing.
+pub fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
     let flow = flow_indices(measured, |entry| &entry.block);
     if let Some(&first) = flow.first() {
         suppress_document_auto_before(&mut measured[first].block);
@@ -371,6 +373,91 @@ pub(crate) fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) 
                 }
             }
         }
+    }
+}
+
+/// Spacing before and after, as one paragraph carries it.
+type SpacingPair = (Option<f64>, Option<f64>);
+
+/// The spacing of every paragraph that placement may zero in place (see
+/// [`apply_contextual_spacing_measured`]): flow paragraphs, and the paragraphs in
+/// table cells at any depth. Recorded before placement, it turns the placed blocks
+/// back into the blocks placement started from, without copying them first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlacementSpacing(Vec<SpacingPair>);
+
+impl PlacementSpacing {
+    pub fn record<'a>(blocks: impl IntoIterator<Item = &'a LayoutBlock>) -> Self {
+        fn visit(block: &LayoutBlock, recorded: &mut Vec<SpacingPair>) {
+            match block {
+                LayoutBlock::Paragraph(paragraph) => {
+                    if let Some(spacing) = paragraph
+                        .attrs
+                        .as_ref()
+                        .and_then(|attrs| attrs.spacing.as_ref())
+                    {
+                        recorded.push((spacing.before, spacing.after));
+                    }
+                }
+                LayoutBlock::Table(table) => {
+                    for block in table
+                        .rows
+                        .iter()
+                        .flat_map(|row| &row.cells)
+                        .flat_map(|cell| &cell.blocks)
+                    {
+                        visit(block, recorded);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut recorded = Vec::new();
+        for block in blocks {
+            visit(block, &mut recorded);
+        }
+        Self(recorded)
+    }
+
+    /// Puts the recorded spacing back into `blocks`, the blocks it was recorded
+    /// from as placement left them.
+    pub fn restore<'a>(&self, blocks: impl IntoIterator<Item = &'a mut LayoutBlock>) {
+        fn visit(block: &mut LayoutBlock, recorded: &mut std::slice::Iter<'_, SpacingPair>) {
+            match block {
+                LayoutBlock::Paragraph(paragraph) => {
+                    if let Some(spacing) = paragraph
+                        .attrs
+                        .as_mut()
+                        .and_then(|attrs| attrs.spacing.as_mut())
+                    {
+                        let (before, after) = recorded
+                            .next()
+                            .expect("spacing restored into the blocks it was recorded from");
+                        spacing.before = *before;
+                        spacing.after = *after;
+                    }
+                }
+                LayoutBlock::Table(table) => {
+                    for block in table
+                        .rows
+                        .iter_mut()
+                        .flat_map(|row| &mut row.cells)
+                        .flat_map(|cell| &mut cell.blocks)
+                    {
+                        visit(block, recorded);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut recorded = self.0.iter();
+        for block in blocks {
+            visit(block, &mut recorded);
+        }
+        debug_assert!(
+            recorded.next().is_none(),
+            "spacing restored into the blocks it was recorded from"
+        );
     }
 }
 
@@ -536,6 +623,81 @@ mod tests {
             serde_json::to_value(&once).unwrap(),
             serde_json::to_value(&twice).unwrap()
         );
+    }
+
+    #[test]
+    fn recorded_placement_spacing_turns_placed_blocks_back_into_the_unplaced_ones() {
+        let paragraph = |id: &str, attrs: Value| json!({"kind": "paragraph", "id": id, "runs": [], "attrs": attrs});
+        let contextual = |id: &str| {
+            paragraph(
+                id,
+                json!({"styleId": "Normal", "contextualSpacing": true, "spacing": {"before": 6, "after": 6}}),
+            )
+        };
+        let listed = |id: &str| {
+            paragraph(
+                id,
+                json!({"numPr": {"numId": 3}, "spacing": {"before": 14, "after": 14, "beforeAuto": true, "afterAuto": true}}),
+            )
+        };
+        let table = |id: &str, blocks: Vec<Value>| json!({"kind": "table", "id": id, "rows": [{"id": format!("{id}r"), "cells": [{"id": format!("{id}c"), "blocks": blocks}]}]});
+        let blocks = vec![
+            paragraph(
+                "first",
+                json!({"spacing": {"before": 14, "beforeAuto": true}}),
+            ),
+            contextual("c1"),
+            contextual("c2"),
+            // An empty paragraph's contextual spacing reaches into the first cell.
+            contextual("c3"),
+            table(
+                "outer",
+                vec![
+                    contextual("cell1"),
+                    contextual("cell2"),
+                    listed("l1"),
+                    listed("l2"),
+                    table("inner", vec![contextual("deep1"), contextual("deep2")]),
+                ],
+            ),
+            paragraph(
+                "broken",
+                json!({"pageBreakBefore": true, "spacing": {"before": 14, "after": 4, "beforeAuto": true}}),
+            ),
+            paragraph("plain", json!({})),
+            listed("l3"),
+            listed("l4"),
+        ];
+        let mut measured = blocks
+            .into_iter()
+            .map(|block| crate::types::MeasuredBlock {
+                block: serde_json::from_value(block).unwrap(),
+                measure: crate::types::BlockExtent::Paragraph(crate::types::ParagraphExtent {
+                    lines: Vec::new(),
+                    total_height: 0.0,
+                }),
+            })
+            .collect::<Vec<_>>();
+        let unplaced = serde_json::to_value(&measured).unwrap();
+        let spacing = PlacementSpacing::record(measured.iter().map(|measured| &measured.block));
+        apply_contextual_spacing_measured(&mut measured);
+        let placed = serde_json::to_value(&measured).unwrap();
+        for zeroed in [
+            &placed[0]["block"]["attrs"]["spacing"]["before"],
+            &placed[1]["block"]["attrs"]["spacing"]["after"],
+            &placed[3]["block"]["attrs"]["spacing"]["after"],
+            &placed[4]["block"]["rows"][0]["cells"][0]["blocks"][0]["attrs"]["spacing"]["after"],
+            &placed[4]["block"]["rows"][0]["cells"][0]["blocks"][1]["attrs"]["spacing"]["before"],
+            &placed[4]["block"]["rows"][0]["cells"][0]["blocks"][2]["attrs"]["spacing"]["after"],
+            &placed[4]["block"]["rows"][0]["cells"][0]["blocks"][4]["rows"][0]["cells"][0]["blocks"]
+                [0]["attrs"]["spacing"]["after"],
+            &placed[5]["block"]["attrs"]["spacing"]["before"],
+            &placed[7]["block"]["attrs"]["spacing"]["after"],
+        ] {
+            assert_eq!(zeroed, 0.0, "placement zeroes each kind of spacing");
+        }
+        spacing.restore(measured.iter_mut().map(|measured| &mut measured.block));
+        assert_eq!(serde_json::to_value(&measured).unwrap(), unplaced);
     }
 
     #[test]
