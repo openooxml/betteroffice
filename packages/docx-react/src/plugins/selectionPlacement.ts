@@ -7,7 +7,10 @@ import {
   type FloatingSize,
 } from '../../../../shared/plugin-host/floatingPlacement';
 import { pluginSelectionKeys } from './selectionIdentity';
-import type { DocxPluginContext, DocxPluginGeometry } from './types';
+import type { DocxAnchorGeometryResult, DocxPluginContext, DocxPluginGeometry } from './types';
+
+type FailureCode = Extract<DocxAnchorGeometryResult, { ok: false }>['failure']['code'];
+const KEPT_WHILE: ReadonlySet<FailureCode> = new Set(['pending', 'stale-version', 'layout-unavailable']);
 
 /** @experimental The plugin API may change in minor releases. */
 export interface DocxSelectionPlacementRequest extends FloatingSize, FloatingPlacementOptions {
@@ -19,7 +22,10 @@ export interface DocxSelectionPlacementRequest extends FloatingSize, FloatingPla
 export interface DocxSelectionPlacement extends FloatingPlacement {
   /** The selection's box on its anchor page, in overlay-layer pixels. */
   anchor: FloatingRect;
-  /** The box is the last one placed: the selection is unchanged but the current layout has not placed it yet. */
+  /**
+   * The box is the last one placed: the selection is unchanged and its geometry is pending or not
+   * shown by the current layout yet. A failed or missing target drops the box instead.
+   */
   kept: boolean;
 }
 
@@ -31,7 +37,7 @@ export type DocxSelectionPlacer = (
 
 /**
  * Places a floating box by the current selection. While a new layout has not placed an unchanged
- * selection yet, the last box is kept; null without a selection box.
+ * selection yet, the last box is kept; null without a selection box or once its geometry fails.
  *
  * @experimental The plugin API may change in minor releases.
  */
@@ -55,7 +61,7 @@ export function createDocxSelectionPlacement(): DocxSelectionPlacer {
         height: Math.max(...rects.map((rect) => rect.y + rect.height)) - y,
       };
       last = { key, anchor, page: result.pageRect, viewport: geometry.viewport };
-    } else if (last?.key === key) {
+    } else if (last?.key === key && (!result || result.ok || KEPT_WHILE.has(result.failure.code))) {
       kept = true;
       if (geometry) last.viewport = geometry.viewport;
     } else {

@@ -1,3 +1,4 @@
+/** @experimental The plugin API may change in minor releases. */
 export interface FloatingRect {
   x: number;
   y: number;
@@ -5,13 +6,16 @@ export interface FloatingRect {
   height: number;
 }
 
+/** @experimental The plugin API may change in minor releases. */
 export interface FloatingSize {
   width: number;
   height: number;
 }
 
+/** @experimental The plugin API may change in minor releases. */
 export type FloatingSide = 'above' | 'below';
 
+/** @experimental The plugin API may change in minor releases. */
 export interface FloatingPlacementOptions {
   /** The side tried first; `above` by default. */
   side?: FloatingSide;
@@ -21,7 +25,11 @@ export interface FloatingPlacementOptions {
   margin?: number;
 }
 
-/** Rectangles share one coordinate space, such as overlay-layer pixels. */
+/**
+ * Rectangles share one coordinate space, such as overlay-layer pixels.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export interface FloatingPlacementInput extends FloatingPlacementOptions {
   anchor: FloatingRect;
   size: FloatingSize;
@@ -30,6 +38,7 @@ export interface FloatingPlacementInput extends FloatingPlacementOptions {
   page?: FloatingRect | null;
 }
 
+/** @experimental The plugin API may change in minor releases. */
 export interface FloatingPlacement extends FloatingRect {
   side: FloatingSide;
   /** Placed on the other side because the preferred one had no room. */
@@ -45,14 +54,18 @@ function intersect(a: FloatingRect, b: FloatingRect): FloatingRect | null {
   const top = Math.max(a.y, b.y);
   const right = Math.min(a.x + a.width, b.x + b.width);
   const bottom = Math.min(a.y + a.height, b.y + b.height);
-  if (right < left || bottom < top) return null;
+  if (right < left || bottom < top || (right === left && a.width > 0) || (bottom === top && a.height > 0)) return null;
   if (left === a.x && top === a.y && right === a.x + a.width && bottom === a.y + a.height) return a;
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(value, max));
 
-/** Places a box above or below an anchor, flipping when the preferred side has no room, inside the viewport. */
+/**
+ * Places a box above or below an anchor, flipping when the preferred side has no room, inside the viewport.
+ *
+ * @experimental The plugin API may change in minor releases.
+ */
 export function placeFloating({
   anchor, size, viewport, page, side = 'above', gap = 8, margin = 8,
 }: FloatingPlacementInput): FloatingPlacement {
