@@ -1482,4 +1482,49 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[test]
+    fn used_rows_ends_where_the_used_range_ends() {
+        fn check(sheet: &Sheet) {
+            let want = sheet.used_range().map_or(0, |range| range.end.row + 1);
+            let mut workbook = Workbook::default();
+            workbook.sheets.push(sheet.clone());
+            assert_eq!(workbook.used_rows(SheetId(0)), want, "{sheet:?}");
+        }
+        let number = |value: f64| Cell {
+            value: CellValue::Number { value },
+            ..Cell::default()
+        };
+        let mut sheet = Sheet::new("Data");
+        check(&sheet);
+        for a1 in ["C3", "A1", "Z2", "B9", "A9", "XFD1"] {
+            sheet.set_cell(CellRef::parse_a1(a1).unwrap(), number(1.0));
+            check(&sheet);
+        }
+        sheet.set_cell(CellRef::parse_a1("B1048576").unwrap(), number(2.0));
+        check(&sheet);
+        for a1 in ["B1048576", "A9", "B9"] {
+            sheet.set_cell(CellRef::parse_a1(a1).unwrap(), Cell::default());
+            check(&sheet);
+        }
+        sheet.merges.push(CellRange::parse_a1("D4:E40").unwrap());
+        check(&sheet);
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("F50:F60").unwrap(),
+            external_target: None,
+            location: Some("Data!A1".into()),
+            tooltip: None,
+            display: None,
+        });
+        check(&sheet);
+        sheet.merges.push(CellRange::parse_a1("A100:B120").unwrap());
+        check(&sheet);
+        let mut links_only = Sheet::new("Links");
+        links_only.hyperlinks = sheet.hyperlinks.clone();
+        check(&links_only);
+        let mut merges_only = Sheet::new("Merges");
+        merges_only.merges = sheet.merges.clone();
+        check(&merges_only);
+        assert_eq!(Workbook::default().used_rows(SheetId(3)), 0);
+    }
 }
