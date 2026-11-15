@@ -603,6 +603,14 @@ impl DepGraph {
             .collect()
     }
 
+    /// forgets every cell marked unevaluated, as a build starts.
+    pub fn clear_unevaluated(&self) {
+        self.unevaluated
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+    }
+
     /// marks cells unevaluated, for a graph built over values earlier recalcs
     /// left so.
     pub fn assume_unevaluated(&self, cells: impl IntoIterator<Item = UnevaluatedCell>) {
@@ -752,6 +760,74 @@ impl DepGraph {
     /// every volatile formula cell, in unspecified order.
     pub fn volatile_cells(&self) -> impl Iterator<Item = (SheetId, CellRef)> + '_ {
         self.volatile.iter().map(|k| (k.sheet, k.cell()))
+    }
+
+    /// removes the last edge of the lowest node that has one, from both indexes.
+    #[cfg(feature = "test-counters")]
+    #[doc(hidden)]
+    pub fn drop_one_edge(&mut self) -> bool {
+        let Some((&key, entry)) = self
+            .deps
+            .iter_mut()
+            .filter(|(_, entry)| !entry.edges.is_empty())
+            .min_by_key(|(key, _)| **key)
+        else {
+            return false;
+        };
+        let Some((sheet, range)) = entry.edges.pop() else {
+            return false;
+        };
+        if let Some(readers) = self.by_sheet.get_mut(&sheet)
+            && let Some(index) = readers.iter().position(|&read| read == (range, key))
+        {
+            readers.remove(index);
+        }
+        true
+    }
+
+    /// the first part differing from `other`; spills, answers and currency only when `evaluated`.
+    #[cfg(feature = "test-counters")]
+    #[doc(hidden)]
+    pub fn structural_difference(&self, other: &Self, evaluated: bool) -> Option<&'static str> {
+        let nodes = self.deps.len() != other.deps.len()
+            || self.deps.iter().any(|(key, entry)| {
+                other
+                    .deps
+                    .get(key)
+                    .is_none_or(|found| found.edges != entry.edges || *found.ast != *entry.ast)
+            });
+        let answers = *self.answered.lock().unwrap_or_else(|err| err.into_inner())
+            != *other.answered.lock().unwrap_or_else(|err| err.into_inner());
+        let currency = *self
+            .currency_coercion
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            != *other
+                .currency_coercion
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+        [
+            ("sheet names", self.names != other.names),
+            (
+                "defined names",
+                self.defined_names != other.defined_names
+                    || self.defined_name_indices != other.defined_name_indices,
+            ),
+            ("tables", self.tables != other.tables),
+            ("nodes", nodes),
+            ("reverse edges", self.by_sheet != other.by_sheet),
+            ("volatile cells", self.volatile != other.volatile),
+            (
+                "spills",
+                evaluated
+                    && (self.spills != other.spills
+                        || self.spills_by_sheet != other.spills_by_sheet),
+            ),
+            ("answers", evaluated && answers),
+            ("currency evidence", evaluated && currency),
+        ]
+        .into_iter()
+        .find_map(|(part, differs)| differs.then_some(part))
     }
 
     /// parsed asts shared with `engine::run_recalc` evaluation.
