@@ -655,6 +655,14 @@ fn shape_paragraph(
     super::lower_paragraph_spacing(&values, &mut attrs, env, false);
     super::lower_paragraph_indent(&values, &mut attrs);
     super::lower_paragraph_tabs(&values, &mut attrs);
+    if let Some(bullet) = object(paragraph, "bullet") {
+        attrs.list_marker = string_in(bullet, "text");
+        attrs.list_is_bullet = Some(true);
+        attrs.list_marker_suffix = Some("tab".to_owned());
+        attrs.list_marker_font_family = string_in(bullet, "fontFamily");
+        attrs.list_marker_font_size = number_in(bullet, "size");
+        attrs.list_marker_color = resolve_shape_color(bullet.get("color"), env);
+    }
     if env.shape_styles.0.is_some() {
         let styled = super::lower_paragraph_attrs(
             &values,
@@ -1937,6 +1945,25 @@ mod tests {
             block.geometry_path[2],
             json!({"type": "line", "x": 0.8, "y": 1.0})
         );
+    }
+
+    #[test]
+    fn drawing_bullets_lower_to_list_markers() {
+        let shape = json!({"shapeType": "rect", "textBody": {"content": [{
+            "type": "paragraph",
+            "formatting": {"indentLeft": 360, "indentFirstLine": 360, "hangingIndent": true},
+            "bullet": {"text": "•", "size": 22.0, "fontFamily": "Arial", "color": {"rgb": "FF0000"}},
+            "content": [{"type": "run", "content": [{"type": "text", "text": "one"}]}]
+        }]}});
+        let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+        let paragraph = &block.inner_text.unwrap()[0];
+        let attrs = paragraph.attrs.as_ref().unwrap();
+        assert_eq!(attrs.list_marker.as_deref(), Some("•"));
+        assert_eq!(attrs.list_marker_suffix.as_deref(), Some("tab"));
+        assert_eq!(attrs.list_marker_font_family.as_deref(), Some("Arial"));
+        assert_eq!(attrs.list_marker_font_size, Some(22.0));
+        assert_eq!(attrs.list_marker_color.as_deref(), Some("#FF0000"));
+        assert_eq!(paragraph.runs.len(), 1);
     }
 
     #[test]

@@ -681,7 +681,7 @@ fn parse_drawing_text_paragraph(
         .unwrap_or((240.0, "auto"));
     let left = number("marL").unwrap_or(0.0) / EMU_PER_TWIP;
     let first_line = number("indent").unwrap_or(0.0) / EMU_PER_TWIP;
-    let mut formatting = serde_json::json!({
+    let formatting = serde_json::json!({
         "alignment": alignment,
         "spaceBefore": spacing("spcBef").unwrap_or(0.0),
         "spaceAfter": spacing("spcAft").unwrap_or(0.0),
@@ -693,32 +693,40 @@ fn parse_drawing_text_paragraph(
     });
     let level = number("lvl").unwrap_or(0.0).clamp(0.0, 8.0) as u32;
     numbering.retain(|deeper, _| *deeper <= level);
-    if let Some(bullet) = bullet_text(properties, level, numbering) {
-        let mut marker = first_run
-            .map(|run| parse_drawing_run_formatting(run, font_color, defaults))
-            .unwrap_or_else(|| parse_drawing_run_formatting(paragraph, font_color, defaults))
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(typeface) = properties
-            .and_then(|properties| properties.child_by_local_name("buFont"))
-            .and_then(|font| font.attribute(None, "typeface"))
-            .filter(|typeface| !typeface.starts_with('+'))
-        {
-            marker["fontFamily"] = serde_json::json!({"ascii": typeface, "hAnsi": typeface});
-        }
-        formatting["tabs"] = serde_json::json!([{"alignment": "left", "position": left}]);
-        let mut run = drawing_run(&bullet, Some(marker));
-        if let Some(content) = run["content"].as_array_mut() {
-            content.push(serde_json::json!({"type": "tab"}));
-        }
-        runs.insert(0, run);
-    } else {
-        numbering.remove(&level);
-    }
-    Some(serde_json::json!({
+    let mut paragraph_json = serde_json::json!({
         "type": "paragraph",
         "formatting": formatting,
         "content": runs,
-    }))
+    });
+    if let Some(text) = bullet_text(properties, level, numbering) {
+        let text_formatting = first_run
+            .and_then(|run| parse_drawing_run_formatting(run, font_color, defaults))
+            .unwrap_or_default();
+        let bullet_property = |name| properties.and_then(|value| value.child_by_local_name(name));
+        let mut bullet = serde_json::json!({ "text": text });
+        if let Some(color) = bullet_property("buClr")
+            .and_then(|color| crate::drawingml::parse_color_element(Some(color)))
+            .and_then(|color| serde_json::to_value(color).ok())
+            .or_else(|| text_formatting.get("color").cloned())
+        {
+            bullet["color"] = color;
+        }
+        let percent = bullet_property("buSzPct")
+            .and_then(|value| value.parse_numeric_attribute(None, "val", 1.0))
+            .filter(safe_number)
+            .map_or(1.0, |value| value / 100_000.0);
+        bullet["size"] = serde_json::json!(size / 100.0 * percent);
+        if let Some(typeface) = bullet_property("buFont")
+            .and_then(|font| font.attribute(None, "typeface"))
+            .filter(|typeface| !typeface.starts_with('+'))
+        {
+            bullet["fontFamily"] = serde_json::json!(typeface);
+        }
+        paragraph_json["bullet"] = bullet;
+    } else {
+        numbering.remove(&level);
+    }
+    Some(paragraph_json)
 }
 
 /// The marker a `buChar` or `buAutoNum` paragraph starts with.
@@ -863,6 +871,27 @@ fn apply_run_properties(
         .is_some_and(|strike| strike != "noStrike")
     {
         formatting.insert("strike".to_owned(), serde_json::json!(true));
+    }
+    let kerning = properties
+        .parse_numeric_attribute(None, "kern", 1.0)
+        .filter(safe_number);
+    let spacing = properties
+        .parse_numeric_attribute(None, "spc", 1.0)
+        .filter(safe_number);
+    if kerning.is_some() || spacing.is_some() {
+        let mut character = serde_json::Map::new();
+        if let Some(kerning) = kerning.filter(|value| *value > 0.0) {
+            character.insert("kerning".to_owned(), serde_json::json!(kerning / 50.0));
+        }
+        if let Some(spacing) = spacing.filter(|value| *value != 0.0) {
+            character.insert("spacing".to_owned(), serde_json::json!(spacing / 5.0));
+        }
+        if !character.is_empty() {
+            formatting.insert(
+                "characterSpacing".to_owned(),
+                serde_json::Value::Object(character),
+            );
+        }
     }
     match properties.attribute(None, "cap") {
         Some("all") => {
@@ -1438,17 +1467,20 @@ mod tests {
         );
         let bullet = &content[1];
         assert_eq!(bullet["formatting"]["spaceAfter"], 0.0);
-        let item = &bullet["content"][1]["formatting"];
+        let item = &bullet["content"][0]["formatting"];
         assert_eq!(
             (&item["bold"], &item["italic"]),
             (&serde_json::json!(true), &serde_json::json!(false))
         );
         assert_eq!(bullet["formatting"]["indentLeft"], 360.0);
         assert_eq!(bullet["formatting"]["hangingIndent"], true);
-        assert_eq!(bullet["formatting"]["tabs"][0]["position"], 360.0);
+        assert_eq!(
+            bullet["bullet"],
+            serde_json::json!({"text": "•", "color": {"themeColor": "dk1"}, "size": 22.0})
+        );
         assert_eq!(
             bullet["content"][0]["content"],
-            serde_json::json!([{"type": "text", "text": "•"}, {"type": "tab"}])
+            serde_json::json!([{"type": "text", "text": "one"}])
         );
     }
 
