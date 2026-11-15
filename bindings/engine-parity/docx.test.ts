@@ -28,6 +28,7 @@ import {
   type EngineHandle,
   type Exclusion,
   type KnownDifference,
+  type MaskedPath,
   type MediaSourcesWire,
   type OneEngineOnly,
   type Row,
@@ -216,6 +217,15 @@ function versionNonce(session: Session): string {
   const version = session.version();
   return version.slice(0, version.lastIndexOf('-'));
 }
+
+const sessionVersion = (path: string): MaskedPath => ({
+  path,
+  shape: (value) => {
+    const match = typeof value === 'string' ? /^<generated \d+>(-(?:0|[1-9][0-9]*))$/.exec(value) : null;
+    if (!match) throw new Error(`${JSON.stringify(value)} is not a session nonce followed by -{epoch}`);
+    return match[1];
+  },
+});
 
 function engineFor(engine: DocxEngine, yrs: Yrs) {
   return async (): Promise<EngineHandle<Docx>> => {
@@ -1000,6 +1010,47 @@ function paragraphAnchors(session: Session): Anchor[] {
   ];
 }
 
+const PAGE_WINDOWS: [number, number][] = [[0, 0], [0, 9], [1, 0], [Number.NaN, 0]];
+const REGIONS: [string, string][] = [['body', ''], ['header', ''], ['header', 'rIdHeader'], ['footnote', '1']];
+const GLYPH_A = 36;
+
+function pagedRects(query: (from: number, to: number, firstPage: number, lastPage: number) => string): string[] {
+  return PAGE_WINDOWS.flatMap(([first, last]) => RANGES.map(([from, to]) => query(from, to, first, last)));
+}
+
+function regionRects(query: (region: string, partId: string, from: number, to: number) => string): string[] {
+  return REGIONS.flatMap(([region, partId]) => RANGES.map(([from, to]) => query(region, partId, from, to)));
+}
+
+function retainedMetaOf(session: Session, request = regionRequest()) {
+  return retainedMeta(session.layout_document_with_regions_retained_meta(layoutInput(session, request).input));
+}
+
+function residentLoc(session: Session, prefix: string, index: number) {
+  return { story: 'body', paraId: paraId(session, prefix), offset: textAt(session, prefix, index) };
+}
+
+function settled<T>(read: () => T): { value: T } | { refused: string } {
+  try {
+    return { value: read() };
+  } catch (error) {
+    return { refused: String(error) };
+  }
+}
+
+// FrameDelta v1 keeps its flags at byte 12, bit 0 marking a full frame.
+const fullFrame = (frame: Uint8Array) => (new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(12, true) & 1) === 1;
+
+interface ListedPage { pageIndex: number; width: number; height: number }
+
+// Opened the way displayListQueries.ts opens a store: page slots and sizes, no primitives yet.
+function placeholderDisplay({ engine, session }: Docx) {
+  const list = JSON.parse(displayList(session)) as { contractVersion?: number; pages: ListedPage[] };
+  const contract = list.contractVersion === undefined ? {} : { contractVersion: list.contractVersion };
+  const pages = list.pages.map(({ pageIndex, width, height }) => ({ pageIndex, width, height, primitives: [] }));
+  return { list, contract, handle: engine.open_display_list(JSON.stringify({ ...contract, pages })) };
+}
+
 const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
 
 const rows: Row<Docx>[] = [
@@ -1130,8 +1181,17 @@ const rows: Row<Docx>[] = [
     setup: ({ session: s }: Docx) => trackedInsertion(s),
     call: ({ session: s }) => s.list_revisions(),
   }),
-  { method: 'EditSession.apply_edits_json', mutates: true, call: ({ session: s }) => s.apply_edits_json(editRequest(s)) },
-  { method: 'EditSession.validate_edits_json', call: ({ session: s }) => s.validate_edits_json(editRequest(s)) },
+  {
+    method: 'EditSession.apply_edits_json',
+    mutates: true,
+    masked: [sessionVersion('baseVersion'), sessionVersion('version')],
+    call: ({ session: s }) => JSON.parse(s.apply_edits_json(editRequest(s))) as unknown,
+  },
+  {
+    method: 'EditSession.validate_edits_json',
+    masked: [sessionVersion('baseVersion')],
+    call: ({ session: s }) => JSON.parse(s.validate_edits_json(editRequest(s))) as unknown,
+  },
   { method: 'EditSession.read_paragraphs_json', call: ({ session: s }) => s.read_paragraphs_json(JSON.stringify({ story: 'body', view: 'accepted' })) },
   { method: 'EditSession.read_stories_json', call: ({ session: s }) => s.read_stories_json(JSON.stringify({ view: 'accepted' })) },
   { method: 'EditSession.paragraphs', call: ({ session: s }) => s.paragraphs('body') },
@@ -3040,6 +3100,354 @@ const rows: Row<Docx>[] = [
       return { bare, framed, caret, range: s.resident_caret_snapshot_json() };
     },
   },
+  defineRow({
+    method: 'EditSession.apply_update_with_inference',
+    mutates: true,
+    setup: (docx: Docx) => trackedRemote(docx, remoteUpdate),
+    call: ({ session: s }, update) => notUndoable(s, () => s.apply_update_with_inference(update)),
+  }),
+  defineRow({
+    method: 'EditSession.encode_diff_chunks',
+    setup: ({ fresh }: Docx) => fresh().encode_state_vector(),
+    call: ({ session: s }, vector) => ({ whole: s.encode_diff_chunks(vector, 1 << 20), bounded: s.encode_diff_chunks(vector, 64) }),
+  }),
+  defineRow({
+    method: 'EditSession.direct_batches_applied',
+    masked: [sessionVersion('edit.baseVersion'), sessionVersion('edit.version')],
+    setup: ({ session: s }: Docx) => s.set_direct_batches(true),
+    call: ({ session: s }) => {
+      const initial = s.direct_batches_applied();
+      const request = JSON.parse(editRequest(s)) as Record<string, unknown>;
+      const edit = JSON.parse(s.apply_edits_json(JSON.stringify({ ...request, history: 'none' }))) as unknown;
+      const applied = s.direct_batches_applied();
+      if (applied === initial) throw new Error('the edit took the replica path, so the count did not move');
+      return { initial, edit, applied };
+    },
+  }),
+  { method: 'EditSession.decode_font', call: ({ session: s }) => s.decode_font(fontBytes) },
+  defineRow({
+    method: 'EditSession.echo_glyph_set_json',
+    setup: ({ session: s }: Docx) => s.register_measure_font(fontBytes),
+    call: ({ session: s }, font) => ({ kerned: s.echo_glyph_set_json(font, 12, true, 'Parity AV'), plain: s.echo_glyph_set_json(font, 12, false, 'Parity AV') }),
+  }),
+  defineRow({
+    method: 'EditSession.outline_glyph_json',
+    setup: ({ session: s }: Docx) => s.register_measure_font(fontBytes),
+    call: ({ session: s }, font) => s.outline_glyph_json(font, GLYPH_A),
+  }),
+  defineRow({
+    method: 'EditSession.register_substitute_measure_font',
+    setup: ({ session: s }: Docx) => s.register_measure_font(fontBytes),
+    call: ({ session: s }, font) => ({
+      font,
+      known: s.register_substitute_measure_font(font, 'Calibri'),
+      unknown: s.register_substitute_measure_font(font, 'Parity Unknown'),
+    }),
+  }),
+  defineRow({
+    method: 'EditSession.measure_paragraph_json',
+    setup: ({ session: s }: Docx) => s.register_measure_font(fontBytes),
+    call: ({ session: s }, font) => ({ plain: s.measure_paragraph_json(measureInput(font, false)), authoritative: s.measure_paragraph_json(measureInput(font, true)) }),
+  }),
+  defineRow({
+    method: 'EditSession.begin_region_layout',
+    setup: ({ session: s }: Docx) => layoutInput(s).input,
+    call: ({ session: s }, input) => s.begin_region_layout(input),
+  }),
+  defineRow({
+    method: 'EditSession.resume_region_layout',
+    setup: ({ session: s }: Docx) => s.begin_region_layout(layoutInput(s).input),
+    call: ({ session: s }, begun) => {
+      if ((JSON.parse(begun) as { layoutJson?: string }).layoutJson !== undefined) throw new Error('the region layout finished before any resume');
+      const steps: string[] = [];
+      let done = false;
+      while (!done && steps.length < 100) {
+        const step = s.resume_region_layout(2);
+        steps.push(step);
+        done = (JSON.parse(step) as { layoutJson?: string }).layoutJson !== undefined;
+      }
+      if (!done) throw new Error(`the region layout did not finish in ${steps.length} resumes`);
+      return { begun, steps };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.layout_document_with_regions_prefix_retained_json',
+    setup: ({ session: s }: Docx) => {
+      breakBeforeFinal(s);
+      return layoutInput(s).input;
+    },
+    call: ({ session: s }, input) => s.layout_document_with_regions_prefix_retained_json(input, 1),
+  }),
+  defineRow({
+    method: 'EditSession.layout_document_with_regions_exact_prefix_retained',
+    setup: ({ session: s }: Docx) => {
+      breakBeforeFinal(s);
+      return layoutInput(s).input;
+    },
+    call: ({ session: s }, input) => s.layout_document_with_regions_exact_prefix_retained(input, 1),
+  }),
+  defineRow({
+    method: 'EditSession.retained_layout_json',
+    setup: ({ session: s }: Docx) => s.layout_document_with_regions_retained(layoutInput(s).input),
+    call: ({ session: s }) => s.retained_layout_json(),
+  }),
+  defineRow({
+    method: 'EditSession.retained_kernel_inputs_json',
+    setup: ({ session: s }: Docx) => s.layout_document_with_regions_retained(layoutInput(s).input),
+    call: ({ session: s }) => s.retained_kernel_inputs_json(),
+  }),
+  { method: 'RetainedLayoutMeta.layout_shell_json', call: ({ session: s }) => retainedMetaOf(s).layout_shell_json },
+  defineRow({
+    method: 'EditSession.release_display_pages_frame',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }, epoch) => {
+      const frame = s.release_display_pages_frame(Uint32Array.from([0]), epoch);
+      if (frame.length === 0) throw new Error('the release of a built page was superseded');
+      return { frame, kept: frameEpoch(s) };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.resident_deleted_units',
+    setup: ({ session: s }: Docx) => {
+      const epoch = residentFrame(s);
+      caretIn(s, 'Second body', 6);
+      return epoch;
+    },
+    call: ({ session: s }, epoch) => {
+      const before = s.resident_deleted_units();
+      const frame = s.apply_delete('backward', epoch, 3);
+      return { before, frame, after: s.resident_deleted_units() };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.display_range_rects_on_pages_json',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }) => pagedRects((from, to, first, last) => s.display_range_rects_on_pages_json(from, to, first, last)),
+  }),
+  defineRow({
+    method: 'EditSession.display_range_rects_region_json',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }) => regionRects((region, partId, from, to) => s.display_range_rects_region_json(region, partId, from, to)),
+  }),
+  defineRow({
+    method: 'EditSession.display_range_rects_batch',
+    setup: ({ session: s }: Docx) => residentFrame(s),
+    call: ({ session: s }) => REGIONS.map(([region, partId]) => s.display_range_rects_batch(region, partId, Float64Array.from(RANGES.flat()))),
+  }),
+  { method: 'EditSession.geometry_position_outline_json', call: ({ session: s }) => s.geometry_position_outline_json('body') },
+  defineRow({
+    method: 'EditSession.resident_geometry_json',
+    // The request storyGeometry sends in packages/docx/src/yrs/residentEngineSession.ts.
+    setup: ({ session: s }: Docx) => [
+      JSON.stringify({ ranges: [[0, 400]], selection: [residentLoc(s, 'Second body', 0), residentLoc(s, 'Second body', 6)] }),
+      JSON.stringify({ ranges: [[0, 40], [60, 120]] }),
+    ],
+    call: ({ session: s }, requests) => requests.map((request) => s.resident_geometry_json('body', request)),
+  }),
+  {
+    method: 'EditSession.resident_section_revision',
+    call: ({ session: s }) => {
+      const initial = s.resident_section_revision();
+      breakBeforeFinal(s);
+      return { initial, afterBreak: s.resident_section_revision() };
+    },
+  },
+  { method: 'EditSession.yrs_blocks_for_story', call: ({ session: s }) => s.yrs_blocks_for_story('body', '{}') },
+  defineRow({
+    method: 'EditSession.patch_style_languages_xml',
+    setup: ({ session: s }: Docx) => s.set_style_language('Normal', JSON.stringify({ lang: 'de-DE' })),
+    call: ({ session: s }) => s.patch_style_languages_xml(new TextDecoder().decode(fixtureEntries['word/styles.xml'])),
+  }),
+  defineRow({
+    method: 'hit_test_regions_by_handle',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (_, handle) => HIT_POINTS.map(([page, x, y]) => engine.hit_test_regions_by_handle(handle, page, x, y))),
+  }),
+  defineRow({
+    method: 'vertical_move_by_handle',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (_, handle) => MOVES.map(([position, direction, goalX]) => engine.vertical_move_by_handle(handle, position, direction, goalX))),
+  }),
+  defineRow({
+    method: 'range_rects_on_pages_json',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (display) => pagedRects((from, to, first, last) => engine.range_rects_on_pages_json(display, from, to, first, last))),
+  }),
+  defineRow({
+    method: 'range_rects_on_pages_by_handle',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (_, handle) => pagedRects((from, to, first, last) => engine.range_rects_on_pages_by_handle(handle, from, to, first, last))),
+  }),
+  defineRow({
+    method: 'range_rects_region_json',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (display) => regionRects((region, partId, from, to) => engine.range_rects_region_json(display, region, partId, from, to))),
+  }),
+  defineRow({
+    method: 'range_rects_region_by_handle',
+    setup: openedDisplay,
+    call: ({ engine }, opened) => onDisplay(engine, opened, (_, handle) => regionRects((region, partId, from, to) => engine.range_rects_region_by_handle(handle, region, partId, from, to))),
+  }),
+  {
+    method: 'register_measure_font',
+    call: ({ engine }) => {
+      engine.clear_measure_fonts();
+      return [engine.register_measure_font(fontBytes), engine.register_measure_font(fontBytes)];
+    },
+  },
+  defineRow({
+    method: 'register_substitute_measure_font',
+    setup: ({ engine }: Docx) => moduleFont(engine),
+    call: ({ engine }, font) => ({
+      font,
+      known: engine.register_substitute_measure_font(font, 'Calibri'),
+      unknown: engine.register_substitute_measure_font(font, 'Parity Unknown'),
+    }),
+  }),
+  defineRow({
+    method: 'outline_glyph_json',
+    setup: ({ engine }: Docx) => moduleFont(engine),
+    call: ({ engine }, font) => engine.outline_glyph_json(font, GLYPH_A),
+  }),
+  {
+    method: 'parse_relationships_xml',
+    call: ({ engine }) => engine.parse_relationships_xml(fixtureEntries['word/_rels/document.xml.rels']!, 'word/_rels/document.xml.rels'),
+  },
+  defineRow({
+    method: 'EditSession.apply_host_update',
+    mutates: true,
+    setup: (docx: Docx) => trackedRemote(docx, remoteUpdate),
+    call: ({ session: s }, update) => notUndoable(s, () => s.apply_host_update(update)),
+  }),
+  {
+    method: 'EditSession.apply_seed_raw_ops',
+    call: ({ session: s }) => {
+      const result = s.apply_seed_raw_ops('body', JSON.stringify([{ op: 'insert', index: 0, text: 'Seed ' }, { op: 'format', index: 0, len: 4, attrs: { bold: true } }]));
+      return { result, after: s.story_segments('body') };
+    },
+  },
+  {
+    method: 'EditSession.bootstrap_peer',
+    call: ({ fresh }) => {
+      const worker = fresh();
+      worker.open_docx(fixture, true, GENERATION);
+      const peer = fresh();
+      const result = peer.bootstrap_peer(worker.encode_state(), worker.encode_peer_metadata(), fixture);
+      return { result, segments: peer.story_segments('body'), stories: peer.list_stories_json(), comments: peer.list_comments() };
+    },
+  },
+  {
+    method: 'EditSession.clear_measure_fonts',
+    call: ({ session: s }) => {
+      const before = [s.register_measure_font(fontBytes), s.register_measure_font(fontBytes)];
+      const result = s.clear_measure_fonts();
+      return { before, result, after: s.register_measure_font(fontBytes) };
+    },
+  },
+  defineRow({
+    method: 'clear_measure_fonts',
+    setup: ({ engine }: Docx) => moduleFont(engine),
+    call: ({ engine }, first) => {
+      const before = [first, engine.register_measure_font(fontBytes)];
+      const result = engine.clear_measure_fonts();
+      return { before, result, after: engine.register_measure_font(fontBytes) };
+    },
+  }),
+  {
+    method: 'EditSession.start_update_event_observation',
+    call: ({ session: s }) => {
+      const result = s.start_update_event_observation();
+      peerEdit(s, 'First body', 'Observed ');
+      const events = drainEvents(s);
+      if (events.length === 0) throw new Error('the observed edit queued no update event');
+      return { result, events };
+    },
+  },
+  defineRow({
+    method: 'EditSession.clear_update_event_observation',
+    setup: ({ session: s }: Docx) => s.start_update_event_observation(),
+    call: ({ session: s }) => {
+      peerEdit(s, 'First body', 'Queued ');
+      const queued = drainEvents(s);
+      if (queued.length === 0) throw new Error('the observed edit queued no update event');
+      peerEdit(s, 'Second body', 'Dropped ');
+      const result = s.clear_update_event_observation();
+      const dropped = s.drain_update_event();
+      peerEdit(s, 'Final', 'Unobserved ');
+      return { queued, result, dropped, after: s.drain_update_event() };
+    },
+  }),
+  defineRow({
+    method: 'EditSession.reset_frame_base',
+    setup: ({ session: s }: Docx) => layout(s).fontChains,
+    call: ({ session: s }, fontChains) => {
+      s.build_display_list_frame(frameExtras(fontChains), 0);
+      const delta = s.build_display_list_frame(frameExtras(fontChains), frameEpoch(s));
+      const result = s.reset_frame_base();
+      const full = s.build_display_list_frame(frameExtras(fontChains), frameEpoch(s));
+      if (fullFrame(delta) || !fullFrame(full)) throw new Error(`expected a delta before the reset and a full frame after it, got full=${fullFrame(delta)} then full=${fullFrame(full)}`);
+      return { delta, result, full };
+    },
+  }),
+  {
+    method: 'EditSession.set_direct_batches',
+    masked: [sessionVersion('edit.baseVersion'), sessionVersion('edit.version')],
+    call: ({ session: s }) => {
+      const initial = s.direct_batches_applied();
+      const result = s.set_direct_batches(true);
+      const request = JSON.parse(editRequest(s)) as Record<string, unknown>;
+      const edit = JSON.parse(s.apply_edits_json(JSON.stringify({ ...request, history: 'none' }))) as unknown;
+      const applied = s.direct_batches_applied();
+      if (applied === initial) throw new Error('the edit took the replica path, so the count does not show the setting');
+      return { initial, result, edit, applied };
+    },
+  },
+  {
+    method: 'EditSession.set_header_footer_aliases',
+    call: ({ session: s }) => {
+      const result = s.set_header_footer_aliases(HEADER_ALIASES);
+      const aliases = s.header_footer_aliases_json();
+      if ((JSON.parse(aliases) as Record<string, string>).rIdHeaderAlias !== 'rIdHeader') throw new Error(`the header alias is not active: ${aliases}`);
+      return { result, aliases };
+    },
+  },
+  {
+    method: 'EditSession.seed_opaque_sequences',
+    call: ({ session: s }) => {
+      const before = s.encode_state();
+      const result = s.seed_opaque_sequences(JSON.stringify(['Figure']));
+      const after = s.encode_state();
+      if (Buffer.compare(Buffer.from(before), Buffer.from(after)) === 0) throw new Error('seeding a sequence name left the document state unchanged');
+      return { result, after };
+    },
+  },
+  defineRow({
+    method: 'close_display_list',
+    setup: openedDisplay,
+    call: ({ engine }, { handle }) => {
+      const before = engine.range_rects_by_handle(handle, 1, 6);
+      const result = engine.close_display_list(handle);
+      const after = settled(() => engine.range_rects_by_handle(handle, 1, 6));
+      if (!('refused' in after)) throw new Error('a closed handle still answered');
+      return { before, result, after };
+    },
+  }),
+  defineRow({
+    method: 'update_display_list',
+    setup: placeholderDisplay,
+    call: ({ engine }, { list, contract, handle }) => {
+      try {
+        const before = settled(() => handleAnswers(engine, handle));
+        const update = { total: list.pages.length, ...contract, keep: true, replace: list.pages.map((page, index) => [index, page]) };
+        const result = engine.update_display_list(handle, JSON.stringify(update));
+        const after = handleAnswers(engine, handle);
+        if (JSON.stringify(before) === JSON.stringify({ value: after })) throw new Error('the loaded pages answer as the placeholders did');
+        return { before, result, after };
+      } finally {
+        engine.close_display_list(handle);
+      }
+    },
+  }),
 ];
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
@@ -3067,40 +3475,16 @@ const exclusions: Exclusion[] = [
 const knownDifferences: KnownDifference[] = [];
 
 const notYetCovered: string[] = [
-  'EditSession.apply_host_update',
-  'EditSession.apply_seed_raw_ops',
-  'EditSession.apply_update_with_inference', 'EditSession.begin_region_layout', 'EditSession.begin_shared_reads',
-  'EditSession.bootstrap_peer',
-  'EditSession.clear_measure_fonts', 'EditSession.clear_update_event_observation',
-  'EditSession.decode_font',
-  'EditSession.direct_batches_applied', 'EditSession.display_range_rects_batch',
-  'EditSession.display_range_rects_on_pages_json', 'EditSession.display_range_rects_region_json',
-  'EditSession.echo_glyph_set_json', 'EditSession.encode_diff_chunks',
+  'EditSession.begin_shared_reads', // no effect observable through the public surface on these fixtures
   'EditSession.encode_peer_metadata',
-  'EditSession.end_shared_reads',
-  'EditSession.geometry_position_outline_json',
-  'EditSession.layout_document_with_regions_exact_prefix_retained',
-  'EditSession.layout_document_with_regions_prefix_retained_json',
-  'EditSession.measure_paragraph_json',
-  'EditSession.outline_glyph_json',
-  'EditSession.patch_style_languages_xml',
-  'EditSession.register_substitute_measure_font', 'EditSession.release_display_pages_frame', 'EditSession.reset_frame_base',
-  'EditSession.resident_deleted_units', 'EditSession.resident_geometry_json', 'EditSession.resident_section_revision',
-  'EditSession.resume_region_layout',
-  'EditSession.retained_kernel_inputs_json', 'EditSession.retained_layout_json',
-  'EditSession.seed_opaque_sequences',
-  'EditSession.set_direct_batches', 'EditSession.set_display_retain_built_pages',
-  'EditSession.set_header_footer_aliases',
-  'EditSession.set_local_lowering',
-  'EditSession.set_windowed_incremental_builds',
-  'EditSession.start_update_event_observation',
-  'EditSession.update_measure_font_outlines', 'EditSession.yrs_blocks_for_story',
-  'RetainedLayoutMeta.layout_shell_json', 'RetainedLayoutMeta.notes_converged', 'RetainedLayoutMeta.provisional',
-  'clear_measure_fonts', 'close_display_list', 'decodeFontFace', 'decodeTiffPng',
-  'hit_test_regions_by_handle',
-  'outline_glyph_json', 'parse_relationships_xml', 'range_rects_on_pages_by_handle', 'range_rects_on_pages_json',
-  'range_rects_region_by_handle', 'range_rects_region_json', 'register_measure_font', 'register_substitute_measure_font',
-  'update_display_list', 'vertical_move_by_handle',
+  'EditSession.end_shared_reads', // no effect observable through the public surface on these fixtures
+  'EditSession.set_display_retain_built_pages', // no effect observable through the public surface on these fixtures
+  'EditSession.set_local_lowering', // no effect observable through the public surface on these fixtures
+  'EditSession.set_windowed_incremental_builds', // no effect observable through the public surface on these fixtures
+  'EditSession.update_measure_font_outlines',
+  'RetainedLayoutMeta.notes_converged', // the current fixtures only ever yield one constant value
+  'RetainedLayoutMeta.provisional', // the current fixtures only ever yield one constant value
+  'decodeFontFace', 'decodeTiffPng',
 ];
 
 const NO_RASTERIZER = 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/docx/src/wasm/enginePng.ts';
@@ -3131,7 +3515,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(59);
+    expect(notYetCovered.length).toBe(11);
   });
 
   for (const row of rows) {
