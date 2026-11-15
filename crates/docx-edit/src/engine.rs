@@ -365,6 +365,8 @@ thread_local! {
         measurement_attempts: 0,
         preview_shifts: 0,
     }) };
+    /// Deferred body patches applied, and those that fell back to a full lowering.
+    pub(crate) static DEFERRED_PATCHES: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     static BODY_MEASUREMENT_WORK: RefCell<(Vec<usize>, u64)> = const { RefCell::new((Vec::new(), 0)) };
     static HEADER_FOOTER_MEASUREMENTS: Cell<usize> = const { Cell::new(0) };
     static REGION_FULL_PASSES: Cell<usize> = const { Cell::new(0) };
@@ -5701,6 +5703,17 @@ impl EngineSession {
                 &self.doc.yrs_doc().transact(),
                 env,
             )?;
+            let segments = self.doc.segment_index("body").ok()?;
+            let paragraphs = self.doc.paragraph_index("body").ok()?;
+            let current = paragraphs
+                .para_slot(&paragraph)
+                .and_then(|slot| segments.formatted_segment_units()?.get(slot as usize))
+                .is_some_and(|unit| lowered.local.seed_matches_after_edit(unit));
+            if !current {
+                #[cfg(test)]
+                DEFERRED_PATCHES.with(|counts| counts.set((counts.get().0, counts.get().1 + 1)));
+                return None;
+            }
         }
         let replaced = slot..slot.checked_add(1)?;
         let old_block = Rc::clone(lowered.blocks.shared().get(slot)?);
@@ -5769,6 +5782,10 @@ impl EngineSession {
             lowered.local.edit = Some(edit);
             return None;
         };
+        #[cfg(test)]
+        if lowered.local.deferred {
+            DEFERRED_PATCHES.with(|counts| counts.set((counts.get().0 + 1, counts.get().1)));
+        }
         let blocks = &lowered.blocks;
         let previous_patch = previous_patch.filter(|_| previous_patch_matches);
         if self.relayout_trigger.get().uses_region_path() {
