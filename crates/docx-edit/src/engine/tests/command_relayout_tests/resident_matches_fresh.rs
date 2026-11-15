@@ -610,11 +610,16 @@ fn typing_in_formatted_paragraphs_lays_out_as_a_fresh_session_does() {
     assert_deferred(type_fixed(resident_matches_fresh), 1, "fixed typing");
 }
 
+/// Fallbacks the generated typing takes. A body keystroke right after a cell
+/// keystroke patches in place: the cell keystroke re-lowers only its table,
+/// which leaves the body's stored paragraphs current.
+const GENERATED_FALLBACKS: usize = 99;
+
 #[test]
 fn generated_typing_lays_out_as_a_fresh_session_does() {
     assert_deferred(
         type_all_generated(resident_matches_fresh),
-        100,
+        GENERATED_FALLBACKS,
         "generated typing",
     );
 }
@@ -648,7 +653,7 @@ fn fresh_sessions_agree_on_every_typed_state() {
     assert_deferred(type_fixed(fresh_matches_fresh), 1, "fixed typing");
     assert_deferred(
         type_all_generated(fresh_matches_fresh),
-        100,
+        GENERATED_FALLBACKS,
         "generated typing",
     );
 }
