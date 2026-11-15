@@ -180,7 +180,7 @@ impl SheetPatch<'_> {
         let dirty = self.dirty_formulas(source, &rows)?;
         let mut out = Vec::with_capacity(source.len());
         out.extend_from_slice(&element.prefix);
-        let mut source_rows = rows
+        let mut source_rows: Vec<_> = rows
             .iter()
             .filter_map(|row| {
                 self.axes
@@ -188,7 +188,11 @@ impl SheetPatch<'_> {
                     .current(row.index)
                     .map(|current| (current, row))
             })
-            .peekable();
+            .collect();
+        // a move makes the map non-monotone; the element is written in current
+        // order, so the rows it reuses are visited in that order too
+        source_rows.sort_unstable_by_key(|(current, _)| *current);
+        let mut source_rows = source_rows.into_iter().peekable();
         let mut cells = self.sheet.iter_cells().peekable();
         let mut originals = SourceCellCursor::new(self.original, self.original.iter_cells());
         let mut heights = self.sheet.row_heights.keys().copied().peekable();

@@ -62,12 +62,56 @@ async function tablesFixture() {
   return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
 }
 
-async function compare(script: (workbook: WorkbookHandle) => unknown) {
-  const nativeWorkbook = native.openWorkbook(fixture, { calculation });
-  const wasmWorkbook = wasm.openWorkbook(fixture, { calculation });
+/** `Data` holding 1234.5 as `#,##0.00` in A1, `Alpha` in A2, 123 in A3 and `=A3+1` in B1, and a
+ * hidden `Hidden` sheet holding `alpha` in A1. */
+async function findFixture() {
+  const rels = (entries: [string, string, string][]) =>
+    `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${entries
+      .map(([id, kind, target]) => `<Relationship Id="${id}" Type="${DOC_RELS}/${kind}" Target="${target}"/>`)
+      .join('')}</Relationships>`;
+  const sheet = (rows: string) =>
+    `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="${MAIN}"><sheetData>${rows}</sheetData></worksheet>`;
+  const override = (part: string, type: string) =>
+    `<Override PartName="${part}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.${type}+xml"/>`;
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+    override('/xl/workbook.xml', 'sheet.main') + override('/xl/styles.xml', 'styles') +
+    [1, 2].map((n) => override(`/xl/worksheets/sheet${n}.xml`, 'worksheet')).join('') + '</Types>');
+  zip.file('_rels/.rels', rels([['rId1', 'officeDocument', 'xl/workbook.xml']]));
+  zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="${MAIN}" xmlns:r="${DOC_RELS}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Hidden" sheetId="2" state="hidden" r:id="rId2"/></sheets></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', rels([['rId1', 'worksheet', 'worksheets/sheet1.xml'], ['rId2', 'worksheet', 'worksheets/sheet2.xml'], ['rId3', 'styles', 'styles.xml']]));
+  zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="${MAIN}"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>`);
+  zip.file('xl/worksheets/sheet1.xml', sheet(
+    '<row r="1"><c r="A1" s="1"><v>1234.5</v></c><c r="B1"><f>A3+1</f><v>124</v></c></row>' +
+    '<row r="2"><c r="A2" t="inlineStr"><is><t>Alpha</t></is></c></row>' +
+    '<row r="3"><c r="A3"><v>123</v></c></row>'));
+  zip.file('xl/worksheets/sheet2.xml', sheet('<row r="1"><c r="A1" t="inlineStr"><is><t>alpha</t></is></c></row>'));
+  return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
+}
+
+function unversioned(result: object) {
+  const rest: Record<string, unknown> = { ...result };
+  delete rest.version;
+  return rest;
+}
+
+const generatedVersions = <T>(value: T): T =>
+  JSON.parse(JSON.stringify(value).replace(/"[0-9a-f]{32}-(\d+)"/g, '"<version>-$1"'));
+
+function cellsOf(result: object) {
+  const { matches } = result as { matches?: { cell: { sheetId: string; a1: string } }[] };
+  return matches?.map((match) => `${match.cell.sheetId}!${match.cell.a1}`) ?? result;
+}
+
+async function compare<T>(script: (workbook: WorkbookHandle) => T, bytes: Uint8Array = fixture) {
+  const nativeWorkbook = native.openWorkbook(bytes, { calculation });
+  const wasmWorkbook = wasm.openWorkbook(bytes, { calculation });
   try {
-    expect(script(nativeWorkbook)).toEqual(script(wasmWorkbook));
+    const nativeResult = script(nativeWorkbook);
+    const wasmResult = script(wasmWorkbook);
+    expect(nativeResult).toEqual(wasmResult);
     await expectSavedPartsEqual(nativeWorkbook.save(), wasmWorkbook.save());
+    return wasmResult;
   } finally {
     nativeWorkbook.dispose();
     wasmWorkbook.dispose();
@@ -158,6 +202,73 @@ describe('xlsx native/wasm package parity', () => {
     });
     expect(await native.exportXlsxMarkdown(fixture)).toEqual(await wasm.exportXlsxMarkdown(fixture));
     expect(await native.exportXlsxStructured(fixture)).toEqual(await wasm.exportXlsxStructured(fixture));
+  });
+
+  test('findText matches displayed values and letter case alike on both engines', async () => {
+    const found = await compare((workbook) => ({
+      formatted: unversioned(workbook.findText({ text: '1,234.5', lookIn: 'values', sheetIds: ['sheet:0'] })),
+      anyCase: unversioned(workbook.findText({ text: 'ALPHA', sheetIds: ['sheet:0'] })),
+    }), await findFixture());
+    expect(cellsOf(found.formatted)).toEqual(['sheet:0!A1']);
+    expect(cellsOf(found.anyCase)).toEqual(['sheet:0!A2']);
+  });
+
+  test('findText with matchCase matches on both engines', async () => {
+    const found = await compare((workbook) => ({
+      upper: unversioned(workbook.findText({ text: 'ALPHA', matchCase: true, sheetIds: ['sheet:0'] })),
+      exact: unversioned(workbook.findText({ text: 'Alpha', matchCase: true, sheetIds: ['sheet:0'] })),
+    }), await findFixture());
+    expect(cellsOf(found.upper)).toEqual([]);
+    expect(cellsOf(found.exact)).toEqual(['sheet:0!A2']);
+  });
+
+  test('findText over the workbook skips a hidden sheet on both engines', async () => {
+    const found = await compare((workbook) => unversioned(workbook.findText({ text: 'alpha' })), await findFixture());
+    expect(cellsOf(found)).toEqual(['sheet:0!A2']);
+  });
+
+  const replaceTarget = (a1: string) => ({ sheetId: 'sheet:0', range: { kind: 'a1' as const, a1 } });
+  const applyReplace = (workbook: WorkbookHandle) => workbook.applyEdits({
+    expectVersion: workbook.version(),
+    steps: [
+      { op: 'replaceText', target: replaceTarget('A3:A3'), query: '1', replacement: '2' },
+      { op: 'replaceText', target: replaceTarget('B1:B1'), query: 'A3', replacement: '(', lookIn: 'formulas' },
+    ],
+  });
+
+  test('replaceText edits entered text and refuses a formula break on both engines', async () => {
+    const result = await compare((workbook) => ({
+      applied: generatedVersions(unversioned(applyReplace(workbook))),
+      edited: unversioned(workbook.findText({ text: '223', entireCell: true, sheetIds: ['sheet:0'] })),
+      kept: unversioned(workbook.findText({ text: 'A3+1', lookIn: 'formulas', sheetIds: ['sheet:0'] })),
+    }), await findFixture());
+    if (!('receipts' in result.applied)) throw new Error('Expected applied edits');
+    expect(result.applied).toMatchObject({ baseVersion: '<version>-0' });
+    const receipts = result.applied.receipts as { replace?: { refused?: number; refusedCells?: { cell: string }[] } }[];
+    expect(receipts[1]?.replace?.refusedCells?.map((refused) => refused.cell)).toEqual(['B1']);
+    expect(receipts[1]?.replace?.refused).toBe(1);
+    expect(receipts[0]?.replace?.refused).toBe(0);
+    expect(cellsOf(result.edited)).toEqual(['sheet:0!A3']);
+    expect(cellsOf(result.kept)).toEqual(['sheet:0!B1']);
+  });
+
+  test('replaceText base versions differ between two loads of the same workbook on each engine', async () => {
+    const bytes = await findFixture();
+    const baseVersions = (engine: Xlsx) => [0, 1].map(() => {
+      const workbook = engine.openWorkbook(bytes, { calculation });
+      try {
+        const applied = applyReplace(workbook) as unknown as { baseVersion?: unknown };
+        expect(applied.baseVersion).toMatch(/^[0-9a-f]{32}-0$/);
+        return String(applied.baseVersion);
+      } finally {
+        workbook.dispose();
+      }
+    });
+    const [a, b] = baseVersions(native);
+    const [c, d] = baseVersions(wasm);
+    console.log(`BASEVERSION-PROBE native ${a} ${b} wasm ${c} ${d}`);
+    expect(a).not.toBe(b);
+    expect(c).not.toBe(d);
   });
 
   test('deleting and inserting sheets around tables, with undo and redo, matches on both engines', async () => {
