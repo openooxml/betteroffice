@@ -1469,6 +1469,9 @@ fn placed_column_measurement_frames(
     bands
 }
 
+/// Wrap phases each pinned picture frame adds to the phase budget.
+const PIN_RECOVERY_PHASES: usize = 2;
+
 fn stabilize_flow_wrapping<F>(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
@@ -1559,7 +1562,11 @@ where
     };
     #[cfg(test)]
     let max_phases = WRAP_PHASE_LIMIT.with(Cell::get).unwrap_or(max_phases);
-    for phase in 0..max_phases {
+    let mut recovery = 0;
+    for phase in 0.. {
+        if phase == max_phases + recovery {
+            break;
+        }
         let (layout, recorded) = if has_unequal {
             docx_layout::place::layout_document_with_column_widths(input)?
         } else {
@@ -1655,6 +1662,7 @@ where
                 next_wrap_frames[index].page_width = None;
             }
             visited.clear();
+            recovery += PIN_RECOVERY_PHASES;
         }
         if accept {
             for (index, unequal) in unequal.iter().enumerate() {
