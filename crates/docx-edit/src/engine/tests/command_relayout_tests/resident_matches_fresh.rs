@@ -498,6 +498,59 @@ fn boundary_key(engine: &EngineSession, rng: &mut Rng) -> Option<Key> {
     Some(Key::insert("body", at, ["a", "b", "😀"][rng.below(3)]))
 }
 
+/// Types the first fixed keys, lets a peer bold a run of a paragraph they
+/// typed into, then types into it again; `relayout` lays the peer's update out
+/// before that key.
+fn peer_formats_between_keys(relayout: bool) {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let bytes = typing_package();
+    let engine = seeded_engine(9812, &bytes);
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request).seeded(9812, bytes);
+    let label = format!("peer formatting, relayout {relayout}");
+    for (step, key) in TYPING[..4].iter().enumerate() {
+        let key = typing_key(&engine, *key);
+        host.command(&key.story, key.start, key.end, key.text);
+        resident_matches_fresh(&host, &format!("{label}, keystroke {}", step + 1));
+    }
+
+    let paras = story_paras(&engine, "body");
+    let para = paras.iter().find(|para| para.id == "00001003").unwrap();
+    let (start, text) = para
+        .texts
+        .iter()
+        .find(|(_, text)| text == "larger type")
+        .unwrap();
+    let end = start + text.encode_utf16().count() as u32;
+    let peer = crate::EditingDoc::new(9813);
+    peer.apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .unwrap();
+    let vector = engine.doc().encode_state_vector_v1();
+    peer.format_range(
+        &crate::EditCtx::local("", ""),
+        crate::StoryRange::new("body", *start, end),
+        &crate::InlineFormatDelta {
+            bold: crate::Patch::Set(true),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    engine
+        .doc()
+        .apply_update_v1(&peer.encode_diff_v1(&vector).unwrap())
+        .unwrap();
+    if relayout {
+        host.relayout(None);
+        resident_matches_fresh(&host, &format!("{label}, peer update"));
+    }
+
+    let last = typing_key(&engine, (At::Body("00001003", 2), Some("x")));
+    host.command(&last.story, last.start, last.end, last.text);
+    resident_matches_fresh(&host, &format!("{label}, key after the peer"));
+}
+
 fn type_fixed(check: fn(&CommandHost, &str)) {
     let bytes = typing_package();
     let mut keys = TYPING.into_iter();
@@ -550,6 +603,12 @@ fn typing_across_run_boundaries_lays_out_as_a_fresh_session_does() {
             resident_matches_fresh,
         );
     }
+}
+
+#[test]
+fn typing_after_a_peer_formats_the_paragraph_lays_out_as_a_fresh_session_does() {
+    peer_formats_between_keys(false);
+    peer_formats_between_keys(true);
 }
 
 #[test]
