@@ -9,8 +9,8 @@ const LEAD: &str = "00002600";
 const KEPT: &str = "00002700";
 const RELEASED_PAGES: usize = 4;
 const RELEASED_DIGEST: u64 = 0x6302_e410_5b28_5ae3;
-const MARGIN_CHANGE_PAGES: usize = 0;
-const MARGIN_CHANGE_DIGEST: u64 = 0;
+const MARGIN_CHANGE_PAGES: usize = 4;
+const MARGIN_CHANGE_DIGEST: u64 = 0x1ac3_1774_7ad7_87fa;
 
 fn margins(left: u32, right: u32) -> String {
     format!(
