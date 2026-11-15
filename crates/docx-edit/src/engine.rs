@@ -374,6 +374,7 @@ thread_local! {
     static CERTIFIED_FLOAT_WORK: RefCell<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())) };
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static PREVIEW_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    #[cfg(test)]
     static WRAP_PHASE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
     static REGION_WORK_COUNTS: Cell<RegionWorkCounts> = const { Cell::new(RegionWorkCounts {
         certification: 0,
@@ -1536,7 +1537,10 @@ where
             .enumerate()
             .filter_map(|(index, measured)| match &measured.block {
                 LayoutBlock::Paragraph(paragraph)
-                    if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_))) =>
+                    if paragraph
+                        .runs
+                        .iter()
+                        .any(|run| matches!(run, Run::Image(_))) =>
                 {
                     Some((index, measured.block.clone(), measured.measure.clone()))
                 }
@@ -1632,7 +1636,10 @@ where
             let cycle = &visited[first..];
             for (index, block, measure) in &pictures {
                 let start = &cycle[0].3[*index];
-                if cycle.iter().any(|(_, _, _, frames)| frames[*index] != *start) {
+                if cycle
+                    .iter()
+                    .any(|(_, _, _, frames)| frames[*index] != *start)
+                {
                     input.measured[*index].block = block.clone();
                     input.measured[*index].measure = measure.clone();
                 }

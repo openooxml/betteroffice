@@ -86,7 +86,7 @@ fn side_margin_change() -> Vec<u8> {
     package(120, 9, &section)
 }
 
-fn opened(engine: &EngineSession, bytes: &[u8]) -> CommandHost<'_> {
+fn opened<'a>(engine: &'a EngineSession, bytes: &[u8]) -> CommandHost<'a> {
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
     let request = lowering_pages::region_request(engine, bytes, font).to_string();
     CommandHost::open_with(engine, request)
@@ -136,12 +136,10 @@ fn layout_digest(engine: &EngineSession) -> (usize, u64) {
     let value = serde_json::from_str::<serde_json::Value>(&json).unwrap();
     let pages = layout_pages(&value).unwrap();
     let number = |value: Option<&serde_json::Value>| {
-        value
-            .and_then(serde_json::Value::as_f64)
-            .map_or_else(
-                || "-".to_owned(),
-                |number| format!("{:.0}", (number * 100.0).round()),
-            )
+        value.and_then(serde_json::Value::as_f64).map_or_else(
+            || "-".to_owned(),
+            |number| format!("{:.0}", (number * 100.0).round()),
+        )
     };
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for page in pages {
