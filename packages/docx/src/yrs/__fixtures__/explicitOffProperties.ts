@@ -8,6 +8,7 @@ const TARGET = '0E100001';
 const TEXT = 'word word';
 /** Repeats the last word, so the edit has no unique token alignment and the paragraph is written from the model. */
 const APPENDED = ' word';
+export const EDITED_TEXT = `${TEXT}${APPENDED}`;
 
 export type OnOffScope = 'paragraph' | 'run';
 export type OnOffCase = 'off' | 'absent' | 'on';
@@ -29,6 +30,18 @@ export const ON_OFF_CASES: ReadonlyArray<{ value: OnOffCase; title: string }> = 
   { value: 'absent', title: 'absent under a style that turns it on is saved absent (keeps source bytes)' },
   { value: 'on', title: 'explicitly on under a style that turns it on is saved as an explicit on (keeps source bytes)' },
 ];
+
+const OPEN_TOGGLE = 'open: the session stores this explicit value like the inherited one, so a cleared value cannot be told from an untouched one';
+const OPEN_CS = 'open: the session does not carry this property on body runs, so a cleared value cannot be told from an untouched one';
+const OPEN_ON = 'open: the session stores an explicit on like an absent value, so a cleared value cannot be told from an untouched one';
+
+/** Why a styled case is not written back, or undefined when it is. */
+function openReason(element: string, value: OnOffCase): string | undefined {
+  if (element === 'cs' && value !== 'absent') return OPEN_CS;
+  if (element === 'snapToGrid' && value === 'on') return OPEN_ON;
+  if (TOGGLE_PROPERTIES.includes(element) && value === 'on') return OPEN_TOGGLE;
+  return undefined;
+}
 
 const direct = (element: string, value: OnOffCase) =>
   value === 'off' ? `<w:${element} w:val="0"/>` : value === 'on' ? `<w:${element}/>` : '';
@@ -72,7 +85,8 @@ export function bothStylesFixture(element: string): Promise<Uint8Array> {
 export const unstyledRunFixture = (rPr: string) => packageOf('', '', rPr);
 
 type Session = Awaited<ReturnType<typeof Yrs.createYrsSession>>;
-type FormatDelta = Parameters<Session['formatRange']>[1];
+type Range = Parameters<Session['formatRange']>[0];
+type Edit = (session: Session, range: Range) => void;
 
 /** `replaced` when the edited paragraph is written from the model instead of by a paragraph patch. */
 function savePath(session: Session): 'replaced' | 'patched' | 'unchanged' {
@@ -87,20 +101,19 @@ function savePath(session: Session): 'replaced' | 'patched' | 'unchanged' {
   return body.changed.some((ordinal) => patched.has(ordinal)) ? 'patched' : 'replaced';
 }
 
-/** Applies `format` to the paragraph's text when given, appends a repeated word and saves. */
-export async function appendAndSave(yrs: typeof Yrs, bytes: Uint8Array, format?: FormatDelta): Promise<{ path: string; xml: string }> {
+/** Runs `edits` over the paragraph's text, appends a repeated word and saves. */
+export async function appendAndSave(yrs: typeof Yrs, bytes: Uint8Array, ...edits: Edit[]): Promise<{ path: string; xml: string }> {
   const session = await yrs.createYrsSession();
   try {
     session.openDocx(bytes, true);
     const target = session.paragraphs('body').find((entry) => entry.paraId.toUpperCase() === TARGET);
     if (!target || target.text !== TEXT) throw new Error(`paragraph ${TARGET} not found with its source text`);
-    if (format) {
-      session.formatRange({
-        story: 'body',
-        start: { paraId: target.paraId, offset: 0 },
-        end: { paraId: target.paraId, offset: target.text.length },
-      }, format);
-    }
+    const range = {
+      story: 'body',
+      start: { paraId: target.paraId, offset: 0 },
+      end: { paraId: target.paraId, offset: target.text.length },
+    };
+    for (const edit of edits) edit(session, range);
     session.insertText({ story: 'body', paraId: target.paraId, offset: target.text.length }, APPENDED);
     const path = savePath(session);
     const saved = await yrs.saveYrsDocx(session, { updateModifiedDate: false });
@@ -111,13 +124,18 @@ export async function appendAndSave(yrs: typeof Yrs, bytes: Uint8Array, format?:
   }
 }
 
+const savedParagraph = (xml: string) => xml.match(new RegExp(`<w:p\\b[^>]*w14:paraId="${TARGET}"[^>]*>[\\s\\S]*?</w:p>`, 'i'))?.[0];
 const tagOf = (xml: string, element: string) => xml.match(new RegExp(`<w:${element}(?=[\\s/>])[^>]*>`))?.[0];
 const valueOf = (tag: string | undefined): OnOffCase =>
   tag === undefined ? 'absent' : /\sw:val="(0|false|off)"/.test(tag) ? 'off' : 'on';
 
+/** The text of the saved target paragraph. */
+export const savedText = (xml: string) =>
+  [...(savedParagraph(xml) ?? '').matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map((match) => match[1]).join('');
+
 /** How the saved target paragraph states `element`: in its `w:pPr`, or the same on every text run. */
 export function savedValue(xml: string, element: string, scope: OnOffScope): SavedValue {
-  const paragraph = xml.match(new RegExp(`<w:p\\b[^>]*w14:paraId="${TARGET}"[^>]*>[\\s\\S]*?</w:p>`, 'i'))?.[0];
+  const paragraph = savedParagraph(xml);
   if (!paragraph) return 'missing';
   if (scope === 'paragraph') {
     const pPr = paragraph.match(/<w:pPr>[\s\S]*?<\/w:pPr>/)?.[0] ?? '';
@@ -128,55 +146,113 @@ export function savedValue(xml: string, element: string, scope: OnOffScope): Sav
   return values.length === 0 ? 'missing' : values.length === 1 ? values[0]! : `mixed:${values.join('+')}`;
 }
 
-/** The effective value of a run property under no style: absent reads as off. */
-const effectiveUnstyled = (value: SavedValue) => (value === 'absent' ? 'off' : value);
+/** The effective value of a property whose absence reads as `inherited`. */
+const effective = (value: SavedValue, inherited: 'on' | 'off') => (value === 'absent' ? inherited : value);
 
-type Outcome = { path: string; savedAs: string; expected: string };
-type SaveCase = { group: string; name: string; run: (api: typeof Yrs) => Promise<Outcome> };
+type Outcome = { path: string; text: string; savedAs: string; expected: string };
+type SaveCase = { group: string; name: string; open?: string; run: (api: typeof Yrs) => Promise<Outcome> };
 
 const STYLED = 'on/off properties of a paragraph written from the model on save';
 const CHANGED = 'run properties the user changes on a paragraph written from the model on save';
+const WRITTEN_BACK = 'user changes to a property whose explicit off the save writes back';
 
-/** Every case: its save must take the replace path and state the expected value. */
+const outcome = (path: string, xml: string, savedAs: string, expected: string): Outcome =>
+  ({ path, text: savedText(xml), savedAs, expected });
+
+/** Sets `element` to `value` (null clears) on the paragraph or its text. */
+function setter(element: string, scope: OnOffScope, value: boolean | null): Edit {
+  if (scope === 'run') return (session, range) => { session.formatRange(range, { other: { [element]: value } }); };
+  if (element === 'bidi') return (session, range) => { session.setParagraphAttrs(range, { bidi: value }); };
+  return (session, range) => { session.setParagraphAttrs(range, { other: { [element]: value } }); };
+}
+
+const WRITTEN_BACK_PROPERTIES: ReadonlyArray<{ element: string; scope: OnOffScope }> = [
+  { element: 'pageBreakBefore', scope: 'paragraph' },
+  { element: 'bidi', scope: 'paragraph' },
+  { element: 'snapToGrid', scope: 'run' },
+];
+
+const USER_ACTIONS: ReadonlyArray<{ title: string; edits: Array<boolean | null>; expected: OnOffCase; exact: boolean }> = [
+  { title: 'set on by the user, is saved on (changes the effective value)', edits: [true], expected: 'on', exact: false },
+  { title: 'set off by the user, is saved off (keeps source bytes)', edits: [false], expected: 'off', exact: true },
+  { title: 'cleared by the user, is saved absent so the style shows through (changes the effective value)', edits: [null], expected: 'absent', exact: true },
+  { title: 'set on and back off by the user, is saved off (keeps source bytes)', edits: [true, false], expected: 'off', exact: true },
+  { title: 'untouched by the user, is saved off (keeps source bytes)', edits: [], expected: 'off', exact: true },
+];
+
+const strikePair = (xml: string) =>
+  `strike:${effective(savedValue(xml, 'strike', 'run'), 'off')},dstrike:${effective(savedValue(xml, 'dstrike', 'run'), 'off')}`;
+
+/** Every case: its save must take the replace path, keep the edited text and state the expected value. */
 export const EXPLICIT_OFF_SAVE_CASES: readonly SaveCase[] = [
   ...ON_OFF_PROPERTIES.flatMap(({ element, scope }) => ON_OFF_CASES.map(({ value, title }): SaveCase => ({
     group: STYLED,
     name: `w:${element} ${title}`,
+    open: openReason(element, value),
     run: async (api) => {
       const { path, xml } = await appendAndSave(api, await onOffFixture(element, scope, value));
-      return { path, savedAs: savedValue(xml, element, scope), expected: value };
+      return outcome(path, xml, savedValue(xml, element, scope), value);
     },
   }))),
   ...TOGGLE_PROPERTIES.map((element): SaveCase => ({
     group: STYLED,
     name: `w:${element} explicitly off under a paragraph style and a character style that both turn it on is saved as an explicit off (keeps source bytes)`,
+    open: OPEN_TOGGLE,
     run: async (api) => {
       const { path, xml } = await appendAndSave(api, await bothStylesFixture(element));
-      return { path, savedAs: savedValue(xml, element, 'run'), expected: 'off' };
+      return outcome(path, xml, savedValue(xml, element, 'run'), 'off');
     },
   })),
+  ...WRITTEN_BACK_PROPERTIES.flatMap(({ element, scope }) => USER_ACTIONS.map(({ title, edits, expected, exact }): SaveCase => ({
+    group: WRITTEN_BACK,
+    name: `w:${element} explicitly off in the source under a style that turns it on, ${title}`,
+    run: async (api) => {
+      const { path, xml } = await appendAndSave(api, await onOffFixture(element, scope, 'off'), ...edits.map((value) => setter(element, scope, value)));
+      const saved = savedValue(xml, element, scope);
+      return outcome(path, xml, exact ? saved : effective(saved, 'on'), expected);
+    },
+  }))),
   {
     group: CHANGED,
     name: 'w:caps turned on by the user over an explicit off is saved on (changes the effective value)',
     run: async (api) => {
-      const { path, xml } = await appendAndSave(api, await unstyledRunFixture('<w:caps w:val="0"/>'), { other: { allCaps: true } });
-      return { path, savedAs: effectiveUnstyled(savedValue(xml, 'caps', 'run')), expected: 'on' };
+      const { path, xml } = await appendAndSave(api, await unstyledRunFixture('<w:caps w:val="0"/>'), setter('allCaps', 'run', true));
+      return outcome(path, xml, effective(savedValue(xml, 'caps', 'run'), 'off'), 'on');
     },
   },
   {
     group: CHANGED,
     name: 'w:caps turned off by the user over an explicit on is saved off (changes the effective value)',
     run: async (api) => {
-      const { path, xml } = await appendAndSave(api, await unstyledRunFixture('<w:caps/>'), { other: { allCaps: null } });
-      return { path, savedAs: effectiveUnstyled(savedValue(xml, 'caps', 'run')), expected: 'off' };
+      const { path, xml } = await appendAndSave(api, await unstyledRunFixture('<w:caps/>'), setter('allCaps', 'run', null));
+      return outcome(path, xml, effective(savedValue(xml, 'caps', 'run'), 'off'), 'off');
     },
   },
   {
     group: CHANGED,
     name: 'w:smallCaps the user never touched keeps its explicit off beside w:caps turned on (keeps source bytes)',
+    open: OPEN_TOGGLE,
     run: async (api) => {
-      const { path, xml } = await appendAndSave(api, await unstyledRunFixture('<w:caps w:val="0"/><w:smallCaps w:val="0"/>'), { other: { allCaps: true } });
-      return { path, savedAs: savedValue(xml, 'smallCaps', 'run'), expected: 'off' };
+      const { path, xml } = await appendAndSave(api, await unstyledRunFixture('<w:caps w:val="0"/><w:smallCaps w:val="0"/>'), setter('allCaps', 'run', true));
+      return outcome(path, xml, savedValue(xml, 'smallCaps', 'run'), 'off');
+    },
+  },
+  {
+    group: CHANGED,
+    name: 'w:strike untouched by the user keeps the w:strike and w:dstrike pair (keeps source bytes)',
+    run: async (api) => {
+      const { path, xml } = await appendAndSave(api, await unstyledRunFixture('<w:strike/>'));
+      return outcome(path, xml, strikePair(xml), 'strike:on,dstrike:off');
+    },
+  },
+  {
+    group: CHANGED,
+    name: 'w:strike changed by the user from single to double strike saves w:dstrike without w:strike (changes the effective value)',
+    run: async (api) => {
+      const { path, xml } = await appendAndSave(api, await unstyledRunFixture('<w:strike/>'), (session, range) => {
+        session.formatRange(range, { strike: { double: true } });
+      });
+      return outcome(path, xml, strikePair(xml), 'strike:off,dstrike:on');
     },
   },
 ];

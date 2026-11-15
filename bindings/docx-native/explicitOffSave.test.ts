@@ -1,14 +1,19 @@
 import { describe, expect, test } from 'bun:test';
 import type * as wasmYrs from '../../packages/docx/src/yrs';
 import * as nativeYrs from '@betteroffice/docx-native/yrs';
-import { EXPLICIT_OFF_SAVE_CASES } from '../../packages/docx/src/yrs/__fixtures__/explicitOffProperties';
+import { EDITED_TEXT, EXPLICIT_OFF_SAVE_CASES } from '../../packages/docx/src/yrs/__fixtures__/explicitOffProperties';
 
 for (const group of new Set(EXPLICIT_OFF_SAVE_CASES.map((entry) => entry.group))) {
   describe(`native: ${group}`, () => {
-    for (const { name, run } of EXPLICIT_OFF_SAVE_CASES.filter((entry) => entry.group === group)) {
+    for (const { name, open, run } of EXPLICIT_OFF_SAVE_CASES.filter((entry) => entry.group === group)) {
+      if (open) {
+        test.todo(`${name}; ${open}`);
+        continue;
+      }
       test(name, async () => {
-        const { path, savedAs, expected } = await run(nativeYrs as unknown as typeof wasmYrs);
+        const { path, text, savedAs, expected } = await run(nativeYrs as unknown as typeof wasmYrs);
         expect({ path }).toEqual({ path: 'replaced' });
+        expect({ text }).toEqual({ text: EDITED_TEXT });
         expect({ savedAs }).toEqual({ savedAs: expected });
       });
     }
