@@ -107,7 +107,7 @@ const LARGE: &[&str] = &[
 const PARTNERS: &[&str] = &["Data!A1:A20", "Data!A:A", "Data!B1:B19", "#N/A"];
 
 /// formulas the spill layout holds on its own data sheet, above and below
-/// the anchors, so they run before and after the spills in either order.
+/// the anchors.
 const LOCAL: &[&str] = &[
     "SUMPRODUCT(F:F)",
     "SUMPRODUCT(F1:F40*1)",
@@ -122,9 +122,7 @@ const LOCAL: &[&str] = &[
     "SUMPRODUCT(A1:A1000,G1:G1000)",
 ];
 
-/// the rows of the spill layout's data sheet before its spills land: the
-/// lower copy of the local formulas ends there, above where the G25 spill
-/// ends (row 424).
+/// the rows of the spill layout's data sheet before its spills land.
 const SPILL_ROWS_BEFORE: u32 = 299 + LOCAL.len() as u32;
 
 const LAYOUTS: &[&str] = &[
@@ -141,7 +139,7 @@ fn atoms() -> Vec<&'static str> {
         .collect()
 }
 
-/// a fixed xorshift stream, so the sampled argument lists never change.
+/// a fixed xorshift stream.
 struct Stream(u64);
 
 impl Stream {

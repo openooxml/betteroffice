@@ -781,11 +781,7 @@ impl Sheet {
         self.hyperlinks.iter().find(|link| link.range.contains(at))
     }
 
-    /// the last row [`Sheet::used_range`] covers, without visiting every
-    /// cell. like the scan it pairs the smallest start row with the largest
-    /// end row and normalizes the pair, so a range stored with its corners
-    /// reversed counts as it does there; the cell map is ordered by row, so
-    /// its first and last keys hold the cells' smallest and largest rows.
+    /// the last row [`Sheet::used_range`] covers.
     fn last_used_row(&self) -> Option<RowId> {
         let cells = self
             .cells
@@ -1575,8 +1571,7 @@ mod tests {
         "cell emptied in place",
     ];
 
-    /// a range stored with its start below its end, as the public fields
-    /// allow.
+    /// a range stored with its start below its end.
     fn reversed(start: (RowId, ColId), end: (RowId, ColId)) -> CellRange {
         CellRange {
             start: CellRef::new(start.0, start.1),
@@ -1585,8 +1580,7 @@ mod tests {
     }
 
     /// a sheet with the features whose bits are set in `mask`, each placed
-    /// below the data, and the used-row count the scan's normalized rectangle
-    /// gives: the larger of the smallest start row and the largest end row.
+    /// below the data, and the used-row count the scan gives.
     fn featured(mask: u32) -> (Workbook, RowId) {
         let at = |a1: &str| CellRef::parse_a1(a1).unwrap();
         let mut sheet = Sheet::new("Data");

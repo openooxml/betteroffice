@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Formulas that need a sheet's last used row, such as SUMPRODUCT and whole-column references, no longer rescan every cell of the sheet to find it.
+Recalculation is faster for formulas that depend on a sheet's last used row, such as SUMPRODUCT over whole columns.
