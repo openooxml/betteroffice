@@ -163,7 +163,7 @@ export class XlsxAgentWorkbook extends PrototypeDocument<CellChange, XlsxEditSte
   grep(options: GrepOptions) {
     this.checkQuery(options);
     if (options.caseSensitive === false) throw new DocumentToolError('UNSUPPORTED', 'XLSX search is case-sensitive. Omit caseSensitive or set it to true.');
-    const found = unwrap(this.handle.findText({ text: options.query, sheetIds: options.story ? [this.resolveSheet(options.story).nativeId] : undefined, limit: 10000 }));
+    const found = unwrap(this.handle.findText({ text: options.query, matchCase: true, sheetIds: options.story ? [this.resolveSheet(options.story).nativeId] : undefined, limit: 10000 }));
     const page = this.searchPage(options, found.matches.map(hit => ({ ref: this.ref(this.resolveNative(hit.cell.sheetId), hit.cell.a1), sheet: this.resolveNative(hit.cell.sheetId), a1: hit.cell.a1, text: hit.text.slice(0, 400), length: hit.text.length })), found.truncated);
     const read = this.readTargets(page.matches);
     return { ...page, matches: page.matches.map((hit, index) => ({ ...hit, cell: this.hold(read.targets[index]) })) };

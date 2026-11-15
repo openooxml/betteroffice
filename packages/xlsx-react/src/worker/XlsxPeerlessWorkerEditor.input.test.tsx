@@ -68,7 +68,7 @@ async function workbook(protectedSheet: boolean, formatCells = false) {
   zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>');
   zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>');
   zip.file('xl/styles.xml', '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf/><xf applyProtection="1"><protection locked="0"/></xf></cellXfs></styleSheet>');
-  zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1" s="1"><v>2</v></c></row></sheetData>${protectedSheet ? `<sheetProtection sheet="1"${formatCells ? ' formatCells="0"' : ''}/>` : ''}</worksheet>`);
+  zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1" s="1"><v>2</v></c><c r="C1" t="inlineStr"><is><t>one</t></is></c></row></sheetData>${protectedSheet ? `<sheetProtection sheet="1"${formatCells ? ' formatCells="0"' : ''}/>` : ''}</worksheet>`);
   return zip.generateAsync({ type: 'uint8array' });
 }
 
@@ -142,5 +142,32 @@ describe('peerless protected cell input', () => {
     await waitFor(() => expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('Diese Zelle liegt auf einem geschützten Blatt.'));
     expect(await api.commands.execute('save', null)).toMatchObject({ ok: false,
       failure: { code: 'sheet-protected', message: 'Diese Zelle liegt auf einem geschützten Blatt.' } });
+  });
+});
+
+describe('peerless replace dialog', () => {
+  it('opens from the keyboard and applies a replacement', async () => {
+    const { view, session } = await mount(false);
+    const name = view.getByTestId('xlsx-name-box');
+    fireEvent.change(name, { target: { value: 'C1' } });
+    fireEvent.keyDown(name, { key: 'Enter' });
+    await waitFor(() => expect(session.selection?.range).toMatchObject({ kind: 'rowCol', start: { row: 0, col: 2 } }));
+
+    const scroll = view.getByTestId('xlsx-scroll');
+    fireEvent.keyDown(scroll, { key: 'h', ...(navigator.platform.match(/Mac|iPod|iPhone|iPad/) ? { metaKey: true } : { ctrlKey: true }) });
+    const dialog = await waitFor(() => view.getByRole('dialog'));
+    expect(dialog.textContent).toContain('All sheets');
+    fireEvent.change(view.getByRole('textbox', { name: 'Find' }), { target: { value: 'one' } });
+    fireEvent.change(view.getByRole('textbox', { name: 'Replace with' }), { target: { value: 'two' } });
+    const apply = view.getByRole('button', { name: 'Replace all' }) as HTMLButtonElement;
+    fireEvent.click(apply);
+    await waitFor(async () => {
+      await act(async () => {
+        const callbacks = [...frames.values()];
+        frames.clear();
+        for (const callback of callbacks) callback(0);
+      });
+      expect((await session.call.cellInputs(0, 'C1')).cells[0][0].input).toBe('two');
+    });
   });
 });

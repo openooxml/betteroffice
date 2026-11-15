@@ -359,6 +359,25 @@ fn rounding_is_half_away_from_zero() {
     assert_eq!(fv(-2.5, "0"), "-3");
     assert_eq!(fv(0.125, "0.00"), "0.13");
     assert_eq!(fv(2.674, "0.00"), "2.67");
+    assert_eq!(fv(1.005, "0.00"), "1.01");
+    assert_eq!(fv(-1.005, "0.00"), "-1.01");
+    assert_eq!(fv(2.675, "0.00"), "2.68");
+    assert_eq!(fv(3.5e-4, "0.00%"), "0.04%");
+    assert_eq!(fv(3.5e-4, "#,##0.00%"), "0.04%");
+    assert_eq!(fv(123456789012.345, "0.00"), "123456789012.35");
+    assert_eq!(fv(1e15 + 0.75, "0"), "1000000000000000");
+}
+
+#[test]
+fn every_section_rounds_at_fifteen_significant_digits() {
+    assert_eq!(fv(9007199254740993.0, "0"), "9007199254740990");
+    assert_eq!(fv(1.005, "0.00E+00"), "1.01E+00");
+    assert_eq!(fv(9.995, "0.00"), "10.00");
+    assert_eq!(fv(1e-20, "0.00"), "0.00");
+    assert_eq!(fv(1.005, "#.##"), "1.01");
+    let half = fv(1000000000000009.5, "0 ?/2");
+    assert_eq!(half, fv(1000000000000010.0, "0 ?/2"));
+    assert!(!half.contains("1/2"));
 }
 
 #[test]

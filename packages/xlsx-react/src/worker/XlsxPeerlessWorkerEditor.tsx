@@ -1,3 +1,4 @@
+import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '../sheetLimits';
 import { usePluginGestures } from '../../../../shared/plugin-host/usePluginGestures';
 import type { NavigationContext } from '../selectionData';
 import {
@@ -9,7 +10,8 @@ import {
   selectionKeyReducer, toTsv,
 } from '@betteroffice/xlsx';
 import type {
-  CellAddr, CellInputEdit, CellRange, Proposal, Selection, WorkbookSheetView, WorkbookSheetSummary, XlsxRangeTarget,
+  CellAddr, CellInputEdit, CellRange, ChartResizeEdges, Proposal, Selection, WorkbookSheetView,
+  WorkbookSheetSummary, XlsxCellAddress, XlsxEditResult, XlsxRangeTarget, XlsxValidationResult,
 } from '@betteroffice/xlsx';
 import type { WorkbookCommandSelection } from '@betteroffice/xlsx/worker';
 import { editorExportFaces, useDefaultFonts } from '../useDefaultFonts';
@@ -20,7 +22,7 @@ import { createXlsxCommandController, XlsxCommandAdmissionError, XlsxHostRefusal
 import { isMacPlatform } from '../commands/descriptors';
 import { useContextMenu } from '../../../../shared/react-toolbar/ContextMenu';
 import type { OverflowMenuEntry } from '../../../../shared/react-toolbar/MenuList';
-import { xlsxContextMenuEntries } from '../contextMenu/menus';
+import { xlsxContextMenuEntries, type XlsxContextFreezeTarget } from '../contextMenu/menus';
 import { commandReason, initialZoomScale } from '../commands/evaluate';
 import { REFUSAL_CAUSE_KEYS, type XlsxRefusalCause } from '../commands/refusalCause';
 import type { XlsxCommandFailureCode } from '../commands/types';
@@ -56,6 +58,9 @@ import { ROW_GUTTER_WIDTH } from '../plugins/rowDecorations';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost, type XlsxPluginHostBinding } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
+import {
+  ReplaceDialog, type ReplaceDialogApi, type ReplaceDialogTarget, withSheetCatalog,
+} from '../components/ReplaceDialog';
 import { cellInViewport, deriveLimits, extendScrollExtent, nearestCellScroll, positionAtPoint } from '../viewer/sessionGeometry';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import type { XlsxAsyncExportBridge } from './createAsyncEditorApi';
@@ -69,10 +74,14 @@ import { CellClipboard, clipboardHtml, newClipboardMarker, parseCellClipboardTex
 import { WorkerCellEcho } from './WorkerCellEcho';
 import { WorkerDraftController, type WorkerNativeDraft } from './WorkerDraftController';
 import { PeerlessWorkerInputs } from './PeerlessWorkerInputs';
+import { COLUMN_HEADER_HEIGHT, columnWidthFromPx, rowHeightFromPx } from '../components/SheetGrid';
+import type { SheetGridHeaderHandlers } from '../components/SheetGrid';
 import { WorkerPresentationStore } from './WorkerPresentationStore';
+import { useChartResizeGesture } from './useChartResizeGesture';
+import type { ChartDragPreview, SelectedChart } from './chartResize';
 import {
-  PeerlessSelectionEffect, PeerlessWorkerAccessibility, PeerlessWorkerExtent, PeerlessWorkerOverlay,
-  PeerlessWorkerPresence,
+  PeerlessSelectionEffect, PeerlessSheetGrid, PeerlessWorkerAccessibility, PeerlessWorkerExtent,
+  PeerlessWorkerOverlay, PeerlessWorkerPresence,
 } from './PeerlessWorkerSurface';
 import { PeerlessWorkerAnnouncer } from './PeerlessWorkerAnnouncer';
 import { WorkbookFailure } from '../components/WorkbookFailure';
@@ -83,6 +92,8 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
 const chartKeys: Record<string, [number, number] | undefined> = {
   ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
 };
+const SHEET_MAX_ROW = 1_048_575;
+const SHEET_MAX_COL = 16_383;
 
 function address(cell: CellAddr): string {
   let column = '';
@@ -221,8 +232,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const [refusal, setRefusal] = useState<{
     code: XlsxCommandFailureCode; detail?: string; message?: string; cause?: XlsxRefusalCause;
   } | null>(null);
-  const [selectedChart, setSelectedChart, chartRef] = useSyncedState<{ id: string; movable: boolean } | null>(null);
-  const [chartOffset, setChartOffset] = useState<{ x: number; y: number } | null>(null);
+  const [selectedChart, setSelectedChart, chartRef] = useSyncedState<SelectedChart | null>(null);
+  const [chartPreview, setChartPreview] = useState<ChartDragPreview | null>(null);
+  const [chartSheetExtent, setChartSheetExtent] = useState<{ width: number; height: number } | null>(null);
   const [renaming, setRenaming] = useState<number | null>(null);
   const tabsRef = useRef<HTMLDivElement>(null);
   const pendingActivation = useRef<string | null>(null);
@@ -241,6 +253,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   const borderColor = useRef<string | undefined>(undefined);
   const [proposals, setProposals, proposalsRef] = useSyncedState<Proposal[]>([]);
   const [proposalsPanelOpen, setProposalsPanelOpen, panelRef] = useSyncedState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [replaceTarget, setReplaceTarget] = useState<ReplaceDialogTarget | null>(null);
+  const replaceReveal = useRef<(cell: XlsxCellAddress) => void>(() => {});
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
   const navigation = useRef(0);
   const [selectionNavigation] = useState(createSelectionDataNavigation);
@@ -316,6 +331,35 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const editable = () => Boolean(ownerRef.current?.ready && !ownerRef.current.retiring &&
     !ownerRef.current.failure && !ownerRef.current.readOnly && !propsRef.current.readOnly && !coordinatorRef.current?.readOnly);
+  // the resize gesture is installed before its committer so the read-only and
+  // failure effects can cancel a pointer that is still down.
+  const resizeChartRef = useRef<(edges: ChartResizeEdges) => void>(() => {});
+  const { start: startChartResize, cancel: cancelChartResize, nudge: nudgeChartResize,
+    active: chartResizeActive } = useChartResizeGesture({
+    zoom: () => sourceRef.current?.painted?.request.zoom ?? zoomRef.current,
+    preview: setChartPreview,
+    commit: (_handle, edges) => resizeChartRef.current(edges),
+  });
+  // the engine clamps the preview at the far edge of the last cell, not at the
+  // used range; read it once per resize gesture.
+  const chartResizing = chartPreview?.kind === 'resize';
+  useEffect(() => {
+    const owner = run;
+    if (!selectedChart || !chartResizing || !owner?.ready || !owner.current) {
+      setChartSheetExtent(null);
+      return;
+    }
+    let cancelled = false;
+    void owner.session.call.cellGeometry(active, SHEET_MAX_ROW, SHEET_MAX_COL)
+      .then((geometry) => {
+        if (!cancelled) setChartSheetExtent({
+          width: geometry.rect.x + geometry.rect.w,
+          height: geometry.rect.y + geometry.rect.h,
+        });
+      })
+      .catch(() => { if (!cancelled) setChartSheetExtent(null); });
+    return () => { cancelled = true; };
+  }, [run, run?.ready, active, selectedChart, chartResizing]);
   const report = useCallback((error: unknown) => {
     if (error instanceof XlsxHostRefusalError) {
       setRefusal({ code: error.code, message: error.message });
@@ -342,6 +386,55 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     return selectionRef.current && sheets?.some((sheet) => sheet.index === activeRef.current)
       ? rangeTarget(activeRef.current, selectionRef.current) : undefined;
   };
+  const openReplaceDialog = () => {
+    const selected = selectedTarget();
+    if (!selected || selected.range.kind !== 'rowCol') {
+      setReplaceTarget(null);
+    } else {
+      const { start, end } = selected.range;
+      const from = address(start);
+      const to = address(end);
+      setReplaceTarget({
+        sheetId: selected.sheetId,
+        range: selected.range,
+        label: from === to ? from : `${from}:${to}`,
+        activeCell: selected.activeCell,
+        sheets: (run?.session.editState.sheets ?? run?.session.state.sheets)?.map((sheet) => ({
+          sheetId: sheet.id,
+          name: sheet.name,
+        })),
+      });
+      const call = run?.session.call;
+      if (call) {
+        void Promise.resolve(call.readCells({ ranges: [] })).then((catalog) => {
+          setReplaceTarget((current) => current?.sheets && current.sheetId === selected.sheetId
+            ? { ...current, sheets: withSheetCatalog(current.sheets, catalog) }
+            : current);
+        }, () => {});
+      }
+    }
+    setReplaceOpen(true);
+  };
+  const replaceApi = useMemo<ReplaceDialogApi>(() => ({
+    version: () => run?.session.call.version() ?? '',
+    find: (request) => {
+      const call = run?.session.call;
+      if (!call) throw new Error('The editor is not ready.');
+      return call.findText(request);
+    },
+    reveal: (cell) => replaceReveal.current(cell),
+    validate: (request): Promise<XlsxValidationResult> => {
+      const call = run?.session.call;
+      if (!call) throw new Error('The editor is not ready.');
+      return call.validateEdits(request);
+    },
+    apply: (request): Promise<XlsxEditResult> => coordinator.runAfterPendingInput(() =>
+      coordinator.command({ kind: 'applyEdits', payload: { args: [request] } }).result.then((status) => {
+        if (!status.result) throw new Error('The replacement was not applied.');
+        mutation.current += 1;
+        return status.result as XlsxEditResult;
+      })),
+  }), [run]);
   const hidden = () => selectionHidden(sourceRef.current?.painted?.displayList.grid);
   const navigationContext = () => {
     const owner = ownerRef.current;
@@ -542,7 +635,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     isReady: () => run?.ready ?? false, readOnly: () => propsRef.current.readOnly ?? false,
     allowHostProposals: () => propsRef.current.allowHostProposals ?? false,
     seal: (): InputSeal => {
-      if (chartDrag.current) return { refused: 'gesture-active' };
+      if (chartDrag.current || chartResizeActive()) return { refused: 'gesture-active' };
       flushNudgeRef.current();
       return draftController.seal();
     },
@@ -1143,12 +1236,13 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       nudgeTimer.current = null;
       nudge.current = null; chartDrag.current = null; dragging.current = false; clickStart.current = null;
       revealing.current = null;
+      cancelChartResize();
     };
     pluginHost.beginLoad();
     cancelGestures();
     setRefusal(null); presentation.reset();
     activeSheetId.current = undefined;
-    setSelectedChart(null); setChartOffset(null); setFormatToken(null); setProposals([]); setStaleFor({});
+    setSelectedChart(null); setChartPreview(null); setFormatToken(null); setProposals([]); setStaleFor({});
     setProposalsPanelOpen(false); formatSource.current = null;
     setCatalog(run?.session.editState.sheets ?? run?.session.state.sheets ?? []);
     navigation.current += 1;
@@ -1232,7 +1326,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       if (sourceRef.current === source) sourceRef.current = null;
       if (echoRef.current === echo) echoRef.current = null;
     };
-  }, [run, coordinator, draftController, capture]);
+  }, [run, coordinator, draftController, capture, cancelChartResize]);
   useEffect(() => {
     neighborFrames.clear();
     neighborRevision.current += 1;
@@ -1303,15 +1397,16 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     if (props.readOnly) {
       flushNudgeRef.current(true);
       draftController.finish(); setFormatToken(null); chartDrag.current = null; nudge.current = null;
-      setChartOffset(null);
+      cancelChartResize();
+      setChartPreview(null);
     }
     void coordinator.setReadOnly(Boolean(props.readOnly), props.allowHostProposals).result.catch(report);
-  }, [run, run?.ready, props.readOnly, props.allowHostProposals, coordinator, draftController]);
+  }, [run, run?.ready, props.readOnly, props.allowHostProposals, coordinator, draftController, cancelChartResize]);
   useEffect(() => {
     if (!run?.failure) return;
     echoRef.current?.dispose(); sourceRef.current?.dispose(); coordinator.fail(run.failure); draftController.dispose();
-    chartDrag.current = null; nudge.current = null;
-  }, [run, run?.failure, coordinator, draftController]);
+    chartDrag.current = null; nudge.current = null; cancelChartResize();
+  }, [run, run?.failure, coordinator, draftController, cancelChartResize]);
 
   const command = (input: PeerlessWorkerCommandInput) => {
     const frame = sourceRef.current?.captureCommandFrame() ?? undefined;
@@ -1562,12 +1657,27 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   nameNavigation.current = (cell) => { navigate(activeRef.current, selectionAt(cell)); focus(); };
   sheetNavigation.current = (sheet) => { if (sheet === activeRef.current) navigate(sheet); };
+  replaceReveal.current = (cell) => {
+    const sheets = run?.session.editState.sheets ?? run?.session.state.sheets;
+    const sheet = sheets?.find((entry) => entry.id === cell.sheetId)?.index;
+    if (sheet !== undefined) navigate(sheet, selectionAt({ row: cell.row, col: cell.col }));
+  };
   const moveChart = (sheet: number, id: string, dx: number, dy: number, retained = false, generation = run?.generation) => {
     if (!run?.ready || !run.current || run.retiring || generation !== run.generation || run.failure ||
       !retained && !editable() || dx === 0 && dy === 0) return;
     const target = rangeTarget(sheet, selectionRef.current ?? selectionAt({ row: 0, col: 0 }));
     command({ kind: 'moveChart', payload: { args: [sheet, id, dx, dy], target } });
-    setChartOffset(null);
+    setChartPreview(null);
+  };
+  resizeChartRef.current = (edges) => {
+    const selected = chartRef.current;
+    if (!selected) return;
+    const generation = run?.generation;
+    if (!run?.ready || !run.current || run.retiring || generation !== run.generation || run.failure || !editable()) return;
+    const sheet = activeRef.current;
+    const target = rangeTarget(sheet, selectionRef.current ?? selectionAt({ row: 0, col: 0 }));
+    setChartPreview(null);
+    command({ kind: 'resizeChart', payload: { args: [sheet, selected.id, edges], target } });
   };
   const flushNudge = (retained = false) => {
     const pending = nudge.current;
@@ -1588,9 +1698,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       chartDrag.current = null;
       if (drag && event.button === 0) gestures.current.moveChart(drag.sheet, drag.id,
         (event.clientX - drag.x) / drag.zoom, (event.clientY - drag.y) / drag.zoom, false, drag.generation);
-      else setChartOffset(null);
+      else setChartPreview(null);
     };
-    const cancel = () => { dragging.current = false; chartDrag.current = null; setChartOffset(null); gestures.current.flushNudge(); };
+    const cancel = () => { dragging.current = false; chartDrag.current = null; setChartPreview(null); gestures.current.flushNudge(); };
     window.addEventListener('mouseup', stop); window.addEventListener('blur', cancel);
     return () => {
       window.removeEventListener('mouseup', stop); window.removeEventListener('blur', cancel);
@@ -1622,6 +1732,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     setZoom: (scale) => setZoom(scale),
     setBorderStyle: (value) => { borderStyle.current = value; }, setBorderColor: (value) => { borderColor.current = value; },
     setProposalsPanelOpen: (open) => { setProposalsPanelOpen(open); if (open) requestProposals(true); },
+    setReplaceOpen: (open) => { if (open) openReplaceDialog(); else setReplaceOpen(false); },
     markStale: (id, cells) => setStaleFor(({ [id]: _removed, ...rest }) => cells ? { ...rest, [id]: cells } : rest),
     refreshProposals: () => requestProposals(), i18n: () => propsRef.current.i18n, translate: t,
     fail: (error) => run?.fail(error), afterPaint: () => coordinator.whenPresented().then(() => true, () => false),
@@ -1661,7 +1772,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   });
   const selectAtPoint = (request: { x: number; y: number }) => {
     const { cell, chart } = point({ clientX: request.x, clientY: request.y });
-    if (chart) { setSelectedChart({ id: chart.id, movable: chart.movable }); return null; }
+    if (chart) {
+      setSelectedChart({ id: chart.id, movable: chart.movable, resizable: chart.resizable,
+        placeholder: chart.placeholder ?? false });
+      return null;
+    }
     if (!cell) return null;
     const sheet = activeRef.current;
     const covers = () => {
@@ -1724,6 +1839,127 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     },
   });
   const renameDone = useRef(false);
+  const selectHeader = (axis: 'col' | 'row', index: number, extend: boolean) => {
+    const sheet = activeRef.current;
+    const from = extend ? selectionRef.current : null;
+    // A header press spans the sheet's own extent, and a shifted press spans
+    // from the anchor's track to the pressed one. It bypasses the cell
+    // navigation on purpose: a merged cell inside the track must not snap the
+    // anchor away from the pressed header, and selecting a track must not
+    // scroll the sheet.
+    const first = axis === 'col' ? from?.anchor.col ?? index : from?.anchor.row ?? index;
+    const track = axis === 'col'
+      ? { top: 0, left: Math.min(first, index), bottom: XLSX_MAX_ROWS - 1, right: Math.max(first, index) }
+      : { top: Math.min(first, index), left: 0, bottom: Math.max(first, index), right: XLSX_MAX_COLUMNS - 1 };
+    const corner = axis === 'col' ? { row: 0, col: index } : { row: index, col: 0 };
+    const next: Selection = from
+      ? { anchor: from.anchor, focus: corner, range: track }
+      : { ...selectionAt(corner), range: track };
+    placeSelection(sheet, next);
+    command({ kind: 'select', payload: { selection: rangeTarget(sheet, next) } });
+  };
+  const endChartGesture = () => { chartDrag.current = null; cancelChartResize(); setChartPreview(null); };
+  const dropChart = () => { endChartGesture(); setSelectedChart(null); };
+  /**
+   * The corner above the row numbers selects the whole sheet, the same raw
+   * path as a header press: the range is the sheet's own extent, not the
+   * painted window's, and the host hears the selection as one `select`.
+   */
+  const onSelectAll = () => {
+    if (!run?.ready || run.failure) return;
+    draftController.commit('cell'); draftController.commit('formula'); flushNudge();
+    dropChart();
+    const sheet = activeRef.current;
+    const next: Selection = {
+      anchor: { row: 0, col: 0 },
+      focus: { row: 0, col: 0 },
+      range: { top: 0, left: 0, bottom: XLSX_MAX_ROWS - 1, right: XLSX_MAX_COLUMNS - 1 },
+    };
+    placeSelection(sheet, next);
+    command({ kind: 'select', payload: { selection: rangeTarget(sheet, next) } });
+    focus();
+  };
+  const onHeaderMouseDown = (axis: 'col' | 'row', index: number, event: MouseEvent) => {
+    if (event.button !== 0 || fromPlugin(event) || !run?.ready || run.failure ||
+      draftController.cellInput?.contains(event.target as Node) ||
+      draftController.isComposing('cell') || draftController.isComposing('formula')) return;
+    draftController.commit('cell'); draftController.commit('formula'); flushNudge();
+    dropChart();
+    selectHeader(axis, index, event.shiftKey);
+    focus();
+  };
+  const onHeaderResize = (axis: 'col' | 'row', index: number, size: number,
+    run?: { at: number; count: number }) => {
+    if (run && ((axis === 'row' && run.count >= XLSX_MAX_ROWS) || (axis === 'col' && run.count >= XLSX_MAX_COLUMNS))) return;
+    if (!editable() || !Number.isFinite(size)) return;
+    const sheet = activeRef.current;
+    // the drag is measured in pixels; the engine stores characters and points.
+    // A whole-run drag is one transaction, so undo takes it back in one step.
+    const ops = run
+      ? Array.from({ length: run.count }, (_, offset) => axis === 'col'
+        ? { type: 'setColWidth', sheet, col: run.at + offset, width: columnWidthFromPx(size) }
+        : { type: 'setRowHeight', sheet, row: run.at + offset, height: rowHeightFromPx(size) })
+      : [axis === 'col'
+        ? { type: 'setColWidth', sheet, col: index, width: columnWidthFromPx(size) }
+        : { type: 'setRowHeight', sheet, row: index, height: rowHeightFromPx(size) }];
+    command({ kind: 'applyOps', payload: { args: [ops] } });
+  };
+  // keyed on the session: the first render has run === null, and a `[]` memo
+  // would freeze that closure so the `!run?.ready` guard never passed again.
+  const headerHandlers = useMemo<SheetGridHeaderHandlers>(
+    () => ({ onHeaderMouseDown, onHeaderResize, onSelectAll, onHeaderPress: dropChart,
+      // a drag from an unselected header extends from the anchor the press set;
+      // the press already committed the drafts and took focus.
+      onHeaderDragSelect: (axis, index) => {
+        if (!run?.ready || run.failure) return;
+        selectHeader(axis, index, true);
+      },
+    }), [run]);
+  const headerMenu = useContextMenu({
+    // the bands are siblings of the scroller, so their contextmenu never
+    // reaches a listener bound to scrollRef; the editor root sees both.
+    surface: rootRef,
+    subscribe: commands.store.subscribe,
+    resolve: (request) => {
+      if (!run?.ready || run.failure || inPluginChrome(request.target)) return null;
+      if (draftController.cellInput?.contains(request.target as Node)) return null;
+      const band = request.target instanceof Element
+        ? request.target.closest<HTMLElement>('[data-testid="xlsx-column-headers"], [data-testid="xlsx-row-headers"]')
+        : null;
+      if (!band) return null;
+      const axis = band.dataset.testid === 'xlsx-column-headers' ? 'columnHeader' : 'rowHeader';
+      const track = request.target instanceof Element
+        ? request.target.closest<HTMLElement>('[data-col], [data-row]') : null;
+      const index = Number(axis === 'columnHeader' ? track?.dataset.col : track?.dataset.row);
+      if (!track || !Number.isInteger(index)) return null;
+      dropChart();
+      selectHeader(axis === 'columnHeader' ? 'col' : 'row', index, false);
+      // freezing reads the frame the bands painted, so the split matches what
+      // the user sees rather than a request the editor has not drawn yet; the
+      // apply re-checks the sheet because the menu can outliven a navigation.
+      const freezeTarget = (): XlsxContextFreezeTarget | undefined => {
+        const frame = sourceRef.current?.painted;
+        if (!frame || frame.request.sheet !== activeRef.current) return undefined;
+        return {
+          rows: frame.displayList.grid?.frozenRows ?? 0,
+          cols: frame.displayList.grid?.frozenCols ?? 0,
+          index,
+          apply: (rows, cols) => {
+            if (!editable() || frame.request.sheet !== activeRef.current) return;
+            const sheet = activeRef.current;
+            command({ kind: 'applyOps', payload: { args: [[{
+              type: 'setFreezePane', sheet,
+              pane: rows === 0 && cols === 0 ? null : { rows, cols, top_left: { row: rows, col: cols } },
+            }]] } });
+          },
+        };
+      };
+      return { label: t(axis === 'columnHeader' ? 'editor.columnHeaderMenuLabel' : 'editor.rowHeaderMenuLabel'),
+        testId: axis === 'columnHeader' ? 'xlsx-column-header-menu' : 'xlsx-row-header-menu',
+        entries: () => guardEntries(xlsxContextMenuEntries(axis, commands.store, t, freezeTarget()),
+          () => !run?.failure && editable()) };
+    },
+  });
   const finishRename = (input: HTMLInputElement | null, commit: boolean) => {
     if (renameDone.current) return;
     renameDone.current = true;
@@ -1780,7 +2016,9 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const { cell, chart } = point(event);
     clickStart.current = null;
     if (chart) {
-      setSelectedChart({ id: chart.id, movable: chart.movable });
+      setSelectedChart({ id: chart.id, movable: chart.movable, resizable: chart.resizable,
+        placeholder: chart.placeholder ?? false });
+      setChartPreview(null);
       if (editable() && chart.movable && event.button === 0) chartDrag.current = {
         generation: run.generation, sheet: activeRef.current, id: chart.id,
         zoom: sourceRef.current?.painted?.request.zoom ?? zoomRef.current,
@@ -1798,9 +2036,11 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
   };
   const onMouseMove = (event: MouseEvent<HTMLDivElement>) => {
     if (fromPlugin(event) || run?.failure) return;
+    // a captured resize handle owns hover feedback until it is released.
+    if (chartResizeActive()) return;
     const drag = chartDrag.current;
     if (drag) {
-      setChartOffset({ x: event.clientX - drag.x, y: event.clientY - drag.y });
+      setChartPreview({ kind: 'move', x: event.clientX - drag.x, y: event.clientY - drag.y });
       event.currentTarget.style.cursor = 'move'; return;
     }
     const { cell, chart } = point(event);
@@ -1856,7 +2096,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
     const chart = chartRef.current;
     if (chart) {
       if (event.key === 'Escape') {
-        chartDrag.current = null; nudge.current = null; setChartOffset(null); setSelectedChart(null);
+        chartDrag.current = null; nudge.current = null; setChartPreview(null); setSelectedChart(null);
         event.preventDefault(); return;
       }
       const delta = !mod && chartKeys[event.key];
@@ -1864,7 +2104,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         const step = event.shiftKey ? 10 : 1;
         const base = nudge.current ?? { generation: run.generation, sheet: activeRef.current, id: chart.id, dx: 0, dy: 0 };
         nudge.current = { ...base, dx: base.dx + delta[0] * step, dy: base.dy + delta[1] * step };
-        setChartOffset({ x: nudge.current.dx * zoomRef.current, y: nudge.current.dy * zoomRef.current });
+        setChartPreview({ kind: 'move', x: nudge.current.dx * zoomRef.current,
+          y: nudge.current.dy * zoomRef.current });
         if (nudgeTimer.current !== null) clearTimeout(nudgeTimer.current);
         const owner = run;
         nudgeTimer.current = setTimeout(() => {
@@ -1976,10 +2217,20 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         <div ref={dockAreaRef} data-testid="xlsx-workspace" style={{ position: 'relative', display: 'flex', flex: 1, minHeight: 0 }}>
           {renderDock('left')}
           <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
+          <ReplaceDialog
+            open={replaceOpen}
+            target={replaceTarget}
+            api={replaceApi}
+            readOnly={Boolean(props.readOnly)}
+            onClose={() => setReplaceOpen(false)}
+            onApplied={() => commands.refresh()}
+          />
           {isProposalsAvailable() && proposalsPanelOpen && <ProposalsPanel proposals={proposals} staleFor={staleFor}
             style={{ top: 4, right: 8, width: 'min(320px, calc(100% - 16px))', maxHeight: 'min(420px, calc(100% - 12px))' }} />}
           {pluginHost.rowGutter && <PluginRowGutter host={pluginHost.host} index={pluginHost.rowGutter}
-            painted={pluginHost.painted} zoom={zoom} />}
+            painted={pluginHost.painted} zoom={zoom} top={props.showSheetHeaders ? COLUMN_HEADER_HEIGHT : 0} />}
+          <PeerlessSheetGrid store={presentation} active={active} leadingInset={pluginHost.rowGutter ? ROW_GUTTER_WIDTH * zoom : 0} showSheetHeaders={Boolean(props.showSheetHeaders)} headerHandlers={headerHandlers}
+            selectAllLabel={t('commands.selectAll')}>
           <div ref={scrollRef} id={gridId} data-testid="xlsx-scroll" tabIndex={0} onKeyDown={onKeyDown}
             role="group" aria-roledescription={t('a11y.gridRoleDescription')}
             aria-label={sheets.find((sheet) => sheet.index === active)?.name || t('a11y.gridLabel')}
@@ -1994,12 +2245,16 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
             }}
             onMouseLeave={(event) => { event.currentTarget.style.cursor = 'default'; event.currentTarget.title = ''; }}
             style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none',
-              ...(pluginHost.rowGutter ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}) }}>
+              ...(pluginHost.rowGutter && !props.showSheetHeaders ? { marginLeft: ROW_GUTTER_WIDTH * zoom } : {}) }}>
             <PeerlessWorkerExtent store={presentation} zoom={zoom} />
             <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>
               <canvas ref={canvasRef} style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} />
               <PeerlessWorkerOverlay store={presentation} active={active} zoom={zoom} selectedChart={selectedChart}
-                chartOffset={chartOffset} controller={draftController} run={run} disabled={Boolean(error) || Boolean(props.readOnly)}
+                chartPreview={chartPreview} chartSheetExtent={chartSheetExtent}
+                onResizeStart={(handle, event) => { flushNudge(); startChartResize(handle, event); }}
+                onResizeNudge={nudgeChartResize}
+                controller={draftController} run={run} disabled={Boolean(error) || Boolean(props.readOnly)}
+                showSheetHeaders={Boolean(props.showSheetHeaders)}
                 onFill={fillSelection} cellAt={fillCellAt} fillHandle={props.fillHandle} />
               <PeerlessWorkerPresence store={presentation} run={run} provider={props.collaboration?.provider}
                 active={active} sheets={sheets} />
@@ -2008,6 +2263,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
                 height={(painted?.displayList.height ?? 0) * (painted?.request.zoom ?? zoom)} />}
             </div>
           </div>
+          </PeerlessSheetGrid>
           {renderDock('bottom')}
           </div>
           {renderDock('right')}
@@ -2022,7 +2278,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
             : <>{commandReason(refusal.code, { translate: t }).message}{refusal.detail ? `: ${refusal.detail}` : ''}</>)}
         </div>}
         {error && sheets.length > 0 && <WorkbookFailure kind="stopped" details={error.message} />}
-        {gridMenu.element}{tabMenu.element}
+        {gridMenu.element}{tabMenu.element}{headerMenu.element}
         {sheets.length > 0 && <div ref={tabsRef} data-testid="xlsx-sheet-tabs" role="tablist" aria-label={t('editor.sheetTabsLabel')}
           style={{ display: 'flex', gap: 2, padding: '4px 6px', borderTop: '1px solid #e0e0e0', background: '#fafafa', overflowX: 'auto' }}>
           {sheets.map((sheet, position) => renaming === sheet.index ? <input key={sheet.id} data-testid="xlsx-sheet-rename"

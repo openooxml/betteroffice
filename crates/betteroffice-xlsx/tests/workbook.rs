@@ -1,13 +1,18 @@
+#[cfg(any(
+    feature = "unstable-track-moves",
+    feature = "unstable-track-visibility"
+))]
+use betteroffice_xlsx::MAX_COLS;
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
-    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
+    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ChartResize, ColStyle,
     DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, ErrorValue, FreezePane,
     GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
     MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
     ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, Stylesheet,
-    UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    UpdateOrigin, Viewport, Workbook, WorkbookModel, resolve_chart_anchor,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10131,6 +10136,324 @@ fn a_moved_chart_survives_a_save_and_undoes_in_one_step() {
     assert_eq!(workbook.model().sheets[0].charts[0].anchor, moved);
 }
 
+/// Resizing a two-cell chart is one undo step that survives a save and reopen:
+/// both corners reach the drawing part, the anchor resolves back to the dragged
+/// rect, and the way the anchor follows a grid edit is untouched.
+#[test]
+fn a_resized_chart_survives_a_save_and_undoes_in_one_step() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    let before = workbook.model().sheets[0].charts[0].anchor;
+    let geometry = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
+    let before_rect = resolve_chart_anchor(before, &geometry, 0, 0).unwrap().rect;
+
+    assert!(
+        workbook
+            .resize_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                ChartResize {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 96.0,
+                    bottom: 48.0,
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap()
+            .applied
+    );
+    let resized = workbook.model().sheets[0].charts[0].anchor;
+    assert_ne!(resized, before);
+    assert_eq!(
+        resized.edit_as(),
+        AnchorEditAs::OneCell,
+        "a resize must not change how the anchor follows a grid edit"
+    );
+    let after_rect = resolve_chart_anchor(resized, &geometry, 0, 0).unwrap().rect;
+    assert_eq!(after_rect.x, before_rect.x, "the left edge did not move");
+    assert_eq!(after_rect.y, before_rect.y, "the top edge did not move");
+    assert!(
+        (after_rect.w - (before_rect.w + 96.0)).abs() < 0.5,
+        "{after_rect:?} after {before_rect:?}"
+    );
+    assert!(
+        (after_rect.h - (before_rect.h + 48.0)).abs() < 0.5,
+        "{after_rect:?} after {before_rect:?}"
+    );
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+    let undone = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(undone.model().sheets[0].charts[0].anchor, before);
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, resized);
+}
+
+/// An east or south resize leaves the `from` marker exactly as read, even when
+/// it sits on a hidden column or carries an offset past its row's height.
+#[test]
+fn a_resize_keeps_the_marker_of_an_edge_that_did_not_move() {
+    let hidden_from_column = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let sheet = test_part_text(&parts, "xl/worksheets/sheet1.xml").replace(
+            "<sheetData>",
+            r#"<cols><col min="3" max="3" width="9" customWidth="1" hidden="1"/></cols><sheetData>"#,
+        );
+        set_test_part(&mut parts, "xl/worksheets/sheet1.xml", sheet.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let oversized_row_offset = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec()).unwrap().replace(
+            "<xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff>",
+            "<xdr:row>4</xdr:row><xdr:rowOff>762000</xdr:rowOff>",
+        );
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let from_of = |anchor: ChartAnchor| match anchor {
+        ChartAnchor::TwoCell { from, .. } => from,
+        other => panic!("expected a two-cell anchor, got {other:?}"),
+    };
+
+    for (bytes, edges, expected_from) in [
+        (
+            hidden_from_column,
+            ChartResize {
+                right: 40.0,
+                ..ChartResize::default()
+            },
+            AnchorCell {
+                col: 2,
+                col_off: 12700,
+                row: 4,
+                row_off: 0,
+            },
+        ),
+        (
+            oversized_row_offset,
+            ChartResize {
+                bottom: 30.0,
+                ..ChartResize::default()
+            },
+            AnchorCell {
+                col: 2,
+                col_off: 12700,
+                row: 4,
+                row_off: 762000,
+            },
+        ),
+    ] {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        let before = workbook.model().sheets[0].charts[0].anchor;
+        assert_eq!(from_of(before), expected_from);
+
+        assert!(
+            workbook
+                .resize_chart(
+                    SheetId(0),
+                    "xl/drawings/drawing1.xml#0",
+                    edges,
+                    CalculationOptions::default(),
+                )
+                .unwrap()
+                .applied
+        );
+        let resized = workbook.model().sheets[0].charts[0].anchor;
+        assert_ne!(resized, before, "{edges:?} must move an edge");
+        assert_eq!(
+            from_of(resized),
+            expected_from,
+            "{edges:?} must not renormalize the untouched corner"
+        );
+
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+        assert_eq!(
+            from_of(reopened.model().sheets[0].charts[0].anchor),
+            expected_from
+        );
+    }
+}
+
+/// A resize is clamped to a pixel and to the grid rather than collapsing into
+/// an inverted anchor no save could write.
+#[test]
+fn a_resize_keeps_a_pixel_of_chart_on_the_sheet() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    let before = workbook.model().sheets[0].charts[0].anchor;
+    let geometry = GridGeometry::new(&workbook.model().sheets[0], &workbook.model().styles);
+    let before_rect = resolve_chart_anchor(before, &geometry, 0, 0).unwrap().rect;
+
+    let frame = "xl/drawings/drawing1.xml#0";
+    workbook
+        .resize_chart(
+            SheetId(0),
+            frame,
+            ChartResize {
+                left: -10_000.0,
+                top: -10_000.0,
+                right: -(before_rect.w as f32) - 500.0,
+                bottom: -(before_rect.h as f32) - 500.0,
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let resized = workbook.model().sheets[0].charts[0].anchor;
+    let rect = resolve_chart_anchor(resized, &geometry, 0, 0).unwrap().rect;
+    assert_eq!(rect.x, 0.0, "the left edge stops at the sheet");
+    assert_eq!(rect.y, 0.0, "the top edge stops at the sheet");
+    assert!(rect.w >= 1.0, "{rect:?}");
+    assert!(rect.h >= 1.0, "{rect:?}");
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+
+    assert!(
+        !workbook
+            .resize_chart(
+                SheetId(0),
+                frame,
+                ChartResize::default(),
+                CalculationOptions::default(),
+            )
+            .unwrap()
+            .applied,
+        "a resize with no edge movement changes nothing"
+    );
+}
+
+/// A one-cell anchor keeps its size in `xdr:ext`, which a save never rewrites,
+/// and an absolute anchor carries its position in attributes; resizing either
+/// is refused before anything changes.
+#[test]
+fn resizing_refuses_a_one_cell_and_an_absolute_anchor() {
+    let one_cell = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+            .unwrap()
+            .replace(
+                r#"<xdr:twoCellAnchor editAs="oneCell">"#,
+                "<xdr:oneCellAnchor>",
+            )
+            .replace(
+                "<xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>",
+                "",
+            )
+            .replace("</xdr:twoCellAnchor>", "</xdr:oneCellAnchor>")
+            .replace(
+                "<xdr:graphicFrame>",
+                r#"<xdr:ext cx="1905000" cy="1143000"/><xdr:graphicFrame>"#,
+            );
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let absolute = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+            .unwrap()
+            .replace(
+                r#"<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"#,
+                r#"<xdr:absoluteAnchor><xdr:pos x="95250" y="190500"/><xdr:ext cx="1905000" cy="1143000"/>"#,
+            )
+            .replace("</xdr:twoCellAnchor>", "</xdr:absoluteAnchor>");
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+
+    for (bytes, kind, reason) in [
+        (one_cell, "OneCell", "one-cell extent"),
+        (absolute, "Absolute", "pinned"),
+    ] {
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        assert_eq!(
+            match workbook.model().sheets[0].charts[0].anchor {
+                ChartAnchor::OneCell { .. } => "OneCell",
+                ChartAnchor::Absolute { .. } => "Absolute",
+                ChartAnchor::TwoCell { .. } => "TwoCell",
+            },
+            kind
+        );
+        let before = workbook.model().sheets[0].charts[0].anchor;
+        let saved = workbook.save().unwrap();
+        let error = workbook
+            .resize_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                ChartResize {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 50.0,
+                    bottom: 50.0,
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message) if message.contains(reason)),
+            "{error:?}"
+        );
+        assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+        assert_eq!(
+            workbook.save().unwrap(),
+            saved,
+            "a refused resize must leave the package alone"
+        );
+    }
+}
+
+/// One drawing anchor held by two sheets is one element in one part, so a
+/// resize repins every sheet holding it and undo takes them back together.
+#[test]
+fn a_resize_repins_every_sheet_sharing_the_drawing() {
+    let mut workbook = Workbook::open(&shared_drawing_fixture()).unwrap();
+    assert_eq!(
+        workbook.model().sheets[1].charts[0].drawing,
+        workbook.model().sheets[0].charts[0].drawing,
+        "the fixture must share one drawing"
+    );
+    let before = workbook.model().sheets[0].charts[0].anchor;
+
+    assert!(
+        workbook
+            .resize_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                ChartResize {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 48.0,
+                    bottom: 24.0,
+                },
+                CalculationOptions::default(),
+            )
+            .unwrap()
+            .applied
+    );
+    let resized = workbook.model().sheets[0].charts[0].anchor;
+    assert_ne!(resized, before);
+    assert_eq!(
+        workbook.model().sheets[1].charts[0].anchor,
+        resized,
+        "the sheet sharing the anchor must follow it"
+    );
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+    assert_eq!(reopened.model().sheets[1].charts[0].anchor, resized);
+
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+    assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
+}
+
 /// One chart part can back two anchors on a sheet, so a part cannot name a
 /// frame. Each frame hit-tests to its own id, moves alone, and reaches the
 /// anchor it was read from on save.
@@ -10483,6 +10806,63 @@ fn set_chart_anchor_refuses_what_a_save_cannot_write() {
     };
     assert!(repin(&mut workbook, resized).unwrap().applied);
     let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+}
+
+/// A resize reaches a live peer as the anchor its author wrote: both sides end
+/// on one anchor whose untouched `from` marker still sits on the hidden column.
+#[test]
+fn collaborative_sessions_resize_a_chart_and_converge() {
+    let bytes = {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let sheet = test_part_text(&parts, "xl/worksheets/sheet1.xml").replace(
+            "<sheetData>",
+            r#"<cols><col min="3" max="3" width="9" customWidth="1" hidden="1"/></cols><sheetData>"#,
+        );
+        set_test_part(&mut parts, "xl/worksheets/sheet1.xml", sheet.into_bytes());
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    };
+    let mut left = Workbook::open_collaborative(&bytes, 305).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 306).unwrap();
+    let before = left.model().sheets[0].charts[0].anchor;
+    let ChartAnchor::TwoCell { from, .. } = before else {
+        panic!("two-cell anchor");
+    };
+
+    assert!(
+        left.resize_chart(
+            SheetId(0),
+            "xl/drawings/drawing1.xml#0",
+            ChartResize {
+                right: 40.0,
+                bottom: 20.0,
+                ..ChartResize::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap()
+        .applied
+    );
+    let resized = left.model().sheets[0].charts[0].anchor;
+    assert_ne!(resized, before);
+
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    assert!(
+        right
+            .apply_update_v1(&update, CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(right.model().sheets[0].charts[0].anchor, resized);
+    assert_eq!(right.model(), left.model());
+    assert!(
+        matches!(resized, ChartAnchor::TwoCell { from: kept, .. } if kept == from),
+        "{resized:?} must keep the from marker {from:?}"
+    );
+
+    let reopened = Workbook::open(&right.save().unwrap()).unwrap();
     assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
 }
 
@@ -12752,6 +13132,148 @@ fn hidden_custom_sizes_survive_bounded_workbook_snapshots() {
     assert_eq!(restored.model().sheets[0].row_heights.get(&0), Some(&30.0));
 }
 
+#[cfg(feature = "unstable-track-visibility")]
+#[test]
+fn a_visibility_range_hides_its_span_and_refuses_a_span_past_the_sheet() {
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(5, 21.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    let before = workbook.model().clone();
+    workbook
+        .apply_ops(
+            vec![Op::SetColsVisibility {
+                sheet: SheetId(0),
+                col: 4,
+                count: 4,
+                hidden: true,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        workbook.model().sheets[0].hidden_col_widths.get(&5),
+        Some(&21.0)
+    );
+    assert!(workbook.model().sheets[0].col_hidden(4));
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model(), &before);
+
+    let mut sheet = Sheet::new("Sized");
+    sheet.col_widths.insert(MAX_COLS - 1, 12.0);
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let source = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    for op in [
+        Op::SetColsVisibility {
+            sheet: SheetId(0),
+            col: MAX_COLS - 2,
+            count: 8,
+            hidden: true,
+        },
+        Op::SetRowsVisibility {
+            sheet: SheetId(0),
+            row: MAX_ROWS - 2,
+            count: 8,
+            hidden: true,
+        },
+        Op::SetColsVisibility {
+            sheet: SheetId(0),
+            col: 3,
+            count: 0,
+            hidden: true,
+        },
+    ] {
+        assert!(
+            matches!(
+                workbook.apply_ops(vec![op.clone()], CalculationOptions::default()),
+                Err(Error::InvalidOperation(_))
+            ),
+            "{op:?} crosses the sheet limit or names no track"
+        );
+    }
+    assert_eq!(
+        workbook.model().sheets[0].col_widths.get(&(MAX_COLS - 1)),
+        Some(&12.0),
+        "a refused range leaves the widths alone"
+    );
+    assert!(!workbook.can_undo());
+}
+
+#[cfg(feature = "unstable-track-visibility")]
+#[test]
+fn a_visibility_range_syncs_its_whole_span_to_a_peer() {
+    let mut sheet = Sheet::new("Sized");
+    for col in 2..6 {
+        sheet.col_widths.insert(col, 10.0 + f64::from(col));
+    }
+    for row in 2..6 {
+        sheet.row_heights.insert(row, 20.0 + f64::from(row));
+    }
+    let model = WorkbookModel {
+        sheets: vec![sheet],
+        ..Default::default()
+    };
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut source = Workbook::open_collaborative(&bytes, 751).unwrap();
+    let mut peer = Workbook::open_collaborative(&bytes, 752).unwrap();
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&updates);
+    let _subscription = source
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    source
+        .apply_ops(
+            vec![
+                Op::SetColsVisibility {
+                    sheet: SheetId(0),
+                    col: 2,
+                    count: 4,
+                    hidden: true,
+                },
+                Op::SetRowsVisibility {
+                    sheet: SheetId(0),
+                    row: 2,
+                    count: 4,
+                    hidden: true,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for update in updates.lock().unwrap().drain(..) {
+        peer.apply_update_v1(&update, CalculationOptions::default())
+            .unwrap();
+    }
+    assert_eq!(
+        peer.model().sheets[0].col_widths,
+        source.model().sheets[0].col_widths
+    );
+    assert_eq!(
+        peer.model().sheets[0].row_heights,
+        source.model().sheets[0].row_heights
+    );
+    for col in 2..6 {
+        assert!(
+            peer.model().sheets[0].col_hidden(col),
+            "column {col} must hide for the peer"
+        );
+    }
+    for row in 2..6 {
+        assert!(
+            peer.model().sheets[0].row_hidden(row),
+            "row {row} must hide for the peer"
+        );
+    }
+}
+
 fn hidden_custom_sizes_source() -> Vec<u8> {
     let mut sheet = Sheet::new("Sized");
     sheet.col_widths.insert(0, 0.0);
@@ -13568,6 +14090,327 @@ fn png_targets_validate_sheets_and_scale_all_forms() {
             workbook.render_png(target, &RenderOptions::default()),
             Err(Error::SheetOutOfRange(_))
         ));
+    }
+}
+
+/// A row that holds an array formula and nothing else is a permitted move, but
+/// the recalculation that follows evaluates `SEQUENCE(ROW())` at its new row
+/// and grows the relocated rectangle past the moved run. Undo has to put that
+/// array back where it was rather than mirror the grown rectangle: the mirror
+/// no longer fits the run it would tear.
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn a_row_move_that_recalculation_grows_undoes_and_redoes() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            formula: Some("SEQUENCE(ROW())".into()),
+            ..Cell::default()
+        },
+    );
+    sheet.set_array_formula(cell("A1"), CellRange::new(cell("A1"), cell("A1")));
+    for (at, value) in [("A2", 2.0), ("A3", 3.0), ("A6", 6.0)] {
+        sheet.set_cell(
+            cell(at),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveRows {
+                sheet: SheetId(0),
+                row: 0,
+                count: 1,
+                before: 3,
+            }],
+            options,
+        )
+        .unwrap();
+    let moved = &workbook.model().sheets[0];
+    assert_eq!(
+        moved.array_formula(cell("A3")),
+        Some(CellRange::parse_a1("A3:A5").unwrap()),
+        "recalculation grows the relocated array"
+    );
+    assert_eq!(
+        moved.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 2.0 })
+    );
+
+    workbook
+        .undo(options)
+        .expect("undo must not be refused by the rectangle recalculation grew");
+    assert_eq!(
+        workbook.model(),
+        &base,
+        "undo restores the pre-move workbook, including the retired spill cells"
+    );
+
+    workbook.redo(options).unwrap();
+    let redone = &workbook.model().sheets[0];
+    assert_eq!(
+        redone.array_formula(cell("A3")),
+        Some(CellRange::parse_a1("A3:A5").unwrap())
+    );
+    assert_eq!(
+        redone.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 2.0 })
+    );
+}
+
+/// The mirror image: the moved run passes *over* the array, so the array sits
+/// in the tracks the move shifts rather than in the run itself. Recalculation
+/// grows the relocated rectangle after the move was recorded, and the inverse
+/// mirror's run does not carry the grown anchor. The inverse has to clip the
+/// rectangle back to the extent the move left before the mirror, or undo is
+/// refused as if a user had tried to tear the array.
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn a_row_move_stepping_over_a_grown_array_undoes_and_redoes() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            formula: Some("SEQUENCE(2*ROW()-1)".into()),
+            ..Cell::default()
+        },
+    );
+    sheet.set_array_formula(cell("A1"), CellRange::new(cell("A1"), cell("A1")));
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveRows {
+                sheet: SheetId(0),
+                row: 2,
+                count: 1,
+                before: 0,
+            }],
+            options,
+        )
+        .unwrap();
+    let moved = &workbook.model().sheets[0];
+    assert_eq!(
+        moved.array_formula(cell("A2")),
+        Some(CellRange::parse_a1("A2:A4").unwrap()),
+        "recalculation grows the array now in the stepped-over row"
+    );
+    assert_eq!(
+        moved.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 3.0 })
+    );
+
+    workbook
+        .undo(options)
+        .expect("undo must clip the grown rectangle before its mirror");
+    assert_eq!(
+        workbook.model(),
+        &base,
+        "undo restores the pre-move workbook and leaves no array at the old anchor"
+    );
+
+    workbook.redo(options).unwrap();
+    let redone = &workbook.model().sheets[0];
+    assert_eq!(
+        redone.array_formula(cell("A2")),
+        Some(CellRange::parse_a1("A2:A4").unwrap())
+    );
+    assert_eq!(
+        redone.cell(cell("A4")).map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 3.0 })
+    );
+}
+
+/// A move may be submitted with `before` naming the gap after the last track
+/// (dropping past XFD, or the mirror of a move to the front). The apply layer
+/// reads that as the terminal insertion gap, so validation must too.
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn a_move_to_the_terminal_gap_applies_and_undoes() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    for (at, value) in [("A1", 1.0), ("B3", 2.0)] {
+        sheet.set_cell(
+            cell(at),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveRows {
+                sheet: SheetId(0),
+                row: 0,
+                count: 1,
+                before: MAX_ROWS,
+            }],
+            options,
+        )
+        .expect("the gap after the last row is a legal move destination");
+    assert_eq!(
+        workbook.model().sheets[0]
+            .cell(CellRef::new(MAX_ROWS - 1, 0))
+            .map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 1.0 }),
+        "the row lands last"
+    );
+    workbook.undo(options).unwrap();
+    assert_eq!(workbook.model(), &base, "the terminal move undoes");
+
+    workbook
+        .apply_ops(
+            vec![Op::MoveCols {
+                sheet: SheetId(0),
+                col: 1,
+                count: 1,
+                before: MAX_COLS,
+            }],
+            options,
+        )
+        .expect("the gap after the last column is a legal move destination");
+    assert_eq!(
+        workbook.model().sheets[0]
+            .cell(CellRef::new(2, MAX_COLS - 1))
+            .map(|cell| cell.value.clone()),
+        Some(CellValue::Number { value: 2.0 }),
+        "the column lands last"
+    );
+    workbook.undo(options).unwrap();
+    assert_eq!(workbook.model(), &base, "the terminal column move undoes");
+}
+
+#[cfg(not(feature = "unstable-track-moves"))]
+#[test]
+fn a_batch_holding_a_track_move_is_refused_whole() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+    let probe = Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("C1"),
+        cell: CellState {
+            value: CellValue::Number { value: 7.0 },
+            ..CellState::default()
+        },
+    };
+    for track_move in [
+        Op::MoveCols {
+            sheet: SheetId(0),
+            col: 0,
+            count: 1,
+            before: 2,
+        },
+        Op::MoveRows {
+            sheet: SheetId(0),
+            row: 0,
+            count: 1,
+            before: 2,
+        },
+    ] {
+        let ops = vec![probe.clone(), track_move];
+        for error in [
+            workbook.apply_ops(ops.clone(), options).unwrap_err(),
+            workbook
+                .apply_ops_profiled(ops, options, &mut || 0.0)
+                .unwrap_err(),
+        ] {
+            assert!(matches!(error, Error::Operation(_)));
+            assert_eq!(
+                error.to_string(),
+                "cannot move sheet 0 tracks: moving rows or columns is not supported yet"
+            );
+        }
+        assert_eq!(workbook.model(), &base);
+        assert!(!workbook.undo(options).unwrap().applied);
+    }
+}
+
+#[cfg(not(feature = "unstable-track-visibility"))]
+#[test]
+fn a_batch_holding_a_visibility_range_is_refused_whole() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let options = CalculationOptions::default();
+    let base = workbook.model().clone();
+    let probe = Op::SetCell {
+        sheet: SheetId(0),
+        at: cell("C1"),
+        cell: CellState {
+            value: CellValue::Number { value: 7.0 },
+            ..CellState::default()
+        },
+    };
+    for range in [
+        Op::SetColsVisibility {
+            sheet: SheetId(0),
+            col: 0,
+            count: 2,
+            hidden: true,
+        },
+        Op::SetRowsVisibility {
+            sheet: SheetId(0),
+            row: 0,
+            count: 2,
+            hidden: true,
+        },
+    ] {
+        let ops = vec![probe.clone(), range];
+        for error in [
+            workbook.apply_ops(ops.clone(), options).unwrap_err(),
+            workbook
+                .apply_ops_profiled(ops, options, &mut || 0.0)
+                .unwrap_err(),
+        ] {
+            assert!(matches!(error, Error::Operation(_)));
+            assert_eq!(
+                error.to_string(),
+                "cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet"
+            );
+        }
+        assert_eq!(workbook.model(), &base);
+        assert!(!workbook.undo(options).unwrap().applied);
     }
 }
 

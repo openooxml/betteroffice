@@ -1,4 +1,4 @@
-import type { ChartInfo, ChartMutation } from '../charts';
+import type { ChartInfo, ChartMutation, ChartResizeEdges } from '../charts';
 /**
  * Wasm loader for the xlsx-wasm core.
  *
@@ -590,6 +590,14 @@ export interface WorkbookHandle extends CollaborationReplica {
    * absolute anchor.
    */
   moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult;
+  /**
+   * move the edges of the chart frame `chart` names — a {@link ChartRegion} id
+   * — by content-pixel deltas, clamped to the grid and a 1x1px minimum, as one
+   * undo step. the new two-cell anchor is written back on save. throws for a
+   * chart pinned by an absolute anchor or held by a one-cell extent, neither of
+   * which a save can rewrite.
+   */
+  resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult;
   setActiveSheet(index: number): void;
   /**
    * apply one user input to a cell (parses number/bool/formula/text) and
@@ -695,7 +703,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   listDefinedNames(request?: XlsxDefinedNamesRequest): XlsxDefinedNamesResult;
   /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
   readCells(request: XlsxReadRequest): XlsxReadResult;
-  /** Exact, case-sensitive search over display text, one match per cell. */
+  /** Literal search over display text, one match per cell; ignores case unless `matchCase`. */
   findText(request: XlsxFindRequest): XlsxFindResult;
   /** Resolves, stages and rehearses a batch like `applyEdits`, changing nothing. */
   validateEdits(request: XlsxEditRequest): XlsxValidationResult;
@@ -1208,6 +1216,9 @@ function wrapWorkbookDocument(
     },
     moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult {
       return parseJson(() => doc.moveChartJson(JSON.stringify({ sheet, chart, dx, dy })), true);
+    },
+    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult {
+      return parseJson(() => doc.resizeChartJson(JSON.stringify({ sheet, chart, ...edges })), true);
     },
     setActiveSheet(index: number): void {
       mutatingWasmCall(() => doc.setActiveSheet(index));

@@ -165,8 +165,8 @@ fn wasm_host() -> Host {
 fn js_entropy() -> u64 {
     #[cfg(target_arch = "wasm32")]
     {
-        ((js_sys::Math::random() * 9_007_199_254_740_992.0) as u64)
-            ^ (js_sys::Date::now() as u64).rotate_left(21)
+        crate::identity::platform_random()
+            .map_or_else(crate::identity::fallback_draw, |[word]| word)
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -2873,6 +2873,11 @@ impl EditSession {
     ) -> u32 {
         self.core
             .prime_save_seed_states_slice(paragraphs, inflated, max_bytes)
+    }
+
+    /// What the last [`Self::prime_save_seed_states_slice`] call charged against its `max_bytes`.
+    pub fn prime_last_slice_cost(&self) -> f64 {
+        self.core.prime_last_slice_cost() as f64
     }
 
     /// The paragraph IDs a save applies, as the package writer's

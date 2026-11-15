@@ -2053,6 +2053,9 @@ impl SnapshotValidation {
                         .formats
                         .get(base_sheet_index(key).unwrap_or(usize::MAX))
                         .unwrap_or(&default);
+                    if left.hide_gridlines != sheet.format.hide_gridlines {
+                        return Err(invalid());
+                    }
                     if !equal_record(
                         left,
                         &sheet.format,

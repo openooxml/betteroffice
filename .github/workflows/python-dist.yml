@@ -66,6 +66,9 @@ jobs:
     if: ${{ !startsWith(inputs.binding, 'fonts-') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -88,6 +91,9 @@ jobs:
     if: ${{ startsWith(inputs.binding, 'fonts-') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -117,6 +123,9 @@ jobs:
     if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && (needs.font-pack.result == 'success' || needs.wheels.result == 'success' && needs.sdist.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
     steps:
       - run: echo "${{ inputs.binding }}" > built.txt
 

@@ -365,6 +365,12 @@ pub fn segments_digest(segments: &[StorySegment]) -> u128 {
             tail[..rest.len()].copy_from_slice(rest);
             self.add(u64::from_le_bytes(tail) ^ ((bytes.len() as u64) << 56));
         }
+        fn write_usize(&mut self, i: usize) {
+            self.write(&(i as u64).to_le_bytes());
+        }
+        fn write_isize(&mut self, i: isize) {
+            self.write(&(i as i64).to_le_bytes());
+        }
         fn finish(&self) -> u64 {
             self.finish128() as u64
         }
@@ -467,6 +473,14 @@ impl PendingSegment {
         Self {
             insert,
             attributes: diff.attributes,
+        }
+    }
+
+    /// The embedded map this entry holds, if it holds one.
+    pub(crate) fn map_hook(&self) -> Option<&yrs::Hook<MapRef>> {
+        match &self.insert {
+            PendingInsert::Map(hook) => Some(hook),
+            PendingInsert::Value(_) => None,
         }
     }
 }
@@ -777,6 +791,10 @@ pub struct EditingDoc {
     save_story_states: Arc<Mutex<identity::StoryStateCache>>,
     /// A save seed state prime in progress; see [`EditingDoc::prime_save_seed_states_slice`].
     prime_progress: Mutex<Option<identity::PrimeProgress>>,
+    prime_last_slice_cost: AtomicU64,
+    /// The `max_bytes` the last prime slice left unspent.
+    #[cfg(test)]
+    prime_last_slice_left: AtomicU64,
     #[cfg(test)]
     save_story_cache_disabled: AtomicBool,
     sticky_positions: Mutex<sticky_positions::StickyPositions>,
@@ -888,6 +906,9 @@ impl EditingDoc {
             paragraph_indexes: Mutex::default(),
             save_story_states,
             prime_progress: Mutex::new(None),
+            prime_last_slice_cost: AtomicU64::new(0),
+            #[cfg(test)]
+            prime_last_slice_left: AtomicU64::new(0),
             #[cfg(test)]
             save_story_cache_disabled: AtomicBool::new(false),
             sticky_positions: Mutex::default(),
@@ -1296,7 +1317,7 @@ impl EditingDoc {
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
-    #[cfg(all(test, feature = "wasm"))]
+    #[cfg(test)]
     pub(crate) fn forget_seeding(&self) {
         self.save_story_states.lock().unwrap().clear();
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);

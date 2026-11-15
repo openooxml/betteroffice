@@ -689,6 +689,7 @@ fn parse_worksheet(
     let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
     let mut alternate_depth: usize = 0;
+    let mut seen_view = false;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -804,7 +805,19 @@ fn parse_worksheet(
                             .is_some_and(|value| is_truthy(&value)),
                         zero_height: attr(&e, b"zeroHeight")?
                             .is_some_and(|value| is_truthy(&value)),
+                        default_col_width: attr(&e, b"defaultColWidth")?
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .filter(|w| w.is_finite() && (0.0..=MAX_COL_WIDTH_CHARS).contains(w)),
+                        base_col_width: attr(&e, b"baseColWidth")?
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .filter(|w| f64::from(*w) <= MAX_COL_WIDTH_CHARS),
+                        ..sheet.format
                     };
+                }
+                b"sheetView" if !seen_view => {
+                    seen_view = true;
+                    sheet.format.hide_gridlines = attr(&e, b"showGridLines")?
+                        .is_some_and(|value| matches!(value.as_str(), "0" | "false"));
                 }
                 _ => {}
             },
@@ -973,7 +986,9 @@ fn parse_conditional_formats(
                     rule.formulas.push(formula);
                 }
             }
-            Event::End(e) if e.name().local_name().as_ref() == b"cfRule" && rule.is_some() => {
+            Event::End(e)
+                if e.name().local_name().as_ref() == b"cfRule" && depth == 2 && rule.is_some() =>
+            {
                 let mut rule = rule.take().unwrap();
                 rule.raw_xml = std::str::from_utf8(&data[rule_start.min(after)..after])
                     .ok()
@@ -984,6 +999,7 @@ fn parse_conditional_formats(
             }
             Event::End(e)
                 if e.name().local_name().as_ref() == b"conditionalFormatting"
+                    && depth == 1
                     && group.is_some() =>
             {
                 groups.push(group.take().unwrap());

@@ -891,6 +891,10 @@ export class EditSession {
      */
     persist_paragraph_ids(): string;
     /**
+     * What the last [`Self::prime_save_seed_states_slice`] call charged against its `max_bytes`.
+     */
+    prime_last_slice_cost(): number;
+    /**
      * Caches save seed states without reseeding, within the paragraph and
      * inflated package budgets.
      */
@@ -1973,6 +1977,7 @@ export interface InitOutput {
     readonly editsession_part_metadata_json: (a: number) => [number, number];
     readonly editsession_patch_style_languages_xml: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
+    readonly editsession_prime_last_slice_cost: (a: number) => number;
     readonly editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
     readonly editsession_prime_save_seed_states_slice: (a: number, b: number, c: number, d: number) => number;
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
