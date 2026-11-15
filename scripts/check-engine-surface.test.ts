@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { compareSurfaces, normalizeType, parseParams, parseSurface } from "./check-engine-surface";
+import {
+  type AllowedReturnDifference,
+  compareSurfaces,
+  normalizeReturnType,
+  normalizeType,
+  parseParams,
+  parseSurface,
+} from "./check-engine-surface";
 
 const wasm = `
 export class XlsxDocument {
@@ -255,5 +262,49 @@ export declare function load(): string | null
     expect(expected.functions.has("load")).toBe(true);
     expect(actual.functions.has("load")).toBe(true);
     expect(compareSurfaces(expected, actual, ["Example"])).toEqual([]);
+  });
+
+  test("return types keep null and still map Buffer", () => {
+    expect(normalizeReturnType("string | null")).toBe("string | null");
+    expect(normalizeReturnType("Buffer | null | null")).toBe("Uint8Array | null");
+    expect(normalizeReturnType("Buffer")).toBe("Uint8Array");
+  });
+
+  const twoNullable = {
+    wasm: "export class Example {\n  read(): string;\n  write(): string;\n}\n",
+    native: "export declare class Example {\n  read(): string | null\n  write(): string | null\n}\n",
+  };
+  const readAllowed: AllowedReturnDifference = {
+    member: "Example.read",
+    wasm: "string",
+    native: "string | null",
+    reason: "fixture",
+  };
+
+  test("an allowed return difference suppresses exactly that member", () => {
+    const problems = compareSurfaces(
+      parseSurface(twoNullable.wasm), parseSurface(twoNullable.native), ["Example"], [], [readAllowed],
+    );
+    expect(problems).toEqual([
+      "Example.write: return type mismatch (write(): string vs write(): string | null)",
+    ]);
+  });
+
+  test("an allowed return difference for other types does not suppress the member", () => {
+    const problems = compareSurfaces(
+      parseSurface(twoNullable.wasm), parseSurface(twoNullable.native), ["Example"], [],
+      [readAllowed, { ...readAllowed, member: "Example.write", native: "number | null" }],
+    );
+    expect(problems).toEqual([
+      "Example.write: return type mismatch (write(): string vs write(): string | null)",
+      "Example.write: allowed return difference (wasm string, native number | null) no longer differs; remove it",
+    ]);
+  });
+
+  test("a stale allowed return difference fails", () => {
+    const same = parseSurface(twoNullable.native);
+    expect(compareSurfaces(same, same, ["Example"], [], [readAllowed])).toEqual([
+      "Example.read: allowed return difference (wasm string, native string | null) no longer differs; remove it",
+    ]);
   });
 });

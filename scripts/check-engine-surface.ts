@@ -26,10 +26,19 @@ export interface Surface {
   consts: Set<string>;
 }
 
+export interface AllowedReturnDifference {
+  /** `Class.member` or `function name`, as in `pending`. */
+  member: string;
+  wasm: string;
+  native: string;
+  reason: string;
+}
+
 interface FormatConfig {
   wasm: string;
   native: string;
   pending: string[];
+  allowedReturns: AllowedReturnDifference[];
 }
 
 export const FORMATS: Record<string, FormatConfig> = {
@@ -37,51 +46,61 @@ export const FORMATS: Record<string, FormatConfig> = {
     wasm: "packages/xlsx/src/wasm/generated/xlsx_wasm.d.ts",
     native: "bindings/xlsx-native/index.d.ts",
     pending: [],
+    allowedReturns: [],
   },
   docx: {
     wasm: "packages/docx/src/wasm/generated/edit/docx_edit.d.ts",
     native: "bindings/docx-native/index.d.ts",
     pending: [],
+    allowedReturns: [],
   },
   "docx-parse": {
     wasm: "packages/docx/src/wasm/generated/parse/docx_parse.d.ts",
     native: "bindings/docx-native/index.d.ts",
     pending: [],
+    allowedReturns: [],
   },
   "docx-query": {
     wasm: "packages/docx/src/wasm/generated/query/docx_query.d.ts",
     native: "bindings/docx-native/index.d.ts",
     pending: [],
+    allowedReturns: [],
   },
   "docx-opc": {
     wasm: "packages/docx/src/wasm/generated/opc/ooxml_opc.d.ts",
     native: "bindings/docx-native/index.d.ts",
     pending: [],
+    allowedReturns: [],
   },
   "pptx-preflight": {
     wasm: "packages/pptx/src/wasm/generated/preflight/pptx_preflight.d.ts",
     native: "bindings/pptx-native/index.d.ts",
     pending: [],
+    allowedReturns: [],
   },
   "xlsx-preflight": {
     wasm: "packages/xlsx/src/wasm/generated/preflight/xlsx_preflight.d.ts",
     native: "bindings/xlsx-native/index.d.ts",
     pending: [],
+    allowedReturns: [],
   },
   "docx-preflight": {
     wasm: "packages/docx/src/wasm/generated/preflight/docx_preflight.d.ts",
     native: "bindings/docx-native/index.d.ts",
     pending: [],
+    allowedReturns: [],
   },
   pptx: {
     wasm: "packages/pptx/src/wasm/generated/pptx_wasm.d.ts",
     native: "bindings/pptx-native/index.d.ts",
     pending: [],
+    allowedReturns: [],
   },
   "pptx-metafile": {
     wasm: "packages/pptx/src/wasm/generated/metafile_svg_wasm.d.ts",
     native: "bindings/pptx-native/index.d.ts",
     pending: ["MetafileConverter"],
+    allowedReturns: [],
   },
 };
 
@@ -114,12 +133,21 @@ function splitTopLevel(input: string, separator: string): string[] {
 }
 
 export function normalizeType(raw: string): string {
+  return normalizeUnion(raw, true);
+}
+
+/** Like normalizeType, but `null` stays part of the type. */
+export function normalizeReturnType(raw: string): string {
+  return normalizeUnion(raw, false);
+}
+
+function normalizeUnion(raw: string, dropNull: boolean): string {
   let type = raw.trim().replace(/\s+/g, " ");
   type = type.replace(/\bBuffer\b/g, "Uint8Array");
   if (type.includes("|")) {
     const parts = splitTopLevel(type, "|")
       .map((part) => part.trim())
-      .filter((part) => part !== "null" && part !== "");
+      .filter((part) => !(dropNull && part === "null") && part !== "");
     const deduped: string[] = [];
     for (const part of parts) {
       if (!deduped.includes(part)) deduped.push(part);
@@ -198,7 +226,7 @@ function parseMember(declaration: string, options: ParseOptions): MemberInfo | n
   if (item.startsWith("get ")) {
     const getter = /^get\s+(\w+)\s*\(\s*\)\s*:\s*(.+)$/.exec(item);
     if (!getter) return null;
-    return { kind: "getter", name: getter[1], params: [], returnType: normalizeType(getter[2]) };
+    return { kind: "getter", name: getter[1], params: [], returnType: normalizeReturnType(getter[2]) };
   }
   if (item.startsWith("readonly ")) {
     const readonlyMatch = /^readonly\s+(\w+)\s*:\s*(.+)$/.exec(item);
@@ -207,7 +235,7 @@ function parseMember(declaration: string, options: ParseOptions): MemberInfo | n
       kind: "getter",
       name: readonlyMatch[1],
       params: [],
-      returnType: normalizeType(readonlyMatch[2]),
+      returnType: normalizeReturnType(readonlyMatch[2]),
     };
   }
   const method = /^(\w+)\s*\((.*)\)\s*(?::\s*(.+))?$/.exec(item);
@@ -216,7 +244,7 @@ function parseMember(declaration: string, options: ParseOptions): MemberInfo | n
     kind,
     name: method[1],
     params: parseParams(method[2], options),
-    returnType: normalizeType(method[3] ?? "void"),
+    returnType: normalizeReturnType(method[3] ?? "void"),
   };
 }
 
@@ -246,7 +274,7 @@ export function parseSurface(text: string, options: ParseOptions = {}): Surface 
       kind: "method",
       name,
       params: parseParams(fnMatch[2], options),
-      returnType: normalizeType(fnMatch[3]),
+      returnType: normalizeReturnType(fnMatch[3]),
     });
   }
   const defaultRe = /export\s+default\s+function\s+(\w+)/;
@@ -270,9 +298,20 @@ export function compareSurfaces(
   native: Surface,
   classNames: string[],
   pending: readonly string[] = [],
+  allowedReturns: readonly AllowedReturnDifference[] = [],
 ): string[] {
   const skipped = new Set(pending);
   const problems: string[] = [];
+  const usedAllowances = new Set<AllowedReturnDifference>();
+  const returnDiffers = (item: string, expected: MemberInfo, actual: MemberInfo): boolean => {
+    if (actual.returnType === expected.returnType) return false;
+    const allowance = allowedReturns.find((entry) =>
+      entry.member === item && entry.wasm === expected.returnType && entry.native === actual.returnType
+    );
+    if (!allowance) return true;
+    usedAllowances.add(allowance);
+    return false;
+  };
   for (const item of skipped) {
     const [owner, member] = item.startsWith("function ")
       ? [undefined, item.slice("function ".length)]
@@ -343,7 +382,7 @@ export function compareSurfaces(
         );
         continue;
       }
-      if (actual.returnType !== expected.returnType) {
+      if (returnDiffers(`${className}.${name}`, expected, actual)) {
         problems.push(
           `${className}.${name}: return type mismatch (${describe(expected)} vs ${describe(actual)})`,
         );
@@ -378,9 +417,16 @@ export function compareSurfaces(
       );
       continue;
     }
-    if (actual.returnType !== expected.returnType) {
+    if (returnDiffers(`function ${name}`, expected, actual)) {
       problems.push(
         `function ${name}: return type mismatch (${describe(expected)} vs ${describe(actual)})`,
+      );
+    }
+  }
+  for (const entry of allowedReturns) {
+    if (!usedAllowances.has(entry)) {
+      problems.push(
+        `${entry.member}: allowed return difference (wasm ${entry.wasm}, native ${entry.native}) no longer differs; remove it`,
       );
     }
   }
@@ -400,10 +446,15 @@ function main(): void {
   const wasmSurface = parseSurface(wasmText);
   const problems = compareSurfaces(
     wasmSurface, parseSurface(nativeText), [...wasmSurface.classes.keys()], config.pending,
+    config.allowedReturns,
   );
   if (config.pending.length > 0) {
     console.log(`engine surface pending for ${format} (${config.pending.length}):`);
     for (const item of config.pending) console.log(`  - ${item}`);
+  }
+  if (config.allowedReturns.length > 0) {
+    console.log(`engine surface allowed return differences for ${format} (${config.allowedReturns.length}):`);
+    for (const entry of config.allowedReturns) console.log(`  - ${entry.member}: ${entry.reason}`);
   }
   if (problems.length > 0) {
     console.error(`engine surface mismatch for ${format}:`);
