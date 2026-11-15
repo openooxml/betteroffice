@@ -136,9 +136,14 @@ export function normalizeType(raw: string): string {
   return normalizeUnion(raw, true);
 }
 
-/** Like normalizeType, but `null` stays part of the type. */
+/** Like normalizeType, but `null` stays part of the type and union members are sorted, `null` last. */
 export function normalizeReturnType(raw: string): string {
-  return normalizeUnion(raw, false);
+  const type = normalizeUnion(raw, false);
+  if (!type.includes("|")) return type;
+  const parts = splitTopLevel(type, "|").map((part) => part.trim());
+  const members = parts.filter((part) => part !== "null").sort();
+  if (parts.includes("null")) members.push("null");
+  return members.join(" | ");
 }
 
 function normalizeUnion(raw: string, dropNull: boolean): string {
