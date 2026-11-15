@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Typing in a table cell of a long document now lays out only that table instead of the whole body, and tables after the edit keep their measurements instead of being remeasured.
+Most typing in a table cell of a long document now lays out only that table instead of the whole body, and tables after the edit keep their measurements instead of being remeasured.
