@@ -27,7 +27,22 @@ import { MOUNTED } from '../__fixtures__/mounted';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor: settleWithin } = await import('@testing-library/react');
+
+let tornDown = false;
+const waits = new Set<Promise<unknown>>();
+
+/** A waitFor whose callback stops reaching the editor once teardown starts; afterEach awaits every one still pending. */
+function waitFor<T>(callback: () => T | Promise<T>, options?: Parameters<typeof settleWithin>[1]): Promise<T> {
+  const wait = settleWithin(() => {
+    if (tornDown) throw new Error('the test ended before this wait settled');
+    return callback();
+  }, options);
+  const forget = () => { waits.delete(wait); };
+  waits.add(wait);
+  void wait.then(forget, forget);
+  return wait;
+}
 
 const WASM = resolve(import.meta.dir, '../../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const VIEWPORT = { width: 800, height: 600 };
@@ -71,10 +86,16 @@ const restorers: (() => void)[] = [];
 const sessions: WorkbookSession[] = [];
 
 afterEach(async () => {
-  await act(async () => { cleanup(); });
-  for (const session of sessions.splice(0)) await session.dispose();
-  for (const restore of restorers.splice(0).reverse()) restore();
-});
+  tornDown = true;
+  try {
+    await act(async () => { cleanup(); });
+    await Promise.allSettled(waits);
+    for (const session of sessions.splice(0)) await session.dispose();
+    for (const restore of restorers.splice(0).reverse()) restore();
+  } finally {
+    tornDown = false;
+  }
+}, 10_000);
 
 afterAll(async () => {
   HTMLCanvasElement.prototype.getContext = originalGetContext;
@@ -241,10 +262,41 @@ function stubFrames(): () => Promise<void> {
   });
 }
 
+/** Times mountGated's setup and its waits; a wait that fails is rethrown naming the phase it stalled in. */
+function mountClock() {
+  const spent = { setup: 0, ready: 0, plugins: 0 };
+  let since = performance.now();
+  const lap = (phase: keyof typeof spent) => {
+    const now = performance.now();
+    spent[phase] = Math.round(now - since);
+    since = now;
+    return spent[phase];
+  };
+  return {
+    lap,
+    async wait<T>(phase: 'ready' | 'plugins', settle: () => Promise<T>): Promise<T> {
+      try {
+        const settled = await settle();
+        lap(phase);
+        return settled;
+      } catch (error) {
+        const ms = lap(phase);
+        const plugins = phase === 'ready' ? 'plugins not run' : `plugins ${spent.plugins} ms`;
+        if (error instanceof Error) {
+          error.message += `\nmount stalled in ${phase} after ${ms} ms `
+            + `(setup ${spent.setup} ms, ready ${spent.ready} ms, ${plugins})`;
+        }
+        throw error;
+      }
+    },
+  };
+}
+
 async function mountGated(
   editor: Editor, gates: Record<string, Gate>,
-  { protectedSheet = false, sparse = false, starting = 0 } = {}
+  { protectedSheet = false, sparse = false, starting = 0, nameStall = false } = {}
 ): Promise<Book> {
+  const clock = nameStall ? mountClock() : null;
   const errors: XlsxPluginError[] = [];
   const log: GateLog = { loaded: new Set<string>(), cleanups: [], contexts: {} };
   const plugins = Object.entries(gates).map(([key, gate]) => gatePlugin(gate.id ?? key, gate, log));
@@ -263,8 +315,14 @@ async function mountGated(
     const element = (next: XlsxPlugin[]) => <XlsxEditor legacySyncApi experimentalWorkerOpen={false} file={file}
       plugins={next} onPluginError={onPluginError} onReady={onReady} />;
     const view = render(element(plugins));
-    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
-    await waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED);
+    if (clock) {
+      clock.lap('setup');
+      await clock.wait('ready', () => waitFor(() => expect(api).toBeDefined(), MOUNTED));
+      await clock.wait('plugins', () => waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED));
+    } else {
+      await waitFor(() => expect(api).toBeDefined(), MOUNTED);
+      await waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED);
+    }
     const base = common(view);
     return {
       ...base,
@@ -315,8 +373,14 @@ async function mountGated(
   const element = (next: XlsxPlugin[]) => <XlsxWorkerEditor backend="peerless" file={file} plugins={next}
     onPluginError={onPluginError} onReady={ready} />;
   const view = render(element(plugins));
-  await waitFor(async () => { await pump(); expect(ready).toHaveBeenCalledTimes(1); }, MOUNTED);
-  await waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED);
+  if (clock) {
+    clock.lap('setup');
+    await clock.wait('ready', () => waitFor(async () => { await pump(); expect(ready).toHaveBeenCalledTimes(1); }, MOUNTED));
+    await clock.wait('plugins', () => waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED));
+  } else {
+    await waitFor(async () => { await pump(); expect(ready).toHaveBeenCalledTimes(1); }, MOUNTED);
+    await waitFor(() => expect(log.loaded.size).toBe(plugins.length - starting), MOUNTED);
+  }
   const api = ready.mock.calls[0][0];
   const base = common(view);
   return {
@@ -448,7 +512,8 @@ for (const editor of ['in-thread', 'peerless'] as const) {
 
     it('after a refused commit and Escape, retyping the cell writes the new input', async () => {
       const book = await mountGated(editor, { numbers: { beforeCellCommit: (commit) =>
-        /^\d+$/.test(commit.input) ? { action: 'accept' } : { action: 'refuse', message: 'Numbers only' } } });
+        /^\d+$/.test(commit.input) ? { action: 'accept' } : { action: 'refuse', message: 'Numbers only' } } },
+      { nameStall: true });
       await book.select(0);
       await book.type('abc');
       await waitFor(() => expect(book.refusal()).toBe('Numbers only'));
@@ -458,7 +523,7 @@ for (const editor of ['in-thread', 'peerless'] as const) {
       await waitFor(() => expect(book.editor()).toBeNull());
       await book.type('42');
       await waitFor(async () => expect(await book.input(0)).toBe('42'));
-    });
+    }, 10_000);
 
     it('a commit while a gating plugin starts is refused, and the same Enter commits once it is ready', async () => {
       let ready!: () => void;

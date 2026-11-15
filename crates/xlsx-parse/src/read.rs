@@ -996,7 +996,9 @@ fn parse_conditional_formats(
                     rule.formulas.push(formula);
                 }
             }
-            Event::End(e) if e.name().local_name().as_ref() == b"cfRule" && rule.is_some() => {
+            Event::End(e)
+                if e.name().local_name().as_ref() == b"cfRule" && depth == 2 && rule.is_some() =>
+            {
                 let mut rule = rule.take().unwrap();
                 rule.raw_xml = std::str::from_utf8(&data[rule_start.min(after)..after])
                     .ok()
@@ -1007,6 +1009,7 @@ fn parse_conditional_formats(
             }
             Event::End(e)
                 if e.name().local_name().as_ref() == b"conditionalFormatting"
+                    && depth == 1
                     && group.is_some() =>
             {
                 groups.push(group.take().unwrap());

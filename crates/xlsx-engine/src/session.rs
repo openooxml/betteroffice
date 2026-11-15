@@ -2844,6 +2844,53 @@ mod tests {
     }
 
     #[test]
+    fn track_moves_are_refused_before_the_batch_applies() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let saved = session.save().unwrap();
+        let set = r#"{"type":"setCell","sheet":0,"at":{"row":0,"col":2},"cell":{"value":{"kind":"text","value":"Probe"}}}"#;
+        for mv in [
+            r#"{"type":"moveCols","sheet":0,"col":0,"count":1,"before":2}"#,
+            r#"{"type":"moveRows","sheet":0,"row":0,"count":1,"before":2}"#,
+        ] {
+            let transaction = format!(r#"{{"ops":[{set},{mv}]}}"#);
+            for result in [
+                session.apply_ops_json(&transaction, None),
+                session.apply_ops_profiled_json(&transaction, None, &mut || 0.0),
+            ] {
+                assert_eq!(
+                    result.unwrap_err(),
+                    "cannot move sheet 0 tracks: moving rows or columns is not supported yet"
+                );
+                assert!(
+                    !session
+                        .cell_json(r#"{"sheet":0,"row":0,"col":2}"#)
+                        .unwrap()
+                        .contains(r#""input":"Probe""#)
+                );
+            }
+            assert!(
+                session
+                    .cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
+                    .unwrap()
+                    .contains(r#""input":"Hello""#)
+            );
+            assert!(
+                session
+                    .cell_json(r#"{"sheet":0,"row":1,"col":1}"#)
+                    .unwrap()
+                    .contains(r#""input":"42""#)
+            );
+            assert!(
+                session
+                    .undo_json(None)
+                    .unwrap()
+                    .contains(r#""applied":false"#)
+            );
+            assert_eq!(session.save().unwrap(), saved);
+        }
+    }
+
+    #[test]
     fn collaborative_freeze_panes_cross_the_json_boundary() {
         let bytes = sample_xlsx();
         let mut left = Session::open_collaborative(&bytes, 715, None).unwrap();

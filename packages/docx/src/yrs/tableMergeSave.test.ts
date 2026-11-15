@@ -493,3 +493,78 @@ describe('saving table rows with grid offsets', () => {
     }
   });
 });
+
+describe('saving table row header and cant-split flags', () => {
+  beforeAll(async () => {
+    await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
+    await preloadOpcWasm(new Uint8Array(readFileSync(
+      resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm')
+    )));
+  }, 30_000);
+
+  const row = (properties: string, text: string) => `<w:tr>${properties}${cell(paragraph(text))}</w:tr>`;
+  const flagTable = (rows: string[]) =>
+    `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4680"/></w:tblGrid>${rows.join('')}</w:tbl>`;
+
+  async function savedFlags(bytes: Uint8Array) {
+    const parsed = await parseDocx(bytes.slice().buffer, { preloadFonts: false });
+    const table = parsed.package.document.content.find((block) => block.type === 'table');
+    if (table?.type !== 'table') throw new Error('table missing');
+    return table.rows.map(({ formatting }) => [formatting?.header, formatting?.cantSplit]);
+  }
+
+  it('keeps untouched rows with the flags on, off and absent', async () => {
+    const rows = [
+      row('<w:trPr><w:tblHeader/></w:trPr>', 'Header on'),
+      row('<w:trPr><w:tblHeader w:val="0"/></w:trPr>', 'Header off'),
+      row('', 'Absent'),
+      row('<w:trPr><w:cantSplit/></w:trPr>', 'Cant split on'),
+      row('<w:trPr><w:cantSplit w:val="0"/></w:trPr>', 'Cant split off'),
+    ];
+    const session = await opened(docx(flagTable(rows) + paragraph('Tail')));
+    try {
+      const saved = await saveYrsDocx(session, { updateModifiedDate: false });
+      const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      for (const source of rows) expect(xml).toContain(source);
+      expect(await savedFlags(saved.bytes)).toEqual([
+        [true, undefined],
+        [false, undefined],
+        [undefined, undefined],
+        [undefined, true],
+        [undefined, false],
+      ]);
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('keeps the flags off on a row whose height changes', async () => {
+    const off = '<w:trPr><w:cantSplit w:val="0"/><w:tblHeader w:val="0"/></w:trPr>';
+    const rows = [
+      row(off, 'Changed'),
+      row('<w:trPr><w:cantSplit/><w:tblHeader/></w:trPr>', 'On'),
+      row('', 'Absent'),
+      row(off, 'Untouched off'),
+    ];
+    const session = await opened(docx(flagTable(rows) + paragraph('Tail')));
+    try {
+      session.setRowHeight({ story: 'body', tableIndex: 0, row: 0, column: 0 }, 720, 'exact');
+      const saved = await saveYrsDocx(session, { updateModifiedDate: false });
+      const xml = new TextDecoder().decode(unzipContainer(saved.bytes)['word/document.xml']);
+      const savedRows = xml.match(/<w:tr\b[\s\S]*?<\/w:tr>/g)!;
+      expect(savedRows).toHaveLength(4);
+      expect(savedRows[0]).toContain('<w:trHeight w:val="720" w:hRule="exact"/>');
+      expect(savedRows[0]).toContain('<w:cantSplit w:val="0"/>');
+      expect(savedRows[0]).toContain('<w:tblHeader w:val="0"/>');
+      expect(savedRows.slice(1)).toEqual(rows.slice(1));
+      expect(await savedFlags(saved.bytes)).toEqual([
+        [false, false],
+        [true, true],
+        [undefined, undefined],
+        [false, false],
+      ]);
+    } finally {
+      session.destroy();
+    }
+  });
+});
