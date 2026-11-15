@@ -676,7 +676,7 @@ jobs:
         run: |
           bun run build:docx-wasm
           bun run build:fonts
-          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx packages/xlsx-react scripts/parity/parity.test.ts scripts/native-engine.test.ts
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx/ packages/xlsx-i18n/ packages/xlsx-react scripts/parity/parity.test.ts scripts/native-engine.test.ts
 
       - name: Check engine surface
         run: |
@@ -693,10 +693,10 @@ jobs:
 
       - name: Test the pptx packages on the native engine
         run: |
-          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/ packages/pptx-react/
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/ packages/pptx-i18n/ packages/pptx-react/
 
       - name: Test the docx packages on the native engine
-        run: bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-react/
+        run: bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-i18n/ packages/docx-react/
 
       - name: Test the agents package on the native engine
         run: bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/
