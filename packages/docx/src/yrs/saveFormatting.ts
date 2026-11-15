@@ -134,7 +134,7 @@ export function paragraphAttrsToFormatting(
     }
     if (
       !inherits('pageBreakBefore') &&
-      attrs.pageBreakBefore !== (orig.pageBreakBefore || undefined)
+      (attrs.pageBreakBefore || undefined) !== (orig.pageBreakBefore || undefined)
     ) {
       result.pageBreakBefore = attrs.pageBreakBefore || undefined;
     }
@@ -156,7 +156,7 @@ export function paragraphAttrsToFormatting(
     if (attrs.cnfStyle != null && !sameValue(attrs.cnfStyle, orig.cnfStyle)) {
       result.cnfStyle = attrs.cnfStyle;
     }
-    if (!inherits('bidi') && attrs.bidi !== (orig.bidi || undefined)) {
+    if (!inherits('bidi') && (attrs.bidi || undefined) !== (orig.bidi || undefined)) {
       result.bidi = attrs.bidi || undefined;
     }
     return result;

@@ -502,7 +502,11 @@ const ON_OFF_RUN_PROPERTIES = new Set<string>([
   'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl', 'boldCs', 'italicCs',
 ]);
 
-const SOURCE_RUN_PROPERTIES = ['bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily'] as const;
+const SOURCE_RUN_PROPERTIES = [
+  'bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily',
+  'allCaps', 'smallCaps', 'strike', 'doubleStrike', 'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl',
+  'cs', 'snapToGrid',
+] as const;
 
 const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
 
@@ -556,9 +560,12 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
     if (key === 'fontFamily') continue;
     const value = source?.[key];
     if (value === undefined) continue;
-    const live = ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
+    const live = key === 'cs' ? attributes.complexScript
+      : key === 'snapToGrid' ? attributes.snapToGrid !== false
+        : ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
     if ((key === 'language' && attributes.language === undefined) || sameJson(value, live) ||
-      ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined)) {
+      ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined) ||
+      (key === 'cs' && attributes.complexScript === undefined)) {
       result[key] = value;
     }
   }
