@@ -1337,6 +1337,32 @@ mod tests {
         .clone()
     }
 
+    fn auto_number(attributes: &str) -> Option<String> {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let xml = format!(r#"<a:pPr xmlns:a="a"><a:buAutoNum {attributes}/></a:pPr>"#);
+        let document = parse_xml(xml.as_bytes(), "pPr", &mut budget).unwrap();
+        bullet_text(document.root(), 0, &mut HashMap::new())
+    }
+
+    #[test]
+    fn alpha_auto_number_uses_letters() {
+        let label = auto_number(r#"type="alphaLcParenR" startAt="2""#);
+        assert_eq!(label.as_deref(), Some("b)"));
+    }
+
+    #[test]
+    fn roman_auto_number_uses_numerals() {
+        let label = auto_number(r#"type="romanUcPeriod" startAt="4""#);
+        assert_eq!(label.as_deref(), Some("IV."));
+    }
+
+    #[test]
+    fn huge_start_value_is_clamped() {
+        let label = auto_number(r#"type="arabicPlain" startAt="99999999999999999999999""#);
+        assert_eq!(label.as_deref(), Some("32767"));
+    }
+
     #[test]
     fn run_text_defaults_to_the_shape_style_font_color() {
         let mut context = SmartArtContext::default();

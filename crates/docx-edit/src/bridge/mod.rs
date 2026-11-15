@@ -6591,6 +6591,11 @@ mod tests {
     }
 
     #[test]
+    fn hostile_colour_value_does_not_panic() {
+        assert!(!automatic_text_needs_white("#abcde\u{20ac}"));
+    }
+
+    #[test]
     fn chart_theme_typefaces_lower_to_the_theme_fonts() {
         let mut theme = docx_parse::Theme::default();
         theme.font_scheme.major_font.latin = "Theme Major".to_owned();
