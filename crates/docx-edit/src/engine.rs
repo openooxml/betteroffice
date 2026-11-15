@@ -5967,12 +5967,17 @@ impl EngineSession {
         }
         let map = &lowered.map;
         // Stories are lowered once each, so a slot that still names the story is its slot.
-        let slot = lowered
+        let cached = lowered
             .cell_story_slot
             .as_ref()
             .filter(|(story, slot)| *story == edit.story && map.stories.get(*slot) == Some(story))
-            .map(|(_, slot)| *slot)
-            .or_else(|| map.stories.iter().position(|story| *story == edit.story))?;
+            .map(|(_, slot)| *slot);
+        let repeated = |id: &str| map.stories.iter().filter(|story| *story == id).count() > 1;
+        let slot = match cached {
+            Some(slot) => slot,
+            None if repeated(&edit.story) => return None,
+            None => map.stories.iter().position(|story| *story == edit.story)?,
+        };
         let paragraph = map
             .paragraphs
             .iter()
@@ -5995,6 +6000,9 @@ impl EngineSession {
         };
         let table = lowered.table_embeds.get(id)?;
         let first_story = id.strip_prefix("body:table:")?;
+        if cached.is_none() && repeated(first_story) {
+            return None;
+        }
         let (start, end) = (old.pm_start? as u64, old.pm_end? as u64);
         // The table lowers its first cell before any story inside it.
         let stories = map.stories[..=slot]

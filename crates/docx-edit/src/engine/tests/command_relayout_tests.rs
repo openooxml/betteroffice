@@ -1500,6 +1500,70 @@ fn cell_edits_re_lower_only_their_table_and_lay_out_as_a_full_recompute_does() {
     }
 }
 
+#[test]
+fn typing_into_a_cell_story_shown_by_two_tables_matches_a_fresh_session() {
+    use super::lowering_fixture::{Package, para, run};
+    use yrs::{Map, Text, Transact};
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let cell = |id: &str| format!("<w:tc>{}</w:tc>", para(id, &run("Cell text")));
+    let table = |cells: String, columns: usize| {
+        let grid = r#"<w:gridCol w:w="1500"/>"#.repeat(columns);
+        format!("<w:tbl><w:tblPr/><w:tblGrid>{grid}</w:tblGrid><w:tr>{cells}</w:tr></w:tbl>")
+    };
+    let body = format!(
+        "{}{}{}",
+        table(cell("00000F71"), 1),
+        table(cell("00000F72") + &cell("00000F73"), 2),
+        para("00000F74", &run("A body paragraph after the tables")),
+    );
+    let bytes = Package::new(&body).bytes();
+    let client_id = 9761;
+    let engine = seeded_engine(client_id, &bytes);
+    let shared = cell_holding(&engine, "00000F71");
+    let (index, rows) = {
+        let txn = engine.doc().yrs_doc().transact();
+        let mut index = 0;
+        let mut tables = Vec::new();
+        for diff in crate::story_ref(&txn, "body")
+            .unwrap()
+            .diff(&txn, yrs::types::text::YChange::identity)
+        {
+            if let yrs::Out::YMap(map) = &diff.insert
+                && crate::map_string(map, &txn, crate::KIND_KEY).as_deref() == Some("table")
+            {
+                tables.push((index, map.get(&txn, "rows")));
+            }
+            index += crate::out_len(&diff.insert);
+        }
+        let Some((index, Some(yrs::Out::Any(rows)))) = tables.pop() else {
+            panic!("the second table has rows");
+        };
+        (index, rows)
+    };
+    let mut rows_json = String::new();
+    rows.to_json(&mut rows_json);
+    let mut rows: serde_json::Value = serde_json::from_str(&rows_json).unwrap();
+    rows[0]["cells"][1]["story"] = json!(shared);
+    engine
+        .doc()
+        .apply_raw_ops(
+            "body",
+            vec![crate::RawOp::SetEmbedAttr {
+                index,
+                key: "rows".to_owned(),
+                value: yrs::Any::from_json(&rows.to_string()).unwrap(),
+            }],
+            &crate::EditCtx::local("", ""),
+        )
+        .unwrap();
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+    assert!(host.command(&shared, 0, 0, Some("x")));
+    host.assert_matches_cold("typing into a cell story two tables show");
+}
+
 /// The index of the top-level table whose cells hold the paragraph keyed `id`
 /// among the blocks pagination measured.
 fn measured_table_holding(engine: &EngineSession, id: &str) -> usize {
