@@ -815,10 +815,11 @@ impl LocalLowering {
             return false;
         };
         expected.len() == current.len()
-            && expected
-                .iter()
-                .zip(&current)
-                .all(|(left, right)| left.text == right.text && left.units == right.units)
+            && expected.iter().zip(&current).all(|(left, right)| {
+                left.text == right.text
+                    && left.units == right.units
+                    && same_attributes(&left.attrs, Some(&right.attrs))
+            })
     }
 
     pub(crate) fn refresh_seed<T: ReadTxn>(

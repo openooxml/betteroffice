@@ -199,6 +199,22 @@ fn fresh_matches_fresh(host: &CommandHost, label: &str) {
     assert_same_inputs(&fresh_inputs(host), &fresh_inputs(host), label);
 }
 
+/// Deferred body patches applied and fallbacks taken on this thread so far.
+fn deferred_patches() -> (usize, usize) {
+    crate::engine::DEFERRED_PATCHES.with(|counts| counts.get())
+}
+
+/// Deferred patches and fallbacks since `before`.
+fn deferred_since(before: (usize, usize)) -> (usize, usize) {
+    let now = deferred_patches();
+    (now.0 - before.0, now.1 - before.1)
+}
+
+fn assert_deferred((patched, fallbacks): (usize, usize), expected: usize, label: &str) {
+    assert!(patched > 0, "{label}: no deferred patch was applied");
+    assert_eq!(fallbacks, expected, "{label}: deferred fallbacks");
+}
+
 /// Opens `bytes` as a host does, types up to `keys` keystrokes from
 /// `next_key` and runs `check` on the opened state and after every keystroke.
 fn type_and_check(
@@ -208,7 +224,8 @@ fn type_and_check(
     keys: usize,
     mut next_key: impl FnMut(&EngineSession) -> Option<Key>,
     check: fn(&CommandHost, &str),
-) {
+) -> (usize, usize) {
+    let before = deferred_patches();
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -228,6 +245,7 @@ fn type_and_check(
             &format!("{name}, keystroke {step} [{}]", typed.join("; ")),
         );
     }
+    deferred_since(before)
 }
 
 const STYLES: &str = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:keepNext/><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style></w:styles>"#;
@@ -501,7 +519,8 @@ fn boundary_key(engine: &EngineSession, rng: &mut Rng) -> Option<Key> {
 /// Types the first fixed keys, lets a peer bold a run of a paragraph they
 /// typed into, then types into it again; `relayout` lays the peer's update out
 /// before that key.
-fn peer_formats_between_keys(relayout: bool) {
+fn peer_formats_between_keys(relayout: bool) -> (usize, usize) {
+    let before = deferred_patches();
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -549,9 +568,10 @@ fn peer_formats_between_keys(relayout: bool) {
     let last = typing_key(&engine, (At::Body("00001003", 2), Some("x")));
     host.command(&last.story, last.start, last.end, last.text);
     resident_matches_fresh(&host, &format!("{label}, key after the peer"));
+    deferred_since(before)
 }
 
-fn type_fixed(check: fn(&CommandHost, &str)) {
+fn type_fixed(check: fn(&CommandHost, &str)) -> (usize, usize) {
     let bytes = typing_package();
     let mut keys = TYPING.into_iter();
     type_and_check(
@@ -561,10 +581,10 @@ fn type_fixed(check: fn(&CommandHost, &str)) {
         TYPING.len(),
         |engine| keys.next().map(|key| typing_key(engine, key)),
         check,
-    );
+    )
 }
 
-fn type_generated(seed: u64, keys: usize, check: fn(&CommandHost, &str)) {
+fn type_generated(seed: u64, keys: usize, check: fn(&CommandHost, &str)) -> (usize, usize) {
     let mut rng = Rng::new(seed);
     let bytes = package(&generated_body(&mut rng));
     type_and_check(
@@ -574,23 +594,34 @@ fn type_generated(seed: u64, keys: usize, check: fn(&CommandHost, &str)) {
         keys,
         |engine| generated_key(engine, &mut rng),
         check,
-    );
+    )
+}
+
+fn type_all_generated(check: fn(&CommandHost, &str)) -> (usize, usize) {
+    let before = deferred_patches();
+    for seed in 0..SEEDS {
+        type_generated(seed, GENERATED_KEYS, check);
+    }
+    deferred_since(before)
 }
 
 #[test]
 fn typing_in_formatted_paragraphs_lays_out_as_a_fresh_session_does() {
-    type_fixed(resident_matches_fresh);
+    assert_deferred(type_fixed(resident_matches_fresh), 1, "fixed typing");
 }
 
 #[test]
 fn generated_typing_lays_out_as_a_fresh_session_does() {
-    for seed in 0..SEEDS {
-        type_generated(seed, GENERATED_KEYS, resident_matches_fresh);
-    }
+    assert_deferred(
+        type_all_generated(resident_matches_fresh),
+        100,
+        "generated typing",
+    );
 }
 
 #[test]
 fn typing_across_run_boundaries_lays_out_as_a_fresh_session_does() {
+    let before = deferred_patches();
     for seed in 0..SEEDS {
         let mut rng = Rng::new(seed);
         let bytes = package(&boundary_body(&mut rng));
@@ -603,18 +634,21 @@ fn typing_across_run_boundaries_lays_out_as_a_fresh_session_does() {
             resident_matches_fresh,
         );
     }
+    assert_deferred(deferred_since(before), 0, "boundary typing");
 }
 
 #[test]
 fn typing_after_a_peer_formats_the_paragraph_lays_out_as_a_fresh_session_does() {
-    peer_formats_between_keys(false);
-    peer_formats_between_keys(true);
+    assert_deferred(peer_formats_between_keys(false), 1, "peer, no relayout");
+    assert_deferred(peer_formats_between_keys(true), 1, "peer, relayout");
 }
 
 #[test]
 fn fresh_sessions_agree_on_every_typed_state() {
-    type_fixed(fresh_matches_fresh);
-    for seed in 0..SEEDS {
-        type_generated(seed, GENERATED_KEYS, fresh_matches_fresh);
-    }
+    assert_deferred(type_fixed(fresh_matches_fresh), 1, "fixed typing");
+    assert_deferred(
+        type_all_generated(fresh_matches_fresh),
+        100,
+        "generated typing",
+    );
 }
