@@ -558,7 +558,6 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
     if (key === 'fontFamily') continue;
     const value = source?.[key];
     if (value === undefined) continue;
-    // Only an explicit off is seeded for snapToGrid, so the source on is never written back.
     if (key === 'snapToGrid' && value !== false) continue;
     const live = key === 'snapToGrid' ? attributes.snapToGrid
       : ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];

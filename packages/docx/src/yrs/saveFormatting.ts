@@ -132,7 +132,6 @@ export function paragraphAttrsToFormatting(
     if (attrs.styleId !== (orig.styleId || undefined)) {
       result.styleId = attrs.styleId || undefined;
     }
-    // A source value is seeded into attrs, so null there means the user cleared it.
     const sourceOnOff = (key: 'pageBreakBefore' | 'bidi') =>
       orig[key] === undefined ? attrs[key] || undefined : attrs[key] ?? undefined;
     if (!inherits('pageBreakBefore')) {
