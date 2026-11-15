@@ -782,16 +782,27 @@ impl Sheet {
     }
 
     /// the last row [`Sheet::used_range`] covers, without visiting every
-    /// cell: the cell map is ordered by row, so its last key holds the
-    /// largest row.
+    /// cell. like the scan it pairs the smallest start row with the largest
+    /// end row and normalizes the pair, so a range stored with its corners
+    /// reversed counts as it does there; the cell map is ordered by row, so
+    /// its first and last keys hold the cells' smallest and largest rows.
     fn last_used_row(&self) -> Option<RowId> {
-        let cells = self.cells.last_key_value().map(|(&(row, _), _)| row);
-        self.hyperlinks
+        let cells = self
+            .cells
+            .first_key_value()
+            .zip(self.cells.last_key_value())
+            .map(|((&(first, _), _), (&(last, _), _))| (first, last));
+        let ranges = self
+            .hyperlinks
             .iter()
-            .map(|link| link.range.end.row)
-            .chain(self.merges.iter().map(|range| range.end.row))
-            .chain(cells)
-            .max()
+            .map(|link| link.range)
+            .chain(self.merges.iter().copied())
+            .map(|range| (range.start.row, range.end.row));
+        let (top, bottom) = cells
+            .into_iter()
+            .chain(ranges)
+            .reduce(|(top, bottom), (start, end)| (top.min(start), bottom.max(end)))?;
+        Some(top.max(bottom))
     }
 
     pub fn used_range(&self) -> Option<CellRange> {
@@ -1549,7 +1560,7 @@ mod tests {
             .map_or(0, |range| range.end.row.saturating_add(1))
     }
 
-    const FEATURES: [&str; 9] = [
+    const FEATURES: [&str; 12] = [
         "data",
         "style-only cell",
         "cleared cell",
@@ -1559,15 +1570,28 @@ mod tests {
         "conditional format below",
         "spill extent",
         "table below",
+        "reversed hyperlink",
+        "reversed merge",
+        "cell emptied in place",
     ];
 
+    /// a range stored with its start below its end, as the public fields
+    /// allow.
+    fn reversed(start: (RowId, ColId), end: (RowId, ColId)) -> CellRange {
+        CellRange {
+            start: CellRef::new(start.0, start.1),
+            end: CellRef::new(end.0, end.1),
+        }
+    }
+
     /// a sheet with the features whose bits are set in `mask`, each placed
-    /// below the data, and the used-row count each one alone gives.
+    /// below the data, and the used-row count the scan's normalized rectangle
+    /// gives: the larger of the smallest start row and the largest end row.
     fn featured(mask: u32) -> (Workbook, RowId) {
         let at = |a1: &str| CellRef::parse_a1(a1).unwrap();
         let mut sheet = Sheet::new("Data");
         let mut workbook = Workbook::default();
-        let mut expected = 0;
+        let mut bounds: Vec<(RowId, RowId)> = Vec::new();
         let has = |bit: u32| mask & (1 << bit) != 0;
         if has(0) {
             for a1 in ["A1", "C10", "B4"] {
@@ -1579,7 +1603,7 @@ mod tests {
                     },
                 );
             }
-            expected = expected.max(10);
+            bounds.push((0, 9));
         }
         if has(1) {
             sheet.set_cell(
@@ -1589,7 +1613,7 @@ mod tests {
                     ..Cell::default()
                 },
             );
-            expected = expected.max(30);
+            bounds.push((29, 29));
         }
         if has(2) {
             sheet.set_cell(
@@ -1603,7 +1627,7 @@ mod tests {
         }
         if has(3) {
             sheet.merges.push(CellRange::parse_a1("E40:F60").unwrap());
-            expected = expected.max(60);
+            bounds.push((39, 59));
         }
         if has(4) {
             sheet.hyperlinks.push(Hyperlink {
@@ -1613,7 +1637,7 @@ mod tests {
                 tooltip: None,
                 display: None,
             });
-            expected = expected.max(70);
+            bounds.push((69, 69));
         }
         if has(5) {
             sheet.row_heights.insert(79, 30.0);
@@ -1639,8 +1663,91 @@ mod tests {
                 columns: vec!["a".into(), "b".into(), "c".into()],
             });
         }
+        if has(9) {
+            sheet.hyperlinks.push(Hyperlink {
+                range: reversed((149, 7), (0, 7)),
+                external_target: None,
+                location: Some("Data!A1".into()),
+                tooltip: None,
+                display: None,
+            });
+            bounds.push((149, 0));
+        }
+        if has(10) {
+            sheet.merges.push(reversed((159, 8), (2, 9)));
+            bounds.push((159, 2));
+        }
+        if has(11) {
+            sheet.set_cell(
+                at("I200"),
+                Cell {
+                    value: CellValue::Number { value: 3.0 },
+                    ..Cell::default()
+                },
+            );
+            *sheet.cell_mut(at("I200")).unwrap() = Cell::default();
+            bounds.push((199, 199));
+        }
         workbook.sheets.push(sheet);
+        let expected = bounds
+            .into_iter()
+            .reduce(|(top, bottom), (start, end)| (top.min(start), bottom.max(end)))
+            .map_or(0, |(top, bottom)| top.max(bottom) + 1);
         (workbook, expected)
+    }
+
+    #[test]
+    fn reversed_links_and_merges_count_as_the_scan_counts_them() {
+        let link = |range: CellRange| Hyperlink {
+            range,
+            external_target: None,
+            location: Some("Data!A1".into()),
+            tooltip: None,
+            display: None,
+        };
+        let cell = Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        };
+        let mut links_only = Sheet::new("Data");
+        links_only.hyperlinks.push(link(reversed((99, 0), (0, 0))));
+        let mut merges_only = Sheet::new("Data");
+        merges_only.merges.push(reversed((99, 0), (0, 1)));
+        let mut both = Sheet::new("Data");
+        both.set_cell(CellRef::new(4, 0), cell.clone());
+        both.set_cell(CellRef::new(7, 2), cell);
+        both.hyperlinks.push(link(reversed((99, 3), (0, 3))));
+        both.merges.push(reversed((120, 4), (1, 5)));
+        for (sheet, want) in [(links_only, 100), (merges_only, 100), (both, 8)] {
+            let mut workbook = Workbook::default();
+            workbook.sheets.push(sheet);
+            assert_eq!(scanned_used_rows(&workbook, SheetId(0)), want);
+            assert_eq!(workbook.used_rows(SheetId(0)), want);
+        }
+    }
+
+    #[test]
+    fn a_cell_emptied_through_cell_mut_still_counts_as_the_scan_counts_it() {
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(2, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(
+            CellRef::new(40, 1),
+            Cell {
+                value: CellValue::Text { value: "x".into() },
+                ..Cell::default()
+            },
+        );
+        *sheet.cell_mut(CellRef::new(40, 1)).unwrap() = Cell::default();
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(sheet);
+        assert_eq!(scanned_used_rows(&workbook, SheetId(0)), 41);
+        assert_eq!(workbook.used_rows(SheetId(0)), 41);
     }
 
     #[test]
