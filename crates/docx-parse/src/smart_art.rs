@@ -742,15 +742,18 @@ fn bullet_text(
     let scheme = properties.child_by_local_name("buAutoNum")?;
     let start = scheme
         .parse_numeric_attribute(None, "startAt", 1.0)
-        .filter(|value| value.is_finite() && *value >= 1.0)
-        .unwrap_or(1.0) as usize;
+        .filter(|value| value.is_finite())
+        .unwrap_or(1.0)
+        .clamp(1.0, 32767.0) as usize;
     let count = numbering.entry(level).or_insert(0);
     *count += 1;
-    let value = start + *count - 1;
+    let value = start.saturating_add(*count - 1);
     let kind = scheme.attribute(None, "type").unwrap_or("arabicPeriod");
-    let (body, suffix) = kind
-        .find(|character: char| character.is_ascii_uppercase())
-        .map_or((kind, ""), |split| kind.split_at(split));
+    let body = ["alphaLc", "alphaUc", "romanLc", "romanUc", "arabic"]
+        .into_iter()
+        .find(|prefix| kind.starts_with(prefix))
+        .unwrap_or("");
+    let suffix = kind.strip_prefix(body).unwrap_or(kind);
     let label = match body {
         "alphaLc" => alphabetic(value).to_ascii_lowercase(),
         "alphaUc" => alphabetic(value),
