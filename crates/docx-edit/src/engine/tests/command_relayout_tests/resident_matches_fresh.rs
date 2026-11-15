@@ -341,6 +341,7 @@ fn typing_package() -> Vec<u8> {
             "00001006",
             &run("A closing paragraph long enough to wrap over two lines of this narrow page."),
         ),
+        para("00001007", ""),
     ]
     .concat();
     package(&body)
@@ -355,7 +356,7 @@ enum At {
     Cell(usize, u32),
 }
 
-const TYPING: [(At, Option<&str>); 12] = [
+const TYPING: [(At, Option<&str>); 14] = [
     (At::BodyEnd("00001003", 0), Some("y")),
     (At::BodyEnd("00001003", 4), None),
     (At::Body("00001002", 5), Some("x")),
@@ -368,6 +369,8 @@ const TYPING: [(At, Option<&str>); 12] = [
     (At::Body("00001002", 12), None),
     (At::Body("00001005", 8), Some("x")),
     (At::Cell(3, 0), Some("y")),
+    (At::Body("00001002", 3), Some("😀")),
+    (At::BodyEnd("00001007", 0), Some("x")),
 ];
 
 fn typing_key(engine: &EngineSession, (at, text): (At, Option<&'static str>)) -> Key {
@@ -461,6 +464,40 @@ fn generated_key(engine: &EngineSession, rng: &mut Rng) -> Option<Key> {
     }
 }
 
+/// Paragraphs of short runs, each formatted unlike its neighbours and
+/// repeating the same few characters, plus one empty paragraph.
+fn boundary_body(rng: &mut Rng) -> String {
+    use lowering_fixture::para;
+    let mut body: String = (0..5)
+        .map(|index| {
+            let runs: String = (0..2 + rng.below(5))
+                .map(|run| {
+                    let text = ["a", "ab", "ba", "b", "a😀"][rng.below(5)];
+                    formatted(FORMATS[(index + run) % FORMATS.len()], text)
+                })
+                .collect();
+            para(&format!("{:08X}", 0x3001 + index), &runs)
+        })
+        .collect();
+    body += &para("00003010", "");
+    body
+}
+
+/// Inserts at the start of a run or at a paragraph's end, or deletes one
+/// character, in a body paragraph.
+fn boundary_key(engine: &EngineSession, rng: &mut Rng) -> Option<Key> {
+    let paras = story_paras(engine, "body");
+    let para = &paras[rng.below(paras.len())];
+    if para.has_text() && rng.chance(2) {
+        return Some(Key::delete("body", para.character(rng)?));
+    }
+    let at = para
+        .texts
+        .get(rng.below(para.texts.len() + 1))
+        .map_or(para.text_end(), |(start, _)| *start);
+    Some(Key::insert("body", at, ["a", "b", "😀"][rng.below(3)]))
+}
+
 fn type_fixed(check: fn(&CommandHost, &str)) {
     let bytes = typing_package();
     let mut keys = TYPING.into_iter();
@@ -496,6 +533,22 @@ fn typing_in_formatted_paragraphs_lays_out_as_a_fresh_session_does() {
 fn generated_typing_lays_out_as_a_fresh_session_does() {
     for seed in 0..SEEDS {
         type_generated(seed, GENERATED_KEYS, resident_matches_fresh);
+    }
+}
+
+#[test]
+fn typing_across_run_boundaries_lays_out_as_a_fresh_session_does() {
+    for seed in 0..SEEDS {
+        let mut rng = Rng::new(seed);
+        let bytes = package(&boundary_body(&mut rng));
+        type_and_check(
+            &format!("boundary seed {seed}"),
+            9700 + seed,
+            &bytes,
+            GENERATED_KEYS,
+            |engine| boundary_key(engine, &mut rng),
+            resident_matches_fresh,
+        );
     }
 }
 
