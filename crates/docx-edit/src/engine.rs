@@ -87,6 +87,9 @@ struct LoweredStory {
     /// The plain text edit of a body cell story since this lowering, which
     /// re-lowering only that cell's table absorbs.
     cell_edit: Option<CellTextEdit>,
+    /// The cell story the last table patch edited and its index in
+    /// `map.stories`, which the next keystroke in that cell reads again.
+    cell_story_slot: Option<(String, usize)>,
 }
 
 /// A plain text edit of a body cell story: no paragraph or revision created.
@@ -5963,11 +5966,17 @@ impl EngineSession {
             return None;
         }
         let map = &lowered.map;
-        let slot = map.stories.iter().position(|story| *story == edit.story)? as u32;
+        // Stories are lowered once each, so a slot that still names the story is its slot.
+        let slot = lowered
+            .cell_story_slot
+            .as_ref()
+            .filter(|(story, slot)| *story == edit.story && map.stories.get(*slot) == Some(story))
+            .map(|(_, slot)| *slot)
+            .or_else(|| map.stories.iter().position(|story| *story == edit.story))?;
         let paragraph = map
             .paragraphs
             .iter()
-            .position(|(story, _)| *story == slot)? as u32;
+            .position(|(story, _)| *story as usize == slot)? as u32;
         let pm = map
             .paragraph_blocks
             .iter()
@@ -5987,7 +5996,11 @@ impl EngineSession {
         let table = lowered.table_embeds.get(id)?;
         let first_story = id.strip_prefix("body:table:")?;
         let (start, end) = (old.pm_start? as u64, old.pm_end? as u64);
-        let stories = map.stories.iter().position(|story| story == first_story)?;
+        // The table lowers its first cell before any story inside it.
+        let stories = map.stories[..=slot]
+            .iter()
+            .rposition(|story| story == first_story)
+            .or_else(|| map.stories.iter().position(|story| story == first_story))?;
         let paragraphs = map
             .paragraphs
             .iter()
@@ -6162,6 +6175,7 @@ impl EngineSession {
             },
             shifted_version: lowered.blocks.version(),
         });
+        lowered.cell_story_slot = Some((edit.story, slot));
         lowered.generation = generation;
         lowered.doc_epoch = epoch;
         lowered.serialized_blocks = None;
@@ -6411,6 +6425,7 @@ impl EngineSession {
                 preview_paragraph_edits: Vec::new(),
                 table_embeds,
                 cell_edit: None,
+                cell_story_slot: None,
             },
         );
         Ok(())
