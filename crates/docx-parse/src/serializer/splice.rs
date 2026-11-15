@@ -5838,4 +5838,190 @@ mod tests {
             &[modelled(START, "One", ""), modelled("", "Two", &range_end(0))],
         );
     }
+
+    /// Each paragraph's comment markers in `xml`, in order.
+    fn comment_marks(xml: &str) -> Vec<Vec<(String, String, usize)>> {
+        paragraph_occurrences(xml)
+            .unwrap()
+            .iter()
+            .map(|occurrence| {
+                marks(&xml[paragraph_span(xml, occurrence).unwrap()])
+                    .unwrap()
+                    .comments
+            })
+            .collect()
+    }
+
+    /// Asserts that the direct splice puts every comment marker where `written` has it.
+    fn assert_direct_where_moved(source: &[String], written: &[String]) {
+        let ([_, _, saved], _) = saved_beside_an_edit(source, written);
+        let mut wanted = comment_marks(&written.concat());
+        wanted.push(Vec::new());
+        assert_eq!(saved.as_deref().map(comment_marks), Some(wanted));
+    }
+
+    #[test]
+    #[ignore = "the direct splice keeps the source positions of comment markers"]
+    fn a_range_end_moved_into_the_first_paragraph_text_is_written_where_it_moved_on_the_direct_splice() {
+        let shortened = format!(
+            "<w:p><w:pPr><w:pageBreakBefore/></w:pPr>{START}<w:r><w:t>On</w:t></w:r>{}<w:r><w:t>e</w:t></w:r></w:p>",
+            range_end(0)
+        );
+        assert_direct_where_moved(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", &range_end(0), "Two"),
+            ],
+            &[shortened, modelled("", "Two", "")],
+        );
+    }
+
+    #[test]
+    #[ignore = "the direct splice keeps the source positions of comment markers"]
+    fn a_range_end_moved_past_the_next_paragraph_text_is_written_where_it_moved_on_the_direct_splice() {
+        assert_direct_where_moved(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", &range_end(0), "Two"),
+            ],
+            &[modelled(START, "One", ""), modelled("", "Two", &range_end(0))],
+        );
+    }
+
+    /// Each splice path's save of `source` written as `written` in order, `None` for a new
+    /// paragraph after the one before it, with `removed` dropped.
+    fn saved_as_written(
+        source: &str,
+        written: &[(Option<u32>, &str)],
+        removed: &[u32],
+    ) -> [Option<String>; 3] {
+        let mut recorded = RecordedParagraphs::default();
+        let mut inserted = Vec::new();
+        let mut previous = 0;
+        for (ordinal, xml) in written {
+            match ordinal {
+                Some(ordinal) => {
+                    recorded.written.insert(*ordinal, (*xml).to_owned());
+                    previous = *ordinal;
+                }
+                None => {
+                    recorded.inserted.push((*xml).to_owned());
+                    inserted.push(S13SpliceAnchor::After(previous));
+                }
+            }
+            recorded.order.push(*ordinal);
+        }
+        let body: String = written.iter().map(|(_, xml)| *xml).collect();
+        let serialized = format!("{SERIALIZED_ROOT}<w:body>{body}</w:body></w:document>");
+        let part = S13SplicedPart {
+            format_only: Vec::new(),
+            part: "word/document.xml".to_owned(),
+            sha256: String::new(),
+            paragraphs: written.iter().filter_map(|(ordinal, _)| *ordinal).collect(),
+            changed: Vec::new(),
+            inserted,
+            removed: removed.to_vec(),
+            paragraph_patches: Vec::new(),
+            legacy_paragraphs: Vec::new(),
+            table_patches: Vec::new(),
+        };
+        let none = BTreeMap::new();
+        [
+            splice_story_part(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &none,
+                &mut Vec::new(),
+            ),
+            replace_story_part(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &none,
+                &mut Vec::new(),
+            ),
+            splice_source_direct(
+                source,
+                &serialized,
+                &recorded,
+                &part,
+                &none,
+                &none,
+                &mut Vec::new(),
+            ),
+        ]
+    }
+
+    const NEW: &str = "<w:p><w:r><w:t>New</w:t></w:r></w:p>";
+
+    fn inserted_after_a_held_end() -> ([Option<String>; 3], String) {
+        let first = modelled(START, "One", &range_end(0));
+        let second = modelled("", "Two", "");
+        let source = body(&format!(
+            "{}{}",
+            rich("00A10001", START, "One"),
+            rich("00A10002", &range_end(0), "Two")
+        ));
+        let saved = saved_as_written(
+            &source,
+            &[(Some(0), &first), (None, NEW), (Some(1), &second)],
+            &[],
+        );
+        (saved, body(&format!("{first}{NEW}{second}")))
+    }
+
+    #[test]
+    fn a_paragraph_inserted_after_a_held_range_end_stays_outside_the_comment_on_the_story_splice() {
+        let ([saved, _, _], _) = inserted_after_a_held_end();
+        assert_eq!(saved, None);
+    }
+
+    #[test]
+    fn a_paragraph_inserted_after_a_held_range_end_stays_outside_the_comment_on_the_replacing_splice()
+    {
+        let ([_, saved, _], written) = inserted_after_a_held_end();
+        assert_eq!(saved, Some(written));
+    }
+
+    fn deleted_inside_a_range() -> ([Option<String>; 3], String, String) {
+        let first = modelled(START, "One", &range_end(0));
+        let third = modelled("", "Two", "");
+        let (kept_first, kept_third) = (
+            rich("00A10001", START, "One"),
+            rich("00A10003", &range_end(0), "Two"),
+        );
+        let source = body(&format!(
+            "{kept_first}{}{kept_third}",
+            rich("00A10002", "", "Mid")
+        ));
+        let saved = saved_as_written(&source, &[(Some(0), &first), (Some(2), &third)], &[1]);
+        (
+            saved,
+            body(&format!("{first}{third}")),
+            body(&format!("{kept_first}{kept_third}")),
+        )
+    }
+
+    #[test]
+    fn a_paragraph_deleted_inside_a_range_leaves_the_model_placement_on_the_story_splice() {
+        let ([saved, _, _], _, _) = deleted_inside_a_range();
+        assert_eq!(saved, None);
+    }
+
+    #[test]
+    fn a_paragraph_deleted_inside_a_range_leaves_the_model_placement_on_the_replacing_splice() {
+        let ([_, saved, _], written, _) = deleted_inside_a_range();
+        assert_eq!(saved, Some(written));
+    }
+
+    #[test]
+    fn a_paragraph_deleted_inside_a_range_leaves_the_model_placement_on_the_direct_splice() {
+        let ([_, _, saved], _, kept) = deleted_inside_a_range();
+        assert_eq!(saved, Some(kept));
+    }
 }
