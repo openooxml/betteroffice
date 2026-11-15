@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   DocxEditor,
   defineDocxPlugin,
+  useDocxSelectionPlacement,
   type DocxEditorRef,
   type DocxPluginContext,
   type DocxPluginEvent,
@@ -182,6 +183,19 @@ function HeaderProbe({ geometry }: { geometry: DocxPluginGeometry }) {
   );
 }
 
+function PlacementProbe({ context, geometry }: { context: ProbeContext; geometry: DocxPluginGeometry }) {
+  const placement = useDocxSelectionPlacement(context, { width: 120, height: 30, geometry });
+  if (!placement) return null;
+  return (
+    <div
+      data-testid="probe-placement"
+      data-anchor={JSON.stringify(placement.anchor)}
+      data-kept={String(placement.kept)}
+      style={{ position: 'absolute', left: placement.x, top: placement.y, width: placement.width, height: placement.height, outline: '1px solid green' }}
+    />
+  );
+}
+
 function GeometryProbe({ geometry }: { geometry: DocxPluginGeometry }) {
   useEffect(() => {
     probe.geometry = geometry;
@@ -229,9 +243,10 @@ const alignment = defineDocxPlugin<ProbeState>({
     if (event.type === 'load' || event.type === 'document-change') await refresh(context);
   },
   panel: { title: 'Probe', placement: 'right', render: ProbePanel },
-  overlay: ({ geometry }) => (
+  overlay: ({ context, geometry }) => (
     <>
       <GeometryProbe geometry={geometry} />
+      <PlacementProbe context={context} geometry={geometry} />
       {repeatedHeader && <HeaderProbe geometry={geometry} />}
       {Array.from({ length: geometry.layout.pageCount }, (_, index) => {
         const bounds = geometry.dom.getPageBounds(index);
