@@ -438,7 +438,10 @@ fn moved_marks(
             if let Some(&held) = moves.get(&ordinal) {
                 wanted.comments.truncate(wanted.comments.len() - held);
             }
-            if let Some(&held) = ordinal.checked_sub(1).and_then(|previous| moves.get(&previous)) {
+            if let Some(&held) = ordinal
+                .checked_sub(1)
+                .and_then(|previous| moves.get(&previous))
+            {
                 let previous = &all[&(ordinal - 1)].1.comments;
                 let mut head: Vec<_> = previous[previous.len() - held..]
                     .iter()
@@ -5851,7 +5854,10 @@ mod tests {
                 rich("00A10001", START, "One"),
                 rich("00A10002", &range_end(0), "Two"),
             ],
-            &[modelled(START, "One", ""), modelled("", "Two", &range_end(0))],
+            &[
+                modelled(START, "One", ""),
+                modelled("", "Two", &range_end(0)),
+            ],
         );
     }
 
@@ -5878,7 +5884,8 @@ mod tests {
 
     #[test]
     #[ignore = "the direct splice keeps the source positions of comment markers"]
-    fn a_range_end_moved_into_the_first_paragraph_text_is_written_where_it_moved_on_the_direct_splice() {
+    fn a_range_end_moved_into_the_first_paragraph_text_is_written_where_it_moved_on_the_direct_splice()
+     {
         let shortened = format!(
             "<w:p><w:pPr><w:pageBreakBefore/></w:pPr>{START}<w:r><w:t>On</w:t></w:r>{}<w:r><w:t>e</w:t></w:r></w:p>",
             range_end(0)
@@ -5894,13 +5901,17 @@ mod tests {
 
     #[test]
     #[ignore = "the direct splice keeps the source positions of comment markers"]
-    fn a_range_end_moved_past_the_next_paragraph_text_is_written_where_it_moved_on_the_direct_splice() {
+    fn a_range_end_moved_past_the_next_paragraph_text_is_written_where_it_moved_on_the_direct_splice()
+     {
         assert_direct_where_moved(
             &[
                 rich("00A10001", START, "One"),
                 rich("00A10002", &range_end(0), "Two"),
             ],
-            &[modelled(START, "One", ""), modelled("", "Two", &range_end(0))],
+            &[
+                modelled(START, "One", ""),
+                modelled("", "Two", &range_end(0)),
+            ],
         );
     }
 
@@ -5999,7 +6010,7 @@ mod tests {
 
     #[test]
     fn a_paragraph_inserted_after_a_held_range_end_stays_outside_the_comment_on_the_replacing_splice()
-    {
+     {
         let ([_, saved, _], written) = inserted_after_a_held_end();
         assert_eq!(saved, Some(written));
     }
