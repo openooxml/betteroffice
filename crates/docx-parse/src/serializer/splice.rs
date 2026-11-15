@@ -5542,4 +5542,197 @@ mod tests {
             Some(body(written))
         );
     }
+
+    const PLAIN: &str = "<w:p><w:r><w:t>Plain</w:t></w:r></w:p>";
+    const EDITED: &str = "<w:p><w:r><w:t>Plain, edited</w:t></w:r></w:p>";
+    const START: &str = "<w:commentRangeStart w:id=\"0\"/>";
+
+    /// A comment range end on `id` with its reference run.
+    fn range_end(id: u32) -> String {
+        format!(
+            "<w:commentRangeEnd w:id=\"{id}\"/><w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:commentReference w:id=\"{id}\"/></w:r>"
+        )
+    }
+
+    /// A source paragraph with what a rewrite from the model drops.
+    fn rich(rsid: &str, head: &str, text: &str) -> String {
+        format!(
+            "<w:p w:rsidR=\"{rsid}\" w:rsidRDefault=\"{rsid}\"><w:pPr><w:pageBreakBefore/><w:bidi/><w:rPr><w:rtl/></w:rPr></w:pPr>{head}<w:r w:rsidRPr=\"{rsid}\"><w:rPr><w:rtl/></w:rPr><w:t xml:space=\"preserve\">{text}</w:t></w:r></w:p>"
+        )
+    }
+
+    /// A paragraph as the model writes it.
+    fn modelled(head: &str, text: &str, tail: &str) -> String {
+        format!(
+            "<w:p><w:pPr><w:pageBreakBefore/></w:pPr>{head}<w:r><w:t>{text}</w:t></w:r>{tail}</w:p>"
+        )
+    }
+
+    /// Each splice path's save of `source` then `PLAIN`, written as `written` then `EDITED`,
+    /// and the source with only that last paragraph edited.
+    fn saved_beside_an_edit(
+        source: &[String],
+        written: &[String],
+    ) -> ([Option<String>; 3], String) {
+        let last = source.len() as u32;
+        let mut paragraphs: Vec<(u32, &str)> = written
+            .iter()
+            .enumerate()
+            .map(|(ordinal, xml)| (ordinal as u32, xml.as_str()))
+            .collect();
+        paragraphs.push((last, EDITED));
+        let saved = splice_paths(
+            &body(&format!("{}{PLAIN}", source.concat())),
+            &paragraphs,
+            &[last],
+            &[],
+            &[(last, EDITED)],
+        );
+        (saved, body(&format!("{}{EDITED}", source.concat())))
+    }
+
+    fn end_at_a_paragraph_head() -> ([Option<String>; 3], String) {
+        saved_beside_an_edit(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", &range_end(0), "Two"),
+            ],
+            &[
+                modelled(START, "One", &range_end(0)),
+                modelled("", "Two", ""),
+            ],
+        )
+    }
+
+    fn range_over_three_paragraphs() -> ([Option<String>; 3], String) {
+        saved_beside_an_edit(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", "", "Two"),
+                rich("00A10003", &range_end(0), "Three"),
+            ],
+            &[
+                modelled(START, "One", ""),
+                modelled("", "Two", &range_end(0)),
+                modelled("", "Three", ""),
+            ],
+        )
+    }
+
+    fn two_ends_at_one_paragraph_head() -> ([Option<String>; 3], String) {
+        let starts = "<w:commentRangeStart w:id=\"1\"/><w:commentRangeStart w:id=\"2\"/>";
+        let ends = format!("{}{}", range_end(1), range_end(2));
+        saved_beside_an_edit(
+            &[
+                rich("00A10001", starts, "One"),
+                rich("00A10002", &ends, "Two"),
+            ],
+            &[modelled(starts, "One", &ends), modelled("", "Two", "")],
+        )
+    }
+
+    #[test]
+    fn a_range_end_held_at_a_paragraph_head_keeps_both_paragraphs_on_the_story_splice() {
+        let ([saved, _, _], kept) = end_at_a_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn a_range_end_held_at_a_paragraph_head_keeps_both_paragraphs_on_the_replacing_splice() {
+        let ([_, saved, _], kept) = end_at_a_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn a_range_end_held_at_a_paragraph_head_keeps_both_paragraphs_on_the_direct_splice() {
+        let ([_, _, saved], kept) = end_at_a_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn a_range_over_three_paragraphs_keeps_them_on_the_story_splice() {
+        let ([saved, _, _], kept) = range_over_three_paragraphs();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn a_range_over_three_paragraphs_keeps_them_on_the_replacing_splice() {
+        let ([_, saved, _], kept) = range_over_three_paragraphs();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn a_range_over_three_paragraphs_keeps_them_on_the_direct_splice() {
+        let ([_, _, saved], kept) = range_over_three_paragraphs();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn two_range_ends_at_one_paragraph_head_keep_both_paragraphs_on_the_story_splice() {
+        let ([saved, _, _], kept) = two_ends_at_one_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn two_range_ends_at_one_paragraph_head_keep_both_paragraphs_on_the_replacing_splice() {
+        let ([_, saved, _], kept) = two_ends_at_one_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    #[test]
+    fn two_range_ends_at_one_paragraph_head_keep_both_paragraphs_on_the_direct_splice() {
+        let ([_, _, saved], kept) = two_ends_at_one_paragraph_head();
+        assert_eq!(saved, Some(kept));
+    }
+
+    /// Asserts that each story path that saves puts every comment marker where `written` has it.
+    fn assert_written_where_moved(source: &[String], written: &[String]) {
+        let (saved, _) = saved_beside_an_edit(source, written);
+        let comments = |xml: &str| -> Vec<Vec<(String, String, usize)>> {
+            paragraph_occurrences(xml)
+                .unwrap()
+                .iter()
+                .map(|occurrence| {
+                    marks(&xml[paragraph_span(xml, occurrence).unwrap()])
+                        .unwrap()
+                        .comments
+                })
+                .collect()
+        };
+        let mut wanted = comments(&written.concat());
+        wanted.push(Vec::new());
+        let mut writes = 0;
+        for (path, saved) in saved.iter().take(2).enumerate() {
+            let Some(saved) = saved else { continue };
+            writes += 1;
+            assert_eq!(comments(saved), wanted, "path {path}: {saved}");
+        }
+        assert!(writes > 0);
+    }
+
+    #[test]
+    fn a_range_end_moved_into_the_first_paragraph_text_is_written_where_it_moved() {
+        let shortened = format!(
+            "<w:p><w:pPr><w:pageBreakBefore/></w:pPr>{START}<w:r><w:t>On</w:t></w:r>{}<w:r><w:t>e</w:t></w:r></w:p>",
+            range_end(0)
+        );
+        assert_written_where_moved(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", &range_end(0), "Two"),
+            ],
+            &[shortened, modelled("", "Two", "")],
+        );
+    }
+
+    #[test]
+    fn a_range_end_moved_past_the_next_paragraph_text_is_written_where_it_moved() {
+        assert_written_where_moved(
+            &[
+                rich("00A10001", START, "One"),
+                rich("00A10002", &range_end(0), "Two"),
+            ],
+            &[modelled(START, "One", ""), modelled("", "Two", &range_end(0))],
+        );
+    }
 }
