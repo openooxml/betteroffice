@@ -80,7 +80,10 @@ fn fixed_units() -> Vec<StorySegment> {
                     (
                         "grid",
                         any_map([
-                            ("cols", any_array([Any::BigInt(1), Any::BigInt(2), Any::BigInt(3)])),
+                            (
+                                "cols",
+                                any_array([Any::BigInt(1), Any::BigInt(2), Any::BigInt(3)]),
+                            ),
                             ("blob", any_buffer(&[9, 8, 7])),
                             ("flag", Any::Bool(false)),
                         ]),
