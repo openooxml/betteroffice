@@ -1540,4 +1540,120 @@ mod tests {
         check(&merges_only);
         assert_eq!(Workbook::default().used_rows(SheetId(3)), 0);
     }
+
+    /// the used-row count as a full scan of the used range computes it.
+    fn scanned_used_rows(workbook: &Workbook, sheet: SheetId) -> RowId {
+        workbook
+            .sheet(sheet)
+            .and_then(Sheet::used_range)
+            .map_or(0, |range| range.end.row.saturating_add(1))
+    }
+
+    const FEATURES: [&str; 9] = [
+        "data",
+        "style-only cell",
+        "cleared cell",
+        "merge below",
+        "hyperlink below",
+        "row properties",
+        "conditional format below",
+        "spill extent",
+        "table below",
+    ];
+
+    /// a sheet with the features whose bits are set in `mask`, each placed
+    /// below the data, and the used-row count each one alone gives.
+    fn featured(mask: u32) -> (Workbook, RowId) {
+        let at = |a1: &str| CellRef::parse_a1(a1).unwrap();
+        let mut sheet = Sheet::new("Data");
+        let mut workbook = Workbook::default();
+        let mut expected = 0;
+        let has = |bit: u32| mask & (1 << bit) != 0;
+        if has(0) {
+            for a1 in ["A1", "C10", "B4"] {
+                sheet.set_cell(
+                    at(a1),
+                    Cell {
+                        value: CellValue::Number { value: 1.0 },
+                        ..Cell::default()
+                    },
+                );
+            }
+            expected = expected.max(10);
+        }
+        if has(1) {
+            sheet.set_cell(
+                at("B30"),
+                Cell {
+                    style: Some(1),
+                    ..Cell::default()
+                },
+            );
+            expected = expected.max(30);
+        }
+        if has(2) {
+            sheet.set_cell(
+                at("D50"),
+                Cell {
+                    value: CellValue::Text { value: "x".into() },
+                    ..Cell::default()
+                },
+            );
+            sheet.set_cell(at("D50"), Cell::default());
+        }
+        if has(3) {
+            sheet.merges.push(CellRange::parse_a1("E40:F60").unwrap());
+            expected = expected.max(60);
+        }
+        if has(4) {
+            sheet.hyperlinks.push(Hyperlink {
+                range: CellRange::parse_a1("G70").unwrap(),
+                external_target: Some("https://example.com".into()),
+                location: None,
+                tooltip: None,
+                display: None,
+            });
+            expected = expected.max(70);
+        }
+        if has(5) {
+            sheet.row_heights.insert(79, 30.0);
+            sheet.hidden_row_heights.insert(80, 15.0);
+            sheet.row_styles.insert(81, 1);
+        }
+        if has(6) {
+            sheet.conditional_formats.push(ConditionalFormatting {
+                sqref: "A90:C100".into(),
+                rules: Vec::new(),
+            });
+        }
+        if has(7) {
+            sheet.set_array_formula(at("H1"), CellRange::parse_a1("H1:H120").unwrap());
+        }
+        if has(8) {
+            workbook.tables.push(Table {
+                name: "Table1".into(),
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A130:C140").unwrap(),
+                header_rows: 1,
+                totals_rows: 0,
+                columns: vec!["a".into(), "b".into(), "c".into()],
+            });
+        }
+        workbook.sheets.push(sheet);
+        (workbook, expected)
+    }
+
+    #[test]
+    fn used_rows_matches_the_used_range_scan_on_generated_sheets() {
+        for mask in 0..1u32 << FEATURES.len() {
+            let (workbook, expected) = featured(mask);
+            let names: Vec<&str> = (0..FEATURES.len())
+                .filter(|bit| mask & (1 << bit) != 0)
+                .map(|bit| FEATURES[bit])
+                .collect();
+            let scanned = scanned_used_rows(&workbook, SheetId(0));
+            assert_eq!(workbook.used_rows(SheetId(0)), scanned, "{names:?}");
+            assert_eq!(scanned, expected, "{names:?}");
+        }
+    }
 }
