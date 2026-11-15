@@ -5567,12 +5567,13 @@ impl EngineSession {
                     let paragraph = &range_result.start.para;
                     let offset = if lowered.local.deferred {
                         lowered.local.offset(paragraph, u32::MAX)?;
+                        // A seed's text starts after the table or break that leads its
+                        // paragraph, as the lowering read it.
                         let raw = self
                             .doc
                             .paragraph_index(&range.story)
                             .ok()?
-                            .para_span(paragraph)?
-                            .0;
+                            .para_content_start(paragraph)?;
                         if lowered.doc_epoch == before {
                             lowered.local.refresh_coordinates(
                                 paragraph,
