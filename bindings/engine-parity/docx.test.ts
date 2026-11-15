@@ -1,6 +1,8 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { deflateSync } from 'node:zlib';
 import JSZip from 'jszip';
 import initWasm, * as wasmEdit from '../../packages/docx/src/wasm/generated/edit/docx_edit.js';
 import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/docx/src/wasm/generated/preflight/docx_preflight.js';
@@ -10,7 +12,9 @@ import { readTableFragment, type ClipboardTableReader } from '../../packages/doc
 import { decodeEncodedSelection } from '../../packages/docx/src/yrs/encodedSelection';
 import type { YrsStorySegment } from '../../packages/docx/src/yrs/index';
 import { deobfuscateFont } from '../../packages/docx/src/utils/fontDeobfuscation';
+import { chunkEntries, parseSkeleton } from '../../packages/fonts/src/slices';
 import { FORMATS, parseSurface } from '../../scripts/check-engine-surface';
+import { expectFontFace, fontCases, type FontCase } from '../font-fixtures';
 import {
   coverageProblems,
   defineRow,
@@ -1049,6 +1053,98 @@ function placeholderDisplay({ engine, session }: Docx) {
   const contract = list.contractVersion === undefined ? {} : { contractVersion: list.contractVersion };
   const pages = list.pages.map(({ pageIndex, width, height }) => ({ pageIndex, width, height, primitives: [] }));
   return { list, contract, handle: engine.open_display_list(JSON.stringify({ ...contract, pages })) };
+}
+
+// The peer metadata frame: magic, u32 version, SHA-256 of the wire shape, u64 JSON and blob lengths, then both sections.
+function peerSections(metadata: Uint8Array) {
+  const view = new DataView(metadata.buffer, metadata.byteOffset, metadata.byteLength);
+  const jsonLength = Number(view.getBigUint64(44, true));
+  const blobLength = Number(view.getBigUint64(52, true));
+  if (new TextDecoder().decode(metadata.subarray(0, 6)) !== 'BOPEER' || 60 + jsonLength + blobLength !== metadata.byteLength) {
+    throw new Error('the peer metadata is not a framed header, JSON and blob section');
+  }
+  const wire = JSON.parse(new TextDecoder().decode(metadata.subarray(60, 60 + jsonLength))) as { source_digest: string; source_length: number };
+  if (wire.source_digest !== createHash('sha256').update(fixture).digest('hex') || wire.source_length !== fixture.byteLength) {
+    throw new Error('the peer metadata describes another source package');
+  }
+  return { version: view.getUint32(8, true), shape: Buffer.from(metadata.subarray(12, 44)).toString('hex'), wire, blobs: metadata.subarray(60 + jsonLength) };
+}
+
+const SLICED_FACE = '../../packages/fonts-cjk/assets/NotoSansKR-Regular';
+
+interface SlicedFace { core: Uint8Array; grown: Uint8Array; glyph: number }
+
+let slicedFaceCache: SlicedFace | undefined;
+
+// A sliced CFF face as progressive loading installs it: the core outlines, then the same face with chunk 1 added.
+function slicedFace(): SlicedFace {
+  if (slicedFaceCache) return slicedFaceCache;
+  const slice = (file: string) => wasmEngine.decodeFontFace(new Uint8Array(readFileSync(new URL(`${SLICED_FACE}/${file}`, import.meta.url))), 'zstd').font;
+  const skeleton = parseSkeleton(slice('skeleton.zst'));
+  const outlines = new Map(chunkEntries(slice('core.zst')));
+  const core = new Uint8Array(skeleton.reassemble(outlines));
+  const chunk = chunkEntries(slice('c001.zst'));
+  const glyph = chunk.find(([id, outline]) => skeleton.chunkOfGlyph(id) === 1 && !outlines.has(id) && outline.byteLength > 1)?.[0];
+  if (glyph === undefined) throw new Error('chunk 1 of the sliced face holds no outline the core lacks');
+  for (const [id, outline] of chunk) outlines.set(id, outline);
+  slicedFaceCache = { core, grown: new Uint8Array(skeleton.reassemble(outlines)), glyph };
+  return slicedFaceCache;
+}
+
+function decodedFace(decoded: wasmEdit.DecodedFontFace, expected: FontCase): wasmEdit.DecodedFontFace {
+  expectFontFace(decoded, expected);
+  return decoded;
+}
+
+const HELLO_FRAME = new Uint8Array([0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x05, 0x29, 0x00, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0xa3, 0x6d, 0x9f, 0x88]);
+
+// A one-row, single-strip little-endian TIFF, laid out as minimal_tiff in crates/ooxml-drawingml/src/media.rs.
+function stripTiff(width: number, photometric: number, compression: number, bits: number[], strip: ArrayLike<number>, colormap: number[] = []): Uint8Array {
+  const entries: [number, number, number][] = [
+    [256, 1, width], [257, 1, 1], [258, bits.length, 0], [259, 1, compression], [262, 1, photometric],
+    [273, 1, 0], [277, 1, bits.length], [278, 1, 1], [279, 1, strip.length],
+    ...(colormap.length > 0 ? [[320, colormap.length, 0] as [number, number, number]] : []),
+  ];
+  const stripAt = 10 + entries.length * 12 + 4;
+  const bitsAt = stripAt + strip.length + (strip.length % 2);
+  const outOfLineBits = bits.length > 2 ? bits.length * 2 : 0;
+  const colormapAt = bitsAt + outOfLineBits;
+  const tiff = new Uint8Array(colormapAt + colormap.length * 2);
+  const view = new DataView(tiff.buffer);
+  view.setUint16(0, 0x4949, true);
+  view.setUint16(2, 42, true);
+  view.setUint32(4, 8, true);
+  view.setUint16(8, entries.length, true);
+  entries.forEach(([tag, count, value], index) => {
+    const at = 10 + index * 12;
+    view.setUint16(at, tag, true);
+    view.setUint16(at + 2, tag === 273 || tag === 279 ? 4 : 3, true);
+    view.setUint32(at + 4, count, true);
+    if (tag === 258 && outOfLineBits === 0) bits.forEach((bit, sample) => view.setUint16(at + 8 + sample * 2, bit, true));
+    else view.setUint32(at + 8, tag === 273 ? stripAt : tag === 258 ? bitsAt : tag === 320 ? colormapAt : value, true);
+  });
+  tiff.set(Array.from(strip), stripAt);
+  if (outOfLineBits > 0) bits.forEach((bit, sample) => view.setUint16(bitsAt + sample * 2, bit, true));
+  colormap.forEach((entry, index) => view.setUint16(colormapAt + index * 2, entry, true));
+  return tiff;
+}
+
+const RGB_PIXELS = [0xff, 0x00, 0x00, 0x00, 0x80, 0xff];
+const PALETTE = Array.from({ length: 3 * 256 }, (_, index) => ([1, 256 + 2, 2 * 256, 2 * 256 + 3].includes(index) ? 0xff00 : 0));
+const TIFFS: [string, Uint8Array, number][] = [
+  ['RGB', stripTiff(2, 2, 1, [8, 8, 8], RGB_PIXELS), 2],
+  ['RGB, PackBits', stripTiff(2, 2, 32773, [8, 8, 8], [RGB_PIXELS.length - 1, ...RGB_PIXELS]), 2],
+  ['RGB, Deflate', stripTiff(2, 2, 8, [8, 8, 8], deflateSync(Uint8Array.from(RGB_PIXELS))), 2],
+  ['palette', stripTiff(4, 3, 1, [8], [0, 1, 2, 3], PALETTE), 4],
+];
+
+// The PNG signature and an IHDR of the TIFF's size, so a passthrough or an empty image cannot match.
+function decodedPng(png: Uint8Array, width: number): Uint8Array {
+  const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+  if (png.byteLength < 24 || view.getUint32(0) !== 0x89504e47 || view.getUint32(12) !== 0x49484452 || view.getUint32(16) !== width || view.getUint32(20) !== 1) {
+    throw new Error(`the decoded image is not a ${width}x1 PNG`);
+  }
+  return png;
 }
 
 const PARSES =['parse_docx_s2', 'parse_docx_s3', 'parse_docx_s4', 'parse_docx_s5', 'parse_docx_s6', 'parse_docx_s7', 'parse_docx_s8'] as const;
@@ -3136,6 +3232,18 @@ const rows: Row<Docx>[] = [
     call: ({ session: s }, font) => s.outline_glyph_json(font, GLYPH_A),
   }),
   defineRow({
+    method: 'EditSession.update_measure_font_outlines',
+    setup: ({ session: s }: Docx) => s.register_measure_font(slicedFace().core),
+    call: ({ session: s }, font) => {
+      const { grown, glyph } = slicedFace();
+      const before = s.outline_glyph_json(font, glyph);
+      const result = s.update_measure_font_outlines(font, grown);
+      const after = s.outline_glyph_json(font, glyph);
+      if (after === before) throw new Error('the update leaves the chunk 1 glyph drawn as before');
+      return { result, before, after };
+    },
+  }),
+  defineRow({
     method: 'EditSession.register_substitute_measure_font',
     setup: ({ session: s }: Docx) => s.register_measure_font(fontBytes),
     call: ({ session: s }, font) => ({
@@ -3309,6 +3417,21 @@ const rows: Row<Docx>[] = [
     setup: ({ engine }: Docx) => moduleFont(engine),
     call: ({ engine }, font) => engine.outline_glyph_json(font, GLYPH_A),
   }),
+  ...fontCases().filter(({ maxOutput }) => maxOutput === undefined).map((face, index): Row<Docx> => ({
+    method: 'decodeFontFace',
+    name: `decodeFontFace (${face.codec} fixture ${index + 1}${face.dict ? ', with a dictionary' : ''})`,
+    call: ({ engine }) => decodedFace(engine.decodeFontFace(face.bytes, face.codec, face.dict), face),
+  })),
+  {
+    method: 'decodeFontFace',
+    name: 'decodeFontFace (inline frame)',
+    call: ({ engine }) => decodedFace(engine.decodeFontFace(HELLO_FRAME, 'zstd'), { bytes: HELLO_FRAME, codec: 'zstd', font: new TextEncoder().encode('hello') }),
+  },
+  ...TIFFS.map(([variant, tiff, width]): Row<Docx> => ({
+    method: 'decodeTiffPng',
+    name: `decodeTiffPng (${variant})`,
+    call: ({ engine }) => decodedPng(engine.decodeTiffPng(tiff), width),
+  })),
   {
     method: 'parse_relationships_xml',
     call: ({ engine }) => engine.parse_relationships_xml(fixtureEntries['word/_rels/document.xml.rels']!, 'word/_rels/document.xml.rels'),
@@ -3334,6 +3457,17 @@ const rows: Row<Docx>[] = [
       const peer = fresh();
       const result = peer.bootstrap_peer(worker.encode_state(), worker.encode_peer_metadata(), fixture);
       return { result, segments: peer.story_segments('body'), stories: peer.list_stories_json(), comments: peer.list_comments() };
+    },
+  },
+  {
+    method: 'EditSession.encode_peer_metadata',
+    call: ({ fresh }) => {
+      const worker = fresh();
+      worker.open_docx(fixture, true, GENERATION);
+      const metadata = worker.encode_peer_metadata();
+      const peer = fresh();
+      peer.bootstrap_peer(worker.encode_state(), metadata, fixture);
+      return { metadata, sections: peerSections(metadata), segments: peer.story_segments('body') };
     },
   },
   {
@@ -3476,15 +3610,12 @@ const knownDifferences: KnownDifference[] = [];
 
 const notYetCovered: string[] = [
   'EditSession.begin_shared_reads', // no effect observable through the public surface on these fixtures
-  'EditSession.encode_peer_metadata',
   'EditSession.end_shared_reads', // no effect observable through the public surface on these fixtures
   'EditSession.set_display_retain_built_pages', // no effect observable through the public surface on these fixtures
   'EditSession.set_local_lowering', // no effect observable through the public surface on these fixtures
   'EditSession.set_windowed_incremental_builds', // no effect observable through the public surface on these fixtures
-  'EditSession.update_measure_font_outlines',
   'RetainedLayoutMeta.notes_converged', // the current fixtures only ever yield one constant value
   'RetainedLayoutMeta.provisional', // the current fixtures only ever yield one constant value
-  'decodeFontFace', 'decodeTiffPng',
 ];
 
 const NO_RASTERIZER = 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/docx/src/wasm/enginePng.ts';
@@ -3515,7 +3646,7 @@ describe('docx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(11);
+    expect(notYetCovered.length).toBe(7);
   });
 
   for (const row of rows) {
