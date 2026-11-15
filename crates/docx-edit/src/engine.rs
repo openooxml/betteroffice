@@ -1542,7 +1542,7 @@ where
                         .iter()
                         .any(|run| matches!(run, Run::Image(_))) =>
                 {
-                    Some((index, measured.block.clone(), measured.measure.clone()))
+                    Some(index)
                 }
                 _ => None,
             })
@@ -1550,6 +1550,7 @@ where
     } else {
         Vec::new()
     };
+    let mut pinned = BTreeSet::new();
     let mut touched = false;
     let max_phases = if has_unequal || has_continuous_floats {
         32 + input.measured.len()
@@ -1591,6 +1592,9 @@ where
                 let LayoutBlock::Paragraph(paragraph) = &measured.block else {
                     continue;
                 };
+                if pinned.contains(&index) {
+                    continue;
+                }
                 if !paragraph
                     .runs
                     .iter()
@@ -1632,19 +1636,25 @@ where
                 });
         let accept =
             has_unequal && !frames_changed && (repeated.is_some() || phase + 1 == max_phases);
-        if let Some(first) = repeated.filter(|_| has_continuous_floats && !accept) {
-            let cycle = &visited[first..];
-            for (index, block, measure) in &pictures {
-                let start = &cycle[0].3[*index];
-                if cycle
-                    .iter()
-                    .any(|(_, _, _, frames)| frames[*index] != *start)
-                {
-                    input.measured[*index].block = block.clone();
-                    input.measured[*index].measure = measure.clone();
-                }
+        if let Some(first) = repeated.filter(|_| has_continuous_floats && !has_unequal) {
+            let cycling = pictures
+                .iter()
+                .copied()
+                .filter(|index| {
+                    visited[first..]
+                        .iter()
+                        .any(|(_, _, _, frames)| frames[*index] != next_wrap_frames[*index])
+                })
+                .collect::<Vec<_>>();
+            if cycling.is_empty() {
+                break;
             }
-            return Ok(true);
+            for index in cycling {
+                pinned.insert(index);
+                next_wrap_frames[index].horizontal_frame = None;
+                next_wrap_frames[index].page_width = None;
+            }
+            visited.clear();
         }
         if accept {
             for (index, unequal) in unequal.iter().enumerate() {
