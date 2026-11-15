@@ -2,7 +2,7 @@
 //! section that opens below a one-column section.
 
 use super::*;
-use crate::seed::fixture::{Package, para, run};
+use crate::seed::fixture::{Package, image, para, run};
 
 const PAGE: &str = r#"<w:pgSz w:w="5760" w:h="5760"/>"#;
 const LEAD: &str = "00002600";
@@ -75,6 +75,34 @@ fn equal_columns(columns: u32, lead: usize) -> Vec<u8> {
         margins(360, 360)
     );
     package(if columns == 2 { 212 } else { 152 }, lead, &section)
+}
+
+/// Three columns of equal widths that the section declares unequal, with the
+/// picture over the second one.
+fn unequal_marked_columns(lead: usize) -> Vec<u8> {
+    let section = format!(
+        r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}<w:cols w:num="3" w:space="360" w:equalWidth="0"><w:col w:w="1440" w:space="360"/><w:col w:w="1440" w:space="360"/><w:col w:w="1440"/></w:cols></w:sectPr>"#,
+        margins(360, 360)
+    );
+    package(152, lead, &section)
+}
+
+/// A shape placed by page side and an inline picture in a continuous section.
+fn page_side_shape_with_inline_picture() -> Vec<u8> {
+    let section = format!(
+        r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}</w:sectPr>"#,
+        margins(360, 360)
+    );
+    let body = format!(
+        "{}{}{}{}{section}",
+        first_section(),
+        para("00002900", &format!("{}{INSIDE_SHAPE}", run("Anchor "))),
+        para("00002901", &format!("{}{}", run("Inline "), image("image", "inline"))),
+        filler_paragraphs(0x2A00, 12),
+    );
+    Package::new(&body)
+        .rel("image", "image", "media/image1.png")
+        .bytes()
 }
 
 /// One column whose continuous section widens both side margins.
@@ -252,4 +280,232 @@ fn wrapping_that_reaches_the_phase_limit_without_repeating_fails() {
             .unwrap_err()
             .contains("anchored shape wrapping did not converge")
     );
+}
+
+fn text_end(engine: &EngineSession, id: &str) -> u32 {
+    engine
+        .doc()
+        .paragraph_index("body")
+        .unwrap()
+        .para_span(id)
+        .unwrap()
+        .1
+        - 1
+}
+
+/// The measured body of `bytes` as an open lays it out, before wrapping settles.
+fn measured_body(engine: &EngineSession, bytes: &[u8]) -> crate::engine::PreparedRegionLayout {
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let request = lowering_pages::region_request(engine, bytes, font).to_string();
+    engine.set_local_lowering(true);
+    let mut prepared = engine
+        .prepare_region_layout(&request, None, RelayoutTrigger::Open)
+        .unwrap();
+    prepared.measure(usize::MAX).unwrap();
+    prepared
+}
+
+fn picture_index(input: &LayoutInput) -> Option<usize> {
+    input.measured.iter().position(|measured| {
+        matches!(
+            &measured.block,
+            LayoutBlock::Paragraph(paragraph)
+                if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
+        )
+    })
+}
+
+/// Every block of `prepared` measured afresh in one pass, with no picture
+/// held to a horizontal frame.
+fn fresh_measures(prepared: &crate::engine::PreparedRegionLayout) -> Vec<serde_json::Value> {
+    let input = &prepared.input;
+    let mut blocks = input
+        .measured
+        .iter()
+        .map(|measured| measured.block.clone())
+        .collect::<Vec<_>>();
+    let (widths, frames) =
+        crate::engine::region_table_measurement_frames(blocks.iter(), input, &prepared.regions);
+    let geometry = crate::engine::initial_float_page_geometry(input, &prepared.regions);
+    docx_layout::measure_blocks::measure_blocks_with_column_frames(
+        &mut blocks,
+        &widths,
+        &frames,
+        &prepared.measurement,
+        Some(&geometry),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+    .unwrap()
+    .iter()
+    .map(|measure| serde_json::to_value(measure).unwrap())
+    .collect()
+}
+
+/// Checks the open session against a fresh session opened on the same
+/// document: the frame, and the measured blocks and options it paginates.
+fn assert_input_matches_fresh(
+    host: &mut CommandHost<'_>,
+    client_id: u64,
+    bytes: &[u8],
+    label: &str,
+) {
+    host.assert_matches_cold(label);
+    let cold = cold_session(host.engine, client_id, Some((client_id, bytes)));
+    cold.set_local_lowering(true);
+    cold.layout_regions_for_trigger(&host.request, None, RelayoutTrigger::Open)
+        .unwrap();
+    let inputs = |engine: &EngineSession| {
+        serde_json::from_str::<serde_json::Value>(&engine.retained_kernel_inputs_json().unwrap())
+            .unwrap()
+    };
+    assert_eq!(inputs(host.engine), inputs(&cold), "{label}");
+}
+
+#[test]
+fn a_cycling_page_side_shape_beside_an_inline_picture_keeps_the_convergence_error() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let bytes = page_side_shape_with_inline_picture();
+    let engine = seeded_engine(9806, &bytes);
+    let mut prepared = measured_body(&engine, &bytes);
+    let page_side = prepared
+        .input
+        .measured
+        .iter()
+        .any(|measured| match &measured.block {
+            LayoutBlock::Shape(shape) => crate::engine::wraps_by_page_side(shape),
+            _ => false,
+        });
+    assert!(page_side);
+    assert!(picture_index(&prepared.input).is_some());
+    let laid_out = crate::engine::stabilize_flow_wrapping(
+        &mut prepared.input,
+        &prepared.regions,
+        &prepared.measurement,
+        |input, phase| {
+            let mut layout = docx_layout::place::layout_document(input)?;
+            for fragment in layout
+                .pages
+                .iter_mut()
+                .flat_map(|page| page.fragments.iter_mut())
+            {
+                if let docx_layout::types::Fragment::Shape(shape) = fragment {
+                    shape.wrap_offset_x = Some(if phase % 2 == 0 { 12.0 } else { 36.0 });
+                }
+            }
+            Ok(layout)
+        },
+    );
+    assert!(matches!(
+        laid_out,
+        Err(docx_layout::LayoutError::Invalid(message))
+            if message == "anchored shape wrapping did not converge"
+    ));
+}
+
+#[test]
+fn flow_after_a_settled_picture_measures_as_a_fresh_layout_does() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let bytes = equal_columns(3, 60);
+    let engine = seeded_engine(9807, &bytes);
+    let mut prepared = measured_body(&engine, &bytes);
+    let picture = picture_index(&prepared.input).unwrap();
+    let settled = crate::engine::stabilize_flow_wrapping(
+        &mut prepared.input,
+        &prepared.regions,
+        &prepared.measurement,
+        |input, _| docx_layout::place::layout_document(input),
+    );
+    assert!(settled.unwrap());
+    let fresh = fresh_measures(&prepared);
+    for (index, measured) in prepared.input.measured.iter().enumerate().skip(picture) {
+        assert_eq!(
+            serde_json::to_value(&measured.measure).unwrap(),
+            fresh[index],
+            "block {index}"
+        );
+    }
+}
+
+#[test]
+fn equal_column_picture_edits_leave_the_input_a_fresh_open_builds() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    for (client_id, columns, lead) in [(9808, 2, 9), (9809, 3, 60)] {
+        let bytes = equal_columns(columns, lead);
+        let engine = seeded_engine(client_id, &bytes);
+        let mut host = opened(&engine, &bytes).seeded(client_id, bytes.clone());
+        let check = |host: &mut CommandHost<'_>, label: &str| {
+            assert_input_matches_fresh(
+                host,
+                client_id,
+                &bytes,
+                &format!("{columns} columns: {label}"),
+            );
+        };
+        check(&mut host, "open");
+        let at = lead_end(&engine);
+        let typed = format!(" {}", words(40, 900));
+        host.command("body", at, at, Some(&typed));
+        check(&mut host, "typing before the picture");
+        host.command("body", at, at + typed.chars().count() as u32, None);
+        check(&mut host, "shrinking the lead");
+        let grown = format!(" {}", words(20, 900));
+        host.command("body", at, at, Some(&grown));
+        check(&mut host, "growing the lead");
+        let split = at + grown.chars().count() as u32 / 2;
+        engine
+            .split_resident_paragraph(crate::Position::new("body", split))
+            .unwrap();
+        host.relayout(Some("body"));
+        check(&mut host, "enter in the lead");
+    }
+}
+
+#[test]
+fn edits_in_the_preceding_section_leave_the_input_a_fresh_open_builds() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    for (client_id, columns, lead) in [(9810, 2, 9), (9811, 3, 60)] {
+        let bytes = equal_columns(columns, lead);
+        let engine = seeded_engine(client_id, &bytes);
+        let mut host = opened(&engine, &bytes).seeded(client_id, bytes.clone());
+        for count in [6, 14, 30] {
+            let at = text_end(&engine, "00002000");
+            host.command("body", at, at, Some(&format!(" {}", words(count, 700))));
+            assert_input_matches_fresh(
+                &mut host,
+                client_id,
+                &bytes,
+                &format!("{columns} columns: {count} words typed in the section above"),
+            );
+        }
+    }
+}
+
+#[test]
+fn a_picture_cycling_in_unequal_columns_keeps_the_convergence_error() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    for (client_id, bytes, settles) in [
+        (9812, equal_columns(3, 60), true),
+        (9813, unequal_marked_columns(60), false),
+    ] {
+        let engine = seeded_engine(client_id, &bytes);
+        let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+        engine.set_local_lowering(true);
+        let laid_out = engine.layout_document_with_regions_retained(&request);
+        if settles {
+            laid_out.unwrap();
+        } else {
+            assert!(
+                laid_out
+                    .unwrap_err()
+                    .contains("anchored shape wrapping did not converge")
+            );
+        }
+    }
 }
