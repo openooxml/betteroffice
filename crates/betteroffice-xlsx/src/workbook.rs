@@ -12,6 +12,8 @@ mod format_calculation_tests;
 mod format_facets_tests;
 mod formula_entry;
 mod geometry;
+#[cfg(test)]
+mod graph_reuse_tests;
 mod preserved_fragments;
 mod proposals;
 pub(crate) mod reads;
@@ -465,6 +467,25 @@ fn on_used_edge(bounds: Option<CellRange>, at: CellRef) -> bool {
     })
 }
 
+/// How full recalculations came by their dependency graph.
+#[derive(Default)]
+struct GraphReuse {
+    /// The model epoch at which the graph last matched a build over the model.
+    current_at: Option<u64>,
+    #[cfg(any(test, feature = "test-counters"))]
+    keeps: u64,
+    #[cfg(any(test, feature = "test-counters"))]
+    rebuilds: u64,
+}
+
+/// A full recalculation of a copy of the model over a graph built afresh.
+#[cfg(test)]
+struct FreshRecalculation {
+    model: WorkbookModel,
+    graph: DepGraph,
+    result: RecalcResult,
+}
+
 pub struct Workbook {
     #[cfg(feature = "fonts")]
     pub(crate) font_manager: betteroffice_fonts::FontManager,
@@ -489,6 +510,7 @@ pub struct Workbook {
     active_sheet: SheetId,
     undo: UndoStack,
     graph: Option<DepGraph>,
+    graph_reuse: GraphReuse,
     rand_seed: Option<u32>,
     proposals: ProposalSet,
     last_calculation: CalculationResult,
@@ -627,6 +649,12 @@ fn eager_authority() -> bool {
 #[cfg(not(test))]
 fn eager_authority() -> bool {
     false
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Removes one edge from a kept graph before it recalculates.
+    pub(crate) static CORRUPT_KEPT_EDGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn missing_authority() -> Error {
@@ -1060,6 +1088,7 @@ impl Workbook {
             active_sheet,
             undo: UndoStack::new(),
             graph,
+            graph_reuse: GraphReuse::default(),
             rand_seed: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
@@ -1081,6 +1110,7 @@ impl Workbook {
             fonts: Mutex::new(crate::font::FontRegistry::default()),
         };
         if build_graph {
+            workbook.mark_graph_current();
             workbook.derive_unevaluated(None);
         }
         Ok(workbook)
@@ -1337,6 +1367,7 @@ impl Workbook {
         self.rebase_sheet_positions(&frozen.sheet_keys, &structure.sheet_keys);
         self.invalidate_sheet_info();
         self.graph = Some(graph);
+        self.mark_graph_current();
         self.last_calculation = calculation;
         self.mode = WorkbookMode::Collaborative {
             structure: Box::new(structure),
@@ -1611,6 +1642,7 @@ impl Workbook {
         };
         self.invalidate_sheet_info();
         self.graph = Some(graph);
+        self.mark_graph_current();
         self.last_calculation = calculation.clone();
         self.undo.clear();
         self.preserved_undo.clear();
@@ -2265,6 +2297,7 @@ impl Workbook {
         mark(EditStage::Validated);
         self.ensure_graph();
         let formula = state.formula.clone();
+        let keeps_graph = self.keeps_graph_current(&[(sheet, cell, formula.clone())]);
         let mut ops = vec![Op::SetCell {
             sheet,
             at: cell,
@@ -2289,6 +2322,9 @@ impl Workbook {
         mark(EditStage::Recalculated);
         let result = self.mutation_result(true, result, &seeds);
         self.publish(update);
+        if keeps_graph {
+            self.mark_graph_current();
+        }
         Ok(result)
     }
 
@@ -2370,6 +2406,7 @@ impl Workbook {
             inverse.extend(chunk);
         }
         self.ensure_graph();
+        let keeps_graph = self.keeps_graph_current(&touched);
         let prepared = self.prepare_commit(
             ops,
             StagedApply::new(preview, inverse),
@@ -2398,6 +2435,9 @@ impl Workbook {
         );
         let result = self.mutation_result(true, result, &seeds);
         self.publish(update);
+        if keeps_graph {
+            self.mark_graph_current();
+        }
         Ok(result)
     }
 
@@ -3161,6 +3201,7 @@ impl Workbook {
             inverse.extend(chunk);
         }
         self.ensure_graph();
+        let keeps_graph = self.keeps_graph_current(&touched);
         let prepared = self.prepare_commit(
             ops,
             StagedApply::new(preview, inverse),
@@ -3190,6 +3231,9 @@ impl Workbook {
         let mutation = self.mutation_result(true, result, &seeds);
         self.proposals.remove(id);
         self.publish(update);
+        if keeps_graph {
+            self.mark_graph_current();
+        }
         Ok(ProposalAcceptance {
             proposal_id: id.to_string(),
             mutation,
@@ -4262,22 +4306,136 @@ impl Workbook {
         result
     }
 
+    /// Keeps a current graph; tests check a kept one against a fresh build.
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
+        let keep = self.graph_current();
+        #[cfg(test)]
+        let fresh = keep.then(|| self.fresh_full_recalculation(options));
         self.bump_model_epoch();
         self.recalculated_since_open = true;
         self.calculations_since_open = self.calculations_since_open.saturating_add(1);
-        let (graph, result) = rebuild_and_recalc_all_after(
-            &mut self.model,
+        self.count_graph_reuse(keep);
+        let result = if keep {
+            let graph = self.graph.as_mut().expect("graph initialized");
+            #[cfg(test)]
+            if CORRUPT_KEPT_EDGE.get() {
+                assert!(graph.drop_one_edge());
+            }
+            xlsx_calc::engine::recalc_all_kept(
+                &mut self.model,
+                graph,
+                options.now_serial,
+                self.rand_seed,
+            )
+        } else {
+            let (graph, result) = rebuild_and_recalc_all_after(
+                &mut self.model,
+                self.graph.as_ref(),
+                options.now_serial,
+                self.rand_seed,
+            );
+            self.graph = Some(graph);
+            result
+        };
+        self.mark_graph_current();
+        self.dirty_geometry_cells(&result.changed);
+        let result = calculation_result(&result);
+        #[cfg(test)]
+        if let Some(fresh) = &fresh
+            && let Some(difference) = self.fresh_difference(fresh, &result, options)
+        {
+            panic!("a kept dependency graph diverged from a fresh build: {difference}");
+        }
+        self.last_calculation = result.clone();
+        xlsx_model::progress::pulse();
+        result
+    }
+
+    #[cfg(any(test, feature = "test-counters"))]
+    fn count_graph_reuse(&mut self, kept: bool) {
+        if kept {
+            self.graph_reuse.keeps += 1;
+        } else {
+            self.graph_reuse.rebuilds += 1;
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-counters")))]
+    fn count_graph_reuse(&mut self, _kept: bool) {}
+
+    fn graph_current(&self) -> bool {
+        self.graph.is_some() && self.graph_reuse.current_at == Some(self.model_epoch)
+    }
+
+    fn mark_graph_current(&mut self) {
+        self.graph_reuse.current_at = Some(self.model_epoch);
+    }
+
+    /// Whether the graph is current and stays so after `touched`, which set or clear no formula.
+    fn keeps_graph_current(&self, touched: &[(SheetId, CellRef, Option<String>)]) -> bool {
+        let values_only = touched.iter().all(|(sheet, cell, formula)| {
+            formula.is_none()
+                && current_cell_state(&self.model, *sheet, *cell)
+                    .formula
+                    .is_none()
+        });
+        self.graph_current() && !self.is_collaborative() && values_only
+    }
+
+    /// Full recalculations that kept the dependency graph, and those that rebuilt it.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-counters"))]
+    pub fn graph_reuse_counts(&self) -> (u64, u64) {
+        (self.graph_reuse.keeps, self.graph_reuse.rebuilds)
+    }
+
+    /// [`Workbook::recalculate_all`], returning how it differs from one over a fresh graph.
+    #[cfg(test)]
+    pub(crate) fn recalculate_all_beside_fresh(
+        &mut self,
+        options: CalculationOptions,
+    ) -> Option<String> {
+        let fresh = self.fresh_full_recalculation(options);
+        let result = self.recalculate_all(options);
+        self.fresh_difference(&fresh, &result, options)
+    }
+
+    #[cfg(test)]
+    fn fresh_full_recalculation(&self, options: CalculationOptions) -> FreshRecalculation {
+        let mut model = self.model.clone();
+        let (graph, result) = xlsx_calc::engine::rebuild_and_recalc_all_beside(
+            &mut model,
             self.graph.as_ref(),
             options.now_serial,
             self.rand_seed,
         );
-        self.graph = Some(graph);
-        self.dirty_geometry_cells(&result.changed);
-        let result = calculation_result(&result);
-        self.last_calculation = result.clone();
-        xlsx_model::progress::pulse();
-        result
+        FreshRecalculation {
+            model,
+            graph,
+            result,
+        }
+    }
+
+    /// What evaluation decides counts only when no clock or random draw tells the runs apart.
+    #[cfg(test)]
+    fn fresh_difference(
+        &self,
+        fresh: &FreshRecalculation,
+        result: &CalculationResult,
+        options: CalculationOptions,
+    ) -> Option<String> {
+        let graph = self.graph.as_ref()?;
+        let evaluated = (options.now_serial.is_some() && self.rand_seed.is_some())
+            || graph.volatile_cells().next().is_none();
+        xlsx_calc::engine::full_recalculation_difference(
+            (&self.model, graph),
+            (&fresh.model, &fresh.graph),
+            evaluated,
+        )
+        .or_else(|| {
+            (evaluated && calculation_result(&fresh.result) != *result)
+                .then(|| "the result lists differ".to_owned())
+        })
     }
 
     /// Derives what a recalculation would leave unevaluated, for a session
@@ -4323,6 +4481,7 @@ impl Workbook {
             let graph = DepGraph::build(&self.model);
             assume_unevaluated(&graph, &self.last_calculation);
             self.graph = Some(graph);
+            self.mark_graph_current();
         }
     }
 
@@ -6924,6 +7083,10 @@ impl Workbook {
             active_sheet,
             undo: UndoStack::new(),
             graph,
+            graph_reuse: GraphReuse {
+                current_at: build_graph.then_some(0),
+                ..GraphReuse::default()
+            },
             rand_seed: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
