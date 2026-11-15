@@ -407,6 +407,99 @@ fn a_cycling_page_side_shape_beside_an_inline_picture_keeps_the_convergence_erro
     ));
 }
 
+/// Places every fragment of the `picture` paragraph in the column at `column_x`.
+fn put_in_column(layout: &mut docx_layout::types::Layout, picture: &LayoutBlock, column_x: f64) {
+    let LayoutBlock::Paragraph(picture) = picture else {
+        panic!("the picture block is a paragraph");
+    };
+    for fragment in layout
+        .pages
+        .iter_mut()
+        .flat_map(|page| page.fragments.iter_mut())
+    {
+        if let docx_layout::types::Fragment::Paragraph(fragment) = fragment
+            && fragment.block_id == picture.id
+        {
+            fragment.horizontal_frame = Some(docx_layout::types::HorizontalFrame {
+                margin_left: 24.0,
+                content_width: 336.0,
+                column_x,
+                column_width: 96.0,
+            });
+        }
+    }
+}
+
+#[test]
+fn a_picture_pinned_on_the_last_wrap_phase_still_lays_out() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let bytes = equal_columns(3, 60);
+    let engine = seeded_engine(9814, &bytes);
+    let mut prepared = measured_body(&engine, &bytes);
+    let picture = picture_index(&prepared.input).unwrap();
+    let block = prepared.input.measured[picture].block.clone();
+    crate::engine::WRAP_PHASE_LIMIT.with(|limit| limit.set(Some(3)));
+    let settled = crate::engine::stabilize_flow_wrapping(
+        &mut prepared.input,
+        &prepared.regions,
+        &prepared.measurement,
+        |input, phase| {
+            let mut layout = docx_layout::place::layout_document(input)?;
+            let column_x = if phase % 2 == 0 { 144.0 } else { 264.0 };
+            put_in_column(&mut layout, &block, column_x);
+            Ok(layout)
+        },
+    );
+    crate::engine::WRAP_PHASE_LIMIT.with(|limit| limit.set(None));
+    assert!(settled.unwrap());
+}
+
+#[test]
+fn wrapping_that_keeps_moving_after_a_pin_ends_in_the_convergence_error() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let bytes = page_side_shape_with_inline_picture();
+    let engine = seeded_engine(9815, &bytes);
+    let mut prepared = measured_body(&engine, &bytes);
+    let picture = picture_index(&prepared.input).unwrap();
+    let block = prepared.input.measured[picture].block.clone();
+    let mut moved = 40.0;
+    let laid_out = crate::engine::stabilize_flow_wrapping(
+        &mut prepared.input,
+        &prepared.regions,
+        &prepared.measurement,
+        |input, phase| {
+            let mut layout = docx_layout::place::layout_document(input)?;
+            let column_x = if phase % 2 == 0 { 144.0 } else { 264.0 };
+            put_in_column(&mut layout, &block, column_x);
+            let offset = match phase {
+                0 | 2 => 12.0,
+                1 => 36.0,
+                _ => {
+                    moved += 1.0;
+                    moved
+                }
+            };
+            for fragment in layout
+                .pages
+                .iter_mut()
+                .flat_map(|page| page.fragments.iter_mut())
+            {
+                if let docx_layout::types::Fragment::Shape(shape) = fragment {
+                    shape.wrap_offset_x = Some(offset);
+                }
+            }
+            Ok(layout)
+        },
+    );
+    assert!(matches!(
+        laid_out,
+        Err(docx_layout::LayoutError::Invalid(message))
+            if message == "anchored shape wrapping did not converge"
+    ));
+}
+
 #[test]
 fn flow_after_a_settled_picture_measures_as_a_fresh_layout_does() {
     let fonts = docx_layout::MeasureFonts::default();
