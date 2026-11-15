@@ -21,9 +21,10 @@ const W_NAMESPACE: &str = "http://schemas.openxmlformats.org/wordprocessingml/20
 /// same permission markers, the same number of page and column breaks in the paragraph's own
 /// runs, and no revision or note ID the source lacks. Source IDs the written XML lacks are kept,
 /// as are relationship IDs: the save keeps every source relationship.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Marks {
     comments: Vec<(String, String, usize)>,
+    text: usize,
     permissions: Vec<(String, String)>,
     page_breaks: usize,
     column_breaks: usize,
@@ -348,7 +349,92 @@ fn marks(xml: &str) -> Option<Marks> {
         *marks.ids.entry((kind, id())).or_insert(0) += 1;
     }
     marks.permissions.sort();
+    marks.text = offset;
     Some(marks)
+}
+
+/// Source and wanted marks by ordinal, with written trailing comment ends moved to the next head.
+fn paragraph_marks<'x>(
+    paragraphs: impl IntoIterator<Item = (u32, &'x str, &'x str)>,
+    breaks: bool,
+) -> Option<BTreeMap<u32, (Marks, Marks)>> {
+    let mut all = BTreeMap::new();
+    for (ordinal, source, written) in paragraphs {
+        all.insert(ordinal, (marks(source)?, marks(written)?));
+    }
+    let same = |a: &(String, String, usize), b: &(String, String, usize)| a.0 == b.0 && a.1 == b.1;
+    let mut moves = BTreeMap::new();
+    for (&ordinal, (source, written)) in &all {
+        let Some((next, _)) = ordinal.checked_add(1).and_then(|next| all.get(&next)) else {
+            continue;
+        };
+        let held = written
+            .comments
+            .iter()
+            .rev()
+            .take_while(|(name, _, offset)| {
+                *offset == written.text
+                    && matches!(name.as_str(), "w:commentRangeEnd" | "w:commentReference")
+            })
+            .count();
+        let tail = &written.comments[written.comments.len() - held..];
+        if held > 0
+            && next.comments.len() >= held
+            && next.comments[..held]
+                .iter()
+                .zip(tail)
+                .all(|(head, moved)| head.2 == 0 && same(head, moved))
+            && !source
+                .comments
+                .iter()
+                .any(|marker| tail.iter().any(|moved| same(marker, moved)))
+        {
+            moves.insert(ordinal, held);
+        }
+    }
+    loop {
+        let mut wanted = moved_marks(&all, &moves);
+        let count = moves.len();
+        moves.retain(|ordinal, _| {
+            [*ordinal, *ordinal + 1]
+                .iter()
+                .all(|ordinal| all[ordinal].0.admit(&wanted[ordinal], breaks))
+        });
+        if moves.len() == count {
+            return Some(
+                all.into_iter()
+                    .filter_map(|(ordinal, (source, _))| {
+                        Some((ordinal, (source, wanted.remove(&ordinal)?)))
+                    })
+                    .collect(),
+            );
+        }
+    }
+}
+
+/// Written marks by ordinal with each move's trailing markers placed at the next paragraph's head.
+fn moved_marks(
+    all: &BTreeMap<u32, (Marks, Marks)>,
+    moves: &BTreeMap<u32, usize>,
+) -> BTreeMap<u32, Marks> {
+    all.iter()
+        .map(|(&ordinal, (_, written))| {
+            let mut wanted = written.clone();
+            if let Some(&held) = moves.get(&ordinal) {
+                wanted.comments.truncate(wanted.comments.len() - held);
+            }
+            if let Some(&held) = ordinal.checked_sub(1).and_then(|previous| moves.get(&previous)) {
+                let previous = &all[&(ordinal - 1)].1.comments;
+                let mut head: Vec<_> = previous[previous.len() - held..]
+                    .iter()
+                    .map(|(name, id, _)| (name.clone(), id.clone(), 0))
+                    .collect();
+                head.append(&mut wanted.comments);
+                wanted.comments = head;
+            }
+            (ordinal, wanted)
+        })
+        .collect()
 }
 
 fn word_attribute(
@@ -1815,6 +1901,13 @@ fn splice_story_part_inner(
     }
     let mut replaced = BTreeSet::new();
     let mut ranged = BTreeSet::new();
+    let kept_marks = paragraph_marks(
+        written
+            .iter()
+            .filter(|(ordinal, _)| !changed.contains(*ordinal))
+            .map(|(&ordinal, xml)| (ordinal, &source[spans[&ordinal].clone()], xml.as_str())),
+        breaks,
+    )?;
     for (&ordinal, xml) in written {
         ooxml_opc::progress::tick();
         if changed.contains(&ordinal) {
@@ -1822,12 +1915,12 @@ fn splice_story_part_inner(
             continue;
         }
         let paragraph = &source[spans[&ordinal].clone()];
-        let wanted = marks(xml)?;
-        if marks(paragraph)?.admit(&wanted, breaks) {
+        let (retained, wanted) = &kept_marks[&ordinal];
+        if retained.admit(wanted, breaks) {
             continue;
         }
         let rangeable = changed_comment_ranges(paragraph, xml).is_some_and(|patched| {
-            marks(&patched).is_some_and(|marks| marks.admit(&wanted, breaks))
+            marks(&patched).is_some_and(|marks| marks.admit(wanted, breaks))
         });
         if rangeable {
             ranged.insert(ordinal);
@@ -2318,13 +2411,23 @@ pub(crate) fn replace_story_part(
         let xml = replacement_xml(&scopes, span.start, serialized, xml)?;
         edits.push((span, rank, xml));
     }
+    let mut unchanged = Vec::new();
+    for (&ordinal, xml) in &recorded.written {
+        if !changed.contains(&ordinal) && !rows.removed.contains(&ordinal) {
+            unchanged.push((ordinal, &source[span(ordinal)?], xml.as_str()));
+        }
+    }
+    let kept_marks = paragraph_marks(unchanged, breaks)?;
     for (&ordinal, xml) in &recorded.written {
         if rows.removed.contains(&ordinal) {
             continue;
         }
         let range = span(ordinal)?;
         let paragraph = &source[range.clone()];
-        if changed.contains(&ordinal) || !marks(paragraph)?.admit(&marks(xml)?, breaks) {
+        let kept = kept_marks
+            .get(&ordinal)
+            .is_some_and(|(retained, wanted)| retained.admit(wanted, breaks));
+        if changed.contains(&ordinal) || !kept {
             let xml = if let Some(patched) = patched.get(&ordinal) {
                 let id = assignments
                     .get(&ordinal)
