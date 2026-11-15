@@ -1567,6 +1567,45 @@ fn a_simple_row_patch_keeps_an_untouched_table_with_omitted_nested_content() {
 }
 
 #[test]
+fn a_row_patch_keeps_untouched_row_header_and_cant_split_flags() {
+    let rows: Vec<String> = [
+        "",
+        "<w:trPr><w:cantSplit/><w:tblHeader/></w:trPr>",
+        r#"<w:trPr><w:cantSplit w:val="0"/><w:tblHeader w:val="0"/></w:trPr>"#,
+        "",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, properties)| {
+        format!(
+            "<w:tr>{properties}{}</w:tr>",
+            table_cell("", &paragraph(index as u32 + 1, "abc")),
+        )
+    })
+    .collect();
+    let xml = table_document(&rows.concat(), 1);
+    let (doc, mut model) = open(&xml);
+    doc.set_cell_shading(
+        &ctx(),
+        &TableRange::cell(CellLoc::new("body", 0, 0, 0)),
+        Some("112233"),
+    )
+    .unwrap();
+    let entry = save_entry(&doc).unwrap();
+    assert!(!entry["tablePatches"].as_array().unwrap().is_empty());
+    model_cell(&mut model, 0)["formatting"]["shading"]["fill"] = json!({"rgb": "112233"});
+    let (output, warnings) = save(&xml, &doc, model);
+    assert!(output.contains(r#"w:fill="112233""#), "{output}");
+    for row in &rows[1..] {
+        assert!(output.contains(row.as_str()), "{output}");
+    }
+    assert_eq!(
+        warnings,
+        [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#],
+    );
+}
+
+#[test]
 fn merge_with_a_cell_text_edit_splices_the_merged_row_and_keeps_unrelated_paragraphs_byte_for_byte()
 {
     let xml = source(&paragraph(1, "abc"));

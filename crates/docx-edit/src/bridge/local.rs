@@ -794,6 +794,34 @@ impl LocalLowering {
         Some(())
     }
 
+    pub(crate) fn seed_matches_after_edit(&self, unit: &[(Out, Option<Box<Attrs>>)]) -> bool {
+        let Some(edit) = self.edit.as_ref() else {
+            return false;
+        };
+        let Some(seed) = self.seeds.get(&edit.paragraph) else {
+            return false;
+        };
+        let mut stored = Vec::new();
+        for part in seed.parts() {
+            push_segment(&mut stored, part.text, part.attrs, part.units);
+        }
+        let mut current = Vec::new();
+        for (value, attrs) in unit {
+            if let Out::Any(Any::String(text)) = value {
+                push_segment(&mut current, text, attrs.as_deref(), utf16_len(text));
+            }
+        }
+        let Some(expected) = patch_segments(&stored, edit) else {
+            return false;
+        };
+        expected.len() == current.len()
+            && expected.iter().zip(&current).all(|(left, right)| {
+                left.text == right.text
+                    && left.units == right.units
+                    && same_attributes(&left.attrs, Some(&right.attrs))
+            })
+    }
+
     pub(crate) fn refresh_seed<T: ReadTxn>(
         &mut self,
         id: &str,
