@@ -30,6 +30,19 @@ fn reaching_picture_below(left: u32, right: u32) -> Vec<u8> {
     section_below(left, right, &picture(310, 30, 60))
 }
 
+/// [`side_margins_below`] with a picture 270 px from the page's left edge
+/// beside a long paragraph.
+fn picture_beside_long_text_below(left: u32, right: u32) -> Vec<u8> {
+    section_holding(
+        left,
+        right,
+        &para(
+            PICTURE,
+            &format!("{}{}", picture(270, 30, 60), run(&"a ".repeat(240))),
+        ),
+    )
+}
+
 /// [`reaching_picture_below`] with the picture alone in a paragraph above the
 /// text it reaches into.
 fn picture_above_text_below(left: u32, right: u32) -> Vec<u8> {
@@ -106,6 +119,42 @@ fn first_picture_line(engine: &EngineSession) -> (usize, f64) {
             })
         })
         .unwrap()
+}
+
+/// The width and side offsets of each measured line of the picture's
+/// paragraph.
+fn picture_lines(engine: &EngineSession) -> Vec<(f64, Option<f64>, Option<f64>)> {
+    let pagination = engine.pagination.borrow();
+    pagination
+        .input
+        .as_ref()
+        .unwrap()
+        .measured
+        .iter()
+        .find_map(|measured| match (&measured.block, &measured.measure) {
+            (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent))
+                if paragraph
+                    .runs
+                    .iter()
+                    .any(|run| matches!(run, Run::Image(_))) =>
+            {
+                Some(
+                    extent
+                        .lines
+                        .iter()
+                        .map(|line| (line.width, line.left_offset, line.right_offset))
+                        .collect(),
+                )
+            }
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn print_picture_lines(engine: &EngineSession, label: &str) {
+    let lines = picture_lines(engine);
+    println!();
+    println!("LINES {label}: {} lines {lines:?}", lines.len());
 }
 
 fn assert_at_new_left_margin(engine: &EngineSession, label: &str) {
@@ -214,4 +263,22 @@ fn side_margins_shifted_from_the_section_above_lay_out_text_below_a_picture_like
     let mut host = opened(&engine, &bytes).seeded(client_id, bytes.clone());
     set_side_margins(&mut host, picture_above_text_below, 720, 1440);
     assert_input_matches_fresh(&mut host, client_id, &bytes, "shifted margins");
+}
+
+#[test]
+fn side_margins_set_back_after_frame_narrowing_lay_out_like_a_fresh_open() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let client_id = 9826;
+    let bytes = picture_beside_long_text_below(720, 1440);
+    let engine = seeded_engine(client_id, &bytes);
+    let mut host = opened(&engine, &bytes).seeded(client_id, bytes.clone());
+    print_picture_lines(&engine, "before");
+    set_side_margins(&mut host, picture_beside_long_text_below, 1440, 720);
+    print_picture_lines(&engine, "after");
+    let fresh_bytes = picture_beside_long_text_below(1440, 720);
+    let fresh = seeded_engine(9827, &fresh_bytes);
+    opened(&fresh, &fresh_bytes);
+    print_picture_lines(&fresh, "fresh");
+    assert_input_matches_fresh(&mut host, client_id, &bytes, "margins of the section above");
 }
