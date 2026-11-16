@@ -950,3 +950,48 @@ describe('validClipboardFragment runs', () => {
     expect(validClipboardFragment({ paragraphs: [{ text: 'a'.repeat(runs.length), runs }] })).toBe(false);
   });
 });
+
+describe('readClipboardSlice leftOut', () => {
+  const span = (segments: YrsStorySegment[]) => segments.reduce((sum, segment) => sum + (segment.kind === 'text' ? segment.text.length : 1), 0);
+  const read = (segments: YrsStorySegment[], from = 0, to = span(segments), stories: Record<string, YrsStorySegment[]> = {}) =>
+    readClipboardSlice(fakeReader({ ...stories, body: segments }, {}), { story: 'body', from, to });
+
+  test('names each selected object the fragment cannot carry', () => {
+    for (const kind of ['noteRef', 'shape', 'chart', 'opaqueDrawing', 'horizontalRule', 'pageBreak', 'columnBreak', 'opaque', 'field', 'unknown']) {
+      expect(read([textSegment('ab'), embedSegment(kind), textSegment('cd'), pilcrowSegment('p0')]).leftOut).toEqual([kind]);
+    }
+  });
+
+  test('names equations and content controls, which come back as bare text', () => {
+    expect(read([textSegment('ab'), embedSegment('math', { plainText: 'x=1' }), pilcrowSegment('p0')]).leftOut).toEqual(['math']);
+    expect(read([textSegment('ab'), embedSegment('sdt', { content: [{ kind: 'text', text: 'SDT' }] }), pilcrowSegment('p0')]).leftOut).toEqual(['sdt']);
+    expect(read([embedSegment('blockSdt', { story: 'control' })], 0, 1, { control: [textSegment('kept'), pilcrowSegment('pc')] }).leftOut).toEqual(['blockSdt']);
+  });
+
+  test('names each kind once in selection order', () => {
+    expect(read([embedSegment('chart'), embedSegment('noteRef'), embedSegment('chart'), pilcrowSegment('p0')]).leftOut).toEqual(['chart', 'noteRef']);
+  });
+
+  test('names objects inside a selected table', () => {
+    const table = { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'cell', tcPr: {} }] }] };
+    expect(read([embedSegment('table', table), pilcrowSegment('p0')], 0, 2, { cell: [textSegment('a'), embedSegment('noteRef'), pilcrowSegment('pc')] }).leftOut)
+      .toEqual(['noteRef']);
+  });
+
+  test('names a column break the selected paragraph records between its runs', () => {
+    const boundaries = (type: string) => ({ _originalRunBoundaries: [{ text: 'ALPHA before ' }, { text: '', breaks: [{ offset: 0, type }] }, { text: ' after ALPHA' }] });
+    const body = (type: string) => [textSegment('ALPHA before  after ALPHA'), pilcrowSegment('p0', boundaries(type)), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(body('column'), 0, 25).leftOut).toEqual(['columnBreak']);
+    expect(read(body('column'), 0, 26).leftOut).toEqual(['columnBreak']);
+    expect(read(body('column'), 26, 31).leftOut).toBeUndefined();
+    expect(read(body('column'), 0, 5).leftOut).toBeUndefined();
+    expect(read(body('page'), 0, 25).leftOut).toBeUndefined();
+  });
+
+  test('leaves the report out for text and everything the fragment carries', () => {
+    const image = { src: 'data:image/png;base64,AA==' };
+    expect(read([textSegment('ab'), embedSegment('tab'), embedSegment('break'), embedSegment('bookmarkStart'), embedSegment('commentRangeStart'),
+      embedSegment('field', { displayText: 'link' }), embedSegment('image', image), pilcrowSegment('p0')]).leftOut).toBeUndefined();
+    expect(read([textSegment('ab'), embedSegment('noteRef'), textSegment('cd'), pilcrowSegment('p0')], 3, 6).leftOut).toBeUndefined();
+  });
+});
