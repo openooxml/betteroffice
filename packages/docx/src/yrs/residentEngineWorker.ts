@@ -2357,7 +2357,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
         value = readResidentProperties(session, request.read.target);
         break;
       case 'sectionProperties':
-        value = session.sectionProperties();
+        value = session.sectionProperties(request.read.paragraphs);
         break;
       case 'exportStructuredWithPages': {
         if (commandLayout?.complete()) postCommandFrame(0);
