@@ -33,10 +33,6 @@ export interface TextWatermark {
   layout: 'diagonal' | 'horizontal';
   /** Font size in points. When undefined the renderer auto-sizes to the page (Word's "Auto"). */
   fontSize?: number;
-  /** Width in EMUs of the shape box Word stretches the text to fill (when known). */
-  widthEmu?: number;
-  /** Height in EMUs of that box (when known). */
-  heightEmu?: number;
   /** Accessibility flag. Undefined defaults to true for watermarks. */
   decorative?: boolean;
 }

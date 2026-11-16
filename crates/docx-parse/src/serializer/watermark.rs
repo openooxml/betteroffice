@@ -17,7 +17,6 @@ pub fn serialize_watermark(watermark: &Watermark) -> String {
             semitransparent,
             layout,
             font_size,
-            ..
         } => serialize_text_watermark(text, font, color, *semitransparent, layout, *font_size),
         Watermark::Picture {
             relationship_id,
@@ -289,8 +288,6 @@ mod tests {
             semitransparent: true,
             layout: "diagonal".to_owned(),
             font_size: Some(42.5),
-            width_emu: None,
-            height_emu: None,
         };
         let xml = serialize_watermark(&watermark);
         assert_eq!(xml.len(), 1_335);
@@ -318,8 +315,6 @@ mod tests {
             semitransparent: false,
             layout: "horizontal".to_owned(),
             font_size: None,
-            width_emu: None,
-            height_emu: None,
         };
         let xml = serialize_watermark(&watermark);
         assert!(xml.contains("width:260pt;height:130pt;z-index"));
@@ -371,8 +366,6 @@ mod tests {
             semitransparent: false,
             layout: "horizontal".to_owned(),
             font_size: None,
-            width_emu: None,
-            height_emu: None,
         };
         let xml = serialize_watermark(&watermark);
         assert!(!xml.contains("<evil"));
@@ -398,17 +391,15 @@ mod tests {
 
     #[test]
     fn emitted_text_watermark_parses_back() {
-        let watermark = |width_emu, height_emu| Watermark::Text {
+        let original = Watermark::Text {
             text: "CONFIDENTIAL".to_owned(),
             font: "Aptos".to_owned(),
             color: "#D8D8D8".to_owned(),
             semitransparent: true,
             layout: "diagonal".to_owned(),
             font_size: None,
-            width_emu,
-            height_emu,
         };
-        let fragment = serialize_watermark(&watermark(None, None));
+        let fragment = serialize_watermark(&original);
         let xml = format!(
             "<w:hdr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">{fragment}</w:hdr>"
         );
@@ -421,10 +412,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             crate::vml::extract_watermark(parsed.root(), None, None),
-            Some(watermark(
-                Some(312.0 * EMU_PER_PT),
-                Some(156.0 * EMU_PER_PT)
-            ))
+            Some(original)
         );
     }
 }
