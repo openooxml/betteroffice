@@ -83,11 +83,15 @@ fn raw_request(package: &Value, page_gap: f64) -> Value {
         .into_iter()
         .flatten()
         .filter_map(|entry| {
-            let watermark = entry
-                .get(1)?
+            let part = entry.get(1)?;
+            let mut watermark = part
                 .get("watermark")
-                .filter(|value| !value.is_null())?;
-            Some((entry.get(0)?.as_str()?.to_owned(), watermark.clone()))
+                .filter(|value| !value.is_null())?
+                .clone();
+            if let Some(shape_box) = part.get("watermarkBox").filter(|value| !value.is_null()) {
+                watermark["box"] = shape_box.clone();
+            }
+            Some((entry.get(0)?.as_str()?.to_owned(), watermark))
         })
         .collect();
     if !header_watermarks.is_empty() {

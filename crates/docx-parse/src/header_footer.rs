@@ -15,7 +15,7 @@ use crate::relationships::{
 use crate::smart_art::SmartArtContext;
 use crate::styles::{DocDefaults, StyleMap};
 use crate::theme::Theme;
-use crate::vml::{Watermark, extract_watermark};
+use crate::vml::{Watermark, WatermarkBox, extract_watermark, extract_watermark_box};
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -30,6 +30,9 @@ pub struct HeaderFooter {
     pub custom_root_bindings: Vec<crate::paragraph::RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watermark: Option<Watermark>,
+    /// The shape box of a text `watermark`, which layout stretches it to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark_box: Option<WatermarkBox>,
 }
 
 /// Relationships of one kind that target one part, in document.xml.rels order; the first is the canonical story.
@@ -61,12 +64,17 @@ pub fn parse_header_footer(
     let watermark = is_header
         .then(|| extract_watermark(Some(root), parser.relationships, Some(parser.media)))
         .flatten();
+    let watermark_box = watermark
+        .is_some()
+        .then(|| extract_watermark_box(root))
+        .flatten();
     Ok(HeaderFooter {
         story_type: if is_header { "header" } else { "footer" }.to_owned(),
         hdr_ftr_type: normalize_header_footer_type(Some(hdr_ftr_type)).to_owned(),
         content,
         custom_root_bindings: crate::document::custom_root_bindings(root),
         watermark,
+        watermark_box,
     })
 }
 
@@ -693,6 +701,7 @@ mod tests {
                     hdr_ftr_type: kind.to_owned(),
                     content: Vec::new(),
                     watermark: None,
+                    watermark_box: None,
                     custom_root_bindings: Vec::new(),
                 },
             );

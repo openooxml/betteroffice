@@ -45,7 +45,10 @@ export function getDocumentWatermark(doc: Document | null | undefined): Watermar
 /** Each header's own watermark, by relationship id. */
 export function getHeaderWatermarks(doc: Document | null | undefined): Record<string, Watermark> | undefined {
   const entries = [...(doc?.package.headers ?? [])].filter(([, hf]) => hf.watermark);
-  return entries.length ? Object.fromEntries(entries.map(([rId, hf]) => [rId, hf.watermark!])) : undefined;
+  return entries.length ? Object.fromEntries(entries.map(([rId, hf]) => {
+    const box = (hf as HeaderFooter & { watermarkBox?: unknown }).watermarkBox;
+    return [rId, box ? { ...hf.watermark!, box } : hf.watermark!];
+  })) : undefined;
 }
 
 /** Strip the watermark from every header. */
@@ -78,7 +81,8 @@ function setOnAllHeaders(doc: Document, watermark: Watermark): Document {
   if (!headers || headers.size === 0) return doc;
   const next = new Map<string, HeaderFooter>();
   for (const [rId, hf] of headers) {
-    next.set(rId, { ...hf, watermark: { ...watermark } });
+    const { watermarkBox: _box, ...rest } = hf as HeaderFooter & { watermarkBox?: unknown };
+    next.set(rId, { ...rest, watermark: { ...watermark } });
   }
   return { ...doc, package: { ...doc.package, headers: next } };
 }

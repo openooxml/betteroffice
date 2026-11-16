@@ -7293,6 +7293,9 @@ impl EngineSession {
                 }
             }
         }
+        for watermark in regions.header_watermarks.values() {
+            collector.collect_watermark(watermark);
+        }
         let requirements = collector.finish();
         let preview_superset_safe = stable_markers
             && requirements
