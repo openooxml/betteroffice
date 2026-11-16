@@ -121,42 +121,6 @@ fn first_picture_line(engine: &EngineSession) -> (usize, f64) {
         .unwrap()
 }
 
-/// The width and side offsets of each measured line of the picture's
-/// paragraph.
-fn picture_lines(engine: &EngineSession) -> Vec<(f64, Option<f64>, Option<f64>)> {
-    let pagination = engine.pagination.borrow();
-    pagination
-        .input
-        .as_ref()
-        .unwrap()
-        .measured
-        .iter()
-        .find_map(|measured| match (&measured.block, &measured.measure) {
-            (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent))
-                if paragraph
-                    .runs
-                    .iter()
-                    .any(|run| matches!(run, Run::Image(_))) =>
-            {
-                Some(
-                    extent
-                        .lines
-                        .iter()
-                        .map(|line| (line.width, line.left_offset, line.right_offset))
-                        .collect(),
-                )
-            }
-            _ => None,
-        })
-        .unwrap()
-}
-
-fn print_picture_lines(engine: &EngineSession, label: &str) {
-    let lines = picture_lines(engine);
-    println!();
-    println!("LINES {label}: {} lines {lines:?}", lines.len());
-}
-
 fn assert_at_new_left_margin(engine: &EngineSession, label: &str) {
     let (page, x) = first_picture_line(engine);
     assert_eq!(page, 0, "{label}");
@@ -215,8 +179,9 @@ fn set_side_margins(
     host.relayout(Some("body"));
 }
 
+/// Guards against reusing a stale measure when side margins are set to those of the section above.
 #[test]
-fn side_margins_set_to_the_section_above_lay_out_like_a_fresh_open() {
+fn guard_side_margins_set_to_the_section_above_lay_out_like_a_fresh_open() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let client_id = 9822;
@@ -228,8 +193,9 @@ fn side_margins_set_to_the_section_above_lay_out_like_a_fresh_open() {
     assert_input_matches_fresh(&mut host, client_id, &bytes, "margins of the section above");
 }
 
+/// Guards against reusing a stale measure when side margins shift away from the section above.
 #[test]
-fn side_margins_shifted_from_the_section_above_lay_out_like_a_fresh_open() {
+fn guard_side_margins_shifted_from_the_section_above_lay_out_like_a_fresh_open() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let client_id = 9823;
@@ -241,8 +207,9 @@ fn side_margins_shifted_from_the_section_above_lay_out_like_a_fresh_open() {
     assert_at_new_left_margin(&engine, "shifted margins");
 }
 
+/// Guards text below a picture against a stale measure when side margins match the section above.
 #[test]
-fn side_margins_set_to_the_section_above_lay_out_text_below_a_picture_like_a_fresh_open() {
+fn guard_side_margins_set_to_the_section_above_lay_out_text_below_a_picture_like_a_fresh_open() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let client_id = 9824;
@@ -253,8 +220,10 @@ fn side_margins_set_to_the_section_above_lay_out_text_below_a_picture_like_a_fre
     assert_input_matches_fresh(&mut host, client_id, &bytes, "margins of the section above");
 }
 
+/// Guards text below a picture against a stale measure when side margins leave the section above.
 #[test]
-fn side_margins_shifted_from_the_section_above_lay_out_text_below_a_picture_like_a_fresh_open() {
+fn guard_side_margins_shifted_from_the_section_above_lay_out_text_below_a_picture_like_a_fresh_open()
+{
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let client_id = 9825;
@@ -265,20 +234,15 @@ fn side_margins_shifted_from_the_section_above_lay_out_text_below_a_picture_like
     assert_input_matches_fresh(&mut host, client_id, &bytes, "shifted margins");
 }
 
+/// Guards frame-narrowed measure reuse across a side margin change, with or without the flag check.
 #[test]
-fn side_margins_set_back_after_frame_narrowing_lay_out_like_a_fresh_open() {
+fn guard_side_margins_set_back_after_frame_narrowing_lay_out_like_a_fresh_open() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let client_id = 9826;
     let bytes = picture_beside_long_text_below(720, 1440);
     let engine = seeded_engine(client_id, &bytes);
     let mut host = opened(&engine, &bytes).seeded(client_id, bytes.clone());
-    print_picture_lines(&engine, "before");
     set_side_margins(&mut host, picture_beside_long_text_below, 1440, 720);
-    print_picture_lines(&engine, "after");
-    let fresh_bytes = picture_beside_long_text_below(1440, 720);
-    let fresh = seeded_engine(9827, &fresh_bytes);
-    opened(&fresh, &fresh_bytes);
-    print_picture_lines(&fresh, "fresh");
     assert_input_matches_fresh(&mut host, client_id, &bytes, "margins of the section above");
 }
