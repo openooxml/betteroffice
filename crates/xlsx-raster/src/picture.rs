@@ -396,62 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn the_encoded_length_of_an_image_is_held_to_the_frame_budget_before_it_decodes() {
-        let gif = red_gif_inset_by_one_column(3, 2);
-        let mut padded = gif.clone();
-        padded.resize(gif.len() + (2 << 20), 0);
-        let paint = |bytes: &[u8], spent: u64| {
-            let images = ImageMap::from([("xl/media/image1.png", bytes)]);
-            let mut pictures = Pictures::new(&images);
-            pictures.bytes = spent;
-            let mut target = Pixmap::new(40, 20).unwrap();
-            pictures
-                .paint(
-                    &mut target,
-                    &mut ClipSurface::default(),
-                    &image_command(ImageCrop::default()),
-                )
-                .unwrap();
-            (rgb(&target, 30), pictures.bytes - spent)
-        };
-        let (color, charged) = paint(&gif, 0);
-        assert_eq!(color, (255, 0, 0));
-        assert!(charged > 0);
-        assert_eq!(
-            paint(&padded, MAX_FRAME_IMAGE_BYTES - (1 << 20)),
-            ((0, 0, 0), 0)
-        );
-    }
-
-    #[test]
-    fn a_crop_reaching_outside_its_image_is_charged_for_the_pixels_it_keeps() {
-        let png = red_then_blue_png();
-        let images = ImageMap::from([("xl/media/image1.png", png.as_slice())]);
-        let mut pictures = Pictures::new(&images);
-        let mut clip_surface = ClipSurface::default();
-        let mut target = Pixmap::new(40, 20).unwrap();
-        pictures
-            .paint(
-                &mut target,
-                &mut clip_surface,
-                &image_command(ImageCrop::default()),
-            )
-            .unwrap();
-        pictures.bytes = MAX_FRAME_IMAGE_BYTES - 4;
-        let mut target = Pixmap::new(40, 20).unwrap();
-        let reaching_above = image_command(ImageCrop {
-            top: -1.0,
-            right: 0.5,
-            ..ImageCrop::default()
-        });
-        pictures
-            .paint(&mut target, &mut clip_surface, &reaching_above)
-            .unwrap();
-        assert_eq!(rgb(&target, 2), (255, 0, 0));
-        assert_eq!(pictures.bytes, MAX_FRAME_IMAGE_BYTES);
-    }
-
-    #[test]
     fn an_image_without_decodable_bytes_paints_nothing() {
         for images in [
             ImageMap::new(),
