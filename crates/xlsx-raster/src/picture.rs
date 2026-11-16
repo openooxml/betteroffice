@@ -24,6 +24,7 @@ const MAX_FRAME_IMAGE_BYTES: u64 = 536_870_912;
 pub(crate) struct Pictures<'a> {
     images: &'a ImageMap<'a>,
     decoded: HashMap<&'a str, Option<Pixmap>>,
+    crops: HashMap<(&'a str, [i32; 4]), Option<Pixmap>>,
     pixels: u64,
     bytes: u64,
 }
@@ -33,6 +34,7 @@ impl<'a> Pictures<'a> {
         Self {
             images,
             decoded: HashMap::new(),
+            crops: HashMap::new(),
             pixels: 0,
             bytes: 0,
         }
@@ -77,14 +79,23 @@ impl<'a> Pictures<'a> {
         let (Some(rect), Some(kept)) = (Rect::from_xywh(*x, *y, *w, *h), kept) else {
             return Ok(());
         };
-        let cropped;
         let source = if kept.width() == image.width() && kept.height() == image.height() {
             image.as_ref()
         } else {
-            let Some(pixels) = image.clone_rect(kept) else {
+            let edges = [kept.left(), kept.top(), kept.right(), kept.bottom()];
+            let cost = u64::from(kept.width()) * u64::from(kept.height()) * 4;
+            let bytes = &mut self.bytes;
+            let cropped = self.crops.entry((key, edges)).or_insert_with(|| {
+                if *bytes + cost > MAX_FRAME_IMAGE_BYTES {
+                    return None;
+                }
+                let pixels = image.clone_rect(kept)?;
+                *bytes += cost;
+                Some(pixels)
+            });
+            let Some(cropped) = cropped else {
                 return Ok(());
             };
-            cropped = pixels;
             cropped.as_ref()
         };
         let paint = Paint {
