@@ -214,3 +214,22 @@ fn text_watermark_paints_the_glyphs_it_was_stretched_with() {
         "{advances} x {scale}: {run}"
     );
 }
+
+fn stretched_text_run(text: &str) -> Value {
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let run = painted_watermark(
+        &watermarked_document(["672pt", "58.5pt", "Calibri", "48pt", text]),
+        font,
+    );
+    assert_eq!(run["text"], text);
+    assert_eq!(run["kind"], "text", "{run}");
+    assert!(run["horizontalScale"].as_f64().is_some(), "{run}");
+    assert!((run["width"].as_f64().unwrap() * 0.75 - 672.0).abs() < 0.01, "{run}");
+    run
+}
+
+#[test]
+fn text_watermark_with_a_character_its_first_face_lacks_keeps_the_text_run() {
+    stretched_text_run("DRAFT \u{4E2D}");
+}
