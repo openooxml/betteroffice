@@ -174,6 +174,13 @@ fn styled_tables_match_golden() {
 }
 
 #[test]
+fn column_stripes_match_golden() {
+    let columns_only = r#"<tableStyleInfo name="Wide" showFirstColumn="0" showLastColumn="0" showRowStripes="0" showColumnStripes="1"/>"#;
+    let wb = workbook(12, 12, |_, _| 0, "", &[("A1:L11", 1, columns_only)]);
+    assert_golden("column_stripes", &wb);
+}
+
+#[test]
 fn plain_sheet_matches_golden() {
     let wb = workbook(12, 8, border_or_fill, "", &[]);
     assert_golden("plain_sheet", &wb);
