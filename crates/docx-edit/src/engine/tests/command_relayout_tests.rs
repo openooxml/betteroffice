@@ -1273,4 +1273,5 @@ fn edits_beside_a_shape_placed_by_page_side_lay_out_as_a_full_recompute_does() {
     host.assert_matches_cold("typing beside the shape");
 }
 
+mod equal_column_pictures;
 mod resident_matches_fresh;
