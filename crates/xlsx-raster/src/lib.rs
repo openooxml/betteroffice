@@ -1264,6 +1264,32 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_text_taller_than_its_row_paints_only_the_lines_that_fit() {
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 60.0,
+            h: 20.0,
+        };
+        let text = |text: &str, wrap: Option<xlsx_render::TextWrap>| {
+            let mut dl = text_dl(text, cell, false, None, false);
+            if let DrawCmd::Text { wrap: slot, .. } = &mut dl.commands[0] {
+                *slot = wrap;
+            }
+            dl
+        };
+        let wrap = xlsx_render::TextWrap {
+            width: 30.0,
+            line_height: 20.0,
+            valign: xlsx_render::TextValign::Center,
+        };
+        assert_eq!(
+            ink_row_bands(&text("one two six", Some(wrap))),
+            ink_row_bands(&text("one", None))
+        );
+    }
+
+    #[test]
     fn rotated_number_overflow_paints_hashes_along_its_direction() {
         let cell = DlRect {
             x: 0.0,

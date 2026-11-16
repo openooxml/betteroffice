@@ -1030,6 +1030,21 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_text_taller_than_its_row_paints_only_the_lines_that_fit() {
+        let mut wrapped = text("one two six");
+        if let DrawCmd::Text { clip, wrap, .. } = &mut wrapped {
+            clip.h = 20.0;
+            *wrap = Some(TextWrap {
+                width: 30.0,
+                line_height: 20.0,
+                valign: TextValign::Center,
+            });
+        }
+        let page = translate_sheet(&display_list(vec![wrapped])).unwrap();
+        assert_eq!(page.scene.encoding().resources.glyph_runs.len(), 1);
+    }
+
+    #[test]
     fn underline_kinds_draw_one_or_two_bars() {
         let edges = |underline: bool, style: Option<RunUnderline>| {
             let mut command = text("Total");
