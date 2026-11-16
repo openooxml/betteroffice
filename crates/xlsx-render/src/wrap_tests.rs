@@ -303,6 +303,38 @@ fn an_unsized_row_grows_to_the_formatted_text_it_wraps() {
 }
 
 #[test]
+fn a_wrapped_cell_measures_its_lines_against_its_whole_row_or_merge() {
+    let mut wb = workbook(&[
+        (CellRef::new(0, 0), text("a\nb\nc"), wrap_alignment()),
+        (CellRef::new(1, 0), text("a\nb\nc"), wrap_alignment()),
+    ]);
+    wb.sheets[0].row_heights.insert(0, 40.0);
+    wb.sheets[0].row_heights.insert(1, 15.0);
+    wb.sheets[0].row_heights.insert(2, 15.0);
+    wb.sheets[0]
+        .merges
+        .push(CellRange::new(CellRef::new(1, 0), CellRef::new(2, 0)));
+    let fit_heights = |scroll: f32| {
+        let viewport = Viewport {
+            x: 0.0,
+            y: scroll,
+            width: 200.0,
+            height: 200.0,
+        };
+        let dl = build_display_list(&wb, SheetId(0), &viewport).unwrap();
+        dl.commands
+            .iter()
+            .filter(|cmd| matches!(cmd, DrawCmd::Text { .. }))
+            .map(|cmd| serde_json::to_value(cmd).unwrap()["wrap"]["fitHeight"].as_f64())
+            .map(|fit| fit.map(|fit| (fit * 100.0).round() as i64))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(fit_heights(0.0), [Some(5433), Some(4100)]);
+    assert_eq!(fit_heights(12.0), [Some(5433), Some(4100)]);
+    assert_eq!(fit_heights(60.0), [Some(4100)]);
+}
+
+#[test]
 fn only_the_wrapped_lines_that_fit_paint() {
     let wrap = TextWrap {
         width: 100.0,

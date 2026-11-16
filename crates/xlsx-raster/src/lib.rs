@@ -1295,6 +1295,65 @@ mod tests {
         );
     }
 
+    fn wrapped_row(row_pt: f64, scroll: f32, zoom: f32) -> DisplayList {
+        let mut workbook = xlsx_model::Workbook::default();
+        workbook.styles.cell_xfs.push(xlsx_model::Xf {
+            alignment: Some(xlsx_model::Alignment {
+                v: Some(xlsx_model::VAlign::Center),
+                wrap_text: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 6.0);
+        sheet.row_heights.insert(0, row_pt);
+        sheet.set_cell(
+            xlsx_model::CellRef::new(0, 0),
+            xlsx_model::Cell {
+                value: xlsx_model::CellValue::Text {
+                    value: "xxxx xxxx xxxx xxxx".into(),
+                },
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        workbook.sheets.push(sheet);
+        let dl = xlsx_render::build_display_list(
+            &workbook,
+            xlsx_model::SheetId(0),
+            &xlsx_render::Viewport {
+                x: 0.0,
+                y: scroll,
+                width: 60.0,
+                height: 80.0,
+            },
+        )
+        .unwrap();
+        xlsx_render::scaled(dl, zoom)
+    }
+
+    #[test]
+    fn a_row_scrolled_partly_out_of_view_keeps_its_wrapped_lines() {
+        let scroll = 4;
+        let whole: Vec<(u32, u32)> = ink_row_bands(&wrapped_row(40.0, 0.0, 1.0))
+            .into_iter()
+            .filter(|&(_, bottom)| bottom >= scroll)
+            .map(|(top, bottom)| (top.saturating_sub(scroll), bottom - scroll))
+            .collect();
+        assert_eq!(whole.len(), 3, "{whole:?}");
+        assert_eq!(ink_row_bands(&wrapped_row(40.0, scroll as f32, 1.0)), whole);
+    }
+
+    #[test]
+    fn a_wrapped_row_paints_the_same_lines_at_every_zoom() {
+        let lines: Vec<usize> = [1.0, 2.0, 4.0]
+            .into_iter()
+            .map(|zoom| ink_row_bands(&wrapped_row(24.5, 0.0, zoom)).len())
+            .collect();
+        assert_eq!(lines, [2, 2, 2]);
+    }
+
     #[test]
     fn rotated_number_overflow_paints_hashes_along_its_direction() {
         let cell = DlRect {

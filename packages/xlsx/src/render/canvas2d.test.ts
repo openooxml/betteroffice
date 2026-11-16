@@ -642,6 +642,36 @@ describe('Canvas2D wrapped text', () => {
     expect(wrappedFills('ab cd ef', 'left', 'top').map((f) => [f.text, f.y])).toEqual([['ab cd', 50], ['ef', 68]]);
     expect(wrappedFills('ab cd ef', 'right', 'bottom').map((f) => [f.text, f.y])).toEqual([['ab cd', 32], ['ef', 50]]);
   });
+
+  function paintedLines(row: number, scroll: number, zoom: number): number {
+    let lines = 0;
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      measureText(value: string) {
+        return { width: value.length * 10, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText() { lines += 1; },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 100 * zoom, height: 100 * zoom,
+      commands: [{ op: 'text', x: 4 * zoom, y: (row / 2 - scroll) * zoom, text: 'a\nb\nc\nd', fontSize: 11 * zoom,
+        color: '#000000', align: 'left', clip: { x: 0, y: 0, w: 100 * zoom, h: (row - scroll) * zoom },
+        wrap: { width: 1000 * zoom, lineHeight: 18 * zoom, valign: 'center', fitHeight: (row + 1) * zoom },
+      } as unknown as TextCmd],
+    }, 1);
+    return lines;
+  }
+
+  it('keeps the wrapped lines of a row scrolled partly out of view', () => {
+    expect(paintedLines(50, 0, 1)).toBe(3);
+    expect(paintedLines(50, 4, 1)).toBe(3);
+  });
+
+  it('paints the same wrapped lines at every zoom', () => {
+    expect([1, 2, 4].map((zoom) => paintedLines(32, 0, zoom))).toEqual([2, 2, 2]);
+  });
 });
 
 describe('wrapped text breaker', () => {
