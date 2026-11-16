@@ -142,6 +142,24 @@ test('clipboard slice reads a multi-cell selection as text and fragment', async 
   }
 }, TIMEOUT);
 
+test('clipboard slice reads the cell selection the read names, not the live one', async () => {
+  const { client, engine } = await openTableWorker();
+  try {
+    engine.setCellSelection({ anchor: cellLoc('body', 0, 0, 0), head: cellLoc('body', 0, 1, 1) });
+    const rows = (engine.tablePayload('body', 0)?.rows ?? []) as Array<{ cells: Array<{ story: string }> }>;
+    const cellStory = rows[0]!.cells[0]!.story;
+    const paraId = engine.paragraphs(cellStory)[0]!.paraId;
+    const selection = { anchor: { story: cellStory, paraId, offset: 0 }, focus: { story: cellStory, paraId, offset: 1 } };
+    const text = await client.documentRead({ kind: 'clipboardSlice', selection, cells: null });
+    expect(text.value.text).toBe('a');
+    const row = await client.documentRead({ kind: 'clipboardSlice', selection,
+      cells: { anchor: cellLoc('body', 0, 0, 0), head: cellLoc('body', 0, 0, 1) } });
+    expect(row.value.text).toBe('a\tb');
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
 test('clipboard slice reads a body range spanning a table', async () => {
   const { client, engine } = await openTableWorker();
   try {

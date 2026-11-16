@@ -992,7 +992,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       };
       active.current.clipboard = createClipboardPrefetch({ binding, isCurrent: () => active.current?.binding === binding,
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
-        readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }) });
+        readClipboardSlice: (selection, cells) => controller.read({ kind: 'clipboardSlice', selection, cells }) });
     }
     updateReadOnly();
     updateRenderEnvironment();
@@ -1100,7 +1100,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           return completed && replay.written;
         },
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
-        readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }),
+        readClipboardSlice: (selection, cells) => controller.read({ kind: 'clipboardSlice', selection, cells }),
         write: (text) => navigator.clipboard.writeText(text),
         writeSlice: async (text, html) => {
           if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) throw new Error('ClipboardItem unavailable');
