@@ -116,7 +116,7 @@ const CONDITIONAL: &str = r#"<conditionalFormatting sqref="B1:F9"><cfRule type="
 fn border_or_fill(row: u32, col: usize) -> u32 {
     match (row + col as u32) % 5 {
         0 => 2,
-        3 if row % 2 == 0 => 1,
+        3 if row.is_multiple_of(2) => 1,
         _ => 0,
     }
 }
