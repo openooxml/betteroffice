@@ -95,9 +95,6 @@ export interface DisplayListTextWatermark {
     semitransparent: boolean;
     layout: 'diagonal' | 'horizontal';
     fontSize?: number;
-    /** The shape box the text stretches to fill; wins over `fontSize`. */
-    widthEmu?: number;
-    heightEmu?: number;
     /** Undefined defaults to true for watermarks. */
     decorative?: boolean;
 }
