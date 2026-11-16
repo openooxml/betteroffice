@@ -160,6 +160,365 @@ fn replacing_one_paragraph_keeps_other_paragraph_bytes() {
     }
 }
 
+fn paragraph_span(xml: &str, id: &str) -> (usize, usize) {
+    let at = xml
+        .find(&format!(r#"w14:paraId="{id}""#))
+        .expect("edited paragraph");
+    let start = xml[..at].rfind("<w:p ").expect("paragraph start");
+    let end = at + xml[at..].find("</w:p>").expect("closed paragraph") + "</w:p>".len();
+    (start, end)
+}
+
+fn assert_bytes_kept_around(source: &str, saved: &str, id: &str, text: &str) {
+    let (start, end) = paragraph_span(source, id);
+    let (saved_start, saved_end) = paragraph_span(saved, id);
+    assert!(saved[saved_start..saved_end].contains(text), "{saved}");
+    assert_eq!(
+        &saved[..saved_start],
+        &source[..start],
+        "source bytes differ before the edited paragraph"
+    );
+    assert_eq!(
+        &saved[saved_end..],
+        &source[end..],
+        "source bytes differ after the edited paragraph"
+    );
+}
+
+fn edit_and_save(source: &str, id: &str, text: &str) -> String {
+    let mut document = Document::open(&docx(source)).unwrap();
+    document.replace_paragraph_text(id, text).unwrap();
+    saved_main_part(&document.save().unwrap())
+}
+
+fn cell(properties: &str, content: &str) -> String {
+    format!(
+        r#"<w:tc><w:tcPr><w:tcW w:type="dxa" w:w="2400"/>{properties}</w:tcPr>{content}</w:tc>"#
+    )
+}
+
+fn table(columns: usize, rows: &[String]) -> String {
+    let grid = r#"<w:gridCol w:w="2400"/>"#.repeat(columns);
+    format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:type="auto" w:w="0"/></w:tblPr><w:tblGrid>{grid}</w:tblGrid>{}</w:tbl>"#,
+        rows.iter()
+            .map(|row| format!("<w:tr>{row}</w:tr>"))
+            .collect::<String>()
+    )
+}
+
+#[test]
+fn editing_before_a_vertically_merged_cell_keeps_the_body_bytes() {
+    let rows = [
+        [
+            cell(
+                r#"<w:vMerge w:val="restart"/>"#,
+                &paragraph("0000004A", &run("A")),
+            ),
+            cell("", &paragraph("0000004B", &run("B"))),
+        ]
+        .concat(),
+        [
+            cell("<w:vMerge/>", "<w:p/>"),
+            cell("", &paragraph("0000004C", &run("D"))),
+        ]
+        .concat(),
+    ];
+    let source = main_part(
+        &[
+            paragraph("0000004E", &run("Old text")),
+            table(2, &rows),
+            paragraph("0000004D", &run("After.")),
+        ]
+        .concat(),
+    );
+    let saved = edit_and_save(&source, "0000004E", "New text");
+    assert_bytes_kept_around(&source, &saved, "0000004E", "New text");
+}
+
+fn assert_edit_before_table_keeps_the_body_bytes(table: &str) {
+    let source = main_part(
+        &[
+            paragraph("0000004E", &run("Old text")),
+            table.to_owned(),
+            paragraph("0000004D", &run("After.")),
+        ]
+        .concat(),
+    );
+    let saved = edit_and_save(&source, "0000004E", "New text");
+    assert_bytes_kept_around(&source, &saved, "0000004E", "New text");
+}
+
+fn number_paragraphs(value: &mut serde_json::Value, next: &mut u32) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(serde_json::Value::as_str) == Some("paragraph") {
+                object.insert("sourceOrdinal".to_owned(), (*next).into());
+                *next += 1;
+            }
+            for child in object.values_mut() {
+                number_paragraphs(child, next);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                number_paragraphs(child, next);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Saves `source` with its first paragraph edited and only `planned` source paragraphs spliced.
+fn splice_save(source: &str, planned: &[u32]) -> String {
+    use sha2::{Digest, Sha256};
+    let package = docx(source);
+    let parsed =
+        docx_parse::parse_docx_s9_wire(&package, docx_parse::S9ParseOptions::default()).unwrap();
+    let mut document = serde_json::to_value(parsed.document.package).unwrap()["document"].clone();
+    document.as_object_mut().unwrap().remove("sections");
+    number_paragraphs(&mut document["content"], &mut 0);
+    document["content"][0]["content"] = serde_json::json!([
+        {"type": "run", "content": [{"type": "text", "text": "New text"}]}
+    ]);
+    let request: docx_parse::S13SaveRequest = serde_json::from_value(serde_json::json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": document,
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [{
+            "part": "word/document.xml",
+            "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+            "paragraphs": planned,
+            "changed": [0],
+        }]},
+    }))
+    .unwrap();
+    saved_main_part(&docx_parse::write_docx_s13(request, &package).unwrap())
+}
+
+#[test]
+fn an_orphan_merge_continuation_keeps_a_planned_paragraph_and_conflicts_on_an_unplanned_one() {
+    let rows = [
+        [
+            cell("<w:vMerge/>", &paragraph("0000005A", &run("Orphan"))),
+            cell(
+                r#"<w:vMerge w:val="restart"/>"#,
+                &paragraph("0000005B", &run("Top")),
+            ),
+        ]
+        .concat(),
+        [
+            cell("", &paragraph("0000005C", &run("Left"))),
+            cell("<w:vMerge/>", &paragraph("0000005D", &run("Covered"))),
+        ]
+        .concat(),
+    ];
+    let table = table(2, &rows);
+    assert_edit_before_table_keeps_the_body_bytes(&table);
+    let source = main_part(
+        &[
+            paragraph("0000004E", &run("Old text")),
+            table.clone(),
+            paragraph("0000004D", &run("After.")),
+        ]
+        .concat(),
+    );
+    let planned = splice_save(&source, &[0, 1, 2, 3, 4, 5]);
+    assert!(planned.contains("New text"), "{planned}");
+    assert!(
+        planned.contains(&table),
+        "planned orphan paragraph lost the table bytes"
+    );
+    let unplanned = splice_save(&source, &[0, 2, 3, 4, 5]);
+    assert!(unplanned.contains("New text"), "{unplanned}");
+    assert!(
+        !unplanned.contains(&table),
+        "unplanned orphan paragraph kept the splice"
+    );
+}
+
+#[test]
+fn editing_before_a_nested_table_in_a_merge_continuation_keeps_the_body_bytes() {
+    let nested = table(1, &[cell("", &paragraph("0000006A", &run("Inner")))]);
+    let rows = [
+        [
+            cell(
+                r#"<w:vMerge w:val="restart"/>"#,
+                &paragraph("0000006B", &run("Top")),
+            ),
+            cell("", &paragraph("0000006C", &run("B"))),
+        ]
+        .concat(),
+        [
+            cell(
+                "<w:vMerge/>",
+                &format!("{nested}{}", paragraph("0000006D", &run("Below"))),
+            ),
+            cell("", &paragraph("0000006E", &run("D"))),
+        ]
+        .concat(),
+    ];
+    assert_edit_before_table_keeps_the_body_bytes(&table(2, &rows));
+}
+
+#[test]
+fn explicit_and_bare_merge_continuations_both_keep_the_body_bytes() {
+    for merge in [r#"<w:vMerge w:val="continue"/>"#, "<w:vMerge/>"] {
+        let rows = [
+            [
+                cell(
+                    r#"<w:vMerge w:val="restart"/>"#,
+                    &paragraph("0000007A", &run("Top")),
+                ),
+                cell("", &paragraph("0000007B", &run("B"))),
+            ]
+            .concat(),
+            [
+                cell(merge, &paragraph("0000007C", &run("Covered"))),
+                cell("", &paragraph("0000007D", &run("D"))),
+            ]
+            .concat(),
+        ];
+        assert_edit_before_table_keeps_the_body_bytes(&table(2, &rows));
+    }
+}
+
+struct Generator(u64);
+
+impl Generator {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next() % bound as u64) as usize
+    }
+}
+
+fn next_id(used: &mut u32) -> String {
+    *used += 1;
+    format!("{:08X}", 0x1000_0000 + *used)
+}
+
+struct GeneratedCell {
+    start: usize,
+    span: usize,
+    merge: Option<&'static str>,
+}
+
+fn merged_table(generator: &mut Generator, used: &mut u32, depth: usize) -> String {
+    let columns = 2 + generator.below(3);
+    let row_count = 2 + generator.below(3);
+    let mut layout: Vec<Vec<GeneratedCell>> = Vec::new();
+    for row in 0..row_count {
+        let mut cells = Vec::new();
+        let mut start = 0;
+        while start < columns {
+            let span = if start + 1 < columns && generator.below(3) == 0 {
+                2
+            } else {
+                1
+            };
+            let above = row
+                .checked_sub(1)
+                .and_then(|previous| {
+                    layout[previous]
+                        .iter()
+                        .position(|cell| cell.start == start && cell.span == span)
+                })
+                .filter(|_| generator.below(2) == 0);
+            if let Some(index) = above {
+                let previous = &mut layout[row - 1][index];
+                if previous.merge.is_none() {
+                    previous.merge = Some("restart");
+                }
+            }
+            cells.push(GeneratedCell {
+                start,
+                span,
+                merge: above.map(|_| "continue"),
+            });
+            start += span;
+        }
+        layout.push(cells);
+    }
+    let mut rows = Vec::new();
+    for cells in &layout {
+        let mut row = String::new();
+        for generated in cells {
+            let mut properties = String::new();
+            if generated.span > 1 {
+                properties.push_str(&format!(r#"<w:gridSpan w:val="{}"/>"#, generated.span));
+            }
+            let content = match generated.merge {
+                Some("continue") => {
+                    properties.push_str("<w:vMerge/>");
+                    if generator.below(2) == 0 {
+                        "<w:p/>".to_owned()
+                    } else {
+                        paragraph(&next_id(used), &run("continued"))
+                    }
+                }
+                merge => {
+                    if merge == Some("restart") {
+                        properties.push_str(r#"<w:vMerge w:val="restart"/>"#);
+                    }
+                    let text = paragraph(&next_id(used), &run("cell"));
+                    if depth == 0 && generator.below(4) == 0 {
+                        format!("{}{text}", merged_table(generator, used, depth + 1))
+                    } else {
+                        text
+                    }
+                }
+            };
+            row.push_str(&cell(&properties, &content));
+        }
+        rows.push(row);
+    }
+    table(columns, &rows)
+}
+
+fn generated_body(generator: &mut Generator, used: &mut u32, edited: &str) -> String {
+    let mut blocks = vec![paragraph(edited, &run("Opening."))];
+    for control in 0..2 + generator.below(2) {
+        let table = merged_table(generator, used, 0);
+        if control == 0 {
+            blocks.push(format!(
+                r#"<w:sdt><w:sdtPr><w:id w:val="{}"/></w:sdtPr><w:sdtContent>{table}</w:sdtContent></w:sdt>"#,
+                100 + *used
+            ));
+        } else {
+            blocks.push(table);
+        }
+        blocks.push(paragraph(&next_id(used), &run("Between.")));
+    }
+    blocks.concat()
+}
+
+#[test]
+fn editing_beside_generated_merged_tables_keeps_the_body_bytes() {
+    let mut generator = Generator(0x9E37_79B9_7F4A_7C15);
+    for case in 0..64 {
+        let mut used = 0;
+        let source = main_part(&generated_body(&mut generator, &mut used, "0FFFFFFF"));
+        let saved = edit_and_save(&source, "0FFFFFFF", "New text");
+        let (start, end) = paragraph_span(&source, "0FFFFFFF");
+        let (saved_start, saved_end) = paragraph_span(&saved, "0FFFFFFF");
+        assert!(
+            saved[saved_start..saved_end].contains("New text"),
+            "case {case}"
+        );
+        assert_eq!(
+            (&saved[..saved_start], &saved[saved_end..]),
+            (&source[..start], &source[end..]),
+            "source bytes differ outside the edited paragraph in case {case}"
+        );
+    }
+}
+
 #[test]
 fn unedited_save_keeps_table_of_contents_field_marks() {
     let entry = |anchor: &str, title: &str, page: &str| {
