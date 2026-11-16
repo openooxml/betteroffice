@@ -500,25 +500,34 @@ test('active_composition_paints_its_preedit_at_the_caret_until_it_commits', asyn
   expect(editor.commands[0]!.payload).toMatchObject({ text: '한' });
 });
 
-test('range_composition_paints_its_preedit_at_the_selection_start', async () => {
-  const editor = await mount(true, false, false, candidate => ({
-    identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
-    layoutRevision: candidate.payload.layoutRevision,
-    pages: [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0] }],
-    caret: null, selectionFocus: { x: 30, y: 0, width: 1, height: 20 },
-    selectionRects: [{ x: 10, y: 0, width: 20, height: 20 }],
-  }));
-  const shown = () => editor.queryByTestId('docx-preedit');
-  preedit(editor.textarea, 'compositionstart');
-  preedit(editor.textarea, 'compositionupdate', 'あ');
-  expect(shown()?.textContent).toBe('あ');
-  expect([shown()!.style.left, shown()!.style.top, shown()!.style.lineHeight]).toEqual(['10px', '0px', '20px']);
-  preedit(editor.textarea, 'compositionend', 'あ');
-  expect(shown()).toBeNull();
-  await waitFor(() => { expect(editor.commands).toHaveLength(1); });
-  expect(editor.commands[0]!.kind).toBe('replaceSelection');
-  expect(editor.commands[0]!.payload).toMatchObject({ text: 'あ' });
-});
+for (const backward of [false, true]) {
+  test(`range_composition_paints_its_preedit_at_the_selection_start_${backward ? 'backward' : 'forward'}`, async () => {
+    const editor = await mount(true, false, false, candidate => ({
+      identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+      layoutRevision: candidate.payload.layoutRevision,
+      pages: [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0] }],
+      caret: null, selectionFocus: { x: backward ? 10 : 30, y: 0, width: 1, height: 20 },
+      selectionRects: [{ x: 10, y: 0, width: 20, height: 20 }],
+    }));
+    const start = { story: 'body', paraId: 'worker', offset: 1 };
+    const end = { story: 'body', paraId: 'worker', offset: 3 };
+    const selection = backward ? { anchor: end, focus: start } : { anchor: start, focus: end };
+    fireEvent.keyDown(editor.textarea, { key: backward ? 'ArrowLeft' : 'ArrowRight', code: backward ? 'ArrowLeft' : 'ArrowRight', shiftKey: true });
+    await editor.acknowledge(0, 'applied', { selection });
+    editor.present(frame(2, editor.commands[0]!.seq));
+    expect(editor.binding.viewStore.getSnapshot().workerSelection).toEqual(selection);
+    const shown = () => editor.queryByTestId('docx-preedit');
+    preedit(editor.textarea, 'compositionstart');
+    preedit(editor.textarea, 'compositionupdate', 'あ');
+    expect(shown()?.textContent).toBe('あ');
+    expect([shown()!.style.left, shown()!.style.top, shown()!.style.lineHeight]).toEqual(['10px', '0px', '20px']);
+    preedit(editor.textarea, 'compositionend', 'あ');
+    expect(shown()).toBeNull();
+    await waitFor(() => { expect(editor.commands).toHaveLength(2); });
+    expect(editor.commands[1]!.kind).toBe('replaceSelection');
+    expect(editor.commands[1]!.payload).toEqual({ text: 'あ', selection });
+  });
+}
 
 test('synthetic_composition_payload_commits_and_recovers_through_paged_editor', async () => {
   const editor = await mount();
