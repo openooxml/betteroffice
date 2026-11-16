@@ -53,7 +53,7 @@ impl TableStyleInfo {
 type WorkbookTableStyle = (String, Vec<(TableStyleElementType, Option<u32>, u32)>);
 
 /// Fill each table's style from its `tableStyleInfo`, preferring a style the
-/// workbook defines over a preset of the same name.
+/// workbook defines with elements over a preset of the same name.
 pub(crate) fn resolve_tables(
     tables: Vec<(Table, Option<TableStyleInfo>)>,
     styles_xml: Option<&[u8]>,
@@ -79,7 +79,10 @@ fn resolve(
     defined: &[WorkbookTableStyle],
     styles: &Stylesheet,
 ) -> Vec<TableStyleElement> {
-    let mut elements = match defined.iter().find(|(name, _)| *name == info.name) {
+    let mut elements = match defined
+        .iter()
+        .find(|(name, elements)| *name == info.name && !elements.is_empty())
+    {
         Some((_, elements)) => elements
             .iter()
             .map(|&(kind, dxf, size)| TableStyleElement {
