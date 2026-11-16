@@ -113,6 +113,12 @@ export type ClipboardSliceTarget = {
 /** @internal Raw table payload lowered to the anchor reader's shape, or null. */
 export declare function clipboardTablePayload(value: unknown): TablePayload | null;
 /**
+ * The kinds a picture selection's slice read names as uncarried when it throws, so a cut can be
+ * refused after the error crossed the worker boundary as a message; null for any other error.
+ * @internal
+ */
+export declare function clipboardLeftOutInError(error: unknown): string[] | null;
+/**
  * Reads one rectangular table as a fragment. `rect` is inclusive; it expands
  * to fully cover every merged cell it touches.
  * @internal

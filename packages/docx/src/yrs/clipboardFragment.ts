@@ -668,6 +668,21 @@ function recordsColumnBreak(properties: Record<string, unknown>): boolean {
 
 const BLOCK_EMBEDS = new Set(['table', 'blockSdt', 'pageBreak', 'columnBreak']);
 
+const UNCARRIED_PICTURE_SELECTION = 'Picture selection contains unsupported clipboard objects: ';
+
+/**
+ * The kinds a picture selection's slice read names as uncarried when it throws, so a cut can be
+ * refused after the error crossed the worker boundary as a message; null for any other error.
+ * @internal
+ */
+export function clipboardLeftOutInError(error: unknown): string[] | null {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  const at = message.indexOf(UNCARRIED_PICTURE_SELECTION);
+  if (at < 0) return null;
+  const kinds = message.slice(at + UNCARRIED_PICTURE_SELECTION.length).split(', ').filter(Boolean);
+  return kinds.length > 0 ? kinds : null;
+}
+
 function shadingOf(tcPr: Record<string, unknown>): string | undefined {
   const color = typeof tcPr.backgroundColor === 'string' ? tcPr.backgroundColor.replace(/^#+/, '') : null;
   return color && /^[0-9a-f]{6}$/iu.test(color) ? color : undefined;
@@ -908,7 +923,7 @@ export function readClipboardSlice(
   const fragment = sawRichContent || paragraphs.some(paragraph => paragraph.text !== '') ? { paragraphs } : null;
   if (!fragment) return { text, fragment, ...report };
   if (clipboardFragmentHasPictures(fragment)) {
-    if (sawUnrepresentableEmbed) throw new Error('Picture selection contains unsupported clipboard objects');
+    if (sawUnrepresentableEmbed) throw new Error(`${UNCARRIED_PICTURE_SELECTION}${[...leftOut].join(', ')}`);
     if (!validClipboardFragment(fragment)) throw new Error('Clipboard fragment exceeds the supported size or shape');
     return { text, fragment, ...report };
   }

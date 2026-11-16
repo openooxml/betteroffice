@@ -49,7 +49,7 @@ import {
   yrsTableSelectionRange,
 } from './yrsCommands';
 import { clipboardFragmentHtml, parseClipboardHtml } from './internals/clipboardHtml';
-import { DocxCutRefusedError } from './internals/cutRefused';
+import { cutRefusalFrom, DocxCutRefusedError } from './internals/cutRefused';
 import { toast } from 'sonner';
 import { InputOperationQueue } from './inputOperationQueue';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
@@ -1628,14 +1628,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [onCutRefused, t]);
 
   const refuseCut = useCallback((): boolean => {
-    let leftOut: string[] | undefined;
+    let refusal: DocxCutRefusedError | null;
     try {
-      leftOut = session ? yrsClipboardSlice(session, themeColors).leftOut : undefined;
-    } catch {
-      return false;
+      const leftOut = session ? yrsClipboardSlice(session, themeColors).leftOut : undefined;
+      refusal = leftOut?.length ? new DocxCutRefusedError(leftOut) : null;
+    } catch (error) {
+      refusal = cutRefusalFrom(error);
     }
-    if (!leftOut?.length) return false;
-    notifyCutRefused(new DocxCutRefusedError(leftOut));
+    if (!refusal) return false;
+    notifyCutRefused(refusal);
     return true;
   }, [notifyCutRefused, session, themeColors]);
 
@@ -1650,7 +1651,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const result: CutCopy = { written: false };
     const copied = session;
     let written: Promise<void>;
-    const hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session, themeColors).fragment;
+    let hasFragment = false;
+    try {
+      hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session, themeColors).fragment;
+    } catch (error) {
+      if (!cut) throw error;
+    }
     const slice = new Promise<ReturnType<typeof yrsClipboardSlice>>((resolve, reject) => {
       const apply = (source: YrsSession): void | Promise<void> => {
         try {
@@ -1660,8 +1666,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           if (captured.text) resolve(captured);
           else reject(new Error('Nothing is selected to copy'));
         } catch (error) {
-          if (error instanceof DocxCutRefusedError) notifyCutRefused(error);
-          reject(error);
+          const refusal = cut ? cutRefusalFrom(error) : null;
+          if (refusal) notifyCutRefused(refusal);
+          reject(refusal ?? error);
         }
         if (cut) return written;
       };

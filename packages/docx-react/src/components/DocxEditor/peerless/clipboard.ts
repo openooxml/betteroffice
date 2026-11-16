@@ -2,7 +2,7 @@ import { clipboardFragmentHasPictures, clipboardFragmentIsTextOnly } from '@bett
 import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection, YrsSelectionText } from '@betteroffice/docx/yrs';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
-import { DocxCutRefusedError } from '../internals/cutRefused';
+import { cutRefusalFrom, DocxCutRefusedError } from '../internals/cutRefused';
 import { flushAdmittedInput } from './inputAdmission';
 import type { PeerlessViewIdentity } from './viewStore';
 
@@ -164,8 +164,13 @@ export async function copyWorkerSelection(options: SelectionRead & { write(text:
     if (!writeClipboardCapture(options.data, options.prefetched)) return false;
     captured = options.prefetched;
   } else if (options.readClipboardSlice || options.readCapture) {
-    const sliceCaptured = options.readCapture ? await options.readCapture()
-      : await readWorkerClipboardSlice({ ...options, readClipboardSlice: options.readClipboardSlice! });
+    let sliceCaptured: ClipboardCapture | Awaited<ReturnType<typeof readWorkerClipboardSlice>>;
+    try {
+      sliceCaptured = options.readCapture ? await options.readCapture()
+        : await readWorkerClipboardSlice({ ...options, readClipboardSlice: options.readClipboardSlice! });
+    } catch (error) {
+      throw (options.cut ? cutRefusalFrom(error) : null) ?? error;
+    }
     if (options.cut && sliceCaptured) refuseLeftOut(sliceCaptured.slice);
     if (!sliceCaptured || (!sliceCaptured.slice.text && !sliceCaptured.slice.fragment)) return false;
     if (!options.isCurrent() || !sameIdentity(identity, sliceCaptured.identity) ||
