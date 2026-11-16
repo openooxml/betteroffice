@@ -580,6 +580,26 @@ test('composition_after_an_unpresented_commit_waits_for_its_frame', async () => 
   expect(shown()!.style.left).toBe('30px');
 });
 
+test('composition_after_typing_held_behind_an_inflight_insert_waits_for_its_frame', async () => {
+  const editor = await mount(false, false, false, undefined, (revision) => revision === 1 ? 10 : 30);
+  const shown = () => editor.queryByTestId('docx-preedit');
+  beforeinput(editor.textarea, 'insertText', 'x');
+  await waitFor(() => { expect(editor.commands).toHaveLength(1); });
+  beforeinput(editor.textarea, 'insertText', 'y');
+  preedit(editor.textarea, 'compositionstart');
+  preedit(editor.textarea, 'compositionupdate', '未');
+  expect(editor.commands).toHaveLength(1);
+  expect(shown()).toBeNull();
+  await editor.acknowledge(0, 'applied');
+  await waitFor(() => { expect(editor.commands).toHaveLength(2); });
+  expect(editor.commands[1]!.payload).toEqual({ text: 'y' });
+  expect(shown()).toBeNull();
+  await editor.acknowledge(1, 'applied');
+  editor.present(frame(2, editor.commands[1]!.seq));
+  expect(shown()?.textContent).toBe('未');
+  expect(shown()!.style.left).toBe('30px');
+});
+
 test('recoverable_drafts_remain_until_individually_dismissed', async () => {
   const editor = await mount();
   for (const [index, text] of ['先', '後'].entries()) {
