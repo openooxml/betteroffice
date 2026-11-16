@@ -346,6 +346,45 @@ mod tests {
     }
 
     #[test]
+    fn each_crop_of_an_image_is_copied_once_per_frame_inside_its_budget() {
+        let png = red_then_blue_png();
+        let images = ImageMap::from([("xl/media/image1.png", png.as_slice())]);
+        let mut pictures = Pictures::new(&images);
+        let mut clip_surface = ClipSurface::default();
+        let mut target = Pixmap::new(40, 20).unwrap();
+        pictures
+            .paint(
+                &mut target,
+                &mut clip_surface,
+                &image_command(ImageCrop::default()),
+            )
+            .unwrap();
+        let decoded = pictures.bytes;
+        let right_half = image_command(ImageCrop {
+            left: 0.5,
+            ..ImageCrop::default()
+        });
+        for _ in 0..64 {
+            pictures
+                .paint(&mut target, &mut clip_surface, &right_half)
+                .unwrap();
+        }
+        assert_eq!(rgb(&target, 2), (0, 0, 255));
+        assert_eq!(pictures.bytes, decoded + 4);
+
+        pictures.bytes = MAX_FRAME_IMAGE_BYTES - 3;
+        let mut target = Pixmap::new(40, 20).unwrap();
+        let left_half = image_command(ImageCrop {
+            right: 0.5,
+            ..ImageCrop::default()
+        });
+        pictures
+            .paint(&mut target, &mut clip_surface, &left_half)
+            .unwrap();
+        assert_eq!(rgb(&target, 2), (0, 0, 0));
+    }
+
+    #[test]
     fn an_image_without_decodable_bytes_paints_nothing() {
         for images in [
             ImageMap::new(),
