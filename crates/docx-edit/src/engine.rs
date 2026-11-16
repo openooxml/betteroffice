@@ -9347,6 +9347,19 @@ impl EngineSession {
             #[cfg(test)]
             HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(count.get() + 1));
             let watermark = regions.header_watermarks.get(&r_id).cloned();
+            let blank = watermark.is_some().then(|| HeaderFooterVariant {
+                r_id: r_id.clone(),
+                kind,
+                hf_type,
+                section_index,
+                measured: Vec::new(),
+                height: 0.0,
+                flow_height: 0.0,
+                visual_top: 0.0,
+                visual_bottom: 0.0,
+                field_widths: Vec::new(),
+                watermark: None,
+            });
             if let Some(mut variant) = measure_header_footer(
                 r_id,
                 kind,
@@ -9356,7 +9369,9 @@ impl EngineSession {
                 content_width,
                 metrics,
                 measurement,
-            )? {
+            )?
+            .or(blank)
+            {
                 variant.watermark = watermark;
                 variants.push(variant);
             }
