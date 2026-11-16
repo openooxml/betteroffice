@@ -14581,7 +14581,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         for r_id in ["rId1", "rId2"] {
             engine
                 .doc()
-                .create_story(&format!("hf:{r_id}"), "Header", "Normal", "left")
+                .create_story(format!("hf:{r_id}"), "Header", "Normal", "left")
                 .unwrap();
         }
         let request = |title_pg: bool| {
