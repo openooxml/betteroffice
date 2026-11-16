@@ -132,7 +132,9 @@ fn an_adopted_collaboration_snapshot_draws_table_fonts_as_the_fresh_open() {
 
 fn recovered(workbook: &Workbook) -> Workbook {
     let checkpoint = workbook.recovery_checkpoint(0, None).unwrap();
-    Workbook::restore_recovery_checkpoint(&checkpoint).unwrap().0
+    Workbook::restore_recovery_checkpoint(&checkpoint)
+        .unwrap()
+        .0
 }
 
 #[test]
