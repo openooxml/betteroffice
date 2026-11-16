@@ -11,7 +11,7 @@ use super::*;
 mod binary;
 
 const MAGIC: &[u8; 8] = b"XLSXRECV";
-const CODEC_VERSION: u8 = 8;
+const CODEC_VERSION: u8 = 9;
 /// Bytes one capture may encode. wasm32 caps a `Vec` at 2 GiB and the heap at
 /// 4 GiB, and a capture holds its encoded parts and the framed output at once.
 const CAPTURE_BUDGET: usize = 1 << 30;
@@ -2086,7 +2086,7 @@ mod tests {
     }
 
     #[test]
-    fn cascade_composition_recovery_writer_uses_codec_eight() {
+    fn cascade_composition_recovery_writer_uses_the_current_codec() {
         let mut styled = model();
         styled.styles.cell_xfs = vec![xlsx_model::Xf::default(); 2];
         styled.styles.cell_xfs[1].xf_id = Some(2);

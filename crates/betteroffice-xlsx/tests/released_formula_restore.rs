@@ -101,7 +101,10 @@ fn a_released_recovery_checkpoint_restores_for_its_engine_version() {
             );
         }
         Err(error) => assert!(
-            error.to_string().contains("engine version mismatch"),
+            error.to_string().contains("engine version mismatch")
+                || error
+                    .to_string()
+                    .contains("Unsupported workbook recovery codec"),
             "{error}"
         ),
     }
