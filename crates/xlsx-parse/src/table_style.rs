@@ -134,28 +134,32 @@ fn resolve(
             .collect(),
         None => preset(name, styles),
     };
-    let painting: Vec<_> = elements
+    let painting = elements
         .iter()
         .filter(|element| element.format != Default::default())
-        .map(|element| element.kind)
-        .collect();
+        .fold(0, |kinds, element| kinds | bit(element.kind));
     elements.retain(|element| {
         #[cfg(test)]
-        tests::PROBES.with(|probes| probes.set(probes.get() + painting.len()));
+        tests::PROBES.with(|probes| probes.set(probes.get() + 1));
         element.format != Default::default()
-            || (spans(element) && !painting.contains(&element.kind))
+            || (spans(element.kind, element.size) && painting & bit(element.kind) == 0)
     });
     elements.sort_by_key(|element| element.kind);
     elements.dedup_by_key(|element| element.kind);
     elements
 }
 
+/// The bit of `kind` in a set of element types.
+fn bit(kind: TableStyleElementType) -> u16 {
+    1 << kind as u16
+}
+
 /// Whether an element that paints nothing still sets a stripe band wider than one.
-fn spans(element: &TableStyleElement) -> bool {
+fn spans(kind: TableStyleElementType, size: u32) -> bool {
     use TableStyleElementType::*;
-    element.size > 1
+    size > 1
         && matches!(
-            element.kind,
+            kind,
             FirstRowStripe | SecondRowStripe | FirstColumnStripe | SecondColumnStripe
         )
 }
@@ -188,6 +192,9 @@ fn workbook_table_styles(data: &[u8]) -> Result<Vec<WorkbookTableStyle>, ParseEr
     let mut depth = 0;
     let mut styles: Vec<WorkbookTableStyle> = Vec::new();
     let mut open = false;
+    let mut counted = 0;
+    let mut plain = 0;
+    let mut plain_spans = 0;
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) if local_name(&e) == b"tableStyle" => {
@@ -195,6 +202,7 @@ fn workbook_table_styles(data: &[u8]) -> Result<Vec<WorkbookTableStyle>, ParseEr
                     && attr(&e, b"table")?.is_none_or(|value| is_truthy(&value));
                 if open && let Some(name) = attr(&e, b"name")? {
                     styles.push((name, Vec::new()));
+                    (counted, plain, plain_spans) = (0, 0, 0);
                 } else {
                     open = false;
                 }
@@ -208,9 +216,23 @@ fn workbook_table_styles(data: &[u8]) -> Result<Vec<WorkbookTableStyle>, ParseEr
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(1)
                     .max(1);
-                if let Some((_, elements)) = styles.last_mut()
-                    && elements.len() < MAX_STYLE_ENTRIES
-                {
+                let Some((_, elements)) = styles.last_mut() else {
+                    continue;
+                };
+                let keep = if dxf.is_some() {
+                    let room = counted < MAX_STYLE_ENTRIES;
+                    counted += usize::from(room);
+                    room
+                } else {
+                    let spanning = spans(kind, size);
+                    let keep = plain & bit(kind) == 0 || (spanning && plain_spans & bit(kind) == 0);
+                    plain |= bit(kind);
+                    if spanning {
+                        plain_spans |= bit(kind);
+                    }
+                    keep
+                };
+                if keep {
                     elements.push((kind, dxf, size));
                 }
             }
