@@ -5,4 +5,4 @@
 "@betteroffice/rust-crates": minor
 ---
 
-XLSX wrapped text shows only the lines whose top half fits its whole row or merged area, clipped at its edge, at any zoom and scroll position; the display list's `TextWrap` gains `fitHeight`.
+XLSX wrapped text shows only the lines whose top half fits its whole row or merged area, also across a frozen pane, at any zoom and scroll position; the display list's `TextWrap` gains `maxLines`, which every painter obeys.
