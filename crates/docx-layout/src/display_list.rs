@@ -4211,16 +4211,28 @@ fn emit_watermark(
     }
 }
 
-/// Pen x, baseline, width, em, rotation and horizontal scale of a text
-/// watermark whose em is its box height and whose glyphs stretch to its box
-/// width, the box centred where its style places it and turned about its centre.
+struct FittedTextWatermark {
+    x: f64,
+    baseline: f64,
+    width: f64,
+    em: f64,
+    rotation: f64,
+    scale: f64,
+    glyphs: Option<(ooxml_text::FontId, Vec<PlacedGlyph>)>,
+}
+
+/// Geometry of a text watermark whose em is its box height and whose glyphs
+/// stretch to its box width, the box centred where its style places it and
+/// turned about its centre. When the family's chain resolves, the glyphs are
+/// those its stretch was measured from, placed so a painter scaling them from
+/// their left edge and turning them about their own centre lands on the box.
 fn fitted_text_watermark(
     shape_box: &WatermarkBoxIn,
     page: &PageIn,
     fonts: Option<&ShapeFonts<'_>>,
     family: &str,
     text: &str,
-) -> Option<[f64; 6]> {
+) -> Option<FittedTextWatermark> {
     let width = shape_box.width_pt * 96.0 / 72.0;
     let em = shape_box.height_pt * 96.0 / 72.0;
     if !(width.is_finite() && em.is_finite() && width > 0.0 && em > 0.0) {
@@ -4246,29 +4258,55 @@ fn fitted_text_watermark(
     let (sin, cos) = rotation.to_radians().sin_cos();
     let pivot_x = centre_x - 0.1 * em * sin;
     let pivot_y = centre_y + 0.1 * em * cos;
-    let advance = fonts
-        .and_then(|fonts| fonts.chain_for(family, false, false)?.ids.first().copied())
-        .and_then(|font| {
-            let shaped = ooxml_text::shape_with_direction(
-                fonts?.store,
-                font,
-                text,
-                em as f32,
-                &[],
-                ooxml_text::ShapeDirection::Ltr,
-            );
-            let advance: f64 = shaped.ok()?.iter().map(|g| f64::from(g.x_advance)).sum();
-            (advance.is_finite() && advance > 0.0).then_some(advance)
-        })
-        .unwrap_or_else(|| (text.trim().chars().count().max(1) as f64) * em * 0.62);
-    Some([
-        pivot_x - width / 2.0,
-        pivot_y + 0.2 * em,
+    let shaped = fonts.and_then(|fonts| {
+        let font = *fonts.chain_for(family, false, false)?.ids.first()?;
+        let glyphs = ooxml_text::shape_with_direction(
+            fonts.store,
+            font,
+            text,
+            em as f32,
+            &[],
+            ooxml_text::ShapeDirection::Ltr,
+        )
+        .ok()?;
+        let advance: f64 = glyphs.iter().map(|g| f64::from(g.x_advance)).sum();
+        (advance.is_finite() && advance > 0.0).then_some((font, glyphs, advance))
+    });
+    let advance = shaped.as_ref().map_or_else(
+        || (text.trim().chars().count().max(1) as f64) * em * 0.62,
+        |(_, _, advance)| *advance,
+    );
+    let glyphs = shaped.map(|(font, shaped, advance)| {
+        let lead = (width - advance) / 2.0;
+        let baseline = pivot_y + 0.2 * em - lead * sin;
+        let mut pen = pivot_x - advance / 2.0 - lead * cos;
+        let placed = shaped
+            .iter()
+            .map(|glyph| {
+                let origin = pen;
+                pen += f64::from(glyph.x_advance);
+                PlacedGlyph {
+                    id: glyph.glyph_id,
+                    x: round3(origin + f64::from(glyph.x_offset)),
+                    y: round3(baseline - f64::from(glyph.y_offset)),
+                    cluster: glyph.cluster,
+                    advance: round3(f64::from(glyph.x_advance)),
+                    logical_order: None,
+                    bidi_level: None,
+                }
+            })
+            .collect();
+        (font, placed)
+    });
+    Some(FittedTextWatermark {
+        x: pivot_x - width / 2.0,
+        baseline: pivot_y + 0.2 * em,
         width,
         em,
         rotation,
-        100.0 * width / advance,
-    ])
+        scale: 100.0 * width / advance,
+        glyphs,
+    })
 }
 
 fn watermark_auto_font_px(text: &str, available_width_px: f64) -> f64 {
@@ -4314,23 +4352,52 @@ fn emit_text_watermark(
     } else {
         None
     };
-    let (x, baseline, width, font_px, rotation, horizontal_scale) = match fitted {
-        Some([x, baseline, width, em, rotation, scale]) => (
-            x,
-            baseline,
-            width,
-            em,
-            (rotation != 0.0).then(|| px(rotation)),
-            Some(px(scale)),
+    let (x, baseline, width, font_px, rotation, horizontal_scale, glyphs) = match fitted {
+        Some(fitted) => (
+            fitted.x,
+            fitted.baseline,
+            fitted.width,
+            fitted.em,
+            (fitted.rotation != 0.0).then(|| px(fitted.rotation)),
+            Some(px(fitted.scale)),
+            fitted.glyphs,
         ),
-        None => (x, baseline, width, font_px, rotation, None),
+        None => (x, baseline, width, font_px, rotation, None, None),
     };
     let font = format!("400 {}px {}, sans-serif", px(font_px), family);
+    let color = wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string());
 
-    let attrs = DocAttrs {
+    let mut attrs = DocAttrs {
         decorative: Some(wm.decorative.unwrap_or(true)),
         ..DocAttrs::default()
     };
+    if let (Some((face, glyphs)), Some(fonts)) = (glyphs, fonts) {
+        attrs.fallback_font = Some(font);
+        prims.push(Primitive::GlyphRun(GlyphRunPrimitive {
+            font_id: face.to_u32(),
+            size: round3(font_px),
+            color,
+            paint_text: glyph_paint_text(fonts.store, face, &text).map(Box::new),
+            text,
+            glyphs,
+            echo: None,
+            paint_clip: None,
+            word_spacing: None,
+            rtl: None,
+            opacity,
+            rotation_deg: rotation,
+            horizontal_scale,
+            all_caps: false,
+            small_caps: false,
+            hidden: false,
+            text_shadow: None,
+            text_outline: false,
+            emphasis_mark: None,
+            text_effect: None,
+            attrs,
+        }));
+        return;
+    }
     prims.push(Primitive::Text(TextRunPrimitive {
         text,
         paint_text: None,
@@ -4340,7 +4407,7 @@ fn emit_text_watermark(
         paint_clip: None,
         font,
         scripts: None,
-        color: wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string()),
+        color,
         letter_spacing: None,
         word_spacing: None,
         rtl: None,
