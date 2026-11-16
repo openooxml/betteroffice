@@ -74,6 +74,7 @@ export declare class YrsPositionProjection {
     private readonly tables;
     private readonly blockBoundaries;
     private readonly source;
+    private tree;
     private readonly paragraphsById;
     constructor(session: Pick<YrsSession, 'storySegments'>, rootStory: string, source?: YrsStorySegmentSource);
     get size(): number;
@@ -84,6 +85,10 @@ export declare class YrsPositionProjection {
     tableStartForLoc(at: YrsCellLoc): number | null;
     cellPosition(tableStart: number, row: number, column: number): number | null;
     targetAt(position: number): YrsPointerProjectionTarget;
+    /** The deepest story whose content holds `position`, the root when none does. */
+    private deepestStoryAt;
+    /** The stories by content start, each with the index of the nearest one holding its start. */
+    private storyTree;
     positionForLoc(loc: YrsLoc): number | null;
     /** The location of a block embed's start or end at `position`, in the offsets of the paragraph after it. */
     blockBoundaryAt(position: number): YrsLoc | null;
