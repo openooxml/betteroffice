@@ -2879,6 +2879,21 @@ test('a section read limited to paragraphs follows a remote paragraph id change'
   } finally { remote.destroy(); client.destroy(); }
 }, TIMEOUT);
 
+test('a section read limited to paragraphs follows a local paragraph id change', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  try {
+    const before = engine.paragraphs('body')[0]!.paraId;
+    expect((await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value.sections[0]!.section).toBe(before);
+    engine.applyRawOps('body', [{ op: 'setEmbedAttr', index: engine.paragraphs('body')[0]!.text.length, key: 'paraId', value: 'local-first' }]);
+    expect(engine.paragraphs('body')[0]!.paraId).toBe('local-first');
+    const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+    const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value;
+    expect(full.sections[0]!.section).toBe('local-first');
+    expect(limited.sections[0]!.section).toBe('local-first');
+    expect(limited.sections).toEqual(full.sections);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('a legacy section break lowers on the worker as a section split', async () => {
   const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgMar w:left="1800"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
   const remote = await createYrsSession({ clientId: 8311 });
