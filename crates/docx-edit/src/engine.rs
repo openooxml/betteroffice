@@ -14632,6 +14632,54 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
+    fn region_layout_paints_the_watermark_of_a_header_with_no_blocks() {
+        let engine = EngineSession::new(1338);
+        engine
+            .doc()
+            .create_story("hf:rId1", "", "Normal", "left")
+            .unwrap();
+        engine
+            .doc()
+            .apply_raw_ops(
+                "hf:rId1",
+                vec![crate::RawOp::Delete { index: 0, len: 1 }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+        assert!(
+            crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "hf:rId1", &RenderEnv::default())
+                .unwrap()
+                .is_empty()
+        );
+        let request = json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5},
+                    "headerFooterRefs": {"headerDefault": "rId1"}
+                }],
+                "headerWatermarks": {
+                    "rId1": {"kind": "text", "text": "DRAFT", "widthEmu": 1828800, "heightEmu": 457200}
+                }
+            },
+            "measurement": {"defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"}},
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let display: serde_json::Value =
+            serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+        assert_eq!(display["pages"][0]["watermarkPrimitiveCount"], json!(1));
+    }
+
+    #[test]
     fn region_layout_operation_lowers_and_measures_resident_body() {
         const FONT: &[u8] =
             include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
