@@ -271,11 +271,14 @@ fn translate_command(
                 let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                     measure_text(line, *font_size)
                 });
+                let count =
+                    xlsx_render::wrap::wrapped_lines_fitting(lines.len(), wrap, *font_size, clip.h);
                 lines
                     .iter()
+                    .take(count)
                     .enumerate()
                     .map(|(index, line)| {
-                        let y = xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap);
+                        let y = xlsx_render::wrap::wrapped_line_y(*y, index, count, wrap);
                         prepare(*x, y, line, *align)
                     })
                     .collect::<Result<Vec<_>, _>>()?
