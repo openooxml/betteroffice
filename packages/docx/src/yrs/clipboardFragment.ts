@@ -554,6 +554,7 @@ function cellContent(reader: ClipboardTableReader, story: string, onLeftOut?: Le
         ...(Object.keys(segment.attributes).length > 0 ? { attributes: { ...segment.attributes } } : {}),
       });
     } else if (segment.kind === 'pilcrow') {
+      if (onLeftOut && recordsColumnBreak(segment.properties)) onLeftOut('columnBreak', false);
       content.push({
         kind: 'pilcrow',
         ...(Object.keys(segment.properties).length > 0 ? { properties: { ...segment.properties } } : {}),
@@ -672,6 +673,30 @@ function recordedColumnBreakIn(properties: Record<string, unknown>, paragraphSta
   }
   return false;
 }
+
+/** Whether the paragraph recorded a column break between its runs, wherever it sits. */
+function recordsColumnBreak(properties: Record<string, unknown>): boolean {
+  const boundaries = properties._originalRunBoundaries;
+  return Array.isArray(boundaries) && boundaries.some(value => {
+    const breaks = record(value)?.breaks;
+    return Array.isArray(breaks) && breaks.some(entry => record(entry)?.type === 'column');
+  });
+}
+
+/** Whether the recorded run boundaries still span the paragraph's `length` units, so their break offsets place its breaks. */
+function boundariesSpan(properties: Record<string, unknown>, length: number): boolean {
+  const boundaries = properties._originalRunBoundaries;
+  if (!Array.isArray(boundaries)) return false;
+  let total = 0;
+  for (const value of boundaries) {
+    const boundary = record(value);
+    if (!boundary) return false;
+    total += typeof boundary.storyText === 'string' ? boundary.storyText.length : typeof boundary.text === 'string' ? boundary.text.length : 0;
+  }
+  return total === length;
+}
+
+const BLOCK_EMBEDS = new Set(['table', 'blockSdt', 'pageBreak', 'columnBreak']);
 
 function shadingOf(tcPr: Record<string, unknown>): string | undefined {
   const color = typeof tcPr.backgroundColor === 'string' ? tcPr.backgroundColor.replace(/^#+/, '') : null;
@@ -871,12 +896,25 @@ export function readClipboardSlice(
   };
   let offset = 0;
   let paragraphStart = 0;
+  let ended: { start: number; pilcrow: number; located: boolean } | null = null;
   for (const segment of reader.storySegments(target.story)) {
     const start = offset;
     offset += segment.kind === 'text' ? segment.text.length : 1;
     if (segment.kind === 'pilcrow') {
-      if (paragraphStart < to && start >= from && recordedColumnBreakIn(segment.properties, paragraphStart, from, to)) leftOut.add('columnBreak');
+      const located = boundariesSpan(segment.properties, start - paragraphStart);
+      const touched = from < to && from <= start && to > paragraphStart;
+      if (touched && (located ? recordedColumnBreakIn(segment.properties, paragraphStart, from, to) : recordsColumnBreak(segment.properties))) {
+        leftOut.add('columnBreak');
+      }
+      ended = { start: paragraphStart, pilcrow: start, located };
       paragraphStart = offset;
+    } else if (segment.kind === 'embed' && BLOCK_EMBEDS.has(segment.embedKind)) {
+      if (ended && segment.embedKind === 'columnBreak' && from < to && from <= ended.pilcrow && to > ended.start &&
+        (!ended.located || to > ended.pilcrow)) leftOut.add('columnBreak');
+      if (segment.embedKind !== 'pageBreak' && segment.embedKind !== 'columnBreak') ended = null;
+      paragraphStart = offset;
+    } else {
+      ended = null;
     }
     if (offset <= from || start >= to) continue;
     if (segment.kind === 'text') {

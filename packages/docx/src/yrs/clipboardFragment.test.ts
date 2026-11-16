@@ -988,6 +988,29 @@ describe('readClipboardSlice leftOut', () => {
     expect(read(body('page'), 0, 25).leftOut).toBeUndefined();
   });
 
+  test('names a column break whose recorded offset no longer places it anywhere the paragraph touches', () => {
+    const stale = { _originalRunBoundaries: [{ text: 'ALPHA', breaks: [{ offset: 2, type: 'column' }] }] };
+    const body = [textSegment('ALPHA before'), pilcrowSegment('p0', stale), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(body, 8, 10).leftOut).toEqual(['columnBreak']);
+    expect(read(body, 13, 18).leftOut).toBeUndefined();
+  });
+
+  test('names a column break unit that follows the touched paragraph', () => {
+    const body = [textSegment('ALPHA'), pilcrowSegment('p0'), embedSegment('columnBreak'), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(body, 1, 3).leftOut).toEqual(['columnBreak']);
+    expect(read(body, 7, 9).leftOut).toBeUndefined();
+    const placed = { _originalRunBoundaries: [{ text: 'AL' }, { text: 'PHA', breaks: [{ offset: 0, type: 'column' }] }] };
+    const located = [textSegment('ALPHA'), pilcrowSegment('p0', placed), embedSegment('columnBreak'), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(located, 3, 5).leftOut).toBeUndefined();
+    expect(read(located, 3, 6).leftOut).toEqual(['columnBreak']);
+  });
+
+  test('names a column break a selected table cell records', () => {
+    const table = { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'cell', tcPr: {} }] }] };
+    const cell = [textSegment('ab'), pilcrowSegment('pc', { _originalRunBoundaries: [{ text: 'ab', breaks: [{ offset: 1, type: 'column' }] }] })];
+    expect(read([embedSegment('table', table), pilcrowSegment('p0')], 0, 2, { cell }).leftOut).toEqual(['columnBreak']);
+  });
+
   test('leaves the report out for text and everything the fragment carries', () => {
     const image = { src: 'data:image/png;base64,AA==' };
     expect(read([textSegment('ab'), embedSegment('tab'), embedSegment('break'), embedSegment('bookmarkStart'), embedSegment('commentRangeStart'),
