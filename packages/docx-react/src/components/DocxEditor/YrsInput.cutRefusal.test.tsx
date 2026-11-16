@@ -14,6 +14,7 @@ import {
 } from '@betteroffice/docx/yrs';
 import { YrsInput, type YrsInputRef } from './YrsInput';
 import type { DocxCutRefusedError } from './internals/cutRefused';
+import { yrsCellStory } from './yrsCommands';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -67,12 +68,13 @@ async function mount() {
     />
   );
   const textarea = view.getByTestId('yrs-input');
+  const flush = () => act(async () => { await input.current!.flushPendingInput(); });
   const extendThenShiftDelete = async () => {
     fireEvent.keyDown(textarea, { key: 'ArrowRight', shiftKey: true });
     fireEvent.keyDown(textarea, { key: 'Delete', shiftKey: true });
-    await act(async () => { await input.current!.flushPendingInput(); });
+    await flush();
   };
-  return { session, written, refusals, extendThenShiftDelete };
+  return { session, written, refusals, textarea, flush, extendThenShiftDelete };
 }
 
 test('a Shift+Delete pressed before a queued selection onto a column break paragraph settles is refused and deletes nothing', async () => {
@@ -94,5 +96,32 @@ test('a Shift+Delete pressed before a queued selection onto plain text settles c
   await extendThenShiftDelete();
   expect(written).toEqual(['C']);
   expect(session.paragraphs('body').find(paragraph => paragraph.paraId === charlie.paraId)?.text).toBe('HARLIE');
+  expect(refusals).toEqual([]);
+});
+
+test('a Shift+Delete pressed in a table cell while input is pending deletes the next character', async () => {
+  const { session, textarea, flush } = await mount();
+  const alpha = session.paragraphs('body').find(paragraph => paragraph.text === 'ALPHA')!;
+  const { table } = session.insertTable({ story: 'body', paraId: alpha.paraId, offset: 'ALPHA'.length }, 1, 2);
+  const first = yrsCellStory(session, { ...table, row: 0, column: 0 })!;
+  const second = yrsCellStory(session, { ...table, row: 0, column: 1 })!;
+  session.insertText({ story: second, paraId: session.paragraphs(second)[0]!.paraId, offset: 0 }, 'ABC');
+  session.setSelection({ story: first, paraId: session.paragraphs(first)[0]!.paraId, offset: 0 });
+  fireEvent.keyDown(textarea, { key: 'Tab' });
+  fireEvent.keyDown(textarea, { key: 'ArrowRight' });
+  fireEvent.keyDown(textarea, { key: 'Delete', shiftKey: true });
+  await flush();
+  expect(session.paragraphs(second)[0]!.text).toBe('AC');
+});
+
+test('a Shift+Delete over a range with no clipboard available deletes nothing', async () => {
+  const { session, written, refusals, extendThenShiftDelete } = await mount();
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  const charlie = session.paragraphs('body').find(paragraph => paragraph.text === 'CHARLIE')!;
+  session.setSelection({ story: 'body', paraId: charlie.paraId, offset: 0 });
+  const before = session.storySegments('body');
+  await extendThenShiftDelete();
+  expect(session.storySegments('body')).toEqual(before);
+  expect(written).toEqual([]);
   expect(refusals).toEqual([]);
 });
