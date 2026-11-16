@@ -47,28 +47,82 @@ fn painted_watermark(bytes: &[u8], font: u32) -> Value {
     let output = engine
         .layout_document_with_regions_json(&request.to_string())
         .unwrap();
-    let display: Value =
-        serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+    let mut display_input: Value = serde_json::from_str(&output).unwrap();
+    display_input["fontChains"] = request["measurement"]["fontChains"].clone();
+    let display: Value = serde_json::from_str(
+        &engine
+            .build_display_list_json(&display_input.to_string())
+            .unwrap(),
+    )
+    .unwrap();
     let page = &display["pages"][0];
     assert_eq!(page["watermarkPrimitiveCount"], json!(1));
     page["primitives"][0].clone()
 }
 
+fn face(run: &Value) -> &str {
+    if run["kind"] == "glyphRun" {
+        run["fallbackFont"].as_str().unwrap()
+    } else {
+        run["font"].as_str().unwrap()
+    }
+}
+
 fn em_px(run: &Value) -> f64 {
-    run["font"]
-        .as_str()
-        .unwrap()
+    if run["kind"] == "glyphRun" {
+        return run["size"].as_f64().unwrap();
+    }
+    face(run)
         .split_whitespace()
         .find_map(|part| part.strip_suffix("px")?.parse().ok())
         .unwrap()
 }
 
+struct PaintedRun {
+    x: f64,
+    width: f64,
+    pivot_x: f64,
+    baseline: f64,
+}
+
+fn painted_run(run: &Value) -> PaintedRun {
+    if run["kind"] != "glyphRun" {
+        let x = run["x"].as_f64().unwrap();
+        let width = run["width"].as_f64().unwrap();
+        return PaintedRun {
+            x,
+            width,
+            pivot_x: x + width / 2.0,
+            baseline: run["baselineY"].as_f64().unwrap(),
+        };
+    }
+    let glyphs = run["glyphs"].as_array().unwrap();
+    let left = glyphs
+        .iter()
+        .map(|glyph| glyph["x"].as_f64().unwrap())
+        .fold(f64::MAX, f64::min);
+    let right = glyphs
+        .iter()
+        .map(|glyph| glyph["x"].as_f64().unwrap() + glyph["advance"].as_f64().unwrap())
+        .fold(f64::MIN, f64::max);
+    let scale = run["horizontalScale"].as_f64().unwrap_or(100.0) / 100.0;
+    PaintedRun {
+        x: left,
+        width: (right - left) * scale,
+        pivot_x: (left + right) / 2.0,
+        baseline: glyphs[0]["y"].as_f64().unwrap(),
+    }
+}
+
 fn rotated_em_box_points(run: &Value) -> [f64; 4] {
     let em = em_px(run);
-    let x = run["x"].as_f64().unwrap();
-    let width = run["width"].as_f64().unwrap();
-    let baseline = run["baselineY"].as_f64().unwrap();
-    let (pivot_x, pivot_y) = (x + width / 2.0, baseline - 0.2 * em);
+    let PaintedRun {
+        x,
+        width,
+        pivot_x,
+        baseline,
+    } = painted_run(run);
+    let pivot_y = baseline - 0.2 * em;
     let angle = run["rotationDeg"].as_f64().unwrap().to_radians();
     let (sin, cos) = angle.sin_cos();
     let top = baseline - 0.8 * em;
@@ -116,7 +170,6 @@ fn text_watermark_fills_its_shape_box_centred_on_the_margin_box() {
     for (shape, [width_pt, height_pt], expected) in cases {
         let [_, _, family, _, text] = shape;
         let run = painted_watermark(&watermarked_document(shape), font);
-        assert_eq!(run["kind"], "text", "{text}");
         assert_eq!(run["text"], text);
         assert_eq!(run["rotationDeg"].as_f64(), Some(-45.0), "{text}");
         let bounds = rotated_em_box_points(&run);
@@ -126,13 +179,38 @@ fn text_watermark_fills_its_shape_box_centred_on_the_margin_box() {
                 "{text}: box {bounds:?}, expected {expected:?}"
             );
         }
-        let painted_width = run["width"].as_f64().unwrap() * 0.75;
+        let painted_width = painted_run(&run).width * 0.75;
         assert!((painted_width - width_pt).abs() < 0.01, "{text}: {run}");
         let em_pt = em_px(&run) * 0.75;
         assert!((em_pt - height_pt).abs() < 0.01, "{text}: {run}");
-        let face = run["font"].as_str().unwrap();
-        assert!(face.contains(family), "{text}: {run}");
+        assert!(face(&run).contains(family), "{text}: {run}");
         let stretch = run["horizontalScale"].as_f64();
         assert!(stretch.is_some_and(|scale| scale > 0.0), "{text}: {run}");
     }
+}
+
+#[test]
+fn text_watermark_paints_the_glyphs_it_was_stretched_with() {
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let run = painted_watermark(
+        &watermarked_document(["672pt", "58.5pt", "Calibri", "48pt", "Sample copy"]),
+        font,
+    );
+    assert_eq!(run["kind"], "glyphRun", "{run}");
+    assert_eq!(run["fontId"].as_u64(), Some(u64::from(font)), "{run}");
+    assert_eq!(run["text"], "Sample copy");
+    assert_eq!(run["rotationDeg"].as_f64(), Some(-45.0), "{run}");
+    assert_eq!(run["opacity"].as_f64(), Some(0.5), "{run}");
+    let scale = run["horizontalScale"].as_f64().unwrap() / 100.0;
+    let advances: f64 = run["glyphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|glyph| glyph["advance"].as_f64().unwrap())
+        .sum();
+    assert!(
+        (advances * scale * 0.75 - 672.0).abs() < 0.05,
+        "{advances} x {scale}: {run}"
+    );
 }
