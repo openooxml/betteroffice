@@ -185,30 +185,12 @@ impl RowFit {
     }
 }
 
-/// the baseline step of wrapped `size_pt` text: on screen the face's own line
-/// height where it is known, otherwise one fitted row of it; on the print grid
-/// when `print_dpi` is set.
-pub(crate) fn line_pitch_pt(size_pt: f64, family: Option<&str>, print_dpi: Option<f64>) -> f64 {
-    match (print_dpi, family.and_then(line_height_em)) {
-        (None, Some(em)) => size_pt * em,
-        (dpi, _) => dpi
-            .map_or(RowFit::Screen, |dpi| RowFit::Print { dpi })
-            .natural(size_pt),
-    }
-}
-
-/// `(usWinAscent + usWinDescent) / unitsPerEm` of common faces whose wrapped
-/// lines excel spaces at the face's line height; calibri keeps the fitted row.
-fn line_height_em(family: &str) -> Option<f64> {
-    Some(match family.trim().to_ascii_lowercase().as_str() {
-        "arial" | "helvetica" | "liberation sans" | "arimo" => 1.1172,
-        "times new roman" | "liberation serif" | "tinos" => 1.1074,
-        "courier new" | "liberation mono" | "cousine" => 1.1328,
-        "verdana" => 1.2153,
-        "tahoma" => 1.2070,
-        "georgia" => 1.1362,
-        _ => return None,
-    })
+/// the baseline step of wrapped `size_pt` text: one fitted row of it, on
+/// the print grid when `print_dpi` is set.
+pub(crate) fn line_pitch_pt(size_pt: f64, print_dpi: Option<f64>) -> f64 {
+    print_dpi
+        .map_or(RowFit::Screen, |dpi| RowFit::Print { dpi })
+        .natural(size_pt)
 }
 
 /// floors to whole points, absorbing the float error a ratio leaves just under
@@ -1654,22 +1636,6 @@ mod tests {
         sheet.format.default_row_height_pt = Some(13.75);
         let grid = GridGeometry::new(&sheet, &styles);
         assert!((grid.row_y(1) - row_pt_to_px(14.0)).abs() < 0.001);
-    }
-
-    #[test]
-    fn wrapped_lines_step_by_the_face_line_height() {
-        assert!((line_pitch_pt(36.0, Some("Arial"), None) - 36.0 * 1.1172).abs() < 1e-9);
-        assert_eq!(
-            line_pitch_pt(36.0, Some("Calibri"), None),
-            autofit_row_height_pt(36.0)
-        );
-        assert_eq!(line_pitch_pt(36.0, None, None), autofit_row_height_pt(36.0));
-    }
-
-    #[test]
-    fn verdana_and_tahoma_step_by_their_own_line_heights() {
-        assert!((line_pitch_pt(36.0, Some("Verdana"), None) - 36.0 * 1.2153).abs() < 1e-9);
-        assert!((line_pitch_pt(36.0, Some("Tahoma"), None) - 36.0 * 1.2070).abs() < 1e-9);
     }
 
     #[test]

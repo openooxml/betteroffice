@@ -1130,7 +1130,6 @@ where
             width: text_width,
             line_height: geometry::row_pt_to_px(geometry::line_pitch_pt(
                 f64::from(size),
-                font_family.as_deref(),
                 print.map(|(m, _)| f64::from(m.dpi)),
             )),
             valign: resolve_rotation_valign(valign),
