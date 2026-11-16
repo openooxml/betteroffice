@@ -1718,16 +1718,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const copied = queued ? copyAfterReplica(true) : null;
     if (queued && (copied || !hasTextRange())) {
       enqueueInputOperation(async () => {
-        if (copied?.written) return deleteSelection(false, copied);
-        if (session?.cellSelection() || (hasTextRange() && (copied || refuseCut()))) return;
-        await deleteUnits('forward', 1);
+        if (!hasTextRange()) await deleteUnits('forward', 1);
+        else if (copied?.written) deleteSelection(false, copied);
       }, 'mutation');
     } else if (hasTextRange()) {
       copyOrCut(true);
     } else {
       deleteDirection('forward');
     }
-  }, [copyAfterReplica, copyOrCut, deleteDirection, deleteSelection, deleteUnits, enqueueInputOperation, hasTextRange, holdInput, refuseCut, session]);
+  }, [copyAfterReplica, copyOrCut, deleteDirection, deleteSelection, deleteUnits, enqueueInputOperation, hasTextRange, holdInput]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
