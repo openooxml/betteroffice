@@ -417,7 +417,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     resident.setParagraphAttrs({ story: 'body', start: at, end: at }, { other: { sectPr, sectionBreakType: sectPr.sectionStart ?? null } });
     return session.version() !== version;
   };
-  const sectionProperties =(paragraphs?: ResidentSectionParagraphs): ResidentSectionSnapshot => {
+  const sectionProperties = (paragraphs?: ResidentSectionParagraphs): ResidentSectionSnapshot => {
     const document = partDocument();
     const margins = JSON.parse(session.section_margins_json()) as Record<string, DocxSectionMargins>;
     if (!paragraphs) return readSectionSnapshot(resident, document, margins, seededSectionMarks, sectionsTouched);
