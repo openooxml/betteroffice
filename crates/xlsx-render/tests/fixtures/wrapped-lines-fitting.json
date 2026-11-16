@@ -40,6 +40,11 @@
     "fontSize": 9, "count": 3, "lines": 2
   },
   {
+    "name": "the fourth line of 9 pt text with its top half exactly inside a 36.75 pt row",
+    "wrap": { "width": 100, "lineHeight": 14.666667, "valign": "center", "fitHeight": 50 },
+    "fontSize": 9, "count": 4, "lines": 4
+  },
+  {
     "name": "every line fits",
     "wrap": { "width": 100, "lineHeight": 13.4, "valign": "center", "fitHeight": 201 },
     "fontSize": 9, "count": 2, "lines": 2

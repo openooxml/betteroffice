@@ -1313,7 +1313,7 @@ mod tests {
             xlsx_model::CellRef::new(row, 0),
             xlsx_model::Cell {
                 value: xlsx_model::CellValue::Text {
-                    value: "xxxx xxxx xxxx xxxx".into(),
+                    value: "xxxxx xxxx xxxx xxxx".into(),
                 },
                 style: Some(0),
                 ..Default::default()
@@ -1349,11 +1349,28 @@ mod tests {
 
     #[test]
     fn a_wrapped_row_paints_the_same_lines_at_every_zoom() {
-        let lines: Vec<usize> = [1.0, 2.0, 4.0]
+        for zoom in [1u32, 2, 4] {
+            let widths = ink_band_widths(&wrapped_row(0, 24.5, 0.0, zoom as f32));
+            assert_eq!(widths.len(), 2, "zoom {zoom}: {widths:?}");
+            assert!(
+                widths[0] > widths[1] + 3 * zoom,
+                "zoom {zoom}: the first word should lead: {widths:?}"
+            );
+        }
+    }
+
+    fn ink_band_widths(dl: &DisplayList) -> Vec<u32> {
+        let pixels = Pixmap::decode_png(&render_png(dl).unwrap()).unwrap();
+        let dark = |x: u32, y: u32| pixels.pixel(x, y).unwrap().red() < 128;
+        ink_row_bands(dl)
             .into_iter()
-            .map(|zoom| ink_row_bands(&wrapped_row(0, 24.5, 0.0, zoom)).len())
-            .collect();
-        assert_eq!(lines, [2, 2, 2]);
+            .map(|(top, bottom)| {
+                let ink: Vec<u32> = (0..pixels.width())
+                    .filter(|&x| (top..=bottom).any(|y| dark(x, y)))
+                    .collect();
+                ink.last().unwrap() - ink[0] + 1
+            })
+            .collect()
     }
 
     #[test]
