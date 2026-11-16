@@ -75,9 +75,7 @@ impl<'a> Pictures<'a> {
             (crop.top * height).round() as i32,
             ((1.0 - crop.right) * width).round() as i32,
             ((1.0 - crop.bottom) * height).round() as i32,
-        )
-        .zip(IntRect::from_xywh(0, 0, image.width(), image.height()))
-        .and_then(|(kept, whole)| kept.intersect(&whole));
+        );
         let (Some(rect), Some(kept)) = (Rect::from_xywh(*x, *y, *w, *h), kept) else {
             return Ok(());
         };
@@ -137,25 +135,20 @@ impl<'a> Pictures<'a> {
     fn decode(&mut self, bytes: &[u8]) -> Option<Pixmap> {
         use image::ImageDecoder as _;
 
-        let encoded = bytes.len() as u64;
-        let allowance = MAX_IMAGE_BYTES.min(MAX_FRAME_IMAGE_BYTES.saturating_sub(self.bytes));
-        if encoded > allowance {
-            return None;
-        }
         let bytes = ooxml_raster::png_with_end(bytes);
         let mut reader = image::ImageReader::new(Cursor::new(bytes.as_ref()))
             .with_guessed_format()
             .ok()?;
         let mut header_limits = image::Limits::default();
-        header_limits.max_alloc = Some(allowance - encoded);
+        header_limits.max_alloc =
+            Some(MAX_IMAGE_BYTES.min(MAX_FRAME_IMAGE_BYTES.saturating_sub(self.bytes)));
         reader.limits(header_limits);
         let mut decoder = reader.into_decoder().ok()?;
         let (width, height) = decoder.dimensions();
         let pixels = u64::from(width) * u64::from(height);
-        let decoding = decoder
+        let cost = decoder
             .total_bytes()
             .saturating_add(pixels.saturating_mul(4));
-        let cost = decoding.saturating_add(encoded);
         if pixels > MAX_IMAGE_PIXELS
             || cost > MAX_IMAGE_BYTES
             || self.pixels + pixels > MAX_FRAME_IMAGE_PIXELS
@@ -168,7 +161,7 @@ impl<'a> Pictures<'a> {
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(width);
         limits.max_image_height = Some(height);
-        limits.max_alloc = Some(decoding);
+        limits.max_alloc = Some(cost);
         decoder.set_limits(limits).ok()?;
         let orientation = decoder.orientation().ok()?;
         let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
