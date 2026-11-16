@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    DisplayList, DrawCmd, SheetId, SnapshotBudget, Viewport, Workbook, WorkbookSnapshotBuilder,
-    WorkbookSnapshotEncoder,
+    CalculationOptions, DisplayList, DrawCmd, SheetId, SnapshotBudget, Viewport, Workbook,
+    WorkbookSnapshotBuilder, WorkbookSnapshotEncoder,
 };
 
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -103,11 +103,21 @@ fn a_snapshot_restore_draws_table_fonts_as_the_fresh_open() {
     let source = source();
     let fresh = Workbook::open(&source).unwrap();
     assert_eq!(render(&snapshot_round_trip(&fresh)), render(&fresh));
-    let collaborative = Workbook::open_collaborative(&source, 811).unwrap();
-    assert_eq!(
-        render(&snapshot_round_trip(&collaborative)),
-        render(&collaborative)
-    );
+}
+
+#[test]
+fn an_adopted_collaboration_snapshot_draws_table_fonts_as_the_fresh_open() {
+    let source = source();
+    let fresh = Workbook::open(&source).unwrap();
+    let writer = Workbook::open_collaborative(&source, 811).unwrap();
+    let mut reader = Workbook::open_collaborative(&source, 812).unwrap();
+    reader
+        .apply_update_v1(
+            &writer.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(render(&reader), render(&fresh));
 }
 
 #[test]
