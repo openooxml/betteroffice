@@ -135,26 +135,31 @@ pub fn wrapped_line_y(y: f32, index: usize, count: usize, wrap: &TextWrap) -> f3
         }
 }
 
-/// share of a line by which a wrapped line may pass the fit height and still
-/// count as fitting.
+/// share of a line by which a wrapped line may pass the cell's height and
+/// still count as fitting.
 const FIT_TOLERANCE: f64 = 1e-4;
 
-/// how many of `count` wrapped lines excel paints in the wrap's fit height:
-/// those whose top half is inside it, to a ten-thousandth of a line, at least
-/// one; they are then aligned as the full text and the cell clip cuts what
-/// passes its edge. computed in f64 like the canvas painter.
-pub fn wrapped_lines_fitting(count: usize, wrap: &TextWrap, font_size_pt: f32) -> usize {
-    let Some(height) = wrap.fit_height else {
-        return count;
-    };
+/// the most wrapped lines excel paints in a row or merged area `height` px
+/// tall: those whose top half is inside it, to a ten-thousandth of a line, at
+/// least one. `None` when the height or the arithmetic is not a number: every
+/// line paints.
+pub fn max_wrapped_lines(height: f32, line_height: f32, font_size_pt: f32) -> Option<u32> {
+    if !height.is_finite() {
+        return None;
+    }
     let font = f64::from(font_size_pt) * crate::geometry::PX_PER_PT;
-    let room = (f64::from(height) - font / 2.0) / f64::from(wrap.line_height);
-    let fitting = if room.is_finite() && room >= 0.0 {
-        (room + FIT_TOLERANCE).floor() as usize + 1
-    } else {
-        1
-    };
-    count.min(fitting.max(1))
+    let room = (f64::from(height) - font / 2.0) / f64::from(line_height) + FIT_TOLERANCE;
+    if room.is_nan() {
+        return None;
+    }
+    Some(room.floor().clamp(0.0, f64::from(u32::MAX - 1)) as u32 + 1)
+}
+
+/// how many of `count` wrapped lines a painter paints: at most the wrap's
+/// `max_lines`, every line without it.
+pub fn wrapped_lines_kept(count: usize, wrap: &TextWrap) -> usize {
+    wrap.max_lines
+        .map_or(count, |max| count.min(usize::try_from(max).unwrap_or(usize::MAX)))
 }
 
 /// lines a wrapped cell takes in a text box `width` px wide, measured with
@@ -289,7 +294,7 @@ mod tests {
             width: 10.0,
             line_height: 18.0,
             valign,
-            fit_height: None,
+            max_lines: None,
         };
         let ys = |valign| -> Vec<f32> {
             (0..3)

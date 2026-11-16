@@ -271,7 +271,7 @@ fn translate_command(
                 let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                     measure_text(line, *font_size)
                 });
-                let count = xlsx_render::wrap::wrapped_lines_fitting(lines.len(), wrap, *font_size);
+                let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
                 lines
                     .iter()
                     .take(count)
@@ -1012,7 +1012,7 @@ mod tests {
                 width: 30.0,
                 line_height: 14.0,
                 valign: TextValign::Top,
-                fit_height: None,
+                max_lines: None,
             });
         }
         for (command, width, overflow) in

@@ -283,8 +283,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text(line, *font_size)
                     });
-                    let count =
-                        xlsx_render::wrap::wrapped_lines_fitting(lines.len(), wrap, *font_size);
+                    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
                     for (index, line) in lines.iter().take(count).enumerate() {
                         font::paint_text(
                             &mut pixmap,

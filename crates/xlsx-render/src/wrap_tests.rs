@@ -361,16 +361,6 @@ struct FitCase {
     max_lines: u32,
 }
 
-fn max_lines(height: f32, line_height: f32, font_size: f32) -> Option<u32> {
-    let wrap = TextWrap {
-        width: 100.0,
-        line_height,
-        valign: TextValign::Center,
-        fit_height: Some(height),
-    };
-    u32::try_from(wrap::wrapped_lines_fitting(usize::MAX, &wrap, font_size)).ok()
-}
-
 #[test]
 fn the_shared_table_gives_the_most_wrapped_lines_a_row_keeps() {
     let cases: Vec<FitCase> =
@@ -378,7 +368,7 @@ fn the_shared_table_gives_the_most_wrapped_lines_a_row_keeps() {
     let kept: Vec<(&str, Option<u32>)> = cases
         .iter()
         .map(|case| {
-            let lines = max_lines(case.height, case.line_height, case.font_size);
+            let lines = wrap::max_wrapped_lines(case.height, case.line_height, case.font_size);
             (case.name.as_str(), lines)
         })
         .collect();
@@ -390,7 +380,13 @@ fn the_shared_table_gives_the_most_wrapped_lines_a_row_keeps() {
 }
 
 fn kept_of_three(height: f32) -> usize {
-    max_lines(height, 20.0, 11.0).map_or(3, |max| 3.min(max as usize))
+    let text_wrap = TextWrap {
+        width: 100.0,
+        line_height: 20.0,
+        valign: TextValign::Center,
+        max_lines: wrap::max_wrapped_lines(height, 20.0, 11.0),
+    };
+    wrap::wrapped_lines_kept(3, &text_wrap)
 }
 
 #[test]

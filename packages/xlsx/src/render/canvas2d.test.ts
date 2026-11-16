@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import fixture from '../../test-fixtures/path-backend-agreement.json';
-import type { DisplayList, GeometryPathCommand, PatternType, TextCmd, TextWrap } from '../display-list/types';
+import type { DisplayList, GeometryPathCommand, PatternType, TextCmd } from '../display-list/types';
 import { paintDisplayList } from './canvas2d';
 import { PATTERN_MASKS } from './patterns';
 import wrapFixture from '../../../../crates/xlsx-render/tests/fixtures/text-wrap-agreement.json';
-import fitFixture from '../../../../crates/xlsx-render/tests/fixtures/wrapped-lines-fitting.json';
-import { fontSizePx } from './fontString';
-import { wrapLines, wrappedLinesFitting } from './wrap';
+import { wrapLines } from './wrap';
 
 describe('Canvas2D pattern masks', () => {
   it('cover the specified share of each 8x8 tile', () => {
@@ -677,14 +675,6 @@ describe('Canvas2D wrapped text', () => {
     expect(kept('top')).toEqual([['a', 50], ['b', 68]]);
     expect(kept('center')).toEqual([['a', 41], ['b', 59]]);
     expect(kept('bottom')).toEqual([['a', 32], ['b', 50]]);
-  });
-
-  it('paints the lines the Rust painters paint for each shared fit case', () => {
-    const cases = fitFixture as { name: string; height: number; lineHeight: number; fontSize: number; maxLines: number }[];
-    const kept = cases.map(({ name, height, lineHeight, fontSize }) => [name, wrappedLinesFitting(
-      Number.MAX_SAFE_INTEGER, { width: 100, lineHeight, valign: 'center', fitHeight: height } as TextWrap,
-      fontSizePx({ fontSize } as TextCmd))]);
-    expect(kept).toEqual(cases.map(({ name, maxLines }) => [name, maxLines]));
   });
 });
 

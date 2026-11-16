@@ -704,9 +704,9 @@ const rows: Row<Xlsx>[] = [
     call: ({ doc }) => {
       const cell = { row: 1, col: 0 };
       doc.applyOpsJson(json({ ops: [{ type: 'patchRangeStyle', sheet: 0, range: { start: cell, end: cell }, patch: { textWrapping: 'wrap' } }] }));
-      const list = JSON.parse(doc.displayListJson(json({ x: 0, y: 10, width: 800, height: 400 }))) as { commands: { wrap?: { fitHeight?: number } }[] };
+      const list = JSON.parse(doc.displayListJson(json({ x: 0, y: 10, width: 800, height: 400 }))) as { commands: { wrap?: { maxLines?: number } }[] };
       const wraps = list.commands.flatMap((command) => (command.wrap ? [command.wrap] : []));
-      if (wraps.length === 0 || wraps.some((wrap) => wrap.fitHeight === undefined)) throw new Error(`no fit height: ${JSON.stringify(wraps)}`);
+      if (wraps.length === 0 || wraps.some((wrap) => wrap.maxLines === undefined)) throw new Error(`no line limit: ${JSON.stringify(wraps)}`);
       return wraps;
     },
   },

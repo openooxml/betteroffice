@@ -593,6 +593,9 @@ struct CellBox {
     y: f32,
     w: f32,
     h: f32,
+    /// the height of the whole row or merged area, also where a frozen pane
+    /// cuts `h`.
+    whole_h: f32,
     clip: Rect,
 }
 
@@ -1126,14 +1129,17 @@ where
                     .iter()
                     .all(|part| part.kind == xlsx_model::numfmt::FormatPartKind::Padding)
             }))
-        .then(|| TextWrap {
-            width: text_width,
-            line_height: geometry::row_pt_to_px(geometry::line_pitch_pt(
+        .then(|| {
+            let line_height = geometry::row_pt_to_px(geometry::line_pitch_pt(
                 f64::from(size),
                 print.map(|(m, _)| f64::from(m.dpi)),
-            )),
-            valign: resolve_rotation_valign(valign),
-            fit_height: Some(cell_box.h + 1.0),
+            ));
+            TextWrap {
+                width: text_width,
+                line_height,
+                valign: resolve_rotation_valign(valign),
+                max_lines: wrap::max_wrapped_lines(cell_box.whole_h + 1.0, line_height, size),
+            }
         });
         let number_format = number_format.filter(|_| wrap.is_none());
         let (tx, ty, clip, number_format) = if stacked {
@@ -1991,6 +1997,7 @@ fn cell_box(
         y: row.raw_start,
         w: col.raw_end - col.raw_start,
         h: row.raw_end - row.raw_start,
+        whole_h: geom.row_y(end_row.saturating_add(1)) - geom.row_y(at.row),
         clip: Rect {
             x: col.start,
             y: row.start,

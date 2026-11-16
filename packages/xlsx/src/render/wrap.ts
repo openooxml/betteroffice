@@ -122,19 +122,3 @@ export function wrappedLineY(y: number, index: number, count: number, wrap: Text
   const step = wrap.valign === 'top' ? index : wrap.valign === 'center' ? index - last / 2 : index - last;
   return y + wrap.lineHeight * step;
 }
-
-/** Share of a line by which a wrapped line may pass the fit height and still count as fitting. */
-const FIT_TOLERANCE = 1e-4;
-
-/**
- * How many of `count` wrapped lines Excel paints in the wrap's fit height:
- * those whose top half is inside it, to a ten-thousandth of a line, at least
- * one; they are then aligned as the full text and the cell clip cuts what
- * passes its edge. The Rust painters compute the same in f64.
- */
-export function wrappedLinesFitting(count: number, wrap: TextWrap, fontSizePx: number): number {
-  if (wrap.fitHeight === undefined) return count;
-  const room = (wrap.fitHeight - fontSizePx / 2) / wrap.lineHeight;
-  const fitting = Number.isFinite(room) && room >= 0 ? Math.floor(room + FIT_TOLERANCE) + 1 : 1;
-  return Math.min(count, Math.max(fitting, 1));
-}

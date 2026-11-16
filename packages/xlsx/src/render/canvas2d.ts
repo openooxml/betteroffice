@@ -20,7 +20,7 @@ import type {
 import { fontSizePx, fontString } from './fontString';
 import { PATTERN_MASKS } from './patterns';
 import { paintNumberFormat } from './number-format';
-import { wrapLines, wrappedLinesFitting, wrappedLineY } from './wrap';
+import { wrapLines, wrappedLineY } from './wrap';
 
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
 const STACKED_ASCENT_RATIO = 0.8;
@@ -265,7 +265,7 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     const align = cmd.align ?? 'left';
     ctx.textAlign = ALIGN_TO_TEXT_ALIGN[align];
     const lines = wrapLines(cmd.text, wrap.width, (run) => ctx.measureText(run).width);
-    const count = wrappedLinesFitting(lines.length, wrap, fontSizePx(cmd));
+    const count = Math.min(lines.length, wrap.maxLines ?? lines.length);
     lines.slice(0, count).forEach((line, index) => {
       paintRun(ctx, { ...cmd, y: wrappedLineY(cmd.y, index, count, wrap) }, line, cmd.x, align);
     });
