@@ -94,13 +94,14 @@ fn equal_columns_below_other_side_margins(lead: usize) -> Vec<u8> {
 }
 
 /// Three columns of equal widths that the section declares unequal, with the
-/// picture over the second one.
+/// picture over the second one, in a continuous section whose side margins
+/// differ from the section above's.
 fn unequal_marked_columns(lead: usize) -> Vec<u8> {
     let section = format!(
         r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}<w:cols w:num="3" w:space="360" w:equalWidth="0"><w:col w:w="1440" w:space="360"/><w:col w:w="1440" w:space="360"/><w:col w:w="1440"/></w:cols></w:sectPr>"#,
         margins(360, 360)
     );
-    package(152, lead, &section)
+    package_below((720, 720), 152, lead, &section)
 }
 
 /// A shape placed by page side and an inline picture in a continuous section
