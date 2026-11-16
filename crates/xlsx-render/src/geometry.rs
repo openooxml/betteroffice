@@ -204,7 +204,8 @@ fn line_height_em(family: &str) -> Option<f64> {
         "arial" | "helvetica" | "liberation sans" | "arimo" => 1.1172,
         "times new roman" | "liberation serif" | "tinos" => 1.1074,
         "courier new" | "liberation mono" | "cousine" => 1.1328,
-        "verdana" | "tahoma" => 1.2070,
+        "verdana" => 1.2153,
+        "tahoma" => 1.2070,
         "georgia" => 1.1362,
         _ => return None,
     })
