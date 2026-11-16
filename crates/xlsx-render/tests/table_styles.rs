@@ -3,7 +3,7 @@ use xlsx_render::{DisplayList, DrawCmd, GridGeometry, Viewport, build_display_li
 
 const STYLES: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills><borders count="1"><border/></borders><cellXfs count="2"><xf fontId="0" fillId="0" borderId="0"/><xf fontId="0" fillId="2" borderId="0" applyFill="1"/></cellXfs><dxfs count="2"><dxf><font><b/><color rgb="FFFFFFFF"/></font><fill><patternFill><bgColor rgb="FF195A82"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFF78C"/></patternFill></fill></dxf></dxfs><tableStyles count="1"><tableStyle name="Budget" pivot="0" count="2"><tableStyleElement type="headerRow" dxfId="0"/><tableStyleElement type="firstRowStripe" dxfId="1"/></tableStyle></tableStyles></styleSheet>"#;
 
-const PLAIN_STRIPES: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellXfs><dxfs count="2"><dxf><fill><patternFill><bgColor rgb="FFFFF78C"/></patternFill></fill></dxf><dxf/></dxfs><tableStyles count="2"><tableStyle name="Unset" pivot="0" count="2"><tableStyleElement type="firstRowStripe" dxfId="0"/><tableStyleElement type="secondRowStripe" size="3"/></tableStyle><tableStyle name="Blank" pivot="0" count="2"><tableStyleElement type="firstRowStripe" dxfId="0"/><tableStyleElement type="secondRowStripe" dxfId="1" size="3"/></tableStyle></tableStyles></styleSheet>"#;
+const PLAIN_STRIPES: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellXfs><dxfs count="2"><dxf><fill><patternFill><bgColor rgb="FFFFF78C"/></patternFill></fill></dxf><dxf/></dxfs><tableStyles count="3"><tableStyle name="Unset" pivot="0" count="2"><tableStyleElement type="firstRowStripe" dxfId="0"/><tableStyleElement type="secondRowStripe" size="3"/></tableStyle><tableStyle name="Blank" pivot="0" count="2"><tableStyleElement type="firstRowStripe" dxfId="0"/><tableStyleElement type="secondRowStripe" dxfId="1" size="3"/></tableStyle><tableStyle name="Duplicate" pivot="0" count="2"><tableStyleElement type="firstRowStripe" size="3"/><tableStyleElement type="firstRowStripe" dxfId="0"/></tableStyle></tableStyles></styleSheet>"#;
 
 const DECLARED_PRESET: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellXfs><tableStyles count="1" defaultTableStyle="TableStyleMedium2"><tableStyle name="TableStyleMedium2" pivot="0" count="0"/></tableStyles></styleSheet>"#;
 
@@ -208,6 +208,15 @@ fn a_stripe_that_paints_nothing_keeps_its_size() {
                 "{style} row {row}"
             );
         }
+    }
+    let wb = workbook_with(PLAIN_STRIPES, &info("Duplicate", true), 0, false);
+    let list = render(&wb);
+    for (row, fill) in [(1, Some("#fff78c")), (2, None), (3, Some("#fff78c")), (4, None)] {
+        assert_eq!(
+            fill_at(&wb, &list, CellRef::new(row, 1)),
+            fill.map(String::from),
+            "Duplicate row {row}"
+        );
     }
 }
 
