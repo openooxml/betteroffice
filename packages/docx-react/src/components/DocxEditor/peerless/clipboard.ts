@@ -1,5 +1,5 @@
 import { clipboardFragmentHasPictures, clipboardFragmentIsTextOnly } from '@betteroffice/docx/yrs';
-import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection, YrsSelectionText } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection, YrsSelectionText, YrsTableRange } from '@betteroffice/docx/yrs';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
 import { flushAdmittedInput } from './inputAdmission';
@@ -27,7 +27,8 @@ export async function readWorkerSelection(options: SelectionRead) {
   return { selection, text: info.selectedText, version: state.version, identity, info };
 }
 
-type ClipboardSliceRead = SelectionRead & { readClipboardSlice(selection: DocxCommandSelection): Promise<DocxClipboardSlice> };
+type ReadClipboardSlice = (selection: DocxCommandSelection, cells: YrsTableRange | null) => Promise<DocxClipboardSlice>;
+type ClipboardSliceRead = SelectionRead & { readClipboardSlice: ReadClipboardSlice };
 
 async function readSnapshotSlice(options: ClipboardSliceRead, state: PeerlessViewSnapshot) {
   const identity = { ...state.identity };
@@ -35,7 +36,8 @@ async function readSnapshotSlice(options: ClipboardSliceRead, state: PeerlessVie
   const selection = structuredClone(state.workerSelection);
   const { anchor, focus } = selection;
   if (anchor.story !== focus.story) throw new Error('Cross-story selection is unavailable');
-  const slice = await options.readClipboardSlice(selection);
+  const cells = state.editState?.tableContext?.cells;
+  const slice = await options.readClipboardSlice(selection, cells ? structuredClone(cells) : null);
   if (!options.isCurrent()) throw new Error('Document was replaced');
   return { selection, slice, version: state.version, identity, html: slice.fragment ? clipboardFragmentHtml(slice.fragment) : null };
 }
@@ -156,7 +158,7 @@ export function writeClipboardCapture(data: DataTransfer, capture: ClipboardCapt
 }
 
 export async function copyWorkerSelection(options: SelectionRead & { write(text: string): Promise<void>; cut?: boolean;
-  readClipboardSlice?(selection: DocxCommandSelection): Promise<DocxClipboardSlice>;
+  readClipboardSlice?: ReadClipboardSlice;
   writeSlice?(text: string, html: string): Promise<void>;
   data?: DataTransfer | null; prefetched?: ClipboardCapture | null;
   readCapture?(): Promise<ClipboardCapture | null>;
