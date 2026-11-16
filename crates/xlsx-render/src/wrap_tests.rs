@@ -351,6 +351,68 @@ fn a_merge_across_the_frozen_row_keeps_the_lines_of_its_whole_height() {
     }
 }
 
+#[test]
+fn a_merge_across_the_frozen_rows_lays_out_as_before() {
+    let layout = |valign: VAlign| {
+        let mut wb = workbook(&[(
+            CellRef::new(0, 0),
+            text("a\nb\nc"),
+            Alignment {
+                wrap_text: true,
+                v: Some(valign),
+                ..Alignment::default()
+            },
+        )]);
+        let sheet = &mut wb.sheets[0];
+        for row in 0..3 {
+            sheet.row_heights.insert(row, 15.0);
+        }
+        sheet
+            .merges
+            .push(CellRange::new(CellRef::new(0, 0), CellRef::new(2, 0)));
+        sheet.freeze_pane = Some(xlsx_model::FreezePane::new(1, 0, CellRef::new(1, 0)));
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 400.0,
+        };
+        let dl = build_display_list(&wb, SheetId(0), &viewport).unwrap();
+        dl.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                DrawCmd::Text {
+                    x,
+                    y,
+                    text,
+                    clip,
+                    wrap: Some(text_wrap),
+                    ..
+                } => {
+                    let lines =
+                        wrap::wrap_lines(text, text_wrap.width, |line| line.len() as f32 * 7.0);
+                    let count = wrap::wrapped_lines_kept(lines.len(), text_wrap);
+                    let baselines: Vec<f32> = (0..count)
+                        .map(|index| wrap::wrapped_line_y(*y, index, count, text_wrap))
+                        .collect();
+                    Some((*x, *clip, text_wrap.width, text_wrap.line_height, baselines))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let clip = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 64.0,
+        h: 20.0,
+    };
+    let laid_out = |baselines: [f32; 3]| [(2.0, clip, 60.0, 18.666666, baselines.to_vec())];
+    assert_eq!(layout(VAlign::Bottom), laid_out([-22.266666, -3.5999994, 15.066667]));
+    assert_eq!(layout(VAlign::Top), laid_out([12.266666, 30.933332, 49.6]));
+    assert_eq!(layout(VAlign::Center), laid_out([-4.999999, 13.666667, 32.333332]));
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FitCase {
