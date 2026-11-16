@@ -1,0 +1,62 @@
+[
+  {
+    "name": "three lines of 9 pt text in a 32 pt row",
+    "wrap": { "width": 100, "lineHeight": 16, "valign": "center", "fitHeight": 43.667 },
+    "fontSize": 9, "count": 3, "lines": 3
+  },
+  {
+    "name": "two lines of 10 pt text in a 21 pt row",
+    "wrap": { "width": 100, "lineHeight": 17.333, "valign": "center", "fitHeight": 29 },
+    "fontSize": 10, "count": 2, "lines": 2
+  },
+  {
+    "name": "three lines of 10 pt text in a 32 pt merged area",
+    "wrap": { "width": 100, "lineHeight": 17.333, "valign": "center", "fitHeight": 43.667 },
+    "fontSize": 10, "count": 3, "lines": 3
+  },
+  {
+    "name": "two bottom-aligned lines of 14 pt text in a 29.25 pt row",
+    "wrap": { "width": 100, "lineHeight": 24.667, "valign": "bottom", "fitHeight": 40 },
+    "fontSize": 14, "count": 2, "lines": 2
+  },
+  {
+    "name": "the third line of 12 pt text mostly below a 28 pt row",
+    "wrap": { "width": 100, "lineHeight": 20, "valign": "bottom", "fitHeight": 38.333 },
+    "fontSize": 12, "count": 3, "lines": 2
+  },
+  {
+    "name": "the second line of 11 pt text mostly below a 14 pt row",
+    "wrap": { "width": 100, "lineHeight": 18.667, "valign": "center", "fitHeight": 19.667 },
+    "fontSize": 11, "count": 2, "lines": 1
+  },
+  {
+    "name": "the second line of 10 pt text mostly below a 12 pt row",
+    "wrap": { "width": 100, "lineHeight": 17.333, "valign": "bottom", "fitHeight": 17 },
+    "fontSize": 10, "count": 2, "lines": 1
+  },
+  {
+    "name": "the third line of 9 pt text below a 26 px row",
+    "wrap": { "width": 100, "lineHeight": 13.4, "valign": "center", "fitHeight": 27 },
+    "fontSize": 9, "count": 3, "lines": 2
+  },
+  {
+    "name": "every line fits",
+    "wrap": { "width": 100, "lineHeight": 13.4, "valign": "center", "fitHeight": 201 },
+    "fontSize": 9, "count": 2, "lines": 2
+  },
+  {
+    "name": "two lines of 36 pt text",
+    "wrap": { "width": 100, "lineHeight": 53.6, "valign": "center", "fitHeight": 108.3 },
+    "fontSize": 36, "count": 2, "lines": 2
+  },
+  {
+    "name": "no line fits and the first still paints",
+    "wrap": { "width": 100, "lineHeight": 13.4, "valign": "center", "fitHeight": 5 },
+    "fontSize": 9, "count": 3, "lines": 1
+  },
+  {
+    "name": "without a fit height every line paints",
+    "wrap": { "width": 100, "lineHeight": 13.4, "valign": "center" },
+    "fontSize": 9, "count": 3, "lines": 3
+  }
+]

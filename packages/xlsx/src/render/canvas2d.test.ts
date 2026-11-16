@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import fixture from '../../test-fixtures/path-backend-agreement.json';
-import type { DisplayList, GeometryPathCommand, PatternType, TextCmd } from '../display-list/types';
+import type { DisplayList, GeometryPathCommand, PatternType, TextCmd, TextWrap } from '../display-list/types';
 import { paintDisplayList } from './canvas2d';
 import { PATTERN_MASKS } from './patterns';
 import wrapFixture from '../../../../crates/xlsx-render/tests/fixtures/text-wrap-agreement.json';
-import { wrapLines } from './wrap';
+import fitFixture from '../../../../crates/xlsx-render/tests/fixtures/wrapped-lines-fitting.json';
+import { fontSizePx } from './fontString';
+import { wrapLines, wrappedLinesFitting } from './wrap';
 
 describe('Canvas2D pattern masks', () => {
   it('cover the specified share of each 8x8 tile', () => {
@@ -671,6 +673,13 @@ describe('Canvas2D wrapped text', () => {
 
   it('paints the same wrapped lines at every zoom', () => {
     expect([1, 2, 4].map((zoom) => paintedLines(32, 0, zoom))).toEqual([2, 2, 2]);
+  });
+
+  it('paints the lines the Rust painters paint for each shared fit case', () => {
+    const cases = fitFixture as unknown as { name: string; wrap: TextWrap; fontSize: number; count: number; lines: number }[];
+    const painted = cases.map(({ name, wrap, fontSize, count }) =>
+      [name, wrappedLinesFitting(count, wrap, fontSizePx({ fontSize } as TextCmd))]);
+    expect(painted).toEqual(cases.map(({ name, lines }) => [name, lines]));
   });
 });
 

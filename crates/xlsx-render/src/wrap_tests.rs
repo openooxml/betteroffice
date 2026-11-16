@@ -334,25 +334,31 @@ fn a_wrapped_cell_measures_its_lines_against_its_whole_row_or_merge() {
     assert_eq!(fit_heights(60.0), [Some(4100)]);
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FitCase {
+    name: String,
+    wrap: TextWrap,
+    font_size: f32,
+    count: usize,
+    lines: usize,
+}
+
 #[test]
 fn only_the_wrapped_lines_that_fit_paint() {
-    let fitted = |line_height: f32, height: f32| TextWrap {
-        width: 100.0,
-        line_height,
-        valign: TextValign::Center,
-        fit_height: Some(height + 1.0),
-    };
-    assert_eq!(wrap::wrapped_lines_fitting(3, &fitted(13.4, 20.0), 9.0), 1);
-    assert_eq!(wrap::wrapped_lines_fitting(3, &fitted(13.4, 4.0), 9.0), 1);
-    assert_eq!(wrap::wrapped_lines_fitting(3, &fitted(13.4, 26.0), 9.0), 2);
-    assert_eq!(wrap::wrapped_lines_fitting(2, &fitted(13.4, 200.0), 9.0), 2);
-    assert_eq!(
-        wrap::wrapped_lines_fitting(2, &fitted(53.6, 107.3), 36.0),
-        2
-    );
-    let unmeasured = TextWrap {
-        fit_height: None,
-        ..fitted(13.4, 4.0)
-    };
-    assert_eq!(wrap::wrapped_lines_fitting(3, &unmeasured, 9.0), 3);
+    let cases: Vec<FitCase> =
+        serde_json::from_str(include_str!("../tests/fixtures/wrapped-lines-fitting.json"))
+            .unwrap();
+    let painted: Vec<(&str, usize)> = cases
+        .iter()
+        .map(|case| {
+            let lines = wrap::wrapped_lines_fitting(case.count, &case.wrap, case.font_size);
+            (case.name.as_str(), lines)
+        })
+        .collect();
+    let expected: Vec<(&str, usize)> = cases
+        .iter()
+        .map(|case| (case.name.as_str(), case.lines))
+        .collect();
+    assert_eq!(painted, expected);
 }
