@@ -53,7 +53,7 @@ for (const cut of [false, true]) {
           await expect(copyWorkerSelection({ binding, readSelection, cut, isCurrent: () => true, write, writeSlice,
             readClipboardSlice: async () => readClipboardSlice({ storySegments: story => stories[story] ?? [], tablePayload: () => null },
               { story: 'body', from: 0, to: 2 }),
-          })).rejects.toThrow('Picture selection contains unsupported clipboard objects');
+          })).rejects.toThrow(cut ? 'Cut refused: the clipboard cannot carry' : 'Picture selection contains unsupported clipboard objects');
           expect(write).not.toHaveBeenCalled();
           expect(writeSlice).not.toHaveBeenCalled();
           expect(submit).not.toHaveBeenCalled();

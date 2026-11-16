@@ -984,31 +984,49 @@ describe('readClipboardSlice leftOut', () => {
     expect(read(body('column'), 0, 25).leftOut).toEqual(['columnBreak']);
     expect(read(body('column'), 0, 26).leftOut).toEqual(['columnBreak']);
     expect(read(body('column'), 26, 31).leftOut).toBeUndefined();
-    expect(read(body('column'), 0, 5).leftOut).toBeUndefined();
+    expect(read(body('column'), 0, 5).leftOut).toEqual(['columnBreak']);
     expect(read(body('page'), 0, 25).leftOut).toBeUndefined();
   });
 
-  test('names a column break whose recorded offset no longer places it anywhere the paragraph touches', () => {
-    const stale = { _originalRunBoundaries: [{ text: 'ALPHA', breaks: [{ offset: 2, type: 'column' }] }] };
-    const body = [textSegment('ALPHA before'), pilcrowSegment('p0', stale), textSegment('BRAVO'), pilcrowSegment('p1')];
-    expect(read(body, 8, 10).leftOut).toEqual(['columnBreak']);
-    expect(read(body, 13, 18).leftOut).toBeUndefined();
+  test('names a column break typing moved away from its recorded offset wherever a cut touches its paragraph', () => {
+    const recorded = { _originalRunBoundaries: [{ text: 'ALPHA before', breaks: [{ offset: 6, type: 'column' }] }] };
+    const body = [textSegment('TYPEDALPHA before'), pilcrowSegment('p0', recorded), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(body, 0, 2).leftOut).toEqual(['columnBreak']);
+    expect(read(body, 10, 13).leftOut).toEqual(['columnBreak']);
+    expect(read(body, 18, 21).leftOut).toBeUndefined();
   });
 
-  test('names a column break unit that follows the touched paragraph', () => {
-    const body = [textSegment('ALPHA'), pilcrowSegment('p0'), embedSegment('columnBreak'), textSegment('BRAVO'), pilcrowSegment('p1')];
-    expect(read(body, 1, 3).leftOut).toEqual(['columnBreak']);
-    expect(read(body, 7, 9).leftOut).toBeUndefined();
-    const placed = { _originalRunBoundaries: [{ text: 'AL' }, { text: 'PHA', breaks: [{ offset: 0, type: 'column' }] }] };
-    const located = [textSegment('ALPHA'), pilcrowSegment('p0', placed), embedSegment('columnBreak'), textSegment('BRAVO'), pilcrowSegment('p1')];
-    expect(read(located, 3, 5).leftOut).toBeUndefined();
-    expect(read(located, 3, 6).leftOut).toEqual(['columnBreak']);
+  test('names a column break unit after a paragraph holding a hyperlink or a field, which records no run boundaries', () => {
+    const link = [textSegment('see '), textSegment('link', { link: { href: 'https://example.com' } }), pilcrowSegment('p0'),
+      embedSegment('columnBreak'), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(link, 0, 3).leftOut).toEqual(['columnBreak']);
+    expect(read(link, 10, 13).leftOut).toBeUndefined();
+    const field = [textSegment('page '), embedSegment('field', { displayText: '1' }), pilcrowSegment('p0'),
+      embedSegment('columnBreak'), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(field, 0, 3).leftOut).toEqual(['columnBreak']);
+    expect(read(field, 8, 11).leftOut).toBeUndefined();
   });
 
-  test('names a column break a selected table cell records', () => {
+  test('names a column break a table cell records when the cut takes the table', () => {
     const table = { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'cell', tcPr: {} }] }] };
     const cell = [textSegment('ab'), pilcrowSegment('pc', { _originalRunBoundaries: [{ text: 'ab', breaks: [{ offset: 1, type: 'column' }] }] })];
     expect(read([embedSegment('table', table), pilcrowSegment('p0')], 0, 2, { cell }).leftOut).toEqual(['columnBreak']);
+  });
+
+  test('names a column break a selected cell range records', () => {
+    const stories = stories2x2();
+    stories.c11 = [textSegment('d'), pilcrowSegment('p11', { _originalRunBoundaries: [{ text: 'd', breaks: [{ offset: 0, type: 'column' }] }] })];
+    const reader = fakeReader(stories, { 'body:0': payload2x2() });
+    const cells = (row: number, column: number) => readClipboardSlice(reader, {
+      cells: { anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 }, head: { story: 'body', tableIndex: 0, row, column } },
+    });
+    expect(cells(1, 1).leftOut).toEqual(['columnBreak']);
+    expect(cells(0, 1).leftOut).toBeUndefined();
+  });
+
+  test('names what a picture selection cannot carry in its copy error', () => {
+    const reader = fakeReader({ body: [embedSegment('image', { src: 'data:image/png;base64,AA==' }), embedSegment('chart'), pilcrowSegment('p0')] }, {});
+    expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 3 })).toThrow('Picture selection contains unsupported clipboard objects: chart');
   });
 
   test('leaves the report out for text and everything the fragment carries', () => {

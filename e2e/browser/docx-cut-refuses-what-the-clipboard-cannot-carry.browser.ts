@@ -109,6 +109,46 @@ const breakKind = (type: 'page' | 'column'): Kind => ({
 });
 const BREAKS = [breakKind('page'), breakKind('column')];
 
+const TWO_COLUMNS = '<w:cols w:num="2" w:space="720"/>';
+const COLUMN_BREAK = '<w:r><w:br w:type="column"/></w:r>';
+const columnBreakAfter = (id: string, lead: string): Kind => ({
+  id, parts: [], object: '', cols: TWO_COLUMNS,
+  body: '<w:p w14:paraId="00000001"><w:r><w:t>ALPHA</w:t></w:r></w:p>' +
+    `<w:p w14:paraId="00000002">${lead}<w:r><w:t xml:space="preserve"> before </w:t></w:r>${COLUMN_BREAK}<w:r><w:t xml:space="preserve"> after BRAVO</w:t></w:r></w:p>` +
+    '<w:p w14:paraId="00000003"><w:r><w:t>CHARLIE</w:t></w:r></w:p>',
+});
+const UNRECORDED = [
+  columnBreakAfter('column-break-beside-a-hyperlink', '<w:hyperlink w:anchor="target"><w:r><w:t>LINK</w:t></w:r></w:hyperlink>'),
+  columnBreakAfter('column-break-beside-a-field', '<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>'),
+];
+const CELL_BREAK: Kind = {
+  id: 'column-break-in-a-table-cell', parts: [], object: '', cols: TWO_COLUMNS,
+  body: '<w:p w14:paraId="00000001"><w:r><w:t>ALPHA</w:t></w:r></w:p>' +
+    '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>' +
+    `<w:p w14:paraId="00000004"><w:r><w:t xml:space="preserve">CELL before </w:t></w:r>${COLUMN_BREAK}<w:r><w:t xml:space="preserve"> after CELL</w:t></w:r></w:p></w:tc></w:tr></w:tbl>` +
+    '<w:p w14:paraId="00000003"><w:r><w:t>CHARLIE</w:t></w:r></w:p>',
+};
+
+async function press(page: Page, keys: string[]): Promise<void> {
+  for (const key of keys) await page.keyboard.press(key);
+}
+
+async function selectSecondParagraphLine(page: Page, input: Locator): Promise<void> {
+  await input.focus();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await expect(page.locator(CARET).first()).toBeVisible({ timeout: 10_000 });
+  await press(page, ['ArrowDown', 'Home', 'Shift+End']);
+  await expect.poll(() => page.locator(HIGHLIGHT).count(), { timeout: 5000 }).toBeGreaterThan(0);
+}
+
+async function typeBeforeTheBreak(page: Page, input: Locator): Promise<void> {
+  await input.focus();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await expect(page.locator(CARET).first()).toBeVisible({ timeout: 10_000 });
+  await press(page, ['ArrowDown', 'Home']);
+  await page.keyboard.type('TYPED');
+}
+
 async function selectIntoLastParagraph(page: Page, input: Locator): Promise<void> {
   await input.focus();
   await page.keyboard.press('ControlOrMeta+Home');
@@ -211,6 +251,83 @@ for (const editor of EDITORS) {
       });
     }
   }
+
+  for (const kind of [KINDS[0]!, KINDS[2]!]) {
+    test(`a Shift+Delete over a ${kind.id} is refused in the ${editor.name} editor`, async ({ page }, info) => {
+      test.setTimeout(180_000);
+      const input = await open(page, editor.query, kind);
+      await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+      const before = await savedParts(page, info, kind, 'before');
+      await selectFirstParagraph(page, input);
+      await page.keyboard.press('Shift+Delete');
+      await expect(page.getByText(CUT_REFUSED)).toBeVisible({ timeout: 15_000 });
+      expect(await savedParts(page, info, kind, 'after')).toEqual(before);
+      expect(await clipboardText(page)).toBe(SENTINEL);
+    });
+  }
+
+  test(`a Shift+Delete of plain text still cuts it to the clipboard in the ${editor.name} editor`, async ({ page }, info) => {
+    test.setTimeout(180_000);
+    const input = await open(page, editor.query, PLAIN);
+    await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+    await selectFirstParagraph(page, input);
+    await page.keyboard.press('Shift+Delete');
+    await expect.poll(() => clipboardText(page), { timeout: 15_000 }).toContain('ALPHA before');
+    await expect.poll(async () => (await savedParts(page, info, PLAIN, 'after'))['word/document.xml'], { timeout: 30_000 }).not.toContain('ALPHA');
+    await expect(page.getByText(CUT_REFUSED)).toHaveCount(0);
+  });
+
+  for (const [kind, selection, select] of [
+    ...UNRECORDED.map(kind => [kind, 'of the line', selectSecondParagraphLine] as const),
+    [CELL_BREAK, 'of everything', selectAll] as const,
+  ]) {
+    test(`a cut ${selection} beside a ${kind.id} is refused in the ${editor.name} editor`, async ({ page }, info) => {
+      test.setTimeout(180_000);
+      const input = await open(page, editor.query, kind);
+      await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+      const before = await savedParts(page, info, kind, 'before');
+      expect(before['word/document.xml']).toContain('w:type="column"');
+      await select(page, input);
+      await page.keyboard.press('ControlOrMeta+x');
+      await expect(page.getByText(CUT_REFUSED)).toBeVisible({ timeout: 15_000 });
+      expect(await savedParts(page, info, kind, 'after')).toEqual(before);
+      expect(await clipboardText(page)).toBe(SENTINEL);
+    });
+  }
+
+  test(`a cut across a column break that typing moved is refused in the ${editor.name} editor`, async ({ page }, info) => {
+    test.setTimeout(180_000);
+    const kind = breakKind('column');
+    const input = await open(page, editor.query, kind);
+    await typeBeforeTheBreak(page, input);
+    await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+    const before = await savedParts(page, info, kind, 'before');
+    expect(before['word/document.xml']).toContain('TYPED');
+    await input.focus();
+    await press(page, [...Array(9).fill('ArrowRight'), ...Array(8).fill('Shift+ArrowRight')]);
+    await expect.poll(() => page.locator(HIGHLIGHT).count(), { timeout: 5000 }).toBeGreaterThan(0);
+    await page.keyboard.press('ControlOrMeta+x');
+    await expect(page.getByText(CUT_REFUSED)).toBeVisible({ timeout: 15_000 });
+    expect(await savedParts(page, info, kind, 'after')).toEqual(before);
+    expect(await clipboardText(page)).toBe(SENTINEL);
+  });
+
+  test(`a cut of ordinary text after typing before a column break still cuts in the ${editor.name} editor`, async ({ page }, info) => {
+    test.setTimeout(180_000);
+    const kind = breakKind('column');
+    const input = await open(page, editor.query, kind);
+    await typeBeforeTheBreak(page, input);
+    await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+    await press(page, ['ControlOrMeta+End', 'Shift+Home']);
+    await expect.poll(() => page.locator(HIGHLIGHT).count(), { timeout: 5000 }).toBeGreaterThan(0);
+    await page.keyboard.press('ControlOrMeta+x');
+    await expect.poll(() => clipboardText(page), { timeout: 15_000 }).toContain('CHARLIE');
+    await expect.poll(async () => (await savedParts(page, info, kind, 'after'))['word/document.xml'], { timeout: 30_000 }).not.toContain('CHARLIE');
+    const saved = (await savedParts(page, info, kind, 'final'))['word/document.xml'];
+    expect(saved).toContain('TYPED');
+    expect(saved).toContain('w:type="column"');
+    await expect(page.getByText(CUT_REFUSED)).toHaveCount(0);
+  });
 
   test(`a cut of plain text still moves it to the clipboard in the ${editor.name} editor`, async ({ page }, info) => {
     test.setTimeout(180_000);
