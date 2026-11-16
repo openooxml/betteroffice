@@ -2323,6 +2323,12 @@ mod tests {
                 "#8FAADC",
             ),
             ("4472C4", r#"<a:lumMod val="75000"/>"#, "#2F5597"),
+            ("FF0000", r#"<a:lumOff val="-25000"/>"#, "#800000"),
+            (
+                "4472C4",
+                r#"<a:lumMod val="75000"/><a:lumOff val="-25000"/>"#,
+                "#111E36",
+            ),
             ("6254E7", r#"<a:tint val="50000"/>"#, "#C5C3F3"),
         ] {
             let xml = format!(r#"<a:srgbClr val="{rgb}">{modifiers}</a:srgbClr>"#);
