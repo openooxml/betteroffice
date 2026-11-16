@@ -138,3 +138,15 @@ for (const [index, order] of (['synced', 'concurrent'] as const).entries()) test
     errors.mockRestore();
   }
 }, 60_000);
+
+test('a section read limited to a missing cell paragraph matches the full read', async () => {
+  const { main, story } = await danglingHost(12_100, 'synced');
+  const client = new ResidentEngineWorkerClient(startWorker());
+  clients.push(client);
+  await client.bootstrap(main.residentWorkerSnapshot()!, '{}');
+  const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+  const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [{ story, paraId: `${story}#p0` }] })).value;
+  expect(full.paragraphs.some((entry) => entry.story === story)).toBe(false);
+  expect(limited.paragraphs).toEqual([]);
+  expect(limited.sections).toEqual(full.sections);
+}, 60_000);
