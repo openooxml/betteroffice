@@ -140,6 +140,8 @@ fn resolve(
         .map(|element| element.kind)
         .collect();
     elements.retain(|element| {
+        #[cfg(test)]
+        tests::PROBES.with(|probes| probes.set(probes.get() + painting.len()));
         element.format != Default::default()
             || (spans(element) && !painting.contains(&element.kind))
     });
@@ -250,6 +252,7 @@ mod tests {
 
     thread_local! {
         pub(super) static VISITS: Cell<usize> = const { Cell::new(0) };
+        pub(super) static PROBES: Cell<usize> = const { Cell::new(0) };
     }
 
     const STYLES: &[u8] = br#"<styleSheet><tableStyles count="1"><tableStyle name="Budget" pivot="0" count="2"><tableStyleElement type="headerRow" dxfId="0"/><tableStyleElement type="firstRowStripe" dxfId="1"/></tableStyle></tableStyles></styleSheet>"#;
@@ -292,5 +295,70 @@ mod tests {
         let resolved = resolve_tables(tables, Some(STYLES), &styles).unwrap();
         assert!(resolved.iter().all(|table| table.style.len() == 2));
         assert_eq!(VISITS.with(Cell::get), 2);
+    }
+
+    fn budget(elements: &str) -> Vec<u8> {
+        format!(
+            r#"<styleSheet><tableStyles count="1"><tableStyle name="Budget" pivot="0">{elements}</tableStyle></tableStyles></styleSheet>"#
+        )
+        .into_bytes()
+    }
+
+    fn two_dxfs() -> Stylesheet {
+        let mut styles = Stylesheet::default();
+        styles.dxfs = vec![
+            DifferentialFormat {
+                bold: Some(true),
+                ..Default::default()
+            },
+            DifferentialFormat {
+                fill: Some("#fff78c".into()),
+                ..Default::default()
+            },
+        ];
+        styles
+    }
+
+    #[test]
+    fn plain_stripes_check_painting_types_in_constant_time() {
+        let styles = two_dxfs();
+        let count = 200;
+        let xml = budget(
+            &(r#"<tableStyleElement type="headerRow" dxfId="0"/>"#.repeat(count)
+                + &r#"<tableStyleElement type="firstRowStripe" dxfId="9" size="3"/>"#
+                    .repeat(count)),
+        );
+        PROBES.with(|probes| probes.set(0));
+        let resolved = resolve_tables(vec![table("T")], Some(&xml), &styles).unwrap();
+        assert_eq!(
+            resolved[0]
+                .style
+                .iter()
+                .map(|element| (element.kind, element.size))
+                .collect::<Vec<_>>(),
+            [
+                (TableStyleElementType::FirstRowStripe, 3),
+                (TableStyleElementType::HeaderRow, 1),
+            ]
+        );
+        assert!(PROBES.with(Cell::get) <= 2 * count);
+    }
+
+    #[test]
+    fn plain_stripes_at_the_cap_keep_a_later_painting_stripe() {
+        let styles = two_dxfs();
+        let xml = budget(
+            &(r#"<tableStyleElement type="firstRowStripe" size="3"/>"#.repeat(MAX_STYLE_ENTRIES)
+                + r#"<tableStyleElement type="firstRowStripe" dxfId="1"/>"#),
+        );
+        let resolved = resolve_tables(vec![table("T")], Some(&xml), &styles).unwrap();
+        assert_eq!(
+            resolved[0].style,
+            [TableStyleElement {
+                kind: TableStyleElementType::FirstRowStripe,
+                size: 1,
+                format: styles.dxfs[1].clone(),
+            }]
+        );
     }
 }
