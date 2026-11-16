@@ -494,7 +494,10 @@ impl LocalLowering {
             if paragraph.id != BlockId::Str(id.clone())
                 || paragraph.attrs.is_none()
                 || !shiftable(&blocks[slot])
-                || page_break_depends_on_paragraph(paragraph, blocks.get(slot + 1).map(Rc::as_ref))
+                || page_break_depends_on_paragraph(
+                    paragraph,
+                    blocks[slot + 1..].iter().map(Rc::as_ref),
+                )
             {
                 return false;
             }
@@ -675,7 +678,7 @@ impl LocalLowering {
             paragraph.pm_start == Some(seed.pm_start as f64)
                 && paragraph.attrs.is_some()
                 && shiftable(&blocks[seed.slot])
-                && !page_break_depends_on_paragraph(paragraph, blocks.get(seed.slot + 1))
+                && !page_break_depends_on_paragraph(paragraph, &blocks[seed.slot + 1..])
         });
     }
 
@@ -1337,9 +1340,24 @@ fn shift_pair(start: &mut Option<f64>, end: &mut Option<f64>, delta: i64) {
     }
 }
 
-fn page_break_depends_on_paragraph(paragraph: &ParagraphBlock, next: Option<&LayoutBlock>) -> bool {
-    matches!(next, Some(LayoutBlock::PageBreak(page_break))
-        if page_break.pm_start == paragraph.pm_end)
+fn page_break_depends_on_paragraph<'a>(
+    paragraph: &ParagraphBlock,
+    following: impl IntoIterator<Item = &'a LayoutBlock>,
+) -> bool {
+    let mut following = following.into_iter();
+    match following.next() {
+        Some(LayoutBlock::PageBreak(page_break)) => page_break.pm_start == paragraph.pm_end,
+        Some(LayoutBlock::ColumnBreak(column_break))
+            if column_break.pm_start == paragraph.pm_end =>
+        {
+            following
+                .take_while(|block| {
+                    matches!(block, LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_))
+                })
+                .any(|block| matches!(block, LayoutBlock::PageBreak(_)))
+        }
+        _ => false,
+    }
 }
 
 fn shiftable(block: &LayoutBlock) -> bool {
