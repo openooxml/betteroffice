@@ -318,15 +318,16 @@ for (const editor of EDITORS) {
     const input = await open(page, editor.query, kind);
     await typeBeforeTheBreak(page, input);
     await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
-    await press(page, ['ControlOrMeta+End', 'Shift+Home']);
+    await press(page, ['ControlOrMeta+End', ...Array('CHARLIE'.length).fill('Shift+ArrowLeft')]);
     await expect.poll(() => page.locator(HIGHLIGHT).count(), { timeout: 5000 }).toBeGreaterThan(0);
     await page.keyboard.press('ControlOrMeta+x');
-    await expect.poll(() => clipboardText(page), { timeout: 15_000 }).toContain('CHARLIE');
     await expect.poll(async () => (await savedParts(page, info, kind, 'after'))['word/document.xml'], { timeout: 30_000 }).not.toContain('CHARLIE');
+    await expect(page.getByText(CUT_REFUSED)).not.toBeVisible();
+    await expect(page.getByText(CUT_REFUSED)).toHaveCount(0);
     const saved = (await savedParts(page, info, kind, 'final'))['word/document.xml'];
     expect(saved).toContain('TYPED');
     expect(saved).toContain('w:type="column"');
-    await expect(page.getByText(CUT_REFUSED)).toHaveCount(0);
+    await expect.poll(() => clipboardText(page), { timeout: 15_000 }).toContain('CHARLIE');
   });
 
   test(`a cut of plain text still moves it to the clipboard in the ${editor.name} editor`, async ({ page }, info) => {
@@ -341,3 +342,21 @@ for (const editor of EDITORS) {
     await expect(page.getByText(CUT_REFUSED)).toHaveCount(0);
   });
 }
+
+const DEFAULT_EDITOR = EDITORS.find(editor => editor.name === 'default')!;
+
+test(`a cut of the first line after a column break selected with End and Shift+Home is refused in the ${DEFAULT_EDITOR.name} editor`, async ({ page }, info) => {
+  test.setTimeout(180_000);
+  const kind = breakKind('column');
+  const input = await open(page, DEFAULT_EDITOR.query, kind);
+  await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+  const before = await savedParts(page, info, kind, 'before');
+  expect(before['word/document.xml']).toContain('w:type="column"');
+  await input.focus();
+  await press(page, ['ControlOrMeta+End', 'Shift+Home']);
+  await expect.poll(() => page.locator(HIGHLIGHT).count(), { timeout: 5000 }).toBeGreaterThan(0);
+  await page.keyboard.press('ControlOrMeta+x');
+  await expect(page.getByText(CUT_REFUSED)).toBeVisible({ timeout: 15_000 });
+  expect(await savedParts(page, info, kind, 'after')).toEqual(before);
+  expect(await clipboardText(page)).toBe(SENTINEL);
+});
