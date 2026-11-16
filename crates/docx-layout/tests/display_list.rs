@@ -1637,6 +1637,36 @@ fn fitted_text_watermark_scales_its_shaped_advance_to_the_box() {
 }
 
 #[test]
+fn a_page_whose_header_has_no_watermark_ignores_the_document_watermark() {
+    let watermark = serde_json::json!({"kind": "text", "text": "SAMPLE", "layout": "diagonal"});
+    let page = |number: u64| {
+        serde_json::json!({
+            "number": number, "sectionIndex": 0, "sectionPageIndex": number - 1,
+            "size": { "w": 816.0, "h": 1056.0 },
+            "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 },
+            "fragments": []
+        })
+    };
+    let input = serde_json::json!({
+        "measured": [],
+        "options": {},
+        "headersFooters": {
+            "titlePg": true,
+            "watermark": watermark,
+            "variants": [
+                { "rId": "rId8", "kind": "header", "type": "default", "watermark": watermark },
+                { "rId": "rId11", "kind": "header", "type": "first" }
+            ]
+        },
+        "layout": { "pages": [page(1), page(2)] }
+    });
+    let json = build_display_list_json(&input.to_string()).expect("builds");
+    let dl: DisplayList = serde_json::from_str(&json).unwrap();
+    assert_eq!(dl.pages[0].watermark_primitive_count, None);
+    assert_eq!(dl.pages[1].watermark_primitive_count, Some(1));
+}
+
+#[test]
 fn fitted_text_watermark_stretch_is_held_to_word_maximum() {
     let input = serde_json::json!({
         "measured": [],
