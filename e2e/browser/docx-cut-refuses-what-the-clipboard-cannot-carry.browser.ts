@@ -28,7 +28,7 @@ const PKG = 'http://schemas.openxmlformats.org/package/2006/relationships';
 const CT = 'application/vnd.openxmlformats-officedocument';
 
 type Part = { path: string; xml: string; contentType: string; relId: string; relType: string; target: string };
-type Kind = { id: string; object: string; parts: Part[]; cols: string };
+type Kind = { id: string; object: string; parts: Part[]; cols: string; body?: string };
 
 function notesPart(tag: 'footnote' | 'endnote', text: string): string {
   const separator = (type: string, id: string, child: string) =>
@@ -101,6 +101,30 @@ const KINDS: Kind[] = [
 
 const PLAIN: Kind = { id: 'plain', cols: '', parts: [], object: '' };
 
+const breakKind = (type: 'page' | 'column'): Kind => ({
+  id: `${type}-break-paragraph`, parts: [], object: '', cols: type === 'column' ? '<w:cols w:num="2" w:space="720"/>' : '',
+  body: '<w:p w14:paraId="00000001"><w:r><w:t>ALPHA</w:t></w:r></w:p>' +
+    `<w:p w14:paraId="00000002"><w:r><w:t xml:space="preserve">BRAVO before </w:t></w:r><w:r><w:br w:type="${type}"/></w:r><w:r><w:t xml:space="preserve"> after BRAVO</w:t></w:r></w:p>` +
+    '<w:p w14:paraId="00000003"><w:r><w:t>CHARLIE</w:t></w:r></w:p>',
+});
+const BREAKS = [breakKind('page'), breakKind('column')];
+
+async function selectIntoLastParagraph(page: Page, input: Locator): Promise<void> {
+  await input.focus();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await expect(page.locator(CARET).first()).toBeVisible({ timeout: 10_000 });
+  for (let step = 0; step < 2; step += 1) await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ControlOrMeta+Shift+End');
+  for (let step = 0; step < 2; step += 1) await page.keyboard.press('Shift+ArrowLeft');
+  await expect.poll(() => page.locator(HIGHLIGHT).count(), { timeout: 5000 }).toBeGreaterThan(1);
+}
+
+async function selectAll(page: Page, input: Locator): Promise<void> {
+  await input.focus();
+  await page.keyboard.press('ControlOrMeta+a');
+  await expect.poll(() => page.locator(HIGHLIGHT).count(), { timeout: 5000 }).toBeGreaterThan(1);
+}
+
 async function build(kind: Kind): Promise<Buffer> {
   const zip = new JSZip();
   const overrides = [`<Override PartName="/word/document.xml" ContentType="${CT}.wordprocessingml.document.main+xml"/>`,
@@ -112,8 +136,8 @@ async function build(kind: Kind): Promise<Buffer> {
   for (const part of kind.parts) zip.file(part.path, part.xml);
   const declarations = Object.entries(NS).map(([prefix, uri]) => `xmlns:${prefix}="${uri}"`).join(' ');
   zip.file('word/document.xml', `<w:document ${declarations}><w:body>` +
-    `<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">ALPHA before </w:t></w:r>${kind.object}<w:r><w:t xml:space="preserve"> after ALPHA</w:t></w:r></w:p>` +
-    '<w:p w14:paraId="00000002"><w:r><w:t>BRAVO target</w:t></w:r></w:p>' +
+    (kind.body ?? `<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">ALPHA before </w:t></w:r>${kind.object}<w:r><w:t xml:space="preserve"> after ALPHA</w:t></w:r></w:p>` +
+    '<w:p w14:paraId="00000002"><w:r><w:t>BRAVO target</w:t></w:r></w:p>') +
     `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>${kind.cols}</w:sectPr></w:body></w:document>`);
   return zip.generateAsync({ type: 'nodebuffer' });
 }
@@ -169,6 +193,23 @@ for (const editor of EDITORS) {
       expect(await savedParts(page, info, kind, 'after')).toEqual(before);
       expect(await clipboardText(page)).toBe(SENTINEL);
     });
+  }
+
+  for (const kind of BREAKS) {
+    for (const [selection, select] of [['into the last paragraph', selectIntoLastParagraph], ['of everything', selectAll]] as const) {
+      test(`a cut ${selection} across a ${kind.id} is refused in the ${editor.name} editor`, async ({ page }, info) => {
+        test.setTimeout(180_000);
+        const input = await open(page, editor.query, kind);
+        await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+        const before = await savedParts(page, info, kind, 'before');
+        expect(before['word/document.xml']).toContain('CHARLIE');
+        await select(page, input);
+        await page.keyboard.press('ControlOrMeta+x');
+        await expect(page.getByText(CUT_REFUSED)).toBeVisible({ timeout: 15_000 });
+        expect(await savedParts(page, info, kind, 'after')).toEqual(before);
+        expect(await clipboardText(page)).toBe(SENTINEL);
+      });
+    }
   }
 
   test(`a cut of plain text still moves it to the clipboard in the ${editor.name} editor`, async ({ page }, info) => {
