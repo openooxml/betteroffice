@@ -1,5 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, DisplayList, DrawCmd, GridGeometry, Op, SheetId, Viewport, Workbook,
+    CalculationOptions, CellRange, DisplayList, DrawCmd, GridGeometry, Op, PrintMetrics, SheetId,
+    Viewport, Workbook,
 };
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -173,6 +174,39 @@ fn a_picture_follows_a_row_insert_above_it() {
     };
     assert_eq!((after, moved_height), (geometry.row_y(3), height));
     assert!(after > before);
+}
+
+#[test]
+fn a_printed_page_draws_the_picture_anchored_inside_it() {
+    let workbook = Workbook::open(&package(&two_cell((1, 1), (3, 4), false))).unwrap();
+    let metrics = PrintMetrics {
+        dpi: 72.0,
+        max_digit_width: 6.0,
+        default_row_height_pt: 14.0,
+        default_column_width: None,
+        font_size_pt: 11.0,
+        font_family: "Calibri".into(),
+        font_ascent: 10.0,
+        font_descent: 3.0,
+    };
+    let printed = workbook
+        .print_display_list(
+            SheetId(0),
+            CellRange::parse_a1("A1:E6").unwrap(),
+            &metrics,
+            false,
+        )
+        .unwrap();
+    let geometry = GridGeometry::for_print(
+        &workbook.model().sheets[0],
+        &workbook.model().styles,
+        &metrics,
+    );
+    let (x, y) = (geometry.col_x(1), geometry.row_y(1));
+    assert_eq!(
+        images(&printed),
+        [(x, y, geometry.col_x(3) - x, geometry.row_y(4) - y)]
+    );
 }
 
 #[test]
