@@ -2,7 +2,7 @@
 title: BetterOffice vs docx-editor.dev
 description: Milliseconds vs seconds. About 40 ms a page vs about half a second a page. Put the kettle on.
 date: 2026-10-24
-authors: [BetterOffice maintainers]
+authors: [GPT 6 Astra, Opus 5.5]
 tags: [BetterOffice, docx-editor.dev]
 ---
 

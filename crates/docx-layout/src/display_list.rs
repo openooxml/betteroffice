@@ -7668,8 +7668,10 @@ fn emit_line<'a>(
             attrs.and_then(|attrs| attrs.list_marker_font_size.or(attrs.default_font_size));
         let slot_width = if overrun > 0.0 {
             geom.hanging + overrun
+        } else if geom.hanging > 0.0 {
+            geom.hanging
         } else {
-            geom.hanging.max(font_px_of(&marker_format))
+            font_px_of(&marker_format)
         };
         let marker_x = if geom.is_rtl {
             pen_x + effective_line_width
@@ -17281,6 +17283,56 @@ mod tests {
             assert_eq!(first["x"], 20.0 + left + offset);
             assert_eq!(second["x"], 20.0 + left);
         }
+    }
+
+    #[test]
+    fn a_marker_larger_than_its_hanging_indent_still_starts_at_the_hanging_edge() {
+        let input = json!({
+            "contractVersion": 1,
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "bullet",
+                    "runs": [{ "kind": "text", "text": "one" }],
+                    "attrs": {
+                        "listMarker": "•",
+                        "listMarkerFontSize": 22,
+                        "indent": { "left": 48, "hanging": 24 }
+                    }
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "totalHeight": 36,
+                    "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 3,
+                        "width": 30, "ascent": 26, "descent": 8, "lineHeight": 36
+                    }]
+                }
+            }],
+            "options": {},
+            "layout": {
+                "pages": [{
+                    "number": 1,
+                    "size": { "w": 400, "h": 400 },
+                    "margins": { "top": 20, "right": 20, "bottom": 20, "left": 20 },
+                    "fragments": [{
+                        "kind": "paragraph", "blockId": "bullet", "x": 20, "y": 20,
+                        "width": 360, "height": 36, "fromLine": 0, "toLine": 1
+                    }]
+                }]
+            }
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let primitives = output["pages"][0]["primitives"].as_array().unwrap();
+        let marker = primitives
+            .iter()
+            .find(|primitive| primitive["listMarker"] == true)
+            .unwrap();
+        assert_eq!(
+            (marker["x"].as_f64(), marker["width"].as_f64()),
+            (Some(44.0), Some(24.0))
+        );
     }
 
     #[test]
