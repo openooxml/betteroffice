@@ -20,6 +20,16 @@ fn shifted_side_margins() -> Vec<u8> {
 /// The picture's continuous section, with side margins of `left` and `right`
 /// twips, below a section whose side margins are 1440 and 720 twips.
 fn side_margins_below(left: u32, right: u32) -> Vec<u8> {
+    section_below(left, right, &picture(6, 24, 60))
+}
+
+/// [`side_margins_below`] with a picture whose wrap edge lies past the text's
+/// right edge under a right margin of 1440 twips and inside it under 720.
+fn reaching_picture_below(left: u32, right: u32) -> Vec<u8> {
+    section_below(left, right, &picture(310, 30, 60))
+}
+
+fn section_below(left: u32, right: u32, picture: &str) -> Vec<u8> {
     let section = format!(
         r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}</w:sectPr>"#,
         margins(left, right)
@@ -29,7 +39,7 @@ fn side_margins_below(left: u32, right: u32) -> Vec<u8> {
         first_section(1440, 720),
         para(
             PICTURE,
-            &format!("{}{}", picture(6, 24, 60), run(&words(30, 300)))
+            &format!("{picture}{}", run(&words(30, 300)))
         ),
         filler_paragraphs(0x3100, 12),
     );
@@ -130,7 +140,7 @@ fn set_side_margins(host: &mut CommandHost<'_>, left: u32, right: u32) {
             .unwrap()
     );
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
-    let bytes = side_margins_below(left, right);
+    let bytes = reaching_picture_below(left, right);
     host.request = lowering_pages::region_request(engine, &bytes, font).to_string();
     host.relayout(Some("body"));
 }
@@ -140,7 +150,7 @@ fn side_margins_set_to_the_section_above_lay_out_like_a_fresh_open() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let client_id = 9822;
-    let bytes = shifted_side_margins();
+    let bytes = reaching_picture_below(720, 1440);
     let engine = seeded_engine(client_id, &bytes);
     let mut host = opened(&engine, &bytes).seeded(client_id, bytes.clone());
     assert_at_new_left_margin(&engine, "open");
@@ -153,7 +163,7 @@ fn side_margins_shifted_from_the_section_above_lay_out_like_a_fresh_open() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let client_id = 9823;
-    let bytes = side_margins_below(1440, 720);
+    let bytes = reaching_picture_below(1440, 720);
     let engine = seeded_engine(client_id, &bytes);
     let mut host = opened(&engine, &bytes).seeded(client_id, bytes.clone());
     set_side_margins(&mut host, 720, 1440);
