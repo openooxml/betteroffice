@@ -693,12 +693,41 @@ const BLANK_TYPING: [(At, Option<&str>); 5] = [
 /// Types into the blank paragraph with local lowering on and compares the
 /// resident layout with a fresh one after every keystroke.
 fn type_into_blank_paragraph(name: &str, client_id: u64, bytes: Vec<u8>) {
+    type_into_blank_paragraph_with(name, client_id, bytes, false);
+}
+
+/// [`type_into_blank_paragraph`], with the first break after the blank
+/// paragraph deleted as a tracked change and laid out accepted when
+/// `delete_first_break`.
+fn type_into_blank_paragraph_with(
+    name: &str,
+    client_id: u64,
+    bytes: Vec<u8>,
+    delete_first_break: bool,
+) {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
     let engine = seeded_engine(client_id, &bytes);
     engine.set_local_lowering(true);
-    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut request = lowering_pages::region_request(&engine, &bytes, font);
+    if delete_first_break {
+        let pilcrow = story_paras(&engine, "body")
+            .into_iter()
+            .find(|para| para.id == "00004002")
+            .unwrap()
+            .pilcrow;
+        let receipt = engine
+            .doc()
+            .delete_range(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::StoryRange::new("body", pilcrow + 1, pilcrow + 2),
+            )
+            .unwrap();
+        request["renderEnv"]["revisionPreview"] = json!({});
+        request["renderEnv"]["revisionPreview"][&receipt.revision_ids[0]] = json!("accepted");
+    }
+    let request = request.to_string();
     let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
     resident_matches_fresh(&host, &format!("{name}, opened"));
     for (step, key) in BLANK_TYPING.into_iter().enumerate() {
@@ -744,5 +773,25 @@ fn typing_in_a_blank_paragraph_before_column_and_page_breaks_matches_a_fresh_lay
         "paragraph, column and page breaks",
         9864,
         blank_paragraph_package(false, &["column", "page"]),
+    );
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_before_a_deleted_column_break_and_a_page_break_matches_fresh() {
+    type_into_blank_paragraph_with(
+        "paragraph, deleted column break, page break",
+        9865,
+        blank_paragraph_package(false, &["column", "page"]),
+        true,
+    );
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_before_a_deleted_page_break_and_a_page_break_matches_fresh() {
+    type_into_blank_paragraph_with(
+        "paragraph, deleted page break, page break",
+        9866,
+        blank_paragraph_package(false, &["page", "page"]),
+        true,
     );
 }
