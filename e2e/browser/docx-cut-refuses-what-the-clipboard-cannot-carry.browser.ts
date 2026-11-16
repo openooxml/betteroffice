@@ -394,11 +394,29 @@ test(`a Shift+Delete pressed before a queued selection onto plain text settles c
   await input.focus();
   await page.keyboard.press('ControlOrMeta+End');
   await expect(page.locator(CARET).first()).toBeVisible({ timeout: 10_000 });
-  await page.keyboard.press('Home');
+  await press(page, ['Home', 'ArrowRight']);
   await expect(page.locator(HIGHLIGHT)).toHaveCount(0);
   await extendThenShiftDeleteInOneTask(page);
   await expect.poll(() => clipboardText(page), { timeout: 15_000 }).toBe('C');
   await expect.poll(async () => (await savedParts(page, info, kind, 'after'))['word/document.xml'], { timeout: 30_000 }).not.toContain('CHARLIE');
   expect((await savedParts(page, info, kind, 'final'))['word/document.xml']).toContain('HARLIE');
+  await expect(page.getByText(CUT_REFUSED)).toHaveCount(0);
+});
+
+test(`a Shift+Delete whose queued selection holds only the hidden column-break unit changes nothing in the ${DEFAULT_EDITOR.name} editor`, async ({ page }, info) => {
+  test.setTimeout(180_000);
+  const kind = breakKind('column');
+  const input = await open(page, DEFAULT_EDITOR.query, kind);
+  await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+  const before = await savedParts(page, info, kind, 'before');
+  await input.focus();
+  await page.keyboard.press('ControlOrMeta+End');
+  await expect(page.locator(CARET).first()).toBeVisible({ timeout: 10_000 });
+  await page.keyboard.press('Home');
+  await expect(page.locator(HIGHLIGHT)).toHaveCount(0);
+  await extendThenShiftDeleteInOneTask(page);
+  await page.waitForTimeout(1000);
+  expect(await clipboardText(page)).toBe(SENTINEL);
+  expect(await savedParts(page, info, kind, 'after')).toEqual(before);
   await expect(page.getByText(CUT_REFUSED)).toHaveCount(0);
 });

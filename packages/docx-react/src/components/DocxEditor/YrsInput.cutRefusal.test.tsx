@@ -92,10 +92,21 @@ test('a Shift+Delete pressed before a queued selection onto a column break parag
 test('a Shift+Delete pressed before a queued selection onto plain text settles cuts that selection', async () => {
   const { session, written, refusals, extendThenShiftDelete } = await mount();
   const charlie = session.paragraphs('body').find(paragraph => paragraph.text === 'CHARLIE')!;
-  session.setSelection({ story: 'body', paraId: charlie.paraId, offset: 0 });
+  session.setSelection({ story: 'body', paraId: charlie.paraId, offset: 1 });
   await extendThenShiftDelete();
   expect(written).toEqual(['C']);
   expect(session.paragraphs('body').find(paragraph => paragraph.paraId === charlie.paraId)?.text).toBe('HARLIE');
+  expect(refusals).toEqual([]);
+});
+
+test('a Shift+Delete whose queued selection holds only the hidden column-break unit writes nothing and deletes nothing', async () => {
+  const { session, written, refusals, extendThenShiftDelete } = await mount();
+  const charlie = session.paragraphs('body').find(paragraph => paragraph.text === 'CHARLIE')!;
+  session.setSelection({ story: 'body', paraId: charlie.paraId, offset: 0 });
+  const before = session.storySegments('body');
+  await extendThenShiftDelete();
+  expect(written).toEqual([]);
+  expect(session.storySegments('body')).toEqual(before);
   expect(refusals).toEqual([]);
 });
 
