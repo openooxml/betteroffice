@@ -104,6 +104,15 @@ export interface SliceSource {
 const opened = new WeakMap<ProgressiveFontFace, [SliceRef, SliceIndex, SliceTransport]>();
 const sources = new WeakMap<ProgressiveFontFace, Promise<SliceSource>>();
 
+/**
+ * The href a worker can fetch. A bundler can name an asset with a URL-like object whose href is only
+ * the served path (Turbopack compiles `new URL(asset, import.meta.url)` so); this realm resolves it
+ * against its location, but the worker these hrefs are sent to cannot.
+ */
+function absoluteHref(url: URL): string {
+  return new URL(url.href, globalThis.location?.href).href;
+}
+
 /** @internal The files of a face `openProgressiveFace` opened with a transport that names URLs. */
 export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> | undefined {
   const entry = opened.get(face);
@@ -114,7 +123,7 @@ export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> |
   if (source === undefined) {
     source = (async () => {
       const urls: Record<string, string> = {};
-      for (const { file } of [{ file: ref.index }, index.skeleton, index.core, ...index.chunks]) urls[file] = (await url(file)).href;
+      for (const { file } of [{ file: ref.index }, index.skeleton, index.core, ...index.chunks]) urls[file] = absoluteHref(await url(file));
       return { ref, urls, ...(timeoutMs === undefined ? {} : { timeoutMs }) };
     })();
     sources.set(face, source);

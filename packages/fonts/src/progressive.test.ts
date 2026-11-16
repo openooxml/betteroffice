@@ -284,6 +284,23 @@ test('a face opened with file URLs names every slice file and the fetch timeout 
   expect(sliceSourceOf(await openProgressiveFace(jpRef, transport([])))).toBeUndefined();
 });
 
+test('a file URL whose href is a path resolves against this realm, so a worker can fetch it', async () => {
+  // Turbopack compiles `new URL(asset, import.meta.url)` to a URL-like object whose href is the served
+  // path; a worker that receives that path has no document to resolve it against.
+  const pathOnly = (file: string) => ({ href: `/_next/static/media/${file}` }) as URL;
+  const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { value: { href: 'https://app.example/ko/room/1' }, configurable: true });
+  try {
+    const face = await openProgressiveFace(jpRef, { ...transport([]), url: async (file) => pathOnly(file) });
+    const source = await sliceSourceOf(face)!;
+    expect(source.urls[jpRef.index]).toBe(`https://app.example/_next/static/media/${jpRef.index}`);
+    expect(Object.values(source.urls).every((href) => href.startsWith('https://app.example/_next/static/media/'))).toBe(true);
+  } finally {
+    if (location) Object.defineProperty(globalThis, 'location', location);
+    else delete (globalThis as { location?: unknown }).location;
+  }
+});
+
 test('a location without file URLs cannot open, so callers fall back to the whole face', async () => {
   const { slices } = createFontProvider({ baseUrl: assets }).resolveScriptFallback('cjk-jp', false, false)!;
   const { url: _url, ...withoutUrl } = slices!;
