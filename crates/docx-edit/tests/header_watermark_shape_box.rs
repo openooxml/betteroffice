@@ -269,3 +269,25 @@ fn text_watermark_centres_on_the_authored_margins_under_a_header_taller_than_the
         "{plain:?} vs {under_tall_header:?}"
     );
 }
+
+#[test]
+fn text_watermark_with_a_degenerate_box_uses_the_unsized_watermark() {
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let unsized_run = painted_watermark(
+        &watermarked_document(["auto", "auto", "Calibri", "48pt", "Sample copy"]),
+        font,
+    );
+    assert!(unsized_run["horizontalScale"].is_null(), "{unsized_run}");
+    for [width, height] in [
+        ["672pt", ".0001pt"],
+        ["0.0001pt", "58.5pt"],
+        ["1000000000000px", "58.5pt"],
+    ] {
+        let run = painted_watermark(
+            &watermarked_document([width, height, "Calibri", "48pt", "Sample copy"]),
+            font,
+        );
+        assert_eq!(run, unsized_run, "{width} x {height}");
+    }
+}
