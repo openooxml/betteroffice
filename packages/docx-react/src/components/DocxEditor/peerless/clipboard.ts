@@ -129,7 +129,7 @@ export function createClipboardPrefetch(options: ClipboardSliceRead) {
   schedule();
   return {
     take,
-    /** Reads the selection as it stood at the call, whatever the selection does while the read runs. */
+    /** Reads the selection as it stood at the call, whatever the selection does while the read runs; a cut rechecks it before acting. */
     async read(): Promise<ClipboardCapture | null> {
       await settleEarlierInput(binding);
       if (disposed || !options.isCurrent()) return null;
@@ -175,6 +175,8 @@ export async function copyWorkerSelection(options: SelectionRead & { write(text:
     if (!sliceCaptured || (!sliceCaptured.slice.text && !sliceCaptured.slice.fragment)) return false;
     if (!options.isCurrent() || !sameIdentity(identity, sliceCaptured.identity) ||
       !sameIdentity(sliceCaptured.identity, binding.viewStore.getSnapshot().identity)) return false;
+    if (options.cut && selectionKey(sliceCaptured.identity, sliceCaptured.version, sliceCaptured.selection) !== snapshotKey(binding))
+      throw new Error('Selection read was superseded');
     if (!options.writeNative?.(sliceCaptured)) {
       if (sliceCaptured.html) {
         try {

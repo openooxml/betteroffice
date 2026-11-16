@@ -204,13 +204,30 @@ test('an incarnation replaced during a pending cut cannot receive the old operat
 });
 
 
-for (const cut of [false, true]) test(`a pending ${cut ? 'cut' : 'copy'} completes with the selection it was pressed on after the selection changes`, async () => {
+test('a pending cut cannot adopt a selection changed while its read is in flight', async () => {
+  const f = fixture();
+  let finish!: (slice: DocxClipboardSlice) => void;
+  f.readClipboardSlice.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  f.publish({ workerSelection: range });
+  const writeNative = mock(() => true);
+  const copied = copyWorkerSelection({ ...f, isCurrent: () => true, cut: true,
+    readCapture: () => f.prefetch.read(), writeNative, write: denied, writeSlice: denied });
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  f.publish({ workerSelection: { ...range, focus: { ...range.focus, offset: 5 } } });
+  finish({ text: 'bcd', fragment: null });
+  await expect(copied).rejects.toThrow('Selection read was superseded');
+  expect(writeNative).not.toHaveBeenCalled();
+  expect(f.submit).not.toHaveBeenCalled();
+  f.prefetch.dispose();
+});
+
+test('a pending copy completes with the selection it was pressed on after the selection changes', async () => {
   const f = fixture();
   let finish!: (slice: DocxClipboardSlice) => void;
   f.readClipboardSlice.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
   f.publish({ workerSelection: range });
   const writeNative = mock((_capture: NonNullable<ReturnType<typeof f.prefetch.take>>) => true);
-  const copied = copyWorkerSelection({ ...f, isCurrent: () => true, cut,
+  const copied = copyWorkerSelection({ ...f, isCurrent: () => true,
     readCapture: () => f.prefetch.read(), writeNative, write: denied, writeSlice: denied });
   for (let i = 0; i < 20; i++) await Promise.resolve();
   f.publish({ workerSelection: { ...range, focus: { ...range.focus, offset: 5 } } });
@@ -218,8 +235,7 @@ for (const cut of [false, true]) test(`a pending ${cut ? 'cut' : 'copy'} complet
   expect(await copied).toBe(true);
   expect(writeNative.mock.calls[0]?.[0].selection).toEqual(range);
   expect(writeNative.mock.calls[0]?.[0].slice.text).toBe('bcd');
-  if (cut) expect(f.submit.mock.calls[0]?.[0]).toEqual({ kind: 'replaceSelection', payload: { text: '', selection: range } });
-  else expect(f.submit).not.toHaveBeenCalled();
+  expect(f.submit).not.toHaveBeenCalled();
   f.prefetch.dispose();
 });
 
