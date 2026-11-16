@@ -1,6 +1,6 @@
 ---
-'@betteroffice/docx': patch
+'@betteroffice/docx': minor
 '@betteroffice/docx-react': patch
 ---
 
-Typing in long documents no longer waits after each keystroke for the ruler to re-read every paragraph of the document; it reads the sections and only the paragraph at the caret.
+The `sectionProperties` read takes an optional `paragraphs` list that limits the tab stops it returns to those paragraphs. The ruler uses it, so typing in long documents no longer waits for every paragraph to be re-read after each keystroke.
