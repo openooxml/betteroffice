@@ -147,7 +147,7 @@ impl<'a> Pictures<'a> {
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(width);
         limits.max_image_height = Some(height);
-        limits.max_alloc = Some((MAX_IMAGE_BYTES - cost).min(MAX_FRAME_IMAGE_BYTES - self.bytes));
+        limits.max_alloc = Some(cost);
         decoder.set_limits(limits).ok()?;
         let orientation = decoder.orientation().ok()?;
         let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
