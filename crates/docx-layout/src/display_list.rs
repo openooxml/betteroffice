@@ -4296,7 +4296,8 @@ fn fitted_text_watermark(
                 .iter()
                 .all(|glyph| glyph.x_offset == 0.0 && glyph.y_offset == 0.0)
             && fonts.is_some_and(|fonts| {
-                text.chars().all(|ch| fonts.store.covers(*font, ch).unwrap_or(false))
+                text.chars()
+                    .all(|ch| fonts.store.covers(*font, ch).unwrap_or(false))
             })
     });
     let glyphs = shaped.map(|(font, shaped, advance)| {

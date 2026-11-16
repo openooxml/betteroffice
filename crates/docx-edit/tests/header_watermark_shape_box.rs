@@ -233,7 +233,10 @@ fn stretched_text_run(text: &str) -> Value {
     assert_eq!(run["text"], text);
     assert_eq!(run["kind"], "text", "{run}");
     assert!(run["horizontalScale"].as_f64().is_some(), "{run}");
-    assert!((run["width"].as_f64().unwrap() * 0.75 - 672.0).abs() < 0.01, "{run}");
+    assert!(
+        (run["width"].as_f64().unwrap() * 0.75 - 672.0).abs() < 0.01,
+        "{run}"
+    );
     run
 }
 
