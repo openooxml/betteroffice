@@ -347,8 +347,7 @@ struct FitCase {
 #[test]
 fn only_the_wrapped_lines_that_fit_paint() {
     let cases: Vec<FitCase> =
-        serde_json::from_str(include_str!("../tests/fixtures/wrapped-lines-fitting.json"))
-            .unwrap();
+        serde_json::from_str(include_str!("../tests/fixtures/wrapped-lines-fitting.json")).unwrap();
     let painted: Vec<(&str, usize)> = cases
         .iter()
         .map(|case| {
