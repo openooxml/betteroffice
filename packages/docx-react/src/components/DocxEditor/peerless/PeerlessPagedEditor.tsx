@@ -229,16 +229,23 @@ function PeerlessCaretLayer({ viewStore, geometryCaret, matches, compositionActi
 }
 
 /** Paints the active IME composition at the caret until the composition commits. */
-function PeerlessPreedit({ viewStore, composition, geometryCaret, matches, formatting, pages }: {
+function PeerlessPreedit({ viewStore, composition, geometryCaret, selectionRects, multiCell, coversThroughSeq, matches, formatting, pages }: {
   viewStore: PeerlessViewStore;
   composition: PeerlessCompositionState | null;
   geometryCaret: DocxEchoRect | null;
+  selectionRects: readonly DocxEchoRect[] | undefined;
+  multiCell: boolean;
+  coversThroughSeq: number | undefined;
   matches: boolean;
   formatting: DocxEditState['effectiveFormatting'] | undefined;
   pages: readonly PageGeometry[];
 }): ReactElement | null {
   const provisional = useShownProvisionalCaret(viewStore);
-  const caret = composition?.phase === 'active' && composition.text ? provisional?.rect ?? (matches ? geometryCaret : null) : null;
+  const start = selectionRects?.[0];
+  const first = geometryCaret ?? (!multiCell && start ? { x: start.x, y: start.y, width: 1, height: start.height } : null);
+  const target = composition?.target;
+  const stale = target?.kind === 'predecessor' && target.ticket.seq !== undefined && (coversThroughSeq ?? -1) < target.ticket.seq;
+  const caret = composition?.phase === 'active' && composition.text ? provisional?.rect ?? (matches && !stale ? first : null) : null;
   const paint = useMemo(() => {
     if (!caret) return null;
     const page = pages.find(({ bounds }) => caret.x >= bounds.x && caret.x <= bounds.x + bounds.width &&
@@ -944,6 +951,8 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
           matches={geometryMatchesDocument(snapshot)} compositionActive={composition?.phase === 'active'}
           multiCell={snapshot.editState?.tableContext?.hasMultiCellSelection === true} input={input} />
         <PeerlessPreedit viewStore={binding.viewStore} composition={composition} geometryCaret={geometry?.caret ?? null}
+          selectionRects={geometry?.selectionRects} coversThroughSeq={geometry?.coversThroughSeq}
+          multiCell={snapshot.editState?.tableContext?.hasMultiCellSelection === true}
           matches={geometryMatchesDocument(snapshot)} formatting={snapshot.editState?.effectiveFormatting} pages={pages} />
         {picturePreview && <div className="paged-editor__picture-drag-preview" aria-hidden style={{ position: 'absolute', left: picturePreview.x, top: picturePreview.y,
           width: picturePreview.width, height: picturePreview.height, outline: '1px dashed rgb(59, 130, 246)', background: 'rgba(59, 130, 246, 0.12)', pointerEvents: 'none', cursor: 'move' }} />}
