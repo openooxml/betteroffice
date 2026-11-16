@@ -4290,8 +4290,11 @@ fn fitted_text_watermark(
     {
         return None;
     }
-    let shaped = shaped.filter(|(font, _, _)| {
+    let shaped = shaped.filter(|(font, glyphs, _)| {
         !text.chars().any(is_rtl_strong)
+            && glyphs
+                .iter()
+                .all(|glyph| glyph.x_offset == 0.0 && glyph.y_offset == 0.0)
             && fonts.is_some_and(|fonts| {
                 text.chars().all(|ch| fonts.store.covers(*font, ch).unwrap_or(false))
             })
