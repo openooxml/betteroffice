@@ -4279,7 +4279,8 @@ fn emit_text_watermark(
     let baseline = page.size.h / 2.0 + lift * cos + font_px * 0.2;
     let weight = if fitted.is_some() { "" } else { "700 " };
     let font = format!("{weight}{}px {}, sans-serif", px(font_px), family);
-    let horizontal_scale = fitted.map(|(box_w, _)| px(100.0 * box_w / advance));
+    let horizontal_scale =
+        fitted.map(|(box_w, _)| px((100.0 * box_w / advance).clamp(1.0, 600.0)));
     let opacity = if wm.semitransparent == Some(true) {
         0.5
     } else {
