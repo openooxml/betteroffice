@@ -27,6 +27,10 @@ export interface ProgressiveFontFace {
   chunksOf(text: string): number[];
   /** The chunks `bytes` holds right now; it grows as chunks load. */
   loadedChunks(): ReadonlySet<number>;
+  /** Every outline chunk the face has, for loading it whole a few chunks at a time. */
+  chunks(): readonly number[];
+  /** Loads these chunks' outlines; resolves with a revision that includes them, or rejects if one fails to load. */
+  ensureChunks(chunks: Iterable<number>): Promise<number>;
   /** Calls `listener` with each new revision; returns an unsubscribe. */
   onUpdate(listener: (revision: number) => void): () => void;
   /** Whether every outline is loaded. */
@@ -159,6 +163,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
   const [skeletonBytes, core] = await Promise.all([readFile(transport, index.skeleton), readFile(transport, index.core)]);
   const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
   const files = new Map<number, SliceFile>(index.chunks.map((chunk) => [chunk.id!, chunk]));
+  const chunkIds: readonly number[] = Object.freeze([...files.keys()]);
   const outlines = new Map<number, Uint8Array>();
   const loaded = new Set<number>([0]);
   const pending = new Map<number, Promise<void>>();
@@ -235,6 +240,8 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     },
     chunksOf: (text) => textChunks(text, skeleton.chunkOfCodepoint),
     loadedChunks: () => loaded,
+    chunks: () => chunkIds,
+    ensureChunks: (chunks) => ensure(chunks),
     onUpdate(listener) {
       listeners.add(listener);
       return () => {
