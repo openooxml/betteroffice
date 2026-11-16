@@ -2,6 +2,35 @@ import { expect, test, type Page, type TestInfo } from 'playwright/test';
 import JSZip from 'jszip';
 import { readFile } from 'node:fs/promises';
 
+type EditorProbe = { alerts: string[] };
+
+let editorLog: string[] = [];
+
+test.beforeEach(async ({ page }) => {
+  editorLog = [];
+  page.on('console', (message) => { if (message.type() === 'error' || message.type() === 'warning') editorLog.push(`console.${message.type()}: ${message.text()}`); });
+  page.on('pageerror', (error) => { editorLog.push(`pageerror: ${error.message}`); });
+  await page.addInitScript(() => {
+    const probe: EditorProbe = { alerts: [] };
+    (window as unknown as { __tableMenuProbe: EditorProbe }).__tableMenuProbe = probe;
+    new MutationObserver(() => {
+      for (const alert of document.querySelectorAll('[role="alert"]')) {
+        const text = alert.textContent?.trim();
+        if (text && probe.alerts.at(-1) !== text) probe.alerts.push(text);
+      }
+    }).observe(document, { childList: true, subtree: true, characterData: true });
+  });
+});
+
+test.afterEach(async ({ page }, info) => {
+  if (info.status === info.expectedStatus) return;
+  const alerts = await page.evaluate(() => (window as unknown as { __tableMenuProbe?: EditorProbe }).__tableMenuProbe?.alerts ?? [])
+    .catch(() => [] as string[]);
+  const report = [...alerts.map((text) => `onError: ${text}`), ...editorLog].join('\n') || 'no editor errors recorded';
+  console.log(`editor errors for "${info.title}":\n${report}`);
+  await info.attach('editor-errors', { body: report, contentType: 'text/plain' });
+});
+
 function documentXml(): string {
   const border = (side: string) => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>`;
   const cell = (text: string) => `<w:tc><w:tcPr><w:tcW w:w="2340" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
