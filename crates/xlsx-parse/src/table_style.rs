@@ -1,6 +1,8 @@
 //! `tableStyleInfo` plus the workbook's `tableStyles` or Excel's presets ->
 //! the [`TableStyleElement`]s a table draws.
 
+use std::collections::HashMap;
+
 use quick_xml::events::{BytesStart, Event};
 use xlsx_model::{
     Color, DifferentialFormat, Stylesheet, Table, TableStyleElement, TableStyleElementType,
@@ -47,10 +49,29 @@ impl TableStyleInfo {
             WholeTable | HeaderRow | TotalRow => true,
         }
     }
+
+    /// The elements of `style` these flags turn on, none when they paint nothing.
+    fn select(&self, style: &[TableStyleElement]) -> Vec<TableStyleElement> {
+        let shown: Vec<_> = style
+            .iter()
+            .filter(|element| self.shows(element.kind))
+            .cloned()
+            .collect();
+        if shown
+            .iter()
+            .all(|element| element.format == DifferentialFormat::default())
+        {
+            return Vec::new();
+        }
+        shown
+    }
 }
 
-/// A `tableStyle` in `styles.xml`: its name and `(type, dxfId, size)` elements.
-type WorkbookTableStyle = (String, Vec<(TableStyleElementType, Option<u32>, u32)>);
+/// A `tableStyleElement` in `styles.xml`: its type, `dxfId` and size.
+type DefinedElement = (TableStyleElementType, Option<u32>, u32);
+
+/// A `tableStyle` in `styles.xml`: its name and elements.
+type WorkbookTableStyle = (String, Vec<DefinedElement>);
 
 /// Fill each table's style from its `tableStyleInfo`, preferring a style the
 /// workbook defines with elements over a preset of the same name.
@@ -63,27 +84,40 @@ pub(crate) fn resolve_tables(
         Some(xml) if tables.iter().any(|(_, info)| info.is_some()) => workbook_table_styles(xml)?,
         _ => Vec::new(),
     };
+    let mut by_name: HashMap<&str, &[DefinedElement]> = HashMap::new();
+    for (name, elements) in &defined {
+        if !elements.is_empty() {
+            by_name.entry(name.as_str()).or_insert(elements.as_slice());
+        }
+    }
+    let mut named: HashMap<String, Vec<TableStyleElement>> = HashMap::new();
     Ok(tables
         .into_iter()
         .map(|(mut table, info)| {
             if let Some(info) = info {
-                table.style = resolve(&info, &defined, styles);
+                table.style = match named.get(&info.name) {
+                    Some(style) => info.select(style),
+                    None => {
+                        let style = resolve(&info.name, &by_name, styles);
+                        let selected = info.select(&style);
+                        named.insert(info.name, style);
+                        selected
+                    }
+                };
             }
             table
         })
         .collect())
 }
 
+/// A named style's elements, one per type, before any `tableStyleInfo` flag.
 fn resolve(
-    info: &TableStyleInfo,
-    defined: &[WorkbookTableStyle],
+    name: &str,
+    defined: &HashMap<&str, &[DefinedElement]>,
     styles: &Stylesheet,
 ) -> Vec<TableStyleElement> {
-    let mut elements = match defined
-        .iter()
-        .find(|(name, elements)| *name == info.name && !elements.is_empty())
-    {
-        Some((_, elements)) => elements
+    let mut elements = match defined.get(name) {
+        Some(elements) => elements
             .iter()
             .map(|&(kind, dxf, size)| {
                 #[cfg(test)]
@@ -98,14 +132,9 @@ fn resolve(
                 }
             })
             .collect(),
-        None => preset(&info.name, styles),
+        None => preset(name, styles),
     };
-    elements.retain(|element| {
-        info.shows(element.kind) && (element.format != Default::default() || spans(element))
-    });
-    if elements.iter().all(|element| element.format == Default::default()) {
-        return Vec::new();
-    }
+    elements.retain(|element| element.format != Default::default() || spans(element));
     elements.sort_by_key(|element| element.kind);
     elements.dedup_by_key(|element| element.kind);
     elements
