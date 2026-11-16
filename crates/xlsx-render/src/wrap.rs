@@ -136,13 +136,14 @@ pub fn wrapped_line_y(y: f32, index: usize, count: usize, wrap: &TextWrap) -> f3
 }
 
 /// how many of `count` wrapped lines excel paints in the wrap's fit height:
-/// those that fit whole, at least one; they are then aligned as the full text.
+/// those whose top half is inside it, at least one; they are then aligned as
+/// the full text and the cell clip cuts what passes its edge.
 pub fn wrapped_lines_fitting(count: usize, wrap: &TextWrap, font_size_pt: f32) -> usize {
     let Some(height) = wrap.fit_height else {
         return count;
     };
     let font = font_size_pt * crate::geometry::PX_PER_PT as f32;
-    let room = (height - font) / wrap.line_height;
+    let room = (height - font / 2.0) / wrap.line_height;
     let fitting = if room.is_finite() && room >= 0.0 {
         room.floor() as usize + 1
     } else {

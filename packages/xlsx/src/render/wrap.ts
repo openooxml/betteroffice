@@ -125,11 +125,12 @@ export function wrappedLineY(y: number, index: number, count: number, wrap: Text
 
 /**
  * How many of `count` wrapped lines Excel paints in the wrap's fit height:
- * those that fit whole, at least one; they are then aligned as the full text.
+ * those whose top half is inside it, at least one; they are then aligned as
+ * the full text and the cell clip cuts what passes its edge.
  */
 export function wrappedLinesFitting(count: number, wrap: TextWrap, fontSizePx: number): number {
   if (wrap.fitHeight === undefined) return count;
-  const room = (wrap.fitHeight - fontSizePx) / wrap.lineHeight;
+  const room = (wrap.fitHeight - fontSizePx / 2) / wrap.lineHeight;
   const fitting = Number.isFinite(room) && room >= 0 ? Math.floor(room) + 1 : 1;
   return Math.min(count, Math.max(fitting, 1));
 }
