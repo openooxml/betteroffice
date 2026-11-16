@@ -233,3 +233,8 @@ fn stretched_text_run(text: &str) -> Value {
 fn text_watermark_with_a_character_its_first_face_lacks_keeps_the_text_run() {
     stretched_text_run("DRAFT \u{4E2D}");
 }
+
+#[test]
+fn right_to_left_text_watermark_keeps_the_text_run() {
+    stretched_text_run("\u{05D8}\u{05D9}\u{05D5}\u{05D8}\u{05D4}");
+}
