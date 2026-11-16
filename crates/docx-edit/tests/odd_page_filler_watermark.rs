@@ -8,7 +8,7 @@ fn odd_page_section_document() -> Vec<u8> {
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">"#,
         r#"<w:p><w:r><w:t>Header</w:t></w:r></w:p>"#,
         r#"<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Watermarks"/></w:docPartObj></w:sdtPr><w:sdtContent><w:p><w:r><w:pict>"#,
-        r#"<v:shape id="PowerPlusWaterMarkObject1" o:spid="_x0000_s2049" type="#_x0000_t136" style="position:absolute;width:412.4pt;height:206.2pt;rotation:315" fillcolor="silver" stroked="f"><v:fill opacity=".5"/><v:textpath style="font-family:&quot;Liberation Sans&quot;;font-size:1pt" string="DRAFT"/></v:shape>"#,
+        r##"<v:shape id="PowerPlusWaterMarkObject1" o:spid="_x0000_s2049" type="#_x0000_t136" style="position:absolute;width:412.4pt;height:206.2pt;rotation:315" fillcolor="silver" stroked="f"><v:fill opacity=".5"/><v:textpath style="font-family:&quot;Liberation Sans&quot;;font-size:1pt" string="DRAFT"/></v:shape>"##,
         r#"</w:pict></w:r></w:p></w:sdtContent></w:sdt></w:hdr>"#,
     );
     let section = |start: &str| {
