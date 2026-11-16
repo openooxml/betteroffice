@@ -26,6 +26,7 @@ interface OutlineFace {
   chunks?(): readonly number[];
   loadedChunks?(): ReadonlySet<number>;
   ensureChunks?(chunks: Iterable<number>): Promise<number>;
+  chunksOfGlyphs?(glyphIds: Iterable<number>): readonly number[];
 }
 
 /**
@@ -53,6 +54,8 @@ interface Owner {
   open: () => Promise<OutlineFace>;
   face?: OutlineFace;
   installed: number;
+  /** The chunks the engine's bytes for these slots hold; the host registered them with the core (chunk 0). */
+  installedChunks: ReadonlySet<number>;
   complete: boolean;
   refused: boolean;
   fill: boolean;
@@ -183,7 +186,9 @@ export class ResidentProgressiveFonts {
         });
         return opening;
       };
-      this.owners.set(owner, { ids: [id], open, installed: 1, complete: false, refused: false, fill: spec.fill === true });
+      this.owners.set(owner, {
+        ids: [id], open, installed: 1, installedChunks: new Set([0]), complete: false, refused: false, fill: spec.fill === true,
+      });
     }
   }
 
@@ -235,10 +240,13 @@ export class ResidentProgressiveFonts {
     const changed = new Set<number>();
     let waiting = true;
     const work = Promise.all([...wanted].map(async ([owner, ids]) => {
-      const before = this.owners.get(owner)!.installed;
+      const state = this.owners.get(owner)!;
+      const before = state.installed;
       await this.load(owner, ids);
-      // A fill may have installed these outlines meanwhile; they changed for this frame all the same.
-      if (this.install(owner) || this.owners.get(owner)!.installed > before) {
+      // Outlines a fill loaded that this frame does not draw reach the engine with the fill's own install, so a
+      // frame during a fill rebuilds the face only for a glyph the engine lacks. A fill may have installed these
+      // outlines meanwhile; they changed for this frame all the same.
+      if ((!this.drawsInstalled(state, ids) && this.install(owner)) || state.installed > before) {
         changed.add(owner);
         if (!waiting) {
           this.late += 1;
@@ -377,6 +385,12 @@ export class ResidentProgressiveFonts {
     }
   }
 
+  /** Whether the engine's bytes already hold every outline these glyph ids draw from; unknown counts as no. */
+  private drawsInstalled(state: Owner, ids: Set<number>): boolean {
+    const chunks = state.face?.chunksOfGlyphs?.(ids);
+    return chunks !== undefined && chunks.every((chunk) => state.installedChunks.has(chunk));
+  }
+
   /** Installs the face's current outlines; on refusal stops progressive loading for it. True when outlines changed. */
   private install(owner: number): boolean {
     const state = this.owners.get(owner)!;
@@ -384,8 +398,11 @@ export class ResidentProgressiveFonts {
     if (!face || this.disposed || state.refused || face.revision <= state.installed) return false;
     try {
       const bytes = new Uint8Array(face.bytes());
+      // The chunks `bytes` holds; a face loading more meanwhile only adds to them.
+      const chunks = new Set(face.loadedChunks?.() ?? []);
       for (const id of state.ids) this.engine.updateFontOutlines(id, bytes);
       state.installed = face.revision;
+      state.installedChunks = chunks;
       state.complete = face.complete();
       return true;
     } catch (error) {

@@ -288,6 +288,27 @@ test('a fill waits while frames draw, so no frame waits for it', async () => {
   expect(chunkHits()).toBe(index.chunks.length);
 });
 
+test('frames during a fill rebuild the face only for a glyph whose outline the engine lacks', async () => {
+  const { resident, updates } = fonts(undefined, [filling]);
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]))).toEqual(new Set([10]));
+  expect(updates).toHaveLength(1);
+  resident.scheduleFill();
+  // Frames a quiet stretch apart let the fill load a batch between them; each draws only the installed glyph.
+  while (chunkHits() < 17) {
+    await sleep(FILL_QUIET_MS + 50);
+    expect(await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]))).toEqual(new Set());
+  }
+  expect(updates).toHaveLength(1);
+  // A glyph the fill loaded but has not installed yet still reaches the engine before its frame paints.
+  const loadedByFill = index.chunks.map((chunk) => chunk.id).find((id) => id !== 41)!;
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(loadedByFill)])]]))).toEqual(new Set([10]));
+  expect(updates).toHaveLength(2);
+  await resident.whenFilled();
+  expect(updates).toHaveLength(3);
+  expect(await resident.ensure(new Map([[11, new Set([glyphIn(41), glyphIn(loadedByFill)])]]))).toEqual(new Set());
+  expect(updates).toHaveLength(3);
+}, 20_000);
+
 test('a fill that fails logs and leaves the face loading as frames need it', async () => {
   const { resident, logs, updates } = fonts(undefined, [filling]);
   failing.add(chunkFile(41));
