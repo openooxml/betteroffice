@@ -1719,3 +1719,33 @@ fn table_width_patches_tbl_pr_and_keeps_rows_byte_identical() {
     );
     assert!(warnings.is_empty(), "{warnings:?}");
 }
+
+#[test]
+fn touched_paragraphs_come_sorted_and_the_same_in_every_session() {
+    let body: String = (1..=48).map(|id| paragraph(id, "abc")).collect();
+    let xml = format!(r#"<w:document {NS}><w:body>{body}</w:body></w:document>"#);
+    let touched = || {
+        let (doc, _) = open(&xml);
+        let end = doc.story_len("body").unwrap();
+        doc.delete_range(&ctx(), StoryRange::new("body", 1, end - 2))
+            .unwrap();
+        doc.paragraph_save_plan().touched_parts
+    };
+    let first = touched();
+    let second = touched();
+    let parts: Vec<&str> = first.iter().map(|(part, _)| part.as_str()).collect();
+    assert!(parts.windows(2).all(|pair| pair[0] < pair[1]), "{parts:?}");
+    let ordinals: Vec<u32> = first
+        .iter()
+        .find(|(part, _)| part == "word/document.xml")
+        .map(|(_, touched)| touched.clone())
+        .unwrap_or_default();
+    assert!(ordinals.len() >= 40, "{first:?}");
+    for (part, touched) in &first {
+        assert!(
+            touched.windows(2).all(|pair| pair[0] < pair[1]),
+            "{part}: {touched:?}"
+        );
+    }
+    assert_eq!(first, second);
+}
