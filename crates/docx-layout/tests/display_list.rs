@@ -1491,6 +1491,40 @@ fn text_watermark_emits_rotated_translucent_text_primitive() {
 }
 
 #[test]
+fn text_watermark_paints_its_face_unbolded_at_its_fill_opacity() {
+    for (semitransparent, opacity) in [(true, Some(0.5)), (false, None)] {
+        let input = serde_json::json!({
+            "measured": [],
+            "options": {},
+            "headersFooters": {
+                "variants": [],
+                "watermark": {
+                    "kind": "text",
+                    "text": "SAMPLE",
+                    "font": "Arial",
+                    "color": "#808080",
+                    "semitransparent": semitransparent,
+                    "layout": "diagonal"
+                }
+            },
+            "layout": { "pages": [
+                { "number": 1, "size": { "w": 816.0, "h": 1056.0 },
+                  "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 },
+                  "fragments": [] }
+            ] }
+        });
+        let json = build_display_list_json(&input.to_string()).expect("builds");
+        let dl: DisplayList = serde_json::from_str(&json).unwrap();
+        let Primitive::Text(t) = &dl.pages[0].primitives[0] else {
+            panic!("watermark should emit text");
+        };
+        assert_eq!(t.font, "400 180px Arial, sans-serif");
+        assert!(!t.text_outline);
+        assert_eq!(t.opacity.as_ref().and_then(|n| n.as_f64()), opacity);
+    }
+}
+
+#[test]
 fn picture_watermark_emits_decorative_washout_image_primitive() {
     let input = serde_json::json!({
         "measured": [],
