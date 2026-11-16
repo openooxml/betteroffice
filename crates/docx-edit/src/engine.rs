@@ -9398,6 +9398,10 @@ impl EngineSession {
                 .collect(),
             variants,
             watermark: regions.watermark.clone(),
+            header_watermarks: regions
+                .header_watermarks
+                .values()
+                .any(|watermark| watermark["kind"] == "text"),
         }))
     }
 

@@ -94,6 +94,8 @@ pub struct HeadersFootersIn {
     #[serde(default)]
     pub(crate) watermark: Option<WatermarkIn>,
     #[serde(default)]
+    header_watermarks: bool,
+    #[serde(default)]
     variants: Vec<HfVariantIn>,
 }
 
@@ -331,6 +333,7 @@ mod tests {
             header_distance: None,
             footer_distance: None,
             watermark: None,
+            header_watermarks: false,
             variants,
         }
     }
@@ -509,10 +512,11 @@ pub(crate) fn page_watermark<'a>(
     page_index: usize,
 ) -> Option<&'a WatermarkIn> {
     let text = |watermark: &WatermarkIn| matches!(watermark, WatermarkIn::Text(_));
-    let per_header = hf
-        .variants
-        .iter()
-        .any(|variant| variant.watermark.as_ref().is_some_and(text));
+    let per_header = hf.header_watermarks
+        || hf
+            .variants
+            .iter()
+            .any(|variant| variant.watermark.as_ref().is_some_and(text));
     if page.parity_filler == Some(true) || !per_header {
         return hf.watermark.as_ref();
     }

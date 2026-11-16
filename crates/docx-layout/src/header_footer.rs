@@ -100,6 +100,9 @@ pub struct HeaderFooterPayload {
     pub variants: Vec<HeaderFooterVariant>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watermark: Option<serde_json::Value>,
+    /// Some header part carries its own text watermark.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub header_watermarks: bool,
 }
 
 #[derive(Clone, Copy)]
