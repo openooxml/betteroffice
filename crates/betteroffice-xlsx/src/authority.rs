@@ -1420,6 +1420,14 @@ impl WorkbookAuthority {
         }
     }
 
+    pub(crate) fn inherit_cell_style_fonts(&mut self, source: &Stylesheet) {
+        if source.has_cell_style_fonts() && !self.base.styles.has_cell_style_fonts() {
+            Arc::make_mut(&mut self.base)
+                .styles
+                .inherit_cell_style_fonts(source);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn clear_xf_xml_markers_for_test(&mut self) {
         let mut value = serde_json::to_value(&self.base.styles).unwrap();

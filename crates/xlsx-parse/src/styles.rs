@@ -30,6 +30,22 @@ pub fn source_style_xml_markers(styles_xml: &[u8]) -> Result<Vec<u32>, ParseErro
         .collect())
 }
 
+/// the state a stylesheet restored without its source part lacks: the xf
+/// markup markers and the cell style fonts.
+#[doc(hidden)]
+pub fn source_style_state(styles_xml: &[u8]) -> Result<Stylesheet, ParseError> {
+    let (styles, _) = parse_stylesheet(Some(styles_xml), None)?;
+    let mut state = Stylesheet::default();
+    for index in 0..styles.cell_xfs.len() as u32 {
+        if styles.xf_has_extra_xml(index) {
+            state.mark_xf_extra_xml(index);
+        }
+    }
+    state.inherit_xf_xml_markers(&Stylesheet::default());
+    state.inherit_cell_style_fonts(&styles);
+    Ok(state)
+}
+
 /// build the stylesheet from the optional style and theme parts; either falls
 /// back to the model defaults.
 pub(crate) fn parse_stylesheet(

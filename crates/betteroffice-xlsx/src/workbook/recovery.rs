@@ -779,6 +779,7 @@ impl Workbook {
         .map_err(invalid)?;
         if let Some(styles) = &source_markers {
             authority.inherit_xf_xml_markers(styles);
+            authority.inherit_cell_style_fonts(styles);
         }
         pulse();
         if authority.full_precision_setting().is_none() {
@@ -792,6 +793,7 @@ impl Workbook {
         let mut model = checkpoint.calculation.apply(projection)?;
         if let Some(styles) = &source_markers {
             model.styles.inherit_xf_xml_markers(styles);
+            model.styles.inherit_cell_style_fonts(styles);
         }
         pulse();
         authority.set_snapshot_projection_valid(true);

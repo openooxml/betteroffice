@@ -852,7 +852,8 @@ pub struct Stylesheet {
     saved_plain: SavedPlain,
     #[serde(skip)]
     bound_plain: Option<u32>,
-    /// font index of each `cellStyleXfs` entry; not snapshotted.
+    /// font index of each `cellStyleXfs` entry; not snapshotted: a restore
+    /// reads it again from the source package.
     #[serde(skip)]
     cell_style_fonts: Vec<Option<u32>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -898,6 +899,7 @@ impl Stylesheet {
             && self.xfs_with_extra_xml == other.xfs_with_extra_xml
             && self.exact_style_indices == other.exact_style_indices
             && self.released_xfs == other.released_xfs
+            && self.cell_style_fonts == other.cell_style_fonts
     }
 }
 
@@ -1115,6 +1117,18 @@ impl Stylesheet {
     /// records the font index of each `cellStyleXfs` entry.
     pub fn set_cell_style_fonts(&mut self, fonts: Vec<Option<u32>>) {
         self.cell_style_fonts = fonts;
+    }
+
+    #[doc(hidden)]
+    pub fn has_cell_style_fonts(&self) -> bool {
+        !self.cell_style_fonts.is_empty()
+    }
+
+    #[doc(hidden)]
+    pub fn inherit_cell_style_fonts(&mut self, source: &Self) {
+        if self.cell_style_fonts.is_empty() {
+            self.cell_style_fonts.clone_from(&source.cell_style_fonts);
+        }
     }
 
     /// resolved fill for a cell style.
