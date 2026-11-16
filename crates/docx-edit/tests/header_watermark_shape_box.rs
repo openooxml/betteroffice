@@ -42,6 +42,10 @@ fn watermarked_document_with_header_tail(
 }
 
 fn painted_watermark(bytes: &[u8], font: u32) -> Value {
+    painted_page(bytes, font)["primitives"][0].clone()
+}
+
+fn painted_page(bytes: &[u8], font: u32) -> Value {
     let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
         .unwrap()
         .document
@@ -63,9 +67,9 @@ fn painted_watermark(bytes: &[u8], font: u32) -> Value {
             .unwrap(),
     )
     .unwrap();
-    let page = &display["pages"][0];
+    let page = display["pages"][0].clone();
     assert_eq!(page["watermarkPrimitiveCount"], json!(1));
-    page["primitives"][0].clone()
+    page
 }
 
 fn face(run: &Value) -> &str {
@@ -255,20 +259,40 @@ fn mark_centre(run: &Value) -> (f64, f64) {
     (painted.pivot_x, painted.baseline - 0.2 * em_px(run))
 }
 
+fn margin_box_rows(page: &Value) -> (f64, f64) {
+    let bounds = &page["contentBounds"];
+    let top = bounds["y"].as_f64().unwrap();
+    (top, top + bounds["height"].as_f64().unwrap())
+}
+
 #[test]
-fn text_watermark_centres_on_the_authored_margins_under_a_header_taller_than_the_top_margin() {
+fn text_watermark_moves_down_with_the_margin_box_a_header_taller_than_the_top_margin_pushes_out() {
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let shape = ["672pt", "58.5pt", "Calibri", "48pt", "Sample copy"];
     let tall = r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="288"/></w:rPr><w:t>Tall</w:t></w:r></w:p>"#;
-    let plain = mark_centre(&painted_watermark(&watermarked_document(shape), font));
-    let under_tall_header = mark_centre(&painted_watermark(
-        &watermarked_document_with_header_tail(shape, tall),
-        font,
-    ));
+    let plain_page = painted_page(&watermarked_document(shape), font);
+    let tall_page = painted_page(&watermarked_document_with_header_tail(shape, tall), font);
+    let (plain_top, plain_bottom) = margin_box_rows(&plain_page);
+    let (pushed_top, pushed_bottom) = margin_box_rows(&tall_page);
+    assert!((plain_top - 96.0).abs() < 0.01, "{plain_top}");
+    assert!((plain_bottom - 960.0).abs() < 0.01, "{plain_bottom}");
+    assert!((pushed_bottom - 960.0).abs() < 0.01, "{pushed_bottom}");
+    let overflow = pushed_top - plain_top;
+    assert!(overflow > 20.0, "{pushed_top}");
+    let plain = mark_centre(&plain_page["primitives"][0]);
+    let under_tall_header = mark_centre(&tall_page["primitives"][0]);
+    assert!((plain.1 - (plain_top + plain_bottom) / 2.0).abs() < 0.07, "{plain:?}");
     assert!(
-        (plain.0 - under_tall_header.0).abs() < 0.001
-            && (plain.1 - under_tall_header.1).abs() < 0.001,
+        (under_tall_header.1 - (pushed_top + pushed_bottom) / 2.0).abs() < 0.07,
+        "{under_tall_header:?} vs margin box {pushed_top}..{pushed_bottom}"
+    );
+    assert!(
+        (under_tall_header.1 - plain.1 - overflow / 2.0).abs() < 0.01,
+        "{plain:?} vs {under_tall_header:?}, overflow {overflow}"
+    );
+    assert!(
+        (plain.0 - under_tall_header.0).abs() < 0.001,
         "{plain:?} vs {under_tall_header:?}"
     );
 }
