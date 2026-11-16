@@ -31,6 +31,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
+import { packagedWasmError, packagedWasmInput } from '../../../../shared/office-session/readWasmAsset';
 import { pngFontReaders, workbookPngFonts } from './pngDisplayList';
 import { renderPng as renderEnginePng, type XlsxPngEngine } from './enginePng';
 import { pngDisplayList, resolvePngTarget, type ResolvedPngTarget } from './pngResolve';
@@ -784,9 +785,11 @@ export function initWasm(
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
   const png = options.png !== false;
+  let asset: URL | undefined;
+  const resolved = input ?? packagedWasmInput(asset = wasmAssetUrl(engineKind === 'native' || png));
   const source = engineKind === 'native' || (input === undefined && png)
-    ? input ?? wasmAssetUrl()
-    : compileWasmInput(input ?? wasmAssetUrl(png));
+    ? resolved
+    : compileWasmInput(resolved);
   initialization = initWasmModule({ module_or_path: source }).then(
     (output) => {
       engineMemory = output.memory;
@@ -794,7 +797,7 @@ export function initWasm(
     },
     (error: unknown) => {
       initialization = undefined;
-      throw toError(error);
+      throw asset && engineKind !== 'native' ? packagedWasmError(asset, error) : toError(error);
     }
   );
   return initialization;
