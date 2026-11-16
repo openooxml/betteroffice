@@ -134,7 +134,15 @@ fn resolve(
             .collect(),
         None => preset(name, styles),
     };
-    elements.retain(|element| element.format != Default::default() || spans(element));
+    let painting: Vec<_> = elements
+        .iter()
+        .filter(|element| element.format != Default::default())
+        .map(|element| element.kind)
+        .collect();
+    elements.retain(|element| {
+        element.format != Default::default()
+            || (spans(element) && !painting.contains(&element.kind))
+    });
     elements.sort_by_key(|element| element.kind);
     elements.dedup_by_key(|element| element.kind);
     elements
