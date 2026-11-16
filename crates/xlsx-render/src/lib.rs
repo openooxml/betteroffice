@@ -1118,7 +1118,7 @@ where
         }
         let rotation_box = rotated.then_some(text_box);
         let wrap = (wraps
-            && !stacked
+            && !rotated
             && matches!(cell.value, CellValue::Text { .. })
             && number_format.as_ref().is_none_or(|layout| {
                 layout
@@ -1127,9 +1127,7 @@ where
                     .all(|part| part.kind == xlsx_model::numfmt::FormatPartKind::Padding)
             }))
         .then(|| TextWrap {
-            width: rotation_deg.map_or(text_width, |deg| {
-                rotated_available_length(text_box.w, text_box.h, deg, size)
-            }),
+            width: text_width,
             line_height: geometry::row_pt_to_px(geometry::line_pitch_pt(
                 f64::from(size),
                 font_family.as_deref(),
@@ -2191,12 +2189,7 @@ impl<'a> FrameStyles<'a> {
                     a.v,
                     indent,
                     a.wrap_text || a.shrink_to_fit,
-                    a.wrap_text
-                        && !a.shrink_to_fit
-                        && matches!(
-                            resolve_text_rotation(a.text_rotation),
-                            (None, false) | (Some(90.0 | -90.0), false)
-                        ),
+                    wrap::wraps(a),
                     a.text_rotation,
                 )
             });
@@ -4091,26 +4084,6 @@ mod tests {
         let json = serde_json::to_value(cmd).unwrap();
         assert_eq!(json["rotationDeg"], 90.0);
         assert_eq!(json["rotationBox"]["w"], cell_box.w as f64);
-    }
-
-    #[test]
-    fn rotated_wrapping_text_wraps_along_its_direction() {
-        let dl = rotated_alignment_dl(
-            Alignment {
-                text_rotation: Some(90),
-                wrap_text: true,
-                ..Alignment::default()
-            },
-            10.0,
-            60.0,
-        );
-        let DrawCmd::Text {
-            rotation_box, wrap, ..
-        } = only_text(&dl)
-        else {
-            panic!("text")
-        };
-        assert_eq!(wrap.unwrap().width, rotation_box.unwrap().h);
     }
 
     #[test]
