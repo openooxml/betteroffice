@@ -904,8 +904,12 @@ where
         geom,
     );
 
-    for &(at, _) in &anchors {
-        let Some(fill) = &fx.xf_at(at).fill else {
+    let anchor_xfs: Vec<Arc<ResolvedXf>> = anchors
+        .iter()
+        .map(|&(at, _)| fx.xf_at(at).clone())
+        .collect();
+    for (&(at, _), xf) in anchors.iter().zip(&anchor_xfs) {
+        let Some(fill) = &xf.fill else {
             continue;
         };
         let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
@@ -972,8 +976,7 @@ where
         &merge_index,
         geom,
     );
-    for &(at, _) in &anchors {
-        let xf = fx.xf_at(at).clone();
+    for (&(at, _), xf) in anchors.iter().zip(&anchor_xfs) {
         let Some(border) = &xf.border else {
             continue;
         };
@@ -989,12 +992,12 @@ where
         );
     }
 
-    for &(at, cell) in &anchors {
+    for (&(at, cell), xf) in anchors.iter().zip(&anchor_xfs) {
         if changed_ghost_cells.contains(&(at.row, at.col)) {
             continue;
         }
         let hyperlink = link_index.at(at);
-        let xf = &**fx.xf_at(at);
+        let xf = &**xf;
         let primary = cell_display_text(xf, wb.date_system, cell, &text_color);
         let hyperlink_only = primary.is_none();
         let Some((text, color, parts)) = primary.or_else(|| {
@@ -2162,24 +2165,34 @@ impl<'a> FrameStyles<'a> {
     /// over the style of a table covering it.
     fn xf_at(&mut self, at: CellRef) -> &Arc<ResolvedXf> {
         let style = self.defaults.effective_style(at);
+        if self.tables.is_empty() {
+            return self.xf(style);
+        }
         let Some((table, mask)) = self.tables.locate(at) else {
             return self.xf(style);
         };
-        let key = (style.unwrap_or(0), table, mask);
-        if !self.table_xfs.contains_key(&key) {
-            let format = self.tables.format(table, mask);
-            let normal = self.xf(Some(0)).font.clone().unwrap_or_default();
-            let xf = self.xf(style).under_table(&format, &normal);
-            self.table_xfs.insert(key, Arc::new(xf));
-        }
-        &self.table_xfs[&key]
+        let (styles, xfs, tables) = (self.styles, &mut self.xfs, &self.tables);
+        self.table_xfs
+            .entry((style.unwrap_or(0), table, mask))
+            .or_insert_with(|| {
+                let format = tables.format(table, mask);
+                let normal = Self::cached(xfs, styles, Some(0)).font.clone();
+                let xf = Self::cached(xfs, styles, style);
+                Arc::new(xf.under_table(&format, &normal.unwrap_or_default()))
+            })
     }
 
     fn xf(&mut self, style: Option<u32>) -> &Arc<ResolvedXf> {
-        let styles = self.styles;
+        Self::cached(&mut self.xfs, self.styles, style)
+    }
+
+    fn cached<'x>(
+        xfs: &'x mut HashMap<u32, Arc<ResolvedXf>>,
+        styles: &Stylesheet,
+        style: Option<u32>,
+    ) -> &'x Arc<ResolvedXf> {
         let style = style.unwrap_or(0);
-        self.xfs
-            .entry(style)
+        xfs.entry(style)
             .or_insert_with(|| Arc::new(Self::resolve(styles, Some(style))))
     }
 
