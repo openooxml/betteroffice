@@ -76,6 +76,7 @@ fn frame_lines(wb: &Workbook, vp: &Viewport, print: Option<(&PrintMetrics, bool)
         SheetId(0),
         vp,
         &[],
+        &[],
         |chart| {
             Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
                 part: chart.part.clone(),
