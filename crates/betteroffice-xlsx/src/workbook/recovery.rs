@@ -2103,6 +2103,62 @@ mod tests {
         assert_eq!(restored.model, workbook.model);
     }
 
+    fn styled_table_model() -> WorkbookModel {
+        let mut styled = model();
+        styled.tables.push(xlsx_model::Table {
+            name: "Styled".into(),
+            sheet: SheetId(0),
+            range: CellRange::new(CellRef::new(0, 0), CellRef::new(2, 0)),
+            header_rows: 1,
+            totals_rows: 0,
+            columns: vec!["Year".into()],
+            style: vec![xlsx_model::TableStyleElement {
+                kind: xlsx_model::TableStyleElementType::HeaderRow,
+                size: 1,
+                format: xlsx_model::DifferentialFormat {
+                    bold: Some(true),
+                    fill: Some("#4472c4".into()),
+                    ..Default::default()
+                },
+            }],
+        });
+        styled
+    }
+
+    #[test]
+    fn recovery_keeps_table_styles() {
+        let workbook = Workbook::from_model(styled_table_model()).unwrap();
+        assert!(!workbook.model.tables[0].style.is_empty());
+        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+        let (restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+        assert_eq!(restored.model.tables, workbook.model.tables);
+    }
+
+    #[test]
+    fn recovery_refuses_a_plain_table_checkpoint_of_the_previous_codec() {
+        const PLAIN_TABLE_CODEC: u8 = 8;
+        let workbook = Workbook::from_model(styled_table_model()).unwrap();
+        let bytes = workbook.recovery_checkpoint(0, None).unwrap();
+        let mut reader = Reader::new(&bytes[41..]);
+        let collaborative = reader.bool().unwrap();
+        let metadata = reader.bytes().unwrap();
+        reader.bytes().unwrap();
+        let plain = workbook
+            .authority_for_test()
+            .encode_plain_table_recovery_state()
+            .unwrap();
+        let mut payload = Writer::new();
+        payload.bool(collaborative);
+        payload.bytes(metadata);
+        payload.bytes(&plain);
+        payload.raw(reader.rest());
+        let previous = framed(PLAIN_TABLE_CODEC, &payload.into_bytes());
+        assert!(matches!(
+            Workbook::restore_recovery_checkpoint(&previous),
+            Err(Error::InvalidRequest(message)) if message == "Unsupported workbook recovery codec"
+        ));
+    }
+
     fn with_capture_budget<T>(max: usize, f: impl FnOnce() -> T) -> T {
         struct Reset(usize);
 

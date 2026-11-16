@@ -1020,6 +1020,14 @@ impl WorkbookAuthority {
         Ok(self.recovery_state_parts()?.concat())
     }
 
+    /// The recovery state as releases before styled tables encoded it.
+    #[cfg(test)]
+    pub(crate) fn encode_plain_table_recovery_state(
+        &self,
+    ) -> crate::snapshot::SnapshotResult<Vec<u8>> {
+        Ok(self.recovery_state_parts()?.concat())
+    }
+
     /// The recovery state in pieces whose concatenation is the state, so the
     /// caller frames the Yrs update without copying it into a buffer of its own.
     pub(crate) fn recovery_state_parts(&self) -> crate::snapshot::SnapshotResult<[Vec<u8>; 3]> {
