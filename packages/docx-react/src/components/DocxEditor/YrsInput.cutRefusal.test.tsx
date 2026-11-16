@@ -99,15 +99,16 @@ test('a Shift+Delete pressed before a queued selection onto plain text settles c
   expect(refusals).toEqual([]);
 });
 
-test('a Shift+Delete whose queued selection holds only the hidden column-break unit writes nothing and deletes nothing', async () => {
+test('a Shift+Delete whose queued selection holds only the hidden column-break unit is refused and changes nothing', async () => {
   const { session, written, refusals, extendThenShiftDelete } = await mount();
   const charlie = session.paragraphs('body').find(paragraph => paragraph.text === 'CHARLIE')!;
   session.setSelection({ story: 'body', paraId: charlie.paraId, offset: 0 });
   const before = session.storySegments('body');
   await extendThenShiftDelete();
+  expect(refusals).toHaveLength(1);
+  expect(refusals[0]!.leftOut).toContain('columnBreak');
   expect(written).toEqual([]);
   expect(session.storySegments('body')).toEqual(before);
-  expect(refusals).toEqual([]);
 });
 
 test('a Shift+Delete pressed in a table cell while input is pending deletes the next character', async () => {

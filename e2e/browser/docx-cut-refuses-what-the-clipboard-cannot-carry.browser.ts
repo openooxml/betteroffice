@@ -403,7 +403,7 @@ test(`a Shift+Delete pressed before a queued selection onto plain text settles c
   await expect(page.getByText(CUT_REFUSED)).toHaveCount(0);
 });
 
-test(`a Shift+Delete whose queued selection holds only the hidden column-break unit changes nothing in the ${DEFAULT_EDITOR.name} editor`, async ({ page }, info) => {
+test(`a Shift+Delete whose queued selection holds only the hidden column-break unit is refused in the ${DEFAULT_EDITOR.name} editor`, async ({ page }, info) => {
   test.setTimeout(180_000);
   const kind = breakKind('column');
   const input = await open(page, DEFAULT_EDITOR.query, kind);
@@ -415,8 +415,33 @@ test(`a Shift+Delete whose queued selection holds only the hidden column-break u
   await page.keyboard.press('Home');
   await expect(page.locator(HIGHLIGHT)).toHaveCount(0);
   await extendThenShiftDeleteInOneTask(page);
-  await page.waitForTimeout(1000);
+  await expect(page.getByText(CUT_REFUSED)).toBeVisible({ timeout: 15_000 });
   expect(await clipboardText(page)).toBe(SENTINEL);
   expect(await savedParts(page, info, kind, 'after')).toEqual(before);
-  await expect(page.getByText(CUT_REFUSED)).toHaveCount(0);
+});
+
+test(`measure: an ordinary cut of only the hidden column-break unit in the ${DEFAULT_EDITOR.name} editor`, async ({ page }, info) => {
+  test.setTimeout(180_000);
+  const kind = breakKind('column');
+  const input = await open(page, DEFAULT_EDITOR.query, kind);
+  await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+  const before = await savedParts(page, info, kind, 'before');
+  await input.focus();
+  await page.keyboard.press('ControlOrMeta+End');
+  await expect(page.locator(CARET).first()).toBeVisible({ timeout: 10_000 });
+  await page.keyboard.press('Home');
+  await expect(page.locator(HIGHLIGHT)).toHaveCount(0);
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(500);
+  await expect.poll(() => page.locator(HIGHLIGHT).count(), { timeout: 5000 }).toBeGreaterThan(0).catch(() => undefined);
+  await page.keyboard.press('ControlOrMeta+x');
+  const notice = await page.getByText(CUT_REFUSED).waitFor({ state: 'visible', timeout: 2000 }).then(() => true, () => false);
+  const clipboard = (await clipboardText(page)) === SENTINEL ? 'sentinel' : 'changed';
+  const after = await savedParts(page, info, kind, 'after');
+  const columnBreak = after['word/document.xml']!.includes('w:type="column"') ? 'kept' : 'lost';
+  const doc = JSON.stringify(after) === JSON.stringify(before) ? 'same' : 'changed';
+  const outcome = notice && doc === 'same' ? 'refused'
+    : !notice && doc === 'same' && clipboard === 'sentinel' ? 'silent'
+      : columnBreak === 'lost' ? 'deleted' : 'other';
+  console.log(`CTRLX_HIDDEN notice=${notice ? 'y' : 'n'} clipboard=${clipboard} column_break=${columnBreak} doc=${doc} outcome=${outcome}`);
 });
