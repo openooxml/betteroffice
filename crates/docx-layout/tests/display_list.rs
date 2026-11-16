@@ -1478,7 +1478,7 @@ fn text_watermark_emits_rotated_translucent_text_primitive() {
     };
     assert_eq!(t.text, "DRAFT");
     assert_eq!(t.color, "#C0C0C0");
-    assert_eq!(t.font, "700 180px Calibri, sans-serif");
+    assert_eq!(t.font, "400 180px Calibri, sans-serif");
     assert_eq!(t.opacity.as_ref().and_then(|n| n.as_f64()), Some(0.5));
     assert_eq!(
         t.rotation_deg.as_ref().and_then(|n| n.as_f64()),
@@ -1609,7 +1609,7 @@ fn header_text_watermark_paints_on_the_pages_its_header_heads() {
     assert_eq!(t.color, "silver");
     assert_eq!(t.opacity.as_ref().map(n), Some(0.5));
     assert_eq!(t.rotation_deg.as_ref().map(n), Some(-45.0));
-    assert_eq!(t.font, "700 180px Liberation Serif, sans-serif");
+    assert_eq!(t.font, "400 180px Liberation Serif, sans-serif");
     assert_eq!(t.horizontal_scale, None);
     assert_eq!(n(&t.x), 73.2);
     assert_eq!(n(&t.baseline_y), 564.0);

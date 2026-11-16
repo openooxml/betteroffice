@@ -4214,12 +4214,8 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
     // primitive's geometry center is exactly the page center before rotation.
     let baseline = page.size.h / 2.0 + font_px * 0.2;
     let family = wm.font.as_deref().unwrap_or(DEFAULT_FONT_FAMILY);
-    let font = format!("700 {}px {}, sans-serif", px(font_px), family);
-    let opacity = if wm.semitransparent == Some(true) {
-        0.5
-    } else {
-        0.85
-    };
+    let font = format!("400 {}px {}, sans-serif", px(font_px), family);
+    let opacity = (wm.semitransparent == Some(true)).then(|| px(0.5));
     let rotation = if wm.layout.as_deref() == Some("diagonal") {
         Some(px(-45.0))
     } else {
@@ -4243,7 +4239,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         letter_spacing: None,
         word_spacing: None,
         rtl: None,
-        opacity: Some(px(opacity)),
+        opacity,
         rotation_deg: rotation,
         horizontal_scale: None,
         substitute_scale: None,
