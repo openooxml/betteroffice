@@ -40,5 +40,9 @@ export default defineConfig({
       },
     },
   },
-  worker: { format: "es" },
+  worker: {
+    format: "es",
+    // Keep worker chunks self-contained so WebKit never re-evaluates the worker entry via chunk back-imports.
+    rolldownOptions: { output: { codeSplitting: false } },
+  },
 });
