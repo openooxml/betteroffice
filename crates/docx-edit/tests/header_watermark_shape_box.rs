@@ -291,3 +291,8 @@ fn text_watermark_with_a_degenerate_box_uses_the_unsized_watermark() {
         assert_eq!(run, unsized_run, "{width} x {height}");
     }
 }
+
+#[test]
+fn text_watermark_with_a_positioned_mark_keeps_the_text_run() {
+    stretched_text_run("DRAFT\u{0301}");
+}
