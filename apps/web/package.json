@@ -20,7 +20,7 @@
     "lucide-react": "^1.23.0",
     "micromark": "^4.0.2",
     "micromark-extension-gfm": "^3.0.0",
-    "motion": "^12.42.2",
+    "motion": "^14.10.1",
     "next": "16.4.1",
     "radix-ui": "^1.6.1",
     "react": "^19.2.7",

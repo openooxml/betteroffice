@@ -365,6 +365,12 @@ pub fn segments_digest(segments: &[StorySegment]) -> u128 {
             tail[..rest.len()].copy_from_slice(rest);
             self.add(u64::from_le_bytes(tail) ^ ((bytes.len() as u64) << 56));
         }
+        fn write_usize(&mut self, i: usize) {
+            self.write(&(i as u64).to_le_bytes());
+        }
+        fn write_isize(&mut self, i: isize) {
+            self.write(&(i as i64).to_le_bytes());
+        }
         fn finish(&self) -> u64 {
             self.finish128() as u64
         }

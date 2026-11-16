@@ -27,3 +27,15 @@ export function readWasmSync(url: URL): Uint8Array | undefined {
     return undefined;
   }
 }
+
+export function packagedWasmInput(url: URL): Uint8Array | URL {
+  return readWasmSync(url) ?? url;
+}
+
+export function packagedWasmError(url: URL, error: unknown): Error {
+  const reason = error instanceof Error ? error.message : String(error);
+  return Object.assign(
+    new Error(`Could not load the packaged WASM asset ${url.href} (${reason}); pass its bytes or a compiled WebAssembly.Module to initWasm(input)`),
+    { cause: error }
+  );
+}
