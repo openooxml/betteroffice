@@ -4276,6 +4276,11 @@ fn fitted_text_watermark(
         || (text.trim().chars().count().max(1) as f64) * em * 0.62,
         |(_, _, advance)| *advance,
     );
+    let shaped = shaped.filter(|(font, _, _)| {
+        fonts.is_some_and(|fonts| {
+            text.chars().all(|ch| fonts.store.covers(*font, ch).unwrap_or(false))
+        })
+    });
     let glyphs = shaped.map(|(font, shaped, advance)| {
         let lead = (width - advance) / 2.0;
         let baseline = pivot_y + 0.2 * em - lead * sin;
