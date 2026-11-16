@@ -3,10 +3,16 @@ use xlsx_render::{DisplayList, DrawCmd, GridGeometry, Viewport, build_display_li
 
 const STYLES: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills><borders count="1"><border/></borders><cellXfs count="2"><xf fontId="0" fillId="0" borderId="0"/><xf fontId="0" fillId="2" borderId="0" applyFill="1"/></cellXfs><dxfs count="2"><dxf><font><b/><color rgb="FFFFFFFF"/></font><fill><patternFill><bgColor rgb="FF195A82"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFF78C"/></patternFill></fill></dxf></dxfs><tableStyles count="1"><tableStyle name="Budget" pivot="0" count="2"><tableStyleElement type="headerRow" dxfId="0"/><tableStyleElement type="firstRowStripe" dxfId="1"/></tableStyle></tableStyles></styleSheet>"#;
 
+const PLAIN_STRIPES: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellXfs><dxfs count="2"><dxf><fill><patternFill><bgColor rgb="FFFFF78C"/></patternFill></fill></dxf><dxf/></dxfs><tableStyles count="2"><tableStyle name="Unset" pivot="0" count="2"><tableStyleElement type="firstRowStripe" dxfId="0"/><tableStyleElement type="secondRowStripe" size="3"/></tableStyle><tableStyle name="Blank" pivot="0" count="2"><tableStyleElement type="firstRowStripe" dxfId="0"/><tableStyleElement type="secondRowStripe" dxfId="1" size="3"/></tableStyle></tableStyles></styleSheet>"#;
+
 /// A sheet holding table `A1:C5`: a header row, three data rows with `B2`
 /// using xf `b2_style`, and a fifth row the table counts as totals when
 /// `totals` is set.
 fn workbook(style_info: &str, b2_style: u32, totals: bool) -> Workbook {
+    workbook_with(STYLES, style_info, b2_style, totals)
+}
+
+fn workbook_with(styles: &str, style_info: &str, b2_style: u32, totals: bool) -> Workbook {
     let rels = |body: &str| {
         format!(
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#
@@ -35,7 +41,7 @@ fn workbook(style_info: &str, b2_style: u32, totals: bool) -> Workbook {
             rels(&(link("rId1", "worksheet", "worksheets/sheet1.xml")
                 + &link("rId2", "styles", "styles.xml"))),
         ),
-        ("xl/styles.xml", STYLES.to_string()),
+        ("xl/styles.xml", styles.to_string()),
         (
             "xl/worksheets/sheet1.xml",
             format!("<worksheet><sheetData>{rows}</sheetData></worksheet>"),
@@ -181,4 +187,20 @@ fn a_total_row_draws_its_element() {
     );
     assert_eq!(text(&list, "a5"), ("#ffffff".into(), true));
     assert_eq!(text(&list, "a4"), ("#ffffff".into(), false));
+}
+
+#[test]
+fn a_stripe_that_paints_nothing_keeps_its_size() {
+    for style in ["Unset", "Blank"] {
+        let wb = workbook_with(PLAIN_STRIPES, &info(style, true), 0, false);
+        let list = render(&wb);
+        assert_eq!(
+            fill_at(&wb, &list, CellRef::new(1, 1)),
+            Some("#fff78c".into()),
+            "{style}"
+        );
+        for row in 2..5 {
+            assert_eq!(fill_at(&wb, &list, CellRef::new(row, 1)), None, "{style} row {row}");
+        }
+    }
 }
