@@ -32,7 +32,9 @@ use xlsx_model::{
 
 use crate::package::PartContentType;
 use crate::tree::{Edit, Element, Part, Replacement, names_are_resolvable, parse_tree};
-use crate::xml::{find_part, format_code_text, resolve_part_path, xstring_attribute_value};
+use crate::xml::{
+    find_part, format_code_text, resolve_part_name, resolve_part_path, xstring_attribute_value,
+};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
@@ -743,7 +745,7 @@ pub(crate) fn sheet_drawing_paths(
         .iter()
         .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
     {
-        let path = resolve_part_path(sheet_dir, target);
+        let path = resolve_part_name(sheet_dir, target);
         if !paths.contains(&path) {
             paths.push(path);
         }

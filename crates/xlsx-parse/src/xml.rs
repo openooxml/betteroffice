@@ -226,6 +226,13 @@ pub(crate) fn resolve_part_path(base_dir: &str, target: &str) -> String {
     segs.join("/")
 }
 
+/// [`resolve_part_path`] in the form [`find_part`] matches, so one part has one name.
+pub(crate) fn resolve_part_name(base_dir: &str, target: &str) -> String {
+    resolve_part_path(base_dir, target)
+        .trim_start_matches('/')
+        .to_owned()
+}
+
 /// find a part by name, tolerating a leading slash on either side.
 pub(crate) fn find_part<'a>(parts: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
     let want = name.trim_start_matches('/');
