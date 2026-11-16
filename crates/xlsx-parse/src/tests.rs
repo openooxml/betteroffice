@@ -5973,6 +5973,78 @@ fn reads_the_chart_anchor_and_every_reference() {
     );
 }
 
+#[test]
+fn chart_colours_apply_their_drawingml_transforms() {
+    let fill = |color: &str| format!("<c:spPr><a:solidFill>{color}</a:solidFill></c:spPr>");
+    let series = |color: &str| {
+        format!(
+            r#"<c:ser>{}<c:val><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:val></c:ser>"#,
+            fill(color)
+        )
+    };
+    let part = format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart>{}{}{}{}{}"#,
+            r#"<c:axId val="1"/><c:axId val="2"/></c:barChart>"#,
+            r#"<c:catAx><c:axId val="1"/><c:txPr><a:bodyPr/><a:p><a:pPr><a:defRPr><a:solidFill>"#,
+            r#"<a:schemeClr val="tx1"><a:lumMod val="65000"/><a:lumOff val="35000"/></a:schemeClr>"#,
+            r#"</a:solidFill></a:defRPr></a:pPr></a:p></c:txPr><c:crossAx val="2"/></c:catAx>"#,
+            r#"<c:valAx><c:axId val="2"/><c:majorGridlines><c:spPr><a:ln w="9525"><a:solidFill>"#,
+            r#"<a:schemeClr val="tx1"><a:lumMod val="15000"/><a:lumOff val="85000"/></a:schemeClr>"#,
+            r#"</a:solidFill></a:ln></c:spPr></c:majorGridlines><c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart><c:spPr><a:solidFill><a:sysClr val="window" lastClr="FFFFFF">"#,
+            r#"<a:lumMod val="50000"/></a:sysClr></a:solidFill></c:spPr></c:chartSpace>"#,
+        ),
+        series(r#"<a:schemeClr val="accent1"><a:lumMod val="75000"/></a:schemeClr>"#),
+        series(r#"<a:schemeClr val="accent2"><a:shade val="50000"/></a:schemeClr>"#),
+        series(r#"<a:srgbClr val="4472C4"><a:tint val="40000"/></a:srgbClr>"#),
+        series(r#"<a:prstClr val="red"><a:alpha val="50000"/></a:prstClr>"#),
+        series(r#"<a:schemeClr val="accent1"/>"#),
+    );
+    let space = crate::chart_space(part.as_bytes(), &Default::default()).expect("chart");
+    let shared = |base: &str, transform| {
+        ooxml_drawingml::resolve_color_value_to_hex(Some(&ooxml_drawingml::ColorValue {
+            rgb: Some(base.to_owned()),
+            transforms: vec![transform],
+            ..Default::default()
+        }))
+        .unwrap()
+    };
+    let colors = space.plot_groups[0]
+        .series
+        .iter()
+        .map(|series| series.color.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        colors,
+        [
+            "#2F5597",
+            &shared("ED7D31", ooxml_drawingml::ColorTransform::Shade(0.5)),
+            &shared("4472C4", ooxml_drawingml::ColorTransform::Tint(0.4)),
+            "#FF000080",
+            "#4472C4",
+        ]
+    );
+    let axes = space.axis_list.as_ref().expect("axes");
+    assert_eq!(
+        axes[0].text.as_ref().and_then(|text| text.color.as_deref()),
+        Some("#595959")
+    );
+    assert_eq!(
+        axes[1]
+            .major_gridline_line
+            .as_ref()
+            .and_then(|line| line.color.as_deref()),
+        Some("#D9D9D9")
+    );
+    assert_eq!(
+        space.fill,
+        Some(ooxml_drawingml::chart::ChartFill::Solid {
+            color: "#808080".to_owned()
+        })
+    );
+}
+
 /// Saving a charted workbook whose references moved patches the chart part in
 /// place: the reference and the cache beside it move together, and every byte
 /// neither owns is left alone.
