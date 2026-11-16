@@ -179,6 +179,39 @@ mod tests {
         bytes
     }
 
+    /// A red GIF whose one frame starts at the second column of its screen.
+    fn red_gif_inset_by_one_column(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = b"GIF89a".to_vec();
+        bytes.extend(width.to_le_bytes());
+        bytes.extend(height.to_le_bytes());
+        bytes.extend([0x80, 0, 0, 255, 0, 0, 255, 0, 0, 0x2C]);
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(0u16.to_le_bytes());
+        bytes.extend((width - 1).to_le_bytes());
+        bytes.extend(height.to_le_bytes());
+        bytes.extend([0, 2]);
+        let pairs = (u32::from(width) - 1) * u32::from(height) / 2;
+        let (mut data, mut acc, mut bits) = (Vec::new(), 0u32, 0u32);
+        for code in (0..pairs).flat_map(|_| [4u32, 0, 0]).chain([5]) {
+            acc |= code << bits;
+            bits += 3;
+            while bits >= 8 {
+                data.push(acc as u8);
+                acc >>= 8;
+                bits -= 8;
+            }
+        }
+        if bits > 0 {
+            data.push(acc as u8);
+        }
+        for block in data.chunks(255) {
+            bytes.push(block.len() as u8);
+            bytes.extend(block);
+        }
+        bytes.extend([0, 0x3B]);
+        bytes
+    }
+
     fn paint(crop: ImageCrop, clip: Option<xlsx_render::Rect>, images: &ImageMap) -> Pixmap {
         let list = DisplayList {
             truncated: false,
@@ -240,6 +273,14 @@ mod tests {
             (rgb(&clipped, 2), rgb(&clipped, 37)),
             ((255, 255, 255), (0, 0, 255))
         );
+    }
+
+    #[test]
+    fn an_image_within_the_pixel_cap_decodes_inside_its_own_budget() {
+        let gif = red_gif_inset_by_one_column(4800, 4800);
+        let images = ImageMap::from([("xl/media/image1.png", gif.as_slice())]);
+        let pixmap = paint(ImageCrop::default(), None, &images);
+        assert_eq!(rgb(&pixmap, 20), (255, 0, 0));
     }
 
     #[test]
