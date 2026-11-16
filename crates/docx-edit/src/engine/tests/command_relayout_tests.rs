@@ -1659,4 +1659,5 @@ fn page_text_headings_are_reused_until_the_body_changes() {
     );
 }
 
+mod equal_column_pictures;
 mod resident_matches_fresh;
