@@ -4,7 +4,7 @@
 use super::*;
 use crate::seed::fixture::{Package, image, para, run};
 
-const PAGE: &str = r#"<w:pgSz w:w="5760" w:h="5760"/>"#;
+pub(super) const PAGE: &str = r#"<w:pgSz w:w="5760" w:h="5760"/>"#;
 const LEAD: &str = "00002600";
 const KEPT: &str = "00002700";
 const RELEASED_PAGES: usize = 4;
@@ -12,13 +12,13 @@ const RELEASED_DIGEST: u64 = 0x6302_e410_5b28_5ae3;
 const MARGIN_CHANGE_PAGES: usize = 4;
 const MARGIN_CHANGE_DIGEST: u64 = 0x1ac3_1774_7ad7_87fa;
 
-fn margins(left: u32, right: u32) -> String {
+pub(super) fn margins(left: u32, right: u32) -> String {
     format!(
         r#"<w:pgMar w:top="360" w:right="{right}" w:bottom="360" w:left="{left}" w:header="200" w:footer="200" w:gutter="0"/>"#
     )
 }
 
-fn first_section(left: u32, right: u32) -> String {
+pub(super) fn first_section(left: u32, right: u32) -> String {
     para(
         "00002000",
         &format!(
@@ -36,7 +36,7 @@ pub(super) fn words(count: usize, from: usize) -> String {
         .join(" ")
 }
 
-fn picture(x_px: u32, width_px: u32, height_px: u32) -> String {
+pub(super) fn picture(x_px: u32, width_px: u32, height_px: u32) -> String {
     let x = u64::from(x_px) * 9525;
     let cx = u64::from(width_px) * 9525;
     let cy = u64::from(height_px) * 9525;
