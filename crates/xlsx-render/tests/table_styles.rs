@@ -211,7 +211,12 @@ fn a_stripe_that_paints_nothing_keeps_its_size() {
     }
     let wb = workbook_with(PLAIN_STRIPES, &info("Duplicate", true), 0, false);
     let list = render(&wb);
-    for (row, fill) in [(1, Some("#fff78c")), (2, None), (3, Some("#fff78c")), (4, None)] {
+    for (row, fill) in [
+        (1, Some("#fff78c")),
+        (2, None),
+        (3, Some("#fff78c")),
+        (4, None),
+    ] {
         assert_eq!(
             fill_at(&wb, &list, CellRef::new(row, 1)),
             fill.map(String::from),
