@@ -18,12 +18,12 @@ fn margins(left: u32, right: u32) -> String {
     )
 }
 
-fn first_section() -> String {
+fn first_section(left: u32, right: u32) -> String {
     para(
         "00002000",
         &format!(
             "<w:pPr><w:sectPr>{PAGE}{}</w:sectPr></w:pPr>{}",
-            margins(360, 360),
+            margins(left, right),
             run("First section ends")
         ),
     )
@@ -49,6 +49,12 @@ fn picture(x_px: u32, width_px: u32, height_px: u32) -> String {
 /// picture's keep-lines paragraph and filler in a continuous section whose
 /// properties are `section`.
 fn package(picture_x: u32, lead: usize, section: &str) -> Vec<u8> {
+    package_below((360, 360), picture_x, lead, section)
+}
+
+/// [`package`] below a one-column section whose left and right margins are
+/// `first`.
+fn package_below(first: (u32, u32), picture_x: u32, lead: usize, section: &str) -> Vec<u8> {
     let kept = para(
         KEPT,
         &format!(
@@ -59,7 +65,7 @@ fn package(picture_x: u32, lead: usize, section: &str) -> Vec<u8> {
     );
     let body = format!(
         "{}{}{kept}{}{section}",
-        first_section(),
+        first_section(first.0, first.1),
         para(LEAD, &run(&words(lead, 0))),
         filler_paragraphs(0x2800, 30),
     );
@@ -77,6 +83,16 @@ pub(super) fn equal_columns(columns: u32, lead: usize) -> Vec<u8> {
     package(if columns == 2 { 212 } else { 152 }, lead, &section)
 }
 
+/// Three equal columns with the picture over the second one, in a continuous
+/// section whose side margins differ from the section above's.
+fn equal_columns_below_other_side_margins(lead: usize) -> Vec<u8> {
+    let section = format!(
+        r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}<w:cols w:num="3" w:space="360"/></w:sectPr>"#,
+        margins(360, 360)
+    );
+    package_below((720, 720), 152, lead, &section)
+}
+
 /// Three columns of equal widths that the section declares unequal, with the
 /// picture over the second one.
 fn unequal_marked_columns(lead: usize) -> Vec<u8> {
@@ -87,7 +103,8 @@ fn unequal_marked_columns(lead: usize) -> Vec<u8> {
     package(152, lead, &section)
 }
 
-/// A shape placed by page side and an inline picture in a continuous section.
+/// A shape placed by page side and an inline picture in a continuous section
+/// whose side margins differ from the section above's.
 fn page_side_shape_with_inline_picture() -> Vec<u8> {
     let section = format!(
         r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}</w:sectPr>"#,
@@ -95,7 +112,7 @@ fn page_side_shape_with_inline_picture() -> Vec<u8> {
     );
     let body = format!(
         "{}{}{}{}{section}",
-        first_section(),
+        first_section(720, 720),
         para("00002900", &format!("{}{INSIDE_SHAPE}", run("Anchor "))),
         para(
             "00002901",
@@ -270,7 +287,7 @@ fn picture_below_a_side_margin_change_keeps_its_layout() {
 fn wrapping_that_reaches_the_phase_limit_without_repeating_fails() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
-    let bytes = equal_columns(3, 60);
+    let bytes = equal_columns_below_other_side_margins(60);
     let engine = seeded_engine(9805, &bytes);
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
     let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
@@ -434,7 +451,7 @@ fn put_in_column(layout: &mut docx_layout::types::Layout, picture: &LayoutBlock,
 fn a_picture_pinned_on_the_last_wrap_phase_still_lays_out() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
-    let bytes = equal_columns(3, 60);
+    let bytes = equal_columns_below_other_side_margins(60);
     let engine = seeded_engine(9814, &bytes);
     let mut prepared = measured_body(&engine, &bytes);
     let picture = picture_index(&prepared.input).unwrap();
@@ -504,7 +521,7 @@ fn wrapping_that_keeps_moving_after_a_pin_ends_in_the_convergence_error() {
 fn flow_after_a_settled_picture_measures_as_a_fresh_layout_does() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
-    let bytes = equal_columns(3, 60);
+    let bytes = equal_columns_below_other_side_margins(60);
     let engine = seeded_engine(9807, &bytes);
     let mut prepared = measured_body(&engine, &bytes);
     let picture = picture_index(&prepared.input).unwrap();

@@ -608,6 +608,18 @@ fn region_table_measurement_frames<'a>(
     input: &LayoutInput,
     regions: &DocumentRegions,
 ) -> (Vec<f64>, Vec<TableMeasurementFrame>) {
+    let (widths, frames, _) = region_frames_with_side_margin_changes(blocks, input, regions);
+    (widths, frames)
+}
+
+/// [`region_table_measurement_frames`], plus whether each block lies in a
+/// continuous section whose start changed the content width between the side
+/// margins, or follows one in a run of continuous sections.
+fn region_frames_with_side_margin_changes<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    input: &LayoutInput,
+    regions: &DocumentRegions,
+) -> (Vec<f64>, Vec<TableMeasurementFrame>, Vec<bool>) {
     let blocks: Vec<_> = blocks.into_iter().collect();
     let region_indices = section_region_indices(blocks.iter().copied());
     let section_breaks: Vec<_> = blocks
@@ -660,8 +672,9 @@ fn region_table_measurement_frames<'a>(
     let mut previous_section = None;
     let mut placement_page_width = fallback_size.w;
     let mut placement_margins = &fallback_margins;
+    let mut side_margins_changed = false;
     let negative_flows = docx_layout::measure_blocks::negative_indent_float_flows(&blocks);
-    blocks
+    let (widths, (frames, side_margin_changes)): (Vec<_>, (Vec<_>, Vec<_>)) = blocks
         .into_iter()
         .zip(negative_flows)
         .map(|(block, negative_flow)| {
@@ -706,6 +719,8 @@ fn region_table_measurement_frames<'a>(
                 None => input.options.columns.as_ref(),
             };
             if previous_section != Some(section_index) {
+                let previous_content_width =
+                    placement_page_width - placement_margins.left - placement_margins.right;
                 let (placement_size, margins) = match section_break {
                     Some(section_break) => (
                         section
@@ -738,6 +753,18 @@ fn region_table_measurement_frames<'a>(
                 if let Some(margins) = margins {
                     placement_margins = margins;
                 }
+                let content_width =
+                    placement_page_width - placement_margins.left - placement_margins.right;
+                let break_type = match section_break {
+                    Some(section_break) => section_break.break_type,
+                    None => input.options.body_break_type,
+                };
+                let continuous = break_type == Some(SectionBreakType::Continuous)
+                    || section.and_then(|section| section.section_start)
+                        == Some(SectionBreakType::Continuous);
+                side_margins_changed = section_index > 0
+                    && continuous
+                    && (side_margins_changed || previous_content_width != content_width);
                 previous_section = Some(section_index);
             }
             let section_width_known = (regions.sections.is_empty()
@@ -763,9 +790,10 @@ fn region_table_measurement_frames<'a>(
                 section_index += 1;
                 column_index = 0;
             }
-            (width, table_frame)
+            (width, (table_frame, side_margins_changed))
         })
-        .unzip()
+        .unzip();
+    (widths, frames, side_margin_changes)
 }
 
 fn initial_float_page_geometry(
@@ -1502,7 +1530,7 @@ where
                     if section.break_type == Some(SectionBreakType::Continuous)
             )
         });
-    let has_continuous_floats = has_continuous
+    let has_continuous_pictures = has_continuous
         && input.measured.iter().any(|measured| {
             matches!(
                 &measured.block,
@@ -1510,7 +1538,7 @@ where
                     if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
             )
         });
-    if shapes.is_empty() && !has_unequal && !has_continuous_floats {
+    if shapes.is_empty() && !has_unequal && !has_continuous_pictures {
         return Ok(false);
     }
     let mut blocks = input
@@ -1518,8 +1546,33 @@ where
         .iter()
         .map(|measured| measured.block.clone())
         .collect::<Vec<_>>();
-    let (mut widths, mut table_wrap_frames) =
-        region_table_measurement_frames(blocks.iter(), input, regions);
+    let (mut widths, mut table_wrap_frames, side_margin_changes) =
+        region_frames_with_side_margin_changes(blocks.iter(), input, regions);
+    let pictures = if has_continuous_pictures {
+        input
+            .measured
+            .iter()
+            .enumerate()
+            .filter_map(|(index, measured)| match &measured.block {
+                LayoutBlock::Paragraph(paragraph)
+                    if side_margin_changes[index]
+                        && paragraph
+                            .runs
+                            .iter()
+                            .any(|run| matches!(run, Run::Image(_))) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let has_continuous_floats = !pictures.is_empty();
+    if shapes.is_empty() && !has_unequal && !has_continuous_floats {
+        return Ok(false);
+    }
     let geometry = initial_float_page_geometry(input, regions);
     let mut previous_offsets = BTreeMap::new();
     let mut previous_bands = BTreeMap::new();
@@ -1530,26 +1583,6 @@ where
             previous_bands.clone(),
             table_wrap_frames.clone(),
         )]
-    } else {
-        Vec::new()
-    };
-    let pictures = if has_continuous_floats {
-        input
-            .measured
-            .iter()
-            .enumerate()
-            .filter_map(|(index, measured)| match &measured.block {
-                LayoutBlock::Paragraph(paragraph)
-                    if paragraph
-                        .runs
-                        .iter()
-                        .any(|run| matches!(run, Run::Image(_))) =>
-                {
-                    Some(index)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
@@ -1599,7 +1632,7 @@ where
                 let LayoutBlock::Paragraph(paragraph) = &measured.block else {
                     continue;
                 };
-                if pinned.contains(&index) {
+                if pinned.contains(&index) || !side_margin_changes[index] {
                     continue;
                 }
                 if !paragraph
