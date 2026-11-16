@@ -265,9 +265,7 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     const align = cmd.align ?? 'left';
     ctx.textAlign = ALIGN_TO_TEXT_ALIGN[align];
     const lines = wrapLines(cmd.text, wrap.width, (run) => ctx.measureText(run).width);
-    const count = cmd.clip
-      ? wrappedLinesFitting(lines.length, wrap, fontSizePx(cmd), cmd.clip.h)
-      : lines.length;
+    const count = wrappedLinesFitting(lines.length, wrap, fontSizePx(cmd));
     lines.slice(0, count).forEach((line, index) => {
       paintRun(ctx, { ...cmd, y: wrappedLineY(cmd.y, index, count, wrap) }, line, cmd.x, align);
     });

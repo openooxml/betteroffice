@@ -25,13 +25,17 @@ pub enum TextValign {
 
 /// wrapped cell text: the painter breaks the run into lines no wider than
 /// `width` and steps their baselines by `line_height`, the block anchored by
-/// `valign` on the single-line baseline `y`.
+/// `valign` on the single-line baseline `y`. `fit_height` is the height the
+/// lines must fit in: the whole row or merged area of the cell plus one pixel,
+/// whatever part of it is in view. A list without it paints every line.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextWrap {
     pub width: f32,
     pub line_height: f32,
     pub valign: TextValign,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit_height: Option<f32>,
 }
 
 /// a rectangle in viewport-local pixels.
@@ -387,6 +391,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                     width: wrap.width * factor,
                     line_height: wrap.line_height * factor,
                     valign: wrap.valign,
+                    fit_height: wrap.fit_height.map(|height| height * factor),
                 }),
             },
         })
@@ -581,6 +586,7 @@ mod tests {
                         width: 8.0,
                         line_height: 18.0,
                         valign: TextValign::Top,
+                        fit_height: Some(17.0),
                     }),
                 },
             ],
@@ -686,6 +692,7 @@ mod tests {
                         width: 16.0,
                         line_height: 36.0,
                         valign: TextValign::Top,
+                        fit_height: Some(34.0),
                     })
                 );
                 assert_eq!(*x, 6.0);

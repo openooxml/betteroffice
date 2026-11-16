@@ -336,18 +336,20 @@ fn a_wrapped_cell_measures_its_lines_against_its_whole_row_or_merge() {
 
 #[test]
 fn only_the_wrapped_lines_that_fit_paint() {
-    let wrap = TextWrap {
+    let fitted = |line_height: f32, height: f32| TextWrap {
         width: 100.0,
-        line_height: 13.4,
+        line_height,
         valign: TextValign::Center,
+        fit_height: Some(height + 1.0),
     };
-    assert_eq!(wrap::wrapped_lines_fitting(3, &wrap, 9.0, 20.0), 1);
-    assert_eq!(wrap::wrapped_lines_fitting(3, &wrap, 9.0, 4.0), 1);
-    assert_eq!(wrap::wrapped_lines_fitting(3, &wrap, 9.0, 26.0), 2);
-    assert_eq!(wrap::wrapped_lines_fitting(2, &wrap, 9.0, 200.0), 2);
-    let title = TextWrap {
-        line_height: 53.6,
-        ..wrap
+    assert_eq!(wrap::wrapped_lines_fitting(3, &fitted(13.4, 20.0), 9.0), 1);
+    assert_eq!(wrap::wrapped_lines_fitting(3, &fitted(13.4, 4.0), 9.0), 1);
+    assert_eq!(wrap::wrapped_lines_fitting(3, &fitted(13.4, 26.0), 9.0), 2);
+    assert_eq!(wrap::wrapped_lines_fitting(2, &fitted(13.4, 200.0), 9.0), 2);
+    assert_eq!(wrap::wrapped_lines_fitting(2, &fitted(53.6, 107.3), 36.0), 2);
+    let unmeasured = TextWrap {
+        fit_height: None,
+        ..fitted(13.4, 4.0)
     };
-    assert_eq!(wrap::wrapped_lines_fitting(2, &title, 36.0, 107.3), 2);
+    assert_eq!(wrap::wrapped_lines_fitting(3, &unmeasured, 9.0), 3);
 }

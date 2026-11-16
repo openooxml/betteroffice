@@ -283,12 +283,8 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text(line, *font_size)
                     });
-                    let count = xlsx_render::wrap::wrapped_lines_fitting(
-                        lines.len(),
-                        wrap,
-                        *font_size,
-                        clip.h,
-                    );
+                    let count =
+                        xlsx_render::wrap::wrapped_lines_fitting(lines.len(), wrap, *font_size);
                     for (index, line) in lines.iter().take(count).enumerate() {
                         font::paint_text(
                             &mut pixmap,
@@ -1288,6 +1284,7 @@ mod tests {
             width: 30.0,
             line_height: 20.0,
             valign: xlsx_render::TextValign::Center,
+            fit_height: Some(21.0),
         };
         assert_eq!(
             ink_row_bands(&text("one two six", Some(wrap))),

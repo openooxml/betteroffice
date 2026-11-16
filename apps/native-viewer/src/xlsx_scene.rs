@@ -271,8 +271,7 @@ fn translate_command(
                 let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                     measure_text(line, *font_size)
                 });
-                let count =
-                    xlsx_render::wrap::wrapped_lines_fitting(lines.len(), wrap, *font_size, clip.h);
+                let count = xlsx_render::wrap::wrapped_lines_fitting(lines.len(), wrap, *font_size);
                 lines
                     .iter()
                     .take(count)
@@ -1013,6 +1012,7 @@ mod tests {
                 width: 30.0,
                 line_height: 14.0,
                 valign: TextValign::Top,
+                fit_height: None,
             });
         }
         for (command, width, overflow) in
@@ -1041,6 +1041,7 @@ mod tests {
                 width: 30.0,
                 line_height: 20.0,
                 valign: TextValign::Center,
+                fit_height: Some(21.0),
             });
         }
         let page = translate_sheet(&display_list(vec![wrapped])).unwrap();

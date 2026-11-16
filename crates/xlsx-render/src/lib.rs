@@ -1134,6 +1134,7 @@ where
                 print.map(|(m, _)| f64::from(m.dpi)),
             )),
             valign: resolve_rotation_valign(valign),
+            fit_height: Some(cell_box.h + 1.0),
         });
         let number_format = number_format.filter(|_| wrap.is_none());
         let (tx, ty, clip, number_format) = if stacked {

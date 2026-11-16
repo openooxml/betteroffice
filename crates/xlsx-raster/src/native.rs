@@ -404,12 +404,8 @@ pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Ve
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text_with_fonts(run.faces, run.stack, line, *font_size)
                     });
-                    let count = xlsx_render::wrap::wrapped_lines_fitting(
-                        lines.len(),
-                        wrap,
-                        *font_size,
-                        clip.h,
-                    );
+                    let count =
+                        xlsx_render::wrap::wrapped_lines_fitting(lines.len(), wrap, *font_size);
                     for (index, line) in lines.iter().take(count).enumerate() {
                         font::paint_text(
                             &mut pixmap,
