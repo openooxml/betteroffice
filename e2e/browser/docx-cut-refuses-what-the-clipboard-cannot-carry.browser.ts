@@ -360,3 +360,45 @@ test(`a cut of the first line after a column break selected with End and Shift+H
   expect(await savedParts(page, info, kind, 'after')).toEqual(before);
   expect(await clipboardText(page)).toBe(SENTINEL);
 });
+
+const extendThenShiftDeleteInOneTask = (page: Page) => pinnedEvaluate(page, (selector: string) => {
+  const input = document.querySelector(selector);
+  if (!input) throw new Error('The editor input is missing');
+  for (const key of ['ArrowRight', 'Delete']) {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey: true, bubbles: true, cancelable: true }));
+  }
+}, INPUT);
+
+test(`a Shift+Delete pressed before a queued selection onto a column break settles is refused in the ${DEFAULT_EDITOR.name} editor`, async ({ page }, info) => {
+  test.setTimeout(180_000);
+  const kind = breakKind('column');
+  const input = await open(page, DEFAULT_EDITOR.query, kind);
+  await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+  const before = await savedParts(page, info, kind, 'before');
+  await input.focus();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await expect(page.locator(CARET).first()).toBeVisible({ timeout: 10_000 });
+  await press(page, ['ArrowDown', 'Home', ...Array('BRAVO before '.length).fill('ArrowRight')]);
+  await expect(page.locator(HIGHLIGHT)).toHaveCount(0);
+  await extendThenShiftDeleteInOneTask(page);
+  await expect(page.getByText(CUT_REFUSED)).toBeVisible({ timeout: 15_000 });
+  expect(await savedParts(page, info, kind, 'after')).toEqual(before);
+  expect(await clipboardText(page)).toBe(SENTINEL);
+});
+
+test(`a Shift+Delete pressed before a queued selection onto plain text settles cuts it in the ${DEFAULT_EDITOR.name} editor`, async ({ page }, info) => {
+  test.setTimeout(180_000);
+  const kind = breakKind('column');
+  const input = await open(page, DEFAULT_EDITOR.query, kind);
+  await pinnedEvaluate(page, (text: string) => navigator.clipboard.writeText(text), SENTINEL);
+  await input.focus();
+  await page.keyboard.press('ControlOrMeta+End');
+  await expect(page.locator(CARET).first()).toBeVisible({ timeout: 10_000 });
+  await page.keyboard.press('Home');
+  await expect(page.locator(HIGHLIGHT)).toHaveCount(0);
+  await extendThenShiftDeleteInOneTask(page);
+  await expect.poll(() => clipboardText(page), { timeout: 15_000 }).toBe('C');
+  await expect.poll(async () => (await savedParts(page, info, kind, 'after'))['word/document.xml'], { timeout: 30_000 }).not.toContain('CHARLIE');
+  expect((await savedParts(page, info, kind, 'final'))['word/document.xml']).toContain('HARLIE');
+  await expect(page.getByText(CUT_REFUSED)).toHaveCount(0);
+});
