@@ -6396,6 +6396,77 @@ fn follows_a_drawing_named_by_two_relationships_once() {
     assert_eq!(charts[0].anchor_index, 0);
 }
 
+fn sheet_rels_naming_the_drawing(targets: &[String]) -> Vec<u8> {
+    let mut rels = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for (index, target) in targets.iter().enumerate() {
+        rels.push_str(&format!(
+            r#"<Relationship Id="rIdDrawing{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="{target}"/>"#
+        ));
+    }
+    rels.push_str("</Relationships>");
+    rels.into_bytes()
+}
+
+/// A package part name has no leading slash, so a target spelled with any
+/// number of them names the same drawing and is followed once.
+#[test]
+fn follows_a_drawing_named_with_extra_leading_slashes_once() {
+    let mut source = charted_package();
+    let drawing = String::from_utf8(DRAWING.to_vec()).unwrap().replace(
+        "</xdr:wsDr>",
+        r#"<xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp/><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#,
+    );
+    set_part(&mut source, "xl/drawings/drawing1.xml", drawing.as_bytes());
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&[
+            "../drawings/drawing1.xml".to_owned(),
+            "//xl/drawings/drawing1.xml".to_owned(),
+            "///xl/drawings/drawing1.xml".to_owned(),
+        ]),
+    );
+    let sheet = "xl/worksheets/sheet1.xml";
+    let drawings = crate::chart::sheet_drawings(&source, sheet).unwrap().len();
+    let anchors = crate::drawing_anchors::sheet_drawing_anchors(&source, sheet).len();
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let charts = parsed.workbook.sheets[0].charts.len();
+    let mut objects = 0;
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |_| {
+            objects += 1;
+            std::ops::ControlFlow::Continue(())
+        });
+    assert!(finished.is_continue());
+    assert_eq!(
+        (drawings, anchors, charts, objects),
+        (1, 1, 1, 2),
+        "drawing parts read, drawings with movable anchors, charts, inventoried objects"
+    );
+}
+
+/// One chart named through more spellings than the per-sheet chart cap is
+/// still one chart, so the workbook opens.
+#[test]
+fn opens_a_chart_whose_drawing_is_named_past_the_chart_cap() {
+    let mut source = charted_package();
+    let targets = (1..=crate::MAX_CHART_ANCHORS + 1)
+        .map(|slashes| format!("{}xl/drawings/drawing1.xml", "/".repeat(slashes)))
+        .collect::<Vec<_>>();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&targets),
+    );
+    assert_eq!(
+        parse_workbook_with_package(&source).map(|parsed| parsed.workbook.sheets[0].charts.len()),
+        Ok(1)
+    );
+}
+
 /// One drawing anchor cannot hold two frames, so a model carrying one source
 /// frame twice has nothing to write back: the pair would collapse into one on
 /// reopen. The save is refused instead.
