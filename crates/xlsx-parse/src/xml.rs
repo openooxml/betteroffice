@@ -233,6 +233,22 @@ pub(crate) fn resolve_part_name(base_dir: &str, target: &str) -> String {
         .to_owned()
 }
 
+#[cfg(test)]
+thread_local! {
+    static NAME_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn count_name_probe() {
+    NAME_PROBES.set(NAME_PROBES.get() + 1);
+}
+
+/// Part names looked at by duplicate checks since the last call.
+#[cfg(test)]
+pub(crate) fn take_name_probes() -> usize {
+    NAME_PROBES.replace(0)
+}
+
 /// find a part by name, tolerating a leading slash on either side.
 pub(crate) fn find_part<'a>(parts: &'a [(String, Vec<u8>)], name: &str) -> Option<&'a [u8]> {
     let want = name.trim_start_matches('/');

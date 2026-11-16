@@ -6467,6 +6467,76 @@ fn opens_a_chart_whose_drawing_is_named_past_the_chart_cap() {
     );
 }
 
+/// Opening a package parses a drawing and its relationships as often when
+/// several relationships name it as when one does.
+#[test]
+fn parses_a_drawing_named_by_several_relationships_as_often_as_one() {
+    let decodes = |source: &[(String, Vec<u8>)]| {
+        let bytes = |path: &str| {
+            source
+                .iter()
+                .find(|(name, _)| name == path)
+                .unwrap()
+                .1
+                .clone()
+        };
+        let drawing = bytes("xl/drawings/drawing1.xml");
+        let drawing_rels = bytes("xl/drawings/_rels/drawing1.xml.rels");
+        crate::tree::watch_decodes(&[&drawing, &drawing_rels]);
+        parse_workbook_with_package(source).unwrap();
+        crate::tree::watched_decodes()
+    };
+    let named_once = decodes(&charted_package());
+    let mut source = charted_package();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(
+            &[
+                "../drawings/drawing1.xml",
+                "../drawings/drawing1.xml",
+                "/xl/drawings/drawing1.xml",
+                "//xl/drawings/drawing1.xml",
+            ]
+            .map(str::to_owned),
+        ),
+    );
+    assert_eq!(
+        decodes(&source),
+        named_once,
+        "parses of the drawing, parses of its relationships"
+    );
+}
+
+/// Telling a new drawing name from one already seen costs one lookup per
+/// relationship, however many distinct drawings a sheet names.
+#[test]
+fn looks_up_each_drawing_name_once() {
+    let mut source = charted_package();
+    let targets = (0..2_000)
+        .map(|index| format!("../drawings/missing{index}.xml"))
+        .collect::<Vec<_>>();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&targets),
+    );
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    crate::xml::take_name_probes();
+    crate::chart::sheet_drawings(&source, "xl/worksheets/sheet1.xml").unwrap();
+    let chart_walk = crate::xml::take_name_probes();
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |_| std::ops::ControlFlow::Continue(()));
+    assert!(finished.is_continue());
+    let inventory = crate::xml::take_name_probes();
+    assert_eq!(
+        (chart_walk, inventory),
+        (2_000, 2_000),
+        "names looked up by the chart walk, by the inventory"
+    );
+}
+
 /// One drawing anchor cannot hold two frames, so a model carrying one source
 /// frame twice has nothing to write back: the pair would collapse into one on
 /// reopen. The save is refused instead.

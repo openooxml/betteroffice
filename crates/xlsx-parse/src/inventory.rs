@@ -278,7 +278,13 @@ impl PreservedPackage {
         let mut drawings: Vec<String> = Vec::new();
         for (_, kind, target) in &relationships {
             let path = resolve_part_name(directory, target);
-            if type_is(kind, "drawing") && !drawings.contains(&path) {
+            if type_is(kind, "drawing")
+                && !drawings.iter().any(|known| {
+                    #[cfg(test)]
+                    crate::xml::count_name_probe();
+                    *known == path
+                })
+            {
                 drawings.push(path);
             }
         }

@@ -746,7 +746,11 @@ pub(crate) fn sheet_drawing_paths(
         .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
     {
         let path = resolve_part_name(sheet_dir, target);
-        if !paths.contains(&path) {
+        if !paths.iter().any(|known| {
+            #[cfg(test)]
+            crate::xml::count_name_probe();
+            *known == path
+        }) {
             paths.push(path);
         }
     }
