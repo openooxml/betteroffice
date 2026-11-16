@@ -68,7 +68,7 @@ pub use save_oracle::with_legacy_save_path;
 #[cfg(feature = "test-counters")]
 pub use styles::legacy_style_reads;
 #[doc(hidden)]
-pub use styles::{source_style_state, source_style_xml_markers};
+pub use styles::source_style_xml_markers;
 #[doc(hidden)]
 pub use write::{FragmentFailure, FragmentFailureReason, FragmentKind, PreservedFragmentFailure};
 pub use write::{

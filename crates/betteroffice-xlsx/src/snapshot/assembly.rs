@@ -2036,15 +2036,12 @@ impl WorkbookSnapshotBuilder {
             return Err(error("snapshot calculation precision differs"));
         }
         authority.restore_full_precision(model.full_precision);
-        if let Some(source) = &source_container
+        if !model.styles.has_xf_xml_markers()
+            && let Some(source) = &source_container
             && let Some(styles) = super::source_style_xml_markers(source.as_bytes())
         {
-            if !model.styles.has_xf_xml_markers() {
-                model.styles.inherit_xf_xml_markers(&styles);
-                authority.inherit_xf_xml_markers(&styles);
-            }
-            model.styles.inherit_cell_style_fonts(&styles);
-            authority.inherit_cell_style_fonts(&styles);
+            model.styles.inherit_xf_xml_markers(&styles);
+            authority.inherit_xf_xml_markers(&styles);
         }
         let source_package = if package_present {
             let facts = self

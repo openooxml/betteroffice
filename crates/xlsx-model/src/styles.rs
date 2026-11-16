@@ -852,10 +852,6 @@ pub struct Stylesheet {
     saved_plain: SavedPlain,
     #[serde(skip)]
     bound_plain: Option<u32>,
-    /// font index of each `cellStyleXfs` entry; not snapshotted: a restore
-    /// reads it again from the source package.
-    #[serde(skip)]
-    cell_style_fonts: Vec<Option<u32>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     format_sources: BTreeMap<u32, Option<u32>>,
     #[serde(skip)]
@@ -899,7 +895,6 @@ impl Stylesheet {
             && self.xfs_with_extra_xml == other.xfs_with_extra_xml
             && self.exact_style_indices == other.exact_style_indices
             && self.released_xfs == other.released_xfs
-            && self.cell_style_fonts == other.cell_style_fonts
     }
 }
 
@@ -1043,7 +1038,6 @@ impl Stylesheet {
             dxfs: _,
             saved_plain: _,
             bound_plain: _,
-            cell_style_fonts: _,
             format_sources: _,
             xfs_with_extra_xml: _,
             exact_style_indices: _,
@@ -1099,36 +1093,6 @@ impl Stylesheet {
     pub fn font_for(&self, style_index: u32) -> Option<&Font> {
         let idx = self.xf(style_index)?.font?;
         self.fonts.get(idx as usize)
-    }
-
-    /// the font of the cell style an xf inherits from, or the first font when
-    /// the workbook names none.
-    pub fn cell_style_font_for(&self, style_index: u32) -> Option<&Font> {
-        let parent = self.xf(style_index).and_then(|xf| xf.xf_id).unwrap_or(0);
-        let font = self
-            .cell_style_fonts
-            .get(parent as usize)
-            .copied()
-            .flatten()
-            .unwrap_or(0);
-        self.fonts.get(font as usize)
-    }
-
-    /// records the font index of each `cellStyleXfs` entry.
-    pub fn set_cell_style_fonts(&mut self, fonts: Vec<Option<u32>>) {
-        self.cell_style_fonts = fonts;
-    }
-
-    #[doc(hidden)]
-    pub fn has_cell_style_fonts(&self) -> bool {
-        !self.cell_style_fonts.is_empty()
-    }
-
-    #[doc(hidden)]
-    pub fn inherit_cell_style_fonts(&mut self, source: &Self) {
-        if self.cell_style_fonts.is_empty() {
-            self.cell_style_fonts.clone_from(&source.cell_style_fonts);
-        }
     }
 
     /// resolved fill for a cell style.

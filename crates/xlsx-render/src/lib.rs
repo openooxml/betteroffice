@@ -27,8 +27,8 @@ use xlsx_model::styles::{BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{
-    CellRange, CellRef, Color, DifferentialFormat, Fill, Font, HAlign, MAX_COLS, MAX_ROWS,
-    SheetChart, SheetId, Table, VAlign, Workbook,
+    CellRange, CellRef, DifferentialFormat, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId,
+    Table, VAlign, Workbook,
 };
 
 use table_style::SheetTables;
@@ -2027,15 +2027,9 @@ struct ResolvedXf {
 }
 
 impl ResolvedXf {
-    /// This xf over a table style: the fill and each bold or italic facet the
-    /// cell leaves as the normal style has, and a font colour that is not the
-    /// cell's own, take the table's.
-    fn under_table(
-        &self,
-        table: &DifferentialFormat,
-        normal: &ResolvedFont,
-        own_color: bool,
-    ) -> Self {
+    /// This xf over a table style: each fill and font facet the cell leaves as
+    /// the normal style has takes the table's.
+    fn under_table(&self, table: &DifferentialFormat, normal: &ResolvedFont) -> Self {
         let mut xf = self.clone();
         if xf.fill.is_none() {
             xf.fill = table
@@ -2044,7 +2038,9 @@ impl ResolvedXf {
                 .map(|color| ResolvedFill::Solid(color.into()));
         }
         let font = xf.font.get_or_insert_with(ResolvedFont::default);
-        if !own_color && let Some(color) = &table.font_color {
+        if (font.color.is_none() || font.color == normal.color)
+            && let Some(color) = &table.font_color
+        {
             font.color = Some(color.as_str().into());
         }
         if font.bold == normal.bold {
@@ -2055,11 +2051,6 @@ impl ResolvedXf {
         }
         xf
     }
-}
-
-/// a font's colour as written, `None` when automatic.
-fn color_spec(font: &Font) -> Option<&Color> {
-    font.color.as_ref().filter(|color| **color != Color::Auto)
 }
 
 #[derive(Clone, PartialEq)]
@@ -2186,12 +2177,8 @@ impl<'a> FrameStyles<'a> {
             .or_insert_with(|| {
                 let format = tables.format(table, mask);
                 let normal = Self::cached(xfs, styles, Some(0)).font.clone();
-                let index = style.unwrap_or(0);
-                let own_color = styles.font_for(index).is_some_and(|font| {
-                    Some(color_spec(font)) != styles.cell_style_font_for(index).map(color_spec)
-                });
                 let xf = Self::cached(xfs, styles, style);
-                Arc::new(xf.under_table(&format, &normal.unwrap_or_default(), own_color))
+                Arc::new(xf.under_table(&format, &normal.unwrap_or_default()))
             })
     }
 

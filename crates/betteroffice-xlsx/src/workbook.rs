@@ -126,7 +126,13 @@ fn source_style_xml_markers(source: &[u8]) -> Option<Stylesheet> {
         })
         .ok()?;
     let (_, bytes) = parts.first()?;
-    xlsx_parse::source_style_state(bytes).ok()
+    let markers = xlsx_parse::source_style_xml_markers(bytes).ok()?;
+    let mut styles = Stylesheet::default();
+    for index in markers {
+        styles.mark_xf_extra_xml(index);
+    }
+    styles.inherit_xf_xml_markers(&Stylesheet::default());
+    Some(styles)
 }
 
 #[must_use = "dropping the subscription stops update delivery"]

@@ -30,22 +30,6 @@ pub fn source_style_xml_markers(styles_xml: &[u8]) -> Result<Vec<u32>, ParseErro
         .collect())
 }
 
-/// the state a stylesheet restored without its source part lacks: the xf
-/// markup markers and the cell style fonts.
-#[doc(hidden)]
-pub fn source_style_state(styles_xml: &[u8]) -> Result<Stylesheet, ParseError> {
-    let (styles, _) = parse_stylesheet(Some(styles_xml), None)?;
-    let mut state = Stylesheet::default();
-    for index in 0..styles.cell_xfs.len() as u32 {
-        if styles.xf_has_extra_xml(index) {
-            state.mark_xf_extra_xml(index);
-        }
-    }
-    state.inherit_xf_xml_markers(&Stylesheet::default());
-    state.inherit_cell_style_fonts(&styles);
-    Ok(state)
-}
-
 /// build the stylesheet from the optional style and theme parts; either falls
 /// back to the model defaults.
 pub(crate) fn parse_stylesheet(
@@ -171,7 +155,6 @@ fn parse_style_pools(
     let mut default_fills = Vec::new();
     let mut default_borders = Vec::new();
     let mut plain_xfs = Vec::new();
-    let mut cell_style_fonts = Vec::new();
 
     loop {
         let event = next_event(&mut reader, &mut buf, &mut physical_depth)?;
@@ -382,10 +365,6 @@ fn parse_style_pools(
                         ed.color = parse_color(&e)?;
                     }
                 }
-                b"xf" if section == Section::CellStyleXfs && (unfiltered || depth == 3) => {
-                    cap(cell_style_fonts.len())?;
-                    cell_style_fonts.push(index_u32(&e, b"fontId")?);
-                }
                 b"xf" if section == Section::CellXfs && (unfiltered || depth == 3) => {
                     let (parsed, flags) = parse_xf(&e)?;
                     xf = Some(parsed);
@@ -498,7 +477,6 @@ fn parse_style_pools(
         fill: first_default(&default_fills),
         border: first_default(&default_borders),
     });
-    ss.set_cell_style_fonts(cell_style_fonts);
     Ok((ss, legacy_cell_xfs))
 }
 
