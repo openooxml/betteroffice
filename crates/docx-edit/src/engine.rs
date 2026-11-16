@@ -10626,12 +10626,13 @@ impl EngineSession {
         };
         let measurement_patch =
             measurement_patch.filter(|_| floats.is_some() && lowered_from.is_none());
-        if floats.is_some_and(|geometry| {
-            widths.first() != previous_widths.first()
-                || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
-                || side_margin_changes != pagination.measured_side_margin_changes.as_slice()
-                || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
-        }) {
+        if side_margin_changes != pagination.measured_side_margin_changes.as_slice()
+            || floats.is_some_and(|geometry| {
+                widths.first() != previous_widths.first()
+                    || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
+                    || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
+            })
+        {
             return Ok(None);
         }
         let contexts = normalization_contexts(regions, measurement, &pagination.retain_matches)?;
@@ -11075,12 +11076,13 @@ impl EngineSession {
         };
         let measurement_patch =
             measurement_patch.filter(|_| floats.is_some() && lowered_from.is_none());
-        if floats.is_some_and(|geometry| {
-            widths.first() != previous_widths.first()
-                || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
-                || side_margin_changes != pagination.measured_side_margin_changes.as_slice()
-                || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
-        }) {
+        if side_margin_changes != pagination.measured_side_margin_changes.as_slice()
+            || floats.is_some_and(|geometry| {
+                widths.first() != previous_widths.first()
+                    || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
+                    || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
+            })
+        {
             return Ok(None);
         }
         let previous_fingerprints = &pagination.block_fingerprints;
