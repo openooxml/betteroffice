@@ -155,6 +155,7 @@ fn parse_style_pools(
     let mut default_fills = Vec::new();
     let mut default_borders = Vec::new();
     let mut plain_xfs = Vec::new();
+    let mut cell_style_fonts = Vec::new();
 
     loop {
         let event = next_event(&mut reader, &mut buf, &mut physical_depth)?;
@@ -365,6 +366,10 @@ fn parse_style_pools(
                         ed.color = parse_color(&e)?;
                     }
                 }
+                b"xf" if section == Section::CellStyleXfs && (unfiltered || depth == 3) => {
+                    cap(cell_style_fonts.len())?;
+                    cell_style_fonts.push(index_u32(&e, b"fontId")?);
+                }
                 b"xf" if section == Section::CellXfs && (unfiltered || depth == 3) => {
                     let (parsed, flags) = parse_xf(&e)?;
                     xf = Some(parsed);
@@ -477,6 +482,7 @@ fn parse_style_pools(
         fill: first_default(&default_fills),
         border: first_default(&default_borders),
     });
+    ss.set_cell_style_fonts(cell_style_fonts);
     Ok((ss, legacy_cell_xfs))
 }
 

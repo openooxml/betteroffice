@@ -852,6 +852,9 @@ pub struct Stylesheet {
     saved_plain: SavedPlain,
     #[serde(skip)]
     bound_plain: Option<u32>,
+    /// font index of each `cellStyleXfs` entry; not snapshotted.
+    #[serde(skip)]
+    cell_style_fonts: Vec<Option<u32>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     format_sources: BTreeMap<u32, Option<u32>>,
     #[serde(skip)]
@@ -1038,6 +1041,7 @@ impl Stylesheet {
             dxfs: _,
             saved_plain: _,
             bound_plain: _,
+            cell_style_fonts: _,
             format_sources: _,
             xfs_with_extra_xml: _,
             exact_style_indices: _,
@@ -1093,6 +1097,24 @@ impl Stylesheet {
     pub fn font_for(&self, style_index: u32) -> Option<&Font> {
         let idx = self.xf(style_index)?.font?;
         self.fonts.get(idx as usize)
+    }
+
+    /// the font of the cell style an xf inherits from, or the first font when
+    /// the workbook names none.
+    pub fn cell_style_font_for(&self, style_index: u32) -> Option<&Font> {
+        let parent = self.xf(style_index).and_then(|xf| xf.xf_id).unwrap_or(0);
+        let font = self
+            .cell_style_fonts
+            .get(parent as usize)
+            .copied()
+            .flatten()
+            .unwrap_or(0);
+        self.fonts.get(font as usize)
+    }
+
+    /// records the font index of each `cellStyleXfs` entry.
+    pub fn set_cell_style_fonts(&mut self, fonts: Vec<Option<u32>>) {
+        self.cell_style_fonts = fonts;
     }
 
     /// resolved fill for a cell style.
