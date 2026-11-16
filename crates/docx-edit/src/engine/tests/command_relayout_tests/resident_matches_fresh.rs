@@ -652,3 +652,97 @@ fn fresh_sessions_agree_on_every_typed_state() {
         "generated typing",
     );
 }
+
+/// A whitespace-only paragraph ending in `breaks`, after a two-cell table or
+/// after a plain paragraph, between plain ones.
+fn blank_paragraph_package(after_table: bool, breaks: &[&str]) -> Vec<u8> {
+    use lowering_fixture::{para, run};
+    let breaks: String = breaks
+        .iter()
+        .map(|kind| format!(r#"<w:br w:type="{kind}"/>"#))
+        .collect();
+    let lead = if after_table {
+        table(&[[
+            para("00004101", &run("North")),
+            para("00004102", &run("South")),
+        ]])
+    } else {
+        para("00004001", &run("Opening words."))
+    };
+    let body = [
+        para("00004000", &run("Before the blank paragraph.")),
+        lead,
+        format!(
+            r#"<w:p w14:paraId="00004002"><w:r><w:t xml:space="preserve">   </w:t>{breaks}</w:r></w:p>"#
+        ),
+        para("00004003", &run("After the breaks.")),
+        para("00004004", &run("Closing words.")),
+    ]
+    .concat();
+    package(&body)
+}
+
+const BLANK_TYPING: [(At, Option<&str>); 5] = [
+    (At::Body("00004002", 0), Some("x")),
+    (At::BodyEnd("00004002", 0), Some("y")),
+    (At::Body("00004002", 0), None),
+    (At::BodyEnd("00004002", 1), None),
+    (At::Body("00004002", 1), Some(" ")),
+];
+
+/// Types into the blank paragraph with local lowering on and compares the
+/// resident layout with a fresh one after every keystroke.
+fn type_into_blank_paragraph(name: &str, client_id: u64, bytes: Vec<u8>) {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let engine = seeded_engine(client_id, &bytes);
+    engine.set_local_lowering(true);
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+    resident_matches_fresh(&host, &format!("{name}, opened"));
+    for (step, key) in BLANK_TYPING.into_iter().enumerate() {
+        let key = typing_key(&engine, key);
+        host.command(&key.story, key.start, key.end, key.text);
+        resident_matches_fresh(
+            &host,
+            &format!("{name}, keystroke {} [{}]", step + 1, key.describe()),
+        );
+    }
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_after_a_table_before_column_and_page_breaks_matches_fresh() {
+    type_into_blank_paragraph(
+        "table, column and page breaks",
+        9861,
+        blank_paragraph_package(true, &["column", "page"]),
+    );
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_after_a_table_before_a_page_break_matches_a_fresh_layout() {
+    type_into_blank_paragraph(
+        "table, page break",
+        9862,
+        blank_paragraph_package(true, &["page"]),
+    );
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_after_a_table_before_a_column_break_matches_a_fresh_layout() {
+    type_into_blank_paragraph(
+        "table, column break",
+        9863,
+        blank_paragraph_package(true, &["column"]),
+    );
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_before_column_and_page_breaks_matches_a_fresh_layout() {
+    type_into_blank_paragraph(
+        "paragraph, column and page breaks",
+        9864,
+        blank_paragraph_package(false, &["column", "page"]),
+    );
+}
