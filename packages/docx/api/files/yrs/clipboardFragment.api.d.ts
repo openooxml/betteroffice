@@ -70,10 +70,14 @@ export interface DocxClipboardParagraph {
 export interface DocxClipboardFragment {
     paragraphs: DocxClipboardParagraph[];
 }
-/** @internal What a copy writes: plain text plus a fragment, null when the selection exceeds the fragment limits. */
+/**
+ * @internal What a copy writes: plain text plus a fragment, null when the selection exceeds the fragment limits.
+ * `leftOut` names the selected embed kinds the slice drops or keeps only as text.
+ */
 export interface DocxClipboardSlice {
     text: string;
     fragment: DocxClipboardFragment | null;
+    leftOut?: string[];
 }
 /** @internal */
 export declare function clipboardFragmentHasPictures(fragment: DocxClipboardFragment | null): boolean;

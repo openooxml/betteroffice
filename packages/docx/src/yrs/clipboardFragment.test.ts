@@ -723,7 +723,7 @@ test('picture copy rejects unrepresentable visible embeds in either order', () =
       const other = embedSegment(kind);
       const reader = fakeReader({ body: first ? [image, other] : [other, image] }, {});
       expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
-      expect(readClipboardSlice(reader, { story: 'body', from: first ? 1 : 0, to: first ? 2 : 1 })).toEqual({ text: '', fragment: null });
+      expect(readClipboardSlice(reader, { story: 'body', from: first ? 1 : 0, to: first ? 2 : 1 })).toEqual({ text: '', fragment: null, leftOut: [kind] });
     }
   }
 });
@@ -821,7 +821,7 @@ test('picture copy rejects content controls beyond the nested text depth limit',
   const reader = fakeReader({ body: [embedSegment('image', { src: 'data:image/png;base64,AA==' }), embedSegment('sdt', payload)] }, {});
   expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
   expect(readClipboardSlice(reader, { story: 'body', from: 1, to: 2 })).toEqual({
-    text: 'deep', fragment: { paragraphs: [{ text: 'deep', runs: [{ text: 'deep', format: { other: {} } }] }] },
+    text: 'deep', fragment: { paragraphs: [{ text: 'deep', runs: [{ text: 'deep', format: { other: {} } }] }] }, leftOut: ['sdt'],
   });
 });
 
