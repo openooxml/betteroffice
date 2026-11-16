@@ -12,8 +12,9 @@ use crate::tree::{Element, parse_tree};
 use crate::xml::{find_part, resolve_part_path};
 
 /// Every picture the drawings of the sheet stored at `sheet_path` anchor directly and do not hide,
-/// in drawing then anchor order. `parts` must carry the sheet's relationship part, its drawing
-/// parts and their relationship parts; one that is missing or does not read contributes nothing.
+/// in drawing then anchor order, at most [`MAX_CHART_ANCHORS`] of them. `parts` must carry the
+/// sheet's relationship part, its drawing parts and their relationship parts; one that is missing
+/// or does not read contributes nothing.
 pub fn sheet_pictures(parts: &[(String, Vec<u8>)], sheet_path: &str) -> Vec<SheetPicture> {
     let Ok(drawings) = sheet_drawings(parts, sheet_path) else {
         return Vec::new();
@@ -65,6 +66,9 @@ pub fn sheet_pictures(parts: &[(String, Vec<u8>)], sheet_path: &str) -> Vec<Shee
                 anchor,
                 crop: fill.child("srcRect").map(source_rect).unwrap_or_default(),
             });
+            if pictures.len() >= MAX_CHART_ANCHORS {
+                return pictures;
+            }
         }
     }
     pictures
