@@ -85,13 +85,17 @@ fn resolve(
     {
         Some((_, elements)) => elements
             .iter()
-            .map(|&(kind, dxf, size)| TableStyleElement {
-                kind,
-                size,
-                format: dxf
-                    .and_then(|dxf| styles.dxfs.get(dxf as usize))
-                    .cloned()
-                    .unwrap_or_default(),
+            .map(|&(kind, dxf, size)| {
+                #[cfg(test)]
+                tests::VISITS.with(|visits| visits.set(visits.get() + 1));
+                TableStyleElement {
+                    kind,
+                    size,
+                    format: dxf
+                        .and_then(|dxf| styles.dxfs.get(dxf as usize))
+                        .cloned()
+                        .unwrap_or_default(),
+                }
             })
             .collect(),
         None => preset(&info.name, styles),
@@ -197,4 +201,59 @@ fn element_type(token: &str) -> Option<TableStyleElementType> {
         "lastTotalCell" => LastTotalCell,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use xlsx_model::{CellRange, CellRef, SheetId};
+
+    use super::*;
+
+    thread_local! {
+        pub(super) static VISITS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    const STYLES: &[u8] = br#"<styleSheet><tableStyles count="1"><tableStyle name="Budget" pivot="0" count="2"><tableStyleElement type="headerRow" dxfId="0"/><tableStyleElement type="firstRowStripe" dxfId="1"/></tableStyle></tableStyles></styleSheet>"#;
+
+    fn table(name: &str) -> (Table, Option<TableStyleInfo>) {
+        let table = Table {
+            name: name.into(),
+            sheet: SheetId(0),
+            range: CellRange::new(CellRef::new(0, 0), CellRef::new(4, 2)),
+            header_rows: 1,
+            totals_rows: 0,
+            columns: Vec::new(),
+            style: Vec::new(),
+        };
+        let info = TableStyleInfo {
+            name: "Budget".into(),
+            first_column: false,
+            last_column: false,
+            row_stripes: true,
+            column_stripes: false,
+        };
+        (table, Some(info))
+    }
+
+    #[test]
+    fn tables_sharing_a_style_visit_its_elements_once() {
+        let mut styles = Stylesheet::default();
+        styles.dxfs = vec![
+            DifferentialFormat {
+                bold: Some(true),
+                ..Default::default()
+            },
+            DifferentialFormat {
+                fill: Some("#fff78c".into()),
+                ..Default::default()
+            },
+        ];
+        let tables = (0..3).map(|n| table(&format!("T{n}"))).collect();
+        VISITS.with(|visits| visits.set(0));
+        let resolved = resolve_tables(tables, Some(STYLES), &styles).unwrap();
+        assert!(resolved.iter().all(|table| table.style.len() == 2));
+        assert_eq!(VISITS.with(Cell::get), 2);
+    }
 }
