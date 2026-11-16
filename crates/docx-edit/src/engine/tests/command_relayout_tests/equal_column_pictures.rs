@@ -29,7 +29,7 @@ fn first_section() -> String {
     )
 }
 
-fn words(count: usize, from: usize) -> String {
+pub(super) fn words(count: usize, from: usize) -> String {
     (from..from + count)
         .map(|index| format!("word{index}"))
         .collect::<Vec<_>>()
@@ -69,7 +69,7 @@ fn package(picture_x: u32, lead: usize, section: &str) -> Vec<u8> {
 }
 
 /// `columns` equal columns with the picture over the second one.
-fn equal_columns(columns: u32, lead: usize) -> Vec<u8> {
+pub(super) fn equal_columns(columns: u32, lead: usize) -> Vec<u8> {
     let section = format!(
         r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}<w:cols w:num="{columns}" w:space="360"/></w:sectPr>"#,
         margins(360, 360)
@@ -117,7 +117,7 @@ fn side_margin_change() -> Vec<u8> {
     package(120, 9, &section)
 }
 
-fn opened<'a>(engine: &'a EngineSession, bytes: &[u8]) -> CommandHost<'a> {
+pub(super) fn opened<'a>(engine: &'a EngineSession, bytes: &[u8]) -> CommandHost<'a> {
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
     let request = lowering_pages::region_request(engine, bytes, font).to_string();
     CommandHost::open_with(engine, request)
@@ -162,7 +162,7 @@ fn layout_pages(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
 
 /// The page count and an FNV-1a digest of every page's size and every
 /// fragment's kind, position, size and line window, in hundredths of a pixel.
-fn layout_digest(engine: &EngineSession) -> (usize, u64) {
+pub(super) fn layout_digest(engine: &EngineSession) -> (usize, u64) {
     let json = engine.retained_layout_json().unwrap();
     let value = serde_json::from_str::<serde_json::Value>(&json).unwrap();
     let pages = layout_pages(&value).unwrap();
@@ -285,7 +285,7 @@ fn wrapping_that_reaches_the_phase_limit_without_repeating_fails() {
     );
 }
 
-fn text_end(engine: &EngineSession, id: &str) -> u32 {
+pub(super) fn text_end(engine: &EngineSession, id: &str) -> u32 {
     engine
         .doc()
         .paragraph_index("body")
@@ -347,7 +347,7 @@ fn fresh_measures(prepared: &crate::engine::PreparedRegionLayout) -> Vec<serde_j
 
 /// Checks the open session against a fresh session opened on the same
 /// document: the frame, and the measured blocks and options it paginates.
-fn assert_input_matches_fresh(
+pub(super) fn assert_input_matches_fresh(
     host: &mut CommandHost<'_>,
     client_id: u64,
     bytes: &[u8],

@@ -1274,4 +1274,5 @@ fn edits_beside_a_shape_placed_by_page_side_lay_out_as_a_full_recompute_does() {
 }
 
 mod equal_column_pictures;
+mod equal_columns_as_released;
 mod resident_matches_fresh;
