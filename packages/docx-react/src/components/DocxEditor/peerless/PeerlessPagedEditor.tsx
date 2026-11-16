@@ -244,7 +244,7 @@ function PeerlessPreedit({ viewStore, composition, geometryCaret, selectionRects
   const start = selectionRects?.[0];
   const first = geometryCaret ?? (!multiCell && start ? { x: start.x, y: start.y, width: 1, height: start.height } : null);
   const target = composition?.target;
-  const stale = target?.kind === 'predecessor' && target.ticket.seq !== undefined && (coversThroughSeq ?? -1) < target.ticket.seq;
+  const stale = target?.kind === 'predecessor' && (target.ticket.seq === undefined || (coversThroughSeq ?? -1) < target.ticket.seq);
   const caret = composition?.phase === 'active' && composition.text ? provisional?.rect ?? (matches && !stale ? first : null) : null;
   const paint = useMemo(() => {
     if (!caret) return null;
