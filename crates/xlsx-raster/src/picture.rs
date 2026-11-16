@@ -125,11 +125,14 @@ impl<'a> Pictures<'a> {
         use image::ImageDecoder as _;
 
         let bytes = ooxml_raster::png_with_end(bytes);
-        let mut decoder = image::ImageReader::new(Cursor::new(bytes.as_ref()))
+        let mut reader = image::ImageReader::new(Cursor::new(bytes.as_ref()))
             .with_guessed_format()
-            .ok()?
-            .into_decoder()
             .ok()?;
+        let mut header_limits = image::Limits::default();
+        header_limits.max_alloc =
+            Some(MAX_IMAGE_BYTES.min(MAX_FRAME_IMAGE_BYTES.saturating_sub(self.bytes)));
+        reader.limits(header_limits);
+        let mut decoder = reader.into_decoder().ok()?;
         let (width, height) = decoder.dimensions();
         let pixels = u64::from(width) * u64::from(height);
         let cost = decoder
