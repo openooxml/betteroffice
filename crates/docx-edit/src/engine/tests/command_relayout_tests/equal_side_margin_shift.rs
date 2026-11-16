@@ -62,7 +62,10 @@ fn first_picture_line(engine: &EngineSession) -> (usize, f64) {
                 Fragment::Paragraph(fragment)
                     if fragment.block_id == paragraph.id && fragment.from_line == 0 =>
                 {
-                    Some((page, fragment.x + extent.lines[0].left_offset.unwrap_or(0.0)))
+                    Some((
+                        page,
+                        fragment.x + extent.lines[0].left_offset.unwrap_or(0.0),
+                    ))
                 }
                 _ => None,
             })
@@ -73,7 +76,10 @@ fn first_picture_line(engine: &EngineSession) -> (usize, f64) {
 fn assert_at_new_left_margin(engine: &EngineSession, label: &str) {
     let (page, x) = first_picture_line(engine);
     assert_eq!(page, 0, "{label}");
-    assert!((x - NEW_LEFT_MARGIN).abs() < 0.01, "{label}: first line at {x}");
+    assert!(
+        (x - NEW_LEFT_MARGIN).abs() < 0.01,
+        "{label}: first line at {x}"
+    );
 }
 
 #[test]

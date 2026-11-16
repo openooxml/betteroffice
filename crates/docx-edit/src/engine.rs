@@ -613,8 +613,8 @@ fn region_table_measurement_frames<'a>(
 }
 
 /// [`region_table_measurement_frames`], plus whether each block lies in a
-/// continuous section whose start changed the content width between the side
-/// margins, or follows one in a run of continuous sections.
+/// continuous section whose start moved either side margin or changed the
+/// page width, or follows one in a run of continuous sections.
 fn region_frames_with_side_margin_changes<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     input: &LayoutInput,
@@ -719,8 +719,11 @@ fn region_frames_with_side_margin_changes<'a>(
                 None => input.options.columns.as_ref(),
             };
             if previous_section != Some(section_index) {
-                let previous_content_width =
-                    placement_page_width - placement_margins.left - placement_margins.right;
+                let previous_frame = (
+                    placement_page_width,
+                    placement_margins.left,
+                    placement_margins.right,
+                );
                 let (placement_size, margins) = match section_break {
                     Some(section_break) => (
                         section
@@ -753,8 +756,11 @@ fn region_frames_with_side_margin_changes<'a>(
                 if let Some(margins) = margins {
                     placement_margins = margins;
                 }
-                let content_width =
-                    placement_page_width - placement_margins.left - placement_margins.right;
+                let frame = (
+                    placement_page_width,
+                    placement_margins.left,
+                    placement_margins.right,
+                );
                 let break_type = match section_break {
                     Some(section_break) => section_break.break_type,
                     None => input.options.body_break_type,
@@ -764,7 +770,7 @@ fn region_frames_with_side_margin_changes<'a>(
                         == Some(SectionBreakType::Continuous);
                 side_margins_changed = section_index > 0
                     && continuous
-                    && (side_margins_changed || previous_content_width != content_width);
+                    && (side_margins_changed || previous_frame != frame);
                 previous_section = Some(section_index);
             }
             let section_width_known = (regions.sections.is_empty()
