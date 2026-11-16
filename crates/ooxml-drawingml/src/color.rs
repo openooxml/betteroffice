@@ -60,7 +60,8 @@ impl ColorTransform {
         }
         let in_range = match name {
             "tint" | "shade" => (0.0..=1.0).contains(&value),
-            "lumMod" | "lumOff" | "satMod" | "alpha" => (0.0..=10.0).contains(&value),
+            "lumMod" | "satMod" | "alpha" => (0.0..=10.0).contains(&value),
+            "lumOff" => (-10.0..=10.0).contains(&value),
             _ => true,
         };
         if !in_range {
@@ -538,19 +539,19 @@ mod tests {
 
     #[test]
     fn transform_parsing_retains_legacy_ranges() {
-        for (name, maximum) in [
-            ("tint", 1.0),
-            ("shade", 1.0),
-            ("lumMod", 10.0),
-            ("lumOff", 10.0),
-            ("satMod", 10.0),
-            ("alpha", 10.0),
+        for (name, minimum, maximum) in [
+            ("tint", 0.0, 1.0),
+            ("shade", 0.0, 1.0),
+            ("lumMod", 0.0, 10.0),
+            ("lumOff", -10.0, 10.0),
+            ("satMod", 0.0, 10.0),
+            ("alpha", 0.0, 10.0),
         ] {
-            for value in [-0.00001, maximum + 0.00001] {
+            for value in [minimum - 0.00001, maximum + 0.00001] {
                 let raw = (value * 100_000.0).to_string();
                 assert_eq!(ColorTransform::from_xml(name, Some(&raw)), None, "{name}");
             }
-            for value in [0.0, maximum] {
+            for value in [minimum, 0.0, maximum] {
                 for raw in [
                     (value * 100_000.0).to_string(),
                     format!("{}%", value * 100.0),
