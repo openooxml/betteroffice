@@ -94,8 +94,11 @@ test('a progressive face loads index, skeleton and core, then only the chunks of
   expect(await face.ensureGlyphs([glyphOf(0)])).toBe(1);
   expect(reads).toEqual([]);
 
+  expect(face.chunksOfGlyphs([glyphOf(0)])).toEqual([0]);
+  expect(face.chunksOfGlyphs([glyphOf(41), glyphOf(40), glyphOf(41)]).sort((a, b) => a - b)).toEqual([40, 41]);
   const [first, second] = await Promise.all([face.ensureGlyphs([glyphOf(40)]), face.ensureGlyphs([glyphOf(40), glyphOf(41)])]);
   expect(reads.sort()).toEqual([index.chunks[39]!.file, index.chunks[40]!.file].sort());
+  expect(face.chunksOfGlyphs([glyphOf(40), glyphOf(41)]).every((chunk) => face.loadedChunks().has(chunk))).toBe(true);
   expect(Math.max(first, second)).toBe(face.revision);
   expect(updates.length).toBeGreaterThan(0);
   expect(updates[updates.length - 1]).toBe(face.revision);
