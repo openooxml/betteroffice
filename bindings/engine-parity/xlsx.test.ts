@@ -697,6 +697,19 @@ const rows: Row<Xlsx>[] = [
     call: ({ doc }, id) => doc.rejectProposalJson(json({ id })),
   }),
   { method: 'XlsxDocument.displayListJson', call: ({ doc }) => doc.displayListJson(VIEWPORT) },
+  {
+    method: 'XlsxDocument.displayListJson',
+    name: 'XlsxDocument.displayListJson (wrapped text in a row scrolled partly under the frozen pane)',
+    mutates: true,
+    call: ({ doc }) => {
+      const cell = { row: 1, col: 0 };
+      doc.applyOpsJson(json({ ops: [{ type: 'patchRangeStyle', sheet: 0, range: { start: cell, end: cell }, patch: { textWrapping: 'wrap' } }] }));
+      const list = JSON.parse(doc.displayListJson(json({ x: 0, y: 10, width: 800, height: 400 }))) as { commands: { wrap?: { fitHeight?: number } }[] };
+      const wraps = list.commands.flatMap((command) => (command.wrap ? [command.wrap] : []));
+      if (wraps.length === 0 || wraps.some((wrap) => wrap.fitHeight === undefined)) throw new Error(`no fit height: ${JSON.stringify(wraps)}`);
+      return wraps;
+    },
+  },
   { method: 'XlsxDocument.displayListForJson', call: ({ doc }) => doc.displayListForJson(1, VIEWPORT) },
   { method: 'XlsxDocument.pngDisplayListJson', call: ({ doc }) => doc.pngDisplayListJson(VIEWPORT) },
   { method: 'XlsxDocument.rangePngDisplayListJson', call: ({ doc }) => [doc.rangePngDisplayListJson('{}'), doc.rangePngDisplayListJson(json({ range: 'A1:C5', scale: 2 }))] },
