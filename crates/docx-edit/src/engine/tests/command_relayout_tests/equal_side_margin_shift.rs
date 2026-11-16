@@ -222,8 +222,7 @@ fn guard_side_margins_set_to_the_section_above_lay_out_text_below_a_picture_like
 
 /// Guards text below a picture against a stale measure when side margins leave the section above.
 #[test]
-fn guard_side_margins_shifted_from_the_section_above_lay_out_text_below_a_picture_like_a_fresh_open()
-{
+fn guard_side_margins_shifted_from_above_lay_out_text_below_a_picture_like_a_fresh_open() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let client_id = 9825;
