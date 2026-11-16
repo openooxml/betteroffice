@@ -160,6 +160,18 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         } }, { inputTime: event.timeStamp });
         return;
       }
+      if (event.key === 'Delete' && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
+        callbacks.current.onClipboard && !isReadOnly()) {
+        const selection = viewStore.getSnapshot().workerSelection;
+        const ranged = !!selection && (selection.anchor.story !== selection.focus.story ||
+          selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset);
+        if (ranged || admission.getSnapshot().pendingInputs > 0) {
+          event.preventDefault();
+          active = null;
+          void callbacks.current.onClipboard(true, null);
+          return;
+        }
+      }
       const tab = event.key === 'Tab' && !event.altKey && !event.ctrlKey && !event.metaKey;
       const editState = viewStore.getSnapshot().editState ?? admission.session.state.editState;
       const tableTab = tab && !!editState?.tableContext;

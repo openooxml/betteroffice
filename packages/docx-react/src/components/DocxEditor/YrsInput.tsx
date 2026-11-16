@@ -1695,6 +1695,24 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     return result;
   }, [enqueueInputOperation, holdInput, holdOperation, notifyCutRefused, readOnly, replicaReadyRef, session, themeColors]);
 
+  const copyWrittenRef = useRef(false);
+  const copyOrCut = useCallback((cut: boolean): boolean => {
+    if (cut && (session?.cellSelection() || !hasTextRange())) return false;
+    const copied = copyAfterReplica(cut);
+    if (copied) {
+      if (cut) deleteSelection(true, copied);
+      return true;
+    }
+    if (cut && refuseCut()) return false;
+    textareaRef.current?.focus();
+    primeCopy();
+    copyWrittenRef.current = false;
+    document.execCommand('copy');
+    if (!copyWrittenRef.current) return false;
+    if (cut) deleteSelection();
+    return true;
+  }, [copyAfterReplica, deleteSelection, hasTextRange, primeCopy, refuseCut, session]);
+
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
       if (!event.nativeEvent.isComposing && event.key !== 'Process' && event.keyCode !== 229) {
@@ -1720,6 +1738,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       } else if (event.key === 'Backspace') {
         event.preventDefault();
         deleteDirection('backward');
+      } else if (event.key === 'Delete' && event.shiftKey && !mod && !event.altKey && !readOnly && hasTextRange()) {
+        event.preventDefault();
+        copyOrCut(true);
       } else if (event.key === 'Delete') {
         event.preventDefault();
         deleteDirection('forward');
@@ -1741,10 +1762,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     },
     [
       copyAfterReplica,
+      copyOrCut,
       deleteDirection,
       handleTab,
+      hasTextRange,
       moveSelection,
       primeCopy,
+      readOnly,
       selectAll,
       splitParagraph,
     ]
@@ -1834,7 +1858,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
-  const copyWrittenRef = useRef(false);
   const handleCopy = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (takeClipboardGesture(event.currentTarget) === 'ignore') {
@@ -2173,22 +2196,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       insertText,
       deleteSelection,
       pasteContent,
-      copySelection(cut) {
-        if (cut && (session?.cellSelection() || !hasTextRange())) return false;
-        const copied = copyAfterReplica(cut);
-        if (copied) {
-          if (cut) deleteSelection(true, copied);
-          return true;
-        }
-        if (cut && refuseCut()) return false;
-        textareaRef.current?.focus();
-        primeCopy();
-        copyWrittenRef.current = false;
-        document.execCommand('copy');
-        if (!copyWrittenRef.current) return false;
-        if (cut) deleteSelection();
-        return true;
-      },
+      copySelection: copyOrCut,
       selectAll() {
         advanceInteractionEpoch();
         selectAll();
@@ -2198,6 +2206,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       advanceInteractionEpoch,
       applyStoredFormatting,
       copyAfterReplica,
+      copyOrCut,
       displayPositionToLoc,
       displaySelection,
       ensureSelection,
