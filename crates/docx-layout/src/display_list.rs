@@ -1794,8 +1794,6 @@ pub(crate) struct WatermarkBoxIn {
     vertical: Option<String>,
     #[serde(default)]
     vertical_relative: Option<String>,
-    #[serde(default)]
-    margins: Option<MarginsIn>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -4243,7 +4241,7 @@ fn fitted_text_watermark(
     if !(width.is_finite() && em.is_finite() && width > 0.0 && em > 0.0) {
         return None;
     }
-    let margins = shape_box.margins.as_ref().unwrap_or(&page.margins);
+    let margins = &page.margins;
     let (left, right) = match shape_box.horizontal_relative.as_deref() {
         Some("page") => (0.0, page.size.w),
         _ => (margins.left, page.size.w - margins.right),

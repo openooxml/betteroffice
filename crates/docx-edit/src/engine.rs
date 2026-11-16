@@ -9733,14 +9733,7 @@ impl EngineSession {
             };
             #[cfg(test)]
             HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(count.get() + 1));
-            let mut watermark = regions.header_watermarks.get(&r_id).cloned();
-            if let Some(shape_box) = watermark
-                .as_mut()
-                .and_then(|value| value.get_mut("box"))
-                .filter(|shape_box| shape_box.is_object())
-            {
-                shape_box["margins"] = serde_json::to_value(&margins).unwrap_or_default();
-            }
+            let watermark = regions.header_watermarks.get(&r_id).cloned();
             let blank = watermark.is_some().then(|| HeaderFooterVariant {
                 r_id: r_id.clone(),
                 kind,
