@@ -2860,6 +2860,25 @@ test('a section read limited to paragraphs matches the full read through typing 
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('a section read limited to paragraphs follows a remote paragraph id change', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8322 });
+  try {
+    const before = engine.paragraphs('body')[0]!.paraId;
+    expect((await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value.sections[0]!.section).toBe(before);
+    remote.loadState(engine.encodeState());
+    remote.applyRawOps('body', [{ op: 'setEmbedAttr', index: remote.paragraphs('body')[0]!.text.length, key: 'paraId', value: 'remote-first' }]);
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    const after = engine.paragraphs('body')[0]!.paraId;
+    expect(after).not.toBe(before);
+    const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+    const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value;
+    expect(full.sections[0]!.section).toBe(after);
+    expect(limited.sections[0]!.section).toBe(after);
+    expect(limited.sections).toEqual(full.sections);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
 test('a legacy section break lowers on the worker as a section split', async () => {
   const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgMar w:left="1800"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
   const remote = await createYrsSession({ clientId: 8311 });
