@@ -90,7 +90,13 @@ function runExtent(run: GlyphRunPrimitive): { left: number; right: number; basel
  * shows on whatever is painted there.
  */
 export function peerlessCaretPaint(page: DisplayPage | undefined, caret: DocxEchoRect): { color: string; halo?: string } {
-  if (!page) return { color: '#000' };
+  const { color, halo } = peerlessPreeditPaint(page, caret);
+  return halo ? { color, halo } : { color };
+}
+
+/** Caret paint plus the colour under the caret, for text drawn over the page. */
+export function peerlessPreeditPaint(page: DisplayPage | undefined, caret: DocxEchoRect): { color: string; halo?: string; background: string } {
+  if (!page) return { color: '#000', background: '#fff' };
   const x = caret.x;
   const y = caret.y + caret.height / 2;
   const paintX = caret.x + Math.max(1, caret.width) / 2;
@@ -126,9 +132,10 @@ export function peerlessCaretPaint(page: DisplayPage | undefined, caret: DocxEch
   const fallback = luminance(fill) < 0.18 ? '#fff' : '#000';
   if (!known) {
     const color = run && text ? run.color : fallback;
-    return { color, halo: luminance(text && run ? text : parseColor(color)!) < 0.18 ? '#fff' : '#000' };
+    const halo = luminance(text && run ? text : parseColor(color)!) < 0.18 ? '#fff' : '#000';
+    return { color, halo, background: halo };
   }
-  return { color: run && text && contrast(text, fill) >= 2 ? run.color : fallback };
+  return { color: run && text && contrast(text, fill) >= 2 ? run.color : fallback, background: `rgb(${fill.join(', ')})` };
 }
 
 /** The caret colour alone, for overlays that draw no halo. */
