@@ -970,4 +970,13 @@ mod tests {
             assert_eq!(xf.protection, protected.then_some(protection));
         }
     }
+
+    #[test]
+    fn differential_pattern_fill_without_a_pattern_type_is_solid() {
+        let xml = br#"<styleSheet><dxfs count="1"><dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>"#;
+        let (styles, _) = parse_styles(xml, &Theme::default()).unwrap();
+        assert_eq!(styles.dxfs.len(), 1);
+        assert_eq!(styles.dxfs[0].font_color.as_deref(), Some("#9c0006"));
+        assert_eq!(styles.dxfs[0].fill.as_deref(), Some("#ffc7ce"));
+    }
 }
