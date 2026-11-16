@@ -43,7 +43,10 @@ fn first_picture_line(engine: &EngineSession) -> (usize, f64) {
         .iter()
         .find_map(|measured| match (&measured.block, &measured.measure) {
             (LayoutBlock::Paragraph(paragraph), BlockExtent::Paragraph(extent))
-                if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_))) =>
+                if paragraph
+                    .runs
+                    .iter()
+                    .any(|run| matches!(run, Run::Image(_))) =>
             {
                 Some((paragraph, extent))
             }
