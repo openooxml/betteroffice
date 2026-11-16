@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': minor
 ---
 
-Excel tables render their table style: header and total rows, banded rows and columns, and first and last columns take the fill, font colour and bold of a built-in or workbook-defined style. Rust `Table` gains `style`.
+Excel tables now render their built-in or workbook-defined table style by default: header, total, banded and first or last column fills, font colours and bold. Breaking: Rust `Table` gains a public `style` field, so struct literals must set it.
