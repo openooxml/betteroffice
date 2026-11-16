@@ -1532,7 +1532,7 @@ fn picture_watermark_emits_decorative_washout_image_primitive() {
 }
 
 #[test]
-fn header_text_watermark_fills_its_box_on_the_pages_its_header_heads() {
+fn header_text_watermark_paints_on_the_pages_its_header_heads() {
     let page = |number: u64| {
         serde_json::json!({
             "number": number, "sectionIndex": 0, "sectionPageIndex": number - 1,
@@ -1575,65 +1575,11 @@ fn header_text_watermark_fills_its_box_on_the_pages_its_header_heads() {
     assert_eq!(t.color, "silver");
     assert_eq!(t.opacity.as_ref().map(n), Some(0.5));
     assert_eq!(t.rotation_deg.as_ref().map(n), Some(-45.0));
-    assert_eq!(t.font, "280px Liberation Serif, sans-serif");
-    assert_eq!(n(&t.width), 688.0);
-    let advance: f64 = 6.0 * 280.0 * 0.62;
-    assert_eq!(
-        t.horizontal_scale.as_ref().map(n),
-        Some((100_000.0 * 688.0 / advance).round() / 1000.0)
-    );
-    let (sin, cos) = (-45f64).to_radians().sin_cos();
-    let (pivot_x, pivot_y) = (n(&t.x) + n(&t.width) / 2.0, n(&t.baseline_y) - 280.0 * 0.2);
-    let lift = 280.0 * (0.35 - 0.2);
-    let (cap_x, cap_y) = (pivot_x + lift * sin, pivot_y - lift * cos);
-    assert!((cap_x - 408.0).abs() < 0.01 && (cap_y - 528.0).abs() < 0.01);
-}
-
-#[test]
-fn fitted_text_watermark_scales_its_shaped_advance_to_the_box() {
-    let mut fonts = ooxml_text::FontStore::new();
-    let font = fonts
-        .register(
-            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf").to_vec(),
-        )
-        .unwrap();
-    let input = serde_json::json!({
-        "measured": [],
-        "options": {},
-        "fontChains": {"liberation sans|0|0": [font.to_u32()]},
-        "headersFooters": {"watermark": {
-            "kind": "text", "text": "DRAFT", "font": "Liberation Sans",
-            "widthEmu": 4572000, "heightEmu": 1371600
-        }},
-        "layout": {"pages": [{"size": {"w": 816.0, "h": 1056.0}, "margins": {}, "fragments": []}]}
-    });
-    let json =
-        docx_layout::display_list::build_display_list_json_with_fonts(&input.to_string(), &fonts)
-            .unwrap();
-    let dl: DisplayList = serde_json::from_str(&json).unwrap();
-    let Primitive::Text(t) = &dl.pages[0].primitives[0] else {
-        panic!("watermark should emit text");
-    };
-    let font_px = 144.0 / 0.7;
-    let advance: f64 = ooxml_text::shape_with_direction(
-        &fonts,
-        font,
-        "DRAFT",
-        font_px as f32,
-        &[],
-        ooxml_text::ShapeDirection::Ltr,
-    )
-    .unwrap()
-    .iter()
-    .map(|glyph| f64::from(glyph.x_advance))
-    .sum();
-    assert_eq!(t.width.as_f64(), Some(480.0));
-    let scale = t
-        .horizontal_scale
-        .as_ref()
-        .and_then(|n| n.as_f64())
-        .unwrap();
-    assert!((scale - 100.0 * 480.0 / advance).abs() < 0.001);
+    assert_eq!(t.font, "700 180px Liberation Serif, sans-serif");
+    assert_eq!(t.horizontal_scale, None);
+    assert_eq!(n(&t.x), 73.2);
+    assert_eq!(n(&t.baseline_y), 564.0);
+    assert_eq!(n(&t.width), 669.6);
 }
 
 #[test]
@@ -1692,28 +1638,6 @@ fn a_header_picture_watermark_paints_only_through_the_document_watermark() {
     let json = build_display_list_json(&input.to_string()).expect("builds");
     let dl: DisplayList = serde_json::from_str(&json).unwrap();
     assert_eq!(dl.pages[0].watermark_primitive_count, None);
-}
-
-#[test]
-fn fitted_text_watermark_stretch_is_held_to_word_maximum() {
-    let input = serde_json::json!({
-        "measured": [],
-        "options": {},
-        "headersFooters": {"watermark": {
-            "kind": "text", "text": "I", "font": "Liberation Sans",
-            "widthEmu": 9144000, "heightEmu": 95250
-        }},
-        "layout": {"pages": [{"size": {"w": 816.0, "h": 1056.0}, "margins": {}, "fragments": []}]}
-    });
-    let json = build_display_list_json(&input.to_string()).expect("builds");
-    let dl: DisplayList = serde_json::from_str(&json).unwrap();
-    let Primitive::Text(t) = &dl.pages[0].primitives[0] else {
-        panic!("watermark should emit text");
-    };
-    assert_eq!(
-        t.horizontal_scale.as_ref().and_then(|n| n.as_f64()),
-        Some(600.0)
-    );
 }
 
 #[test]
