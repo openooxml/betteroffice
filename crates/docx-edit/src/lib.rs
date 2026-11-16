@@ -365,6 +365,12 @@ pub fn segments_digest(segments: &[StorySegment]) -> u128 {
             tail[..rest.len()].copy_from_slice(rest);
             self.add(u64::from_le_bytes(tail) ^ ((bytes.len() as u64) << 56));
         }
+        fn write_usize(&mut self, i: usize) {
+            self.write(&(i as u64).to_le_bytes());
+        }
+        fn write_isize(&mut self, i: isize) {
+            self.write(&(i as i64).to_le_bytes());
+        }
         fn finish(&self) -> u64 {
             self.finish128() as u64
         }
@@ -1311,7 +1317,7 @@ impl EditingDoc {
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
-    #[cfg(all(test, feature = "wasm"))]
+    #[cfg(test)]
     pub(crate) fn forget_seeding(&self) {
         self.save_story_states.lock().unwrap().clear();
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
