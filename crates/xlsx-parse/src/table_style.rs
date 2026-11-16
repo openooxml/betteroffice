@@ -50,7 +50,7 @@ impl TableStyleInfo {
 }
 
 /// A `tableStyle` in `styles.xml`: its name and `(type, dxfId, size)` elements.
-type WorkbookTableStyle = (String, Vec<(TableStyleElementType, u32, u32)>);
+type WorkbookTableStyle = (String, Vec<(TableStyleElementType, Option<u32>, u32)>);
 
 /// Fill each table's style from its `tableStyleInfo`, preferring a style the
 /// workbook defines over a preset of the same name.
@@ -82,17 +82,36 @@ fn resolve(
     let mut elements = match defined.iter().find(|(name, _)| *name == info.name) {
         Some((_, elements)) => elements
             .iter()
-            .filter_map(|&(kind, dxf, size)| {
-                let format = styles.dxfs.get(dxf as usize)?.clone();
-                Some(TableStyleElement { kind, size, format })
+            .map(|&(kind, dxf, size)| TableStyleElement {
+                kind,
+                size,
+                format: dxf
+                    .and_then(|dxf| styles.dxfs.get(dxf as usize))
+                    .cloned()
+                    .unwrap_or_default(),
             })
             .collect(),
         None => preset(&info.name, styles),
     };
-    elements.retain(|element| info.shows(element.kind) && element.format != Default::default());
+    elements.retain(|element| {
+        info.shows(element.kind) && (element.format != Default::default() || spans(element))
+    });
+    if elements.iter().all(|element| element.format == Default::default()) {
+        return Vec::new();
+    }
     elements.sort_by_key(|element| element.kind);
     elements.dedup_by_key(|element| element.kind);
     elements
+}
+
+/// Whether an element that paints nothing still sets a stripe band wider than one.
+fn spans(element: &TableStyleElement) -> bool {
+    use TableStyleElementType::*;
+    element.size > 1
+        && matches!(
+            element.kind,
+            FirstRowStripe | SecondRowStripe | FirstColumnStripe | SecondColumnStripe
+        )
 }
 
 fn preset(name: &str, styles: &Stylesheet) -> Vec<TableStyleElement> {
@@ -135,12 +154,10 @@ fn workbook_table_styles(data: &[u8]) -> Result<Vec<WorkbookTableStyle>, ParseEr
                 }
             }
             Event::Start(e) if open && local_name(&e) == b"tableStyleElement" => {
-                let (Some(kind), Some(dxf)) = (
-                    attr(&e, b"type")?.and_then(|value| element_type(&value)),
-                    attr(&e, b"dxfId")?.and_then(|value| value.parse::<u32>().ok()),
-                ) else {
+                let Some(kind) = attr(&e, b"type")?.and_then(|value| element_type(&value)) else {
                     continue;
                 };
+                let dxf = attr(&e, b"dxfId")?.and_then(|value| value.parse::<u32>().ok());
                 let size = attr(&e, b"size")?
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(1)
