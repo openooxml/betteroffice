@@ -223,4 +223,21 @@ mod tests {
     fn a_sheet_without_drawings_has_no_pictures() {
         assert!(sheet_pictures(&[], "xl/worksheets/sheet1.xml").is_empty());
     }
+
+    #[test]
+    fn a_sheet_relating_one_drawing_many_times_reads_at_most_the_anchor_bound_of_pictures() {
+        let anchor = format!(
+            "<xdr:oneCellAnchor>{}<xdr:ext cx=\"1\" cy=\"1\"/>{}</xdr:oneCellAnchor>",
+            marker("from", 0, 0),
+            pic("img", "")
+        );
+        let mut parts = parts(&anchor.repeat(MAX_CHART_ANCHORS));
+        parts[0].1 = rels(&[
+            ("d1", "drawing", "../drawings/drawing1.xml"),
+            ("d2", "drawing", "//xl/drawings/drawing1.xml"),
+            ("d3", "drawing", "///xl/drawings/drawing1.xml"),
+        ]);
+        let pictures = sheet_pictures(&parts, "xl/worksheets/sheet1.xml");
+        assert_eq!(pictures.len(), MAX_CHART_ANCHORS);
+    }
 }
