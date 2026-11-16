@@ -414,6 +414,7 @@ struct PreparedRegionLayout {
     measured_widths: Vec<f64>,
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
+    measured_side_margin_changes: Vec<bool>,
     measured_float_geometry: Option<[f64; 5]>,
     provisional: bool,
     exact_cut: Option<ExactCut>,
@@ -2208,6 +2209,7 @@ struct PaginationState {
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_font_chains: Option<BTreeMap<String, Vec<u32>>>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
+    measured_side_margin_changes: Vec<bool>,
     measured_float_geometry: Option<[f64; 5]>,
     measured_float_width_policy: Option<FloatWidthPolicy>,
     measured_with_floats: bool,
@@ -5315,6 +5317,7 @@ impl EngineSession {
         pagination.measured_widths = Vec::new();
         pagination.set_font_dependencies(Vec::new(), None);
         pagination.measured_table_wrap_frames = Vec::new();
+        pagination.measured_side_margin_changes = Vec::new();
         pagination.measured_float_geometry = None;
         pagination.measured_float_width_policy = None;
         pagination.measured_with_floats = false;
@@ -7616,6 +7619,7 @@ impl EngineSession {
         let mut measured_widths = Vec::new();
         let mut measured_font_dependencies = Vec::new();
         let mut measured_table_wrap_frames = Vec::new();
+        let mut measured_side_margin_changes = Vec::new();
         let mut measured_float_geometry = None;
         let mut provisional = false;
         let mut exact_cut = None;
@@ -7639,11 +7643,12 @@ impl EngineSession {
                         measured_spacing =
                             BlockSpacing::capture_blocks(blocks.iter(), Some(&regions));
                         apply_section_geometry(&mut input, &regions);
-                        let (widths, table_wrap_frames) =
-                            region_table_measurement_frames(blocks.iter(), &input, &regions);
+                        let (widths, table_wrap_frames, side_margin_changes) =
+                            region_frames_with_side_margin_changes(blocks.iter(), &input, &regions);
                         let geometry = initial_float_page_geometry(&input, &regions);
                         measured_widths.clone_from(&widths);
                         measured_table_wrap_frames.clone_from(&table_wrap_frames);
+                        measured_side_margin_changes.clone_from(&side_margin_changes);
                         measured_float_geometry = Some(float_geometry_key(&geometry));
                         float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
                         let (floats, margin_floats) = resident_float_kinds(
@@ -7668,6 +7673,7 @@ impl EngineSession {
                             &widths,
                             float_width_policy,
                             &table_wrap_frames,
+                            &side_margin_changes,
                             &regions,
                             &measurement,
                             measurement_fingerprint,
@@ -7865,6 +7871,7 @@ impl EngineSession {
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
+            measured_side_margin_changes,
             measured_float_geometry,
             provisional,
             exact_cut,
@@ -7940,6 +7947,7 @@ impl EngineSession {
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
+            measured_side_margin_changes,
             measured_float_geometry,
             provisional,
             exact_cut,
@@ -8274,6 +8282,7 @@ impl EngineSession {
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
+        pagination.measured_side_margin_changes = measured_side_margin_changes;
         pagination.measured_float_geometry = measured_float_geometry;
         pagination.measured_float_width_policy =
             pagination.measured_with.map(|_| float_width_policy);
@@ -8333,6 +8342,7 @@ impl EngineSession {
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
+            measured_side_margin_changes,
             measured_float_geometry,
             provisional,
             exact_cut,
@@ -8868,6 +8878,7 @@ impl EngineSession {
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
+        pagination.measured_side_margin_changes = measured_side_margin_changes;
         pagination.measured_float_geometry = measured_float_geometry;
         pagination.measured_float_width_policy =
             pagination.measured_with.map(|_| float_width_policy);
@@ -10208,6 +10219,7 @@ impl EngineSession {
         widths: &[f64],
         float_width_policy: FloatWidthPolicy,
         table_wrap_frames: &[TableMeasurementFrame],
+        side_margin_changes: &[bool],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
@@ -10221,6 +10233,7 @@ impl EngineSession {
                 widths,
                 float_width_policy,
                 table_wrap_frames,
+                side_margin_changes,
                 regions,
                 measurement,
                 measurement_fingerprint,
@@ -10274,6 +10287,7 @@ impl EngineSession {
         if floats.is_some_and(|geometry| {
             widths.first() != previous_widths.first()
                 || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
+                || side_margin_changes != pagination.measured_side_margin_changes.as_slice()
                 || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
         }) {
             return Ok(None);
@@ -10650,6 +10664,7 @@ impl EngineSession {
         widths: &[f64],
         float_width_policy: FloatWidthPolicy,
         table_wrap_frames: &[TableMeasurementFrame],
+        side_margin_changes: &[bool],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
@@ -10669,6 +10684,7 @@ impl EngineSession {
                 widths,
                 float_width_policy,
                 table_wrap_frames,
+                side_margin_changes,
                 regions,
                 measurement,
                 measurement_fingerprint,
@@ -10720,6 +10736,7 @@ impl EngineSession {
         if floats.is_some_and(|geometry| {
             widths.first() != previous_widths.first()
                 || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
+                || side_margin_changes != pagination.measured_side_margin_changes.as_slice()
                 || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
         }) {
             return Ok(None);
@@ -18070,6 +18087,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 &[300.0],
                 FloatWidthPolicy::for_document(blocks.iter()),
                 &[],
+                &[],
                 &prepared.regions,
                 &prepared.measurement,
                 prepared.measurement_fingerprint,
@@ -18097,6 +18115,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     None,
                     &[300.0],
                     FloatWidthPolicy::for_document(blocks.iter()),
+                    &[],
                     &[],
                     &prepared.regions,
                     &prepared.measurement,
@@ -18393,6 +18412,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     None,
                     &widths,
                     FloatWidthPolicy::for_document(blocks.iter()),
+                    &[],
                     &[],
                     &prepared.regions,
                     &prepared.measurement,
