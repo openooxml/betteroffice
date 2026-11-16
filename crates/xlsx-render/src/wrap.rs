@@ -158,8 +158,9 @@ pub fn max_wrapped_lines(height: f32, line_height: f32, font_size_pt: f32) -> Op
 /// how many of `count` wrapped lines a painter paints: at most the wrap's
 /// `max_lines`, every line without it.
 pub fn wrapped_lines_kept(count: usize, wrap: &TextWrap) -> usize {
-    wrap.max_lines
-        .map_or(count, |max| count.min(usize::try_from(max).unwrap_or(usize::MAX)))
+    wrap.max_lines.map_or(count, |max| {
+        count.min(usize::try_from(max).unwrap_or(usize::MAX))
+    })
 }
 
 /// lines a wrapped cell takes in a text box `width` px wide, measured with
