@@ -143,7 +143,7 @@ export type DocxParagraphAnchorResult =
  * `paragraphIds`, with each spliced part's paragraphs as `[ordinal, session key]`. @internal
  */
 export interface DocxParagraphSavePlan extends Omit<RustParagraphIds, 'splicedParts' | 'wholeParts'> {
-  /** The paragraphs edits changed or removed in parts with no splice plan: parts sorted by path, each part's ordinals ascending. */
+  /** The paragraphs edits changed or removed in parts with no splice plan: parts sorted by path in byte order (`header10` before `header2`), each part's ordinals ascending. */
   touchedParts?: Array<{ part: string; touched: number[] }>;
   /** Parts written from the model whose changes are all run formatting: kept as their source when writing them would drop structure. */
   wholeParts?: Array<{ part: string; sha256: string; paragraphs: Array<[number, string]>; changed: number[] }>;

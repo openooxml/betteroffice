@@ -329,8 +329,9 @@ pub struct ParagraphSavePlan {
     /// its source when that would drop structure.
     pub whole_parts: Vec<SplicedPart>,
     /// `(part path, ordinals)`: the paragraphs an edit changed or removed in a part with no splice
-    /// plan, which a whole write of it may rightly change. Parts are sorted by path and each
-    /// part's ordinals ascend, so the list is the same in every session.
+    /// plan, which a whole write of it may rightly change. Parts are sorted by path in byte order
+    /// (`header10` before `header2`) and each part's ordinals ascend, so the list is the same in
+    /// every session.
     pub touched_parts: Vec<(String, Vec<u32>)>,
 }
 

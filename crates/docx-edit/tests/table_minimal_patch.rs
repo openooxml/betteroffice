@@ -1786,6 +1786,10 @@ fn touched_parts_of_one_save_come_sorted_by_path() {
     }
     let touched = doc.paragraph_save_plan().touched_parts;
     let paths: Vec<&str> = touched.iter().map(|(part, _)| part.as_str()).collect();
-    assert!(paths.len() >= 2, "{touched:?}");
-    assert!(paths.windows(2).all(|pair| pair[0] < pair[1]), "{paths:?}");
+    let expected = [
+        "word/aheader1.xml",
+        "word/bfooter1.xml",
+        "word/document.xml",
+    ];
+    assert_eq!(paths, expected, "{touched:?}");
 }
