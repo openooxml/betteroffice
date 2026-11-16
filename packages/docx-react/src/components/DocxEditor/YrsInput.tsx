@@ -1927,11 +1927,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         return;
       }
       if (readOnly) return;
-      if (refuseCut()) {
-        primedCopyRef.current = null;
-        event.preventDefault();
-        return;
-      }
       const copied = copyAfterReplica(true);
       if (copied) {
         event.preventDefault();
@@ -1939,6 +1934,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         return;
       }
       if (holdInput || replicaReadyRef?.current === false || session?.cellSelection() || !hasTextRange()) {
+        event.preventDefault();
+        return;
+      }
+      if (refuseCut()) {
+        primedCopyRef.current = null;
         event.preventDefault();
         return;
       }
@@ -2175,12 +2175,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       pasteContent,
       copySelection(cut) {
         if (cut && (session?.cellSelection() || !hasTextRange())) return false;
-        if (cut && refuseCut()) return false;
         const copied = copyAfterReplica(cut);
         if (copied) {
           if (cut) deleteSelection(true, copied);
           return true;
         }
+        if (cut && refuseCut()) return false;
         textareaRef.current?.focus();
         primeCopy();
         copyWrittenRef.current = false;
