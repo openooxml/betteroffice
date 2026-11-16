@@ -4213,6 +4213,9 @@ fn emit_watermark(
     }
 }
 
+/// Longest box side, in px, a text watermark is stretched to: ten 22 in pages.
+const MAX_FITTED_WATERMARK_PX: f64 = 21_120.0;
+
 struct FittedTextWatermark {
     x: f64,
     baseline: f64,
@@ -4278,6 +4281,15 @@ fn fitted_text_watermark(
         || (text.trim().chars().count().max(1) as f64) * em * 0.62,
         |(_, _, advance)| *advance,
     );
+    let scale = 100.0 * width / advance;
+    if [width, em, scale]
+        .into_iter()
+        .any(|value| !value.is_finite() || round3(value) == 0.0)
+        || !rotation.is_finite()
+        || width.max(em) > MAX_FITTED_WATERMARK_PX
+    {
+        return None;
+    }
     let shaped = shaped.filter(|(font, _, _)| {
         !text.chars().any(is_rtl_strong)
             && fonts.is_some_and(|fonts| {
@@ -4312,7 +4324,7 @@ fn fitted_text_watermark(
         width,
         em,
         rotation,
-        scale: 100.0 * width / advance,
+        scale,
         glyphs,
     })
 }
