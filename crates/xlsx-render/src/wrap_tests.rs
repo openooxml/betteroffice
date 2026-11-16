@@ -346,7 +346,10 @@ fn only_the_wrapped_lines_that_fit_paint() {
     assert_eq!(wrap::wrapped_lines_fitting(3, &fitted(13.4, 4.0), 9.0), 1);
     assert_eq!(wrap::wrapped_lines_fitting(3, &fitted(13.4, 26.0), 9.0), 2);
     assert_eq!(wrap::wrapped_lines_fitting(2, &fitted(13.4, 200.0), 9.0), 2);
-    assert_eq!(wrap::wrapped_lines_fitting(2, &fitted(53.6, 107.3), 36.0), 2);
+    assert_eq!(
+        wrap::wrapped_lines_fitting(2, &fitted(53.6, 107.3), 36.0),
+        2
+    );
     let unmeasured = TextWrap {
         fit_height: None,
         ..fitted(13.4, 4.0)
