@@ -1666,6 +1666,12 @@ mod tests {
     }
 
     #[test]
+    fn verdana_and_tahoma_step_by_their_own_line_heights() {
+        assert!((line_pitch_pt(36.0, Some("Verdana"), None) - 36.0 * 1.2153).abs() < 1e-9);
+        assert!((line_pitch_pt(36.0, Some("Tahoma"), None) - 36.0 * 1.2070).abs() < 1e-9);
+    }
+
+    #[test]
     fn stored_heights_stand_against_an_authored_default() {
         let mut styles = Stylesheet::default();
         styles.fonts.push(Font {
