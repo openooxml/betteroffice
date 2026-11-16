@@ -130,11 +130,35 @@ fn an_adopted_collaboration_snapshot_draws_table_fonts_as_the_fresh_open() {
     assert_eq!(render(&reader), render(&fresh));
 }
 
+fn recovered(workbook: &Workbook) -> Workbook {
+    let checkpoint = workbook.recovery_checkpoint(0, None).unwrap();
+    Workbook::restore_recovery_checkpoint(&checkpoint).unwrap().0
+}
+
 #[test]
-fn a_recovery_restore_draws_table_fonts_as_the_fresh_open() {
-    let fresh = Workbook::open(&source()).unwrap();
-    let checkpoint = fresh.recovery_checkpoint(0, None).unwrap();
-    let (restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+fn recovery_shows_tables_without_their_style_until_reopened() {
+    let source = source();
+    let fresh = Workbook::open(&source).unwrap();
+    let restored = recovered(&fresh);
+    assert!(!fresh.model().tables[0].style.is_empty());
+    assert!(restored.model().tables[0].style.is_empty());
+    let unstyled = Workbook::open(&source_with(STYLES, "")).unwrap();
+    assert_eq!(render(&restored), render(&unstyled));
+    assert_ne!(render(&restored), render(&fresh));
+    let reopened = Workbook::open(&restored.save().unwrap()).unwrap();
+    assert_eq!(render(&reopened), render(&fresh));
+}
+
+#[test]
+fn a_recovery_restore_draws_cell_style_fonts_as_the_fresh_open() {
+    let fresh = Workbook::open(&source_with(STYLES, "")).unwrap();
+    let restored = recovered(&fresh);
+    let headers = |list: &DisplayList| {
+        (0..5)
+            .map(|index| text(list, &format!("h{index}")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(headers(&render(&restored)), headers(&render(&fresh)));
     assert_eq!(render(&restored), render(&fresh));
 }
 
