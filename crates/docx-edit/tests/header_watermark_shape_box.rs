@@ -12,11 +12,19 @@ const HEADER_START: &str = concat!(
 
 const HEADER_END: &str = r#"</w:pict></w:r></w:p></w:sdtContent></w:sdt></w:hdr>"#;
 
-fn watermarked_document([width, height, family, size, text]: [&str; 5]) -> Vec<u8> {
+fn watermarked_document(shape: [&str; 5]) -> Vec<u8> {
+    watermarked_document_with_header_tail(shape, "")
+}
+
+fn watermarked_document_with_header_tail(
+    [width, height, family, size, text]: [&str; 5],
+    tail: &str,
+) -> Vec<u8> {
     let shape = format!(
         r##"<v:shape id="PowerPlusWaterMarkObject1" o:spid="_x0000_s2049" type="#_x0000_t136" style="position:absolute;margin-left:0;margin-top:0;width:{width};height:{height};rotation:315;z-index:-251658752;mso-position-horizontal:center;mso-position-horizontal-relative:margin;mso-position-vertical:center;mso-position-vertical-relative:margin" o:allowincell="f" fillcolor="silver" stroked="f"><v:fill opacity=".5"/><v:textpath style="font-family:&quot;{family}&quot;;font-size:{size}" string="{text}"/></v:shape>"##
     );
-    let header = format!("{HEADER_START}{shape}{HEADER_END}");
+    let header = format!("{HEADER_START}{shape}{HEADER_END}")
+        .replace("</w:hdr>", &format!("{tail}</w:hdr>"));
     let parts = vec![
         ("[Content_Types].xml".to_owned(), r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#.to_owned()),
         ("_rels/.rels".to_owned(), r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
@@ -237,4 +245,27 @@ fn text_watermark_with_a_character_its_first_face_lacks_keeps_the_text_run() {
 #[test]
 fn right_to_left_text_watermark_keeps_the_text_run() {
     stretched_text_run("\u{05D8}\u{05D9}\u{05D5}\u{05D8}\u{05D4}");
+}
+
+fn mark_centre(run: &Value) -> (f64, f64) {
+    let painted = painted_run(run);
+    (painted.pivot_x, painted.baseline - 0.2 * em_px(run))
+}
+
+#[test]
+fn text_watermark_centres_on_the_authored_margins_under_a_header_taller_than_the_top_margin() {
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let shape = ["672pt", "58.5pt", "Calibri", "48pt", "Sample copy"];
+    let tall = r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="288"/></w:rPr><w:t>Tall</w:t></w:r></w:p>"#;
+    let plain = mark_centre(&painted_watermark(&watermarked_document(shape), font));
+    let under_tall_header = mark_centre(&painted_watermark(
+        &watermarked_document_with_header_tail(shape, tall),
+        font,
+    ));
+    assert!(
+        (plain.0 - under_tall_header.0).abs() < 0.001
+            && (plain.1 - under_tall_header.1).abs() < 0.001,
+        "{plain:?} vs {under_tall_header:?}"
+    );
 }
