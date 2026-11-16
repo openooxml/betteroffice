@@ -648,7 +648,7 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame(wb, sheet, viewport, ghosts, resolver, None)
+    build_frame(wb, sheet, viewport, ghosts, &[], resolver, None)
 }
 
 #[doc(hidden)]
@@ -686,6 +686,7 @@ pub fn build_print_display_list_with_charts<F, R>(
     viewport: &Viewport,
     metrics: &PrintMetrics,
     gridlines: bool,
+    pictures: &[SheetPicture],
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
@@ -697,6 +698,7 @@ where
         sheet,
         viewport,
         &[],
+        pictures,
         resolver,
         Some((metrics, gridlines)),
     )
@@ -707,6 +709,7 @@ fn build_frame<F, R>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
     resolver: F,
     print: Option<(&PrintMetrics, bool)>,
 ) -> Result<DisplayList, RenderError>
@@ -725,7 +728,7 @@ where
         sheet,
         viewport,
         ghosts,
-        &[],
+        pictures,
         resolver,
         print,
         geometry.as_ref(),
@@ -4288,6 +4291,7 @@ mod tests {
             },
             &metrics,
             true,
+            &[],
             |_| {
                 Err::<std::sync::Arc<ooxml_drawingml::chart::ChartSpace>, _>(
                     RenderError::ChartSourceUnavailable {
@@ -4536,6 +4540,7 @@ mod tests {
             SheetId(0),
             &vp,
             &[],
+            &[],
             |chart| {
                 Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
                     part: chart.part.clone(),
@@ -4613,6 +4618,7 @@ mod tests {
             &wb,
             SheetId(0),
             &vp,
+            &[],
             &[],
             |chart| {
                 Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {

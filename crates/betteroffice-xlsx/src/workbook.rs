@@ -3280,6 +3280,7 @@ impl Workbook {
             &viewport,
             metrics,
             gridlines,
+            &self.sheet_pictures(sheet),
             |chart| self.resolve_chart_space(&sheet_ref.name, chart),
         )
         .map_err(Error::from)?;

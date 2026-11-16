@@ -238,6 +238,7 @@ fn print_wraps_on_the_print_row_grid() {
         },
         &metrics,
         false,
+        &[],
         |_| {
             Err::<std::sync::Arc<ooxml_drawingml::chart::ChartSpace>, _>(
                 RenderError::ChartSourceUnavailable {
