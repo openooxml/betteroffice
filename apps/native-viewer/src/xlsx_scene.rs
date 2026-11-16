@@ -1032,7 +1032,6 @@ mod tests {
         assert_eq!(page.skipped.total(), 0);
     }
 
-    #[test]
     fn wrapped_glyph_runs(max_lines: Option<u32>, zoom: f32) -> usize {
         let wrap = serde_json::json!({
             "width": 100.0,

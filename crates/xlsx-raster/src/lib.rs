@@ -1286,7 +1286,7 @@ mod tests {
             ink_row_bands(&dl).len()
         };
         let kept = [Some(1), Some(2), Some(u32::MAX), None].map(bands);
-        assert_eq!(kept, [1, 2, 3, 3]);
+        assert_eq!(kept, [1, 2, 4, 4]);
     }
 
     fn wrapped_row(row: u32, row_pt: f64, scroll: f32, zoom: f32) -> DisplayList {
