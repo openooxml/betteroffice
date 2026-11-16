@@ -93,6 +93,7 @@ async function holdClipboardReads(page: Page, releaseOnClipboardEvent: boolean) 
     };
     const release = () => { waiting = false; for (const send of held.splice(0)) queueMicrotask(send); };
     (window as unknown as { releaseClipboardReads: () => void }).releaseClipboardReads = release;
+    (window as unknown as { heldClipboardReads: () => number }).heldClipboardReads = () => held.length;
     if (!releaseOnClipboardEvent) return;
     document.addEventListener('copy', release, { capture: true, once: true });
     document.addEventListener('cut', release, { capture: true, once: true });
@@ -152,8 +153,13 @@ for (const next of ['click', 'caret move'] as const) test(`a copy lands when a $
   await page.evaluate(() => navigator.clipboard.writeText('sentinel'));
   await input.press('ControlOrMeta+a');
   await input.press('ControlOrMeta+c');
+  const highlight = page.locator('[data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246"]');
+  await expect.poll(() => highlight.count()).toBeGreaterThan(0);
   if (next === 'click') await page.locator('.paged-editor__page canvas').first().click({ position: { x: 300, y: 300 } });
   else await input.press('ArrowDown');
+  await expect.poll(() => page.evaluate(() => (window as unknown as { heldClipboardReads: () => number }).heldClipboardReads())).toBeGreaterThan(0);
+  await expect(highlight).toHaveCount(0);
+  await expect(page.locator('[data-docx-worker-editor] [data-docx-caret]')).toHaveCount(1);
   await page.evaluate(() => (window as unknown as { releaseClipboardReads: () => void }).releaseClipboardReads());
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 5_000 }).toBe('Immediate clipboard text');
 });
