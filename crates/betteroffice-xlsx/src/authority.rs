@@ -1020,24 +1020,9 @@ impl WorkbookAuthority {
         Ok(self.recovery_state_parts()?.concat())
     }
 
-    /// The recovery state as releases before styled tables encoded it.
-    #[cfg(test)]
-    pub(crate) fn encode_plain_table_recovery_state(
-        &self,
-    ) -> crate::snapshot::SnapshotResult<Vec<u8>> {
-        Ok(self.recovery_state_parts_with(false)?.concat())
-    }
-
     /// The recovery state in pieces whose concatenation is the state, so the
     /// caller frames the Yrs update without copying it into a buffer of its own.
     pub(crate) fn recovery_state_parts(&self) -> crate::snapshot::SnapshotResult<[Vec<u8>; 3]> {
-        self.recovery_state_parts_with(true)
-    }
-
-    fn recovery_state_parts_with(
-        &self,
-        styled_tables: bool,
-    ) -> crate::snapshot::SnapshotResult<[Vec<u8>; 3]> {
         use crate::snapshot::wire::Writer;
         use snapshot::Codec;
         let base = &self.base;
@@ -1068,15 +1053,7 @@ impl WorkbookAuthority {
         base.charts.write(&mut writer);
         base.hidden_dimensions.write(&mut writer);
         base.shared_strings.write(&mut writer);
-        if styled_tables {
-            base.tables
-                .iter()
-                .map(|table| (table.clone(), table.style.clone()))
-                .collect::<Vec<snapshot::StyledTable>>()
-                .write(&mut writer);
-        } else {
-            base.tables.write(&mut writer);
-        }
+        base.tables.write(&mut writer);
         let styles = serde_json::to_vec(&base.styles)
             .map_err(|error| crate::snapshot::SnapshotError::new(error.to_string()))?;
         writer.bytes(&styles);
@@ -1195,10 +1172,7 @@ impl WorkbookAuthority {
             charts: Codec::read(&mut reader)?,
             hidden_dimensions: Codec::read(&mut reader)?,
             shared_strings: Codec::read(&mut reader)?,
-            tables: Vec::<snapshot::StyledTable>::read(&mut reader)?
-                .into_iter()
-                .map(snapshot::styled_table)
-                .collect(),
+            tables: Codec::read(&mut reader)?,
             styles: serde_json::from_str(reader.str()?)
                 .map_err(|error| SnapshotError::new(error.to_string()))?,
         };

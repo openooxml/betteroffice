@@ -102,7 +102,7 @@ test('checkpoint after N commands restores a fresh session boundary', async () =
     const projection = { ...opened.editState!, ...edit.editState, ...format.editState, ...selected.editState, ...mode.editState };
     const saved = await original.call.save();
     const checkpoint = await original.call.checkpoint();
-    expect(decodeWorkbookRecovery(checkpoint.state).engine[8]).toBe(9);
+    expect(decodeWorkbookRecovery(checkpoint.state).engine[8]).toBe(8);
     expect(await original.call.version()).toBe(mode.engineVersion);
     await expect(replacement.call.openRecovery({ ...checkpoint, throughSeq: checkpoint.throughSeq - 1 }))
       .rejects.toThrow('envelope mismatch');
@@ -145,7 +145,7 @@ function handle(version = 'engine:0') {
   } as unknown as WorkbookHandle;
 }
 
-function engineHeader(collaborative = false, version = 9) {
+function engineHeader(collaborative = false, version = 8) {
   const engine = new Uint8Array(42);
   engine.set([88, 76, 83, 88, 82, 69, 67, 86, version]);
   engine[41] = Number(collaborative);
@@ -158,7 +158,7 @@ test('recovery reads collaboration flags from binary engine checkpoints', () => 
 });
 
 test.each([
-  ...[0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 255].map((codec) => [`unsupported codec ${codec}`, engineHeader(false, codec)] as const),
+  ...[0, 1, 2, 3, 4, 5, 6, 7, 9, 255].map((codec) => [`unsupported codec ${codec}`, engineHeader(false, codec)] as const),
   ['invalid header', new Uint8Array(42)],
   ['truncated digest', engineHeader().slice(0, 40)],
   ['missing flags', engineHeader().slice(0, 41)],
@@ -754,9 +754,9 @@ test('direct edits validate pending command settlements before synchronization',
 
 test('cascade composition requires the binary engine codec', () => {
   for (const collaborative of [true, false]) {
-    expect(isCollaborativeWorkbookRecovery(engineHeader(collaborative, 9))).toBe(collaborative);
+    expect(isCollaborativeWorkbookRecovery(engineHeader(collaborative, 8))).toBe(collaborative);
   }
-  for (const codec of [2, 3, 4, 5, 6, 7, 8, 10]) {
+  for (const codec of [2, 3, 4, 5, 6, 7, 9]) {
     expect(() => isCollaborativeWorkbookRecovery(engineHeader(false, codec))).toThrow('Unsupported workbook recovery checkpoint');
   }
 });
