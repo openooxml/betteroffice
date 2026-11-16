@@ -2,7 +2,7 @@ import { expect, test, type Page, type TestInfo } from 'playwright/test';
 import JSZip from 'jszip';
 import { readFile } from 'node:fs/promises';
 
-type EditorProbe = { alerts: string[] };
+type EditorProbe = { workers: number; posted: number; pending: Set<string>; alerts: string[] };
 
 let editorLog: string[] = [];
 
@@ -11,8 +11,24 @@ test.beforeEach(async ({ page }) => {
   page.on('console', (message) => { if (message.type() === 'error' || message.type() === 'warning') editorLog.push(`console.${message.type()}: ${message.text()}`); });
   page.on('pageerror', (error) => { editorLog.push(`pageerror: ${error.message}`); });
   await page.addInitScript(() => {
-    const probe: EditorProbe = { alerts: [] };
+    const probe: EditorProbe = { workers: 0, posted: 0, pending: new Set(), alerts: [] };
     (window as unknown as { __tableMenuProbe: EditorProbe }).__tableMenuProbe = probe;
+    const OriginalWorker = window.Worker;
+    window.Worker = class extends OriginalWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options);
+        const worker = probe.workers += 1;
+        const send = this.postMessage.bind(this);
+        this.postMessage = ((message: { id?: number; type?: string }, ...args: unknown[]) => {
+          if (message?.type === 'edit' && message.id !== undefined) { probe.posted += 1; probe.pending.add(`${worker}:${message.id}`); }
+          Reflect.apply(send, this, [message, ...args]);
+        }) as typeof this.postMessage;
+        this.addEventListener('message', (event) => {
+          const id = (event.data as { id?: number } | null)?.id;
+          if (id !== undefined) probe.pending.delete(`${worker}:${id}`);
+        });
+      }
+    };
     new MutationObserver(() => {
       for (const alert of document.querySelectorAll('[role="alert"]')) {
         const text = alert.textContent?.trim();
@@ -30,6 +46,18 @@ test.afterEach(async ({ page }, info) => {
   console.log(`editor errors for "${info.title}":\n${report}`);
   await info.attach('editor-errors', { body: report, contentType: 'text/plain' });
 });
+
+async function workerEdits(page: Page): Promise<number> {
+  return page.evaluate(() => (window as unknown as { __tableMenuProbe: EditorProbe }).__tableMenuProbe.posted);
+}
+
+async function workerConfirmsSelection(page: Page, since = -1) {
+  await page.waitForFunction((after) => {
+    const probe = (window as unknown as { __tableMenuProbe: EditorProbe }).__tableMenuProbe;
+    return probe.posted > after && probe.pending.size === 0;
+  }, since, { timeout: 30000, polling: 'raf' });
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
 
 function documentXml(): string {
   const border = (side: string) => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="000000"/>`;
@@ -83,6 +111,7 @@ async function caretIntoTable(page: Page, input: ReturnType<Page['locator']>) {
   await input.press('ArrowDown');
   await expect(async () => {
     if (await page.locator('[role="menu"]').count() > 0) await page.keyboard.press('Escape');
+    await workerConfirmsSelection(page);
     await page.locator('.paged-editor__page').first()
       .click({ button: 'right', position: { x: 100, y: 100 }, force: true });
     await page.getByRole('menuitem', { name: 'Select entire table', exact: true }).click({ timeout: 2000 });
@@ -94,6 +123,7 @@ async function caretIntoTable(page: Page, input: ReturnType<Page['locator']>) {
 
 async function tableMenuAction(page: Page, label: string) {
   if (await page.locator('[role="menu"]').count() > 0) await page.keyboard.press('Escape');
+  await workerConfirmsSelection(page);
   await page.locator('.paged-editor__page').first()
     .click({ button: 'right', position: { x: 100, y: 100 }, force: true });
   const item = page.getByRole('menuitem', { name: label, exact: true });
@@ -147,8 +177,10 @@ test('worker table commands reshape the saved grid', async ({ page }, info) => {
   await caretIntoTable(page, input);
   await expectHighlights(page, 12);
   const initial = await highlightGrid(page);
+  const beforeClick = await workerEdits(page);
   await page.mouse.click(initial[0]![0]!.x, initial[0]![0]!.y);
   await expectHighlights(page, 0);
+  await workerConfirmsSelection(page, beforeClick);
 
   await tableMenuAction(page, 'Insert row below');
   expect(await savedGrid(page, info, 'row-below')).toMatchObject({ hasTable: true, rows: [4, 4, 4, 4], gridCols: 4 });
@@ -175,11 +207,15 @@ test('worker table commands reshape the saved grid', async ({ page }, info) => {
   await caretIntoTable(page, input);
   const grid = await highlightGrid(page);
   expect(grid.length).toBe(5);
+  const beforeGridClick = await workerEdits(page);
   await page.mouse.click(grid[0]![0]!.x, grid[0]![0]!.y);
   await expectHighlights(page, 0);
+  await workerConfirmsSelection(page, beforeGridClick);
   await input.focus();
+  const beforeExtend = await workerEdits(page);
   await input.press('Shift+ArrowRight');
   await expectHighlights(page, 2);
+  await workerConfirmsSelection(page, beforeExtend);
   await tableMenuAction(page, 'Merge cells');
   const merged = await savedGrid(page, info, 'merge');
   expect(merged.hasTable).toBe(true);
