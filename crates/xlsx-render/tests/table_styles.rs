@@ -5,6 +5,8 @@ const STYLES: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color 
 
 const PLAIN_STRIPES: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellXfs><dxfs count="2"><dxf><fill><patternFill><bgColor rgb="FFFFF78C"/></patternFill></fill></dxf><dxf/></dxfs><tableStyles count="2"><tableStyle name="Unset" pivot="0" count="2"><tableStyleElement type="firstRowStripe" dxfId="0"/><tableStyleElement type="secondRowStripe" size="3"/></tableStyle><tableStyle name="Blank" pivot="0" count="2"><tableStyleElement type="firstRowStripe" dxfId="0"/><tableStyleElement type="secondRowStripe" dxfId="1" size="3"/></tableStyle></tableStyles></styleSheet>"#;
 
+const DECLARED_PRESET: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellXfs><tableStyles count="1" defaultTableStyle="TableStyleMedium2"><tableStyle name="TableStyleMedium2" pivot="0" count="0"/></tableStyles></styleSheet>"#;
+
 /// A sheet holding table `A1:C5`: a header row, three data rows with `B2`
 /// using xf `b2_style`, and a fifth row the table counts as totals when
 /// `totals` is set.
@@ -200,7 +202,23 @@ fn a_stripe_that_paints_nothing_keeps_its_size() {
             "{style}"
         );
         for row in 2..5 {
-            assert_eq!(fill_at(&wb, &list, CellRef::new(row, 1)), None, "{style} row {row}");
+            assert_eq!(
+                fill_at(&wb, &list, CellRef::new(row, 1)),
+                None,
+                "{style} row {row}"
+            );
         }
     }
+}
+
+#[test]
+fn a_declaration_naming_a_preset_without_elements_draws_the_preset() {
+    let wb = workbook_with(DECLARED_PRESET, &info("TableStyleMedium2", true), 0, false);
+    let list = render(&wb);
+    assert_eq!(fill_at(&wb, &list, CellRef::new(0, 2)), theme(4, 0.0));
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(1, 1)),
+        theme(4, 0.7999816888943144)
+    );
 }
