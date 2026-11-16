@@ -1352,7 +1352,10 @@ fn page_break_depends_on_paragraph<'a>(
         {
             following
                 .take_while(|block| {
-                    matches!(block, LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_))
+                    matches!(
+                        block,
+                        LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
+                    )
                 })
                 .any(|block| matches!(block, LayoutBlock::PageBreak(_)))
         }
