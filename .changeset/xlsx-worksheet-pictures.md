@@ -1,7 +1,8 @@
 ---
 '@betteroffice/xlsx': minor
 '@betteroffice/xlsx-native': minor
+'@betteroffice/python-xlsx': minor
 '@betteroffice/rust-crates': minor
 ---
 
-Worksheet pictures now appear in display lists as `image` commands, on by default, and in native PNG exports. `paintDisplayList` draws them when given `resolveImage`, fed by the new `mediaBytes`; otherwise it skips them.
+Breaking: Rust `DrawCmd` gains `Image`, `build_display_list_with_geometry` takes pictures, and `WorkbookHandle` requires `mediaBytes`. Worksheet pictures draw in PNG export and in `paintDisplayList` given `resolveImage`; the bundled editor and viewer do not paint them yet.
