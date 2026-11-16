@@ -347,10 +347,11 @@ fn invalid_background_transforms_are_refused_without_mutating_state() {
     for constructor in constructors {
         invalid.extend([f64::NAN, f64::INFINITY, f64::NEG_INFINITY].map(constructor));
     }
-    let ranged: [fn(f64) -> ColorTransform; 6] = [Tint, Shade, LumMod, LumOff, SatMod, Alpha];
+    let ranged: [fn(f64) -> ColorTransform; 5] = [Tint, Shade, LumMod, SatMod, Alpha];
     for constructor in ranged {
         invalid.extend([-0.01, 1.01].map(constructor));
     }
+    invalid.extend([-1.01, 1.01].map(LumOff));
     for transform in invalid {
         let color = ColorValue {
             rgb: Some("112233".to_owned()),
@@ -382,6 +383,74 @@ fn invalid_background_transforms_are_refused_without_mutating_state() {
             assert_eq!(session.version(), version);
         }
     }
+}
+
+fn background_hex(session: &DeckSession) -> Option<String> {
+    ooxml_drawingml::resolve_color_value_to_hex(background_of(session, 0)?.color.as_ref())
+}
+
+#[test]
+fn a_background_with_a_negative_luminance_offset_is_accepted() {
+    let colors = [
+        ColorValue {
+            rgb: Some("FF0000".to_owned()),
+            transforms: vec![ooxml_drawingml::ColorTransform::LumOff(-0.25)],
+            ..ColorValue::default()
+        },
+        ColorValue {
+            rgb: Some("FF0000".to_owned()),
+            luminance_offset: Some(-0.25),
+            ..ColorValue::default()
+        },
+    ];
+    for (seed, color) in (40..).step_by(2).zip(colors) {
+        let session = DeckSession::open(FIXTURE, seed).unwrap();
+        let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+        let fill = ShapeFill {
+            fill_type: "solid".to_owned(),
+            color: Some(color),
+            gradient: None,
+        };
+
+        let receipt = session
+            .set_slide_background(&context(), &slide_id, Some(&fill))
+            .unwrap();
+        assert_eq!(receipt.after, Some(fill.clone()));
+        assert_eq!(background_hex(&session).as_deref(), Some("#800000"));
+
+        let saved = session.save().unwrap();
+        let slide = part_text(&saved, &slide_part(&session, 0));
+        assert!(slide.contains(r#"<a:lumOff val="-25000"/>"#), "{slide}");
+        let reopened = DeckSession::open(&saved, seed + 1).unwrap();
+        assert_eq!(background_hex(&reopened).as_deref(), Some("#800000"));
+    }
+}
+
+#[test]
+fn a_declared_negative_luminance_offset_survives_a_save() {
+    let source = with_slide_background(
+        r#"<p:bg><p:bgPr><a:solidFill><a:srgbClr val="FF0000"><a:lumOff val="-25000"/></a:srgbClr></a:solidFill><a:effectLst/></p:bgPr></p:bg>"#,
+    );
+    let session = DeckSession::open(&source, 44).unwrap();
+    assert_eq!(background_hex(&session).as_deref(), Some("#800000"));
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let shape_id = session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.kind == ShapeKind::Shape)
+        .unwrap()
+        .id
+        .clone();
+    session
+        .set_shape_fill(&context(), &slide_id, &shape_id, Some("DC2626"))
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&saved, &slide_part(&session, 0));
+    assert!(slide.contains(r#"<a:lumOff val="-25000"/>"#), "{slide}");
+    assert!(slide.contains(r#"<a:srgbClr val="DC2626"/>"#), "{slide}");
+    let reopened = DeckSession::open(&saved, 45).unwrap();
+    assert_eq!(background_hex(&reopened).as_deref(), Some("#800000"));
 }
 
 #[test]

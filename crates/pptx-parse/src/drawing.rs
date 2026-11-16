@@ -2283,15 +2283,15 @@ mod tests {
 
     #[test]
     fn malformed_legacy_transforms_do_not_change_the_color() {
-        for (name, maximum) in [
-            ("tint", 100_000),
-            ("shade", 100_000),
-            ("lumMod", 1_000_000),
-            ("lumOff", 1_000_000),
-            ("satMod", 1_000_000),
-            ("alpha", 1_000_000),
+        for (name, minimum, maximum) in [
+            ("tint", 0, 100_000),
+            ("shade", 0, 100_000),
+            ("lumMod", 0, 1_000_000),
+            ("lumOff", -1_000_000, 1_000_000),
+            ("satMod", 0, 1_000_000),
+            ("alpha", 0, 1_000_000),
         ] {
-            for value in [-1, maximum + 1] {
+            for value in [minimum - 1, maximum + 1] {
                 let xml =
                     format!(r#"<a:srgbClr val="4472C4"><a:{name} val="{value}"/></a:srgbClr>"#);
                 let limits = ParseLimits::default();
@@ -2323,6 +2323,12 @@ mod tests {
                 "#8FAADC",
             ),
             ("4472C4", r#"<a:lumMod val="75000"/>"#, "#2F5597"),
+            ("FF0000", r#"<a:lumOff val="-25000"/>"#, "#800000"),
+            (
+                "4472C4",
+                r#"<a:lumMod val="75000"/><a:lumOff val="-25000"/>"#,
+                "#111E36",
+            ),
             ("6254E7", r#"<a:tint val="50000"/>"#, "#C5C3F3"),
         ] {
             let xml = format!(r#"<a:srgbClr val="{rgb}">{modifiers}</a:srgbClr>"#);

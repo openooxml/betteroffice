@@ -6045,6 +6045,34 @@ fn chart_colours_apply_their_drawingml_transforms() {
     );
 }
 
+#[test]
+fn negative_luminance_offsets_darken_chart_colours() {
+    let series = |color: &str| {
+        format!(
+            r#"<c:ser><c:spPr><a:solidFill>{color}</a:solidFill></c:spPr><c:val><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:val></c:ser>"#
+        )
+    };
+    let part = format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart>{}{}"#,
+            r#"<c:axId val="1"/><c:axId val="2"/></c:barChart>"#,
+            r#"<c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart></c:chartSpace>"#,
+        ),
+        series(r#"<a:srgbClr val="FF0000"><a:lumOff val="-25000"/></a:srgbClr>"#),
+        series(
+            r#"<a:srgbClr val="4472C4"><a:lumMod val="75000"/><a:lumOff val="-25000"/></a:srgbClr>"#
+        ),
+    );
+    let space = crate::chart_space(part.as_bytes(), &Default::default()).expect("chart");
+    let colors = space.plot_groups[0]
+        .series
+        .iter()
+        .map(|series| series.color.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(colors, ["#800000", "#111E36"]);
+}
+
 /// Saving a charted workbook whose references moved patches the chart part in
 /// place: the reference and the cache beside it move together, and every byte
 /// neither owns is left alone.
