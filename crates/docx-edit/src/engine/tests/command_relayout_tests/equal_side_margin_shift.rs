@@ -37,10 +37,7 @@ fn section_below(left: u32, right: u32, picture: &str) -> Vec<u8> {
     let body = format!(
         "{}{}{}{section}",
         first_section(1440, 720),
-        para(
-            PICTURE,
-            &format!("{picture}{}", run(&words(30, 300)))
-        ),
+        para(PICTURE, &format!("{picture}{}", run(&words(30, 300)))),
         filler_paragraphs(0x3100, 12),
     );
     Package::new(&body)
