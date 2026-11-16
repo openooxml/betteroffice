@@ -39,7 +39,7 @@ import type {
   YrsSession,
   YrsStoryRange,
 } from '@betteroffice/docx/yrs';
-import type { BundledFontProvider } from '@betteroffice/docx/layout';
+import type { BundledFontProvider, FontScript } from '@betteroffice/docx/layout';
 import {
   createYrsSidebarProjection,
   extractTrackedChangesFromYrs,
@@ -339,6 +339,13 @@ export interface DocxEditorBaseProps extends DocxEditorPluginProps {
    * with collaboration. Default false.
    */
   previewFirstPage?: boolean;
+  /**
+   * Scripts whose bundled fallback face loads whole in the background once the document is open, so text typed in
+   * them later draws without waiting for its outlines, e.g. `['cjk-kr']`. The face is registered even when the
+   * document has no such text yet; layout is unchanged. Only sliced faces load this way (the CJK faces of
+   * `@betteroffice/fonts-cjk`), at the cost of their whole download (about 3.6 MB for Korean). Worker-only editor only.
+   */
+  preloadFontScripts?: readonly FontScript[];
   /**
    * Accessible page DOM in the worker-only editor. `'full'` (default) places each line where
    * it is painted; `'text'` keeps only readable text, links and tables, which costs less but

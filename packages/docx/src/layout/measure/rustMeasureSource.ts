@@ -111,12 +111,19 @@ export function createRustMeasureSource(options: {
   progressive?: boolean;
   /** With the default provider, give families it doesn't carry the last-resort face. On unless `false`. */
   standIns?: boolean;
+  /**
+   * With `progressive`, script fallbacks to register even when no text asks for them yet; their sliced faces are
+   * marked to load whole in the editor worker, so text typed in those scripts later never waits for an outline.
+   * Chains and measurement stay as the requirements make them.
+   */
+  fill?: readonly FontScript[];
 }): RustMeasureSource {
   const engine = options.engine;
   const standIns = options.standIns !== false;
   const hosted = hostedFontFamilies(options.bundled);
   let implicit = false;
   let generation = 0;
+  let fillIds = new Set<number>();
   let appFamilies = new Set<string>();
   const hostedCoverageUnknown = (family: string) => implicit &&
     hosted?.has(family.trim().toLowerCase()) === true && !appFamilies.has(family.trim().toLowerCase());
@@ -150,7 +157,7 @@ export function createRustMeasureSource(options: {
       const { sliceSourceOf } = await import('@betteroffice/fonts/progressive');
       for (const [slot, face] of registry.progressiveFaces()) {
         const source = await sliceSourceOf(face as Parameters<typeof sliceSourceOf>[0]);
-        if (source) specs.push({ slot, source });
+        if (source) specs.push({ slot, source, ...(fillIds.has(slot) ? { fill: true } : {}) });
       }
       return specs;
     },
@@ -216,6 +223,12 @@ export function createRustMeasureSource(options: {
         return registry.prepareBaseLatin(requirement.family, requirement.bold, requirement.italic,
           requirement.characters ?? [], earlier, requirement.key);
       }));
+      if (options.progressive && options.fill?.length) {
+        // No chain names these faces, so measurement and the reported change stay as the requirements make them.
+        const current = generation;
+        const ids = await registry.getScriptFallbackIds([...options.fill]).catch(() => []);
+        if (current === generation) for (const id of ids) fillIds.add(id);
+      }
       return settled.some(Boolean) || backstops.some(Boolean);
     },
 
@@ -325,6 +338,7 @@ export function createRustMeasureSource(options: {
     clear(): void {
       generation++;
       implicit = false;
+      fillIds = new Set();
       registry.clear();
     },
   };

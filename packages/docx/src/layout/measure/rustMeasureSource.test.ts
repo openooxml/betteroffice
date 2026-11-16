@@ -564,3 +564,33 @@ test('Simplified and Traditional Arabic runs chain Noto Naskh Arabic as their Ar
     }
   }
 });
+
+test('fill scripts register their sliced faces outside every chain and mark them to load whole in the worker', async () => {
+  const { decodeFontFace } = await import('../../../../fonts/src/decode');
+  const runtime = {
+    decoder: (bytes: ArrayBuffer, options: { dict?: ArrayBuffer; codec?: 'zstd' | 'brotli'; maxOutput?: number }) =>
+      decodeFontFace(bytes, options.dict, { codec: options.codec, maxOutput: options.maxOutput }),
+  } as Parameters<typeof createRustMeasureSource>[0]['runtime'];
+  const cjk = fontManager.createFontProvider({ baseUrl: new URL('../../../../fonts-cjk/assets/', import.meta.url) }, runtime)
+    .resolveScriptFallback('cjk-kr', false, false)!;
+  expect(cjk.slices).toBeDefined();
+  const provider = { ...providerFor(Uint8Array.of(1, 2).buffer), resolveScriptFallback: (script: string) => script === 'cjk-kr' ? cjk : undefined };
+  const [filled, plain] = [true, false].map((fill) => {
+    const registered: number[] = [];
+    const source = createRustMeasureSource({
+      bundled: provider, progressive: true, standIns: false, runtime, ...(fill ? { fill: ['cjk-kr'] as const } : {}),
+      engine: { registerFont: (bytes) => registered.push(bytes.byteLength) - 1, clearFonts() {} },
+    });
+    return { source, registered };
+  });
+  for (const { source } of [filled!, plain!]) await source.prepareFontRequirements([regular]);
+  const chains = filled!.source.measurementConfigForRequirements([regular])!.fontChains;
+  expect(chains).toEqual(plain!.source.measurementConfigForRequirements([regular])!.fontChains);
+  const specs = await filled!.source.progressiveFonts!();
+  expect(specs.map((spec) => spec.fill)).toEqual([true]);
+  expect(Object.values(chains).flat()).not.toContain(specs[0]!.slot);
+  expect(filled!.registered).toHaveLength(plain!.registered.length + 1);
+  expect(await plain!.source.progressiveFonts!()).toEqual([]);
+  filled!.source.clear();
+  expect(await filled!.source.progressiveFonts!()).toEqual([]);
+});

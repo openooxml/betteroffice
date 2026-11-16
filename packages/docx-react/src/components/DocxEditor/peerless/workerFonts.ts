@@ -76,11 +76,13 @@ export async function prepareWorkerFontEnvironment(options: {
   onCoverage?: (covers: (requirements: ResidentFontRequirement[]) => boolean) => void;
   /** Register sliced script-fallback faces from their skeleton and core; the worker loads their outlines. */
   progressive?: boolean;
+  /** Scripts whose sliced fallback face the worker loads whole in the background, as `preloadFontScripts` asks. */
+  fill?: Parameters<typeof createRustMeasureSource>[0]['fill'];
 }): Promise<DocxFontEnvironment> {
   const fonts: YrsResidentFontRegistration[] = [];
   const styles = new Map<number, Pick<ResidentFontRequirement, 'family' | 'bold' | 'italic'>>();
   const measurement = createRustMeasureSource({ bundled: hostedFontProvider(options.provider, options.fonts), runtime: options.runtime,
-    progressive: options.progressive, engine: {
+    progressive: options.progressive, fill: options.fill, engine: {
     registerFont(bytes, face) {
       options.signal.throwIfAborted();
       const id = fonts.push(bytes) - 1;

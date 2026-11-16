@@ -62,7 +62,8 @@ function validProgressiveSpecs(specs: unknown, faces: readonly DocxFontFace[]): 
     return Number.isSafeInteger(ref.format) && text(ref.index) && hex(ref.indexSha256) &&
       !!urls && typeof urls === 'object' && !Array.isArray(urls) && Object.keys(urls).length <= 4096 &&
       validSliceUrls(urls) &&
-      (timeoutMs === undefined || (Number.isSafeInteger(timeoutMs) && timeoutMs > 0));
+      (timeoutMs === undefined || (Number.isSafeInteger(timeoutMs) && timeoutMs > 0)) &&
+      (spec.fill === undefined || typeof spec.fill === 'boolean');
   });
 }
 
