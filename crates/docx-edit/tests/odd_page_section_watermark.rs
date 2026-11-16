@@ -38,7 +38,7 @@ fn odd_page_section_document() -> Vec<u8> {
 }
 
 #[test]
-fn odd_page_section_filler_page_paints_the_document_watermark() {
+fn odd_page_section_start_keeps_two_watermarked_pages() {
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let engine = EngineSession::new(73102);
@@ -81,11 +81,11 @@ fn odd_page_section_filler_page_paints_the_document_watermark() {
     let display: Value =
         serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
     let pages = display["pages"].as_array().unwrap();
-    assert_eq!(pages.len(), 3);
-    assert_eq!(pages[0]["header"]["rId"], "rIdHeader");
-    assert_eq!(pages[1]["header"]["rId"], Value::Null);
-    assert_eq!(pages[2]["header"]["rId"], "rIdHeader");
+    assert_eq!(pages.len(), 2);
     for page in pages {
+        assert!(!page["header"].is_null());
+        assert_eq!(page["header"]["rId"], "rIdHeader");
+        assert_eq!(page["parityFiller"], Value::Null);
         assert_eq!(page["watermarkPrimitiveCount"], json!(1));
     }
 }
