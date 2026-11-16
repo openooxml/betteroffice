@@ -3,10 +3,23 @@ use xlsx_render::{DisplayList, DrawCmd, GridGeometry, Viewport, build_display_li
 
 const STYLES: &str = r#"<styleSheet><fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills><borders count="1"><border/></borders><cellXfs count="2"><xf fontId="0" fillId="0" borderId="0"/><xf fontId="0" fillId="2" borderId="0" applyFill="1"/></cellXfs><dxfs count="2"><dxf><font><b/><color rgb="FFFFFFFF"/></font><fill><patternFill><bgColor rgb="FF195A82"/></patternFill></fill></dxf><dxf><fill><patternFill><bgColor rgb="FFFFF78C"/></patternFill></fill></dxf></dxfs><tableStyles count="1"><tableStyle name="Budget" pivot="0" count="2"><tableStyleElement type="headerRow" dxfId="0"/><tableStyleElement type="firstRowStripe" dxfId="1"/></tableStyle></tableStyles></styleSheet>"#;
 
+const FONT_STYLES: &str = r#"<styleSheet><fonts count="7"><font><sz val="11"/><color theme="1"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/></font><font><sz val="12"/><color theme="1" tint="0.25"/><name val="Calibri"/></font><font><sz val="12"/><name val="Calibri"/></font><font><sz val="12"/><color theme="1"/><name val="Calibri"/></font><font><sz val="14"/><color theme="1" tint="0.25"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="2"><xf fontId="0" fillId="0" borderId="0"/><xf fontId="3" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="7"><xf fontId="0" fillId="0" borderId="0" xfId="0"/><xf fontId="1" fillId="0" borderId="0" xfId="0"/><xf fontId="5" fillId="0" borderId="0" xfId="0"/><xf fontId="2" fillId="0" borderId="0" xfId="0"/><xf fontId="4" fillId="0" borderId="0" xfId="1"/><xf fontId="0" fillId="2" borderId="0" xfId="0"/><xf fontId="6" fillId="0" borderId="0" xfId="1"/></cellXfs><cellStyles count="2"><cellStyle name="Normal" xfId="0" builtinId="0"/><cellStyle name="Muted" xfId="1"/></cellStyles><dxfs count="2"><dxf><font><color rgb="FFFFFFFF"/></font><fill><patternFill><bgColor rgb="FF195A82"/></patternFill></fill></dxf><dxf><font><color theme="1" tint="0.25"/></font></dxf></dxfs><tableStyles count="1"><tableStyle name="Plain" pivot="0" count="2"><tableStyleElement type="wholeTable" dxfId="1"/><tableStyleElement type="headerRow" dxfId="0"/></tableStyle></tableStyles></styleSheet>"#;
+
 /// A sheet holding table `A1:C5`: a header row, three data rows with `B2`
 /// using xf `b2_style`, and a fifth row the table counts as totals when
 /// `totals` is set.
 fn workbook(style_info: &str, b2_style: u32, totals: bool) -> Workbook {
+    styled_workbook(STYLES, style_info, &[("B2", b2_style)], totals)
+}
+
+/// [`workbook`] over the stylesheet `styles`, each cell named in `cells`
+/// using the paired xf.
+fn styled_workbook(
+    styles: &str,
+    style_info: &str,
+    cells: &[(&str, u32)],
+    totals: bool,
+) -> Workbook {
     let rels = |body: &str| {
         format!(
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#
@@ -17,11 +30,18 @@ fn workbook(style_info: &str, b2_style: u32, totals: bool) -> Workbook {
             r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/>"#
         )
     };
+    let style = |cell: String| {
+        cells
+            .iter()
+            .find(|(name, _)| *name == cell)
+            .map_or_else(String::new, |(_, xf)| format!(r#" s="{xf}""#))
+    };
     let rows = (1..=5)
         .map(|row| {
-            let style = if row == 2 { format!(r#" s="{b2_style}""#) } else { String::new() };
+            let a = style(format!("A{row}"));
+            let b = style(format!("B{row}"));
             format!(
-                r#"<row r="{row}"><c r="A{row}" t="inlineStr"><is><t>a{row}</t></is></c><c r="B{row}"{style}><v>{row}</v></c></row>"#
+                r#"<row r="{row}"><c r="A{row}"{a} t="inlineStr"><is><t>a{row}</t></is></c><c r="B{row}"{b}><v>{row}</v></c></row>"#
             )
         })
         .collect::<String>();
@@ -35,7 +55,7 @@ fn workbook(style_info: &str, b2_style: u32, totals: bool) -> Workbook {
             rels(&(link("rId1", "worksheet", "worksheets/sheet1.xml")
                 + &link("rId2", "styles", "styles.xml"))),
         ),
-        ("xl/styles.xml", STYLES.to_string()),
+        ("xl/styles.xml", styles.to_string()),
         (
             "xl/worksheets/sheet1.xml",
             format!("<worksheet><sheetData>{rows}</sheetData></worksheet>"),
@@ -181,4 +201,60 @@ fn a_total_row_draws_its_element() {
     );
     assert_eq!(text(&list, "a5"), ("#ffffff".into(), true));
     assert_eq!(text(&list, "a4"), ("#ffffff".into(), false));
+}
+
+fn plain_table(cells: &[(&str, u32)]) -> (Workbook, DisplayList) {
+    let wb = styled_workbook(FONT_STYLES, &info("Plain", true), cells, false);
+    let list = render(&wb);
+    (wb, list)
+}
+
+#[test]
+fn a_header_font_without_a_colour_stays_automatic() {
+    let (_, list) = plain_table(&[("A1", 1)]);
+    assert_eq!(text(&list, "a1"), ("#000000".into(), true));
+}
+
+#[test]
+fn a_header_font_with_its_cell_style_colour_takes_the_style_colour() {
+    let (_, list) = plain_table(&[("A1", 2)]);
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), false));
+}
+
+#[test]
+fn a_bold_header_font_with_its_cell_style_colour_stays_bold_in_the_style_colour() {
+    let (_, list) = plain_table(&[("A1", 3)]);
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), true));
+}
+
+#[test]
+fn an_automatic_data_font_under_a_tinted_cell_style_stays_automatic() {
+    let (_, list) = plain_table(&[("A2", 4)]);
+    assert_eq!(text(&list, "a2"), ("#000000".into(), false));
+    assert_eq!(text(&list, "a3"), (theme(1, 0.25).unwrap(), false));
+}
+
+#[test]
+fn a_font_with_a_parent_style_colour_takes_the_style_colour() {
+    let (_, list) = plain_table(&[("A1", 6)]);
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), false));
+}
+
+#[test]
+fn fills_keep_the_cell_fill_over_the_style_fill() {
+    let (wb, list) = plain_table(&[("A1", 5), ("A2", 5)]);
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(0, 0)),
+        Some("#ffff00".into())
+    );
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(0, 1)),
+        Some("#195a82".into())
+    );
+    assert_eq!(
+        fill_at(&wb, &list, CellRef::new(1, 0)),
+        Some("#ffff00".into())
+    );
+    assert_eq!(fill_at(&wb, &list, CellRef::new(1, 1)), None);
+    assert_eq!(text(&list, "a1"), ("#ffffff".into(), false));
 }
