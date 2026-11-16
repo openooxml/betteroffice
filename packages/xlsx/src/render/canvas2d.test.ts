@@ -611,7 +611,7 @@ describe('Canvas2D text', () => {
 });
 
 describe('Canvas2D wrapped text', () => {
-  function wrappedFills(text: string, align: 'left' | 'center' | 'right', valign: 'top' | 'center' | 'bottom', width = 60) {
+  function wrappedFills(text: string, align: 'left' | 'center' | 'right', valign: 'top' | 'center' | 'bottom', width = 60, maxLines?: number) {
     const fills: { text: string; x: number; y: number; align: string }[] = [];
     const context = {
       font: '', fillStyle: '', textAlign: '', textBaseline: '',
@@ -626,7 +626,7 @@ describe('Canvas2D wrapped text', () => {
       width: 200, height: 200,
       commands: [{ op: 'text', x: 40, y: 50, text, fontSize: 11, color: '#000000',
         align, clip: { x: 0, y: 0, w: 200, h: 200 },
-        wrap: { width, lineHeight: 18, valign },
+        wrap: { width, lineHeight: 18, valign, maxLines },
       } as unknown as TextCmd],
     }, 1);
     return fills;
@@ -645,7 +645,7 @@ describe('Canvas2D wrapped text', () => {
     expect(wrappedFills('ab cd ef', 'right', 'bottom').map((f) => [f.text, f.y])).toEqual([['ab cd', 32], ['ef', 50]]);
   });
 
-  function paintedLines(row: number, scroll: number, zoom: number): number {
+  function paintedLines(maxLines: number | undefined, zoom: number): number {
     let lines = 0;
     const context = {
       font: '', fillStyle: '', textAlign: '', textBaseline: '',
@@ -658,28 +658,33 @@ describe('Canvas2D wrapped text', () => {
     };
     paintDisplayList(context as unknown as CanvasRenderingContext2D, {
       width: 100 * zoom, height: 100 * zoom,
-      commands: [{ op: 'text', x: 4 * zoom, y: (row / 2 - scroll) * zoom, text: 'a\nb\nc\nd', fontSize: 11 * zoom,
-        color: '#000000', align: 'left', clip: { x: 0, y: 0, w: 100 * zoom, h: (row - scroll) * zoom },
-        wrap: { width: 1000 * zoom, lineHeight: 18 * zoom, valign: 'center', fitHeight: (row + 1) * zoom },
+      commands: [{ op: 'text', x: 4 * zoom, y: 50 * zoom, text: 'a\nb\nc\nd', fontSize: 11 * zoom,
+        color: '#000000', align: 'left', clip: { x: 0, y: 0, w: 100 * zoom, h: 100 * zoom },
+        wrap: { width: 1000 * zoom, lineHeight: 18 * zoom, valign: 'center', maxLines },
       } as unknown as TextCmd],
     }, 1);
     return lines;
   }
 
-  it('keeps the wrapped lines of a row scrolled partly out of view', () => {
-    expect(paintedLines(50, 0, 1)).toBe(3);
-    expect(paintedLines(50, 4, 1)).toBe(3);
+  it('paints at most the wrapped lines the display list keeps, at every zoom', () => {
+    expect([1, 2, 4].map((zoom) => paintedLines(2, zoom))).toEqual([2, 2, 2]);
+    expect([1, 4294967295, undefined].map((maxLines) => paintedLines(maxLines, 1))).toEqual([1, 4, 4]);
   });
 
-  it('paints the same wrapped lines at every zoom', () => {
-    expect([1, 2, 4].map((zoom) => paintedLines(32, 0, zoom))).toEqual([2, 2, 2]);
+  it('aligns the kept lines as a block of their own', () => {
+    const kept = (valign: 'top' | 'center' | 'bottom') =>
+      wrappedFills('a\nb\nc', 'left', valign, 60, 2).map((f) => [f.text, f.y]);
+    expect(kept('top')).toEqual([['a', 50], ['b', 68]]);
+    expect(kept('center')).toEqual([['a', 41], ['b', 59]]);
+    expect(kept('bottom')).toEqual([['a', 32], ['b', 50]]);
   });
 
   it('paints the lines the Rust painters paint for each shared fit case', () => {
-    const cases = fitFixture as unknown as { name: string; wrap: TextWrap; fontSize: number; count: number; lines: number }[];
-    const painted = cases.map(({ name, wrap, fontSize, count }) =>
-      [name, wrappedLinesFitting(count, wrap, fontSizePx({ fontSize } as TextCmd))]);
-    expect(painted).toEqual(cases.map(({ name, lines }) => [name, lines]));
+    const cases = fitFixture as { name: string; height: number; lineHeight: number; fontSize: number; maxLines: number }[];
+    const kept = cases.map(({ name, height, lineHeight, fontSize }) => [name, wrappedLinesFitting(
+      Number.MAX_SAFE_INTEGER, { width: 100, lineHeight, valign: 'center', fitHeight: height } as TextWrap,
+      fontSizePx({ fontSize } as TextCmd))]);
+    expect(kept).toEqual(cases.map(({ name, maxLines }) => [name, maxLines]));
   });
 });
 

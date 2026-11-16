@@ -1033,33 +1033,17 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_text_taller_than_its_row_paints_only_the_lines_that_fit() {
-        let mut wrapped = text("one two six");
-        if let DrawCmd::Text { clip, wrap, .. } = &mut wrapped {
-            clip.h = 20.0;
-            *wrap = Some(TextWrap {
-                width: 30.0,
-                line_height: 20.0,
-                valign: TextValign::Center,
-                fit_height: Some(21.0),
-            });
-        }
-        let page = translate_sheet(&display_list(vec![wrapped])).unwrap();
-        assert_eq!(page.scene.encoding().resources.glyph_runs.len(), 1);
-    }
-
-    fn wrapped_glyph_runs(row: f32, scroll: f32, zoom: f32) -> usize {
-        let fit = serde_json::json!({
+    fn wrapped_glyph_runs(max_lines: Option<u32>, zoom: f32) -> usize {
+        let wrap = serde_json::json!({
             "width": 100.0,
-            "lineHeight": 18.0,
+            "lineHeight": 12.0,
             "valign": "center",
-            "fitHeight": row + 1.0,
+            "maxLines": max_lines,
         });
         let mut wrapped = text("a\nb\nc\nd");
-        if let DrawCmd::Text { y, clip, wrap, .. } = &mut wrapped {
-            *y = row / 2.0 - scroll;
-            clip.h = row - scroll;
-            *wrap = Some(serde_json::from_value(fit).unwrap());
+        if let DrawCmd::Text { y, wrap: slot, .. } = &mut wrapped {
+            *y = 30.0;
+            *slot = Some(serde_json::from_value(wrap).unwrap());
         }
         let dl = xlsx_render::scaled(display_list(vec![wrapped]), zoom);
         let page = translate_sheet(&dl).unwrap();
@@ -1067,17 +1051,14 @@ mod tests {
     }
 
     #[test]
-    fn a_row_scrolled_partly_out_of_view_keeps_its_wrapped_lines() {
-        assert_eq!(wrapped_glyph_runs(50.0, 0.0, 1.0), 3);
-        assert_eq!(wrapped_glyph_runs(50.0, 4.0, 1.0), 3);
+    fn wrapped_text_paints_at_most_the_lines_its_display_list_keeps() {
+        let kept = [Some(1), Some(2), Some(u32::MAX), None].map(|max| wrapped_glyph_runs(max, 1.0));
+        assert_eq!(kept, [1, 2, 4, 4]);
     }
 
     #[test]
-    fn a_wrapped_row_paints_the_same_lines_at_every_zoom() {
-        let runs: Vec<usize> = [1.0, 2.0, 4.0]
-            .into_iter()
-            .map(|zoom| wrapped_glyph_runs(32.0, 0.0, zoom))
-            .collect();
+    fn wrapped_text_keeps_the_same_lines_at_every_zoom() {
+        let runs = [1.0, 2.0, 4.0].map(|zoom| wrapped_glyph_runs(Some(2), zoom));
         assert_eq!(runs, [2, 2, 2]);
     }
 

@@ -1266,30 +1266,28 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_text_taller_than_its_row_paints_only_the_lines_that_fit() {
+    fn wrapped_text_paints_at_most_the_lines_its_display_list_keeps() {
         let cell = DlRect {
             x: 0.0,
             y: 0.0,
             w: 60.0,
-            h: 20.0,
+            h: 100.0,
         };
-        let text = |text: &str, wrap: Option<xlsx_render::TextWrap>| {
-            let mut dl = text_dl(text, cell, false, None, false);
+        let bands = |max_lines: Option<u32>| {
+            let wrap = serde_json::json!({
+                "width": 30.0,
+                "lineHeight": 20.0,
+                "valign": "center",
+                "maxLines": max_lines,
+            });
+            let mut dl = text_dl("one two six", cell, false, None, false);
             if let DrawCmd::Text { wrap: slot, .. } = &mut dl.commands[0] {
-                *slot = wrap;
+                *slot = Some(serde_json::from_value(wrap).unwrap());
             }
-            dl
+            ink_row_bands(&dl).len()
         };
-        let wrap = xlsx_render::TextWrap {
-            width: 30.0,
-            line_height: 20.0,
-            valign: xlsx_render::TextValign::Center,
-            fit_height: Some(21.0),
-        };
-        assert_eq!(
-            ink_row_bands(&text("one two six", Some(wrap))),
-            ink_row_bands(&text("one", None))
-        );
+        let kept = [Some(1), Some(2), Some(u32::MAX), None].map(bands);
+        assert_eq!(kept, [1, 2, 3, 3]);
     }
 
     fn wrapped_row(row: u32, row_pt: f64, scroll: f32, zoom: f32) -> DisplayList {
