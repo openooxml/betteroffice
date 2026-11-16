@@ -1637,6 +1637,28 @@ fn fitted_text_watermark_scales_its_shaped_advance_to_the_box() {
 }
 
 #[test]
+fn fitted_text_watermark_stretch_is_held_to_word_maximum() {
+    let input = serde_json::json!({
+        "measured": [],
+        "options": {},
+        "headersFooters": {"watermark": {
+            "kind": "text", "text": "I", "font": "Liberation Sans",
+            "widthEmu": 9144000, "heightEmu": 95250
+        }},
+        "layout": {"pages": [{"size": {"w": 816.0, "h": 1056.0}, "margins": {}, "fragments": []}]}
+    });
+    let json = build_display_list_json(&input.to_string()).expect("builds");
+    let dl: DisplayList = serde_json::from_str(&json).unwrap();
+    let Primitive::Text(t) = &dl.pages[0].primitives[0] else {
+        panic!("watermark should emit text");
+    };
+    assert_eq!(
+        t.horizontal_scale.as_ref().and_then(|n| n.as_f64()),
+        Some(600.0)
+    );
+}
+
+#[test]
 fn tracked_change_runs_emit_revision_washes_and_rules() {
     let input = serde_json::json!({
         "measured": [{
