@@ -179,6 +179,42 @@ mod tests {
         bytes
     }
 
+    fn crc32(bytes: &[u8]) -> u32 {
+        !bytes.iter().fold(!0u32, |crc, &byte| {
+            (0..8).fold(crc ^ u32::from(byte), |crc, _| {
+                if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                }
+            })
+        })
+    }
+
+    /// `png` with a chunk of `kind` carrying `data` right after its header chunk.
+    fn with_chunk(png: &[u8], kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut body = kind.to_vec();
+        body.extend(data);
+        let mut bytes = png[..33].to_vec();
+        bytes.extend((data.len() as u32).to_be_bytes());
+        bytes.extend(&body);
+        bytes.extend(crc32(&body).to_be_bytes());
+        bytes.extend(&png[33..]);
+        bytes
+    }
+
+    fn image_command(crop: ImageCrop) -> DrawCmd {
+        DrawCmd::Image {
+            x: 0.0,
+            y: 0.0,
+            w: 40.0,
+            h: 20.0,
+            asset_id: "xl/media/image1.png".into(),
+            crop,
+            clip: None,
+        }
+    }
+
     /// A red GIF whose one frame starts at the second column of its screen.
     fn red_gif_inset_by_one_column(width: u16, height: u16) -> Vec<u8> {
         let mut bytes = b"GIF89a".to_vec();
@@ -281,6 +317,29 @@ mod tests {
         let images = ImageMap::from([("xl/media/image1.png", gif.as_slice())]);
         let pixmap = paint(ImageCrop::default(), None, &images);
         assert_eq!(rgb(&pixmap, 20), (255, 0, 0));
+    }
+
+    #[test]
+    fn what_a_decoder_reads_while_it_is_built_stays_inside_the_frame_budget() {
+        let mut text = b"a\0".to_vec();
+        text.resize(2 << 20, b'a');
+        let png = with_chunk(&red_then_blue_png(), b"tEXt", &text);
+        let images = ImageMap::from([("xl/media/image1.png", png.as_slice())]);
+        let paint = |spent: u64| {
+            let mut pictures = Pictures::new(&images);
+            pictures.bytes = spent;
+            let mut target = Pixmap::new(40, 20).unwrap();
+            pictures
+                .paint(
+                    &mut target,
+                    &mut ClipSurface::default(),
+                    &image_command(ImageCrop::default()),
+                )
+                .unwrap();
+            rgb(&target, 2)
+        };
+        assert_eq!(paint(0), (255, 0, 0));
+        assert_eq!(paint(MAX_FRAME_IMAGE_BYTES - (1 << 20)), (0, 0, 0));
     }
 
     #[test]
