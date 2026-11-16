@@ -435,6 +435,7 @@ struct PreparedRegionLayout {
     measured_widths: Vec<f64>,
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
+    measured_side_margin_changes: Vec<bool>,
     measured_float_geometry: Option<[f64; 5]>,
     provisional: bool,
     exact_cut: Option<ExactCut>,
@@ -629,6 +630,18 @@ fn region_table_measurement_frames<'a>(
     input: &LayoutInput,
     regions: &DocumentRegions,
 ) -> (Vec<f64>, Vec<TableMeasurementFrame>) {
+    let (widths, frames, _) = region_frames_with_side_margin_changes(blocks, input, regions);
+    (widths, frames)
+}
+
+/// [`region_table_measurement_frames`], plus whether each block lies in a
+/// continuous section whose start moved either side margin or changed the
+/// page width, or follows one in a run of continuous sections.
+fn region_frames_with_side_margin_changes<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    input: &LayoutInput,
+    regions: &DocumentRegions,
+) -> (Vec<f64>, Vec<TableMeasurementFrame>, Vec<bool>) {
     let blocks: Vec<_> = blocks.into_iter().collect();
     let region_indices = section_region_indices(blocks.iter().copied());
     let section_breaks: Vec<_> = blocks
@@ -681,8 +694,9 @@ fn region_table_measurement_frames<'a>(
     let mut previous_section = None;
     let mut placement_page_width = fallback_size.w;
     let mut placement_margins = &fallback_margins;
+    let mut side_margins_changed = false;
     let negative_flows = docx_layout::measure_blocks::negative_indent_float_flows(&blocks);
-    blocks
+    let (widths, (frames, side_margin_changes)): (Vec<_>, (Vec<_>, Vec<_>)) = blocks
         .into_iter()
         .zip(negative_flows)
         .map(|(block, negative_flow)| {
@@ -727,6 +741,11 @@ fn region_table_measurement_frames<'a>(
                 None => input.options.columns.as_ref(),
             };
             if previous_section != Some(section_index) {
+                let previous_frame = (
+                    placement_page_width,
+                    placement_margins.left,
+                    placement_margins.right,
+                );
                 let (placement_size, margins) = match section_break {
                     Some(section_break) => (
                         section
@@ -759,6 +778,21 @@ fn region_table_measurement_frames<'a>(
                 if let Some(margins) = margins {
                     placement_margins = margins;
                 }
+                let frame = (
+                    placement_page_width,
+                    placement_margins.left,
+                    placement_margins.right,
+                );
+                let break_type = match section_break {
+                    Some(section_break) => section_break.break_type,
+                    None => input.options.body_break_type,
+                };
+                let continuous = break_type == Some(SectionBreakType::Continuous)
+                    || section.and_then(|section| section.section_start)
+                        == Some(SectionBreakType::Continuous);
+                side_margins_changed = section_index > 0
+                    && continuous
+                    && (side_margins_changed || previous_frame != frame);
                 previous_section = Some(section_index);
             }
             let section_width_known = (regions.sections.is_empty()
@@ -784,9 +818,10 @@ fn region_table_measurement_frames<'a>(
                 section_index += 1;
                 column_index = 0;
             }
-            (width, table_frame)
+            (width, (table_frame, side_margins_changed))
         })
-        .unzip()
+        .unzip();
+    (widths, frames, side_margin_changes)
 }
 
 fn initial_float_page_geometry(
@@ -1523,7 +1558,7 @@ where
                     if section.break_type == Some(SectionBreakType::Continuous)
             )
         });
-    let has_continuous_floats = has_continuous
+    let has_continuous_pictures = has_continuous
         && input.measured.iter().any(|measured| {
             matches!(
                 &measured.block,
@@ -1531,7 +1566,7 @@ where
                     if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
             )
         });
-    if shapes.is_empty() && !has_unequal && !has_continuous_floats {
+    if shapes.is_empty() && !has_unequal && !has_continuous_pictures {
         return Ok(false);
     }
     let mut blocks = input
@@ -1539,8 +1574,33 @@ where
         .iter()
         .map(|measured| measured.block.clone())
         .collect::<Vec<_>>();
-    let (mut widths, mut table_wrap_frames) =
-        region_table_measurement_frames(blocks.iter(), input, regions);
+    let (mut widths, mut table_wrap_frames, side_margin_changes) =
+        region_frames_with_side_margin_changes(blocks.iter(), input, regions);
+    let pictures = if has_continuous_pictures {
+        input
+            .measured
+            .iter()
+            .enumerate()
+            .filter_map(|(index, measured)| match &measured.block {
+                LayoutBlock::Paragraph(paragraph)
+                    if side_margin_changes[index]
+                        && paragraph
+                            .runs
+                            .iter()
+                            .any(|run| matches!(run, Run::Image(_))) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let has_continuous_floats = !pictures.is_empty();
+    if shapes.is_empty() && !has_unequal && !has_continuous_floats {
+        return Ok(false);
+    }
     let geometry = initial_float_page_geometry(input, regions);
     let mut previous_offsets = BTreeMap::new();
     let mut previous_bands = BTreeMap::new();
@@ -1551,26 +1611,6 @@ where
             previous_bands.clone(),
             table_wrap_frames.clone(),
         )]
-    } else {
-        Vec::new()
-    };
-    let pictures = if has_continuous_floats {
-        input
-            .measured
-            .iter()
-            .enumerate()
-            .filter_map(|(index, measured)| match &measured.block {
-                LayoutBlock::Paragraph(paragraph)
-                    if paragraph
-                        .runs
-                        .iter()
-                        .any(|run| matches!(run, Run::Image(_))) =>
-                {
-                    Some(index)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
@@ -1620,7 +1660,7 @@ where
                 let LayoutBlock::Paragraph(paragraph) = &measured.block else {
                     continue;
                 };
-                if pinned.contains(&index) {
+                if pinned.contains(&index) || !side_margin_changes[index] {
                     continue;
                 }
                 if !paragraph
@@ -2190,6 +2230,7 @@ struct PaginationState {
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_font_chains: Option<BTreeMap<String, Vec<u32>>>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
+    measured_side_margin_changes: Vec<bool>,
     measured_float_geometry: Option<[f64; 5]>,
     measured_float_width_policy: Option<FloatWidthPolicy>,
     measured_with_floats: bool,
@@ -5336,6 +5377,7 @@ impl EngineSession {
         pagination.measured_widths = Vec::new();
         pagination.set_font_dependencies(Vec::new(), None);
         pagination.measured_table_wrap_frames = Vec::new();
+        pagination.measured_side_margin_changes = Vec::new();
         pagination.measured_float_geometry = None;
         pagination.measured_float_width_policy = None;
         pagination.measured_with_floats = false;
@@ -7918,6 +7960,7 @@ impl EngineSession {
         let mut measured_widths = Vec::new();
         let mut measured_font_dependencies = Vec::new();
         let mut measured_table_wrap_frames = Vec::new();
+        let mut measured_side_margin_changes = Vec::new();
         let mut measured_float_geometry = None;
         let mut provisional = false;
         let mut exact_cut = None;
@@ -7941,11 +7984,12 @@ impl EngineSession {
                         measured_spacing =
                             BlockSpacing::capture_blocks(blocks.iter(), Some(&regions));
                         apply_section_geometry(&mut input, &regions);
-                        let (widths, table_wrap_frames) =
-                            region_table_measurement_frames(blocks.iter(), &input, &regions);
+                        let (widths, table_wrap_frames, side_margin_changes) =
+                            region_frames_with_side_margin_changes(blocks.iter(), &input, &regions);
                         let geometry = initial_float_page_geometry(&input, &regions);
                         measured_widths.clone_from(&widths);
                         measured_table_wrap_frames.clone_from(&table_wrap_frames);
+                        measured_side_margin_changes.clone_from(&side_margin_changes);
                         measured_float_geometry = Some(float_geometry_key(&geometry));
                         float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
                         let (floats, margin_floats) = resident_float_kinds(
@@ -7970,6 +8014,7 @@ impl EngineSession {
                             &widths,
                             float_width_policy,
                             &table_wrap_frames,
+                            &side_margin_changes,
                             &regions,
                             &measurement,
                             measurement_fingerprint,
@@ -8167,6 +8212,7 @@ impl EngineSession {
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
+            measured_side_margin_changes,
             measured_float_geometry,
             provisional,
             exact_cut,
@@ -8242,6 +8288,7 @@ impl EngineSession {
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
+            measured_side_margin_changes,
             measured_float_geometry,
             provisional,
             exact_cut,
@@ -8576,6 +8623,7 @@ impl EngineSession {
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
+        pagination.measured_side_margin_changes = measured_side_margin_changes;
         pagination.measured_float_geometry = measured_float_geometry;
         pagination.measured_float_width_policy =
             pagination.measured_with.map(|_| float_width_policy);
@@ -8635,6 +8683,7 @@ impl EngineSession {
             measured_widths,
             measured_font_dependencies,
             measured_table_wrap_frames,
+            measured_side_margin_changes,
             measured_float_geometry,
             provisional,
             exact_cut,
@@ -9170,6 +9219,7 @@ impl EngineSession {
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
+        pagination.measured_side_margin_changes = measured_side_margin_changes;
         pagination.measured_float_geometry = measured_float_geometry;
         pagination.measured_float_width_policy =
             pagination.measured_with.map(|_| float_width_policy);
@@ -10510,6 +10560,7 @@ impl EngineSession {
         widths: &[f64],
         float_width_policy: FloatWidthPolicy,
         table_wrap_frames: &[TableMeasurementFrame],
+        side_margin_changes: &[bool],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
@@ -10523,6 +10574,7 @@ impl EngineSession {
                 widths,
                 float_width_policy,
                 table_wrap_frames,
+                side_margin_changes,
                 regions,
                 measurement,
                 measurement_fingerprint,
@@ -10573,11 +10625,13 @@ impl EngineSession {
         };
         let measurement_patch =
             measurement_patch.filter(|_| floats.is_some() && lowered_from.is_none());
-        if floats.is_some_and(|geometry| {
-            widths.first() != previous_widths.first()
-                || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
-                || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
-        }) {
+        if side_margin_changes != pagination.measured_side_margin_changes.as_slice()
+            || floats.is_some_and(|geometry| {
+                widths.first() != previous_widths.first()
+                    || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
+                    || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
+            })
+        {
             return Ok(None);
         }
         let contexts = normalization_contexts(regions, measurement, &pagination.retain_matches)?;
@@ -10952,6 +11006,7 @@ impl EngineSession {
         widths: &[f64],
         float_width_policy: FloatWidthPolicy,
         table_wrap_frames: &[TableMeasurementFrame],
+        side_margin_changes: &[bool],
         regions: &DocumentRegions,
         measurement: &docx_layout::measure_blocks::MeasurementConfig,
         measurement_fingerprint: u64,
@@ -10971,6 +11026,7 @@ impl EngineSession {
                 widths,
                 float_width_policy,
                 table_wrap_frames,
+                side_margin_changes,
                 regions,
                 measurement,
                 measurement_fingerprint,
@@ -11019,11 +11075,13 @@ impl EngineSession {
         };
         let measurement_patch =
             measurement_patch.filter(|_| floats.is_some() && lowered_from.is_none());
-        if floats.is_some_and(|geometry| {
-            widths.first() != previous_widths.first()
-                || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
-                || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
-        }) {
+        if side_margin_changes != pagination.measured_side_margin_changes.as_slice()
+            || floats.is_some_and(|geometry| {
+                widths.first() != previous_widths.first()
+                    || table_wrap_frames != pagination.measured_table_wrap_frames.as_slice()
+                    || pagination.measured_float_geometry != Some(float_geometry_key(geometry))
+            })
+        {
             return Ok(None);
         }
         let previous_fingerprints = &pagination.block_fingerprints;
@@ -18382,6 +18440,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 &[300.0],
                 FloatWidthPolicy::for_document(blocks.iter()),
                 &[],
+                &[],
                 &prepared.regions,
                 &prepared.measurement,
                 prepared.measurement_fingerprint,
@@ -18409,6 +18468,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     None,
                     &[300.0],
                     FloatWidthPolicy::for_document(blocks.iter()),
+                    &[],
                     &[],
                     &prepared.regions,
                     &prepared.measurement,
@@ -18705,6 +18765,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     None,
                     &widths,
                     FloatWidthPolicy::for_document(blocks.iter()),
+                    &[],
                     &[],
                     &prepared.regions,
                     &prepared.measurement,

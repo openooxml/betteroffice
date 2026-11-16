@@ -4,7 +4,7 @@
 use super::*;
 use crate::seed::fixture::{Package, image, para, run};
 
-const PAGE: &str = r#"<w:pgSz w:w="5760" w:h="5760"/>"#;
+pub(super) const PAGE: &str = r#"<w:pgSz w:w="5760" w:h="5760"/>"#;
 const LEAD: &str = "00002600";
 const KEPT: &str = "00002700";
 const RELEASED_PAGES: usize = 4;
@@ -12,31 +12,31 @@ const RELEASED_DIGEST: u64 = 0x6302_e410_5b28_5ae3;
 const MARGIN_CHANGE_PAGES: usize = 4;
 const MARGIN_CHANGE_DIGEST: u64 = 0x1ac3_1774_7ad7_87fa;
 
-fn margins(left: u32, right: u32) -> String {
+pub(super) fn margins(left: u32, right: u32) -> String {
     format!(
         r#"<w:pgMar w:top="360" w:right="{right}" w:bottom="360" w:left="{left}" w:header="200" w:footer="200" w:gutter="0"/>"#
     )
 }
 
-fn first_section() -> String {
+pub(super) fn first_section(left: u32, right: u32) -> String {
     para(
         "00002000",
         &format!(
             "<w:pPr><w:sectPr>{PAGE}{}</w:sectPr></w:pPr>{}",
-            margins(360, 360),
+            margins(left, right),
             run("First section ends")
         ),
     )
 }
 
-fn words(count: usize, from: usize) -> String {
+pub(super) fn words(count: usize, from: usize) -> String {
     (from..from + count)
         .map(|index| format!("word{index}"))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-fn picture(x_px: u32, width_px: u32, height_px: u32) -> String {
+pub(super) fn picture(x_px: u32, width_px: u32, height_px: u32) -> String {
     let x = u64::from(x_px) * 9525;
     let cx = u64::from(width_px) * 9525;
     let cy = u64::from(height_px) * 9525;
@@ -49,6 +49,12 @@ fn picture(x_px: u32, width_px: u32, height_px: u32) -> String {
 /// picture's keep-lines paragraph and filler in a continuous section whose
 /// properties are `section`.
 fn package(picture_x: u32, lead: usize, section: &str) -> Vec<u8> {
+    package_below((360, 360), picture_x, lead, section)
+}
+
+/// [`package`] below a one-column section whose left and right margins are
+/// `first`.
+fn package_below(first: (u32, u32), picture_x: u32, lead: usize, section: &str) -> Vec<u8> {
     let kept = para(
         KEPT,
         &format!(
@@ -59,7 +65,7 @@ fn package(picture_x: u32, lead: usize, section: &str) -> Vec<u8> {
     );
     let body = format!(
         "{}{}{kept}{}{section}",
-        first_section(),
+        first_section(first.0, first.1),
         para(LEAD, &run(&words(lead, 0))),
         filler_paragraphs(0x2800, 30),
     );
@@ -69,7 +75,7 @@ fn package(picture_x: u32, lead: usize, section: &str) -> Vec<u8> {
 }
 
 /// `columns` equal columns with the picture over the second one.
-fn equal_columns(columns: u32, lead: usize) -> Vec<u8> {
+pub(super) fn equal_columns(columns: u32, lead: usize) -> Vec<u8> {
     let section = format!(
         r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}<w:cols w:num="{columns}" w:space="360"/></w:sectPr>"#,
         margins(360, 360)
@@ -77,17 +83,29 @@ fn equal_columns(columns: u32, lead: usize) -> Vec<u8> {
     package(if columns == 2 { 212 } else { 152 }, lead, &section)
 }
 
+/// Three equal columns with the picture over the second one, in a continuous
+/// section whose side margins differ from the section above's.
+fn equal_columns_below_other_side_margins(lead: usize) -> Vec<u8> {
+    let section = format!(
+        r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}<w:cols w:num="3" w:space="360"/></w:sectPr>"#,
+        margins(360, 360)
+    );
+    package_below((720, 720), 152, lead, &section)
+}
+
 /// Three columns of equal widths that the section declares unequal, with the
-/// picture over the second one.
+/// picture over the second one, in a continuous section whose side margins
+/// differ from the section above's.
 fn unequal_marked_columns(lead: usize) -> Vec<u8> {
     let section = format!(
         r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}<w:cols w:num="3" w:space="360" w:equalWidth="0"><w:col w:w="1440" w:space="360"/><w:col w:w="1440" w:space="360"/><w:col w:w="1440"/></w:cols></w:sectPr>"#,
         margins(360, 360)
     );
-    package(152, lead, &section)
+    package_below((720, 720), 152, lead, &section)
 }
 
-/// A shape placed by page side and an inline picture in a continuous section.
+/// A shape placed by page side and an inline picture in a continuous section
+/// whose side margins differ from the section above's.
 fn page_side_shape_with_inline_picture() -> Vec<u8> {
     let section = format!(
         r#"<w:sectPr><w:type w:val="continuous"/>{PAGE}{}</w:sectPr>"#,
@@ -95,7 +113,7 @@ fn page_side_shape_with_inline_picture() -> Vec<u8> {
     );
     let body = format!(
         "{}{}{}{}{section}",
-        first_section(),
+        first_section(720, 720),
         para("00002900", &format!("{}{INSIDE_SHAPE}", run("Anchor "))),
         para(
             "00002901",
@@ -117,7 +135,7 @@ fn side_margin_change() -> Vec<u8> {
     package(120, 9, &section)
 }
 
-fn opened<'a>(engine: &'a EngineSession, bytes: &[u8]) -> CommandHost<'a> {
+pub(super) fn opened<'a>(engine: &'a EngineSession, bytes: &[u8]) -> CommandHost<'a> {
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
     let request = lowering_pages::region_request(engine, bytes, font).to_string();
     CommandHost::open_with(engine, request)
@@ -162,7 +180,7 @@ fn layout_pages(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
 
 /// The page count and an FNV-1a digest of every page's size and every
 /// fragment's kind, position, size and line window, in hundredths of a pixel.
-fn layout_digest(engine: &EngineSession) -> (usize, u64) {
+pub(super) fn layout_digest(engine: &EngineSession) -> (usize, u64) {
     let json = engine.retained_layout_json().unwrap();
     let value = serde_json::from_str::<serde_json::Value>(&json).unwrap();
     let pages = layout_pages(&value).unwrap();
@@ -270,7 +288,7 @@ fn picture_below_a_side_margin_change_keeps_its_layout() {
 fn wrapping_that_reaches_the_phase_limit_without_repeating_fails() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
-    let bytes = equal_columns(3, 60);
+    let bytes = equal_columns_below_other_side_margins(60);
     let engine = seeded_engine(9805, &bytes);
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
     let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
@@ -285,7 +303,7 @@ fn wrapping_that_reaches_the_phase_limit_without_repeating_fails() {
     );
 }
 
-fn text_end(engine: &EngineSession, id: &str) -> u32 {
+pub(super) fn text_end(engine: &EngineSession, id: &str) -> u32 {
     engine
         .doc()
         .paragraph_index("body")
@@ -347,7 +365,7 @@ fn fresh_measures(prepared: &crate::engine::PreparedRegionLayout) -> Vec<serde_j
 
 /// Checks the open session against a fresh session opened on the same
 /// document: the frame, and the measured blocks and options it paginates.
-fn assert_input_matches_fresh(
+pub(super) fn assert_input_matches_fresh(
     host: &mut CommandHost<'_>,
     client_id: u64,
     bytes: &[u8],
@@ -434,7 +452,7 @@ fn put_in_column(layout: &mut docx_layout::types::Layout, picture: &LayoutBlock,
 fn a_picture_pinned_on_the_last_wrap_phase_still_lays_out() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
-    let bytes = equal_columns(3, 60);
+    let bytes = equal_columns_below_other_side_margins(60);
     let engine = seeded_engine(9814, &bytes);
     let mut prepared = measured_body(&engine, &bytes);
     let picture = picture_index(&prepared.input).unwrap();
@@ -504,7 +522,7 @@ fn wrapping_that_keeps_moving_after_a_pin_ends_in_the_convergence_error() {
 fn flow_after_a_settled_picture_measures_as_a_fresh_layout_does() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
-    let bytes = equal_columns(3, 60);
+    let bytes = equal_columns_below_other_side_margins(60);
     let engine = seeded_engine(9807, &bytes);
     let mut prepared = measured_body(&engine, &bytes);
     let picture = picture_index(&prepared.input).unwrap();
