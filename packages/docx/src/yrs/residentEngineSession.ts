@@ -1187,6 +1187,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
         projectionStories.add(story);
       } finally {
         if (session.version() !== version) {
+          sectionSnapshot = null;
           projectionStories.add(story);
           syncStoryRevisions();
           storyRevision += 1;
