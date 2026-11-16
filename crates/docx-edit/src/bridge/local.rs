@@ -1346,9 +1346,9 @@ fn page_break_depends_on_paragraph<'a>(
 ) -> bool {
     let mut following = following.into_iter();
     match following.next() {
-        Some(LayoutBlock::PageBreak(page_break)) => page_break.pm_start == paragraph.pm_end,
+        Some(LayoutBlock::PageBreak(page_break)) => page_break.pm_start >= paragraph.pm_end,
         Some(LayoutBlock::ColumnBreak(column_break))
-            if column_break.pm_start == paragraph.pm_end =>
+            if column_break.pm_start >= paragraph.pm_end =>
         {
             following
                 .take_while(|block| {
