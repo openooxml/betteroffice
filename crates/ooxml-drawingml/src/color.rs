@@ -60,7 +60,8 @@ impl ColorTransform {
         }
         let in_range = match name {
             "tint" | "shade" => (0.0..=1.0).contains(&value),
-            "lumMod" | "lumOff" | "satMod" | "alpha" => (0.0..=10.0).contains(&value),
+            "lumMod" | "satMod" | "alpha" => (0.0..=10.0).contains(&value),
+            "lumOff" => (-10.0..=10.0).contains(&value),
             _ => true,
         };
         if !in_range {
@@ -538,19 +539,19 @@ mod tests {
 
     #[test]
     fn transform_parsing_retains_legacy_ranges() {
-        for (name, maximum) in [
-            ("tint", 1.0),
-            ("shade", 1.0),
-            ("lumMod", 10.0),
-            ("lumOff", 10.0),
-            ("satMod", 10.0),
-            ("alpha", 10.0),
+        for (name, minimum, maximum) in [
+            ("tint", 0.0, 1.0),
+            ("shade", 0.0, 1.0),
+            ("lumMod", 0.0, 10.0),
+            ("lumOff", -10.0, 10.0),
+            ("satMod", 0.0, 10.0),
+            ("alpha", 0.0, 10.0),
         ] {
-            for value in [-0.00001, maximum + 0.00001] {
+            for value in [minimum - 0.00001, maximum + 0.00001] {
                 let raw = (value * 100_000.0).to_string();
                 assert_eq!(ColorTransform::from_xml(name, Some(&raw)), None, "{name}");
             }
-            for value in [0.0, maximum] {
+            for value in [minimum, 0.0, maximum] {
                 for raw in [
                     (value * 100_000.0).to_string(),
                     format!("{}%", value * 100.0),
@@ -572,6 +573,10 @@ mod tests {
         assert_eq!(
             ColorTransform::from_xml("hueOff", Some("-5400000")),
             Some(ColorTransform::HueOff(-0.25))
+        );
+        assert_eq!(
+            ColorTransform::from_xml("lumOff", Some("-25000")),
+            Some(ColorTransform::LumOff(-0.25))
         );
         assert_eq!(
             ColorTransform::from_xml("alphaMod", Some("200000")),
@@ -631,6 +636,14 @@ mod tests {
             ("FF0000", vec![SatOff(-0.5)], "#BF4040"),
             ("FF0000", vec![Lum(0.25)], "#800000"),
             ("FF0000", vec![LumOff(0.25)], "#FF8080"),
+            ("FF0000", vec![LumOff(-0.25)], "#800000"),
+            ("4472C4", vec![LumOff(-0.1)], "#335BA2"),
+            ("FF0000", vec![LumOff(-0.6)], "#000000"),
+            ("FF0000", vec![LumOff(0.6)], "#FFFFFF"),
+            ("4472C4", vec![LumMod(0.75), LumOff(-0.25)], "#111E36"),
+            ("4472C4", vec![LumMod(0.6), LumOff(0.4)], "#8FAADC"),
+            ("4472C4", vec![LumMod(0.75)], "#2F5597"),
+            ("C0C0C0", vec![LumOff(-0.25)], "#808080"),
             ("FF0000", vec![LumOff(1.0), LumMod(0.5)], "#808080"),
             ("000000", vec![RedOff(-0.5), RedOff(0.5)], "#BC0000"),
         ] {
@@ -696,6 +709,15 @@ mod tests {
         assert_eq!(modified(Some(0.6), Some(0.4), None), "#8FAADC");
         assert_eq!(modified(Some(0.75), None, None), "#2F5597");
         assert_eq!(modified(None, None, Some(0.0)), "#848484");
+        assert_eq!(
+            resolve_color_value_to_hex(Some(&ColorValue {
+                rgb: Some("FF0000".to_owned()),
+                luminance_offset: Some(-0.25),
+                ..ColorValue::default()
+            }))
+            .as_deref(),
+            Some("#800000")
+        );
         assert_eq!(
             resolve_color_value_to_hex(Some(&ColorValue {
                 rgb: Some("808080".to_owned()),
