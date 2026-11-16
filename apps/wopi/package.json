@@ -19,16 +19,16 @@
     "@betteroffice/pptx-react": "workspace:*",
     "@betteroffice/xlsx": "workspace:*",
     "@betteroffice/xlsx-react": "workspace:*",
-    "jszip": "3.10.1",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "yjs": "^13.6.32"
+    "jszip": "3.10.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "yjs": "^13.6.33"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.2",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
+    "@types/bun": "^1.4.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "typescript": "^6.0.3",
-    "vite": "8.1.6"
+    "vite": "8.3.6"
   }
 }
