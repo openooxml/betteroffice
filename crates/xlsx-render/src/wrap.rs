@@ -135,17 +135,22 @@ pub fn wrapped_line_y(y: f32, index: usize, count: usize, wrap: &TextWrap) -> f3
         }
 }
 
+/// share of a line by which a wrapped line may pass the fit height and still
+/// count as fitting.
+const FIT_TOLERANCE: f64 = 1e-4;
+
 /// how many of `count` wrapped lines excel paints in the wrap's fit height:
-/// those whose top half is inside it, at least one; they are then aligned as
-/// the full text and the cell clip cuts what passes its edge.
+/// those whose top half is inside it, to a ten-thousandth of a line, at least
+/// one; they are then aligned as the full text and the cell clip cuts what
+/// passes its edge. computed in f64 like the canvas painter.
 pub fn wrapped_lines_fitting(count: usize, wrap: &TextWrap, font_size_pt: f32) -> usize {
     let Some(height) = wrap.fit_height else {
         return count;
     };
-    let font = font_size_pt * crate::geometry::PX_PER_PT as f32;
-    let room = (height - font / 2.0) / wrap.line_height;
+    let font = f64::from(font_size_pt) * crate::geometry::PX_PER_PT;
+    let room = (f64::from(height) - font / 2.0) / f64::from(wrap.line_height);
     let fitting = if room.is_finite() && room >= 0.0 {
-        room.floor() as usize + 1
+        (room + FIT_TOLERANCE).floor() as usize + 1
     } else {
         1
     };
