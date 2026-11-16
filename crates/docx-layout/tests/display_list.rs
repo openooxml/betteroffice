@@ -1667,6 +1667,34 @@ fn a_page_whose_header_has_no_watermark_ignores_the_document_watermark() {
 }
 
 #[test]
+fn a_header_picture_watermark_paints_only_through_the_document_watermark() {
+    let input = serde_json::json!({
+        "measured": [],
+        "options": {},
+        "headersFooters": {
+            "variants": [
+                { "rId": "rId8", "kind": "header", "type": "default", "watermark": {
+                    "kind": "picture",
+                    "dataUrl": "data:image/png;base64,abc",
+                    "relId": "rId9",
+                    "washout": true,
+                    "widthEmu": 1828800,
+                    "heightEmu": 914400
+                } }
+            ]
+        },
+        "layout": { "pages": [
+            { "number": 1, "size": { "w": 816.0, "h": 1056.0 },
+              "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 },
+              "fragments": [] }
+        ] }
+    });
+    let json = build_display_list_json(&input.to_string()).expect("builds");
+    let dl: DisplayList = serde_json::from_str(&json).unwrap();
+    assert_eq!(dl.pages[0].watermark_primitive_count, None);
+}
+
+#[test]
 fn fitted_text_watermark_stretch_is_held_to_word_maximum() {
     let input = serde_json::json!({
         "measured": [],
