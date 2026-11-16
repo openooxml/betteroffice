@@ -187,16 +187,16 @@ fn plain_sheet_matches_golden() {
 }
 
 #[test]
-fn merged_conditional_sheet_matches_golden() {
+fn merged_cells_match_golden() {
     let extra = format!("{MERGES}{CONDITIONAL}");
     let wb = workbook(10, 7, border_or_fill, &extra, &[]);
-    assert_golden("merged_conditional", &wb);
+    assert_golden("merged_cells", &wb);
 }
 
 #[test]
-fn merged_conditional_sheet_under_a_table_matches_golden() {
+fn merged_cells_with_table_match_golden() {
     let extra = format!("{MERGES}{CONDITIONAL}");
     let custom = info("Wide");
     let wb = workbook(10, 7, border_or_fill, &extra, &[("B2:F8", 1, &custom)]);
-    assert_golden("merged_conditional_table", &wb);
+    assert_golden("merged_cells_with_table", &wb);
 }
