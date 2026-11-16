@@ -156,7 +156,10 @@ fn assert_golden(name: &str, wb: &Workbook) {
             path.display()
         )
     });
-    assert!(actual == expected, "{name} display list differs from its golden file");
+    assert!(
+        actual == expected,
+        "{name} display list differs from its golden file"
+    );
 }
 
 #[test]
