@@ -501,16 +501,20 @@ fn page_variants<'a>(
     )
 }
 
-/// The watermark a page paints: its header's own, else the envelope's.
+/// The watermark a page paints: its header's own when any header carries one,
+/// else the envelope's.
 pub(crate) fn page_watermark<'a>(
     hf: &'a HeadersFootersIn,
     page: &'a PageIn,
     page_index: usize,
 ) -> Option<&'a WatermarkIn> {
     let (header, _) = page_variants(hf, page, page.number.unwrap_or(page_index as u64 + 1));
-    header
-        .and_then(|variant| variant.watermark.as_ref())
-        .or(hf.watermark.as_ref())
+    if page.parity_filler != Some(true)
+        && hf.variants.iter().any(|variant| variant.watermark.is_some())
+    {
+        return header.and_then(|variant| variant.watermark.as_ref());
+    }
+    hf.watermark.as_ref()
 }
 
 /// The header and footer parts [`compose_page_regions`] paints on a page.
