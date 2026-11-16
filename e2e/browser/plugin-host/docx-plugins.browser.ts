@@ -925,7 +925,7 @@ test('a selection placement follows the selection to a new zoom on the in-thread
   await expect.poll(async () => { const read = await sample(); return read && read.zoom === 1 && read.kept === 'false' ? offBy(read) : Infinity; })
     .toBeLessThanOrEqual(1);
   const before = (await sample())!;
-  await page.evaluate(() => (window as unknown as LooseProbe).__probe.editor.setZoom(1.5));
+  await page.evaluate(() => (window as unknown as { __probe: { editor: { setZoom(zoom: number): void } } }).__probe.editor.setZoom(1.5));
   await expect.poll(async () => { const read = await sample(); return read && read.zoom === 1.5 && read.kept === 'false' ? offBy(read) : Infinity; },
     { timeout: 30_000 }).toBeLessThanOrEqual(1);
   const after = (await sample())!;
