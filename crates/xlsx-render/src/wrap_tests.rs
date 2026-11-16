@@ -408,9 +408,15 @@ fn a_merge_across_the_frozen_rows_lays_out_as_before() {
         h: 20.0,
     };
     let laid_out = |baselines: [f32; 3]| [(2.0, clip, 60.0, 18.666666, baselines.to_vec())];
-    assert_eq!(layout(VAlign::Bottom), laid_out([-22.266666, -3.5999994, 15.066667]));
+    assert_eq!(
+        layout(VAlign::Bottom),
+        laid_out([-22.266666, -3.5999994, 15.066667])
+    );
     assert_eq!(layout(VAlign::Top), laid_out([12.266666, 30.933332, 49.6]));
-    assert_eq!(layout(VAlign::Center), laid_out([-4.999999, 13.666667, 32.333332]));
+    assert_eq!(
+        layout(VAlign::Center),
+        laid_out([-4.999999, 13.666667, 32.333332])
+    );
 }
 
 #[derive(serde::Deserialize)]
