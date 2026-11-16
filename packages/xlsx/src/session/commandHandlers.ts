@@ -417,6 +417,7 @@ export function structuralRefusalCause(message: string): WorkbookStructuralRefus
     message === 'fill cannot safely preserve charts anchored in the filled range') return 'chart';
   if (message === 'range move cannot safely preserve Excel tables' ||
     message === 'fill cannot safely preserve Excel tables') return 'table';
+  if (/^cannot move sheet \d+ tracks: table .+ covers the moved tracks$/.test(message)) return 'table';
   if (message === 'fill cannot safely preserve hyperlinks' ||
     message === 'fill cannot safely preserve comments' ||
     message === 'fill cannot safely preserve data validations' ||
@@ -470,7 +471,8 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     /^anchor \d+ of .+ is held by two sheets that disagree on where it sits$/.test(error.message) ||
     /^chart .+ cannot change how it follows a grid edit$/.test(error.message) ||
     /^chart .+ cannot be resized: a one-cell extent is not written back$/.test(error.message) ||
-    /^chart .+ cannot change its anchor kind$/.test(error.message)
+    /^chart .+ cannot change its anchor kind$/.test(error.message) ||
+    /^cannot move sheet \d+ tracks: .+$/.test(error.message)
   )) return structuralRefusal(error.message);
   if (method === 'resizeChart' &&
     /^(?:chart .+ is pinned to the sheet and cannot be resized|chart .+ cannot be resized: a one-cell extent is not written back|chart .+ cannot be resized to that size)$/.test(error.message)) {

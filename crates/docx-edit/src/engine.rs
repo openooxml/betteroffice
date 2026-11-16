@@ -365,6 +365,8 @@ thread_local! {
         measurement_attempts: 0,
         preview_shifts: 0,
     }) };
+    /// Deferred body patches applied, and those that fell back to a full lowering.
+    pub(crate) static DEFERRED_PATCHES: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
     static BODY_MEASUREMENT_WORK: RefCell<(Vec<usize>, u64)> = const { RefCell::new((Vec::new(), 0)) };
     static HEADER_FOOTER_MEASUREMENTS: Cell<usize> = const { Cell::new(0) };
     static REGION_FULL_PASSES: Cell<usize> = const { Cell::new(0) };
@@ -372,6 +374,8 @@ thread_local! {
     static CERTIFIED_FLOAT_WORK: RefCell<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())) };
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static PREVIEW_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    #[cfg(test)]
+    static WRAP_PHASE_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
     static REGION_WORK_COUNTS: Cell<RegionWorkCounts> = const { Cell::new(RegionWorkCounts {
         certification: 0,
         placement: 0,
@@ -1465,6 +1469,9 @@ fn placed_column_measurement_frames(
     bands
 }
 
+/// Wrap phases each pinned picture frame adds to the phase budget.
+const PIN_RECOVERY_PHASES: usize = 2;
+
 fn stabilize_flow_wrapping<F>(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
@@ -1526,13 +1533,40 @@ where
     } else {
         Vec::new()
     };
+    let pictures = if has_continuous_floats {
+        input
+            .measured
+            .iter()
+            .enumerate()
+            .filter_map(|(index, measured)| match &measured.block {
+                LayoutBlock::Paragraph(paragraph)
+                    if paragraph
+                        .runs
+                        .iter()
+                        .any(|run| matches!(run, Run::Image(_))) =>
+                {
+                    Some(index)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let mut pinned = BTreeSet::new();
     let mut touched = false;
     let max_phases = if has_unequal || has_continuous_floats {
         32 + input.measured.len()
     } else {
         shapes.len() + 2
     };
-    for phase in 0..max_phases {
+    #[cfg(test)]
+    let max_phases = WRAP_PHASE_LIMIT.with(Cell::get).unwrap_or(max_phases);
+    let mut recovery = 0;
+    for phase in 0.. {
+        if phase == max_phases + recovery {
+            break;
+        }
         let (layout, recorded) = if has_unequal {
             docx_layout::place::layout_document_with_column_widths(input)?
         } else {
@@ -1565,6 +1599,9 @@ where
                 let LayoutBlock::Paragraph(paragraph) = &measured.block else {
                     continue;
                 };
+                if pinned.contains(&index) {
+                    continue;
+                }
                 if !paragraph
                     .runs
                     .iter()
@@ -1606,6 +1643,27 @@ where
                 });
         let accept =
             has_unequal && !frames_changed && (repeated.is_some() || phase + 1 == max_phases);
+        if let Some(first) = repeated.filter(|_| has_continuous_floats && !has_unequal) {
+            let cycling = pictures
+                .iter()
+                .copied()
+                .filter(|index| {
+                    visited[first..]
+                        .iter()
+                        .any(|(_, _, _, frames)| frames[*index] != next_wrap_frames[*index])
+                })
+                .collect::<Vec<_>>();
+            if cycling.is_empty() {
+                break;
+            }
+            for index in cycling {
+                pinned.insert(index);
+                next_wrap_frames[index].horizontal_frame = None;
+                next_wrap_frames[index].page_width = None;
+            }
+            visited.clear();
+            recovery += PIN_RECOVERY_PHASES;
+        }
         if accept {
             for (index, unequal) in unequal.iter().enumerate() {
                 if !unequal {
@@ -5701,6 +5759,17 @@ impl EngineSession {
                 &self.doc.yrs_doc().transact(),
                 env,
             )?;
+            let segments = self.doc.segment_index("body").ok()?;
+            let paragraphs = self.doc.paragraph_index("body").ok()?;
+            let current = paragraphs
+                .para_slot(&paragraph)
+                .and_then(|slot| segments.formatted_segment_units()?.get(slot as usize))
+                .is_some_and(|unit| lowered.local.seed_matches_after_edit(unit));
+            if !current {
+                #[cfg(test)]
+                DEFERRED_PATCHES.with(|counts| counts.set((counts.get().0, counts.get().1 + 1)));
+                return None;
+            }
         }
         let replaced = slot..slot.checked_add(1)?;
         let old_block = Rc::clone(lowered.blocks.shared().get(slot)?);
@@ -5769,6 +5838,10 @@ impl EngineSession {
             lowered.local.edit = Some(edit);
             return None;
         };
+        #[cfg(test)]
+        if lowered.local.deferred {
+            DEFERRED_PATCHES.with(|counts| counts.set((counts.get().0 + 1, counts.get().1)));
+        }
         let blocks = &lowered.blocks;
         let previous_patch = previous_patch.filter(|_| previous_patch_matches);
         if self.relayout_trigger.get().uses_region_path() {

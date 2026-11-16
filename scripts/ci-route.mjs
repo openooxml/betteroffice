@@ -102,13 +102,17 @@ export async function route(env, fetchImpl = fetch, signal = AbortSignal.timeout
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   let groups = [];
   let result;
+  const ms = count(process.env.BO_CI_ROUTE_DEADLINE_MS, 45_000);
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(new Error(`routing deadline of ${ms} ms passed`)), ms);
   try {
     groups = parseGroups(process.env.ROUTE_GROUPS ?? '');
-    const deadline = AbortSignal.timeout(count(process.env.BO_CI_ROUTE_DEADLINE_MS, 45_000));
-    result = await route(process.env, fetch, deadline);
+    result = await route(process.env, fetch, deadline.signal);
   } catch (error) {
     console.log(`::warning::runner routing fell back to kyora: ${error.message}`);
     result = { routes: allocate(groups, 0), busy: null };
+  } finally {
+    clearTimeout(timer);
   }
   const lines = Object.entries(result.routes).map(([name, label]) => `${name}=${label}`);
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${lines.join('\n')}\n`);
