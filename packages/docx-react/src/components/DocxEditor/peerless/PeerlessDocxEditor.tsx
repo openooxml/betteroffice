@@ -52,6 +52,7 @@ import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
 import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, type ClipboardCapture, isPasteFragmentAllowed } from './clipboard';
 import { submitPasteFragment } from './inputAdmission';
+import { DocxCutRefusedError } from '../internals/cutRefused';
 import type { DocxClipboardFragment, DocxReservationsPayload } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
@@ -1109,8 +1110,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           })]);
         } });
       if (copied) { if (cut) props.onCut?.(); else props.onCopy?.(); }
-    } catch (error) { reportRecoverableError(error instanceof Error ? error : new Error(String(error))); }
-  }, [controller, props.onCopy, props.onCut, reportRecoverableError]);
+    } catch (error) {
+      if (error instanceof DocxCutRefusedError) toast(t('editor.cutRefused'));
+      reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
+    }
+  }, [controller, props.onCopy, props.onCut, reportRecoverableError, t]);
   const notifyPasteRefused = useCallback(() => { toast(t('editor.pasteFailed')); }, [t]);
   const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number): boolean => {
     const current = active.current;
