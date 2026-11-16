@@ -426,9 +426,10 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       document.package.document.finalSectionProperties, margins]);
     if (sectionSnapshot?.revision !== revision) sectionSnapshot = { revision,
       sections: readSectionSnapshot(resident, document, margins, seededSectionMarks, sectionsTouched, []).sections };
+    const live = new Set(paragraphs.length > 0 ? geometryReader.storyIds() : []);
     return { version: resident.proposalEngine.version(), sections: sectionSnapshot.sections,
       paragraphs: paragraphs.flatMap(({ story, paraId }) => {
-        if (!geometryReader.hasStory(story)) return [];
+        if (!live.has(story)) return [];
         let context: YrsSelectionContext;
         try { context = JSON.parse(session.selection_context(story, paraId, 0, paraId, 0)); } catch { return []; }
         return context.paraId === paraId ? [{ story, paraId, tabs: nativeTabStops(context.paragraphProperties.tabs) }] : [];
