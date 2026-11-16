@@ -40,7 +40,7 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 }, 30_000);
 
-function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string, imageMedia = false): Uint8Array {
+function syntheticDocument(headersFooters = false, notes = false, controls = false, bodyXml?: string, sectPr?: string, commentsXml?: string, commentsExtendedXml?: string, imageMedia = false, headerXml?: string): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -70,7 +70,7 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
     parts.set('word/_rels/document.xml.rels', toBytes(
       '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/><Relationship Id="rIdFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer.xml"/></Relationships>'
     ));
-    parts.set('word/header.xml', toBytes('<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>H</w:t></w:r></w:p></w:hdr>'));
+    parts.set('word/header.xml', toBytes(headerXml ?? '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>H</w:t></w:r></w:p></w:hdr>'));
     parts.set('word/footer.xml', toBytes('<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>F</w:t></w:r></w:p></w:ftr>'));
   }
   if (notes) {
@@ -101,11 +101,11 @@ function syntheticDocument(headersFooters = false, notes = false, controls = fal
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-export async function openWorker(options: { collaboration?: boolean; headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string } = {}) {
+export async function openWorker(options: { collaboration?: boolean; headersFooters?: boolean; layoutWithRegions?: boolean; notes?: boolean; controls?: boolean; propertyImages?: boolean; objects?: boolean; imageMedia?: boolean; bodyXml?: string; sectPr?: string; comments?: string; displayWindow?: [number, number]; factory?: typeof startWorker; prepare?: (engine: Awaited<ReturnType<typeof createResidentEngineSession>>) => { story: string; paraId: string; offset: number }; commentsXml?: string; commentsExtendedXml?: string; headerXml?: string } = {}) {
   const worker = (options.factory ?? startWorker)(8301);
   const client = options.collaboration ? new DocxSourceWorkerClient(worker) : new ResidentEngineWorkerClient(worker);
   try {
-    const bytes = syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.commentsXml ?? options.comments, options.commentsExtendedXml, options.imageMedia);
+    const bytes = syntheticDocument(options.headersFooters, options.notes, options.controls, options.bodyXml, options.sectPr, options.commentsXml ?? options.comments, options.commentsExtendedXml, options.imageMedia, options.headerXml);
     if (client instanceof DocxSourceWorkerClient) await client.openSource({ bytes, collaboration: { clientId: 8301 } });
     else await client.open(bytes, { generation: 'd1-command-worker' });
     const engine = worker.sessions[0]!;
@@ -1259,6 +1259,27 @@ test('worker orders hyperlink note and watermark properties and refuses stale re
     const removed = await client.edit(intent(5, 3, 'setWatermark', { watermark: null, expectVersion: saved.version }));
     expect(removed.outcomes[0]?.status).toBe('applied');
     expect((await client.documentRead({ kind: 'properties', target: { kind: 'watermark' } })).value).toMatchObject({ watermark: null });
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker accepts a read word text watermark written back with new text', async () => {
+  const { client, initial } = await openWorker({
+    headersFooters: true,
+    headerXml: '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml"><w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Watermarks"/></w:docPartObj></w:sdtPr><w:sdtContent><w:p><w:r><w:pict>' +
+      '<v:shapetype id="_x0000_t136" coordsize="21600,21600"><v:textpath on="t" fitshape="t"/></v:shapetype>' +
+      '<v:shape id="PowerPlusWaterMarkObject1" type="#_x0000_t136" style="position:absolute;width:515.75pt;height:147.35pt;rotation:315" fillcolor="silver" stroked="f"><v:fill opacity=".5"/>' +
+      '<v:textpath style="font-family:&quot;Liberation Serif&quot;;font-size:1pt" string="SAMPLE"/></v:shape>' +
+      '</w:pict></w:r></w:p></w:sdtContent></w:sdt></w:hdr>',
+  });
+  try {
+    const read = (await client.documentRead({ kind: 'properties', target: { kind: 'watermark' } })).value as unknown as { watermark: Record<string, unknown> };
+    expect(read.watermark).toMatchObject({ kind: 'text', text: 'SAMPLE', font: 'Liberation Serif' });
+    const written = await client.edit(intent(1, 0, 'setWatermark', {
+      watermark: { ...read.watermark, text: 'DRAFT' }, expectVersion: initial.frame.payload.documentVersion!,
+    }));
+    expect(written.outcomes[0]?.status).toBe('applied');
+    expect((await client.documentRead({ kind: 'properties', target: { kind: 'watermark' } })).value)
+      .toMatchObject({ watermark: { kind: 'text', text: 'DRAFT' } });
   } finally { client.destroy(); }
 }, TIMEOUT);
 
