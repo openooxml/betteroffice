@@ -1292,7 +1292,7 @@ mod tests {
         );
     }
 
-    fn wrapped_row(row_pt: f64, scroll: f32, zoom: f32) -> DisplayList {
+    fn wrapped_row(row: u32, row_pt: f64, scroll: f32, zoom: f32) -> DisplayList {
         let mut workbook = xlsx_model::Workbook::default();
         workbook.styles.cell_xfs.push(xlsx_model::Xf {
             alignment: Some(xlsx_model::Alignment {
@@ -1304,9 +1304,13 @@ mod tests {
         });
         let mut sheet = xlsx_model::Sheet::new("Sheet1");
         sheet.col_widths.insert(0, 6.0);
-        sheet.row_heights.insert(0, row_pt);
+        sheet.row_heights.insert(row, row_pt);
+        if row > 0 {
+            let top_left = xlsx_model::CellRef::new(row, 0);
+            sheet.freeze_pane = Some(xlsx_model::FreezePane::new(row, 0, top_left));
+        }
         sheet.set_cell(
-            xlsx_model::CellRef::new(0, 0),
+            xlsx_model::CellRef::new(row, 0),
             xlsx_model::Cell {
                 value: xlsx_model::CellValue::Text {
                     value: "xxxx xxxx xxxx xxxx".into(),
@@ -1323,7 +1327,7 @@ mod tests {
                 x: 0.0,
                 y: scroll,
                 width: 60.0,
-                height: 80.0,
+                height: 100.0,
             },
         )
         .unwrap();
@@ -1331,22 +1335,23 @@ mod tests {
     }
 
     #[test]
-    fn a_row_scrolled_partly_out_of_view_keeps_its_wrapped_lines() {
-        let scroll = 4;
-        let whole: Vec<(u32, u32)> = ink_row_bands(&wrapped_row(40.0, 0.0, 1.0))
-            .into_iter()
-            .filter(|&(_, bottom)| bottom >= scroll)
-            .map(|(top, bottom)| (top.saturating_sub(scroll), bottom - scroll))
-            .collect();
-        assert_eq!(whole.len(), 3, "{whole:?}");
-        assert_eq!(ink_row_bands(&wrapped_row(40.0, scroll as f32, 1.0)), whole);
+    fn a_row_scrolled_partly_under_a_frozen_row_keeps_its_wrapped_lines() {
+        let frozen =
+            xlsx_render::geometry::row_pt_to_px(xlsx_render::geometry::DEFAULT_ROW_HEIGHT_PT);
+        let lines = |scroll: f32| {
+            ink_row_bands(&wrapped_row(1, 40.0, scroll, 1.0))
+                .into_iter()
+                .filter(|&(_, bottom)| bottom as f32 > frozen + 2.0)
+                .count()
+        };
+        assert_eq!([lines(0.0), lines(6.0)], [3, 3]);
     }
 
     #[test]
     fn a_wrapped_row_paints_the_same_lines_at_every_zoom() {
         let lines: Vec<usize> = [1.0, 2.0, 4.0]
             .into_iter()
-            .map(|zoom| ink_row_bands(&wrapped_row(24.5, 0.0, zoom)).len())
+            .map(|zoom| ink_row_bands(&wrapped_row(0, 24.5, 0.0, zoom)).len())
             .collect();
         assert_eq!(lines, [2, 2, 2]);
     }
