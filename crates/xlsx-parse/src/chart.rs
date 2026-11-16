@@ -33,7 +33,8 @@ use xlsx_model::{
 use crate::package::PartContentType;
 use crate::tree::{Edit, Element, Part, Replacement, names_are_resolvable, parse_tree};
 use crate::xml::{
-    find_part, format_code_text, resolve_part_name, resolve_part_path, xstring_attribute_value,
+    PartNames, find_part, format_code_text, resolve_part_name, resolve_part_path,
+    xstring_attribute_value,
 };
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
@@ -740,21 +741,12 @@ pub(crate) fn sheet_drawing_paths(
     sheet_path: &str,
 ) -> Result<Vec<String>, ParseError> {
     let sheet_dir = directory_of(sheet_path);
-    let mut paths: Vec<String> = Vec::new();
-    for (_, _, target) in parse_relationships(rels)?
+    Ok(parse_relationships(rels)?
         .iter()
         .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
-    {
-        let path = resolve_part_name(sheet_dir, target);
-        if !paths.iter().any(|known| {
-            #[cfg(test)]
-            crate::xml::count_name_probe();
-            *known == path
-        }) {
-            paths.push(path);
-        }
-    }
-    Ok(paths)
+        .map(|(_, _, target)| resolve_part_name(sheet_dir, target))
+        .collect::<PartNames>()
+        .into_vec())
 }
 
 struct DrawingAnchor {

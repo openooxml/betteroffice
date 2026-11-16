@@ -2,6 +2,7 @@
 //! attribute lookup, and opc path helpers. malformed input errors, never panics.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use quick_xml::Reader;
 use quick_xml::events::attributes::Attribute;
@@ -247,6 +248,37 @@ pub(crate) fn count_name_probe() {
 #[cfg(test)]
 pub(crate) fn take_name_probes() -> usize {
     NAME_PROBES.replace(0)
+}
+
+/// Part names in the order first seen, each kept once.
+#[derive(Default)]
+pub(crate) struct PartNames {
+    order: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl PartNames {
+    pub(crate) fn push(&mut self, name: String) {
+        #[cfg(test)]
+        count_name_probe();
+        if self.seen.insert(name.clone()) {
+            self.order.push(name);
+        }
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<String> {
+        self.order
+    }
+}
+
+impl FromIterator<String> for PartNames {
+    fn from_iter<I: IntoIterator<Item = String>>(names: I) -> Self {
+        let mut part_names = Self::default();
+        for name in names {
+            part_names.push(name);
+        }
+        part_names
+    }
 }
 
 /// find a part by name, tolerating a leading slash on either side.

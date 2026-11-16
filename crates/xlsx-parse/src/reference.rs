@@ -27,7 +27,7 @@ use crate::tree::{
     Element, Unqualified, Vocabulary, names_are_resolvable, owned_local_name, parse_tree,
 };
 use crate::write::{NS_MAIN, NS_STRICT_MAIN};
-use crate::xml::{find_part, resolve_part_path};
+use crate::xml::{PartNames, find_part, resolve_part_path};
 use crate::{MAX_DEPTH, ParseError};
 
 /// the spreadsheetml vocabulary a pivot part is read in. Transitional and
@@ -647,7 +647,8 @@ fn narrowing_drawings(parts: &[(String, Vec<u8>)], sheet_paths: &[String]) -> Ve
     sheet_paths
         .iter()
         .flat_map(|sheet| related_parts(parts, sheet, &REL_DRAWING))
-        .collect()
+        .collect::<PartNames>()
+        .into_vec()
 }
 
 /// Whether every attribute a reader could take for `name` is the one this path
