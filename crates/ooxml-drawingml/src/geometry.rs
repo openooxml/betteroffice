@@ -318,7 +318,6 @@ pub fn preset_geometry_to_path(
         | "flowChartPredefinedProcess"
         | "flowChartInternalStorage"
         | "flowChartPreparation"
-        | "flowChartManualOperation"
         | "flowChartMagneticTape"
         | "flowChartMagneticDisk"
         | "flowChartMagneticDrum"
@@ -326,6 +325,13 @@ pub fn preset_geometry_to_path(
         | "textBox" => preset_geometry_to_path("rect", adjustments, aspect_ratio)?,
         "flowChartConnector" => preset_geometry_to_path("ellipse", adjustments, aspect_ratio)?,
         "flowChartInputOutput" | "flowChartManualInput" => parallelogram(0.25),
+        "flowChartManualOperation" => vec![
+            C::Move { x: 0.0, y: 0.0 },
+            C::Line { x: 1.0, y: 0.0 },
+            C::Line { x: 0.8, y: 1.0 },
+            C::Line { x: 0.2, y: 1.0 },
+            C::Close,
+        ],
         "flowChartTerminator" => rounded_rect(aspect_ratio, 0.5),
         _ => {
             let mut paths = preset_geometry_layers(shape_type, adjustments, aspect_ratio)?;
