@@ -2,6 +2,7 @@ import { clipboardFragmentHasPictures, clipboardFragmentIsTextOnly } from '@bett
 import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection, YrsSelectionText, YrsTableRange } from '@betteroffice/docx/yrs';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
+import { cutRefusalFrom, DocxCutRefusedError } from '../internals/cutRefused';
 import { flushAdmittedInput } from './inputAdmission';
 import type { PeerlessViewIdentity, PeerlessViewSnapshot } from './viewStore';
 
@@ -119,7 +120,7 @@ export function createClipboardPrefetch(options: ClipboardSliceRead) {
     void capture.then(captured => {
       if (disposed) return;
       const capturedKey = captured ? selectionKey(captured.identity, captured.version, captured.selection) : key;
-      if (capturedKey) cached = { key: capturedKey, capture: (captured?.slice.text || captured?.slice.fragment) ? captured : null };
+      if (capturedKey) cached = { key: capturedKey, capture: (captured?.slice.text || captured?.slice.fragment || captured?.slice.leftOut?.length) ? captured : null };
     }, error => {
       if (!disposed) cached = { key, capture: null, error };
     }).finally(() => { reading = null; schedule(); });
@@ -157,6 +158,10 @@ export function writeClipboardCapture(data: DataTransfer, capture: ClipboardCapt
   return true;
 }
 
+function refuseLeftOut(slice: DocxClipboardSlice): void {
+  if (slice.leftOut?.length) throw new DocxCutRefusedError(slice.leftOut);
+}
+
 export async function copyWorkerSelection(options: SelectionRead & { write(text: string): Promise<void>; cut?: boolean;
   readClipboardSlice?: ReadClipboardSlice;
   writeSlice?(text: string, html: string): Promise<void>;
@@ -168,12 +173,19 @@ export async function copyWorkerSelection(options: SelectionRead & { write(text:
   if (options.cut && binding.viewStore.getSnapshot().editState?.readOnly) return false;
   let captured: { selection: DocxCommandSelection; version: number; identity?: PeerlessViewIdentity };
   if (options.data && options.prefetched) {
-    if (!sameIdentity(options.prefetched.identity, binding.viewStore.getSnapshot().identity) ||
-      !writeClipboardCapture(options.data, options.prefetched)) return false;
+    if (!sameIdentity(options.prefetched.identity, binding.viewStore.getSnapshot().identity)) return false;
+    if (options.cut) refuseLeftOut(options.prefetched.slice);
+    if (!writeClipboardCapture(options.data, options.prefetched)) return false;
     captured = options.prefetched;
   } else if (options.readClipboardSlice || options.readCapture) {
-    const sliceCaptured = options.readCapture ? await options.readCapture()
-      : await readWorkerClipboardSlice({ ...options, readClipboardSlice: options.readClipboardSlice! });
+    let sliceCaptured: ClipboardCapture | Awaited<ReturnType<typeof readWorkerClipboardSlice>>;
+    try {
+      sliceCaptured = options.readCapture ? await options.readCapture()
+        : await readWorkerClipboardSlice({ ...options, readClipboardSlice: options.readClipboardSlice! });
+    } catch (error) {
+      throw (options.cut ? cutRefusalFrom(error) : null) ?? error;
+    }
+    if (options.cut && sliceCaptured) refuseLeftOut(sliceCaptured.slice);
     if (!sliceCaptured || (!sliceCaptured.slice.text && !sliceCaptured.slice.fragment)) return false;
     if (!options.isCurrent() || !sameIdentity(identity, sliceCaptured.identity) ||
       !sameIdentity(sliceCaptured.identity, binding.viewStore.getSnapshot().identity)) return false;

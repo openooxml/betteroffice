@@ -730,6 +730,7 @@
     "linkRemoved": "Link entfernt",
     "linkCopied": "Link in Zwischenablage kopiert",
     "pasteFailed": "Das Einfügen konnte nicht abgeschlossen werden. Es wurde nichts geändert.",
+    "cutRefused": "Die Auswahl enthält Objekte, die nicht ausgeschnitten werden können. Es wurde nichts geändert.",
     "failedToSave": "Dokument konnte nicht gespeichert werden",
     "documentInput": "Dokumenteingabe",
     "documentPreview": "Dokumentvorschau",
