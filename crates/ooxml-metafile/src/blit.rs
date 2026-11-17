@@ -318,22 +318,44 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
             Recolor::None
         }
     };
+    let (source, repeat) = player.source_id(&[b"gdi", job.bmi, job.bits, &job.usage.to_le_bytes()]);
+    let key = (source, crop_key(&job, recolor));
+    if let Some((bitmap, offset, whole)) = player.cache.blits.get(&key).cloned() {
+        return place(player, &job, bitmap, offset, whole);
+    }
+    if player.cache.failed_sources.contains(&source) {
+        return player.omit("bitmaps that could not be decoded");
+    }
     let budget = player
         .limits
         .bitmap_pixels
         .saturating_sub(player.bitmap_pixels);
     let declared = declared_pixels(job.bmi);
-    if declared > budget {
+    if declared > budget && !repeat {
         return player.refuse("the metafile's bitmaps exceed the pixel budget");
     }
-    player.charge(0, declared)?;
-    let dib = match decode(job.bmi, job.bits, job.usage, budget, |pixels| {
-        player.charge(0, pixels.saturating_sub(declared)).is_some()
+    let before = player.bitmap_pixels;
+    if repeat {
+        player.charge(crate::player::repeat_work(declared), 0)?;
+    } else {
+        player.charge(0, declared)?;
+    }
+    let limit = if repeat {
+        crate::dib::MAX_BITMAP_PIXELS
+    } else {
+        budget
+    };
+    let dib = match decode(job.bmi, job.bits, job.usage, limit, |pixels| {
+        repeat || player.charge(0, pixels.saturating_sub(declared)).is_some()
     }) {
         Ok(dib) => dib,
         Err(_) if player.overflowed => return None,
-        Err(_) => return player.omit("bitmaps that could not be decoded"),
+        Err(_) => {
+            player.cache.failed_sources.insert(source);
+            return player.omit("bitmaps that could not be decoded");
+        }
     };
+    let decoded = u64::from(dib.width) * u64::from(dib.height);
     let Some((bitmap, offset, whole)) = crop(
         dib,
         job.source,
@@ -344,6 +366,46 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
     ) else {
         return Some(());
     };
+    let charged = player.bitmap_pixels.saturating_sub(before);
+    let bitmap = player.share_bitmap(bitmap, charged, if repeat { decoded } else { 0 })?;
+    player
+        .cache
+        .blits
+        .insert(key, (Arc::clone(&bitmap), offset, whole));
+    place(player, &job, bitmap, offset, whole)
+}
+
+/// How a blit crops and recolours its source, as a cache key.
+fn crop_key(job: &Blit<'_>, recolor: Recolor) -> [u64; 7] {
+    let (x, y, w, h) = job.source;
+    let recolor = match recolor {
+        Recolor::None => 0,
+        Recolor::ClearBlack => 1,
+        Recolor::ClearWhite => 2,
+        Recolor::Invert => 3,
+        Recolor::Stencil(Rgba { r, g, b, a }) => {
+            4 | (u64::from(u32::from_le_bytes([r, g, b, a])) << 8)
+        }
+    };
+    [
+        x.to_bits(),
+        y.to_bits(),
+        w.to_bits(),
+        h.to_bits(),
+        u64::from(job.rows == Rows::Scan) | (u64::from(job.alpha) << 1),
+        job.transparent
+            .map_or(0, |color| 1 | (u64::from(color) << 1)),
+        recolor,
+    ]
+}
+
+fn place<const FULL: bool>(
+    player: &mut Player<FULL>,
+    job: &Blit<'_>,
+    bitmap: Arc<Bitmap>,
+    offset: (f64, f64),
+    whole: bool,
+) -> Option<()> {
     let (sw, sh) = (job.source.2.abs().max(1.0), job.source.3.abs().max(1.0));
     let (ox, oy) = offset;
     let placed: Xform = match job.corners {
@@ -377,7 +439,7 @@ fn draw<const FULL: bool>(player: &mut Player<FULL>, job: Blit<'_>) -> Option<()
     }
     player.push_op(Op::Image(Image {
         transform,
-        bitmap: Arc::new(bitmap),
+        bitmap,
         opacity: job.opacity.clamp(0.0, 1.0),
         clip,
     }));

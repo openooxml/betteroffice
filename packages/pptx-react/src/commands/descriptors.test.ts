@@ -1,10 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  commandShortcut,
   formatChord,
-  matchesChord,
   PPTX_COMMAND_DESCRIPTORS,
 } from './descriptors';
+import { matchesChord } from '../../../../shared/keyboard/match';
 
 function key(init: KeyboardEventInit): KeyboardEvent {
   return {
@@ -31,6 +30,10 @@ describe('PPTX command descriptors', () => {
         'Mod+Z undo',
         'Mod+Shift+Z redo',
         'Mod+Y redo',
+        'Mod+X cut',
+        'Mod+C copy',
+        'Mod+V paste',
+        'Mod+Shift+V pasteAsPlainText',
       ].sort()
     );
     expect(PPTX_COMMAND_DESCRIPTORS.redo.shortcuts.map((shortcut) => shortcut.chord)).toEqual(['Mod+Shift+Z', 'Mod+Y']);
@@ -40,7 +43,6 @@ describe('PPTX command descriptors', () => {
     expect(formatChord('Mod+Shift+Z', true)).toBe('⇧⌘Z');
     expect(formatChord('Mod+Shift+Z', false)).toBe('Ctrl+Shift+Z');
     expect(formatChord('Mod+B', false)).toBe('Ctrl+B');
-    expect(commandShortcut('fontSize', { points: 12 })).toBeNull();
   });
 
   test('match exact modifiers with Mod as Cmd on macOS and Ctrl elsewhere', () => {

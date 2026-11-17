@@ -110,11 +110,13 @@ function tableContext(engine: DocxWorkerCommandEngine, story: string): DocxComma
       }
     }
   }
+  const multiCell = !!(sameTable && selected && (selected.anchor.row !== selected.head.row ||
+    selected.anchor.column !== selected.head.column));
   return {
     story: focused.story, tableIndex: focused.tableIndex, rowIndex: head.row, columnIndex: head.column,
     rowCount: payload.rows.length, columnCount: columns,
-    hasMultiCellSelection: !!(sameTable && selected && (selected.anchor.row !== selected.head.row ||
-      selected.anchor.column !== selected.head.column)),
+    hasMultiCellSelection: multiCell,
+    ...(multiCell && selected ? { cells: { anchor: { ...selected.anchor }, head: { ...selected.head } } } : {}),
     canSplitCell: true,
     rowSpan: focusedCell.rowspan, columnSpan: focusedCell.colspan,
     ...(typeof payload.tblPr?.justification === 'string' ? { justification: payload.tblPr.justification } : {}),

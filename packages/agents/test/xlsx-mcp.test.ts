@@ -7,7 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import JSZip from 'jszip';
 import { xlsxFixture } from './format-fixtures';
 import { openXlsx } from '../src/xlsx';
-import { cliEnv } from './cli-env';
+import { cliEnv, unexpectedStderr } from './cli-env';
 
 const toolNames = ['xlsx_outline', 'xlsx_read_range', 'xlsx_write_range', 'xlsx_edit_grid', 'xlsx_edit_sheets', 'xlsx_edit_defined_names', 'xlsx_list_defined_names', 'xlsx_format', 'xlsx_find_replace', 'xlsx_sort', 'xlsx_preview'];
 
@@ -80,7 +80,7 @@ test('XLSX MCP discovers tight schemas and executes every spreadsheet tool throu
     const reopened = await openXlsx(await readFile(join(root, 'result.xlsx')));
     try { expect(reopened.listDefinedNames().items.find(name => name.name === 'Rate')).toMatchObject({ name: 'Rate', refersTo: '7' }); expect(reopened.readCells({ sheet: 'Budget', range: 'A101' }).cells[0].value).toEqual({ kind: 'text', value: 'alpha' }); }
     finally { reopened.close(); }
-    expect(stderr).toBe('');
+    expect(unexpectedStderr(stderr)).toBe('');
   } finally { await client.close(); await rm(root, { recursive: true, force: true }); }
 }, 30000);
 

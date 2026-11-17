@@ -231,7 +231,7 @@ fn resolve_selector<T: ReadTxn>(txn: &T, selector: &ParaSelector) -> OpResult<Ve
             let target = all
                 .into_iter()
                 .find(|target| target.bounds.para_id == *id)
-                .ok_or_else(|| OpError::UnknownPara(id.clone()))?;
+                .ok_or_else(|| crate::empty_cells::unknown_paragraph(txn, id))?;
             Ok(vec![target])
         }
         ParaSelector::Many(ids) => {
@@ -243,7 +243,7 @@ fn resolve_selector<T: ReadTxn>(txn: &T, selector: &ParaSelector) -> OpResult<Ve
                 .map(|id| {
                     by_id
                         .remove(id)
-                        .ok_or_else(|| OpError::UnknownPara(id.clone()))
+                        .ok_or_else(|| crate::empty_cells::unknown_paragraph(txn, id))
                 })
                 .collect()
         }
@@ -263,7 +263,10 @@ fn resolve_selector<T: ReadTxn>(txn: &T, selector: &ParaSelector) -> OpResult<Ve
                 })
                 .collect();
             if targets.is_empty() {
-                return Err(OpError::UnknownStory(range.story.clone()));
+                return Err(match story_ref(txn, &range.story) {
+                    Err(error @ crate::EditError::CellHasNoStory(_)) => error.into(),
+                    _ => OpError::UnknownStory(range.story.clone()),
+                });
             }
             Ok(targets)
         }
@@ -537,7 +540,7 @@ impl EditingDoc {
         let index = targets
             .iter()
             .position(|target| target.bounds.para_id == para)
-            .ok_or_else(|| OpError::UnknownPara(para.to_owned()))?;
+            .ok_or_else(|| crate::empty_cells::unknown_paragraph(&txn, para))?;
         let boundary_index = match direction {
             MergeDirection::Forward => {
                 let is_last_in_story = targets
@@ -651,6 +654,33 @@ impl EditingDoc {
             revision_ids: own_insert.into_iter().chain(revision_id).collect(),
             range: Some(caret),
         })
+    }
+
+    pub(crate) fn set_paragraph_language(
+        &self,
+        ctx: &EditCtx,
+        target: &crate::ParagraphTarget,
+        patch: &Any,
+    ) -> OpResult<()> {
+        let mut txn = self.transact_for(ctx);
+        let story = story_ref(&txn, &target.story)?;
+        let map = crate::pilcrows(&story, &txn)
+            .into_iter()
+            .map(|(_, map)| map)
+            .find(|map| {
+                crate::map_string(map, &txn, PARA_ID).as_deref() == Some(target.para_id.as_str())
+            })
+            .ok_or_else(|| OpError::UnknownPara(target.para_id.clone()))?;
+        let previous = map.get(&txn, "language").and_then(|value| match value {
+            Out::Any(value) => Some(value),
+            _ => None,
+        });
+        let language = crate::format::merge_language(previous.as_ref(), patch);
+        if previous.as_ref() != Some(&language) {
+            map.insert(&mut txn, "language", language);
+            identity::promote(self, &mut txn, &map);
+        }
+        Ok(())
     }
 
     /// Applies a tri-state paragraph attribute delta to the selected
@@ -958,6 +988,8 @@ impl EditingDoc {
 /// One complete paragraph for [`EditingDoc::insert_paragraph_records`].
 pub(crate) struct ParagraphRecord {
     pub text: String,
+    /// Replaces `text` when not empty: runs formatted over `run`.
+    pub runs: Vec<crate::ops::text::OverlayRun>,
     /// Pilcrow properties other than the schema identity keys.
     pub properties: Vec<(String, Any)>,
     /// Formatting attributes for the paragraph's text.
@@ -1740,16 +1772,21 @@ impl EditingDoc {
         let mut index = at;
         let mut ids = Vec::with_capacity(records.len());
         for record in records {
-            if !record.text.is_empty() {
-                let mut attrs: Attrs = record
-                    .run
-                    .iter()
+            let plain = [crate::ops::text::RunSlice::plain(&record.text)];
+            let runs: Vec<_> = if record.runs.is_empty() {
+                plain.to_vec()
+            } else {
+                record.runs.iter().map(|run| run.slice()).collect()
+            };
+            for run in runs.iter().filter(|run| !run.text.is_empty()) {
+                let mut attrs: Attrs = crate::ops::text::overlaid(&record.run, run.overlay)
+                    .into_iter()
                     .filter(|(key, _)| !PROTECTED_ATTRS.contains(&key.as_str()))
-                    .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
+                    .map(|(key, value)| (Arc::from(key.as_str()), value))
                     .collect();
                 attrs.extend(insertion_attrs(None, None));
-                story.insert_with_attributes(&mut txn, index, &record.text, attrs);
-                index += crate::ops::utf16_len(&record.text);
+                story.insert_with_attributes(&mut txn, index, run.text, attrs);
+                index += crate::ops::utf16_len(run.text);
             }
             let para_id = allocator.session_key(self);
             let pilcrow = story.insert_embed_with_attributes(

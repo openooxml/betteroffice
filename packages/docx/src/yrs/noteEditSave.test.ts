@@ -17,7 +17,8 @@ import type { DisplayList, DisplayListRegionHit, TextRunPrimitive } from '../lay
 import type { Paragraph } from '../types/content';
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
-import { createYrsSession, type YrsSession } from './index';
+import { saveEditorDocument } from './editorSave';
+import { createYrsSession, editorSaveKeptUnchanged, editorSaveStructureDropped, type YrsSession } from './index';
 import { createYrsInputPositionMap, displayPositionToYrsLoc } from './inputPositionMap';
 import { captureSessionSave, saveYrsDocx, writeSessionSave } from './saveYrsDocx';
 import { yrsToDocument } from './yrsToDocument';
@@ -195,6 +196,85 @@ function rawNoteText(xml: string): string {
 
 describe('typing into a note through the editor path', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
+
+  const smartTag = '<w:smartTag w:uri="urn:schemas-microsoft-com:office:smarttags" w:element="place"><w:r><w:t>Place</w:t></w:r></w:smartTag>';
+  const withHeader = (header: string): PartsMap => new Map([
+    ['[Content_Types].xml', toBytes(CONTENT_TYPES.replace('</Types>', `<Override PartName="/word/header1.xml" ContentType="${OFFICE_DOC}.wordprocessingml.header+xml"/></Types>`))],
+    ['word/_rels/document.xml.rels', toBytes(DOCUMENT_RELS.replace('</Relationships>', '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>'))],
+    ['word/document.xml', toBytes(DOCUMENT.replace('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">').replace('<w:sectPr>', '<w:sectPr><w:headerReference w:type="default" r:id="rId9"/>'))],
+    ['word/header1.xml', toBytes(header)],
+  ]);
+  it('reports nothing for a part a save keeps, whatever serializing it would have dropped', async () => {
+    const parts = withHeader(`<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p>${smartTag}</w:p></w:hdr>`);
+    for (const edit of [false, true]) {
+      const session = await createYrsSession({ clientId: 53010 });
+      try {
+        session.seedFromDocx(fixture(parts));
+        if (edit) typeAtDisplayPosition(session, 'body', 0, 'Revised ');
+        const saved = await saveYrsDocx(session);
+        expect(readDocxContainer(saved.bytes.slice().buffer).text('word/header1.xml')).toContain(smartTag);
+        expect(saved.structureDropped).toBeUndefined();
+      } finally {
+        session.destroy();
+      }
+    }
+  });
+
+  const formattedNote = (session: YrsSession, space: string) => {
+    const notes = FOOTNOTES.replace('<w:r><w:t xml:space="preserve">Ibsen 1879</w:t></w:r>', `<w:r><w:rPr><w:b/></w:rPr><w:t${space}>Near </w:t></w:r>${smartTag}`);
+    session.seedFromDocx(fixture(new Map([['word/footnotes.xml', toBytes(notes)]])));
+    const { paraId } = (session.paragraphs('fn:2') as Array<{ paraId: string }>)[0]!;
+    session.clearFormatting({ story: 'fn:2', start: { paraId, offset: 0 }, end: { paraId, offset: 6 } });
+    session.setSectionProperties('final', { margins: { left: 1800 } });
+  };
+  it('keeps a formatted note part a whole write would lose structure from, beside a section edit', async () => {
+    const session = await createYrsSession({ clientId: 53008 });
+    try {
+      formattedNote(session, '');
+      const saved = await saveYrsDocx(session);
+      const container = readDocxContainer(saved.bytes.slice().buffer);
+      expect(container.text('word/footnotes.xml')).toContain(smartTag);
+      expect(container.text('word/document.xml')).toContain('w:left="1800"');
+      expect(saved.keptUnchanged?.paragraphs[0]).toMatchObject({ part: 'word/footnotes.xml', scope: 'part', dropped: ['w:smartTag'] });
+      expect(saved.structureDropped).toBeUndefined();
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('the editor save writes a formatted header beside a section edit and reports what that drops', async () => {
+    const header = `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">Near </w:t></w:r>${smartTag}</w:p></w:hdr>`;
+    const session = await createYrsSession({ clientId: 53011 });
+    try {
+      session.seedFromDocx(fixture(withHeader(header)));
+      const story = 'hf:rId9';
+      const { paraId } = (session.paragraphs(story) as Array<{ paraId: string }>)[0]!;
+      session.clearFormatting({ story, start: { paraId, offset: 0 }, end: { paraId, offset: 5 } });
+      session.setSectionProperties('final', { margins: { left: 1800 } });
+      const projected = yrsToDocument(session, session.materializeDocx()!);
+      await saveEditorDocument(session, projected, projected.package.document.comments ?? []);
+      expect(editorSaveKeptUnchanged(session)).toBeUndefined();
+      expect(editorSaveStructureDropped(session)?.[0]).toMatchObject({ part: 'word/header1.xml', dropped: ['w:smartTag'] });
+    } finally {
+      session.destroy();
+    }
+  });
+
+  for (const [name, space] of [['not read as written', ''], ['read as written', ' xml:space="preserve"']] as const) {
+    it(`the editor save writes a formatted note part ${name} beside a section edit and reports what that drops`, async () => {
+      const session = await createYrsSession({ clientId: 53009 });
+      try {
+        formattedNote(session, space);
+        const projected = yrsToDocument(session, session.materializeDocx()!);
+        const bytes = await saveEditorDocument(session, projected, projected.package.document.comments ?? []);
+        expect(readDocxContainer(bytes).text('word/document.xml')).toContain('w:left="1800"');
+        expect(editorSaveKeptUnchanged(session)).toBeUndefined();
+        expect(editorSaveStructureDropped(session)?.[0]).toMatchObject({ part: 'word/footnotes.xml', dropped: ['w:smartTag'] });
+      } finally {
+        session.destroy();
+      }
+    });
+  }
 
   for (const kind of ['footnote', 'endnote'] as const) {
     it(`keeps an untouched ${kind} number in a mixed text run`, async () => {

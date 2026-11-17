@@ -1,0 +1,25 @@
+// @betteroffice/docx "./utils/comments" public API surface: the declaration files it reaches, each in files/
+// Regenerate: bun scripts/api-surface.ts --write docx
+files/docx/wrapTypes.api.d.ts
+files/layout/drawing.api.d.ts
+files/types/colors.api.d.ts
+files/types/content.api.d.ts
+files/types/content/chart.api.d.ts
+files/types/content/comment.api.d.ts
+files/types/content/headerFooter.api.d.ts
+files/types/content/image.api.d.ts
+files/types/content/link.api.d.ts
+files/types/content/math.api.d.ts
+files/types/content/paragraph.api.d.ts
+files/types/content/rawXml.api.d.ts
+files/types/content/run.api.d.ts
+files/types/content/sdt.api.d.ts
+files/types/content/section.api.d.ts
+files/types/content/shape.api.d.ts
+files/types/content/table.api.d.ts
+files/types/content/trackedChange.api.d.ts
+files/types/content/watermark.api.d.ts
+files/types/drawingml.api.d.ts
+files/types/formatting.api.d.ts
+files/types/lists.api.d.ts
+files/utils/comments.api.d.ts

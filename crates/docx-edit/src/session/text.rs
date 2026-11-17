@@ -3,12 +3,22 @@ use yrs::Any;
 
 use super::args::{
     apply_mark, edit_ctx, find_para_span, json_to_any, loc_index, parse_inline_format_delta,
-    parse_para_attr_delta, text_receipt_json,
+    parse_para_attr_delta, text_receipt_json, writable_story,
 };
 use super::{EditSessionCore, EngineError, EngineResult};
-use crate::{
-    EditCtx, FormatPolicy, MergeDirection, ParaAttrDelta, ParaSelector, Position, StoryRange,
-};
+use crate::{FormatPolicy, MergeDirection, ParaAttrDelta, ParaSelector, Position, StoryRange};
+
+/// `{reason: count}` for the paragraphs a formatting edit kept unchanged.
+pub(super) fn kept_counts(kept: &crate::KeptUnchanged) -> serde_json::Map<String, Value> {
+    kept.iter()
+        .map(|(reason, count)| (reason.as_str().to_owned(), json!(count)))
+        .collect()
+}
+
+/// `{"keptUnchanged": {reason: count}}` for the paragraphs a formatting edit kept unchanged.
+fn kept_json(kept: &crate::KeptUnchanged) -> String {
+    json!({ "keptUnchanged": kept_counts(kept) }).to_string()
+}
 
 impl EditSessionCore {
     pub fn insert_text(
@@ -20,6 +30,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let doc = self.engine.doc();
@@ -73,6 +84,7 @@ impl EditSessionCore {
         end_offset: u32,
         text: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         if text.is_some() && start != end {
@@ -118,6 +130,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
@@ -156,6 +169,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
@@ -175,6 +189,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
         let ctx = edit_ctx(author_name, author_date)?;
         let receipt = self
@@ -193,6 +208,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         let at = loc_index(self.engine.doc(), story, para_id, offset)?;
         let receipt = if author_name.is_none() && author_date.is_none() {
             let receipt = self
@@ -224,6 +240,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
         // Validate story membership (story-scoped "not found") before merging.
         find_para_span(self.engine.doc(), story, para_id)?;
         let ctx = edit_ctx(author_name, author_date)?;
@@ -243,14 +260,20 @@ impl EditSessionCore {
         end_para: &str,
         end_offset: u32,
         mark_json: &str,
-    ) -> EngineResult<()> {
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
+        let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         apply_mark(
             self.engine.doc(),
+            &ctx,
             StoryRange::new(story, start, end),
             mark_json,
         )
+        .map(|kept| kept_json(&kept))
     }
 
     pub fn format_range(
@@ -261,16 +284,19 @@ impl EditSessionCore {
         end_para: &str,
         end_offset: u32,
         delta_json: &str,
-    ) -> EngineResult<()> {
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
+        let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let delta = parse_inline_format_delta(delta_json)?;
-        let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
-            .format_range(&ctx, StoryRange::new(story, start, end), &delta)
-            .map(|_| ())
-            .map_err(EngineError::message)
+            .format_range_keeping(&ctx, StoryRange::new(story, start, end), &delta)
+            .map(|(_, kept)| kept_json(&kept))
+            .map_err(EngineError::from)
     }
 
     pub fn set_hyperlink(
@@ -281,7 +307,11 @@ impl EditSessionCore {
         end_para: &str,
         end_offset: u32,
         hyperlink_json: &str,
+        author_name: Option<String>,
+        author_date: Option<String>,
     ) -> EngineResult<()> {
+        writable_story(self.engine.doc(), story)?;
+        let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let value: Value = serde_json::from_str(hyperlink_json).map_err(EngineError::message)?;
@@ -294,7 +324,6 @@ impl EditSessionCore {
                 "set_hyperlink expects an object or null",
             ));
         };
-        let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
             .set_hyperlink(&ctx, StoryRange::new(story, start, end), hyperlink)
@@ -309,15 +338,18 @@ impl EditSessionCore {
         start_offset: u32,
         end_para: &str,
         end_offset: u32,
-    ) -> EngineResult<()> {
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> EngineResult<String> {
+        writable_story(self.engine.doc(), story)?;
+        let ctx = edit_ctx(author_name, author_date)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
-            .clear_formatting(&ctx, StoryRange::new(story, start, end))
-            .map(|_| ())
-            .map_err(EngineError::message)
+            .clear_formatting_keeping(&ctx, StoryRange::new(story, start, end))
+            .map(|(_, kept)| kept_json(&kept))
+            .map_err(EngineError::from)
     }
 
     pub fn next_paragraph_style(
@@ -355,6 +387,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<()> {
+        writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));
@@ -391,6 +424,7 @@ impl EditSessionCore {
         author_name: Option<String>,
         author_date: Option<String>,
     ) -> EngineResult<()> {
+        writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
         let selector = ParaSelector::Range(StoryRange::new(story, start, end));

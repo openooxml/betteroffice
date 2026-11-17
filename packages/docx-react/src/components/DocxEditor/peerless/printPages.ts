@@ -22,6 +22,7 @@ export function createWorkerPrintCapture(binding: PeerlessEditSessionBinding,
     async collect(
       buildPages: (pages: number[], frameEpoch: number) => Promise<unknown>,
       complete: (frameEpoch: number) => Promise<unknown>,
+      outlinesInstalled?: () => Promise<number>,
     ) {
       await binding.admission.whenCompositionSettled?.();
       await binding.session.flush();
@@ -37,12 +38,17 @@ export function createWorkerPrintCapture(binding: PeerlessEditSessionBinding,
       version = snapshot.version;
       const pages = snapshot.geometry?.pages;
       if (!pages?.length || snapshot.geometry?.layoutProvisional) throw new Error('Worker print layout is unavailable');
-      for (const { page } of pages) {
-        assertCurrent();
-        await buildPages([page.pageIndex], frameEpoch());
-        assertCurrent();
-        if (!images.has(page.pageIndex)) throw new Error(`Worker print pixels are unavailable for page ${page.pageIndex + 1}`);
-      }
+      const capture = async () => {
+        for (const { page } of pages) {
+          assertCurrent();
+          await buildPages([page.pageIndex], frameEpoch());
+          assertCurrent();
+          if (!images.has(page.pageIndex)) throw new Error(`Worker print pixels are unavailable for page ${page.pageIndex + 1}`);
+        }
+      };
+      const before = await outlinesInstalled?.();
+      await capture();
+      if (before !== undefined && await outlinesInstalled!() !== before) await capture();
       return pages.map(({ page }) => images.get(page.pageIndex)!);
     },
   };

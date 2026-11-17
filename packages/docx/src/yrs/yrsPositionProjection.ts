@@ -93,6 +93,8 @@ export interface YrsProjectedTable extends YrsProjectedNode {
   widthsTwips: number[];
   rowCount: number;
   cells: YrsProjectedCell[];
+  /** The table lost its properties, grid or rows to a concurrent undo: no cells, no caret stop. */
+  unavailable?: true;
 }
 
 /** @internal */
@@ -185,6 +187,7 @@ export class YrsPositionProjection {
   private readonly tables: YrsProjectedTable[] = [];
   private readonly blockBoundaries = new Map<number, YrsLoc>();
   private readonly source: YrsStorySegmentSource;
+  private tree: { stories: StoryProjection[]; parents: Int32Array } | null = null;
   private readonly paragraphsById = new Map<
     StoryProjection,
     Map<string, StoryProjection['paragraphs'][number]>
@@ -214,6 +217,7 @@ export class YrsPositionProjection {
   tableAtPosition(position: number): YrsProjectedTable | null {
     let result: YrsProjectedTable | null = null;
     for (const table of this.tables) {
+      if (table.unavailable) continue;
       if (position < table.start || position > table.start + table.nodeSize) continue;
       if (!result || table.nodeSize < result.nodeSize) result = table;
     }
@@ -246,6 +250,32 @@ export class YrsPositionProjection {
   }
 
   targetAt(position: number): YrsPointerProjectionTarget {
+    const target = this.deepestStoryAt(position);
+    return {
+      story: target?.story ?? this.rootStory,
+      displayPosition: target ? this.inputPositionAt(target, position) : 0,
+      ...(target?.cell ? { cell: target.cell } : {}),
+    };
+  }
+
+  /** The deepest story whose content holds `position`, the root when none does. */
+  private deepestStoryAt(position: number): StoryProjection | null {
+    const { stories, parents } = this.storyTree();
+    let low = 0;
+    let high = stories.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (stories[middle]!.contentStart <= position) low = middle + 1;
+      else high = middle;
+    }
+    // stories nest, so the stories holding `position` are the last one starting
+    // at or before it and its ancestors
+    let index = low - 1;
+    while (index >= 0 && position > stories[index]!.contentStart + stories[index]!.size) {
+      index = parents[index]!;
+    }
+    // where a story starts, one ending there could hold `position` too
+    if (index >= 0 && position !== stories[index]!.contentStart) return stories[index]!;
     let target = this.stories.get(this.rootStory) ?? null;
     for (const story of this.stories.values()) {
       if (
@@ -256,11 +286,29 @@ export class YrsPositionProjection {
         target = story;
       }
     }
-    return {
-      story: target?.story ?? this.rootStory,
-      displayPosition: target ? this.inputPositionAt(target, position) : 0,
-      ...(target?.cell ? { cell: target.cell } : {}),
-    };
+    return target;
+  }
+
+  /** The stories by content start, each with the index of the nearest one holding its start. */
+  private storyTree(): { stories: StoryProjection[]; parents: Int32Array } {
+    if (this.tree) return this.tree;
+    const stories = [...this.stories.values()]
+      .map((story, order) => ({ story, order }))
+      .sort((left, right) => left.story.contentStart - right.story.contentStart || left.order - right.order)
+      .map(({ story }) => story);
+    const parents = new Int32Array(stories.length).fill(-1);
+    const open: number[] = [];
+    stories.forEach((story, index) => {
+      while (open.length > 0) {
+        const holder = stories[open.at(-1)!]!;
+        if (story.contentStart <= holder.contentStart + holder.size) break;
+        open.pop();
+      }
+      parents[index] = open.at(-1) ?? -1;
+      open.push(index);
+    });
+    this.tree = { stories, parents };
+    return this.tree;
   }
 
   positionForLoc(loc: YrsLoc): number | null {
@@ -482,7 +530,8 @@ export class YrsPositionProjection {
     start: number,
     depth: number
   ): YrsProjectedTable {
-    const rows = Array.isArray(segment.payload.rows)
+    const unavailable = isUnavailableTablePayload(segment.payload);
+    const rows = !unavailable && Array.isArray(segment.payload.rows)
       ? (segment.payload.rows as Array<Record<string, unknown>>)
       : [];
     const occupied: boolean[][] = Array.from({ length: rows.length }, () => []);
@@ -541,8 +590,14 @@ export class YrsPositionProjection {
         : [],
       rowCount: rows.length,
       cells,
+      ...(unavailable ? { unavailable: true as const } : {}),
     };
   }
+}
+
+/** Whether a table embed's payload lacks its properties, grid or rows. @internal */
+export function isUnavailableTablePayload(payload: object): boolean {
+  return !('tblPr' in payload && 'grid' in payload && 'rows' in payload);
 }
 
 function asObject(value: unknown): Record<string, unknown> {

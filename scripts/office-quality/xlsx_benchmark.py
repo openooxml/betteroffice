@@ -55,7 +55,7 @@ def prepare_input(source, reference, frozen=None):
     return cleared
 
 
-def measure_sample(sample, root, binaries, soffice, config, offset=0):
+def measure_sample(sample, root, binaries, soffice, config, offset=0, directory='timing'):
     reference = json.loads((root/'expected.json').read_text())
     if sha256(root/'expected.json') != sample['metadata']['calculation']['reference']['sha256']:
         raise ValueError('Calculation reference hash mismatch')
@@ -63,7 +63,7 @@ def measure_sample(sample, root, binaries, soffice, config, offset=0):
     if sha256(input_path) != sample['metadata']['calculation']['input']['sha256']:
         raise ValueError('Frozen calculation input hash mismatch')
     prepare_input(root/'source.xlsx',reference,input_path.read_bytes())
-    output = root/'timing'
+    output = root/directory
     output.mkdir()
     lo_output = output/'libreoffice'
     lo_output.mkdir()

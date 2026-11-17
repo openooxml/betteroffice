@@ -13,7 +13,9 @@ pub use snapshot::SnapshotGraphBuilder;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use xlsx_model::{CellRange, CellRef, ColId, DefinedName, RowId, SheetId, Table, Workbook};
+use xlsx_model::{
+    CellRange, CellRef, CellValue, ColId, DefinedName, RowId, SheetId, Table, Workbook,
+};
 
 use crate::TableSpec;
 use crate::deps::{offset_target, positional_argument, range_join_span, references};
@@ -83,18 +85,35 @@ pub struct DepGraph {
     /// uncomputable functions behind each, sorted; a recalc replaces the entry
     /// of every cell it evaluates.
     unevaluated: std::sync::Mutex<BTreeMap<NodeKey, Vec<String>>>,
+    /// the listed cells with no value of excel's to keep, with what a recalc
+    /// wrote for them, so the next one writes them again. a cell holding
+    /// anything else came from elsewhere, an undo or an op writing its value,
+    /// and keeps it, unless it reads an answer: that computes like any
+    /// formula. an entry outlives a value typed over the formula, so undoing
+    /// that brings the answer back.
+    answered: std::sync::Mutex<HashMap<NodeKey, Answer>>,
+}
+
+/// what a recalc wrote for a formula with no value of excel's to keep.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Answer {
+    pub(crate) formula: String,
+    pub(crate) value: CellValue,
 }
 
 /// a formula cell whose result an engine gap reached, or that reads a cell an
-/// uncomputable function left so: it is never written, keeping excel's cached
-/// value or a blank. a gap of this engine alone keeps the cached value, or
-/// shows the computed error when the file stored none.
+/// uncomputable or unknown function left so. an uncomputable function's cell
+/// is never written, keeping excel's cached value or a blank. an unknown
+/// function's keeps excel's cached value too, but with none the engine's
+/// answer stands: `#NAME?`, or what a handler made of it. a gap of this engine
+/// alone keeps the cached value, or shows the computed error when the file
+/// stored none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnevaluatedCell {
     pub sheet: SheetId,
     pub cell: CellRef,
-    /// the uncomputable functions involved, sorted; empty when only gaps of
-    /// this engine were.
+    /// the uncomputable and unknown functions involved, sorted; empty when
+    /// only gaps of this engine were.
     pub functions: Vec<String>,
 }
 
@@ -190,6 +209,22 @@ impl DepGraph {
         Self::build_with(wb, ParseCache::default())
     }
 
+    /// [`Self::build`], moving in the asts `previous` holds for `wb`'s formulas.
+    pub(crate) fn build_reusing(wb: &Workbook, previous: &DepGraph) -> Self {
+        let mut pool = std::mem::take(&mut *previous.asts.lock().expect("parse cache poisoned"));
+        if pool.is_empty() {
+            return Self::build(wb);
+        }
+        let mut asts = HashMap::new();
+        let cells = wb.sheets.iter().flat_map(|sheet| sheet.iter_cells());
+        for formula in cells.filter_map(|(_, cell)| cell.formula.as_deref()) {
+            if let Some((source, ast)) = pool.remove_entry(formula_source(formula)) {
+                asts.insert(source, ast);
+            }
+        }
+        Self::build_with(wb, std::sync::Mutex::new(asts))
+    }
+
     fn build_with(wb: &Workbook, asts: ParseCache) -> Self {
         let names = wb
             .sheets
@@ -226,6 +261,7 @@ impl DepGraph {
             spills_by_sheet: HashMap::new(),
             asts,
             unevaluated: std::sync::Mutex::default(),
+            answered: std::sync::Mutex::default(),
         };
         for (i, sheet) in wb.sheets.iter().enumerate() {
             let sid = SheetId(i as u32);
@@ -279,6 +315,7 @@ impl DepGraph {
             .unevaluated
             .lock()
             .unwrap_or_else(|err| err.into_inner()) = carried;
+        self.adopt_answered(&previous);
         drop(previous);
         for &(sheet, cell) in rewritten {
             let readers = self
@@ -413,6 +450,7 @@ impl DepGraph {
             spills_by_sheet: HashMap::new(),
             asts: ParseCache::default(),
             unevaluated: std::sync::Mutex::default(),
+            answered: std::sync::Mutex::default(),
         }
     }
 
@@ -565,6 +603,14 @@ impl DepGraph {
             .collect()
     }
 
+    /// forgets every cell marked unevaluated, as a build starts.
+    pub fn clear_unevaluated(&self) {
+        self.unevaluated
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+    }
+
     /// marks cells unevaluated, for a graph built over values earlier recalcs
     /// left so.
     pub fn assume_unevaluated(&self, cells: impl IntoIterator<Item = UnevaluatedCell>) {
@@ -589,6 +635,90 @@ impl DepGraph {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .extend(adopted);
+        self.adopt_answered(other);
+    }
+
+    pub(crate) fn adopt_answered(&self, other: &DepGraph) {
+        let adopted = other
+            .answered
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        self.answered
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .extend(adopted);
+    }
+
+    /// what a recalc wrote for `cell` when an unknown function reached it and
+    /// it held no value of excel's, if it did.
+    pub(crate) fn answered(&self, sheet: SheetId, cell: CellRef) -> Option<Answer> {
+        self.answered
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&NodeKey::new(sheet, cell))
+            .cloned()
+    }
+
+    /// records what a recalc wrote for such a cell, or that it wrote nothing
+    /// of the kind.
+    pub(crate) fn set_answered(&self, sheet: SheetId, cell: CellRef, answer: Option<Answer>) {
+        let mut answered = self.answered.lock().unwrap_or_else(|err| err.into_inner());
+        let key = NodeKey::new(sheet, cell);
+        match answer {
+            Some(answer) => {
+                answered.insert(key, answer);
+            }
+            None => {
+                answered.remove(&key);
+            }
+        }
+    }
+
+    /// moves every answer as an edit moved its cell and rewrote its formula:
+    /// `map` says where each goes and what its formula now reads, or `None`
+    /// when the edit took it away.
+    pub fn rebase_answered(
+        &self,
+        mut map: impl FnMut(SheetId, CellRef, &str) -> Option<(SheetId, CellRef, String)>,
+    ) {
+        let mut answered = self.answered.lock().unwrap_or_else(|err| err.into_inner());
+        *answered = std::mem::take(&mut *answered)
+            .into_iter()
+            .filter_map(|(key, answer)| {
+                let (sheet, cell, formula) = map(key.sheet, key.cell(), &answer.formula)?;
+                let value = answer.value;
+                Some((NodeKey::new(sheet, cell), Answer { formula, value }))
+            })
+            .collect();
+    }
+
+    /// a move wrote each `(sheet, from, to, formula)`: `to` holds `from`'s
+    /// formula as `formula` now, and answers as `from` did or not at all. `from`
+    /// keeps its answer, so undoing the move finds it. every answer is read
+    /// before any is written, as a move's source and target may overlap.
+    pub fn carry_answers(&self, moves: &[(SheetId, CellRef, CellRef, String)]) {
+        let mut answered = self.answered.lock().unwrap_or_else(|err| err.into_inner());
+        let carried: Vec<_> = moves
+            .iter()
+            .map(|(sheet, from, to, formula)| {
+                let value = answered
+                    .get(&NodeKey::new(*sheet, *from))
+                    .map(|answer| answer.value.clone());
+                (NodeKey::new(*sheet, *to), formula, value)
+            })
+            .collect();
+        for (to, formula, value) in carried {
+            match value {
+                Some(value) => {
+                    let formula = formula.clone();
+                    answered.insert(to, Answer { formula, value });
+                }
+                None => {
+                    answered.remove(&to);
+                }
+            }
+        }
     }
 
     /// the functions `cell` is held unevaluated with, if it is.
@@ -630,6 +760,74 @@ impl DepGraph {
     /// every volatile formula cell, in unspecified order.
     pub fn volatile_cells(&self) -> impl Iterator<Item = (SheetId, CellRef)> + '_ {
         self.volatile.iter().map(|k| (k.sheet, k.cell()))
+    }
+
+    /// removes the last edge of the lowest node that has one, from both indexes.
+    #[cfg(feature = "test-counters")]
+    #[doc(hidden)]
+    pub fn drop_one_edge(&mut self) -> bool {
+        let Some((&key, entry)) = self
+            .deps
+            .iter_mut()
+            .filter(|(_, entry)| !entry.edges.is_empty())
+            .min_by_key(|(key, _)| **key)
+        else {
+            return false;
+        };
+        let Some((sheet, range)) = entry.edges.pop() else {
+            return false;
+        };
+        if let Some(readers) = self.by_sheet.get_mut(&sheet)
+            && let Some(index) = readers.iter().position(|&read| read == (range, key))
+        {
+            readers.remove(index);
+        }
+        true
+    }
+
+    /// the first part differing from `other`; spills, answers and currency only when `evaluated`.
+    #[cfg(feature = "test-counters")]
+    #[doc(hidden)]
+    pub fn structural_difference(&self, other: &Self, evaluated: bool) -> Option<&'static str> {
+        let nodes = self.deps.len() != other.deps.len()
+            || self.deps.iter().any(|(key, entry)| {
+                other
+                    .deps
+                    .get(key)
+                    .is_none_or(|found| found.edges != entry.edges || *found.ast != *entry.ast)
+            });
+        let answers = *self.answered.lock().unwrap_or_else(|err| err.into_inner())
+            != *other.answered.lock().unwrap_or_else(|err| err.into_inner());
+        let currency = *self
+            .currency_coercion
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            != *other
+                .currency_coercion
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+        [
+            ("sheet names", self.names != other.names),
+            (
+                "defined names",
+                self.defined_names != other.defined_names
+                    || self.defined_name_indices != other.defined_name_indices,
+            ),
+            ("tables", self.tables != other.tables),
+            ("nodes", nodes),
+            ("reverse edges", self.by_sheet != other.by_sheet),
+            ("volatile cells", self.volatile != other.volatile),
+            (
+                "spills",
+                evaluated
+                    && (self.spills != other.spills
+                        || self.spills_by_sheet != other.spills_by_sheet),
+            ),
+            ("answers", evaluated && answers),
+            ("currency evidence", evaluated && currency),
+        ]
+        .into_iter()
+        .find_map(|(part, differs)| differs.then_some(part))
     }
 
     /// parsed asts shared with `engine::run_recalc` evaluation.
@@ -880,7 +1078,7 @@ impl DepGraph {
 
 #[cfg(test)]
 impl DepGraph {
-    fn assert_matches(&self, other: &Self) {
+    pub(crate) fn assert_matches(&self, other: &Self) {
         let Self {
             names,
             defined_names,
@@ -1103,7 +1301,7 @@ fn push_uncomputable_calls(
         match expression {
             Expr::FuncCall { name, func, args } => {
                 if func.is_none()
-                    && let Some(name) = crate::functions::uncomputable(name)
+                    && let Some(name) = crate::functions::unanswerable(name)
                 {
                     found.insert(name);
                 }

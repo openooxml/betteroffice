@@ -26,6 +26,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   dist:
     name: Build ${{ inputs.binding }}
@@ -58,7 +62,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.13"
 

@@ -1,8 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { buildSnapshot, generateSnapshotsForPackage, reachableFiles } from "./api-surface";
+import {
+  buildSharedSnapshots,
+  buildSnapshot,
+  entriesFromExports,
+  FORMATS,
+  generateSnapshotsForPackage,
+  reachableFiles,
+  sharedFileName,
+} from "./api-surface";
 
 describe("api-surface", () => {
   test("includes transitive declaration inputs and resolves JS specifiers, indexes and package paths", () => {
@@ -81,5 +89,68 @@ describe("api-surface", () => {
     expect(reachableFiles("index.d.ts", files)).toEqual(["a.d.ts", "index.d.ts", "z.d.ts"]);
     expect(buildSnapshot("@test/fixture", ".", "index.d.ts", files))
       .toBe(buildSnapshot("@test/fixture", ".", "index.d.ts", new Map([...files].reverse())));
+  });
+
+  test("shared snapshots keep each declaration file once and index it from every entry that reaches it", () => {
+    const files = new Map([
+      ["index.d.ts", 'export type { Shared } from "./shared.js"; export type { Own } from "./own.js";'],
+      ["worker.d.ts", 'export type { Shared } from "./shared.js";'],
+      ["shared.d.ts", "export interface Shared { value: string; }\n//# sourceMappingURL=shared.d.ts.map"],
+      ["own.d.ts", "export interface Own {}"],
+      ["unused.d.ts", "export interface Unused {}"],
+    ]);
+    const snapshots = buildSharedSnapshots("@test/fixture", [[".", "index.d.ts"], ["./worker", "worker.d.ts"]], files);
+    expect([...snapshots.keys()].sort()).toEqual([
+      "files/index.api.d.ts", "files/own.api.d.ts", "files/shared.api.d.ts", "files/worker.api.d.ts",
+      "index.api.d.ts", "worker.api.d.ts",
+    ]);
+    expect(snapshots.get("index.api.d.ts")).toContain("files/shared.api.d.ts\n");
+    expect(snapshots.get("worker.api.d.ts")).toContain("files/shared.api.d.ts\n");
+    expect(snapshots.get("worker.api.d.ts")).not.toContain("files/own.api.d.ts");
+    const shared = snapshots.get("files/shared.api.d.ts") as string;
+    expect(shared).toContain("export interface Shared { value: string; }");
+    expect(shared).not.toContain("sourceMappingURL");
+    expect([...snapshots.values()].filter((content) => content.includes("interface Shared"))).toHaveLength(1);
+    expect(buildSharedSnapshots("@test/fixture", [[".", "index.d.ts"], ["./worker", "worker.d.ts"]], new Map([...files].reverse())))
+      .toEqual(snapshots);
+    expect(sharedFileName("a/b.d.mts")).toBe("files/a/b.api.d.ts");
+  });
+
+  test("two exports whose snapshot names flatten to the same file fail loudly", () => {
+    const dir = mkdtempSync(join(tmpdir(), "api-surface-collide-"));
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({
+        exports: { "./utils-comments": "./dist/utils-comments.d.mts", "./utils/comments": "./dist/utils/comments.d.mts" },
+      }));
+      const entries = Object.entries(entriesFromExports(dir))
+        .map(([entry, source]): [string, string] => [entry, source.replace(/^src\//, "").replace(/\.ts$/, ".d.ts")]);
+      const files = new Map([["utils-comments.d.ts", "export {};"], ["utils/comments.d.ts", "export {};"]]);
+      expect(() => buildSharedSnapshots("@test/fixture", entries, files))
+        .toThrow('entry "./utils/comments" shares the snapshot utils-comments.api.d.ts with another entry');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("docx checks every sub-path its package exports, from the source tsup builds it from", () => {
+    const docx = join(import.meta.dir, "..", "packages/docx");
+    const manifest = JSON.parse(readFileSync(join(docx, "package.json"), "utf8")) as { exports: Record<string, unknown> };
+    const tsup = readFileSync(join(docx, "tsup.config.ts"), "utf8");
+    expect(Object.keys(FORMATS.docx.entries).sort()).toEqual(Object.keys(manifest.exports).sort());
+    for (const source of Object.values(FORMATS.docx.entries)) {
+      expect(existsSync(join(docx, source))).toBe(true);
+      const built = source.replace(/^src\//, "").replace(/\.ts$/, "");
+      expect(tsup).toMatch(new RegExp(`['"]?${built.replace(/[/.]/g, "\\$&")}['"]?: '${source.replace(/[/.]/g, "\\$&")}'`));
+    }
+  });
+
+  test("an export without a dist types file fails clearly", () => {
+    const dir = mkdtempSync(join(tmpdir(), "api-surface-exports-"));
+    try {
+      writeFileSync(join(dir, "package.json"), JSON.stringify({ exports: { ".": "./dist/index.d.mts", "./x": { import: "./x.mjs" } } }));
+      expect(() => entriesFromExports(dir)).toThrow("./x: no ./dist/<path>.d.mts types file to map to its source");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

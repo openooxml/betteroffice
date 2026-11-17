@@ -5,6 +5,7 @@ export interface TextStyle {
   color?: string;
   fontFamily?: string;
   underline?: string;
+  strike?: string;
   spacingPt?: number;
   baselinePct?: number;
 }
@@ -18,6 +19,7 @@ export interface TextStyleSnapshot {
   color: string | null;
   fontFamily: string | null;
   underline: string | null;
+  strike?: string | null;
   spacingPt?: number | null;
   baselinePct?: number | null;
   /** `a:rPr@kern`: the smallest size, in points, the run is kerned at. */
@@ -555,9 +557,12 @@ export interface PositionedTextRun {
   bold: boolean;
   italic: boolean;
   underline: boolean;
+  strike?: string;
   color: string;
   letterSpacingPx?: number;
   baselineOffsetPx?: number;
+  /** `false` when layout shaped the run without kerning, below its `kern` threshold; absent when kerned. */
+  kerning?: false;
   glyphs: PositionedGlyph[];
 }
 
@@ -581,6 +586,8 @@ export interface TextBoxPrimitive extends PrimitiveBase {
   paragraphs: Array<{
     align?: 'left' | 'center' | 'right' | 'justify';
     level: number;
+    languages?: TextLanguage[];
+    links?: TextLink[];
     runs: Array<{
       text: string;
       fontFamily: string;
@@ -597,6 +604,25 @@ export interface TextBoxPrimitive extends PrimitiveBase {
   textShadow?: Shadow;
 }
 
+/** UTF-16 offsets into the paragraph's concatenated run text. */
+export interface TextLanguage {
+  start: number;
+  end: number;
+  lang: string;
+}
+
+/** UTF-16 offsets into the paragraph's concatenated run text. */
+export interface TextLink {
+  start: number;
+  end: number;
+  target: TextLinkTarget;
+}
+
+export type TextLinkTarget =
+  | { kind: 'url'; href: string }
+  | { kind: 'slide'; index: number }
+  | { kind: 'jump'; jump: 'next' | 'previous' | 'first' | 'last' };
+
 export interface PlaceholderPrimitive extends PrimitiveBase {
   kind: 'placeholder';
   name: string;
@@ -610,6 +636,23 @@ export interface ChartPrimitive extends PrimitiveBase {
   name: string;
   label: string;
   primitives: SlidePrimitive[];
+  /** The plotted values as text, for assistive technology, with no categories
+   *  or series when the chart caches no points. Older engines and charts over
+   *  the size cap leave it out. */
+  data?: ChartData;
+}
+
+/** What a chart plots: one row per category and one column per series. */
+export interface ChartData {
+  categories: string[];
+  series: ChartDataSeries[];
+}
+
+export interface ChartDataSeries {
+  name?: string;
+  /** Each category's value as the chart's data labels would show it; `null`
+   *  where the chart has no number. */
+  values: (string | null)[];
 }
 
 /** A laid-out table. Its cells paint clipped to the table rectangle, and
@@ -619,6 +662,30 @@ export interface TablePrimitive extends PrimitiveBase {
   name: string;
   label: string;
   primitives: SlidePrimitive[];
+  /** The row and column structure, for assistive technology. Older engines
+   *  leave it out. */
+  grid?: TableGrid;
+}
+
+export interface TableGrid {
+  rows: number;
+  columns: number;
+  /** Cells that start a span, in row then column order; cells merged into
+   *  another one are left out. */
+  cells: TableGridCell[];
+}
+
+export interface TableGridCell {
+  row: number;
+  column: number;
+  rowSpan: number;
+  columnSpan: number;
+  /** `column` heads its column (the header row), `row` heads its row (the
+   *  first column). */
+  header?: 'column' | 'row';
+  /** The `[start, end)` range of the table's `primitives` that hold the
+   *  cell's text. */
+  primitives: [number, number];
 }
 
 export type SlidePrimitive =
@@ -629,12 +696,28 @@ export type SlidePrimitive =
   | ChartPrimitive
   | TablePrimitive;
 
+/** What `p:cNvPr` says about a shape for assistive technology. */
+export interface ShapeAltText {
+  title?: string;
+  description?: string;
+  /** The shape, or a group around it, is marked decorative. */
+  decorative?: boolean;
+  /** The nearest enclosing group with alternative text, by its key in `altText`. */
+  group?: string;
+  /** Where the shape starts in `primitives` when what paints it carries no shape id. */
+  primitive?: number;
+}
+
 export interface SlideDisplayList {
   contractVersion: number;
   width: number;
   height: number;
   background?: Paint;
   primitives: SlidePrimitive[];
+  /** Alternative text by shape id, for the shapes that have some. */
+  altText?: Record<string, ShapeAltText>;
+  /** The shape holding the slide's title placeholder. */
+  titleShape?: string;
 }
 
 export type HitTestResult =
@@ -648,7 +731,7 @@ export interface UpdateEvent {
 
 export interface TextParagraphDraft {
   bullet?: boolean;
-  alignment?: ParagraphAlignment | null;
+  alignment?: ParagraphAlignment | 'justLow' | 'dist' | 'thaiDist' | null;
   runs: Array<{ text: string; style?: TextStyle }>;
 }
 

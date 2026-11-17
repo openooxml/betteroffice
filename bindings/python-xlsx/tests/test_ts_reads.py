@@ -144,6 +144,39 @@ def test_uncomputable_formulas_keep_excel_values_and_are_reported(sample_bytes):
     assert bo.Workbook.open(sample_bytes).recalculate().unevaluated == []
 
 
+def test_unknown_functions_keep_excel_values_and_are_reported_by_name(sample_bytes):
+    data = with_sheet_xml(
+        sample_bytes,
+        '<sheetData><row r="1">'
+        "<c r=\"A1\"><f>IFERROR(REPRO_UNKNOWN_FUNCTION(1),0)</f><v>42</v></c>"
+        '<c r="B1"><f>A1*2</f><v>9</v></c>'
+        "<c r=\"C1\"><f>_xlfn.FUTURE(1)</f><v>999</v></c>"
+        "<c r=\"D1\"><f>IFERROR(TYPO(1),0)</f></c>"
+        "<c r=\"E1\"><f>TYPO(1)</f></c>"
+        "</row></sheetData>",
+    )
+    reported = [
+        ("A1", ["REPRO_UNKNOWN_FUNCTION"]),
+        ("B1", ["REPRO_UNKNOWN_FUNCTION"]),
+        ("C1", ["FUTURE"]),
+        ("D1", ["TYPO"]),
+        ("E1", ["TYPO"]),
+    ]
+    assert bo.Workbook.open(data).last_calculation().unevaluated == reported
+    workbook = bo.Workbook.open(data)
+    assert workbook.recalculate().unevaluated == reported
+    assert workbook.value(0, "A1") == pytest.approx(42.0)
+    assert workbook.value(0, "B1") == pytest.approx(9.0)
+    assert workbook.value(0, "C1") == pytest.approx(999.0)
+    assert workbook.value(0, "D1") == pytest.approx(0.0)
+    assert repr(workbook.value(0, "E1")) == 'CellError("#NAME?")'
+    assert workbook.calculation_status()["unevaluatedCells"] == [
+        {"address": address, "functions": functions} for address, functions in reported
+    ]
+    calculation = workbook.read_cells({"ranges": []})["calculation"]
+    assert [(cell["a1"], cell["functions"]) for cell in calculation["unevaluatedCells"]] == reported
+
+
 def test_list_defined_names_defaults_pagination_and_scope():
     workbook = bo.Workbook.open((FIXTURES / "defined-names.xlsx").read_bytes())
     all_names = workbook.list_defined_names()

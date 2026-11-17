@@ -209,6 +209,7 @@ fn proposal_diff_matches_the_typescript_preview_and_render_paths() {
                 proposal: preview.proposal,
                 snapshot: preview.snapshot,
                 text_changes: preview.text_changes,
+                shape_changes: preview.shape_changes,
                 frame: frame.display_list,
             };
             assert_eq!(

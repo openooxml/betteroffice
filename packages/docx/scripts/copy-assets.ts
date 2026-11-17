@@ -41,3 +41,4 @@ for (const { from, to } of assets) {
 }
 
 await writeFile(resolve(root, 'dist/docxWorker.mjs'), "import './yrs/docxWorker.mjs';\n");
+await writeFile(resolve(root, 'dist/docxWorker.node.mjs'), "import './yrs/docxWorker.node.mjs';\n");

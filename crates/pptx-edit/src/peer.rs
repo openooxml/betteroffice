@@ -32,7 +32,12 @@ impl From<crate::EditError> for PeerError {
 
 impl From<crate::ProposalError> for PeerError {
     fn from(error: crate::ProposalError) -> Self {
-        Self::new("proposal", error)
+        let code = if matches!(error, crate::ProposalError::PictureMediaTooLarge { .. }) {
+            "proposalPictureMediaTooLarge"
+        } else {
+            "proposal"
+        };
+        Self::new(code, error)
     }
 }
 

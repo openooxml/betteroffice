@@ -10,8 +10,13 @@ interface CachedImage {
   closed: boolean;
 }
 
-export function browserFrameImages(options: { maxDimension?: number } = {}): {
+export function browserFrameImages(options: { maxDimension?: number } = {}) {
+  return createBrowserFrameImages((bytes, message) => decodeBrowserPresentationImage(bytes, message, options));
+}
+
+export function createBrowserFrameImages(decode: (bytes: Uint8Array, errorMessage: string) => Promise<CanvasImageSource>): {
   resolve(frame: { media: ReadonlyMap<string, Uint8Array> }): CanvasImageResolver & { release(): void };
+  trim(): void;
   dispose(): void;
 } {
   const cache = new Map<string, CachedImage>();
@@ -35,7 +40,7 @@ export function browserFrameImages(options: { maxDimension?: number } = {}): {
           const entry: CachedImage = {
             promise: Promise.resolve(null), source: null, references: 0, retained: true, closed: false,
           };
-          entry.promise = decodeBrowserPresentationImage(bytes, 'Unable to decode slide image', options).catch(() => null)
+          entry.promise = decode(bytes, 'Unable to decode slide image').catch(() => null)
             .then((source) => { entry.source = source; close(entry); return source; });
           image = entry;
           cache.set(id, image);
@@ -61,6 +66,10 @@ export function browserFrameImages(options: { maxDimension?: number } = {}): {
           held.clear();
         },
       });
+    },
+    trim() {
+      for (const image of cache.values()) { image.retained = false; close(image); }
+      cache.clear();
     },
     dispose() {
       disposed = true;

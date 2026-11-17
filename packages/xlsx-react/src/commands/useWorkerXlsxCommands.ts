@@ -157,6 +157,7 @@ export function createWorkerXlsxCommandBinding(
     return {
       status: current.status(),
       readOnly: current.readOnly(),
+      allowHostProposals: current.allowHostProposals?.(),
       collaborative: current.collaborative(),
       selection,
       canUndo: read?.canUndo ?? false,
@@ -344,6 +345,9 @@ export function createWorkerXlsxCommandBinding(
           return done();
         });
       }
+      case 'findReplace':
+        current.setReplaceOpen?.(true);
+        return done(false);
       case 'proposalsPanel': {
         const open = args === null ? !env.proposalsPanelOpen : (bound.open as boolean);
         if (open === env.proposalsPanelOpen) return done(false);

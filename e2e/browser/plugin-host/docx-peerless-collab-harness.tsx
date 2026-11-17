@@ -78,7 +78,7 @@ const onReplica = slots.map((slot, index) => (replica: CollaborationReplica | nu
 function render() {
   root.render(<div style={{ display: 'flex', height: '100%' }}>{slots.slice(0, count).map((slot, index) =>
     <div key={index} data-editor={index} style={{ width: '50%', height: '100%', minWidth: 0 }}>
-      <DocxEditor ref={slot.ref} documentBuffer={slot.file} {...(mixed && index === 1 ? { legacySyncApi: true } : {})}
+      <DocxEditor ref={slot.ref} documentBuffer={slot.file} {...(mixed && index === 1 ? { legacySyncApi: true } : {}) as Record<never, never>}
         showToolbar={false} showRuler={false} showOutlineButton={false} measurementFontProvider={fonts}
         collaboration={{ clientId: pinned ? slot.clientId : undefined, initialUpdate: slot.initialUpdate, onReplica: onReplica[index], presence: slot.provider }}
         onError={error => errors.push(error.message)} />

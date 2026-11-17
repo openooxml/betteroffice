@@ -76,9 +76,19 @@ impl PptxDocument {
         self.inner.propose_json(args).map_err(to_js)
     }
 
+    #[wasm_bindgen(js_name = validateProposalJson)]
+    pub fn validate_proposal_json(&self, args: &str) -> Result<String, JsValue> {
+        self.inner.validate_proposal_json(args).map_err(to_js)
+    }
+
     #[wasm_bindgen(js_name = listProposalsJson)]
     pub fn list_proposals_json(&self) -> Result<String, JsValue> {
         self.inner.list_proposals_json().map_err(to_js)
+    }
+
+    #[wasm_bindgen(js_name = proposalSlideStripJson)]
+    pub fn proposal_slide_strip_json(&self, id: &str) -> Result<String, JsValue> {
+        self.inner.proposal_slide_strip_json(id).map_err(to_js)
     }
 
     #[wasm_bindgen(js_name = previewProposalJson)]

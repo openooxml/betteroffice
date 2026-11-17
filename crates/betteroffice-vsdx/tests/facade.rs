@@ -955,11 +955,65 @@ fn export_svg_page_rejects_an_unknown_page() {
 fn export_png_renders_scaled_raster_pages() {
     let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
     let diagram = Diagram::open(source).unwrap();
-    let first = diagram.export_png(0, 1.0).unwrap();
+    let first = diagram
+        .render_png(
+            betteroffice_vsdx::PngTarget { page: 0 },
+            &betteroffice_vsdx::RenderOptions { scale: 1.0 },
+        )
+        .unwrap();
     assert_eq!(&first.bytes[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
-    let second = diagram.export_png(0, 2.0).unwrap();
+    let second = diagram
+        .render_png(
+            betteroffice_vsdx::PngTarget { page: 0 },
+            &betteroffice_vsdx::RenderOptions { scale: 2.0 },
+        )
+        .unwrap();
     assert_eq!(second.width, first.width * 2);
     assert_eq!(second.height, first.height * 2);
-    assert!(diagram.export_png(99, 1.0).is_err());
-    assert!(diagram.export_png(0, 0.0).is_err());
+    assert!(
+        diagram
+            .render_png(
+                betteroffice_vsdx::PngTarget { page: 99 },
+                &betteroffice_vsdx::RenderOptions { scale: 1.0 }
+            )
+            .is_err()
+    );
+    assert!(
+        diagram
+            .render_png(
+                betteroffice_vsdx::PngTarget { page: 0 },
+                &betteroffice_vsdx::RenderOptions { scale: 0.0 }
+            )
+            .is_err()
+    );
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn png_targets_use_zero_based_pages_with_default_scale() {
+    let diagram = Diagram::open(include_bytes!(
+        "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"
+    ))
+    .unwrap();
+    let target = betteroffice_vsdx::PngTarget { page: 0 };
+    let first = diagram
+        .render_png(target, &betteroffice_vsdx::RenderOptions::default())
+        .unwrap();
+    let second = diagram
+        .render_png(target, &betteroffice_vsdx::RenderOptions { scale: 2.0 })
+        .unwrap();
+    assert_eq!(
+        (second.width, second.height),
+        (first.width * 2, first.height * 2)
+    );
+    assert!(
+        diagram
+            .render_png(
+                betteroffice_vsdx::PngTarget {
+                    page: diagram.pages().count()
+                },
+                &betteroffice_vsdx::RenderOptions::default()
+            )
+            .is_err()
+    );
 }

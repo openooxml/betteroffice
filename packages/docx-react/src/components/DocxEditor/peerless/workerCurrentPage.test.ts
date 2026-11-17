@@ -22,6 +22,7 @@ function controllerOf() {
     query: async (request: { kind: string }) => request.kind === 'partSnapshot' ? { value: { metadata: { body: { sections: [{}, {}, {}] } } } }
       : request.kind === 'sectionProperties' ? { version: 'v1', selection: null, value: { sections: SECTIONS, paragraphs: [] } } : { value: request },
     ref: { getCurrentPage }, getSnapshot: () => snapshot, subscribe: () => () => {},
+    getShellSnapshot: () => snapshot, subscribeShell: () => () => {},
     environment: () => ({ readOnly: true, mode: 'viewing' }),
   } as unknown as WorkerShellController;
   return { getCurrentPage, value };

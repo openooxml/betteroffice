@@ -392,6 +392,35 @@ impl Encoding {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static WATCHED_DECODES: std::cell::RefCell<Vec<(Vec<u8>, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Count every decode of a part whose bytes equal one of `parts`, from zero.
+#[cfg(test)]
+pub(crate) fn watch_decodes(parts: &[&[u8]]) {
+    WATCHED_DECODES.set(parts.iter().map(|bytes| (bytes.to_vec(), 0)).collect());
+}
+
+/// How many times each watched part was decoded, in the order it was watched.
+#[cfg(test)]
+pub(crate) fn watched_decodes() -> Vec<usize> {
+    WATCHED_DECODES.with_borrow(|watched| watched.iter().map(|(_, count)| *count).collect())
+}
+
+#[cfg(test)]
+fn note_decode(data: &[u8]) {
+    WATCHED_DECODES.with_borrow_mut(|watched| {
+        for (bytes, count) in watched.iter_mut() {
+            if bytes.as_slice() == data {
+                *count += 1;
+            }
+        }
+    });
+}
+
 /// a part decoded to utf-8, remembering the encoding its bytes were in. every
 /// span an [`Element`] records indexes this decoded text, so a rewrite splices
 /// there and is re-encoded on the way out.
@@ -402,6 +431,8 @@ pub(crate) struct Part {
 
 impl Part {
     pub(crate) fn decode(data: &[u8]) -> Result<Self, ParseError> {
+        #[cfg(test)]
+        note_decode(data);
         if data.len() > MAX_TREE_BYTES {
             return Err(ParseError::TreeTooLarge);
         }
@@ -696,11 +727,11 @@ fn parse_text(text: &str, nodes: usize) -> Result<(Element, usize), ParseError> 
                 place(done, &mut stack, &mut root)?;
             }
             Event::Text(text) => {
-                let decoded = text.decode().map_err(xml_err)?;
+                let decoded = text.xml10_content().map_err(xml_err)?;
                 push_text(&decoded, &mut stack, &mut budget)?;
             }
             Event::CData(text) => {
-                let decoded = text.decode().map_err(xml_err)?;
+                let decoded = text.xml10_content().map_err(xml_err)?;
                 push_text(&decoded, &mut stack, &mut budget)?;
             }
             Event::GeneralRef(entity) => {

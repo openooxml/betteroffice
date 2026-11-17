@@ -23,9 +23,15 @@ fn cascade_composition_readings_have_distinct_domains_and_clients() {
     let model = composed_model();
     let base = WorkbookBase::from_model(&model).unwrap();
     let domain = b"betteroffice-xlsx-yrs-v7-xf-facets-pattern-fills-style-defaults";
-    let expected =
-        fingerprint_model_with_row_domain_oracle(&model, SCHEMA_VERSION, true, true, true, domain)
-            .unwrap();
+    let expected = fingerprint_model_with_row_domain_oracle(
+        &model,
+        FINGERPRINT_SCHEMA_VERSION,
+        true,
+        true,
+        true,
+        domain,
+    )
+    .unwrap();
     assert_eq!(base.fingerprint, expected.0);
     assert!(
         base.fingerprint
@@ -55,7 +61,14 @@ fn cascade_composition_readings_have_distinct_domains_and_clients() {
             styles = styles.with_written_fills();
         }
         let (fingerprint, client) = builder
-            .hash(styles, SCHEMA_VERSION, true, true, defaults, false)
+            .hash(
+                styles,
+                FINGERPRINT_SCHEMA_VERSION,
+                true,
+                true,
+                defaults,
+                false,
+            )
             .unwrap();
         assert!(fingerprint.starts_with(tag), "{tag}: {fingerprint}");
         assert_eq!(fingerprint_client_id(&fingerprint), Some(client));
@@ -196,7 +209,7 @@ fn cascade_composition_v6_feature_layouts_round_trip() {
         let mut base = WorkbookBase::from_model(&legacy).unwrap();
         (base.fingerprint, base.bootstrap_client_id) = fingerprint_model_with_row_domain_oracle(
             &model,
-            SCHEMA_VERSION,
+            FINGERPRINT_SCHEMA_VERSION,
             true,
             true,
             defaults,

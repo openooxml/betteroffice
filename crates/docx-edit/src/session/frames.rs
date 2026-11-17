@@ -97,6 +97,16 @@ impl EditSessionCore {
             .map_err(EngineError::message)
     }
 
+    /// The text each of `pages` shows in the retained layout, built or not:
+    /// see [`crate::engine::EngineSession::page_texts_json`].
+    pub fn page_texts_json(&self, pages: Vec<u32>) -> EngineResult<String> {
+        let _fonts = self.fonts.enter();
+        let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
+        self.engine
+            .page_texts_json(&pages)
+            .map_err(EngineError::message)
+    }
+
     /// Release display pages; an empty result means the request was superseded.
     pub fn release_display_pages_frame(
         &self,

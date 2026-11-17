@@ -868,7 +868,7 @@ describe('peerless worker input', () => {
     } });
     expect(sent).toHaveLength(1);
     ack(proposal.seq!, 'refused');
-    await expect(proposal.result).rejects.toMatchObject({ code: 'input-failed' });
+    await expect(proposal.result).rejects.toMatchObject({ code: 'edit-unsupported' });
     expect(sent[1]).toMatchObject({ kind: 'select', payload: { selection: selected } });
     expect(sent[1].afterSeq).toBeUndefined();
     ack(sent[1].seq);

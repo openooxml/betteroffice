@@ -1,4 +1,4 @@
-import { XlsxCommandAdmissionError, type XlsxCommandAdmissionCode } from './createXlsxCommandStore';
+import { XlsxCommandAdmissionError } from './createXlsxCommandStore';
 
 /** Cell text typed into the in-cell editor or the formula bar and not yet written. */
 export interface InputDraft {
@@ -24,8 +24,8 @@ export interface InputCoordinatorHooks {
   seal(): InputSeal;
   /** Reads the text the draft's input shows into the draft. */
   sync(): void;
-  /** Writes `draft`; false, or the code of a refusal such as `sheet-protected`, leaves it unwritten. */
-  write(draft: InputDraft): boolean | XlsxCommandAdmissionCode;
+  /** Writes `draft`; false, or a refusal such as a plugin's `XlsxHostRefusalError`, leaves it unwritten. */
+  write(draft: InputDraft): boolean | XlsxCommandAdmissionError;
   /** Closes the input of a written draft that is still the live one. */
   close(draft: InputDraft): void;
   /** Shows a rejected draft in its own input when its sheet is active; false otherwise. */
@@ -97,7 +97,7 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
   let sealing = false;
   let sealFailed = false;
   const written = new WeakSet<InputDraft>();
-  const refusals = new WeakMap<InputDraft, XlsxCommandAdmissionCode>();
+  const refusals = new WeakMap<InputDraft, XlsxCommandAdmissionError>();
   let rejected: readonly InputDraft[] = [];
   const queued: InputDraft[] = [];
 
@@ -179,7 +179,7 @@ export function createInputCoordinator(hooks: InputCoordinatorHooks): InputCoord
 
   /** Why work behind a refused write cannot run: the refusal of the oldest rejected draft. */
   const refusal = (draft: InputDraft | undefined = rejected[0]) =>
-    new XlsxCommandAdmissionError((draft && refusals.get(draft)) ?? 'input-failed');
+    (draft && refusals.get(draft)) ?? new XlsxCommandAdmissionError('input-failed');
 
   /**
    * Writes a finished draft after everything queued before it. It supersedes

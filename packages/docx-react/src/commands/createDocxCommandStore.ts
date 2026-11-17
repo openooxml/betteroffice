@@ -1,3 +1,4 @@
+import { trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import type { Translations } from '@betteroffice/docx-i18n';
 import type { Theme } from '@betteroffice/docx/types/document';
 import {
@@ -5,8 +6,17 @@ import {
   isDocxCommandId,
   isMacPlatform,
   isPluginCommandId,
+  matchesChord,
   shortcutMatchesPlatform,
 } from './descriptors';
+import type { ChordEvent } from '../../../../shared/keyboard/chords';
+import type { ResolvedShortcuts, ShortcutIssue } from '../../../../shared/keyboard/resolve';
+import {
+  effectiveCommandShortcuts,
+  resolveDocxShortcuts,
+  shortcutTarget,
+  type DocxShortcuts,
+} from './shortcuts';
 import {
   commandReason,
   contributedCommandGate,
@@ -76,11 +86,14 @@ export interface DocxCommandBinding {
   ordered<K extends DocxCommandId>(id: K, args: DocxCommandArgs[K]): boolean;
   /** Runs `operation` after input accepted before this call. */
   admit<T>(operation: () => T | Promise<T>): Promise<T>;
+  /** Starts a clipboard read before input admission. */
+  readClipboardText?(): Promise<string>;
   /** Performs a command whose gate passed against `env`. */
   perform<K extends DocxCommandId>(
     id: K,
     args: DocxCommandArgs[K],
-    env: DocxCommandEnvironment
+    env: DocxCommandEnvironment,
+    clipboardText?: Promise<string>
   ): DocxCommandResult | Promise<DocxCommandResult>;
   /** The current document and, for `selection`, the selection in it; null without a document. */
   capture(target: DocxDeferredTarget): DocxCommandOrigin | null;
@@ -100,6 +113,7 @@ export interface DocxChromeContext {
 
 /** A contributed command as the store runs it. */
 export interface DocxPluginCommandBinding {
+  readonly activationId?: string;
   readonly descriptor: DocxPluginCommandDescriptor;
   /** The plugin's own state; the editor's gate applies on top. */
   state(): DocxPluginCommandState;
@@ -109,6 +123,7 @@ export interface DocxPluginCommandBinding {
 
 /** Who a scoped store acts for; asked again inside every operation boundary. */
 export interface DocxCommandScope {
+  gesture(): boolean;
   /** Why the caller may not run `id` now, or null. */
   deny(id: DocxCommandId | DocxPluginCommandId): DocxCommandFailureCode | null;
   /** Notified whenever `deny` may answer differently. */
@@ -147,12 +162,28 @@ export interface DocxCommandController {
   ): void;
   /** Contributed toolbar commands, in display order. */
   pluginToolbar(): readonly DocxPluginCommandId[];
+  pluginActivation(id: DocxPluginCommandId): string | undefined;
   /** Keyboard bindings of the contributed commands. */
   pluginShortcuts(): readonly { id: DocxPluginCommandId; chord: string }[];
-  /**
-   * A store acting for `scope`: its answer is checked inside each operation, and mutating
-   * built-in commands refuse with `unsupported-policy`.
-   */
+  /** Applies a host's shortcut map and returns what was wrong with it. */
+  setShortcuts(shortcuts: DocxShortcuts | undefined): readonly ShortcutIssue[];
+  /** The built-in command a keystroke presses, if any. */
+  shortcutAt(
+    event: ChordEvent,
+    mac: boolean
+  ): { id: DocxCommandId; args: unknown; chord: string } | null;
+  /** The chord a keystroke presses, with who holds it now and who holds it by default. */
+  pressedChord(
+    event: ChordEvent,
+    mac: boolean
+  ): { chord: string; owner: string | undefined; fallback: string | undefined } | null;
+  /** The shortcut id that holds a canonical chord. */
+  shortcutOwner(chord: string): string | undefined;
+  /** Chords the host set for a contributed command; undefined keeps the plugin's own. */
+  hostPluginChords(id: DocxPluginCommandId): readonly string[] | undefined;
+  /** Changes whenever the shortcut map does. */
+  shortcutRevision(): number;
+  /** A store acting for `scope`; mutating built-ins need a gesture in the plugin's UI. */
   scoped(scope: DocxCommandScope): DocxCommandStore;
 }
 
@@ -226,12 +257,48 @@ function platformDescriptor(id: DocxCommandId): DocxCommandDescriptor {
   return filtered;
 }
 
+const defaultTables = new Map<boolean, ResolvedShortcuts>();
+
+function defaultShortcuts(mac: boolean): ResolvedShortcuts {
+  let table = defaultTables.get(mac);
+  if (!table) {
+    table = resolveDocxShortcuts(undefined, { mac });
+    defaultTables.set(mac, table);
+  }
+  return table;
+}
+
 export function createDocxCommandController(): DocxCommandController {
   let binding: DocxCommandBinding | null = null;
   let pluginCommands = new Map<DocxPluginCommandId, DocxPluginCommandBinding>();
   let pluginToolbarIds: readonly DocxPluginCommandId[] = Object.freeze([]);
   let pluginShortcutList: readonly { id: DocxPluginCommandId; chord: string }[] = Object.freeze([]);
   const scopedStores = new WeakMap<DocxCommandScope, DocxCommandStore>();
+  let shortcutMap: DocxShortcuts | undefined;
+  let revision = 0;
+  let resolved: { mac: boolean; table: ResolvedShortcuts } | null = null;
+  const effectiveDescriptors = new Map<DocxCommandId, DocxCommandDescriptor>();
+  const shortcutTable = (): ResolvedShortcuts => {
+    const mac = isMacPlatform();
+    if (resolved?.mac !== mac) {
+      resolved = { mac, table: resolveDocxShortcuts(shortcutMap, { mac }) };
+      effectiveDescriptors.clear();
+    }
+    return resolved.table;
+  };
+  const effectiveDescriptor = (id: DocxCommandId): DocxCommandDescriptor => {
+    if (!shortcutMap) return platformDescriptor(id);
+    const table = shortcutTable();
+    let descriptor = effectiveDescriptors.get(id);
+    if (!descriptor) {
+      descriptor = Object.freeze({
+        ...DOCX_COMMAND_DESCRIPTORS[id],
+        shortcuts: Object.freeze(effectiveCommandShortcuts(table, id)),
+      }) as DocxCommandDescriptor;
+      effectiveDescriptors.set(id, descriptor);
+    }
+    return descriptor;
+  };
   const listeners = new Set<() => void>();
   const snapshots = new Map<string, CachedSnapshot>();
   const chromeRoots = new Set<HTMLElement>();
@@ -338,7 +405,7 @@ export function createDocxCommandController(): DocxCommandController {
     if (changed) notify();
   };
 
-  type Perform<R> = (env: DocxCommandEnvironment) => R | Promise<R>;
+  type Perform<R> = (env: DocxCommandEnvironment, clipboardText?: Promise<string>) => R | Promise<R>;
 
   function run(
     id: DocxCommandId,
@@ -363,10 +430,12 @@ export function createDocxCommandController(): DocxCommandController {
   ): Promise<DocxPluginCommandResult> {
     const current = binding;
     if (!current) return failure('editor-unavailable', null);
+    const gesture = scope?.gesture() ?? false;
     const mutating = isPluginCommandId(id)
       ? pluginCommands.get(id)?.descriptor.mutatesDocument
       : mutatingBuiltIn(id);
     const deferred = origin !== undefined;
+    let clipboardText: Promise<string> | undefined;
     const attempt = (): DocxPluginCommandResult | Promise<DocxPluginCommandResult> => {
       if (deferred) {
         const stale = origin ? current.resume(origin) : 'editor-unavailable';
@@ -377,13 +446,22 @@ export function createDocxCommandController(): DocxCommandController {
       const env = environment(true);
       const state = compute(id, args, env);
       if (!state.enabled) return { ok: false, failure: state.disabledReason };
-      if (scope && mutatingBuiltIn(id)) return failure('unsupported-policy', env);
-      return perform(env!);
+      if (scope && mutatingBuiltIn(id) && !gesture) return failure('unsupported-policy', env);
+      return perform(env!, clipboardText);
     };
     const ordered = !isPluginCommandId(id) && current.ordered(id, args as never);
     // A viewer has no edit peer to wait for: its gates refuse document changes at once.
     const admitted = (deferred || ordered) && !(mutating && current.isViewer?.());
     try {
+      if (id === 'pasteAsPlainText' && current.readClipboardText && (!scope || gesture) &&
+          !scope?.deny(id) && compute(id, args, environment(false)).enabled) {
+        try {
+          clipboardText = current.readClipboardText();
+        } catch (error) {
+          clipboardText = Promise.reject(error);
+        }
+        clipboardText.catch(() => {});
+      }
       return await (admitted ? current.admit(attempt) : attempt());
     } catch (error) {
       if (error instanceof DocxCommandAdmissionError) return failure(error.code, environment(false));
@@ -394,10 +472,10 @@ export function createDocxCommandController(): DocxCommandController {
     }
   }
 
-  const perform = (id: AnyCommandId, args: unknown, env: DocxCommandEnvironment) =>
+  const perform = (id: AnyCommandId, args: unknown, env: DocxCommandEnvironment, clipboardText?: Promise<string>) =>
     isPluginCommandId(id)
       ? pluginCommands.get(id)!.execute()
-      : binding!.perform(id, args as never, env);
+      : binding!.perform(id, args as never, env, clipboardText);
 
   const dispatch = (
     id: unknown,
@@ -407,11 +485,11 @@ export function createDocxCommandController(): DocxCommandController {
     if (!isDocxCommandId(id) && !isPluginCommandId(id)) {
       return Promise.resolve(failure('unsupported-command', environment(false)));
     }
-    return run(id, args, (env) => perform(id, args, env), undefined, scope);
+    return run(id, args, (env, clipboardText) => perform(id, args, env, clipboardText), undefined, scope);
   };
 
   const getDescriptor = (id: AnyCommandId) =>
-    isPluginCommandId(id) ? (pluginCommands.get(id)?.descriptor ?? null) : platformDescriptor(id);
+    isPluginCommandId(id) ? (pluginCommands.get(id)?.descriptor ?? null) : effectiveDescriptor(id);
 
   const store = Object.freeze({
     getDescriptor,
@@ -428,18 +506,17 @@ export function createDocxCommandController(): DocxCommandController {
   const createScoped = (scope: DocxCommandScope): DocxCommandStore => {
     const cache = new Map<
       string,
-      { base: unknown; denial: DocxCommandFailureCode | null; policy: boolean; state: unknown }
+      { base: unknown; denial: DocxCommandFailureCode | null; state: unknown }
     >();
     const getState = (id: AnyCommandId, args?: unknown) => {
       const base = snapshot(id, args).state;
       const denial = scope.deny(id);
-      const policy = !denial && base.enabled && mutatingBuiltIn(id);
       const key = snapshotKey(id, args);
       const cached = cache.get(key);
-      if (cached && cached.base === base && cached.denial === denial && cached.policy === policy) {
+      if (cached && cached.base === base && cached.denial === denial) {
         return cached.state;
       }
-      const code = denial ? disabledCode(denial) : policy ? 'unsupported-policy' : null;
+      const code = denial ? disabledCode(denial) : null;
       const { enabled: _enabled, disabledReason: _reason, ...presentation } = base;
       const state = code
         ? {
@@ -449,7 +526,7 @@ export function createDocxCommandController(): DocxCommandController {
           }
         : base;
       if (cache.size >= MAX_CACHED_SNAPSHOTS) cache.delete(cache.keys().next().value!);
-      cache.set(key, { base, denial, policy, state });
+      cache.set(key, { base, denial, state });
       return state;
     };
     const scopedStore = Object.freeze({
@@ -473,7 +550,7 @@ export function createDocxCommandController(): DocxCommandController {
       prepare(id, target) {
         const origin = capture(target);
         return {
-          execute: (args) => run(id, args, (env) => binding!.perform(id, args, env), origin, scope),
+          execute: (args) => run(id, args, (env, clipboardText) => binding!.perform(id, args, env, clipboardText), origin, scope),
         };
       },
     });
@@ -513,13 +590,15 @@ export function createDocxCommandController(): DocxCommandController {
       return {
         execute: (args) => {
           const current = binding;
-          return run(id, args, (env) => current!.perform(id, args, env), origin);
+          return run(id, args, (env, clipboardText) => current!.perform(id, args, env, clipboardText), origin);
         },
       };
     },
     registerChrome(element) {
       chromeRoots.add(element);
+      const releaseGesture = trackPluginGestures(element);
       return () => {
+        releaseGesture();
         chromeRoots.delete(element);
       };
     },
@@ -550,7 +629,37 @@ export function createDocxCommandController(): DocxCommandController {
       notify();
     },
     pluginToolbar: () => pluginToolbarIds,
+    pluginActivation: (id) => pluginCommands.get(id)?.activationId,
     pluginShortcuts: () => pluginShortcutList,
+    setShortcuts(shortcuts) {
+      shortcutMap = shortcuts;
+      resolved = null;
+      revision += 1;
+      effectiveDescriptors.clear();
+      const { issues } = shortcutTable();
+      notify();
+      return issues;
+    },
+    shortcutAt(event, mac) {
+      for (const [chord, id] of shortcutTable().owners) {
+        if (isPluginCommandId(id) || !matchesChord(chord, event, mac)) continue;
+        return { ...shortcutTarget(id), chord };
+      }
+      return null;
+    },
+    pressedChord(event, mac) {
+      const { owners } = shortcutTable();
+      const fallbacks = defaultShortcuts(mac).owners;
+      for (const chord of new Set([...owners.keys(), ...fallbacks.keys()])) {
+        if (matchesChord(chord, event, mac)) {
+          return { chord, owner: owners.get(chord), fallback: fallbacks.get(chord) };
+        }
+      }
+      return null;
+    },
+    shortcutOwner: (chord) => shortcutTable().owners.get(chord),
+    hostPluginChords: (id) => shortcutTable().chords.get(id),
+    shortcutRevision: () => revision,
     scoped(scope) {
       let scoped = scopedStores.get(scope);
       if (!scoped) {

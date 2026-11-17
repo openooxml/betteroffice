@@ -5,7 +5,7 @@ import type { ResidentPartGeometry, ResidentPartMetadata } from './residentParts
 import type { ResidentControlSnapshot } from './residentControls';
 import type { ResidentPropertyTarget, ResidentPropertySnapshot } from './residentProperties';
 import type { ResidentSectionSnapshot } from './residentSections';
-import type { YrsStoryRange } from './index';
+import type { YrsStoryRange, YrsTableRange } from './index';
 import type { DocxReviewSnapshot, DocxReviewTarget, DocxReviewTargetRanges } from './residentReview';
 import type { ResidentCommentInsertionRange } from './residentCommentProjection';
 import type { DocxToolbarMetadata } from './residentToolbarMetadata';
@@ -123,8 +123,9 @@ export type DocxDocumentRead =
   | { kind: 'validateEdits'; request: DocxEditRequest }
   | { kind: 'contentControlHandles' }
   | { kind: 'partSnapshot' }
+  | { kind: 'fontOutlinesInstalled' }
   | { kind: 'properties'; target: ResidentPropertyTarget }
-  | { kind: 'sectionProperties' }
+  | { kind: 'sectionProperties'; paragraphs?: { story: string; paraId: string }[] }
   | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string; workerFonts?: boolean }
   | { kind: 'listContentControls'; options: DocxContentControlsOptions }
   | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
@@ -137,7 +138,12 @@ export type DocxDocumentRead =
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
   | { kind: 'rawSelectionInfo'; selection: DocxCommandSelection }
-  | { kind: 'clipboardSlice'; selection: DocxCommandSelection }
+  | {
+      kind: 'clipboardSlice';
+      selection: DocxCommandSelection;
+      /** The cell selection to copy in place of `selection`, null for none; omitted, the live one applies. */
+      cells?: YrsTableRange | null;
+    }
   | { kind: 'listStories' }
   | { kind: 'readStories'; request: DocxReadStoriesRequest }
   | { kind: 'findText'; request: DocxFindTextRequest }
@@ -165,6 +171,7 @@ export type DocxDocumentRead =
   | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
   | { kind: 'sidebar'; commentIds: string[]; expectVersion: string }
   | { kind: 'headings'; expectVersion: string }
+  | { kind: 'pageTexts'; pages: number[]; expectFrameEpoch?: number; expectLayoutRevision?: number }
   | { kind: 'adjacentRevision'; selection: DocxCommandSelection | null; direction: 'next' | 'previous' };
 
 /** @internal */
@@ -176,6 +183,8 @@ export interface DocxDocumentReadValues {
   validateEdits: DocxValidationResult;
   contentControlHandles: ResidentControlSnapshot;
   partSnapshot: { metadata: ResidentPartMetadata; geometry: ResidentPartGeometry[]; frameEpoch: number | null; layoutRevision: number };
+  /** Settles once every outline requested so far is installed; counts installs that arrived after their frame painted. */
+  fontOutlinesInstalled: { lateInstalls: number };
   properties: ResidentPropertySnapshot | null;
   sectionProperties: ResidentSectionSnapshot;
   exportStructuredWithPages: string;
@@ -212,6 +221,7 @@ export interface DocxDocumentReadValues {
   bookmarkPosition: number | null;
   sidebar: DocxSidebarRead | null;
   headings: DocxOutlineHeading[] | null;
+  pageTexts: { pages: { pageIndex: number; paragraphs: { text: string; paraId?: string; level?: number; inTable?: true }[] }[]; frameEpoch: number; layoutRevision: number } | null;
   adjacentRevision: { revisionId: string } | null;
 }
 
@@ -420,7 +430,7 @@ export type DocxEngineWorkerResponse = (
       commandFrame?: { session: string; incarnation: number; epoch: number; frame: DocxCommandFrame };
       fontEnvironmentEvent?: DocxFontEnvironmentEvent & { session: string; incarnation: number; epoch: number };
       /** An applied edit may need fonts the host's last font requirements lacked; sent once until the host asks again. */
-      fontRequirementsHint?: { session: string; incarnation: number; epoch: number };
+      fontRequirementsHint?: { session: string; incarnation: number; epoch: number; wholeFaces?: true };
       fontEnvironment?: DocxFontEnvironmentSnapshot;
       checkpoint?: Checkpoint;
       frame?: ArrayBuffer;
@@ -496,7 +506,7 @@ export type DocxEngineWorkerResponse = (
       commandError?: ReplyError;
       failureCode?: SessionFailureCode;
       /** @internal */
-      code?: 'save-unavailable' | 'cut-kept';
+      code?: 'save-unavailable' | 'cut-kept' | 'invalid-selection' | 'table-unavailable';
       residentUnavailable?: boolean;
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;

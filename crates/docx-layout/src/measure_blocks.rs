@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use ooxml_text::measure::{FontChainDependencies, FontChains};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use crate::types::{
     TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetBidiSlice,
     TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
 };
-use ooxml_text::{FontSlotUse, LineBox, LineSpacingRule, apply_spacing_rule, font_slot_use};
+use ooxml_text::{FontSlotUse, LineBox, LineSpacingRule, apply_spacing_rule};
 
 const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
@@ -231,6 +231,63 @@ pub struct FontRequirement {
     pub italic: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub scripts: Vec<String>,
+    #[serde(
+        rename = "characterBits",
+        skip_serializing_if = "FontCharacters::is_empty"
+    )]
+    pub characters: FontCharacters,
+}
+
+#[derive(Clone, Debug)]
+pub struct FontCharacters([u32; 64]);
+
+impl Default for FontCharacters {
+    fn default() -> Self {
+        Self([0; 64])
+    }
+}
+
+impl FontCharacters {
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(|&word| word == 0)
+    }
+
+    fn insert(&mut self, ch: char) {
+        if let Some(index) = ooxml_text::font_store::base_latin_character_index(ch) {
+            self.0[index / 32] |= 1 << (index % 32);
+        }
+    }
+
+    fn extend(&mut self, other: &Self) {
+        for (word, added) in self.0.iter_mut().zip(other.0) {
+            *word |= added;
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = char> + '_ {
+        ooxml_text::font_store::BASE_LATIN_RANGES
+            .into_iter()
+            .flat_map(|(start, end)| (start..=end).filter_map(char::from_u32))
+            .chain(ooxml_text::font_store::BASE_LATIN_ALIASES)
+            .enumerate()
+            .filter_map(|(index, ch)| (self.0[index / 32] & (1 << (index % 32)) != 0).then_some(ch))
+    }
+}
+
+impl Serialize for FontCharacters {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use std::fmt::Write;
+        let length = self
+            .0
+            .iter()
+            .rposition(|&word| word != 0)
+            .map_or(0, |index| index + 1);
+        let mut bits = String::with_capacity(length * 8);
+        for word in &self.0[..length] {
+            write!(bits, "{word:08x}").unwrap();
+        }
+        serializer.serialize_str(&bits)
+    }
 }
 
 /// The fonts `blocks` need, text naming no family taking `default_family`, the family
@@ -244,10 +301,41 @@ pub fn collect_font_requirements<'a>(
     collector.finish().into_values().collect()
 }
 
+/// The fonts the text of `blocks` is measured with: [`collect_font_requirements`]
+/// without the fonts only charts paint with, which no measurement depends on.
+pub fn collect_measured_font_requirements<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+    default_family: &str,
+) -> Vec<FontRequirement> {
+    let mut collector = FontRequirementCollector::default();
+    collector.collect_measured(blocks, default_family);
+    collector.finish_measured().into_values().collect()
+}
+
+/// The first family of a CSS family list, unquoted: the family a painter keys
+/// a font shorthand by.
+pub fn css_primary_family(families: &str) -> &str {
+    let mut quote = None;
+    let mut first = families;
+    for (index, character) in families.char_indices() {
+        match character {
+            '\'' | '"' if quote == Some(character) => quote = None,
+            '\'' | '"' if quote.is_none() => quote = Some(character),
+            ',' if quote.is_none() => {
+                first = &families[..index];
+                break;
+            }
+            _ => {}
+        }
+    }
+    first.trim().trim_matches(['\'', '"']).trim()
+}
+
 /// [`collect_font_requirements`] into `requirements`, keyed as it keys them,
 /// for callers gathering several block runs without copying them. It keeps
-/// every family the blocks name and only those, since a later call may reach
-/// one; gather with a [`FontRequirementCollector`] to drop the unused ones.
+/// every family the blocks name and the families those paint under, since a
+/// later call may reach one; gather with a [`FontRequirementCollector`] to drop
+/// the unused ones.
 pub fn collect_font_requirements_into<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     default_family: &str,
@@ -258,20 +346,20 @@ pub fn collect_font_requirements_into<'a>(
     collector.merge_named_into(requirements);
 }
 
-/// Fonts any revision preview may need. Returns false when any of them needs a
-/// script fallback, whose chain order a superset cannot keep exact. Keeps every
-/// named family, as [`collect_font_requirements_into`] does.
+/// Fonts any revision preview may need. Returns false for script fallbacks or
+/// numbered markers requiring exact collection. Keeps every named family.
 pub fn collect_preview_font_requirements_into<'a>(
     blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     default_family: &str,
     requirements: &mut BTreeMap<String, FontRequirement>,
 ) -> bool {
     let mut collector = FontRequirementCollector::default();
-    collector.collect_preview(blocks, default_family);
+    let stable_markers = collector.collect_preview(blocks, default_family);
     collector.merge_named_into(requirements);
-    requirements
-        .values()
-        .all(|requirement| requirement.scripts.is_empty())
+    stable_markers
+        && requirements
+            .values()
+            .all(|requirement| requirement.scripts.is_empty())
 }
 
 /// Gathers the fonts of several block runs (a document's body, headers, footers
@@ -283,11 +371,45 @@ pub struct FontRequirementCollector {
     named: BTreeMap<String, FontRequirement>,
     implicit: BTreeMap<String, FontRequirement>,
     used: HashSet<String>,
+    preferred_cjk: Option<&'static str>,
+    chart_families: HashSet<String>,
 }
 
+/// Distinct families charts may add to a document's requirements. Past it a page
+/// painting another chart font fails alone when rasterized, where resolving
+/// every font a hostile chart names could fail the whole document's layout.
+const MAX_CHART_FONT_FAMILIES: usize = 64;
+
 impl FontRequirementCollector {
+    /// Puts the CJK script of the document's default East Asian language
+    /// (`w:docDefaults` `w:lang/@w:eastAsia`) first among the CJK scripts a
+    /// family gathers across paragraphs, so a stray paragraph of another CJK
+    /// script does not give the document's own Han text its glyph forms. A
+    /// document that names no CJK language prefers Simplified, the bucket Han
+    /// without a language falls to.
+    pub fn prefer_east_asian_language(&mut self, language: Option<&str>) {
+        self.preferred_cjk = Some(
+            language
+                .and_then(ooxml_text::han_script_for_language)
+                .unwrap_or("cjk-sc"),
+        );
+    }
+
     /// Adds the fonts `blocks` need, as [`collect_font_requirements`] does.
     pub fn collect<'a>(
+        &mut self,
+        blocks: impl IntoIterator<Item = &'a LayoutBlock>,
+        default_family: &str,
+    ) {
+        for block in blocks {
+            self.collect_measured([block], default_family);
+            self.collect_charts(block);
+        }
+    }
+
+    /// Adds the fonts `blocks` measure text with, as
+    /// [`collect_measured_font_requirements`] does.
+    pub fn collect_measured<'a>(
         &mut self,
         blocks: impl IntoIterator<Item = &'a LayoutBlock>,
         default_family: &str,
@@ -300,14 +422,55 @@ impl FontRequirementCollector {
         }
     }
 
-    /// Adds the fonts any revision preview of `blocks` may need, as
-    /// [`collect_preview_font_requirements_into`] does.
+    fn collect_charts(&mut self, block: &LayoutBlock) {
+        walk_charts(std::slice::from_ref(block), &mut |chart| {
+            self.collect_chart(chart);
+        });
+    }
+
+    /// Every style chart text can resolve to: a chart's own and inherited
+    /// `c:txPr` combine per field, and its default title is bold.
+    fn collect_chart(&mut self, chart: &Value) {
+        let mut text = ChartFontText::default();
+        text.gather(chart, true);
+        let scripts = ooxml_text::paragraph_scripts_with_languages(
+            text.strings.iter().map(|string| (*string, None)),
+            false,
+        );
+        let mut characters = FontCharacters::default();
+        for ch in text.strings.iter().flat_map(|string| string.chars()) {
+            characters.insert(ch);
+        }
+        let default = css_primary_family(ooxml_drawingml::chart::CHART_FONT_FAMILY);
+        let italics: &[bool] = if text.italic {
+            &[false, true]
+        } else {
+            &[false]
+        };
+        for family in std::iter::once(default).chain(text.fonts) {
+            if !self.chart_families.contains(family) {
+                if self.chart_families.len() >= MAX_CHART_FONT_FAMILIES {
+                    continue;
+                }
+                self.chart_families.insert(family.to_owned());
+            }
+            for bold in [false, true] {
+                for &italic in italics {
+                    self.name(family, bold, italic, &scripts, true);
+                    self.characters(family, bold, italic, characters.clone());
+                }
+            }
+        }
+    }
+
+    /// Adds preview fonts and returns whether marker characters stay valid.
     pub fn collect_preview<'a>(
         &mut self,
         blocks: impl IntoIterator<Item = &'a LayoutBlock>,
         default_family: &str,
-    ) {
+    ) -> bool {
         let blocks: Vec<&LayoutBlock> = blocks.into_iter().collect();
+        let mut stable_markers = true;
         // A preview hiding the drawings that split a paragraph joins its segments.
         let mut segment_scripts = HashMap::<String, Vec<String>>::new();
         for block in &blocks {
@@ -325,6 +488,7 @@ impl FontRequirementCollector {
             });
         }
         for block in blocks {
+            self.collect_charts(block);
             walk_paragraphs(std::slice::from_ref(block), &mut |paragraph| {
                 let scripts = match &paragraph.id {
                     BlockId::Str(id) if !id.is_empty() => segment_scripts[id].clone(),
@@ -334,6 +498,7 @@ impl FontRequirementCollector {
                 let Some(attrs) = &paragraph.attrs else {
                     return;
                 };
+                stable_markers &= attrs.num_pr.is_none() || attrs.list_is_bullet == Some(true);
                 if attrs.num_pr.is_none()
                     && attrs.list_marker.is_none()
                     && attrs.list_is_bullet.is_none()
@@ -361,6 +526,10 @@ impl FontRequirementCollector {
                 } else {
                     std::slice::from_ref(&marker_style)
                 };
+                let mut characters = FontCharacters::default();
+                for ch in attrs.list_marker.as_deref().unwrap_or("").chars() {
+                    characters.insert(ch);
+                }
                 for family in paragraph
                     .runs
                     .iter()
@@ -378,23 +547,44 @@ impl FontRequirementCollector {
                     let family = attrs.list_marker_font_family.as_deref().unwrap_or(family);
                     for &(bold, italic) in styles {
                         self.name(family, bold, italic, &scripts, true);
+                        self.characters(family, bold, italic, characters.clone());
                     }
                 }
             });
         }
+        stable_markers
     }
 
     /// The requirements measurement can reach, keyed as
-    /// [`collect_font_requirements`] keys them.
+    /// [`collect_font_requirements`] keys them, and the family a compound or
+    /// quoted name paints under, which only the rasterizer looks up.
     pub fn finish(self) -> BTreeMap<String, FontRequirement> {
+        let preferred = self.preferred_cjk;
         let mut requirements = BTreeMap::new();
         self.merge_into(&mut requirements);
+        add_painted_aliases(&mut requirements);
+        prefer_cjk_script(&mut requirements, preferred);
         requirements
     }
 
-    /// Merges every named requirement and nothing else, as main collects them:
-    /// an implicit entry kept here would lead the scripts a later call names.
+    fn finish_measured(self) -> BTreeMap<String, FontRequirement> {
+        let preferred = self.preferred_cjk;
+        let mut requirements = BTreeMap::new();
+        self.merge_into(&mut requirements);
+        prefer_cjk_script(&mut requirements, preferred);
+        requirements
+    }
+
+    /// Merges every named requirement, with the families those paint under, and
+    /// nothing else, as main collects them: an implicit entry kept here would
+    /// lead the scripts a later call names.
     fn merge_named_into(mut self, requirements: &mut BTreeMap<String, FontRequirement>) {
+        for (key, requirement) in &self.implicit {
+            if let Some(named) = self.named.get_mut(key) {
+                named.characters.extend(&requirement.characters);
+            }
+        }
+        add_painted_aliases(&mut self.named);
         self.used.extend(self.named.keys().cloned());
         self.implicit.clear();
         self.merge_into(requirements);
@@ -402,18 +592,26 @@ impl FontRequirementCollector {
 
     fn merge_into(self, requirements: &mut BTreeMap<String, FontRequirement>) {
         let Self {
-            named,
+            mut named,
             implicit,
             used,
+            preferred_cjk: _,
+            chart_families: _,
         } = self;
         for (key, requirement) in implicit {
-            if !named.contains_key(&key) {
-                requirements.entry(key).or_insert(requirement);
+            if let Some(named) = named.get_mut(&key) {
+                named.characters.extend(&requirement.characters);
+            } else {
+                requirements
+                    .entry(key)
+                    .and_modify(|kept| kept.characters.extend(&requirement.characters))
+                    .or_insert(requirement);
             }
         }
         for (key, requirement) in named {
             match requirements.entry(key) {
                 Entry::Occupied(mut kept) => {
+                    kept.get_mut().characters.extend(&requirement.characters);
                     let scripts = &mut kept.get_mut().scripts;
                     for script in requirement.scripts {
                         if !scripts.contains(&script) {
@@ -441,6 +639,15 @@ impl FontRequirementCollector {
     fn reach(&mut self, family: &str, bold: bool, italic: bool, scripts: &[String]) {
         let key = add_font_requirement(family, bold, italic, scripts, &mut self.implicit);
         self.used.insert(key);
+    }
+
+    fn characters(&mut self, family: &str, bold: bool, italic: bool, characters: FontCharacters) {
+        let key = add_font_requirement(family, bold, italic, &[], &mut self.implicit);
+        self.implicit
+            .get_mut(&key)
+            .unwrap()
+            .characters
+            .extend(&characters);
     }
 }
 
@@ -476,6 +683,71 @@ pub fn measured_synthetically<'a>(extents: impl IntoIterator<Item = &'a BlockExt
         }
     }
     extents.into_iter().any(block)
+}
+
+/// What chart text paints with, read off a chart's JSON whatever part of the
+/// chart carries it.
+#[derive(Default)]
+struct ChartFontText<'a> {
+    fonts: BTreeSet<&'a str>,
+    italic: bool,
+    strings: Vec<&'a str>,
+}
+
+impl<'a> ChartFontText<'a> {
+    /// Styles under `points` are kept in the part but never painted: labels
+    /// style per series, so they add text and no fonts.
+    fn gather(&mut self, value: &'a Value, painted: bool) {
+        match value {
+            Value::String(string) => self.strings.push(string),
+            Value::Array(items) => items.iter().for_each(|item| self.gather(item, painted)),
+            Value::Object(fields) => {
+                for (key, field) in fields {
+                    match (key.as_str(), field) {
+                        ("font", Value::String(font)) if painted => {
+                            let font = css_primary_family(font);
+                            if !font.is_empty() {
+                                self.fonts.insert(font);
+                            }
+                        }
+                        ("italic", Value::Bool(true)) if painted => self.italic = true,
+                        ("points", _) => self.gather(field, false),
+                        _ => self.gather(field, painted),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The charts of `blocks`, whether blocks of their own or inline in a paragraph.
+fn walk_charts(blocks: &[LayoutBlock], visit: &mut impl FnMut(&Value)) {
+    fn chart_blocks(blocks: &[LayoutBlock], visit: &mut impl FnMut(&Value)) {
+        for block in blocks {
+            match block {
+                LayoutBlock::Chart(chart) => visit(&chart.chart),
+                LayoutBlock::Table(table) => {
+                    for row in &table.rows {
+                        for cell in &row.cells {
+                            chart_blocks(&cell.blocks, visit);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    chart_blocks(blocks, visit);
+    walk_paragraphs(blocks, &mut |paragraph| {
+        for run in &paragraph.runs {
+            if let Run::Image(image) = run
+                && let Some(chart) = &image.inline_chart
+            {
+                visit(&chart.chart);
+            }
+        }
+    });
 }
 
 fn walk_paragraphs(blocks: &[LayoutBlock], visit: &mut impl FnMut(&ParagraphBlock)) {
@@ -543,6 +815,7 @@ fn add_font_requirement(
             bold,
             italic,
             scripts: Vec::new(),
+            characters: FontCharacters::default(),
         });
     for script in scripts {
         if !requirement.scripts.contains(script) {
@@ -578,13 +851,45 @@ fn collect_paragraph_font_requirements(
         let italic = formatting.italic.unwrap_or(false);
         let slots = formatting.font_slots.as_ref();
         let complex_script = formatting.complex_script.unwrap_or(false);
-        let mut slot_use = text.map_or_else(FontSlotUse::default, |text| {
-            font_slot_use(
-                &text.text,
-                complex_script,
-                slots.and_then(|slots| slots.hint.as_deref()),
-            )
-        });
+        let content = match run {
+            Run::Text(text) => text.text.as_str(),
+            Run::Field(field) => field
+                .fallback
+                .as_deref()
+                .filter(|text| !text.is_empty())
+                .unwrap_or("1"),
+            _ => "",
+        };
+        let hint = slots.and_then(|slots| slots.hint.as_deref()) == Some("eastAsia");
+        let mut characters: [FontCharacters; 4] =
+            std::array::from_fn(|_| FontCharacters::default());
+        let mut slot_use = FontSlotUse::default();
+        for (ch, slot) in
+            ooxml_text::font_slot_characters(content, complex_script && text.is_some(), hint)
+        {
+            if text.is_some() {
+                slot_use.east_asia |= slot == 2;
+                slot_use.complex_script |= slot == 3;
+            }
+            if formatting.all_caps != Some(true) || text.is_none() {
+                characters[slot].insert(ch);
+            }
+            if text.is_some()
+                && (formatting.all_caps == Some(true) || formatting.small_caps == Some(true))
+            {
+                let language = formatting
+                    .language
+                    .as_ref()
+                    .and_then(|language| match slot {
+                        2 => language.east_asia.as_deref().or(language.latin.as_deref()),
+                        3 => language.bidi.as_deref().or(language.latin.as_deref()),
+                        _ => language.latin.as_deref(),
+                    });
+                for upper in ooxml_text::uppercase_for_language(ch, language) {
+                    characters[slot].insert(upper);
+                }
+            }
+        }
         // Text typed into a complex-script run measures with its cs slot too.
         slot_use.complex_script |= complex_script;
         let cs_bold = formatting.bold_cs.unwrap_or(bold);
@@ -653,6 +958,28 @@ fn collect_paragraph_font_requirements(
                 scripts,
             );
         }
+        for (slot, characters) in characters.into_iter().enumerate() {
+            if characters.is_empty() {
+                continue;
+            }
+            let selected = slots.and_then(|slots| match slot {
+                0 => slots.ascii.as_deref(),
+                1 => slots.h_ansi.as_deref(),
+                2 => slots.east_asia.as_deref(),
+                _ => slots.cs.as_deref(),
+            });
+            let family = if text.is_some() {
+                selected.unwrap_or(text_unnamed)
+            } else {
+                run_family
+            };
+            let (bold, italic) = if text.is_some() && slot == 3 {
+                (cs_bold, cs_italic)
+            } else {
+                (bold, italic)
+            };
+            collector.characters(family, bold, italic, characters);
+        }
     }
     if let Some(attrs) = &paragraph.attrs
         && attrs
@@ -690,6 +1017,79 @@ fn collect_paragraph_font_requirements(
             attrs.list_marker_italic.unwrap_or(false),
             scripts,
         );
+        let family = attrs
+            .list_marker_font_family
+            .as_deref()
+            .or_else(|| first_text_run.and_then(|text| text.fmt.font_family.as_deref()))
+            .unwrap_or(default_family);
+        let mut characters = FontCharacters::default();
+        for ch in attrs.list_marker.as_deref().unwrap_or("").chars() {
+            characters.insert(ch);
+        }
+        let bold = attrs.list_marker_bold.unwrap_or(false);
+        let italic = attrs.list_marker_italic.unwrap_or(false);
+        if attrs.list_marker_font_family.is_none()
+            && let Some(painted) = attrs.default_font_family.as_deref()
+            && painted != family
+        {
+            collector.name(painted, bold, italic, scripts, false);
+            collector.reach(painted, bold, italic, scripts);
+            collector.characters(painted, bold, italic, characters.clone());
+        }
+        collector.characters(family, bold, italic, characters);
+    }
+}
+
+/// Adds the family each compound or quoted name paints under, which only the
+/// rasterizer looks up.
+fn add_painted_aliases(requirements: &mut BTreeMap<String, FontRequirement>) {
+    let painted: Vec<FontRequirement> = requirements
+        .values()
+        .filter(|requirement| {
+            let family = css_primary_family(&requirement.family);
+            family != requirement.family && !family.is_empty()
+        })
+        .cloned()
+        .collect();
+    for requirement in painted {
+        let key = add_font_requirement(
+            css_primary_family(&requirement.family),
+            requirement.bold,
+            requirement.italic,
+            &requirement.scripts,
+            requirements,
+        );
+        requirements
+            .get_mut(&key)
+            .unwrap()
+            .characters
+            .extend(&requirement.characters);
+    }
+}
+
+fn prefer_cjk_script(
+    requirements: &mut BTreeMap<String, FontRequirement>,
+    preferred: Option<&str>,
+) {
+    if let Some(preferred) = preferred {
+        for requirement in requirements.values_mut() {
+            prefer_script(&mut requirement.scripts, preferred);
+        }
+    }
+}
+
+/// Moves `preferred` ahead of the other CJK scripts in `scripts`, keeping every
+/// other script where it was.
+fn prefer_script(scripts: &mut Vec<String>, preferred: &str) {
+    let Some(at) = scripts.iter().position(|script| script == preferred) else {
+        return;
+    };
+    let Some(first_cjk) = scripts.iter().position(|script| script.starts_with("cjk-")) else {
+        return;
+    };
+    if first_cjk < at {
+        let script = scripts.remove(at);
+        scripts.insert(first_cjk, script);
     }
 }
 
@@ -1780,6 +2180,7 @@ fn extent_weight(extent: &ParagraphExtent) -> usize {
                         .bidi_slices
                         .as_ref()
                         .map_or(0, |v| v.capacity() * size_of::<TypesetBidiSlice>())
+                    + row.glyph_runs.as_ref().map_or(0, String::capacity)
             })
             .sum::<usize>()
 }
@@ -4574,6 +4975,63 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "base-latin")]
+    fn first_font_invalidates_backstop_only_extents() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let mut config = MeasurementConfig {
+            font_chains: BTreeMap::from([(
+                "requested|0|0".to_owned(),
+                vec![ooxml_text::FontId::base_latin(false, false).to_u32()],
+            )]),
+            defaults: json!({"fontFamily": "Requested", "fontSize": 12}),
+            ..Default::default()
+        };
+        let paragraph: ParagraphBlock = serde_json::from_value(json!({
+            "id": "backstop-run", "runs": [
+                {"kind": "text", "text": "Latin", "fontFamily": "Requested"}
+            ]
+        }))
+        .unwrap();
+        let identity = crate::measure_font_cache_identity(&config.font_chains);
+        assert_eq!(
+            identity,
+            crate::measure_font_cache_identity(&BTreeMap::new())
+        );
+        let backstop = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_ne!(backstop.lines[0].synthetic_fallback, Some(true));
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Hit(_)
+        ));
+        let font = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
+        assert_eq!(crate::register_measure_font_bytes(font).unwrap(), 0);
+        assert_ne!(
+            identity,
+            crate::measure_font_cache_identity(&config.font_chains)
+        );
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Miss(_)
+        ));
+        let before = EXTENT_MEASURE_CALLS.with(|calls| calls.get());
+        measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_eq!(EXTENT_MEASURE_CALLS.with(|calls| calls.get()) - before, 1);
+        config
+            .font_chains
+            .insert("requested|0|0".to_owned(), vec![0]);
+        assert!(matches!(
+            extent_cache_lookup(&paragraph, 300.0, &config, None, 0.0),
+            ExtentLookup::Miss(_)
+        ));
+        let real = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+        assert_ne!(
+            serde_json::to_vec(&backstop).unwrap(),
+            serde_json::to_vec(&real).unwrap()
+        );
+    }
+
+    #[test]
     fn first_font_invalidates_extents_without_a_matching_chain() {
         let fonts = crate::MeasureFonts::default();
         let _scope = fonts.enter();
@@ -7357,6 +7815,154 @@ mod tests {
         );
     }
 
+    #[test]
+    fn collects_the_styles_chart_text_can_paint_with() {
+        let chart = json!({
+            "chartType": "column",
+            "title": "سلام",
+            "text": {"font": "Georgia"},
+            "legend": {"text": {"font": "\"Segoe UI\", sans-serif", "italic": true}},
+            "series": [{"name": "North"}]
+        });
+        let inline = json!({
+            "kind": "image", "src": "", "width": 100, "height": 40,
+            "inlineChart": {
+                "kind": "chart", "id": "c", "width": 100, "height": 40,
+                "chart": {"text": {"font": "Inline Font"}}
+            }
+        });
+        let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind": "chart", "id": "b", "width": 100, "height": 40, "chart": chart},
+            {"kind": "paragraph", "id": "p", "runs": [inline]}
+        ]))
+        .unwrap();
+        for preview in [false, true] {
+            let mut collector = FontRequirementCollector::default();
+            if preview {
+                collector.collect_preview(&blocks, "Calibri");
+            } else {
+                collector.collect(&blocks, "Calibri");
+            }
+            let requirements = collector.finish();
+            for key in [
+                "calibri|0|0",
+                "calibri|1|0",
+                "calibri|1|1",
+                "georgia|1|0",
+                "segoe ui|0|1",
+                "inline font|1|0",
+            ] {
+                assert!(requirements.contains_key(key), "{key}");
+            }
+            assert!(
+                requirements["georgia|0|0"]
+                    .scripts
+                    .contains(&"arabic".to_owned())
+            );
+        }
+        let measured = collect_measured_font_requirements(&blocks, "Calibri");
+        assert!(measured.iter().all(|r| r.key.starts_with("calibri|0|0")));
+    }
+
+    #[test]
+    fn collects_the_family_a_compound_name_paints_under() {
+        let keys = font_requirement_keys(
+            json!({"kind": "text", "text": "A", "fontFamily": "Book,Italic", "bold": true}),
+        );
+        assert!(keys.contains(&"book,italic|1|0".to_owned()));
+        assert!(keys.contains(&"book|1|0".to_owned()));
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "runs": [
+                {"kind": "text", "text": "A", "fontFamily": "Book,Italic"}
+            ]
+        }))
+        .unwrap();
+        let measured = collect_measured_font_requirements([&block], "Calibri");
+        assert!(measured.iter().any(|r| r.key == "book,italic|0|0"));
+        assert!(measured.iter().all(|r| r.key != "book|0|0"));
+    }
+
+    #[test]
+    fn chart_fonts_stop_at_the_family_limit_and_skip_unpainted_points() {
+        let fonts: Vec<Value> = (0..1_100)
+            .map(|index| json!({"text": {"font": format!("Font {index}")}}))
+            .collect();
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "chart", "id": "b", "width": 100, "height": 40,
+            "chart": {
+                "axisList": fonts,
+                "series": [{"dataLabels": {"points": [{
+                    "labels": {"text": {"font": "Point Font", "italic": true}}
+                }]}}]
+            }
+        }))
+        .unwrap();
+        let requirements = collect_font_requirements([&block], "Calibri");
+        assert_eq!(requirements.len(), MAX_CHART_FONT_FAMILIES * 2);
+        assert!(requirements.iter().all(|r| !r.italic));
+        assert!(requirements.iter().any(|r| r.key == "calibri|1|0"));
+    }
+
+    #[test]
+    fn gathering_into_a_map_adds_the_family_a_compound_name_paints_under() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "runs": [{
+                "kind": "text", "text": "A", "fontFamily": "Book,Italic"
+            }]
+        }))
+        .unwrap();
+        let mut gathered = BTreeMap::new();
+        collect_font_requirements_into([&block], "Calibri", &mut gathered);
+        assert!(gathered.contains_key("book,italic|0|0"));
+        assert!(gathered["book|0|0"].characters.iter().any(|ch| ch == 'A'));
+        let mut preview = BTreeMap::new();
+        collect_preview_font_requirements_into([&block], "Calibri", &mut preview);
+        assert!(preview.contains_key("book|0|0"));
+    }
+
+    #[test]
+    fn repeated_gathering_does_not_alias_a_painted_family_again() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "runs": [{
+                "kind": "text", "text": "A", "fontFamily": "\"Last, First\", serif"
+            }]
+        }))
+        .unwrap();
+        let mut gathered = BTreeMap::new();
+        for _ in 0..2 {
+            collect_font_requirements_into([&block], "Calibri", &mut gathered);
+        }
+        assert!(gathered.contains_key("last, first|0|0"));
+        assert!(!gathered.contains_key("last|0|0"));
+    }
+
+    #[test]
+    fn a_compound_name_merged_into_its_painted_family_keeps_the_documents_script_first() {
+        let paragraph = |id: &str, family: &str, text: &str, language: &str| -> LayoutBlock {
+            serde_json::from_value(json!({"kind": "paragraph", "id": id, "runs": [{
+                "kind": "text", "text": text, "fontFamily": family,
+                "language": {"eastAsia": language}
+            }]}))
+            .unwrap()
+        };
+        let japanese = paragraph("jp", "Book", "漢字", "ja-JP");
+        let chinese = paragraph("zh", "Book,Italic", "汉字", "zh-CN");
+        for order in [[&japanese, &chinese], [&chinese, &japanese]] {
+            let mut collector = FontRequirementCollector::default();
+            collector.prefer_east_asian_language(Some("zh-CN"));
+            collector.collect(order, "Calibri");
+            assert_eq!(collector.finish()["book|0|0"].scripts, ["cjk-sc", "cjk-jp"]);
+        }
+    }
+
+    #[test]
+    fn css_primary_family_matches_the_font_shorthand_rules() {
+        assert_eq!(css_primary_family("Calibri, sans-serif"), "Calibri");
+        assert_eq!(css_primary_family("\"Last, First\", serif"), "Last, First");
+        assert_eq!(css_primary_family(" 'Aptos Display' "), "Aptos Display");
+        assert_eq!(css_primary_family("Book,Italic"), "Book");
+    }
+
     fn font_requirement_keys(run: Value) -> Vec<String> {
         let block: LayoutBlock = serde_json::from_value(json!({
             "kind": "paragraph", "id": "p", "runs": [run]
@@ -7398,6 +8004,45 @@ mod tests {
         let mut named = BTreeMap::new();
         collect_font_requirements_into(&blocks, "Calibri", &mut named);
         assert!(named.contains_key("aptos|1|0"));
+    }
+
+    #[test]
+    fn preview_collects_hidden_literal_marker_characters_for_surviving_families() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "hidden-marker", "attrs": {
+                "listMarker": "Ω", "listMarkerHidden": true, "listMarkerBold": true
+            }, "runs": [
+                {"kind": "text", "text": "First", "fontFamily": "First"},
+                {"kind": "text", "text": "Second", "fontFamily": "Second"}
+            ]
+        }))
+        .unwrap();
+        let mut collector = FontRequirementCollector::default();
+        assert!(collector.collect_preview([&block], "Default"));
+        let requirements = collector.finish();
+        for key in ["first|1|0", "second|1|0", "default|1|0"] {
+            assert_eq!(requirements[key].characters.iter().collect::<String>(), "Ω");
+        }
+    }
+
+    #[test]
+    fn a_marker_requires_the_family_it_paints_with() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "p", "attrs": {
+                "listMarker": "7", "listMarkerItalic": true, "defaultFontFamily": "Aptos"
+            }, "runs": [{"kind": "text", "text": "Body", "fontFamily": "Segoe UI"}]
+        }))
+        .unwrap();
+        let mut collector = FontRequirementCollector::default();
+        collector.collect([&block], "Default");
+        let requirements = collector.finish();
+        assert_eq!(
+            requirements["aptos|0|1"]
+                .characters
+                .iter()
+                .collect::<String>(),
+            "7"
+        );
     }
 
     #[test]
@@ -7690,6 +8335,52 @@ mod tests {
             .collect();
 
         assert!(keys.contains(&"calibri|1|0".to_owned()), "{keys:?}");
+    }
+
+    #[test]
+    fn a_family_gathering_several_cjk_scripts_puts_the_documents_own_first() {
+        let paragraph = |id: &str, text: &str, language: &str| -> LayoutBlock {
+            serde_json::from_value(json!({"kind": "paragraph", "id": id, "runs": [{
+                "kind": "text", "text": text, "fontFamily": "MS Mincho",
+                "language": {"eastAsia": language}
+            }]}))
+            .unwrap()
+        };
+        let japanese = paragraph("jp", "漢字", "ja-JP");
+        let chinese = paragraph("zh", "汉字", "zh-CN");
+        for (document, expected) in [
+            (Some("ja-JP"), ["cjk-jp", "cjk-sc"]),
+            (Some("zh-CN"), ["cjk-sc", "cjk-jp"]),
+            (Some("zh-Hans"), ["cjk-sc", "cjk-jp"]),
+            (Some("en-US"), ["cjk-sc", "cjk-jp"]),
+            (None, ["cjk-sc", "cjk-jp"]),
+        ] {
+            for order in [[&japanese, &chinese], [&chinese, &japanese]] {
+                let mut collector = FontRequirementCollector::default();
+                collector.prefer_east_asian_language(document);
+                collector.collect(order, "Calibri");
+                assert_eq!(
+                    collector.finish()["ms mincho|0|0"].scripts,
+                    expected,
+                    "{document:?}"
+                );
+            }
+        }
+        let traditional = paragraph("tc", "漢字", "zh-TW");
+        let korean = paragraph("kr", "漢字", "ko-KR");
+        for (document, expected) in [
+            ("zh-HK", ["cjk-tc", "cjk-jp", "cjk-kr"]),
+            ("ko-KR", ["cjk-kr", "cjk-jp", "cjk-tc"]),
+        ] {
+            let mut collector = FontRequirementCollector::default();
+            collector.prefer_east_asian_language(Some(document));
+            collector.collect([&japanese, &korean, &traditional], "Calibri");
+            assert_eq!(
+                collector.finish()["ms mincho|0|0"].scripts,
+                expected,
+                "{document}"
+            );
+        }
     }
 
     #[test]

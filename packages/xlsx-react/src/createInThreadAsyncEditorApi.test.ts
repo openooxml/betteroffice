@@ -4,6 +4,20 @@ import { createXlsxCommandController, XlsxCommandAdmissionError } from './comman
 import { createInThreadAsyncEditorApi } from './createInThreadAsyncEditorApi';
 import { XlsxAsyncApiSyncAccessError } from './worker/asyncApiErrors';
 
+test('fallback host proposals capture requests and use the editor admission path', async () => {
+  const proposal = { id: 'p1', agentId: 'host', note: null, cells: [] };
+  const proposeChanges = mock(async () => ({ ok: true as const, proposal }));
+  const sync = { handle: {}, commands: createXlsxCommandController().store,
+    proposeChanges } as unknown as XlsxEditorApi;
+  const api = createInThreadAsyncEditorApi(sync, false, () => {});
+  const request = { agentId: 'host', edits: [{ sheet: 0, row: 0, col: 0, input: '7' }] };
+  const original = structuredClone(request);
+  const result = api.proposeChanges!(request);
+  request.edits[0]!.input = 'changed';
+  expect(await result).toEqual({ ok: true, proposal });
+  expect(proposeChanges).toHaveBeenCalledWith(original);
+});
+
 for (const method of ['readCells', 'findText', 'validateEdits', 'applyEdits'] as const) {
   test(`fallback host ${method} captures requests before delayed input`, async () => {
     let release!: () => void;
@@ -31,23 +45,25 @@ for (const method of ['readCells', 'findText', 'validateEdits', 'applyEdits'] as
   });
 }
 
-for (const method of ['renderPng', 'renderRangePng', 'exportStructured', 'exportMarkdown', 'printDisplayList'] as const) {
+for (const method of ['renderPng', 'exportStructured', 'exportMarkdown', 'printDisplayList'] as const) {
   test(`fallback ${method} captures options before delayed input`, async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => { release = resolve; });
     const options = { sheet: 0, range: { start: { row: 0, col: 0 }, end: { row: 1, col: 1 } } };
     const markdownOptions = { includeEmptyCells: true };
-    const args = method === 'exportMarkdown' ? [options, markdownOptions] : [options];
+    const pngOptions = { scale: 2 };
+    const args = method === 'exportMarkdown' ? [options, markdownOptions] : method === 'renderPng' ? [options, pngOptions] : [options];
     const original = structuredClone(args);
     const operation = mock((...captured: unknown[]) => captured);
     const sync = { commands: createXlsxCommandController().store, flushPendingInput: () => pending,
-      handle: { [method]: operation } } as unknown as XlsxEditorApi;
+      handle: { [method]: operation, renderPngFonts: () => [] } } as unknown as XlsxEditorApi;
     const api = createInThreadAsyncEditorApi(sync, false, () => {});
     const work = Reflect.apply(api[method], api, args);
     expect(operation).not.toHaveBeenCalled();
     options.sheet = 1;
     options.range.start.row = 9;
     markdownOptions.includeEmptyCells = false;
+    pngOptions.scale = 3;
     release();
     await work;
     expect(operation.mock.calls[0]).toEqual(original);

@@ -213,6 +213,32 @@ test('a stalled load settles false at the deadline, without Google, and a later 
   expect(added).toHaveLength(4);
 });
 
+test('families arriving during a provider import register even after the deadline', async () => {
+  let arrive!: (module: ReturnType<typeof bundle>) => void;
+  const imported = new Promise<ReturnType<typeof bundle>>((resolve) => { arrive = resolve; });
+  const load = jest.fn(() => imported);
+  configureDefaultFonts({ load });
+  const timeout = globalThis.setTimeout;
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) =>
+    timeout(callback, delay === 5000 ? 10 : delay, ...args)) as typeof setTimeout);
+  try {
+    expect(await loadFont('Import Sans')).toBe(false);
+    expect(added).toHaveLength(0);
+    const second = loadFont('Import Serif');
+    expect(load).toHaveBeenCalledTimes(1);
+    arrive(bundle(['Import Sans', 'Import Serif']));
+    expect(await second).toBe(true);
+    expect(await loadFont('Import Sans')).toBe(true);
+    expect(added.map((face) => face.family).sort()).toEqual([
+      ...Array(4).fill('Import Sans'), ...Array(4).fill('Import Serif'),
+    ]);
+    expect(new Set(dispatched.flatMap((event) => event.fontfaces.map((face) => face.family))))
+      .toEqual(new Set(['Import Sans', 'Import Serif']));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(googleLinks()).toHaveLength(0);
+  } finally { timer.mockRestore(); }
+});
+
 test('a face that fails to load is removed and retried on the next call', async () => {
   const errors: Error[] = [];
   const unsubscribe = onFontError((error) => errors.push(error));

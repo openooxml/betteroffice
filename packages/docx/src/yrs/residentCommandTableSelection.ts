@@ -1,7 +1,8 @@
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 import type { YrsCellLoc, YrsLoc, YrsTableRange } from './index';
 import type { DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
-import { createYrsPositionProjection } from './yrsPositionProjection';
+import { createYrsPositionProjection, isUnavailableTablePayload } from './yrsPositionProjection';
 
 export type TableSelectionTarget = 'table' | 'row' | 'column';
 
@@ -13,18 +14,29 @@ export function readCellSelection(engine: Pick<DocxWorkerCommandEngine, 'cellSel
   try {
     return engine.cellSelection();
   } catch (error) {
-    if (error instanceof WebAssembly.RuntimeError) throw error;
+    if (isEngineTrap(error)) throw error;
     return null;
   }
 }
 
-export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string): YrsCellLoc | null {
-  if (story === rootOf(story)) return null;
-  const projection = createYrsPositionProjection(engine.geometryReader, rootOf(story));
+type ProjectedCellTable = { story: string; tableIndex: number; cells: { story: string; row: number; column: number }[] };
+
+/** The tables of `root` as the position projection lays them out: only what cell location reads. */
+function projectedCellTables(engine: DocxWorkerCommandEngine, root: string): ProjectedCellTable[] | null {
+  const projection = createYrsPositionProjection(engine.geometryReader, root);
   if (!projection) return null;
+  return projection.allTables().map((table) => ({
+    story: table.story,
+    tableIndex: table.tableIndex,
+    cells: table.cells.map((cell) => ({ story: cell.story, row: cell.row, column: cell.column })),
+  }));
+}
+
+function cellIn(tables: readonly ProjectedCellTable[] | null, story: string): YrsCellLoc | null {
+  if (!tables) return null;
   let best: YrsCellLoc | null = null;
-  for (const table of projection.allTables()) {
-    const cell = table.cells.find((candidate) => candidate.story === story);
+  for (const table of tables) {
+    const cell = table.cells.find((candidate) => candidate.story === story || story.startsWith(`${candidate.story}:`));
     if (!cell) continue;
     if (!best || table.story.length > best.story.length) {
       best = { story: table.story, tableIndex: table.tableIndex, row: cell.row, column: cell.column };
@@ -33,8 +45,80 @@ export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string):
   return best;
 }
 
+function isCellOf(tables: readonly ProjectedCellTable[] | null, story: string): boolean {
+  return !!tables?.some((table) => table.cells.some((cell) => cell.story === story));
+}
+
+/** Whether the layout shows `story`: its first paragraph has a position in a fresh projection of `root`. */
+function laidOut(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, root: string, story: string): boolean {
+  const paragraph = engine.geometryReader.hasStory(story) ? engine.geometryReader.paragraphSpans(story)[0] : undefined;
+  if (!paragraph) return false;
+  return createYrsPositionProjection(engine.geometryReader, root)?.positionForLoc({ story, paraId: paragraph.paraId, offset: 0 }) != null;
+}
+
+/** Whether `story` may resolve to a cell of `tables`, an ancestor one included: it is itself a cell there, or the layout shows it. */
+export function shownStory(
+  engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, root: string, tables: readonly ProjectedCellTable[] | null, story: string
+): boolean {
+  return isCellOf(tables, story) || laidOut(engine, root, story);
+}
+
+const projectedTables = new WeakMap<object, Map<string, { key: string; tables: ProjectedCellTable[] | null }>>();
+let shadowCheck = false;
+const cacheCounts = { built: 0, reused: 0, uncached: 0 };
+
+/** @internal Every resolveLiveCell call also builds a fresh projection and throws when the answers differ. */
+export function setCellLocationShadowCheck(enabled: boolean): void {
+  shadowCheck = enabled;
+}
+
+/** @internal How often resolveLiveCell rebuilt, reused or could not cache the projected tables. */
+export function cellLocationCacheCounts(): { built: number; reused: number; uncached: number } {
+  return { ...cacheCounts };
+}
+
+/**
+ * The innermost table cell holding `story`, as the position projection of its root finds it. The
+ * projected tables are kept per engine and root until the engine's structure key changes: a key
+ * that changes with every embed, table row/cell/story change, story creation or removal, and with
+ * the document instance. Engines without a key project on every call. A story that is not itself
+ * a laid-out cell resolves to an outer cell only while the layout shows it.
+ */
+export function resolveLiveCell(engine: DocxWorkerCommandEngine, story: string): YrsCellLoc | null {
+  const root = rootOf(story);
+  if (story === root) return null;
+  const key = typeof engine.cellStructureKey === 'function' ? engine.cellStructureKey() : null;
+  let tables: ProjectedCellTable[] | null;
+  if (key === null) {
+    cacheCounts.uncached++;
+    tables = projectedCellTables(engine, root);
+  } else {
+    let roots = projectedTables.get(engine);
+    if (!roots) projectedTables.set(engine, roots = new Map());
+    const cached = roots.get(root);
+    if (cached?.key === key) {
+      cacheCounts.reused++;
+      tables = cached.tables;
+    } else {
+      cacheCounts.built++;
+      tables = projectedCellTables(engine, root);
+      roots.set(root, { key, tables });
+    }
+  }
+  const located = cellIn(tables, story);
+  if (shadowCheck && key !== null) {
+    const fresh = cellIn(projectedCellTables(engine, root), story);
+    if (JSON.stringify(fresh) !== JSON.stringify(located)) {
+      throw new Error(`cell location cache differs for ${story}: ${JSON.stringify(located)} != ${JSON.stringify(fresh)}`);
+    }
+  }
+  if (located && !shownStory(engine, root, tables, story)) return null;
+  return located;
+}
+
 function validPayload(value: unknown): value is TablePayload {
-  return !!value && typeof value === 'object' && Array.isArray((value as TablePayload).rows);
+  return !!value && typeof value === 'object' && !isUnavailableTablePayload(value) &&
+    Array.isArray((value as TablePayload).rows);
 }
 
 function anchorsOf(engine: DocxWorkerCommandEngine, story: string, tableIndex: number) {
@@ -66,7 +150,15 @@ export function tableRangeFor(
   return { anchor: { ...focused, row: 0, column: 0 }, head: { ...focused, row: endRow, column: endColumn } };
 }
 
-export function cellStart(engine: DocxWorkerCommandEngine, story: string): YrsLoc | null {
+/** The first caret of a cell: its first block, entering a block control that comes before any paragraph. */
+export function cellStart(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'>, story: string): YrsLoc | null {
+  for (const segment of engine.geometryReader.storySegments(story)) {
+    if (segment.kind === 'pilcrow') break;
+    if (segment.kind === 'embed' && segment.embedKind === 'blockSdt' && typeof segment.payload.story === 'string') {
+      const inner = cellStart(engine, segment.payload.story);
+      if (inner) return inner;
+    }
+  }
   const first = engine.geometryReader.paragraphSpans(story)[0];
   return first ? { story, paraId: first.paraId, offset: 0 } : null;
 }
@@ -97,10 +189,13 @@ interface CommonTable {
 
 function commonTableFor(engine: DocxWorkerCommandEngine, first: string, second: string): CommonTable | null {
   if (first === second || rootOf(first) !== rootOf(second)) return null;
-  const projection = createYrsPositionProjection(engine.geometryReader, rootOf(first));
+  const root = rootOf(first);
+  const projection = createYrsPositionProjection(engine.geometryReader, root);
   if (!projection) return null;
+  const tables = projection.allTables();
+  if (!shownStory(engine, root, tables, first) || !shownStory(engine, root, tables, second)) return null;
   let best: { story: string; tableIndex: number } | null = null;
-  for (const table of projection.allTables()) {
+  for (const table of tables) {
     const holds = (story: string) => table.cells.some((cell) => cell.story === story || story.startsWith(`${cell.story}:`));
     if (!holds(first) || !holds(second)) continue;
     if (!best || table.story.length > best.story.length) best = { story: table.story, tableIndex: table.tableIndex };

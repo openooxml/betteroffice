@@ -41,6 +41,9 @@ import type { XlsxCommandResult, XlsxCommandStore } from '../../commands/types';
 import { createAsyncEditorApi } from '../../worker/createAsyncEditorApi';
 import type { WorkerEditorApiBridge } from '../../worker/createWorkerEditorApi';
 import { PeerlessWorkbookSession } from '../../worker/usePeerlessSessionWorkbook';
+import { loadMenuList } from '../../../../../shared/react-toolbar/menuListLoader';
+
+await loadMenuList();
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
 
@@ -223,7 +226,8 @@ describe('host-composed xlsx toolbar', () => {
     const first = asyncEditor();
     const second = asyncEditor();
     const german = { ...en, toolbar: { ...en.toolbar, bold: 'Fett', italic: 'Kursiv', more: 'Weitere Aktionen' },
-      commands: { ...en.commands, reasons: { ...en.commands.reasons, inputFailed: 'Eingabe fehlgeschlagen.' } } };
+      commands: { ...en.commands, reasons: { ...en.commands.reasons, inputFailed: 'Eingabe fehlgeschlagen.',
+        editUnsupported: 'Diese Bearbeitung ist hier nicht möglich.' } } };
     const french = { ...en, toolbar: { ...en.toolbar, bold: 'Gras', italic: 'Italique', more: 'Autres actions' } };
     let formatted!: Promise<XlsxCommandResult>;
     let settled = false;
@@ -286,9 +290,9 @@ describe('host-composed xlsx toolbar', () => {
       await act(async () => {
         first.acknowledge(command, true, false, 'invalid-step');
         expect(await formatted).toMatchObject({ ok: false,
-          failure: { code: 'input-failed', message: german.commands.reasons.inputFailed } });
+          failure: { code: 'edit-unsupported', message: german.commands.reasons.editUnsupported } });
       });
-      expect(screen().getByRole('alert').textContent).toBe(german.commands.reasons.inputFailed);
+      expect(screen().getByRole('alert').textContent).toBe(german.commands.reasons.editUnsupported);
       fireEvent.click(more);
       second.locale(french);
       view.rerender(<HostChrome commands={second.api.commands} />);

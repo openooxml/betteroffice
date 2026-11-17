@@ -1389,6 +1389,64 @@ fn image_alt_text_threads_and_caps() {
     );
 }
 
+/// a picture's relationship id threads onto image primitives as
+/// `relationshipId`, also when its source is empty; an absent or oversized
+/// one is left out of the primitive and its JSON
+#[test]
+fn image_relationship_id_threads_and_drops_oversized() {
+    let max = docx_layout::display_list::MAX_RELATIONSHIP_ID_CHARS;
+    let input = serde_json::json!({
+        "measured": [
+            { "block": { "kind": "paragraph", "id": 1, "pmStart": 1, "pmEnd": 3, "runs": [
+                  { "kind": "image", "src": "", "relationshipId": "rIdLost", "width": 40.0,
+                    "height": 20.0, "pmStart": 1, "pmEnd": 2 } ] },
+              "measure": { "kind": "paragraph", "totalHeight": 24.0,
+                  "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 0,
+                              "width": 40.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 24.0 }] } },
+            { "block": { "kind": "image", "id": 2, "src": "b", "relationshipId": "r".repeat(max) },
+              "measure": { "kind": "image", "width": 60.0, "height": 30.0 } },
+            { "block": { "kind": "image", "id": 3, "src": "c", "relationshipId": "r".repeat(max + 1) },
+              "measure": { "kind": "image", "width": 10.0, "height": 10.0 } },
+            { "block": { "kind": "image", "id": 4, "src": "d" },
+              "measure": { "kind": "image", "width": 10.0, "height": 10.0 } }
+        ],
+        "options": {},
+        "layout": { "pages": [
+            { "size": { "w": 400.0, "h": 200.0 }, "margins": {}, "fragments": [
+                { "kind": "paragraph", "blockId": 1, "x": 50.0, "y": 50.0, "width": 200.0,
+                  "height": 24.0, "fromLine": 0, "toLine": 1, "pmStart": 1, "pmEnd": 3 },
+                { "kind": "image", "blockId": 2, "x": 50.0, "y": 80.0, "width": 60.0, "height": 30.0 },
+                { "kind": "image", "blockId": 3, "x": 50.0, "y": 120.0, "width": 10.0, "height": 10.0 },
+                { "kind": "image", "blockId": 4, "x": 80.0, "y": 120.0, "width": 10.0, "height": 10.0 }
+            ] }
+        ] }
+    });
+    let json = build_display_list_json(&input.to_string()).expect("builds");
+    let dl: DisplayList = serde_json::from_str(&json).unwrap();
+    let mut named: Vec<(&str, Option<usize>)> = dl.pages[0]
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            Primitive::Image(i) => Some((
+                i.rel_id.as_str(),
+                i.relationship_id.as_ref().map(|id| id.chars().count()),
+            )),
+            _ => None,
+        })
+        .collect();
+    named.sort();
+    assert_eq!(
+        named,
+        vec![("", Some(7)), ("b", Some(max)), ("c", None), ("d", None)],
+        "a relationship id past MAX_RELATIONSHIP_ID_CHARS is dropped, not cut"
+    );
+    assert_eq!(
+        json.matches("\"relationshipId\"").count(),
+        2,
+        "a picture without a relationship id serializes as before"
+    );
+}
+
 #[test]
 fn text_watermark_emits_rotated_translucent_text_primitive() {
     let input = serde_json::json!({

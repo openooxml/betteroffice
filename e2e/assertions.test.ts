@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { Layout } from '../packages/docx/src/layout/pagination';
-import { assertLayoutParity, assertWorkbookMirror } from './assertions';
+import { assertLayoutParity, assertWorkbookMirror, stateVectorEntries } from './assertions';
 
 const layout = (): Layout =>
   ({
@@ -71,4 +71,15 @@ test('cross-SDK parity rejects a corrupted final formula value', () => {
       cells
     )
   ).toThrow();
+});
+
+test('state vectors compare by client and clock, not encoding order', () => {
+  const ordered = new Uint8Array([3, 1, 1, 5, 2, 0x80, 0x01, 7]);
+  const reordered = new Uint8Array([3, 0x80, 0x01, 7, 1, 1, 5, 2]);
+  expect([...ordered].join()).not.toBe([...reordered].join());
+  expect(stateVectorEntries(ordered)).toEqual(stateVectorEntries(reordered));
+  expect(stateVectorEntries(ordered)).toEqual([[1n, 1n], [5n, 2n], [128n, 7n]]);
+  expect(stateVectorEntries(new Uint8Array([1, 1, 2]))).not.toEqual(stateVectorEntries(new Uint8Array([1, 1, 3])));
+  expect(() => stateVectorEntries(new Uint8Array([2, 1, 1]))).toThrow();
+  expect(() => stateVectorEntries(new Uint8Array([1, 1, 1, 9]))).toThrow();
 });

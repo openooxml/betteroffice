@@ -182,8 +182,10 @@ function canonical(value: unknown): unknown {
 
 function retryKey(input: DocxProposalInput): string {
   const edit = input.op === 'replaceText'
-    ? { op: input.op, search: input.search, replaceWith: input.replaceWith,
-        occurrence: input.occurrence === undefined || input.occurrence === 1 ? 'first' : input.occurrence }
+    ? { op: input.op, search: input.search, replaceWith: input.replaceWith, at: input.at,
+        occurrence: input.at === undefined
+          ? input.occurrence === undefined || input.occurrence === 1 ? 'first' : input.occurrence
+          : undefined }
     : { op: input.op, at: input.at, text: input.text };
   return JSON.stringify(canonical({ paragraph: input.paragraph, ...edit }));
 }
@@ -345,6 +347,12 @@ export function registerWorkerProposalAuthority(
   const workerSnapshot = (): DocxProposalSnapshot | null => retirementReason ? retiredRegistry!.snapshot() : mirror ? {
     version: peerReady() ? session.version() : mirror.version,
     previewVersion: mirror.proposals.previewVersion,
+    ...(mirror.proposals.revision === undefined ? {} : { revision: mirror.proposals.revision }),
+    ...(mirror.proposals.withdrawn === undefined ? {} : {
+      withdrawn: mirror.proposals.withdrawn.map((record) => ({
+        ...record, paragraph: { ...record.paragraph }, revisionIds: [...record.revisionIds],
+      })),
+    }),
     proposals: mirror.proposals.entries.map(({ record }) => ({
       ...record, paragraph: { ...record.paragraph }, revisionIds: [...record.revisionIds],
     })),

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { pinnedEvaluate } from './pinned-evaluate';
+import { inputReady } from './pptx-async-helpers';
 
 type Format = 'docx' | 'xlsx' | 'pptx';
 type Saved = { file: string; parts: Record<string, string> };
@@ -438,6 +439,7 @@ test('pptx: typed zoom preserves the selected shape and hit testing follows its 
   const fullWidth = (await settled(canvas)).width;
   await preset(page, 'pptx', '50%');
   await expect.poll(() => width(canvas)).toBeCloseTo(fullWidth / 2, 0);
+  await inputReady(page);
   let bounds = await settled(canvas);
   await page.mouse.click(bounds.x + bounds.width * 0.35, bounds.y + bounds.height * 0.45 - 2);
   const selection = page.getByTestId('pptx-shape-selection');
@@ -495,6 +497,7 @@ test('pptx: clicking the slide then PageDown and PageUp move the active slide', 
   await open(page, 'pptx');
   const canvas = page.getByTestId('pptx-slide-canvas');
   const buttons = page.getByRole('complementary', { name: 'Slides', exact: true }).locator('button');
+  await inputReady(page);
   const box = await settled(canvas);
   await page.mouse.click(box.x + box.width * 0.9, box.y + box.height * 0.9);
   await page.keyboard.press('PageDown');

@@ -39,6 +39,7 @@ const HANDLERS: Partial<Record<PptxCommandId, Handler>> = {
   bold: 'onFormat',
   italic: 'onFormat',
   underline: 'onFormat',
+  strikethrough: 'onFormat',
   fontFamily: 'onFormat',
   fontSize: 'onFormat',
   fontSizeStep: 'onFormat',
@@ -82,6 +83,7 @@ function legacyEnvironment(props: ToolbarProps, t: TFunction): PptxCommandEnviro
           bold: formatting.bold ?? false,
           italic: formatting.italic ?? false,
           underline: formatting.underline ?? false,
+          strikethrough: formatting.strikethrough ?? false,
           fontFamily: formatting.fontFamily ?? null,
           fontSize: formatting.fontSize ?? null,
           color: formatting.textColor ?? null,
@@ -123,6 +125,7 @@ function formatAction<K extends PptxCommandId>(
     case 'bold':
     case 'italic':
     case 'underline':
+    case 'strikethrough':
       return id;
     case 'fontFamily':
       return { type: 'fontFamily', value: args.family };
@@ -268,6 +271,7 @@ function project(store: PptxCommandStore): ToolbarProps {
       bold: pressed(state('bold').active),
       italic: pressed(state('italic').active),
       underline: pressed(state('underline').active),
+      strikethrough: pressed(state('strikethrough').active),
       fontFamily: fontFamily.value ?? undefined,
       fontSize: fontSize.value ?? undefined,
       textColor: textColor.value ?? undefined,

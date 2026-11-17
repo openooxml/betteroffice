@@ -1,3 +1,4 @@
+import { isWorkerEngineTrap } from '../../../../../shared/office-session/trap';
 /**
  * Synchronous query facade over one built DisplayList, backed by the Rust
  * hit-testing module (`crates/docx-layout/src/hit.rs`).
@@ -439,12 +440,6 @@ export function onDisplayListQuerySourceFailure(listener: (error: Error) => void
 }
 
 /** A trap (panic) rather than a returned `Err`, which arrives as a string. */
-function isWasmTrap(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  if (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError) return true;
-  return error.name === 'RuntimeError';
-}
-
 type StoreShiftRun = [start: number, count: number, mask: number, delta: number];
 type StoreNoteAnchor = [area: number, note: number, start: number | null, end: number | null];
 
@@ -830,7 +825,7 @@ export function createDisplayListQueries(
       }
     } catch (error) {
       cell.handle = null;
-      if (isWasmTrap(error)) {
+      if (isWorkerEngineTrap(error)) {
         killSource('display-list session open', error);
         return;
       }
@@ -866,7 +861,7 @@ export function createDisplayListQueries(
       );
       for (const [index, page] of replace) revisions[index] = displayPageRevision(page);
     } catch (error) {
-      if (isWasmTrap(error)) {
+      if (isWorkerEngineTrap(error)) {
         killSource('display-list page load', error);
         storeRevisions = null;
         return;
@@ -916,7 +911,7 @@ export function createDisplayListQueries(
       try {
         return byHandle(cell.handle);
       } catch (error) {
-        if (isWasmTrap(error)) {
+        if (isWorkerEngineTrap(error)) {
           killSource(label, error);
           return null;
         }
@@ -927,7 +922,7 @@ export function createDisplayListQueries(
     try {
       return byJson();
     } catch (error) {
-      if (isWasmTrap(error)) {
+      if (isWorkerEngineTrap(error)) {
         killSource(label, error);
         return null;
       }
@@ -977,7 +972,7 @@ export function createDisplayListQueries(
     try {
       return query();
     } catch (error) {
-      if (isWasmTrap(error)) {
+      if (isWorkerEngineTrap(error)) {
         killSource(`worker ${label}`, error);
         return null;
       }

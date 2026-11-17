@@ -24,7 +24,7 @@ def main():
         builds[channel], binaries[channel] = build, binary
     _, version_text = execute([soffice,'--version'])
     version = re.search(r'LibreOffice (\d+(?:\.\d+){2,3})\b',version_text)[1]
-    report = dict(schema_version=1,plan_sha256=job['plan_sha256'],samples=[],benchmark=dict(
+    report = dict(schema_version=1,plan_sha256=job['plan_sha256'],shard=job['shard'],samples=[],benchmark=dict(
         method=job['method'],dpi=96,trials=job['trials'],published_version=job['published_version'],builds=builds,libreoffice_version=version,libreoffice_build=version_text.strip(),
         fonts_sha256=fonts_hash,platform=platform.platform(),
         font_policy='bundled-fontconfig' if platform.system() == 'Linux' else 'system-fonts'))

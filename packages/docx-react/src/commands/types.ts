@@ -164,6 +164,11 @@ export interface DocxCommandArgs {
   reportIssue: null;
   /** 1 is 100%. */
   zoom: { scale: number };
+  cut: null;
+  copy: null;
+  paste: null;
+  pasteAsPlainText: null;
+  selectAll: null;
 }
 
 /** @experimental */
@@ -241,6 +246,11 @@ export interface DocxCommandValues {
   replace: null;
   reportIssue: null;
   zoom: number;
+  cut: null;
+  copy: null;
+  paste: null;
+  pasteAsPlainText: null;
+  selectAll: null;
 }
 
 /**

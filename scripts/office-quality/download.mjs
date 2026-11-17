@@ -1,3 +1,5 @@
+import { corpusSigner } from './private-corpus.mjs';
+
 export const DOWNLOAD_ATTEMPTS = 5;
 export const RETRY_AFTER_CAP_MS = 30_000;
 
@@ -91,15 +93,18 @@ export async function download(url, maximum = 32 * 1024 * 1024, options = {}) {
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     random = Math.random,
     now = Date.now,
+    sign = corpusSigner(),
   } = options;
   let lastError;
   for (let attempt = 0; attempt < attempts; attempt++) {
     let response;
     try {
+      const headers = sign?.(url);
       response = await fetchImpl(url, {
         signal: AbortSignal.timeout(timeoutMs(maximum)),
         credentials: 'omit',
         referrerPolicy: 'no-referrer',
+        ...(headers ? { headers, redirect: 'error' } : {}),
       });
     } catch (error) {
       lastError = error;

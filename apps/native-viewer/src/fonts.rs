@@ -3,6 +3,7 @@ mod docx {
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::Path;
+    use std::sync::Arc;
 
     use anyhow::{Context, Result, anyhow};
     use docx_raster::FontChains;
@@ -10,6 +11,8 @@ mod docx {
     use serde_json::Value;
     use vello::Glyph;
     use vello::peniko::{Blob, FontData};
+
+    type ShapedRuns = Vec<(u32, Vec<Glyph>)>;
 
     const FACES: &[(&str, &str, bool, bool)] = &[
         ("Caladea-Regular.ttf", "Caladea", false, false),
@@ -113,8 +116,13 @@ mod docx {
             let mut faces = Vec::with_capacity(FACES.len());
             for &(file, family, bold, italic) in FACES {
                 let path = assets.join(file);
-                let bytes =
-                    fs::read(&path).with_context(|| format!("read font {}", path.display()))?;
+                let bytes = match fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        return Err(error).with_context(|| format!("read font {}", path.display()));
+                    }
+                };
                 let engine_id = docx_layout::register_measure_font(&bytes)
                     .map_err(|_| anyhow!("register measurement font {}", path.display()))?;
                 let raster_id = store
@@ -127,6 +135,16 @@ mod docx {
                     id: engine_id,
                     data: FontData::new(Blob::from(bytes), 0),
                     family,
+                    bold,
+                    italic,
+                });
+            }
+
+            for (bold, italic, bytes) in base_latin::faces() {
+                faces.push(FontFace {
+                    id: FontId::base_latin(bold, italic).to_u32(),
+                    data: FontData::new(Blob::new(Arc::new(bytes)), 0),
+                    family: base_latin::FAMILY,
                     bold,
                     italic,
                 });
@@ -150,7 +168,9 @@ mod docx {
                     .as_array()
                     .cloned()
                     .unwrap_or_default();
-                let mut chain = vec![pick_face(&faces, family, bold, italic)];
+                let mut chain: Vec<_> = pick_face(&faces, family, bold, italic)
+                    .into_iter()
+                    .collect();
                 for script in scripts.iter().filter_map(Value::as_str) {
                     match script {
                         "arabic" => {
@@ -176,6 +196,9 @@ mod docx {
                     &mut chain,
                     pick_exact(&faces, "Liberation Sans", bold, italic),
                 );
+                if chain.is_empty() {
+                    chain.push(FontId::base_latin(bold, italic).to_u32());
+                }
                 labels.push(format!(
                     "{family}{}{}",
                     if bold { " bold" } else { "" },
@@ -184,10 +207,13 @@ mod docx {
                 chain_ids.insert(key.to_owned(), chain);
             }
             if chain_ids.is_empty() {
-                chain_ids.insert(
-                    "calibri|0|0".to_owned(),
-                    vec![pick_exact(&faces, "Carlito", false, false)],
-                );
+                let mut chain: Vec<_> = pick_exact(&faces, "Carlito", false, false)
+                    .into_iter()
+                    .collect();
+                if chain.is_empty() {
+                    chain.push(FontId::base_latin(false, false).to_u32());
+                }
+                chain_ids.insert("calibri|0|0".to_owned(), chain);
             }
             let chains = chain_ids
                 .iter()
@@ -208,7 +234,10 @@ mod docx {
         }
 
         pub fn face(&self, id: u32) -> Option<&FontFace> {
-            self.faces.get(id as usize).filter(|face| face.id == id)
+            self.faces
+                .get(id as usize)
+                .filter(|face| face.id == id)
+                .or_else(|| self.faces.iter().find(|face| face.id == id))
         }
 
         pub fn shape_fallback(
@@ -219,7 +248,7 @@ mod docx {
             small_caps: bool,
             letter_spacing: f32,
             word_spacing: f32,
-        ) -> Result<(u32, f32, Vec<Glyph>)> {
+        ) -> Result<(f32, ShapedRuns)> {
             let spec = parse_css_font(font)?;
             let key = format!(
                 "{}|{}|{}",
@@ -227,12 +256,35 @@ mod docx {
                 u8::from(spec.bold),
                 u8::from(spec.italic)
             );
-            let font_id = self
-                .chain_ids
-                .get(&key)
-                .and_then(|chain| chain.first())
-                .copied()
-                .unwrap_or_else(|| pick_face(&self.faces, &spec.family, spec.bold, spec.italic));
+            let chain = self.chains.get(&key).cloned().unwrap_or_else(|| {
+                if spec.family == base_latin::FAMILY {
+                    vec![FontId::base_latin(spec.bold, spec.italic)]
+                } else {
+                    vec![
+                        pick_face(&self.faces, &spec.family, spec.bold, spec.italic)
+                            .map(FontId::from_u32)
+                            .unwrap_or(FontId::base_latin(spec.bold, spec.italic)),
+                    ]
+                }
+            });
+            let mut segments: Vec<(FontId, usize, usize)> = Vec::new();
+            for (start, ch) in text.char_indices() {
+                let font = self
+                    .store
+                    .resolve_with_family(&chain, ch, spec.bold, spec.italic, &spec.family)
+                    .ok_or_else(|| anyhow!("text fallback has no face"))?;
+                let end = start + ch.len_utf8();
+                if let Some(last) = segments.last_mut()
+                    && last.0 == font
+                {
+                    last.2 = end;
+                } else {
+                    segments.push((font, start, end));
+                }
+            }
+            if rtl {
+                segments.reverse();
+            }
             let direction = if rtl {
                 ShapeDirection::Rtl
             } else {
@@ -246,48 +298,53 @@ mod docx {
             } else {
                 Vec::new()
             };
-            let shaped = shape_with_direction(
-                &self.store,
-                FontId::from_u32(font_id),
-                text,
-                spec.size,
-                &features,
-                direction,
-            )?;
             let mut pen = 0.0f32;
-            let glyph_count = shaped.len();
-            let glyphs = shaped
-                .iter()
-                .enumerate()
-                .map(|(index, glyph)| {
-                    let placed = Glyph {
-                        id: glyph.glyph_id,
-                        x: pen + glyph.x_offset,
-                        y: -glyph.y_offset,
-                    };
-                    pen += glyph.x_advance;
-                    let cluster_ends = shaped
-                        .get(index + 1)
-                        .is_none_or(|next| next.cluster != glyph.cluster);
-                    if cluster_ends {
-                        let source = text
-                            .get(glyph.cluster as usize..)
-                            .and_then(|tail| tail.chars().next());
-                        if source == Some(' ') {
-                            pen += word_spacing;
+            let mut runs = Vec::new();
+            for (segment_index, &(font_id, start, end)) in segments.iter().enumerate() {
+                let text = &text[start..end];
+                let shaped = shape_with_direction(
+                    &self.store,
+                    font_id,
+                    text,
+                    spec.size,
+                    &features,
+                    direction,
+                )?;
+                let glyph_count = shaped.len();
+                let glyphs = shaped
+                    .iter()
+                    .enumerate()
+                    .map(|(index, glyph)| {
+                        let placed = Glyph {
+                            id: glyph.glyph_id,
+                            x: pen + glyph.x_offset,
+                            y: -glyph.y_offset,
+                        };
+                        pen += glyph.x_advance;
+                        let cluster_ends = shaped
+                            .get(index + 1)
+                            .is_none_or(|next| next.cluster != glyph.cluster);
+                        if cluster_ends {
+                            let source = text
+                                .get(glyph.cluster as usize..)
+                                .and_then(|tail| tail.chars().next());
+                            if source == Some(' ') {
+                                pen += word_spacing;
+                            }
+                            if index + 1 < glyph_count || segment_index + 1 < segments.len() {
+                                pen += letter_spacing;
+                            }
                         }
-                        if index + 1 < glyph_count {
-                            pen += letter_spacing;
-                        }
-                    }
-                    placed
-                })
-                .collect();
-            Ok((font_id, spec.size, glyphs))
+                        placed
+                    })
+                    .collect();
+                runs.push((font_id.to_u32(), glyphs));
+            }
+            Ok((spec.size, runs))
         }
     }
 
-    fn pick_face(faces: &[FontFace], family: &str, bold: bool, italic: bool) -> u32 {
+    fn pick_face(faces: &[FontFace], family: &str, bold: bool, italic: bool) -> Option<u32> {
         let family = family.to_lowercase();
         let metric_family = if family.contains("calibri") || family.contains("carlito") {
             "Carlito"
@@ -303,7 +360,7 @@ mod docx {
         pick_exact(faces, metric_family, bold, italic)
     }
 
-    fn pick_exact(faces: &[FontFace], family: &str, bold: bool, italic: bool) -> u32 {
+    fn pick_exact(faces: &[FontFace], family: &str, bold: bool, italic: bool) -> Option<u32> {
         faces
             .iter()
             .find(|face| face.family == family && face.bold == bold && face.italic == italic)
@@ -314,11 +371,12 @@ mod docx {
             })
             .or_else(|| faces.iter().find(|face| face.family == family))
             .map(|face| face.id)
-            .unwrap_or(0)
     }
 
-    fn push_unique(chain: &mut Vec<u32>, id: u32) {
-        if !chain.contains(&id) {
+    fn push_unique(chain: &mut Vec<u32>, id: Option<u32>) {
+        if let Some(id) = id
+            && !chain.contains(&id)
+        {
             chain.push(id);
         }
     }

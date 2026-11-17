@@ -2,11 +2,14 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "paths": {
+      "#agents-engines": ["../../packages/agents/src/engines.node.ts"],
       "#session-worker": ["../../packages/docx/src/yrs/sessionWorker.node.ts"],
-      "#session-scope": ["../../packages/docx/src/yrs/sessionScope.node.ts"],
       "@betteroffice/docx-react": ["../../packages/docx-react/src/index.ts"],
+      "@betteroffice/docx-react/shortcuts": ["../../packages/docx-react/src/shortcuts.ts"],
       "@betteroffice/xlsx-react": ["../../packages/xlsx-react/src/index.ts"],
+      "@betteroffice/xlsx-react/shortcuts": ["../../packages/xlsx-react/src/shortcuts.ts"],
       "@betteroffice/pptx-react": ["../../packages/pptx-react/src/index.ts"],
+      "@betteroffice/pptx-react/shortcuts": ["../../packages/pptx-react/src/shortcuts.ts"],
       "@betteroffice/docx": ["../../packages/docx/src/core.ts"],
       "@betteroffice/docx/*": ["../../packages/docx/src/*"],
       "@betteroffice/xlsx": ["../../packages/xlsx/src/index.ts"],
@@ -14,6 +17,7 @@
       "@betteroffice/pptx": ["../../packages/pptx/src/index.ts"],
       "@betteroffice/pptx/*": ["../../packages/pptx/src/*"],
       "@betteroffice/fonts": ["../../packages/fonts/src/index.ts"],
+      "@betteroffice/fonts/progressive": ["../../packages/fonts/src/progressive-entry.ts"],
       "@betteroffice/fonts-cjk": ["../../packages/fonts-cjk/src/index.ts"],
       "@betteroffice/fonts-intl": ["../../packages/fonts-intl/src/index.ts"],
       "@betteroffice/fonts-latin": ["../../packages/fonts-latin/src/index.ts"],

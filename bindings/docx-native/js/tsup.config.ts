@@ -34,11 +34,10 @@ export default defineConfig([
       'utils/autoScroll': '../../../packages/docx/src/utils/autoScroll.ts',
       'yrs/index': '../../../packages/docx/src/yrs/index.ts',
       'collaboration/index': '../../../packages/docx/src/collaboration/index.ts',
-      'yrs/docxWorker': '../../../packages/docx/src/yrs/residentEngineWorker.ts',
-      'sessionWorker.browser': '../../../packages/docx/src/yrs/sessionWorker.browser.ts',
-      'sessionScope.browser': '../../../packages/docx/src/yrs/sessionScope.browser.ts',
+      'yrs/docxWorker': '../../../packages/docx/src/yrs/docxWorker.browser.ts',
+      'yrs/docxWorker.node': '../../../packages/docx/src/yrs/docxWorker.node.ts',
       'sessionWorker.node': '../../../packages/docx/src/yrs/sessionWorker.node.ts',
-      'sessionScope.node': '../../../packages/docx/src/yrs/sessionScope.node.ts',
+      'sessionWorker.missing': '../../../packages/docx/src/yrs/sessionWorker.missing.ts',
       'wasm-opc': '../../../packages/docx/src/wasm/opc.ts',
       'wasm-layout': '../../../packages/docx/src/wasm/layout.ts',
       'wasm-edit': '../../../packages/docx/src/wasm/edit.ts',
@@ -52,7 +51,7 @@ export default defineConfig([
     shims: true,
     dts: {
       compilerOptions: {
-        paths: { '#session-worker': [fileURLToPath(new URL('../../../packages/docx/src/yrs/sessionWorker.node.ts', import.meta.url))], '#session-scope': [fileURLToPath(new URL('../../../packages/docx/src/yrs/sessionScope.node.ts', import.meta.url))] },
+        paths: { '#session-worker': [fileURLToPath(new URL('../../../packages/docx/src/yrs/sessionWorker.node.ts', import.meta.url))] },
       },
     },
     splitting: true,
@@ -61,7 +60,7 @@ export default defineConfig([
     treeshake: true,
     minify: true,
     injectStyle: false,
-    external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker', '#session-scope'],
+    external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'],
     esbuildPlugins: [nativeEnginePlugin('docx')],
     esbuildOptions(options) {
       options.chunkNames = 'chunk-[hash]';
@@ -69,6 +68,7 @@ export default defineConfig([
     onSuccess: async () => {
       await writeFile('../dist/browser.js', 'throw new Error("use @betteroffice/docx in browsers");\n');
       await writeFile('../dist/docxWorker.mjs', "import './yrs/docxWorker.mjs';\n");
+      await writeFile('../dist/docxWorker.node.mjs', "import './yrs/docxWorker.node.mjs';\n");
     },
   },
 ]);

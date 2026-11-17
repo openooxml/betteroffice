@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use base64::Engine as _;
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use docx_parse::{S9ParseOptions, parse_docx_s9_wire};
 use quick_xml::{Reader, events::Event};
@@ -21,7 +22,7 @@ fn package(body: &str, attributes: &str, header: Option<&str>) -> Vec<u8> {
     ];
     if let Some(header) = header {
         for (root, part) in [("hdr", "header1"), ("ftr", "footer1")] {
-            parts.push((format!("word/{part}.xml"), format!(r#"<w:{root} xmlns:w="{W}" xmlns:mc="{MC}" xmlns:bofx="urn:foreign" xmlns:bofy="urn:other" {attributes}>{header}</w:{root}>"#).into_bytes()));
+            parts.push((format!("word/{part}.xml"), format!(r#"<w:{root} xmlns:w="{W}" xmlns:r="{R}" xmlns:mc="{MC}" xmlns:bofx="urn:foreign" xmlns:bofy="urn:other" {attributes}>{header}</w:{root}>"#).into_bytes()));
         }
     }
     ooxml_opc::rezip_parts(&parts).unwrap()
@@ -101,6 +102,132 @@ fn python_check(bytes: &[u8], assertions: &str) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn picture_watermark_package(inline: bool) -> Vec<u8> {
+    let picture = r##"<w:r><w:pict><v:shapetype id="_x0000_t75" coordsize="21600,21600" o:spt="75" o:preferrelative="t"/><v:shape id="WordPictureWatermark123" o:spid="_x0000_s1035" type="#_x0000_t75" style="position:absolute;margin-left:-1in;margin-top:413.05pt;width:614pt;height:306.35pt;z-index:-251644928;mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin" o:allowincell="f"><v:imagedata r:id="rId1" o:title="mark"/><w10:wrap anchorx="margin" anchory="margin"/></v:shape></w:pict></w:r>"##;
+    let content = if inline {
+        picture.to_owned()
+    } else {
+        format!("<w:p>{picture}</w:p>")
+    };
+    let control = format!(
+        r#"<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Watermarks"/><w:docPartUnique/></w:docPartObj></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#
+    );
+    let story = if inline {
+        format!("<w:p>{control}</w:p>")
+    } else {
+        control
+    };
+    let source = package(
+        "<w:p/>",
+        r#"xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w10="urn:schemas-microsoft-com:office:word""#,
+        Some(&story),
+    );
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    for (path, xml) in &mut parts {
+        let replacement = match path.as_str() {
+            "[Content_Types].xml" => Some((
+                "</Types>",
+                r#"<Default Extension="png" ContentType="image/png"/></Types>"#,
+            )),
+            "word/document.xml" => Some((
+                "</w:sectPr>",
+                r#"<w:footerReference w:type="default" r:id="footer"/></w:sectPr>"#,
+            )),
+            _ => None,
+        };
+        if let Some((from, to)) = replacement {
+            *xml = String::from_utf8(xml.clone())
+                .unwrap()
+                .replace(from, to)
+                .into_bytes();
+        }
+    }
+    for part in ["header1", "footer1"] {
+        parts.push((
+            format!("word/_rels/{part}.xml.rels"),
+            format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{R}/image" Target="media/watermark.png"/></Relationships>"#).into_bytes(),
+        ));
+    }
+    parts.push((
+        "word/media/watermark.png".to_owned(),
+        base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap(),
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn assert_watermark_relationship(bytes: &[u8], part: &str) {
+    python_check(
+        bytes,
+        &format!(
+            "root=E.fromstring(z.read('word/{part}.xml'))\npict=next(root.iter('{{{W}}}pict'))\nimage=next(pict.iter('{{urn:schemas-microsoft-com:vml}}imagedata'))\nrid=image.attrib['{{{R}}}id']\nassert rid=='rId1',rid\nrels=E.fromstring(z.read('word/_rels/{part}.xml.rels'))\nrel=next(r for r in rels if r.attrib['Id']==rid)\nassert rel.attrib['Type']=='{R}/image'\nassert rel.attrib['Target']=='media/watermark.png'\nassert z.read('word/'+rel.attrib['Target'])"
+        ),
+    );
+}
+
+fn assert_footer_picture_watermark_repack(inline: bool) {
+    let original = picture_watermark_package(inline);
+    let parsed = parse_docx_s9_wire(&original, S9ParseOptions::default()).unwrap();
+    let footer = &parsed.document.package.footer_entries.as_ref().unwrap()[0].1;
+    assert!(footer.watermark.is_none());
+    let content = serde_json::to_string(&footer.content).unwrap();
+    assert!(content.contains(r#""type":"opaqueDrawing""#));
+    assert!(content.contains("WordPictureWatermark123"));
+    let saved = roundtrip(&original);
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let xml = &parts
+        .iter()
+        .find(|(path, _)| path == "word/footer1.xml")
+        .unwrap()
+        .1;
+    let xml = std::str::from_utf8(xml).unwrap();
+    assert_eq!(xml.matches("<w:pict").count(), 1);
+    assert_eq!(xml.matches(r#"id="WordPictureWatermark123""#).count(), 1);
+    assert!(xml.contains(r#"<v:shapetype id="_x0000_t75""#));
+    assert!(xml.contains(r#"<w10:wrap anchorx="margin" anchory="margin"/>"#));
+    assert_watermark_relationship(&saved, "footer1");
+}
+
+#[test]
+fn footer_block_sdt_picture_watermark_survives_repack() {
+    assert_footer_picture_watermark_repack(false);
+}
+
+#[test]
+fn footer_inline_sdt_picture_watermark_survives_repack() {
+    assert_footer_picture_watermark_repack(true);
+}
+
+#[test]
+fn header_picture_watermark_is_extracted_and_saved_once() {
+    for inline in [false, true] {
+        let original = picture_watermark_package(inline);
+        let parsed = parse_docx_s9_wire(&original, S9ParseOptions::default()).unwrap();
+        let header = &parsed.document.package.header_entries.as_ref().unwrap()[0].1;
+        assert!(matches!(
+            header.watermark.as_ref(),
+            Some(docx_parse::vml::Watermark::Picture { .. })
+        ));
+        assert!(
+            !serde_json::to_string(&header.content)
+                .unwrap()
+                .contains("WordPictureWatermark123")
+        );
+        let saved = roundtrip(&original);
+        let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        let xml = &parts
+            .iter()
+            .find(|(path, _)| path == "word/header1.xml")
+            .unwrap()
+            .1;
+        let xml = std::str::from_utf8(xml).unwrap();
+        assert_eq!(xml.matches("<w:pict").count(), 1);
+        assert_eq!(xml.matches("WordPictureWatermark").count(), 1);
+        assert_watermark_relationship(&saved, "header1");
+    }
 }
 
 #[test]
