@@ -9,6 +9,7 @@ import { displayPositionToYrsLoc } from './inputPositionMap';
 import { commandSelectionRange, readCommandSelection, resolveCommandSelection } from './residentCommandAnchors';
 import { cellSelectionHeadPosition, resolvePointerCellRange, resolveShiftArrowCellRange } from './residentCommandTableSelection';
 import type { YrsLoc, YrsStoryRange, YrsTableRange } from './index';
+import type { YrsPositionProjection } from './yrsPositionProjection';
 import type {
   DocxCommandApplyContext,
   DocxCommandIntent,
@@ -51,7 +52,7 @@ export type ResolveDocxSelectionIntentResult = {
 interface SelectionReads {
   version: string;
   indexes: Map<string, DisplayPositionIndex>;
-  positions: Map<string, Array<{ from: number; to: number; at: YrsLoc; length: number }>>;
+  positions: Map<string, Array<{ from: number; to: number; at: YrsLoc; length: number; controls?: InlineControls }>>;
   roots: Map<string, string>;
   parts: Map<string, number>;
   paragraphs: Map<string, {
@@ -119,6 +120,32 @@ function paragraphText(reads: SelectionReads, engine: DocxWorkerCommandEngine, a
   ).join('');
 }
 
+/** Inline controls of a paragraph's content as `[display start, display units]`, in order. */
+type InlineControls = ReadonlyArray<readonly [number, number]>;
+
+function inlineControlsAt(projection: Pick<YrsPositionProjection, 'nodeAt'>, contentStart: number, length: number): InlineControls {
+  const controls: Array<readonly [number, number]> = [];
+  for (let display = 0; display < length;) {
+    const node = projection.nodeAt(contentStart + display);
+    if (node?.kind === 'sdt' && node.nodeSize > 0) {
+      controls.push([display, node.nodeSize]);
+      display += node.nodeSize;
+    } else display++;
+  }
+  return controls;
+}
+
+/** Story units of a paragraph's content before display units `display` of it; inside a control, the edge on the side of its midpoint. */
+function inlineStoryOffset(display: number, controls: InlineControls): number {
+  let expanded = 0;
+  for (const [start, size] of controls) {
+    if (display <= start) break;
+    if (display < start + size) return start - expanded + (display - start < start + size - display ? 0 : 1);
+    expanded += size - 1;
+  }
+  return display - expanded;
+}
+
 function locationAt(reads: SelectionReads, engine: DocxWorkerCommandEngine, root: string, position: number): YrsLoc | null {
   const index = indexFor(reads, engine, root);
   const projection = index.projection(root);
@@ -137,9 +164,13 @@ function locationAt(reads: SelectionReads, engine: DocxWorkerCommandEngine, root
         const ordinal = paragraphs.indices.get(paraId);
         if (ordinal === undefined) throw new Error('Projected selection lacks paragraph');
         const length = node.nodeSize - 2;
-        const leading = paragraphs.spans[ordinal]!.length - length;
+        const boundary = projection.blockBoundaryAt(from);
+        const blocks = !boundary ? 0 : boundary.story === node.story && boundary.paraId === paraId ? boundary.offset : null;
+        const controls = blocks !== null && paragraphs.spans[ordinal]!.length - blocks === length
+          ? [] : inlineControlsAt(projection, from + 1, length);
+        const leading = paragraphs.spans[ordinal]!.length - inlineStoryOffset(length, controls);
         positions.push({ from, to: from, at: { story: node.story, paraId, offset: Math.max(0, leading - 1) }, length: 0 });
-        positions.push({ from: from + 1, to: from + node.nodeSize - 1, at: { story: node.story, paraId, offset: leading }, length });
+        positions.push({ from: from + 1, to: from + node.nodeSize - 1, at: { story: node.story, paraId, offset: leading }, length, controls });
         reads.roots.set(node.story, root);
         from += node.nodeSize;
       } else {
@@ -160,8 +191,9 @@ function locationAt(reads: SelectionReads, engine: DocxWorkerCommandEngine, root
     else high = middle;
   }
   const entry = positions[low - 1];
-  return entry && bounded <= entry.to
-    ? { ...entry.at, offset: entry.at.offset + Math.min(entry.length, bounded - entry.from) } : null;
+  if (!entry || bounded > entry.to) return null;
+  const display = Math.min(entry.length, bounded - entry.from);
+  return { ...entry.at, offset: entry.at.offset + (entry.controls ? inlineStoryOffset(display, entry.controls) : display) };
 }
 
 function scopedList(list: DisplayList, root: string, pageIndex?: number): DisplayList {
