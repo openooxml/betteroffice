@@ -265,6 +265,7 @@ mod tests {
     fn paint(crop: ImageCrop, clip: Option<xlsx_render::Rect>, images: &ImageMap) -> Pixmap {
         let list = DisplayList {
             truncated: false,
+            conditional_pending: 0,
             width: 40.0,
             height: 20.0,
             commands: vec![DrawCmd::Image {

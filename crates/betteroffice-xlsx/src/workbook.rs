@@ -81,6 +81,7 @@ use crate::authority::{
     WorkbookStructure, is_collaborative_local_layout_op, is_structural_op,
     validate_hyperlink_edit_baseline,
 };
+use crate::conditional::Budget;
 use crate::move_range::{move_range_ops, preserved_move_unsupported_part};
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
@@ -3300,6 +3301,26 @@ impl Workbook {
     /// display list for `sheet` with ghost pairs for pending proposals; a
     /// proposal cell whose base drifted paints its committed text instead.
     pub fn display_list_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<DisplayList> {
+        self.display_list_within(sheet, viewport, Budget::Complete)
+    }
+
+    /// [`Self::display_list_for`] for a frame on screen: conditional formats
+    /// spend one frame's budget, and the cells it leaves undecided paint
+    /// without them and count in `conditional_pending` until a later frame.
+    pub fn display_list_frame_for(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+    ) -> Result<DisplayList> {
+        self.display_list_within(sheet, viewport, Budget::Frame)
+    }
+
+    fn display_list_within(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+        budget: Budget,
+    ) -> Result<DisplayList> {
         let sheet_ref = self.sheet(sheet)?;
         validate_viewport(viewport)?;
         let geometry = self.sheet_geometry(sheet)?;
@@ -3341,7 +3362,8 @@ impl Workbook {
         }
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
         let owner = sheet_ref.name.clone();
-        build_display_list_with_geometry(
+        let mut pending = 0;
+        let mut display_list = build_display_list_with_geometry(
             &self.model,
             sheet,
             viewport,
@@ -3350,9 +3372,14 @@ impl Workbook {
             Some(MAX_DISPLAY_CELLS),
             &self.sheet_pictures(sheet),
             |chart| self.resolve_chart_space(&owner, chart),
-            |rows, cols| self.conditional_effects(sheet, rows, cols),
-        )
-        .map_err(Error::from)
+            |rows, cols| {
+                let (formats, undecided) = self.conditional_effects(sheet, rows, cols, budget);
+                pending = undecided;
+                formats
+            },
+        )?;
+        display_list.conditional_pending = pending;
+        Ok(display_list)
     }
 
     /// The chart under a viewport-local point on the active sheet, resolved
@@ -3678,7 +3705,7 @@ impl Workbook {
             None,
             &self.sheet_pictures(sheet),
             |chart| self.resolve_chart_space(&owner, chart),
-            |rows, cols| self.conditional_effects(sheet, rows, cols),
+            |rows, cols| self.conditional_effects(sheet, rows, cols, Budget::Complete).0,
         )?;
         let display_list = if options.scale == 1.0 {
             display_list
@@ -6472,21 +6499,39 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
 }
 
 impl Workbook {
-    /// Resolves a chart against `owner`, revalidating its refresh value per epoch.
+    /// The conditional-format effects on the `rows` by `cols` cells of
+    /// `sheet`, and how many of them `budget` left undecided.
     fn conditional_effects(
         &self,
         sheet: SheetId,
         rows: &[std::ops::Range<u32>],
         cols: &[std::ops::Range<u32>],
-    ) -> xlsx_render::CellFormats {
-        let rules = self
-            .conditional_cache
+        budget: Budget,
+    ) -> (xlsx_render::CellFormats, u32) {
+        self.conditional_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .rules(self.model_epoch, &self.model, sheet);
-        crate::conditional::cell_formats(&self.model, sheet, &rules, rows, cols)
+            .effects(self.model_epoch, &self.model, sheet, rows, cols, budget)
     }
 
+    /// Sets the evaluation one frame on screen spends on conditional formats.
+    #[doc(hidden)]
+    pub fn set_conditional_budget(&self, visits: u64) {
+        self.conditional_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_budget(visits);
+    }
+
+    #[doc(hidden)]
+    pub fn conditional_stats(&self) -> crate::ConditionalStats {
+        self.conditional_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stats()
+    }
+
+    /// Resolves a chart against `owner`, revalidating its refresh value per epoch.
     fn resolve_chart_space(
         &self,
         owner: &str,

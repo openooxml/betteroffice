@@ -20,6 +20,7 @@ import {
 import type { XlsxPngTarget } from '../wasm/pngTarget';
 import { workbookPngFonts } from '../wasm/pngDisplayList';
 import { localNowSerial } from './calculationClock';
+import { settledDisplayListJson } from './settledFrame';
 import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import { isWorkbookCommandFrameRequest, WorkbookCommandRefusal } from './commandProtocol';
@@ -284,7 +285,7 @@ export function createWorkbookSessionHost(
           const result = applyWorkbookReplayOp(speculative, op);
           if (workbookReplayRefused(result)) throw new Error(`Preview refused: ${JSON.stringify(result)}`);
         }
-        const buffer = encoder.encode(workbookDisplayListJson(speculative, viewport, sheet)).buffer;
+        const buffer = encoder.encode(settledDisplayListJson(() => workbookDisplayListJson(speculative, viewport, sheet))).buffer;
         return transferable({ displayList: buffer, version: speculative.version(), epoch: 0,
           sequence, sheet, viewport, mergedRanges: speculative.visibleMergedRanges(sheet, viewport) }, [buffer]);
       } finally { speculative.dispose(); }

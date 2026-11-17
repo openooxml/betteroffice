@@ -86,7 +86,7 @@ const GHOST_FIT_EPSILON_PX: f32 = 1e-3;
 
 /// Conditional-format effects by `(row, col)`, painted over the cells' own
 /// fill, font color, bold and italic.
-pub type CellFormats = BTreeMap<(u32, u32), DifferentialFormat>;
+pub type CellFormats = BTreeMap<(u32, u32), Arc<DifferentialFormat>>;
 
 /// a pending edit rendered as a ghost pair in place of the cell's committed
 /// text: `old_text` struck in red, `new_text` in green.
@@ -786,6 +786,7 @@ where
             hyperlinks: Vec::new(),
             charts: Vec::new(),
             truncated: false,
+            conditional_pending: 0,
         });
     };
 
@@ -1358,6 +1359,7 @@ where
         hyperlinks,
         charts,
         truncated: rows.truncated,
+        conditional_pending: 0,
     })
 }
 

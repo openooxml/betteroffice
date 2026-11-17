@@ -559,7 +559,7 @@ impl Session {
             .map_err(|error| format!("bad viewport: {error}"))?;
         let display_list = self
             .workbook
-            .display_list_for(SheetId(sheet), &viewport)
+            .display_list_frame_for(SheetId(sheet), &viewport)
             .map_err(display_error)?;
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
     }
@@ -576,7 +576,7 @@ impl Session {
         let started = now();
         let display_list = self
             .workbook
-            .display_list(&viewport)
+            .display_list_frame_for(self.workbook.active_sheet(), &viewport)
             .map_err(display_error)?;
         let built = now();
         let json = serde_json::to_string(&display_list).map_err(|error| error.to_string())?;

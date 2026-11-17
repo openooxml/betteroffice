@@ -27,6 +27,8 @@ pub mod fuzzing {
     pub use crate::workbook::recovery::decode as recovery_decode;
 }
 
+#[doc(hidden)]
+pub use conditional::{CONDITIONAL_FRAME_BUDGET, CONDITIONAL_RESULT_CAP, ConditionalStats};
 pub use error::Error;
 pub use snapshot::{
     HydratedWorkbook, SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult,

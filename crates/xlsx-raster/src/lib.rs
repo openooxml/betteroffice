@@ -946,6 +946,7 @@ mod tests {
     fn renders_png_with_magic_bytes() {
         let dl = DisplayList {
             truncated: false,
+            conditional_pending: 0,
             width: 40.0,
             height: 20.0,
             commands: vec![
@@ -1022,6 +1023,7 @@ mod tests {
         };
         let dl = DisplayList {
             truncated: false,
+            conditional_pending: 0,
             width: 30.0,
             height: 120.0,
             commands: vec![DrawCmd::Text {
@@ -1085,6 +1087,7 @@ mod tests {
     ) -> DisplayList {
         DisplayList {
             truncated: false,
+            conditional_pending: 0,
             width: cell.x + cell.w,
             height: cell.y + cell.h,
             commands: vec![DrawCmd::Text {
@@ -1416,6 +1419,7 @@ mod tests {
     fn rejects_malformed_color() {
         let dl = DisplayList {
             truncated: false,
+            conditional_pending: 0,
             width: 10.0,
             height: 10.0,
             commands: vec![DrawCmd::FillRect {
@@ -1471,6 +1475,7 @@ mod tests {
     fn page(width: f32, height: f32, commands: Vec<DrawCmd>) -> DisplayList {
         DisplayList {
             truncated: false,
+            conditional_pending: 0,
             width,
             height,
             commands,

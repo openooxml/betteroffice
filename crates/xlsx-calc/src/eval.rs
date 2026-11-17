@@ -441,8 +441,8 @@ impl<'a> EvalContext<'a> {
         result
     }
 
-    /// whether `consume_cells(count)` would be granted; charges nothing.
-    pub(crate) fn remaining_cells(&self) -> u64 {
+    /// cell visits this evaluation may still make.
+    pub fn remaining_cells(&self) -> u64 {
         self.remaining_cell_visits.get()
     }
 
@@ -523,8 +523,27 @@ impl<'a> EvalContext<'a> {
         ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    pub(crate) fn exhausted(&self) -> bool {
+    /// whether this evaluation was refused budget.
+    pub fn exhausted(&self) -> bool {
         self.exhausted.get()
+    }
+
+    /// readies this context for another formula: a fresh budget and no state
+    /// left from the last one, keeping the criteria indexes it built.
+    pub fn restart(&self) {
+        self.random_state.set(None);
+        self.remaining_cell_visits.set(MAX_EVALUATION_CELL_VISITS);
+        self.remaining_text_bytes.set(MAX_EVALUATION_TEXT_BYTES);
+        self.exhausted.set(false);
+        self.unhandled_budget_errors.set(0);
+        self.unsupported_functions.set(0);
+        self.uncomputable.borrow_mut().clear();
+        self.other_workbook.set(false);
+        self.defined_name_stack.borrow_mut().clear();
+        *self.defined_name_values.borrow_mut() = DefinedNameValues::default();
+        self.array_depth.set(0);
+        self.bindings.borrow_mut().clear();
+        self.lambda_depth.set(0);
     }
 
     /// `#NUM!`, recorded as a budget error, once this evaluation has been
