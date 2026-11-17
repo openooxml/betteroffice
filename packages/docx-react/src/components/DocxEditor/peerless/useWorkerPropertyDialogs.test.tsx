@@ -10,6 +10,7 @@ import {
   useWorkerPropertyDialogs,
 } from './useWorkerPropertyDialogs';
 import type { WorkerShellController } from './workerProperties';
+import { useWorkerRulerControls } from './workerPropertyControls';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -35,6 +36,72 @@ function fixture() {
   const hook = renderHook(() => useWorkerPropertyDialogs(controller, {}));
   return { hook, applyQuery, selection, readAt, controller, range, submit };
 }
+
+type Selection = { anchor: { story: string; paraId: string; offset: number }; focus: { story: string; paraId: string; offset: number } };
+const at = (paraId: string, from: number, toPara = paraId, to = from): Selection =>
+  ({ anchor: { story: 'body', paraId, offset: from }, focus: { story: 'body', paraId: toPara, offset: to } });
+
+function selectionFixture() {
+  const listeners = new Set<() => void>();
+  let state = { status: 'ready', view: { identity: { session: 's', incarnation: 1, epoch: 1 }, version: 1, throughSeq: 1,
+    workerSelection: at('p0', 0), geometry: null, editState: undefined } };
+  const query = mock(async (request: { kind: string }) => ({ version: 'native', selection: state.view.workerSelection,
+    value: request.kind === 'sectionProperties' ? { sections: [], paragraphs: [] }
+      : { kind: 'object', handle: 'picture', properties: { wrapType: 'inline' } } }));
+  const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
+  const controller = { subscribe, getSnapshot: () => state, subscribeShell: subscribe, getShellSnapshot: () => state, query,
+    environment: () => ({ readOnly: false, mode: 'editing' }),
+    ref: { focus() {}, flushPendingInput: async () => {}, getCurrentPage: () => 1 } } as unknown as WorkerShellController;
+  const hook = renderHook(({ dragging }: { dragging: boolean }) => ({
+    dialogs: useWorkerPropertyDialogs(controller, {}, dragging),
+    ruler: useWorkerRulerControls(controller, undefined, true, dragging),
+  }), { initialProps: { dragging: false } });
+  const select = async (selection: Selection) => {
+    await act(async () => {
+      state = { ...state, view: { ...state.view, throughSeq: state.view.throughSeq + 1, workerSelection: selection } };
+      for (const listener of listeners) listener();
+    });
+  };
+  const reads = (kind: string) => query.mock.calls.filter(([request]) => request.kind === kind).length;
+  return { hook, select, reads };
+}
+
+test('a pointer drag issues no selection-keyed reads until pointer-up, then one each', async () => {
+  const { hook, select, reads } = selectionFixture();
+  await act(async () => {});
+  const properties = reads('properties');
+  const ruler = reads('sectionProperties');
+  hook.rerender({ dragging: true });
+  for (let index = 1; index <= 6; index++) await select(at('p0', 0, `p${index}`, 2));
+  await select(at('p7', 3, 'p7', 4));
+  expect(reads('properties') - properties).toBe(0);
+  expect(reads('sectionProperties') - ruler).toBe(0);
+  hook.rerender({ dragging: false });
+  await act(async () => {});
+  expect(reads('properties') - properties).toBe(1);
+  expect(reads('sectionProperties') - ruler).toBe(1);
+  expect(hook.result.current.dialogs.imagePropertiesAvailable).toBe(true);
+});
+
+test('keyboard selection keeps re-reading the ruler for each change and never reads text as an object', async () => {
+  const { select, reads } = selectionFixture();
+  await act(async () => {});
+  const properties = reads('properties');
+  const ruler = reads('sectionProperties');
+  for (let index = 1; index <= 5; index++) await select(at('p0', 0, `p${index}`, 0));
+  expect(reads('sectionProperties') - ruler).toBe(5);
+  expect(reads('properties') - properties).toBe(0);
+});
+
+test('clicking an object still reads its properties', async () => {
+  const { hook, select, reads } = selectionFixture();
+  await act(async () => {});
+  const properties = reads('properties');
+  await select(at('p0', 3, 'p0', 4));
+  await act(async () => {});
+  expect(reads('properties') - properties).toBe(1);
+  expect(hook.result.current.dialogs.imageState).toEqual({ wrap: 'inline' });
+});
 
 test('caret link opens expanded, editable, and submits display text', async () => {
   const { hook, applyQuery, selection, readAt, range, submit } = fixture();

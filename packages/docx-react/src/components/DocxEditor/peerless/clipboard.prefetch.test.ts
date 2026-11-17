@@ -6,7 +6,7 @@ import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection, Y
 const range: DocxCommandSelection = { anchor: { story: 'body', paraId: 'a', offset: 1 }, focus: { story: 'body', paraId: 'a', offset: 4 } };
 const fragment = { paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'text', text: 'bcd' }, { kind: 'pilcrow' }] }] }] }] }] } as DocxClipboardFragment;
 
-function fixture(slice: DocxClipboardSlice = { text: 'bcd', fragment }) {
+function fixture(slice: DocxClipboardSlice = { text: 'bcd', fragment }, held?: () => boolean) {
   const listeners = new Set<() => void>();
   let state = { identity: { session: 'clipboard', incarnation: 1, epoch: 1 }, version: 1, workerSelection: null as DocxCommandSelection | null, editState: { readOnly: false } };
   let tail: unknown;
@@ -19,7 +19,7 @@ function fixture(slice: DocxClipboardSlice = { text: 'bcd', fragment }) {
   const publish = (next: Partial<typeof state>) => { state = { ...state, ...next }; for (const listener of listeners) listener(); };
   const readClipboardSlice = mock(async (_selection: DocxCommandSelection, _cells?: YrsTableRange | null) => slice);
   const readSelection = mock(async () => ({ paraId: 'a', selectedText: 'bcd', paragraphText: 'abcdef', before: 'a', after: 'ef' }));
-  const prefetch = createClipboardPrefetch({ binding, isCurrent: () => true, readSelection, readClipboardSlice });
+  const prefetch = createClipboardPrefetch({ binding, isCurrent: () => true, readSelection, readClipboardSlice, held });
   const setPending = (value: unknown) => { tail = value; };
   return { binding, publish, readClipboardSlice, readSelection, prefetch, submit, setPending };
 }
@@ -124,6 +124,30 @@ test('prefetch starts without a quiet timer and coalesces selection changes duri
   for (let i = 0; i < 40; i++) await Promise.resolve();
   expect(f.readClipboardSlice).toHaveBeenCalledTimes(2);
   expect(f.prefetch.take()?.selection.focus.offset).toBe(19);
+  f.prefetch.dispose();
+});
+
+test('a pointer drag reads no clipboard slice until pointer-up, then one; keyboard selection stays live', async () => {
+  let dragging = false;
+  const f = fixture(undefined, () => dragging);
+  const extend = async (offset: number) => {
+    f.publish({ workerSelection: { ...range, focus: { ...range.focus, offset } } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+  };
+  dragging = true;
+  for (let offset = 2; offset <= 9; offset++) await extend(offset);
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(0);
+  expect(f.prefetch.take()).toBeNull();
+  dragging = false;
+  f.prefetch.resume();
+  expect((await settled(f.prefetch))?.selection.focus.offset).toBe(9);
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(1);
+  for (let offset = 10; offset <= 12; offset++) {
+    await extend(offset);
+    for (let turn = 0; turn < 100 && f.prefetch.take()?.selection.focus.offset !== offset; turn += 1) await new Promise(resolve => setTimeout(resolve, 5));
+    expect(f.prefetch.take()?.selection.focus.offset).toBe(offset);
+  }
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(4);
   f.prefetch.dispose();
 });
 
