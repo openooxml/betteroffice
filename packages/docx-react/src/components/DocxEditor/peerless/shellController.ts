@@ -129,6 +129,7 @@ export function createPeerlessShellController(initial: Options) {
   let revisions: { binding: PeerlessEditSessionBinding; key: string; value: WorkerRevisionState } | null = null;
   let documentKey: unknown;
   let generation = 0;
+  let nativeProbe: { binding: PeerlessEditSessionBinding; identity: PeerlessViewSnapshot['identity']; version: number; token: Promise<string> } | null = null;
   let borderPen: { style: string; size: number; color: { rgb: string } } = { style: 'single', size: 4, color: { rgb: '000000' } };
   const syncBorderPen = () => {
     const cellColor = snapshot.view?.editState?.tableContext?.cellBorderColor;
@@ -160,7 +161,7 @@ export function createPeerlessShellController(initial: Options) {
   const reset = (status: typeof snapshot.status, error: Error | null = null) => {
     const selected = snapshot.view?.workerSelection;
     fontRevision = 0; fontFamilies = []; metadata = null; revisions = null; firstPainted = false; workerMemory = null;
-    unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null;
+    unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null; nativeProbe = null;
     batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false }; publish();
     if (selected) selectionChanged(null);
   };
@@ -381,15 +382,37 @@ export function createPeerlessShellController(initial: Options) {
     const current = ready();
     return settleCommand(current, current.commands.format(intent, { fence: true }));
   };
+  const nativeVersion = (current: PeerlessEditSessionBinding, view: PeerlessViewSnapshot) => {
+    const known = nativeProbe;
+    if (known && known.binding === current && known.version === view.version && sameIdentity(known.identity, view.identity)) return { probe: known, cached: true };
+    const probe = { binding: current, identity: { ...view.identity }, version: view.version,
+      token: options.read({ kind: 'readParagraphs', request: { view: 'accepted', paraIds: [] } }).then(native => native.version) };
+    nativeProbe = probe;
+    probe.token.catch(() => { if (nativeProbe === probe) nativeProbe = null; });
+    return { probe, cached: false };
+  };
   const query = async <K extends DocxDocumentRead['kind']>(request: DocxDocumentRead & { kind: K }): Promise<PeerlessWorkerQuery<K>> => {
     const current = await flush();
     const view = current.viewStore.getSnapshot();
-    const native = await options.read({ kind: 'readParagraphs', request: { view: 'accepted', paraIds: [] } });
-    if (current !== binding || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity) || view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
-    const value = await readAt<K>(request, native.version);
+    const moved = () => current !== binding || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity) || view.throughSeq !== current.viewStore.getSnapshot().throughSeq;
+    const pinned = async () => {
+      const { probe, cached } = nativeVersion(current, view);
+      const token = await probe.token;
+      if (moved()) throw new Error('Worker read was superseded');
+      return { probe, cached, token };
+    };
+    const first = await pinned();
+    let token = first.token;
+    let value: DocxDocumentReadValues[K];
+    try { value = await readAt<K>(request, token); } catch (error) {
+      if (!first.cached || !(error instanceof WorkerReadSupersededError) || moved() || view.version !== current.viewStore.getSnapshot().version) throw error;
+      if (nativeProbe === first.probe) nativeProbe = null;
+      token = (await pinned()).token;
+      value = await readAt<K>(request, token);
+    }
     if (view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
     if (request.kind === 'reviewSnapshot') rememberComments(current, view, (value as DocxDocumentReadValues['reviewSnapshot'])?.uiComments);
-    const result = { version: native.version, value, selection: structuredClone(view.workerSelection) };
+    const result = { version: token, value, selection: structuredClone(view.workerSelection) };
     queryOrigins.set(result, { binding: current, identity: view.identity, version: view.version });
     return result;
   };
