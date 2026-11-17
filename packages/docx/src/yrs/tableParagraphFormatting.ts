@@ -98,7 +98,8 @@ export function tableCellStyleProperties(
       const border = sides[side];
       if (!border) continue;
       const cleared = border.style === 'nil' || border.style === 'none';
-      if (!(band && onOuter && cleared)) borders[edge] = border;
+      if (band && onOuter && cleared) delete borders[edge];
+      else borders[edge] = border;
     }
   }
   const hasBorders = Object.keys(borders).length > 0;

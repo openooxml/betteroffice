@@ -1612,7 +1612,7 @@ function projectRow(
   const columnWidths = table.columnWidths;
   const totalWidth = columnWidths?.reduce((sum, width) => sum + width, 0) ?? 0;
   const totalColumns =
-    columnWidths?.length ??
+    columnWidths?.length ||
     Math.max(
       0,
       ...table.rows.map((candidate) =>

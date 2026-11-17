@@ -5337,7 +5337,9 @@ fn table_cell_style_properties(
                     continue;
                 };
                 let cleared = matches!(string(field(Some(border), "style")), Some("nil" | "none"));
-                if !(band && on_outer && cleared) {
+                if band && on_outer && cleared {
+                    borders.remove(edge);
+                } else {
                     borders.insert(edge.to_owned(), border.clone());
                 }
             }
