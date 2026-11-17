@@ -328,6 +328,10 @@ export interface DocAttrs {
         date: string;
         revisionId: string;
         kind: 'ins' | 'del' | 'format';
+        /** Word's paint color for the revision's marks. */
+        color?: string;
+        /** The revision is half of a move. */
+        isMove?: boolean;
     };
     /** Synthetic numbering glyph for the first line of a list paragraph. */
     listMarker?: boolean;
