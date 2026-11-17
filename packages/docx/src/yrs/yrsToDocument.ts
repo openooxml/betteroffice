@@ -502,7 +502,9 @@ const ON_OFF_RUN_PROPERTIES = new Set<string>([
   'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl', 'boldCs', 'italicCs',
 ]);
 
-const SOURCE_RUN_PROPERTIES = ['bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily'] as const;
+const SOURCE_RUN_PROPERTIES = [
+  'bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily', 'snapToGrid',
+] as const;
 
 const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
 
@@ -556,7 +558,9 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
     if (key === 'fontFamily') continue;
     const value = source?.[key];
     if (value === undefined) continue;
-    const live = ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
+    if (key === 'snapToGrid' && value !== false) continue;
+    const live = key === 'snapToGrid' ? attributes.snapToGrid
+      : ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
     if ((key === 'language' && attributes.language === undefined) || sameJson(value, live) ||
       ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined)) {
       result[key] = value;
@@ -1321,7 +1325,10 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
     child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? { type: 'run', content: [] };
   else if (item.kind === 'text') child = createTextRun(item.text, item.attributes, format);
-  else child = { type: 'run', content: [] };
+  else
+    child =
+      (inlineContentForItem(item, recovery, format) as TrackedWrapper['content'][number] | null) ??
+      { type: 'run', content: [] };
 
   if (item.kind === 'embed' && item.embedKind === 'chart' && child.type === 'run' && child.content.length === 0) return null;
   if (child.type === 'run') Object.assign(child, runPropertyChanges(item.attributes, format));

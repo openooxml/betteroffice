@@ -282,8 +282,28 @@ impl EditSessionCore {
     }
 
     pub fn content_control_targets_json(&self) -> EngineResult<String> {
-        let txn = self.engine.doc().yrs_doc().transact();
-        let inventory = crate::content_controls::Inventory::build(self.engine.doc(), &txn)
+        let doc = self.engine.doc();
+        let txn = doc.yrs_doc().transact();
+        // Read under `txn`, which holds commits off: what the answer is built from.
+        let (revision, structure) = {
+            let revisions = doc.story_revisions.lock().unwrap();
+            (revisions.current, revisions.structure)
+        };
+        let source = doc.source_metadata();
+        if let Some(cached) = self.control_targets.borrow_mut().as_mut()
+            && cached.structure == structure
+            && same_source(&cached.source, &source)
+            && doc
+                .stories_changed_since(cached.revision)
+                .1
+                .iter()
+                .all(|story| !cached.reads.contains(story))
+        {
+            cached.revision = revision;
+            return Ok(cached.json.clone());
+        }
+        self.control_targets.replace(None);
+        let inventory = crate::content_controls::Inventory::build(doc, &txn)
             .map_err(|failure| EngineError::message(failure.message))?;
         drop(txn);
         let mut values = Vec::new();
@@ -305,7 +325,15 @@ impl EditSessionCore {
                 .ok_or_else(|| EngineError::message("control could not be made sticky"))?;
             values.push(serde_json::json!({"control":record.control,"at":{"story":record.story,"index":raw,"encoded":encode_sticky(&position)}}));
         }
-        serde_json::to_string(&values).map_err(EngineError::message)
+        let json = serde_json::to_string(&values).map_err(EngineError::message)?;
+        self.control_targets.replace(Some(ControlTargets {
+            revision,
+            structure,
+            source,
+            reads: inventory.reads,
+            json: json.clone(),
+        }));
+        Ok(json)
     }
 
     pub fn repeat_content_control_at(
@@ -372,5 +400,26 @@ impl EditSessionCore {
             serde_json::from_str(options).map_err(EngineError::message)?;
         outcome_json(&self.engine.doc().find_content_controls(&query, &options))
             .map_err(EngineError::message)
+    }
+}
+
+/// A [`EditSessionCore::content_control_targets_json`] answer and what it read:
+/// it holds while the story structure and source are unchanged and no story
+/// its controls read was stamped since `revision`.
+pub(crate) struct ControlTargets {
+    revision: u64,
+    structure: u64,
+    source: Option<std::sync::Arc<crate::seed::SourceMetadata>>,
+    reads: std::collections::HashSet<String>,
+    json: String,
+}
+
+fn same_source(
+    left: &Option<std::sync::Arc<crate::seed::SourceMetadata>>,
+    right: &Option<std::sync::Arc<crate::seed::SourceMetadata>>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+        (left, right) => left.is_none() && right.is_none(),
     }
 }

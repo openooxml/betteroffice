@@ -1,5 +1,7 @@
 //! Table, row, cell, and table-property serializers.
 
+use std::collections::BTreeSet;
+
 use crate::borders::Borders;
 use crate::formatting::{
     CellMargins, FloatingTableProperties, TableCellFormatting, TableFormatting, TableLook,
@@ -38,9 +40,9 @@ pub fn serialize_table(
         writer.start_element("w:tblPr").end_element();
     }
     append_generated(&mut writer, &grid);
-    for row in &table.rows {
+    for (row, covered) in table.rows.iter().zip(covered_continuations(table)) {
         append_generated(&mut writer, &bookmarks(row.leading_bookmarks.as_deref())?);
-        append_generated(&mut writer, &serialize_table_row(row, context)?);
+        append_generated(&mut writer, &write_row(row, &covered, context)?);
     }
     append_generated(
         &mut writer,
@@ -48,6 +50,60 @@ pub fn serialize_table(
     );
     writer.end_element();
     Ok(writer.finish())
+}
+
+/// Per row, whether each cell continues a vertical merge restarted above its start column.
+fn covered_continuations(table: &Table) -> Vec<Vec<bool>> {
+    let mut active = BTreeSet::new();
+    table
+        .rows
+        .iter()
+        .map(|row| {
+            let mut column = row
+                .formatting
+                .as_ref()
+                .and_then(|formatting| formatting.grid_before)
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.0)
+                .clamp(0.0, f64::from(u16::MAX)) as usize;
+            let cells: Vec<_> = row
+                .cells
+                .iter()
+                .map(|cell| {
+                    let start = column;
+                    let formatting = cell.formatting.as_ref();
+                    let span = formatting.and_then(|formatting| formatting.grid_span);
+                    column = column.saturating_add(span.unwrap_or(1.0) as usize);
+                    let merge = formatting.and_then(|formatting| formatting.v_merge.as_deref());
+                    (start, merge)
+                })
+                .collect();
+            if !cells.is_empty()
+                && cells
+                    .iter()
+                    .all(|(start, merge)| *merge == Some("continue") && active.contains(start))
+            {
+                for (start, _) in &cells {
+                    active.remove(start);
+                }
+                return vec![false; cells.len()];
+            }
+            cells
+                .into_iter()
+                .map(|(start, merge)| match merge {
+                    Some("restart") => {
+                        active.insert(start);
+                        false
+                    }
+                    Some("continue") => active.contains(&start),
+                    _ => {
+                        active.remove(&start);
+                        false
+                    }
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Replays table-level bookmark boundaries, rejecting anything that is not one.
@@ -204,15 +260,24 @@ pub fn serialize_table_row(
     row: &TableRow,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    write_row(row, &[], context)
+}
+
+fn write_row(
+    row: &TableRow,
+    covered: &[bool],
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
     let properties = serialize_table_row_formatting(
         row.formatting.as_ref(),
         row.property_changes.as_deref(),
         row.structural_change.as_ref(),
     );
     let mut content = properties;
-    for cell in &row.cells {
+    for (index, cell) in row.cells.iter().enumerate() {
         content.push_str(&bookmarks(cell.leading_bookmarks.as_deref())?);
-        content.push_str(&serialize_table_cell(cell, context)?);
+        let covered = covered.get(index).copied().unwrap_or(false);
+        content.push_str(&write_cell(cell, covered, context)?);
     }
     content.push_str(&bookmarks(row.trailing_bookmarks.as_deref())?);
     let attributes = row_attributes(
@@ -286,6 +351,14 @@ pub fn serialize_table_cell(
     cell: &TableCell,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    write_cell(cell, false, context)
+}
+
+fn write_cell(
+    cell: &TableCell,
+    covered: bool,
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
     let properties = serialize_table_cell_formatting(
         cell.formatting.as_ref(),
         cell.property_changes.as_deref(),
@@ -294,9 +367,13 @@ pub fn serialize_table_cell(
     let mut writer = XmlWriter::with_capacity(512);
     writer.start_element("w:tc");
     append_generated(&mut writer, &properties);
-    for block in &cell.content {
+    context.vmerge_continuation += u32::from(covered);
+    let content = cell.content.iter().try_for_each(|block| {
         append_generated(&mut writer, &serialize_block_content(block, context)?);
-    }
+        Ok::<_, ParseError>(())
+    });
+    context.vmerge_continuation -= u32::from(covered);
+    content?;
     if cell.content.iter().all(crate::block::is_bookmark_block) {
         context.record_placeholder();
         writer.start_element("w:p").end_element();
@@ -833,6 +910,228 @@ mod tests {
             serialize_table_row_formatting(Some(&formatting), None, None),
             "<w:trPr><w:hidden/></w:trPr>"
         );
+    }
+
+    fn row_with_unplanned_cell_paragraph(merge: Option<&str>) -> TableRow {
+        let formatting = merge.map_or(
+            serde_json::Value::Null,
+            |merge| serde_json::json!({"vMerge": merge}),
+        );
+        serde_json::from_value(serde_json::json!({
+            "type": "tableRow",
+            "cells": [
+                {"type": "tableCell", "formatting": formatting, "content": [
+                    {"type": "paragraph", "sourceOrdinal": 7, "content": []}
+                ]},
+                {"type": "tableCell", "content": [
+                    {"type": "paragraph", "sourceOrdinal": 1, "content": []}
+                ]}
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn splice_conflict(row: &TableRow) -> bool {
+        let mut context = context();
+        context.begin_splice([1], None);
+        serialize_table_row(row, &mut context).unwrap();
+        context.end_splice().unwrap().conflict
+    }
+
+    type MergeRows<'a> = &'a [&'a [(u32, Option<&'a str>)]];
+
+    fn merge_table(rows: MergeRows<'_>) -> Table {
+        let mut ordinal = 0;
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|cells| {
+                let cells: Vec<_> = cells
+                    .iter()
+                    .map(|(span, merge)| {
+                        ordinal += 1;
+                        serde_json::json!({
+                            "type": "tableCell",
+                            "formatting": {"gridSpan": span, "vMerge": merge},
+                            "content": [
+                                {"type": "paragraph", "sourceOrdinal": ordinal, "content": []}
+                            ]
+                        })
+                    })
+                    .collect();
+                serde_json::json!({"type": "tableRow", "cells": cells})
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({"type": "table", "rows": rows})).unwrap()
+    }
+
+    /// For each cell, whether its paragraph left out of the plan keeps the splice.
+    fn exempt_cells(rows: MergeRows<'_>) -> Vec<Vec<bool>> {
+        let table = merge_table(rows);
+        let count: u32 = rows.iter().map(|cells| cells.len() as u32).sum();
+        let mut probed = 0;
+        rows.iter()
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(|_| {
+                        probed += 1;
+                        let mut context = context();
+                        context
+                            .begin_splice((1..=count).filter(|ordinal| *ordinal != probed), None);
+                        serialize_table(&table, &mut context).unwrap();
+                        !context.end_splice().unwrap().conflict
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_unplanned_paragraph_in_a_covered_merge_continuation_cell_keeps_the_splice() {
+        assert_eq!(
+            exempt_cells(&[
+                &[(1, Some("restart")), (1, None)],
+                &[(1, Some("continue")), (1, None)],
+            ]),
+            [[false, false], [true, false]]
+        );
+    }
+
+    #[test]
+    fn an_orphan_merge_continuation_in_the_first_row_conflicts() {
+        assert_eq!(
+            exempt_cells(&[&[(1, Some("continue")), (1, None)], &[(1, None), (1, None)],]),
+            [[false, false], [false, false]]
+        );
+    }
+
+    #[test]
+    fn a_merge_continuation_under_an_unmerged_cell_conflicts() {
+        assert_eq!(
+            exempt_cells(&[&[(1, None), (1, None)], &[(1, Some("continue")), (1, None)],]),
+            [[false, false], [false, false]]
+        );
+    }
+
+    #[test]
+    fn a_continuation_under_a_covered_continuation_keeps_the_splice() {
+        assert_eq!(
+            exempt_cells(&[
+                &[(1, Some("restart")), (1, None)],
+                &[(1, Some("continue")), (1, None)],
+                &[(1, Some("continue")), (1, None)],
+            ]),
+            [[false, false], [true, false], [true, false]]
+        );
+    }
+
+    #[test]
+    fn a_grid_span_shift_between_rows_decides_coverage_by_start_column() {
+        assert_eq!(
+            exempt_cells(&[
+                &[(1, None), (1, Some("restart")), (1, None)],
+                &[(2, None), (1, Some("continue"))],
+                &[(1, None), (1, Some("continue")), (1, None)],
+            ]),
+            vec![
+                vec![false, false, false],
+                vec![false, false],
+                vec![false, true, false],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_row_of_covered_merge_continuations_conflicts() {
+        assert_eq!(
+            exempt_cells(&[&[(2, Some("restart"))], &[(2, Some("continue"))]]),
+            [[false], [false]]
+        );
+    }
+
+    #[test]
+    fn an_unplanned_paragraph_outside_a_continuation_cell_still_conflicts() {
+        for merge in [None, Some("restart")] {
+            let row = row_with_unplanned_cell_paragraph(merge);
+            assert!(
+                splice_conflict(&row),
+                "no conflict for cell merge {merge:?}"
+            );
+        }
+        let paragraph: crate::paragraph::Paragraph = serde_json::from_value(
+            serde_json::json!({"type": "paragraph", "sourceOrdinal": 7, "content": []}),
+        )
+        .unwrap();
+        let mut context = context();
+        context.begin_splice([1], None);
+        super::super::paragraph::serialize_paragraph(&paragraph, &mut context).unwrap();
+        assert!(context.end_splice().unwrap().conflict);
+    }
+
+    fn row_with_cell(formatting: serde_json::Value, ordinals: &[u32]) -> TableRow {
+        let content: Vec<_> = ordinals
+            .iter()
+            .map(|ordinal| {
+                serde_json::json!({"type": "paragraph", "sourceOrdinal": ordinal, "content": []})
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "type": "tableRow",
+            "cells": [
+                {"type": "tableCell", "formatting": formatting, "content": content},
+                {"type": "tableCell", "content": [
+                    {"type": "paragraph", "sourceOrdinal": 1, "content": []}
+                ]}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_planned_paragraph_in_a_merge_continuation_cell_is_still_recorded() {
+        let row = row_with_cell(serde_json::json!({"vMerge": "continue"}), &[7]);
+        let mut context = context();
+        context.begin_splice([1, 7], None);
+        serialize_table_row(&row, &mut context).unwrap();
+        let recorded = context.end_splice().unwrap();
+        assert!(
+            !recorded.conflict,
+            "orphan continuation cell set the splice conflict"
+        );
+        assert!(
+            recorded.written.contains_key(&7),
+            "planned paragraph not recorded"
+        );
+        assert!(recorded.written.contains_key(&1));
+        assert_eq!(recorded.order, [Some(7), Some(1)]);
+    }
+
+    #[test]
+    fn an_unplanned_paragraph_in_a_horizontally_spanned_cell_still_conflicts() {
+        let row = row_with_cell(serde_json::json!({"gridSpan": 2}), &[7]);
+        assert!(splice_conflict(&row), "gridSpan cell was exempt");
+    }
+
+    #[test]
+    fn a_parsed_merge_restart_cell_is_not_exempt_from_the_conflict() {
+        let limits = crate::xml::ParseLimits::default();
+        let properties = crate::xml::parse_xml(
+            br#"<w:tcPr xmlns:w="w"><w:vMerge w:val="restart"/></w:tcPr>"#,
+            "table.xml",
+            &mut crate::xml::ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let mut row = row_with_cell(serde_json::Value::Null, &[7]);
+        row.cells[0].formatting =
+            crate::table::parse_document_table_cell_properties(properties.root());
+        assert_eq!(
+            row.cells[0]
+                .formatting
+                .as_ref()
+                .and_then(|formatting| formatting.v_merge.as_deref()),
+            Some("restart")
+        );
+        assert!(splice_conflict(&row), "restart cell was exempt");
     }
 
     #[test]

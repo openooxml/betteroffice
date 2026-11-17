@@ -445,6 +445,12 @@ impl XlsxDocument {
             .map_err(map_engine_error)
     }
 
+    /// the encoded bytes of the image an `image` draw command names.
+    #[wasm_bindgen(js_name = mediaBytes)]
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>, JsValue> {
+        self.inner.media_bytes(asset_id).map_err(map_engine_error)
+    }
+
     /// slide a chart by a pixel delta as one undo step.
     #[wasm_bindgen(js_name = moveChartJson)]
     pub fn move_chart_json(&mut self, args: &str) -> Result<String, JsValue> {

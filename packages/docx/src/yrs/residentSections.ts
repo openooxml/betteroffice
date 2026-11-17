@@ -59,12 +59,20 @@ export function sectionMarkKey(mark: unknown): string {
   return JSON.stringify(sorted(mark));
 }
 
-export function readSectionSnapshot(engine: ResidentEngineSession, base: Document, margins: Record<string, DocxSectionMargins>, seeded: ReadonlyMap<string, string>, nativeSections = false): ResidentSectionSnapshot {
+/** Limits a section snapshot's `paragraphs` to these paragraphs. */
+export type ResidentSectionParagraphs = readonly { story: string; paraId: string }[];
+
+export function readSectionSnapshot(engine: ResidentEngineSession, base: Document, margins: Record<string, DocxSectionMargins>, seeded: ReadonlyMap<string, string>, nativeSections = false, only?: ResidentSectionParagraphs): ResidentSectionSnapshot {
   const sections: ResidentSectionSnapshot['sections'] = [];
   const paragraphs: ResidentSectionSnapshot['paragraphs'] = [];
+  const wanted = only && new Set(only.map(({ story, paraId }) => `${story}\n${paraId}`));
+  const stories = only && new Set(['body', ...only.map(({ story }) => story)]);
   for (const story of engine.geometryReader.storyIds()) {
+    if (stories && !stories.has(story)) continue;
     for (const paragraph of engine.paragraphs(story)) {
-      paragraphs.push({ story, paraId: paragraph.paraId, tabs: nativeTabStops(paragraph.properties.tabs) });
+      if (!wanted || wanted.has(`${story}\n${paragraph.paraId}`)) {
+        paragraphs.push({ story, paraId: paragraph.paraId, tabs: nativeTabStops(paragraph.properties.tabs) });
+      }
       const properties = (paragraph.properties.sectPr ?? paragraph.properties._sectionProperties) as SectionProperties | undefined;
       if (story === 'body' && properties) {
         const source = !nativeSections && seeded.get(paragraph.paraId) === sectionMarkKey(properties)

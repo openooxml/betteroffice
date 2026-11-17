@@ -17,7 +17,9 @@ use std::ops::Range;
 
 use ooxml_drawingml::chart::{ChartSpace, ChartXml, parse_chart_space};
 use ooxml_drawingml::{
-    Theme as DrawingTheme, parse_color_value, resolve_color_value_to_hex_with_theme,
+    ColorTransform, ColorValue, Theme as DrawingTheme, parse_color_value,
+    resolve_color_value_alpha, resolve_color_value_to_hex_with_theme,
+    resolve_color_value_to_rgba_hex,
 };
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::numfmt::{builtin_format_code, format_value};
@@ -30,7 +32,10 @@ use xlsx_model::{
 
 use crate::package::PartContentType;
 use crate::tree::{Edit, Element, Part, Replacement, names_are_resolvable, parse_tree};
-use crate::xml::{find_part, format_code_text, resolve_part_path, xstring_attribute_value};
+use crate::xml::{
+    PartNames, find_part, format_code_text, resolve_part_name, resolve_part_path,
+    xstring_attribute_value,
+};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
@@ -529,6 +534,36 @@ impl<'a> ChartNode<'a> {
                 .collect(),
         }
     }
+
+    /// An `a:srgbClr`, `a:schemeClr`, `a:sysClr` or `a:prstClr` with its
+    /// transforms in document order.
+    fn color_value(&self) -> Option<ColorValue> {
+        let value = self.attribute(None, "val");
+        let mut color = match self.local_name() {
+            "srgbClr" => parse_color_value(value, None, None, None),
+            "schemeClr" => parse_color_value(None, value.map(scheme_slot), None, None),
+            "sysClr" => parse_color_value(
+                self.attribute(None, "lastClr").or(match value {
+                    Some("windowText") => Some("000000"),
+                    Some("window") => Some("FFFFFF"),
+                    _ => None,
+                }),
+                None,
+                None,
+                None,
+            ),
+            "prstClr" => parse_color_value(value.and_then(preset_color), None, None, None),
+            _ => return None,
+        };
+        color.transforms = self
+            .children
+            .iter()
+            .filter_map(|transform| {
+                ColorTransform::from_xml(transform.local_name(), transform.attribute(None, "val"))
+            })
+            .collect();
+        Some(color)
+    }
 }
 
 impl ChartXml for ChartNode<'_> {
@@ -548,26 +583,28 @@ impl ChartXml for ChartNode<'_> {
         self.element.text_content()
     }
 
+    /// `#RRGGBB`, or `#RRGGBBAA` when the colour is translucent.
     fn solid_fill_hex(&self) -> Option<String> {
-        let color = self
-            .children
-            .iter()
-            .find_map(|child| match child.local_name() {
-                "srgbClr" => Some(parse_color_value(
-                    child.attribute(None, "val"),
-                    None,
-                    None,
-                    None,
-                )),
-                "schemeClr" => Some(parse_color_value(
-                    None,
-                    child.attribute(None, "val").map(scheme_slot),
-                    None,
-                    None,
-                )),
-                _ => None,
-            })?;
-        resolve_color_value_to_hex_with_theme(Some(&color), Some(self.theme))
+        let color = self.children.iter().find_map(ChartNode::color_value)?;
+        if resolve_color_value_alpha(&color) < 1.0 {
+            resolve_color_value_to_rgba_hex(Some(&color), Some(self.theme))
+        } else {
+            resolve_color_value_to_hex_with_theme(Some(&color), Some(self.theme))
+        }
+    }
+}
+
+fn preset_color(name: &str) -> Option<&'static str> {
+    match name {
+        "black" => Some("000000"),
+        "white" => Some("FFFFFF"),
+        "red" => Some("FF0000"),
+        "green" => Some("008000"),
+        "blue" => Some("0000FF"),
+        "yellow" => Some("FFFF00"),
+        "cyan" => Some("00FFFF"),
+        "magenta" => Some("FF00FF"),
+        _ => None,
     }
 }
 
@@ -704,17 +741,12 @@ pub(crate) fn sheet_drawing_paths(
     sheet_path: &str,
 ) -> Result<Vec<String>, ParseError> {
     let sheet_dir = directory_of(sheet_path);
-    let mut paths: Vec<String> = Vec::new();
-    for (_, _, target) in parse_relationships(rels)?
+    Ok(parse_relationships(rels)?
         .iter()
         .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
-    {
-        let path = resolve_part_path(sheet_dir, target);
-        if !paths.contains(&path) {
-            paths.push(path);
-        }
-    }
-    Ok(paths)
+        .map(|(_, _, target)| resolve_part_name(sheet_dir, target))
+        .collect::<PartNames>()
+        .into_vec())
 }
 
 struct DrawingAnchor {

@@ -49,6 +49,8 @@ import {
   yrsTableSelectionRange,
 } from './yrsCommands';
 import { clipboardFragmentHtml, parseClipboardHtml } from './internals/clipboardHtml';
+import { cutRefusalFrom, DocxCutRefusedError } from './internals/cutRefused';
+import { toast } from 'sonner';
 import { InputOperationQueue } from './inputOperationQueue';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
 import { requestQueuedOpeningInput } from './internals/queuedOpeningInput';
@@ -188,6 +190,8 @@ export interface YrsInputProps {
   onCaretInputDispatched?(): void;
   /** Selection-only move or IME start (immediate swap to the DOM blink caret). */
   onCaretInterrupt?(): void;
+  /** A cut was refused because the clipboard cannot carry part of the selection; nothing was deleted. */
+  onCutRefused?(error: Error): void;
 }
 
 const BASE_STYLE: CSSProperties = {
@@ -355,6 +359,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     onCaretInput,
     onCaretInputDispatched,
     onCaretInterrupt,
+    onCutRefused,
   },
   ref
 ) {
@@ -1617,6 +1622,24 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     });
   }, [session]);
 
+  const notifyCutRefused = useCallback((error: DocxCutRefusedError): void => {
+    toast(t('editor.cutRefused'));
+    onCutRefused?.(error);
+  }, [onCutRefused, t]);
+
+  const refuseCut = useCallback((): boolean => {
+    let refusal: DocxCutRefusedError | null;
+    try {
+      const leftOut = session ? yrsClipboardSlice(session, themeColors).leftOut : undefined;
+      refusal = leftOut?.length ? new DocxCutRefusedError(leftOut) : null;
+    } catch (error) {
+      refusal = cutRefusalFrom(error);
+    }
+    if (!refusal) return false;
+    notifyCutRefused(refusal);
+    return true;
+  }, [notifyCutRefused, session, themeColors]);
+
   // A copy asked before the edit peer loads writes the selection it then has.
   const copyAfterReplica = useCallback((cut = false): CutCopy | null => {
     const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard;
@@ -1628,16 +1651,24 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const result: CutCopy = { written: false };
     const copied = session;
     let written: Promise<void>;
-    const hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session, themeColors).fragment;
+    let hasFragment = false;
+    try {
+      hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session, themeColors).fragment;
+    } catch (error) {
+      if (!cut) throw error;
+    }
     const slice = new Promise<ReturnType<typeof yrsClipboardSlice>>((resolve, reject) => {
       const apply = (source: YrsSession): void | Promise<void> => {
         try {
           if (cut && source.cellSelection()) throw new Error('A cut over table cells is unavailable');
           const captured = yrsClipboardSlice(source, themeColors);
+          if (cut && captured.leftOut?.length) throw new DocxCutRefusedError(captured.leftOut);
           if (captured.text) resolve(captured);
           else reject(new Error('Nothing is selected to copy'));
         } catch (error) {
-          reject(error);
+          const refusal = cut ? cutRefusalFrom(error) : null;
+          if (refusal) notifyCutRefused(refusal);
+          reject(refusal ?? error);
         }
         if (cut) return written;
       };
@@ -1662,7 +1693,40 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       : text.then((blob) => blob.text()).then((value) => clipboard.writeText(value));
     written = write.then(() => { result.written = true; }, () => {});
     return result;
-  }, [enqueueInputOperation, holdInput, holdOperation, readOnly, replicaReadyRef, session, themeColors]);
+  }, [enqueueInputOperation, holdInput, holdOperation, notifyCutRefused, readOnly, replicaReadyRef, session, themeColors]);
+
+  const copyWrittenRef = useRef(false);
+  const copyOrCut = useCallback((cut: boolean): boolean => {
+    if (cut && (session?.cellSelection() || !hasTextRange())) return false;
+    const copied = copyAfterReplica(cut);
+    if (copied) {
+      if (cut) deleteSelection(true, copied);
+      return true;
+    }
+    if (cut && refuseCut()) return false;
+    textareaRef.current?.focus();
+    primeCopy();
+    copyWrittenRef.current = false;
+    document.execCommand('copy');
+    if (!copyWrittenRef.current) return false;
+    if (cut) deleteSelection();
+    return true;
+  }, [copyAfterReplica, deleteSelection, hasTextRange, primeCopy, refuseCut, session]);
+
+  const cutOrDeleteForward = useCallback((): void => {
+    const queued = !holdInput && !!inputOperationQueueRef.current?.hasPending();
+    const copied = queued ? copyAfterReplica(true) : null;
+    if (queued && (copied || !hasTextRange())) {
+      enqueueInputOperation(async () => {
+        if (!hasTextRange()) await deleteUnits('forward', 1);
+        else if (copied?.written) deleteSelection(false, copied);
+      }, 'mutation');
+    } else if (hasTextRange()) {
+      copyOrCut(true);
+    } else {
+      deleteDirection('forward');
+    }
+  }, [copyAfterReplica, copyOrCut, deleteDirection, deleteSelection, deleteUnits, enqueueInputOperation, hasTextRange, holdInput]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -1689,6 +1753,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       } else if (event.key === 'Backspace') {
         event.preventDefault();
         deleteDirection('backward');
+      } else if (event.key === 'Delete' && event.shiftKey && !mod && !event.altKey && !readOnly) {
+        event.preventDefault();
+        cutOrDeleteForward();
       } else if (event.key === 'Delete') {
         event.preventDefault();
         deleteDirection('forward');
@@ -1710,10 +1777,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     },
     [
       copyAfterReplica,
+      cutOrDeleteForward,
       deleteDirection,
       handleTab,
       moveSelection,
       primeCopy,
+      readOnly,
       selectAll,
       splitParagraph,
     ]
@@ -1803,7 +1872,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
-  const copyWrittenRef = useRef(false);
   const handleCopy = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (takeClipboardGesture(event.currentTarget) === 'ignore') {
@@ -1906,9 +1974,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         event.preventDefault();
         return;
       }
+      if (refuseCut()) {
+        primedCopyRef.current = null;
+        event.preventDefault();
+        return;
+      }
       if (writeCutEvent(event)) deleteSelection();
     },
-    [copyAfterReplica, deleteSelection, hasTextRange, holdInput, readOnly, replicaReadyRef, session, writeCutEvent]
+    [copyAfterReplica, deleteSelection, hasTextRange, holdInput, readOnly, refuseCut, replicaReadyRef, session, writeCutEvent]
   );
 
   const hasHeldInput = useCallback(
@@ -2137,21 +2210,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       insertText,
       deleteSelection,
       pasteContent,
-      copySelection(cut) {
-        if (cut && (session?.cellSelection() || !hasTextRange())) return false;
-        const copied = copyAfterReplica(cut);
-        if (copied) {
-          if (cut) deleteSelection(true, copied);
-          return true;
-        }
-        textareaRef.current?.focus();
-        primeCopy();
-        copyWrittenRef.current = false;
-        document.execCommand('copy');
-        if (!copyWrittenRef.current) return false;
-        if (cut) deleteSelection();
-        return true;
-      },
+      copySelection: copyOrCut,
       selectAll() {
         advanceInteractionEpoch();
         selectAll();
@@ -2161,6 +2220,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       advanceInteractionEpoch,
       applyStoredFormatting,
       copyAfterReplica,
+      copyOrCut,
       displayPositionToLoc,
       displaySelection,
       ensureSelection,

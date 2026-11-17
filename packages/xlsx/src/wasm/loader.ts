@@ -31,6 +31,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
+import { packagedWasmError, packagedWasmInput } from '../../../../shared/office-session/readWasmAsset';
 import { pngFontReaders, workbookPngFonts } from './pngDisplayList';
 import { renderPng as renderEnginePng, type XlsxPngEngine } from './enginePng';
 import { pngDisplayList, resolvePngTarget, type ResolvedPngTarget } from './pngResolve';
@@ -584,6 +585,11 @@ export interface WorkbookHandle extends CollaborationReplica {
    */
   chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null;
   /**
+   * the encoded bytes (PNG, JPEG, GIF, ...) of the image an `image` draw
+   * command names by `assetId`. throws for a part no picture draws.
+   */
+  mediaBytes(assetId: string): Uint8Array;
+  /**
    * slide the chart frame `chart` names — a {@link ChartRegion} id — by a
    * content-pixel delta, clamped to the grid, as one undo step. the new anchor
    * is written back on save. throws for a chart pinned to the sheet by an
@@ -779,9 +785,11 @@ export function initWasm(
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
   const png = options.png !== false;
+  let asset: URL | undefined;
+  const resolved = input ?? packagedWasmInput(asset = wasmAssetUrl(engineKind === 'native' || png));
   const source = engineKind === 'native' || (input === undefined && png)
-    ? input ?? wasmAssetUrl()
-    : compileWasmInput(input ?? wasmAssetUrl(png));
+    ? resolved
+    : compileWasmInput(resolved);
   initialization = initWasmModule({ module_or_path: source }).then(
     (output) => {
       engineMemory = output.memory;
@@ -789,7 +797,7 @@ export function initWasm(
     },
     (error: unknown) => {
       initialization = undefined;
-      throw toError(error);
+      throw asset && engineKind !== 'native' ? packagedWasmError(asset, error) : toError(error);
     }
   );
   return initialization;
@@ -1213,6 +1221,9 @@ function wrapWorkbookDocument(
     },
     chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null {
       return parseJson(() => doc.chartAtPointJson(JSON.stringify({ viewport, x, y })));
+    },
+    mediaBytes(assetId: string): Uint8Array {
+      return wasmCall(() => doc.mediaBytes(assetId));
     },
     moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult {
       return parseJson(() => doc.moveChartJson(JSON.stringify({ sheet, chart, dx, dy })), true);

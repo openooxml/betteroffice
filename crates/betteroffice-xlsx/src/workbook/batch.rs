@@ -1581,6 +1581,7 @@ impl Workbook {
         let update = self.commit_prepared(prepared)?;
         self.dirty_geometry_cells(&recalculated.changed);
         self.graph = Some(graph);
+        self.mark_graph_current();
         self.last_calculation = calculation_result(&recalculated);
         self.publish(update);
         Ok(Ok(application))

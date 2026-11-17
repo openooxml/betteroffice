@@ -266,6 +266,13 @@ impl BoundaryState {
     }
 }
 
+impl PreviewUnits {
+    /// Whether the lowering recorded any revision-reading unit.
+    pub(crate) fn has_records(&self) -> bool {
+        !self.records.is_empty()
+    }
+}
+
 #[cfg(test)]
 impl PreviewUnits {
     pub(crate) fn snapshot(&self, doc: &EditingDoc) -> impl PartialEq + std::fmt::Debug {
@@ -1029,6 +1036,136 @@ pub(crate) fn replay(
         });
     }
     Some(replays)
+}
+
+/// A top-level body table lowered on its own; see [`relower_body_table`].
+pub(crate) struct ReloweredTable {
+    pub(crate) block: LayoutBlock,
+    pub(crate) map: LoweringMap,
+    /// The display position just past the table.
+    pub(crate) end: u64,
+}
+
+/// Lowers the top-level body table embed `table` on its own, as the body's
+/// lowering would at display position `pm_start` with `stories` stories and
+/// `paragraphs` paragraphs before it. `None` when the table's lowering may
+/// read or change state the surrounding body carries: list numbering, SEQ
+/// fields, hidden field results, revision decisions or revealable content.
+/// The caller checks the table it replaces holds no SEQ field either.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn relower_body_table(
+    doc: &EditingDoc,
+    env: &RenderEnv,
+    table: &MapRef,
+    pm_start: u64,
+    table_ordinal: u32,
+    stories: u32,
+    paragraphs: u32,
+    local: &local::LocalLowering,
+) -> Option<ReloweredTable> {
+    let txn = doc.yrs_doc().transact();
+    let session = txn.get_map(crate::identity::SESSION);
+    // Word numbers SEQ fields across the whole body, so a table holding one
+    // keeps the full lowering.
+    let sequences = session
+        .as_ref()
+        .is_some_and(|session| session.contains_key(&txn, crate::seed::OPAQUE_SEQUENCES));
+    let initial_sequences: BTreeSet<String> = session
+        .map(|session| {
+            any_strings(shared_any(&session, &txn, crate::seed::OPAQUE_SEQUENCES).as_ref())
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    let story = story_ref(&txn, "body").ok()?;
+    let with_sources = RenderEnv {
+        font_theme: env.font_theme.clone().or_else(|| source_font_theme(doc)),
+        media: if env.media_tokens && env.media.is_empty() {
+            doc.media_sources()
+        } else {
+            env.media.clone()
+        },
+        group_pictures: doc
+            .source_index()
+            .map(|index| index.group_picture_sources())
+            .unwrap_or_else(|| env.group_pictures.clone()),
+        shape_styles: super::shapes::ShapeStyles::new(doc),
+        ..env.clone()
+    };
+    let env = &with_sources;
+    let comments = resolve_comment_intervals(&txn, "body", env).ok()?;
+    let fresh = ListState::new(doc.source_metadata().map(|source| source.numbering()));
+    let mut list_state = fresh.clone();
+    let mut opaque_sequences = initial_sequences.clone();
+    let position = WalkPosition {
+        story_slot: 0,
+        table_ordinal,
+        break_ordinal: 0,
+        story_index: 0,
+        paragraph_start: 0,
+        paragraph_pm_start: pm_start,
+        paragraph_pm_units: 0,
+        pm_cursor: pm_start,
+        at_block_boundary: true,
+        at_unit_boundary: true,
+        section_margins: SectionMarginsTwips::default(),
+        stories,
+        paragraphs,
+        safe: true,
+    };
+    let mut output = LoweringOutput::at(position);
+    let mut revealed = Some(Vec::new());
+    let mut active_stories = BTreeSet::from(["body".to_owned()]);
+    let mut scratch = local::LocalLowering::new(false);
+    scratch.source.clone_from(&local.source);
+    scratch.shape_styles.clone_from(&local.shape_styles);
+    scratch
+        .source_font_scheme
+        .clone_from(&local.source_font_scheme);
+    if !env.hyperlink_style_font_sizes.is_empty() {
+        scratch.run_size_sources = run_size_provenance::Sources::new(doc);
+    }
+    let chunk = yrs::types::text::Diff::with_change(Out::YMap(table.clone()), None, None);
+    let _reads = ReadGuard::new();
+    let (mut blocks, after, hidden_field_blocks) = walk_story_chunks(
+        &txn,
+        "body",
+        env,
+        &mut active_stories,
+        &mut list_state,
+        CellEdges::default(),
+        &mut output,
+        &mut opaque_sequences,
+        &mut revealed,
+        &mut scratch,
+        &story,
+        &comments,
+        std::slice::from_ref(&chunk),
+        position,
+        BTreeSet::new(),
+        None,
+    )
+    .ok()?;
+    let reads = READS.with(|reads| reads.borrow_mut().take().unwrap());
+    if blocks.len() != 1
+        || !matches!(blocks[0], LayoutBlock::Table(_))
+        || !after.safe
+        || list_state != fresh
+        || opaque_sequences != initial_sequences
+        || sequences && docx_layout::sequence_fields::reads_sequence_fields(&blocks)
+        || !hidden_field_blocks.is_empty()
+        || !reads.ids.is_empty()
+        || reads.hidden_fields
+        || revealed.is_some_and(|revealed| !revealed.is_empty())
+    {
+        return None;
+    }
+    output.map.finish();
+    Some(ReloweredTable {
+        block: blocks.pop()?,
+        map: output.map,
+        end: after.pm_cursor,
+    })
 }
 
 pub(crate) fn splice(
