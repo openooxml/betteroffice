@@ -1713,6 +1713,21 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     return true;
   }, [copyAfterReplica, deleteSelection, hasTextRange, primeCopy, refuseCut, session]);
 
+  const cutOrDeleteForward = useCallback((): void => {
+    const queued = !holdInput && !!inputOperationQueueRef.current?.hasPending();
+    const copied = queued ? copyAfterReplica(true) : null;
+    if (queued && (copied || !hasTextRange())) {
+      enqueueInputOperation(async () => {
+        if (!hasTextRange()) await deleteUnits('forward', 1);
+        else if (copied?.written) deleteSelection(false, copied);
+      }, 'mutation');
+    } else if (hasTextRange()) {
+      copyOrCut(true);
+    } else {
+      deleteDirection('forward');
+    }
+  }, [copyAfterReplica, copyOrCut, deleteDirection, deleteSelection, deleteUnits, enqueueInputOperation, hasTextRange, holdInput]);
+
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
       if (!event.nativeEvent.isComposing && event.key !== 'Process' && event.keyCode !== 229) {
@@ -1738,9 +1753,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       } else if (event.key === 'Backspace') {
         event.preventDefault();
         deleteDirection('backward');
-      } else if (event.key === 'Delete' && event.shiftKey && !mod && !event.altKey && !readOnly && hasTextRange()) {
+      } else if (event.key === 'Delete' && event.shiftKey && !mod && !event.altKey && !readOnly) {
         event.preventDefault();
-        copyOrCut(true);
+        cutOrDeleteForward();
       } else if (event.key === 'Delete') {
         event.preventDefault();
         deleteDirection('forward');
@@ -1762,10 +1777,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     },
     [
       copyAfterReplica,
-      copyOrCut,
+      cutOrDeleteForward,
       deleteDirection,
       handleTab,
-      hasTextRange,
       moveSelection,
       primeCopy,
       readOnly,
