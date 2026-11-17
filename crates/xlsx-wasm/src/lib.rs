@@ -445,10 +445,22 @@ impl XlsxDocument {
             .map_err(map_engine_error)
     }
 
+    /// the encoded bytes of the image an `image` draw command names.
+    #[wasm_bindgen(js_name = mediaBytes)]
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>, JsValue> {
+        self.inner.media_bytes(asset_id).map_err(map_engine_error)
+    }
+
     /// slide a chart by a pixel delta as one undo step.
     #[wasm_bindgen(js_name = moveChartJson)]
     pub fn move_chart_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.inner.move_chart_json(args).map_err(map_engine_error)
+    }
+
+    /// move a chart's edges by pixel deltas as one undo step.
+    #[wasm_bindgen(js_name = resizeChartJson)]
+    pub fn resize_chart_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.inner.resize_chart_json(args).map_err(map_engine_error)
     }
 
     #[wasm_bindgen(js_name = pngDisplayListJson)]
@@ -544,6 +556,11 @@ impl XlsxDocument {
     #[wasm_bindgen(js_name = moveRangeJson)]
     pub fn move_range_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.inner.move_range_json(args).map_err(map_engine_error)
+    }
+
+    #[wasm_bindgen(js_name = fillRangeJson)]
+    pub fn fill_range_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.inner.fill_range_json(args).map_err(map_engine_error)
     }
 
     /// apply a raw op list as one user transaction; returns `SheetInfo` json.

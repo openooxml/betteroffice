@@ -26,6 +26,7 @@ docx-raster = { package = "betteroffice-docx-raster", path = "../../crates/docx-
 getrandom = "0.3"
 napi = { version = "3.12.4", features = ["napi8", "serde-json"] }
 napi-derive = "3.6.5"
+ooxml-opc = { package = "betteroffice-opc", path = "../../crates/ooxml-opc" }
 ooxml-text = { package = "betteroffice-ooxml-text", path = "../../crates/ooxml-text" }
 serde_json = "1"
 

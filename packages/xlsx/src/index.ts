@@ -23,6 +23,8 @@ export type {
   PathCmd,
   TextCmd,
   TextWrap,
+  ImageCmd,
+  ImageCrop,
   DrawCmd,
   DisplayList,
   GridMeta,
@@ -89,6 +91,7 @@ export type {
 export { buildA11yGrid } from './a11y/index';
 
 export { paintDisplayList } from './render/canvas2d';
+export type { PaintOptions, PictureSource } from './render/canvas2d';
 export {
   initWasm,
   decodeFontFace,
@@ -192,6 +195,7 @@ export type {
   XlsxRangeTarget,
   XlsxReadCalculation,
   XlsxReadRequest,
+  XlsxReplaceStats,
   XlsxUnevaluatedCell,
   XlsxReadResult,
   XlsxSheetEntry,
@@ -233,7 +237,7 @@ export type {
 
 export type { XlsxDefinedNameOp, XlsxDefinedName, XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from './definedNames';
 
-export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName } from './charts';
+export type { ChartInfo, ChartSeriesInfo, ChartEdit, ChartMutation, ChartSeriesName, ChartResizeEdges } from './charts';
 export { fontPackDiagnostics } from './fontPackDiagnostics';
 export type { FontPackDiagnostic } from './fontPackDiagnostics';
 

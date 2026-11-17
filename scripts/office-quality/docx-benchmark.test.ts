@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { CHANNELS, METHOD, TRIALS, docxShards, mergeDocxBenchmarks, timingSummary } from './docx-benchmark.mjs';
-import { nativeFeatures } from './build-native.mjs';
+import { dependencyLine, nativeFeatures } from './build-native.mjs';
 import { renderSection } from './readme.mjs';
 
 function fixture() {
@@ -17,7 +17,7 @@ function fixture() {
   const build = (source_sha: string) => ({ source_sha, binary_sha256: hash, harness_sha256: hash,
     rustc: 'rustc 1.98.0', profile: 'release opt-level=3 lto=thin' });
   const benchmark = { method: METHOD, trials: TRIALS, dpi: 96, libreoffice_version: '26.2.3.2',
-    published_version: '0.2.1', fonts_sha256: hash, builds: { published: build(published), commit: build(current) } };
+    published_version: '0.2.1', libreoffice_fonts_sha256: hash, builds: { published: build(published), commit: build(current) } };
   const parts = docxShards(plan).map((ids, shard) => ({
     schema_version: 1, shard, plan_sha256: hash, benchmark: structuredClone(benchmark), runner: {},
     samples: ids.map((id) => ({ id, source_sha256: hash, libreoffice: {
@@ -26,7 +26,8 @@ function fixture() {
       reference_pages: samples.find((sample) => sample.id === id)!.metadata.reference.pages,
       actual_pages: 2, penalized_ssim: 0.7, resized: false,
     }, timings: Object.fromEntries(CHANNELS.map((channel, index) => [channel,
-      { status: 'ok', elapsed_ms: Array.from({ length: TRIALS }, () => (index + 1) * 100) }])) })),
+      { status: 'ok', elapsed_ms: Array.from({ length: TRIALS }, () => (index + 1) * 100),
+        ...(channel !== 'libreoffice' && { fonts_sha256: hash }) }])) })),
   }));
   const report = { ...plan, samples: samples.map((sample) => ({ ...sample, comparisons: [] })) };
   return { plan, parts, report, hash };
@@ -87,7 +88,10 @@ test('rejects incomplete coverage, mixed builds, bad sources, and malformed meas
     (f: any) => f.parts[0].benchmark.builds.published.harness_sha256 = 'd'.repeat(64),
     (f: any) => f.parts[0].benchmark.builds.published.rustc = 'other',
     (f: any) => f.parts[0].benchmark.libreoffice_version = '99.0.0',
-    (f: any) => f.parts[0].benchmark.fonts_sha256 = 'd'.repeat(64),
+    (f: any) => f.parts[0].benchmark.libreoffice_fonts_sha256 = 'd'.repeat(64),
+    (f: any) => f.parts.forEach((part: any) => part.benchmark.fonts_sha256 = 'd'.repeat(64)),
+    (f: any) => delete f.parts[0].samples[0].timings.published.fonts_sha256,
+    (f: any) => f.parts[0].samples[0].timings.commit.fonts_sha256 = 'manifest',
     (f: any) => f.parts[0].benchmark.published_version = '9.0.0',
     (f: any) => f.parts[0].samples[0].timings.commit.elapsed_ms.pop(),
     (f: any) => f.parts[0].samples[0].timings.commit.elapsed_ms[0] = NaN,
@@ -122,4 +126,15 @@ test('builds older and current Rust APIs with the same native host', () => {
     .toEqual(['substitute-styles']);
   expect(nativeFeatures('pub fn register_substitute_measure_font(id: u32, name: &str) { store.register_named_substitute(id, name) }'))
     .toEqual(['substitute-widths']);
+});
+
+test('the native host builds docx-raster without its default base-latin feature, like the product binding', async () => {
+  expect(dependencyLine('docx-raster', '/src/crates/docx-raster', '[features]\ndefault = ["base-latin"]\n'))
+    .toBe('docx-raster = { package = "betteroffice-docx-raster", path = "/src/crates/docx-raster", default-features = false }');
+  expect(dependencyLine('docx-parse', '/src/crates/docx-parse', 'tiff = ["x"]\n'))
+    .toBe('docx-parse = { package = "betteroffice-docx-parse", path = "/src/crates/docx-parse", features = ["tiff"] }');
+  const binding = await Bun.file(new URL('../../bindings/docx-native/Cargo.toml', import.meta.url)).text();
+  expect(binding).toMatch(/^docx-raster = \{[^}]*default-features = false/m);
+  const build = await Bun.file(new URL('./build-native.mjs', import.meta.url)).text();
+  expect(build).toContain("assertNoBackstop(resolve(build, 'Cargo.toml'), 'docx-native-bench'");
 });

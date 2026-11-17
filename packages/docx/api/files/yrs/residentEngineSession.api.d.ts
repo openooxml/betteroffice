@@ -16,7 +16,7 @@ import { type ResidentPartGeometry } from './residentParts';
 import type { RetainedFrame } from '../layout/render/frameDelta';
 import type { DisplayListHitRegion, DisplayListRect } from '../layout/render/displayListQueries';
 import type { ResidentControlTarget, ResidentControlPosition } from './residentControls';
-import { type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
+import { type DocxSectionMargins, type ResidentSectionParagraphs, type ResidentSectionSnapshot } from './residentSections';
 /** @internal */
 export interface ResidentExactPrefixLayout {
     provisional: boolean;
@@ -93,7 +93,8 @@ export type ResidentEngineSession = Pick<YrsSession, 'clientId' | 'applyDelete' 
     /** The `w:next` style a paragraph break at `at` gives the new paragraph, or null to keep the split's own. */
     nextParagraphStyle(at: YrsLoc): string | null;
     setPropertyDocument(document: Document): boolean;
-    sectionProperties(): ResidentSectionSnapshot;
+    /** Every section, with the tab stops of `paragraphs`, or of every paragraph when omitted. */
+    sectionProperties(paragraphs?: ResidentSectionParagraphs): ResidentSectionSnapshot;
     setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
     updateComment(id: string, patch: DocxCommentPatch): void;
     commentProjection(fresh?: boolean): ResidentCommentProjection | null;
@@ -160,6 +161,8 @@ export type ResidentEngineSession = Pick<YrsSession, 'clientId' | 'applyDelete' 
     primeSaveSeedStates(maxParagraphs: number, maxInflatedBytes: number): boolean;
     /** One slice of {@link primeSaveSeedStates} digesting about `maxBytes` bytes: 0 known, 1 more to do, 2 declined. */
     primeSaveSeedStatesSlice(maxParagraphs: number, maxInflatedBytes: number, maxBytes: number): number;
+    /** What the last {@link primeSaveSeedStatesSlice} call charged against its `maxBytes`. */
+    primeLastSliceCost(): number;
     /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
     openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
     /** The whole document state as one yrs v1 update. */

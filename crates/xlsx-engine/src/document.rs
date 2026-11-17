@@ -311,10 +311,21 @@ impl Document {
         self.session.chart_at_point_json(args).map_err(message)
     }
 
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>, EngineError> {
+        self.session.media_bytes(asset_id).map_err(message)
+    }
+
     pub fn move_chart_json(&mut self, args: &str) -> Result<String, EngineError> {
         let now_serial = (self.host.now_serial)()?;
         self.session
             .move_chart_json(args, now_serial)
+            .map_err(message)
+    }
+
+    pub fn resize_chart_json(&mut self, args: &str) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session
+            .resize_chart_json(args, now_serial)
             .map_err(message)
     }
 
@@ -427,6 +438,13 @@ impl Document {
         let now_serial = (self.host.now_serial)()?;
         self.session
             .move_range_json(args, now_serial)
+            .map_err(message)
+    }
+
+    pub fn fill_range_json(&mut self, args: &str) -> Result<String, EngineError> {
+        let now_serial = (self.host.now_serial)()?;
+        self.session
+            .fill_range_json(args, now_serial)
             .map_err(message)
     }
 

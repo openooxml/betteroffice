@@ -209,6 +209,14 @@ export class EditSession {
      */
     can_undo(): boolean;
     /**
+     * The kinds of effect the web canvas backend leaves off resident display
+     * page `page_index`, as bits in `skippedEffectKinds()` order, the first
+     * kind the lowest bit. `unavailable` holds `(region, area, index)` triples
+     * for the pictures it could not draw: region 0 body, 1 header, 2 footer,
+     * 3 note separator, 4 note, with `area` the note area's index.
+     */
+    canvasSkippedEffects(page_index: number, unavailable: Uint32Array): number;
+    /**
      * The current local cell selection as a [`TableRange`], or `"null"`
      * before one is set. An endpoint whose cell was deleted clamps to a
      * surviving nearby cell. Errors when the table itself no longer resolves.
@@ -882,6 +890,10 @@ export class EditSession {
      * when nothing was changed.
      */
     persist_paragraph_ids(): string;
+    /**
+     * What the last [`Self::prime_save_seed_states_slice`] call charged against its `max_bytes`.
+     */
+    prime_last_slice_cost(): number;
     /**
      * Caches save seed states without reseeding, within the paragraph and
      * inflated package budgets.
@@ -1756,6 +1768,11 @@ export function set_wasm_heap_counting(on: boolean): boolean;
 export function set_wasm_heap_limit(bytes: number): void;
 
 /**
+ * Every kind of effect a PNG export can report as skipped, in reporting order.
+ */
+export function skippedEffectKinds(): string[];
+
+/**
  * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
  */
 export function unzip_docx(data: Uint8Array): any;
@@ -1850,6 +1867,7 @@ export interface InitOutput {
     readonly editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_can_redo: (a: number) => number;
     readonly editsession_can_undo: (a: number) => number;
+    readonly editsession_canvasSkippedEffects: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_cell_selection: (a: number) => [number, number, number, number];
     readonly editsession_clear_cell_selection: (a: number) => [number, number];
     readonly editsession_clear_content_control_value: (a: number, b: number, c: number) => [number, number];
@@ -1959,6 +1977,7 @@ export interface InitOutput {
     readonly editsession_part_metadata_json: (a: number) => [number, number];
     readonly editsession_patch_style_languages_xml: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_persist_paragraph_ids: (a: number) => [number, number, number, number];
+    readonly editsession_prime_last_slice_cost: (a: number) => number;
     readonly editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
     readonly editsession_prime_save_seed_states_slice: (a: number, b: number, c: number, d: number) => number;
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -2109,6 +2128,7 @@ export interface InitOutput {
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
     readonly set_wasm_heap_counting: (a: number) => number;
     readonly set_wasm_heap_limit: (a: number) => void;
+    readonly skippedEffectKinds: () => [number, number];
     readonly unzip_docx: (a: number, b: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

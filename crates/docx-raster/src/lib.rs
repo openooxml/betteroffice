@@ -21,6 +21,7 @@ use docx_layout::display_list::{
     LinePrimitive, PageBorderPrimitive, PageBorderSide, PageBorderZOrder, Primitive, RectPrimitive,
     RevisionKind, ShapePathCommand, ShapePrimitive,
 };
+use docx_layout::skipped_effects::{PrimitiveAt, Region};
 use ooxml_raster::svg;
 use ooxml_raster::{encode_png, parse_css_color};
 use ooxml_text::{FontId, FontStore};
@@ -180,6 +181,8 @@ pub struct SkippedPicture {
     pub limit: Option<u64>,
     pub actual: Option<u64>,
     pub unit: Option<&'static str>,
+    /// The primitive that drew the placeholder.
+    pub at: PrimitiveAt,
 }
 
 #[derive(Clone, Copy)]
@@ -534,24 +537,48 @@ impl<'k> Renderer<'k> {
                 .unwrap_or(0)
                 .min(page.primitives.len()),
         );
-        for primitive in watermark {
+        for (index, primitive) in watermark.iter().enumerate() {
+            self.scratch.images.at = PrimitiveAt {
+                region: Region::Body,
+                index,
+            };
             self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
         }
-        for region in [&page.header, &page.footer].into_iter().flatten() {
+        let header = (Region::Header, &page.header);
+        for (place, region) in [header, (Region::Footer, &page.footer)] {
+            let Some(region) = region else {
+                continue;
+            };
             let scope = ImageScope::HeaderFooter(&region.r_id);
-            for primitive in &region.primitives {
+            for (index, primitive) in region.primitives.iter().enumerate() {
+                self.scratch.images.at = PrimitiveAt {
+                    region: place,
+                    index,
+                };
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
         }
-        for primitive in body {
+        for (index, primitive) in body.iter().enumerate() {
+            self.scratch.images.at = PrimitiveAt {
+                region: Region::Body,
+                index: watermark.len() + index,
+            };
             self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
         }
-        for area in &page.note_areas {
+        for (area_index, area) in page.note_areas.iter().enumerate() {
             let scope = ImageScope::Notes(NoteKind::from_region(area.kind.as_deref()));
-            for primitive in &area.separator_primitives {
+            for (index, primitive) in area.separator_primitives.iter().enumerate() {
+                self.scratch.images.at = PrimitiveAt {
+                    region: Region::NoteSeparator(area_index),
+                    index,
+                };
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
-            for primitive in &area.primitives {
+            for (index, primitive) in area.primitives.iter().enumerate() {
+                self.scratch.images.at = PrimitiveAt {
+                    region: Region::Note(area_index),
+                    index,
+                };
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
         }
@@ -852,6 +879,26 @@ fn paint_shape<'k>(
     if let Some(dash) = stroked.as_ref().and_then(|stroked| stroked.dash.as_ref()) {
         budget.charge_path(dash_segments(path_length(&path), dash))?;
     }
+    let mut ends = Vec::new();
+    if let Some(stroked) = &stroked
+        && (stroked.head.is_some() || stroked.tail.is_some())
+        && let Some([start, next, previous, end]) = path_endpoints(&shape.geometry_path)?
+    {
+        let width = stroked.stroke.width;
+        ends.extend(
+            stroked
+                .head
+                .as_ref()
+                .and_then(|head| line_end_path(head, start, next, width)),
+        );
+        ends.extend(
+            stroked
+                .tail
+                .as_ref()
+                .and_then(|tail| line_end_path(tail, end, previous, width)),
+        );
+        budget.charge_path(ends.len() as u64)?;
+    }
     type Draw<'d> = Box<dyn Fn(&mut Pixmap, Transform, Option<&Mask>) + 'd>;
     let mut parts: Vec<Draw<'_>> = Vec::new();
     if let (Some((source, _)), Some(draws)) = (&picture, &picture_draws) {
@@ -888,6 +935,26 @@ fn paint_shape<'k>(
         parts.push(Box::new(
             |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
                 target.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
+            },
+        ));
+    }
+    if let Some(stroked) = &stroked
+        && !ends.is_empty()
+    {
+        let ends = &ends;
+        let outline = Stroke {
+            dash: None,
+            ..stroked.stroke.clone()
+        };
+        parts.push(Box::new(
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                for (end, open) in ends {
+                    if *open {
+                        target.stroke_path(end, &stroked.paint, &outline, transform, mask);
+                    } else {
+                        target.fill_path(end, &stroked.paint, FillRule::Winding, transform, mask);
+                    }
+                }
             },
         ));
     }
@@ -1481,6 +1548,97 @@ struct ShapeStroke {
     paint: Paint<'static>,
     stroke: Stroke,
     dash: Option<Vec<f32>>,
+    head: Option<LineEnd>,
+    tail: Option<LineEnd>,
+}
+
+/// An arrowhead, oval or diamond at one end of an open shape outline.
+#[derive(Clone)]
+struct LineEnd {
+    kind: String,
+    width: f32,
+    length: f32,
+}
+
+fn line_end(value: Option<&Value>) -> Result<Option<LineEnd>, String> {
+    let Some(object) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let object = object
+        .as_object()
+        .ok_or_else(|| "shape stroke line end must be an object".to_string())?;
+    ensure_keys(
+        object,
+        &["type", "width", "length"],
+        "shape stroke line end",
+    )?;
+    let kind = object.get("type").and_then(Value::as_str).unwrap_or("none");
+    if kind == "none" {
+        return Ok(None);
+    }
+    let scale = |key: &str, base: f32| match object.get(key).and_then(Value::as_str) {
+        Some("sm") => base * 0.75,
+        Some("lg") => base * 1.5,
+        _ => base,
+    };
+    Ok(Some(LineEnd {
+        kind: kind.to_owned(),
+        width: scale("width", 2.0),
+        length: scale("length", 4.0),
+    }))
+}
+
+/// The first two and last two points the outline passes through, as the web
+/// backend reads them for line ends.
+fn path_endpoints(commands: &[ShapePathCommand]) -> Result<Option<[(f32, f32); 4]>, String> {
+    let mut points = Vec::new();
+    for command in commands {
+        let (x, y) = match command {
+            ShapePathCommand::Move { x, y }
+            | ShapePathCommand::Line { x, y }
+            | ShapePathCommand::Quad { x, y, .. }
+            | ShapePathCommand::Cubic { x, y, .. } => (x, y),
+            ShapePathCommand::Close => continue,
+        };
+        points.push((number_f32(x)?, number_f32(y)?));
+    }
+    let count = points.len();
+    if count < 2 {
+        return Ok(None);
+    }
+    Ok(Some([
+        points[0],
+        points[1],
+        points[count - 2],
+        points[count - 1],
+    ]))
+}
+
+/// The path a line end fills, and whether an open `arrow` strokes it instead.
+fn line_end_path(
+    end: &LineEnd,
+    tip: (f32, f32),
+    toward: (f32, f32),
+    stroke_width: f32,
+) -> Option<(Path, bool)> {
+    let angle = (toward.1 - tip.1).atan2(toward.0 - tip.0);
+    let (sin, cos) = angle.sin_cos();
+    let length = stroke_width * end.length;
+    let half_width = stroke_width * end.width;
+    let base = (tip.0 + cos * length, tip.1 + sin * length);
+    let normal = (-sin * half_width, cos * half_width);
+    if end.kind == "oval" {
+        return PathBuilder::from_circle(tip.0, tip.1, half_width).map(|path| (path, false));
+    }
+    let mut builder = PathBuilder::new();
+    builder.move_to(tip.0, tip.1);
+    builder.line_to(base.0 + normal.0, base.1 + normal.1);
+    if end.kind == "diamond" {
+        builder.line_to(tip.0 + cos * length * 2.0, tip.1 + sin * length * 2.0);
+    }
+    builder.line_to(base.0 - normal.0, base.1 - normal.1);
+    builder.close();
+    builder.finish().map(|path| (path, end.kind == "arrow"))
 }
 
 fn shape_stroke(shape: &ShapePrimitive, opacity: f32) -> Result<Option<ShapeStroke>, String> {
@@ -1497,6 +1655,7 @@ fn shape_stroke(shape: &ShapePrimitive, opacity: f32) -> Result<Option<ShapeStro
         .and_then(|stroke| stroke.dash.as_deref());
     let mut custom_dash = None;
     let mut style = StrokeStyle::default();
+    let (mut head, mut tail) = (None, None);
     if let Some(value) = &shape.attrs.stroke_paint {
         let object = value
             .as_object()
@@ -1537,12 +1696,8 @@ fn shape_stroke(shape: &ShapePrimitive, opacity: f32) -> Result<Option<ShapeStro
         {
             return Err(format!("unsupported shape stroke alignment: {alignment}"));
         }
-        if object.get("headEnd").is_some_and(|value| !value.is_null()) {
-            return Err("unsupported shape stroke field: headEnd".to_string());
-        }
-        if object.get("tailEnd").is_some_and(|value| !value.is_null()) {
-            return Err("unsupported shape stroke field: tailEnd".to_string());
-        }
+        head = line_end(object.get("headEnd"))?;
+        tail = line_end(object.get("tailEnd"))?;
         if let Some(cap) = object.get("cap").and_then(Value::as_str) {
             style.cap = match cap {
                 "flat" => LineCap::Butt,
@@ -1591,6 +1746,8 @@ fn shape_stroke(shape: &ShapePrimitive, opacity: f32) -> Result<Option<ShapeStro
         paint,
         stroke,
         dash,
+        head,
+        tail,
     }))
 }
 
@@ -2117,6 +2274,7 @@ struct PageImages<'c> {
     skipped: usize,
     pictures: Vec<SkippedPicture>,
     refusal: Option<PictureFailure>,
+    at: PrimitiveAt,
 }
 
 impl<'c> PageImages<'c> {
@@ -2133,6 +2291,10 @@ impl<'c> PageImages<'c> {
             skipped: 0,
             pictures: Vec::new(),
             refusal: None,
+            at: PrimitiveAt {
+                region: Region::Body,
+                index: 0,
+            },
         }
     }
 
@@ -2148,6 +2310,7 @@ impl<'c> PageImages<'c> {
             limit: failure.limit,
             actual: failure.actual,
             unit: failure.unit,
+            at: self.at,
         });
         self.skipped += 1;
     }
@@ -3888,6 +4051,37 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn shape_line_ends_point_back_along_the_outline() {
+        assert!(line_end(Some(&json!({"type": "none"}))).unwrap().is_none());
+        let end = line_end(Some(
+            &json!({"type": "triangle", "width": null, "length": "lg"}),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!((end.width, end.length), (2.0, 6.0));
+        let commands: Vec<ShapePathCommand> = serde_json::from_value(json!([
+            {"type": "move", "x": 0, "y": 0},
+            {"type": "line", "x": 10, "y": 0}
+        ]))
+        .unwrap();
+        let [start, next, previous, tip] = path_endpoints(&commands).unwrap().unwrap();
+        assert_eq!((start, next), ((0.0, 0.0), (10.0, 0.0)));
+        let (path, open) = line_end_path(&end, tip, previous, 2.0).unwrap();
+        assert!(!open);
+        let bounds = path.bounds();
+        for (actual, expected) in [
+            (bounds.left(), -2.0),
+            (bounds.right(), 10.0),
+            (bounds.top(), -4.0),
+            (bounds.bottom(), 4.0),
+        ] {
+            assert!((actual - expected).abs() < 1e-4, "{actual} != {expected}");
+        }
+        let arrow = line_end(Some(&json!({"type": "arrow"}))).unwrap().unwrap();
+        assert!(line_end_path(&arrow, tip, previous, 2.0).unwrap().1);
+    }
+
     fn picture_scene(references: &[&str]) -> DisplayList {
         let primitives: Vec<Value> = references
             .iter()
@@ -4033,6 +4227,24 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_picture_is_reported_at_its_position_beside_one_with_the_same_id() {
+        let drawn = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==";
+        let failed = "data:image/png;base64,bm90IGFuIGltYWdl";
+        let scene = picture_scene(&[drawn, failed]);
+        let rendered = render_pictures(&scene, &ImageMap::new(), &mut ImageCache::default(), 1.0);
+        let reported: Vec<(&str, PrimitiveAt)> = rendered
+            .skipped_pictures
+            .iter()
+            .map(|picture| (picture.id.as_str(), picture.at))
+            .collect();
+        let at = PrimitiveAt {
+            region: Region::Body,
+            index: 1,
+        };
+        assert_eq!(reported, [("data:image/png;base64", at)]);
+    }
+
+    #[test]
     fn missing_and_unknown_pictures_paint_scaled_placeholders_and_report_reasons() {
         let scene = picture_scene(&["rIdMissing", "rIdGarbage"]);
         let images = ImageMap::from([("rIdGarbage".to_owned(), b"not an image".to_vec())]);
@@ -4050,6 +4262,10 @@ mod tests {
                         limit: None,
                         actual: None,
                         unit: None,
+                        at: PrimitiveAt {
+                            region: Region::Body,
+                            index: 0,
+                        },
                     },
                     SkippedPicture {
                         id: "rIdGarbage".to_owned(),
@@ -4057,6 +4273,10 @@ mod tests {
                         limit: None,
                         actual: None,
                         unit: None,
+                        at: PrimitiveAt {
+                            region: Region::Body,
+                            index: 1,
+                        },
                     },
                 ],
             );

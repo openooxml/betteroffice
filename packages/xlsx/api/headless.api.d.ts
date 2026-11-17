@@ -272,6 +272,8 @@ export interface TextCmd {
     bold?: boolean;
     italic?: boolean;
     underline?: boolean;
+    /** The kind of `underline` when it is not single. */
+    underlineStyle?: 'double' | 'singleAccounting' | 'doubleAccounting';
     strike?: boolean;
     highlight?: string;
     dashedUnderline?: boolean;
@@ -301,10 +303,32 @@ export interface NumberFormatLayout {
     general?: number;
     overflow?: boolean;
 }
+/** Fractions of an image discarded from each edge; absent edges are `0`. */
+export interface ImageCrop {
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+}
+/**
+ * A worksheet picture: the image part `assetId` names, its `crop` discarded and
+ * the rest stretched over the rect. The host supplies the image, for example
+ * from `XlsxDocument.mediaBytes(assetId)`.
+ */
+export interface ImageCmd {
+    op: 'image';
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    assetId: string;
+    crop?: ImageCrop;
+    clip?: Rect;
+}
 /**
  * One draw command; discriminated on `op`.
  */
-export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd;
+export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd | ImageCmd;
 /**
  * Grid metadata for the frame: which sheet cells the visible tracks map to and
  * their viewport-local pixel boundaries. `rowOffsets[i]`/`colOffsets[i]` is the
@@ -319,12 +343,25 @@ export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd
 export interface GridMeta {
     startRow: number;
     startCol: number;
+    /** Leading tracks pinned by a frozen pane; absent when nothing is frozen. */
+    frozenRows?: number;
+    frozenCols?: number;
+    /** Viewport-pixel freeze line on each axis; absent when there is no split. */
+    dividerX?: number;
+    dividerY?: number;
     hiddenRowSpans?: [number, number][];
     hiddenColSpans?: [number, number][];
     rowIndices?: number[];
     colIndices?: number[];
     rowOffsets: number[];
     colOffsets: number[];
+    /**
+     * Full track sizes parallel to `rowOffsets`/`colOffsets`: the sheet-px extent
+     * of each visible track, independent of scroll and of a frozen pane clipping
+     * its leading edge. Absent on lists that predate the field.
+     */
+    rowSizes?: number[];
+    colSizes?: number[];
 }
 export interface HyperlinkRegion {
     top: number;
@@ -361,6 +398,8 @@ export interface ChartRegion {
     clip: Rect;
     /** whether the anchor can be repinned; an absolute one cannot. */
     movable: boolean;
+    /** whether the anchor can be resized. A two-cell anchor writes both corners back, so it can. */
+    resizable: boolean;
 }
 /** Former name of {@link ChartRegion}, when it carried the label alone. */
 export type ChartA11yAttrs = ChartRegion;
@@ -387,7 +426,7 @@ export interface DisplayList {
  * no canvas, no wasm loader, no framework. The seam-purity test walks the
  * import closure from this file and fails if anything impure creeps in.
  */
-export type { Rect, TextAlign, FillRectCmd, PatternFillCmd, PatternType, LineCmd, GeometryPathCommand, PathStroke, PathCmd, TextCmd, DrawCmd, DisplayList, GridMeta, HyperlinkRegion, ChartRegion, ChartA11yAttrs, } from './display-list/types';
+export type { Rect, TextAlign, FillRectCmd, PatternFillCmd, PatternType, LineCmd, GeometryPathCommand, PathStroke, PathCmd, TextCmd, ImageCmd, ImageCrop, DrawCmd, DisplayList, GridMeta, HyperlinkRegion, ChartRegion, ChartA11yAttrs, } from './display-list/types';
 export type { TrackOffsets, ViewportState, VisibleRange, VisibleCells } from './viewport/index';
 export { trackCount, totalExtent, visibleRange, visibleCells, clampScroll, uniformOffsets, } from './viewport/index';
 export type { CellAddr, Selection, CellRange, Direction, SelectionLimits, SelectionData, SelectionHidden, SelectionMerges, MoveOpts, KeyInput, SelectionAction, } from './selection/index';

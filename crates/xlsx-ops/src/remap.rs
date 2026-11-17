@@ -20,6 +20,7 @@ use xlsx_model::{
 };
 
 use crate::apply::OpError;
+use crate::apply::move_axis;
 use crate::apply::remap_ref;
 use crate::op::{CellState, Op};
 
@@ -42,7 +43,9 @@ fn structural_target(op: &Op) -> Option<SheetId> {
         Op::InsertRows { sheet, .. }
         | Op::DeleteRows { sheet, .. }
         | Op::InsertCols { sheet, .. }
-        | Op::DeleteCols { sheet, .. } => Some(sheet),
+        | Op::DeleteCols { sheet, .. }
+        | Op::MoveRows { sheet, .. }
+        | Op::MoveCols { sheet, .. } => Some(sheet),
         _ => None,
     }
 }
@@ -496,15 +499,32 @@ pub fn insertion_keeps_chart_anchor_on_grid(anchor: ChartAnchor, op: &Op) -> boo
 /// when the anchor does not move, `Err` when a marker it must move would leave
 /// the grid.
 fn remap_anchor(anchor: ChartAnchor, op: &Op) -> Result<Option<ChartAnchor>, ()> {
-    let (axis, at, count, inserting) = match *op {
-        Op::InsertRows { at, count, .. } => (Axis::Row, at, count, true),
-        Op::DeleteRows { at, count, .. } => (Axis::Row, at, count, false),
-        Op::InsertCols { at, count, .. } => (Axis::Col, at, count, true),
-        Op::DeleteCols { at, count, .. } => (Axis::Col, at, count, false),
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Insert,
+        Delete,
+        Move(u32),
+    }
+    let (axis, at, count, mode) = match *op {
+        Op::InsertRows { at, count, .. } => (Axis::Row, at, count, Mode::Insert),
+        Op::DeleteRows { at, count, .. } => (Axis::Row, at, count, Mode::Delete),
+        Op::InsertCols { at, count, .. } => (Axis::Col, at, count, Mode::Insert),
+        Op::DeleteCols { at, count, .. } => (Axis::Col, at, count, Mode::Delete),
+        Op::MoveRows {
+            row, count, before, ..
+        } => (Axis::Row, row, count, Mode::Move(before)),
+        Op::MoveCols {
+            col, count, before, ..
+        } => (Axis::Col, col, count, Mode::Move(before)),
         _ => return Ok(None),
     };
     let limit = axis.limit();
-    let shift = |index: u32| shift_anchor_index(index, at, count, inserting, limit);
+    let shift = |index: u32| match mode {
+        Mode::Insert => shift_anchor_index(index, at, count, true, limit),
+        Mode::Delete => shift_anchor_index(index, at, count, false, limit),
+        Mode::Move(before) => Some(move_axis(index, at, count, before)),
+    };
+    let moving = matches!(mode, Mode::Move(_));
     match anchor {
         ChartAnchor::Absolute { .. } => Ok(None),
         ChartAnchor::OneCell { from, extent } => {
@@ -518,9 +538,24 @@ fn remap_anchor(anchor: ChartAnchor, op: &Op) -> Result<Option<ChartAnchor>, ()>
             if edit_as == AnchorEditAs::Absolute {
                 return Ok(None);
             }
-            let moved_from = shift_anchor_cell(from, axis, &shift).ok_or(())?;
+            let mut moved_from = shift_anchor_cell(from, axis, &shift).ok_or(())?;
             let moved_to = match edit_as {
-                AnchorEditAs::TwoCell => shift_anchor_cell(to, axis, &shift).ok_or(())?,
+                AnchorEditAs::TwoCell => {
+                    let mut moved = shift_anchor_cell(to, axis, &shift).ok_or(())?;
+                    if moving && anchor_index(moved_from, axis) > anchor_index(moved, axis) {
+                        match axis {
+                            Axis::Row => {
+                                std::mem::swap(&mut moved_from.row, &mut moved.row);
+                                std::mem::swap(&mut moved_from.row_off, &mut moved.row_off);
+                            }
+                            Axis::Col => {
+                                std::mem::swap(&mut moved_from.col, &mut moved.col);
+                                std::mem::swap(&mut moved_from.col_off, &mut moved.col_off);
+                            }
+                        }
+                    }
+                    moved
+                }
                 _ => translate_anchor_cell(
                     to,
                     axis,
@@ -1529,6 +1564,22 @@ impl<'a> AxisRange<'a> {
                 };
                 (shift(self.start), shift(self.end))
             }
+            Op::MoveRows {
+                row: at,
+                count,
+                before,
+                ..
+            }
+            | Op::MoveCols {
+                col: at,
+                count,
+                before,
+                ..
+            } => {
+                let start = move_axis(self.start, at, count, before);
+                let end = move_axis(self.end, at, count, before);
+                (start.min(end), start.max(end))
+            }
             _ => return Remapped::Unchanged,
         };
         if (start, end) == (self.start, self.end) {
@@ -1648,12 +1699,53 @@ pub(crate) fn remap_auto_filter(sheet: &mut xlsx_model::Sheet, id: SheetId, op: 
 }
 
 fn remap_filter_column(column: u32, old: CellRange, new: CellRange, op: &Op) -> Option<u32> {
-    if !matches!(op, Op::InsertCols { .. } | Op::DeleteCols { .. }) {
+    if !matches!(
+        op,
+        Op::InsertCols { .. } | Op::DeleteCols { .. } | Op::MoveCols { .. }
+    ) {
         return Some(column);
     }
     let absolute = old.start.col.checked_add(column)?;
     let moved = remap_ref(CellRef::new(0, absolute), op)?;
+    // A saved `colId` is an offset from the region's first column, so a
+    // criterion whose column leaves the region (a move can carry it past a
+    // shrinking right edge) has no offset that names it. Drop it, as a delete
+    // of the column does; `RestoreAutoFilter` puts it back on undo.
+    if moved.col < new.start.col || moved.col > new.end.col {
+        return None;
+    }
     moved.col.checked_sub(new.start.col)
+}
+
+/// One `sortState` while the source is scanned: where it starts and how many
+/// edits it owns, so a state that loses every key can be cut whole, the region
+/// its keys must lie in, and how many keys it wrote and lost.
+struct ScannedSortState {
+    start: usize,
+    first_edit: usize,
+    remove: bool,
+    region: Option<CellRange>,
+    conditions: u32,
+    dropped: u32,
+}
+
+impl ScannedSortState {
+    fn new(start: usize, first_edit: usize) -> Self {
+        Self {
+            start,
+            first_edit,
+            remove: false,
+            region: None,
+            conditions: 0,
+            dropped: 0,
+        }
+    }
+
+    /// Whether the state has nothing left to sort by: a key that a delete
+    /// stranded, or every key the region no longer holds.
+    fn leaves_no_key(&self) -> bool {
+        self.remove || (self.conditions > 0 && self.dropped == self.conditions)
+    }
 }
 
 fn remap_auto_filter_xml(
@@ -1667,7 +1759,7 @@ fn remap_auto_filter_xml(
     let mut reader = Reader::from_str(raw);
     let mut edits = Vec::new();
     let mut depth = 0;
-    let mut sort_state = None;
+    let mut sort_state: Option<ScannedSortState> = None;
     let mut has_sort_state = false;
     loop {
         let start = reader.buffer_position() as usize;
@@ -1681,10 +1773,13 @@ fn remap_auto_filter_xml(
                 let condition =
                     depth == 2 && sort_state.is_some() && name.as_ref() == b"sortCondition";
                 if sort {
-                    sort_state = Some((start, edits.len(), false));
+                    sort_state = Some(ScannedSortState::new(start, edits.len()));
                     has_sort_state = true;
+                } else if condition {
+                    sort_state.as_mut()?.conditions += 1;
                 }
                 let mut remove_column = false;
+                let mut remove_condition = false;
                 for attribute in element.attributes() {
                     let attribute = attribute.ok()?;
                     let value = attribute
@@ -1705,18 +1800,39 @@ fn remap_auto_filter_xml(
                         (old != new).then(|| new.to_a1())
                     } else if attribute.key.as_ref() == b"ref" && (sort || condition) {
                         let range = CellRange::parse_a1(value).ok()?;
-                        let deleted_column = condition
+                        let state = sort_state.as_mut()?;
+                        if condition
                             && matches!(op, Op::DeleteCols { .. })
-                            && remap_ref(range.start, op).is_none();
-                        if deleted_column {
-                            sort_state.as_mut()?.2 = true;
+                            && remap_ref(range.start, op).is_none()
+                        {
+                            state.remove = true;
                         }
                         match remap_hyperlink_range(range, op) {
-                            Some(moved) if moved == range => None,
-                            Some(range) => Some(range.to_a1()),
+                            Some(moved) => {
+                                if sort {
+                                    state.region = Some(moved);
+                                }
+                                // A sort key is a reference inside the sort
+                                // region, like a criterion's `colId` is an
+                                // offset inside the filter region: a move that
+                                // shrinks the region can carry the key out of
+                                // it, and the save would then name a column the
+                                // region does not cover. Drop the key, and the
+                                // whole state with it when no key is left.
+                                if condition {
+                                    let region = state.region.unwrap_or(new);
+                                    if !(region.contains(moved.start) && region.contains(moved.end))
+                                    {
+                                        remove_condition = true;
+                                        state.dropped += 1;
+                                        continue;
+                                    }
+                                }
+                                (moved != range).then(|| moved.to_a1())
+                            }
                             None => {
                                 if sort || condition {
-                                    sort_state.as_mut()?.2 = true;
+                                    state.remove = true;
                                 }
                                 None
                             }
@@ -1732,7 +1848,7 @@ fn remap_auto_filter_xml(
                         edits.push((offset..offset + attribute.value.len(), replacement));
                     }
                 }
-                if remove_column {
+                if remove_column || remove_condition {
                     if !empty {
                         reader.read_to_end(element.name()).ok()?;
                     }
@@ -1741,10 +1857,13 @@ fn remap_auto_filter_xml(
                 }
                 if empty {
                     if sort {
-                        let (start, first, remove) = sort_state.take()?;
-                        if remove {
-                            edits.truncate(first);
-                            edits.push((start..reader.buffer_position() as usize, String::new()));
+                        let state = sort_state.take()?;
+                        if state.leaves_no_key() {
+                            edits.truncate(state.first_edit);
+                            edits.push((
+                                state.start..reader.buffer_position() as usize,
+                                String::new(),
+                            ));
                             has_sort_state = false;
                         }
                     }
@@ -1755,11 +1874,14 @@ fn remap_auto_filter_xml(
             Event::End(_) => {
                 depth -= 1;
                 if depth == 1
-                    && let Some((start, first, remove)) = sort_state.take()
-                    && remove
+                    && let Some(state) = sort_state.take()
+                    && state.leaves_no_key()
                 {
-                    edits.truncate(first);
-                    edits.push((start..reader.buffer_position() as usize, String::new()));
+                    edits.truncate(state.first_edit);
+                    edits.push((
+                        state.start..reader.buffer_position() as usize,
+                        String::new(),
+                    ));
                     has_sort_state = false;
                 }
             }
@@ -2540,6 +2662,7 @@ fn remap_span(range: CellRange, op: &Op) -> Remapped<CellRange> {
     match *op {
         Op::DeleteRows { at, count, .. } => clip_span(range, Axis::Row, at, count),
         Op::DeleteCols { at, count, .. } => clip_span(range, Axis::Col, at, count),
+        Op::MoveRows { .. } | Op::MoveCols { .. } => move_span(range, op),
         // inserts only drop a corner on off-sheet-edge overflow
         _ => match (remap_ref(range.start, op), remap_ref(range.end, op)) {
             (Some(start), Some(end)) if start == range.start && end == range.end => {
@@ -2548,6 +2671,37 @@ fn remap_span(range: CellRange, op: &Op) -> Remapped<CellRange> {
             (Some(start), Some(end)) => Remapped::Moved(CellRange { start, end }),
             _ => Remapped::Deleted,
         },
+    }
+}
+
+/// A track move permutes the moved axis without dropping anything, so both
+/// corners follow and only their order on that axis may swap. The other axis
+/// stays with the corner it was written on.
+fn move_span(range: CellRange, op: &Op) -> Remapped<CellRange> {
+    let (Some(start), Some(end)) = (remap_ref(range.start, op), remap_ref(range.end, op)) else {
+        return Remapped::Deleted;
+    };
+    let mut moved = CellRange { start, end };
+    match *op {
+        // the corners swap positions, so each absolute marker travels with the
+        // coordinate it was written on (`$A1:B1` becomes `B1:$B1`)
+        Op::MoveRows { .. } => {
+            if moved.start.row > moved.end.row {
+                std::mem::swap(&mut moved.start.row, &mut moved.end.row);
+                std::mem::swap(&mut moved.start.abs_row, &mut moved.end.abs_row);
+            }
+        }
+        _ => {
+            if moved.start.col > moved.end.col {
+                std::mem::swap(&mut moved.start.col, &mut moved.end.col);
+                std::mem::swap(&mut moved.start.abs_col, &mut moved.end.abs_col);
+            }
+        }
+    }
+    if moved == range {
+        Remapped::Unchanged
+    } else {
+        Remapped::Moved(moved)
     }
 }
 
@@ -2561,8 +2715,13 @@ impl Axis {
     fn is_edited_by(self, op: &Op) -> bool {
         matches!(
             (self, op),
-            (Axis::Row, Op::InsertRows { .. } | Op::DeleteRows { .. })
-                | (Axis::Col, Op::InsertCols { .. } | Op::DeleteCols { .. })
+            (
+                Axis::Row,
+                Op::InsertRows { .. } | Op::DeleteRows { .. } | Op::MoveRows { .. }
+            ) | (
+                Axis::Col,
+                Op::InsertCols { .. } | Op::DeleteCols { .. } | Op::MoveCols { .. }
+            )
         )
     }
 
@@ -2744,6 +2903,30 @@ mod tests {
         assert_eq!(
             formula(&workbook, SheetId(0), "D1").as_deref(),
             Some("SUM(A1:B3)")
+        );
+    }
+
+    /// Moving one column of a joined range past the other swaps the corners;
+    /// each `$` marker belongs to the coordinate it was written on, so it
+    /// moves with that corner instead of staying on the endpoint. A and B
+    /// trade places, and the range still covers the same two cells.
+    #[test]
+    fn a_span_whose_corners_swap_keeps_their_absolute_markers() {
+        let mut workbook = wb(&["Data"]);
+        set_formula(&mut workbook, SheetId(0), "E1", "SUM($A1:B1)");
+        remap_formulas(
+            &mut workbook,
+            &Op::MoveCols {
+                sheet: SheetId(0),
+                col: 0,
+                count: 1,
+                before: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            formula(&workbook, SheetId(0), "E1").as_deref(),
+            Some("SUM(A1:$B1)")
         );
     }
 
@@ -2988,6 +3171,73 @@ mod tests {
             panic!("two-cell anchor");
         };
         assert_eq!(from.row, 4, "an edit on another sheet cannot move it");
+    }
+
+    /// Moving the column a two-cell anchor's corner sits in past the other
+    /// corner reverses the rectangle, so the two corners trade places. A
+    /// corner is a cell *and* its offset, and the offset is measured against
+    /// the column it was written in: swapping only the indices leaves the
+    /// offset in a column of a different width, which can put the corners out
+    /// of order and make the chart unrenderable.
+    #[test]
+    fn a_reversed_two_cell_anchor_swaps_each_corner_with_its_offset() {
+        const COL_OFF: i64 = 80 * 9_525; // 80 px in EMU, inside a 20-character B
+        let mut w = wb(&["Sheet1"]);
+        w.sheets[0].charts = vec![xlsx_model::SheetChart {
+            raw_xml: None,
+            part: "xl/charts/chart1.xml".to_owned(),
+            drawing: "xl/drawings/drawing1.xml".to_owned(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: AnchorCell {
+                    col: 1,
+                    col_off: COL_OFF,
+                    row: 0,
+                    row_off: 0,
+                },
+                to: AnchorCell {
+                    col: 2,
+                    col_off: 0,
+                    row: 1,
+                    row_off: 0,
+                },
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: Vec::new(),
+        }];
+        remap_charts(
+            &mut w,
+            &Op::MoveCols {
+                sheet: SheetId(0),
+                col: 1,
+                count: 1,
+                before: 4,
+            },
+        )
+        .unwrap();
+        let ChartAnchor::TwoCell { from, to, .. } = w.sheets[0].charts[0].anchor else {
+            panic!("two-cell anchor");
+        };
+        assert_eq!(
+            from,
+            AnchorCell {
+                col: 1,
+                col_off: 0,
+                row: 0,
+                row_off: 0,
+            },
+            "the original right corner now leads, carrying its own offset"
+        );
+        assert_eq!(
+            to,
+            AnchorCell {
+                col: 3,
+                col_off: COL_OFF,
+                row: 1,
+                row_off: 0,
+            },
+            "the original left corner now trails, with the 80 px still inside it"
+        );
     }
 
     /// Excel's 3-D reference covers every sheet between its endpoints in

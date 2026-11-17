@@ -53,6 +53,14 @@ export declare class EditSession {
   resident_deleted_units(): number
   apply_delete_profiled(direction: string, expectedFrameEpoch: number, count: number): Uint8Array
   apply_input_profile_json(): string
+  /**
+   * The kinds of effect the web canvas backend leaves off resident display
+   * page `page_index`, as bits in `skippedEffectKinds()` order, the first
+   * kind the lowest bit. `unavailable` holds `(region, area, index)` triples
+   * for the pictures it could not draw: region 0 body, 1 header, 2 footer,
+   * 3 note separator, 4 note, with `area` the note area's index.
+   */
+  canvasSkippedEffects(pageIndex: number, unavailable: Uint32Array): number
   display_hit_test_regions_json(pageIndex: number, x: number, y: number): string
   display_vertical_move_json(position: number, direction: string, goalX: number): string
   display_range_rects_json(from: number, to: number): string
@@ -160,6 +168,7 @@ export declare class EditSession {
   paragraph_identities(): string
   prime_save_seed_states(paragraphs: number, inflated: number): boolean
   prime_save_seed_states_slice(paragraphs: number, inflated: number, maxBytes: number): number
+  prime_last_slice_cost(): number
   paragraph_save_plan(): string
   paragraph_spans(story: string): string
   paragraph_unit(story: string, paraId: string): number
@@ -344,6 +353,7 @@ export interface PngPictureReport {
 export interface PngTargetReport {
   png: Uint8Array
   pictures: Array<PngPictureReport>
+  skippedEffects: Array<string>
 }
 
 export declare function range_rects_by_handle(handle: number, from: number, to: number): string
@@ -385,8 +395,16 @@ export declare function serialize_docx_s12(requestJson: string): string
  */
 export declare function set_wasm_heap_counting(on: boolean): boolean
 
-/** Native no-op; native allocations are not limited. */
+/**
+ * Caps the bytes the calling thread's engine may hold at once; a non-finite or negative value
+ * removes the cap. The engine call that crosses it fails at its next checkpoint (call entry or
+ * exit, or a progress tick) and its object then refuses every call but `free()`. While any thread
+ * has a cap, heap counting is on.
+ */
 export declare function set_wasm_heap_limit(bytes: number): void
+
+/** Every kind of effect a PNG export can report as skipped, in reporting order. */
+export declare function skippedEffectKinds(): string[]
 
 export declare function unzip_docx(data: Uint8Array): any
 
@@ -396,12 +414,15 @@ export declare function vertical_move_by_handle(handle: number, position: number
 
 export declare function vertical_move_json(displayList: string, position: number, direction: string, goalX: number): string
 
-/** Size of the calling thread's last allocation that failed, or 0. */
+/**
+ * Size of the calling thread's last allocation that failed, or 0. It keeps that size after the
+ * thread recovers, until a later failure replaces it.
+ */
 export declare function wasm_failed_allocation_bytes(): number
 
 /**
- * Whether the counters below see every allocation of this thread's engine: false until
- * `set_wasm_heap_counting(true)`.
+ * Whether the counters below see the allocations of this thread's engine: true from
+ * `set_wasm_heap_counting(true)` on, and while any thread has a heap limit.
  */
 export declare function wasm_heap_counted(): boolean
 

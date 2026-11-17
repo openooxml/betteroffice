@@ -1,6 +1,7 @@
 import { test, expect, type Page, type TestInfo } from 'playwright/test';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
+import { caretBoxAtRunStart, movedCaretBox } from './rendered-box';
 
 const SEED = '<w:p><w:r><w:t>Seed</w:t></w:r></w:p>';
 const HEADING_STYLES = '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style></w:styles>';
@@ -104,12 +105,11 @@ for (const arm of ['&peerless=0', '']) {
         await input.press('ControlOrMeta+A');
       } else {
         const caret = page.locator('[data-docx-caret]');
-        await input.press('ControlOrMeta+End');
-        for (let step = 0; step < 'ords here'.length; step += 1) await input.press('ArrowLeft');
-        const middle = await caret.boundingBox();
-        await input.press('ControlOrMeta+Home');
-        const start = await caret.boundingBox();
-        if (!middle || !start) throw new Error('Document caret has no bounds');
+        const firstRun = page.locator('.canvas-page-mirror .layout-run-text').first();
+        let middle = await movedCaretBox(caret, () => input.press('ControlOrMeta+End'));
+        for (let step = 0; step < 'ords here'.length; step += 1) middle = await movedCaretBox(caret, () => input.press('ArrowLeft'));
+        const start = await caretBoxAtRunStart(caret, firstRun, () => input.press('ControlOrMeta+Home'));
+        expect(Math.abs(start.x - middle.x) > 1 || Math.abs(start.y - middle.y) > 1, 'drag start and end points must differ by more than 1px').toBe(true);
         await page.mouse.move(start.x + 0.25, start.y + start.height / 2);
         await page.mouse.down();
         await page.mouse.move(middle.x, middle.y + middle.height / 2, { steps: 12 });

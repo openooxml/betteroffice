@@ -252,6 +252,10 @@ export function createPeerlessWorkerXlsxCommandBinding(
       current.setProposalsPanelOpen(open);
       return done();
     }
+    if (id === 'findReplace') {
+      current.setReplaceOpen?.(true);
+      return done(false);
+    }
     if (!session) return fail('editor-unavailable');
     if (id === 'paintFormat') {
       const armed = current.formatToken() !== null;

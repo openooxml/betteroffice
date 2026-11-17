@@ -1291,8 +1291,8 @@ fn filter(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             return Err(ErrorValue::Value);
         }
         let mut keep = Vec::new();
-        for position in 0..include.values.len() {
-            match to_bool(&include.values[position]) {
+        for (position, value) in include.values.iter().enumerate() {
+            match to_bool(value) {
                 Ok(true) => keep.push(position),
                 Ok(false) => {}
                 Err(error) => return Err(error),

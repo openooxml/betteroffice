@@ -6,6 +6,8 @@ use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
+use crate::RunUnderline;
+
 /// a color reference as it appears in a `<color>` element (§18.8.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Color {
@@ -58,15 +60,81 @@ impl DifferentialFormat {
 }
 
 /// a cell font. only the facets we render are modelled; unset fields inherit.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+///
+/// Serializes `underline` as a boolean; `underline_style` names a kind other than single.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(from = "FontFields")]
 pub struct Font {
     pub name: Option<String>,
     pub size_pt: Option<f64>,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: RunUnderline,
     pub strike: bool,
     pub color: Option<Color>,
+}
+
+impl Font {
+    /// The underline kind a boolean cannot carry.
+    pub fn underline_style(&self) -> Option<RunUnderline> {
+        match self.underline {
+            RunUnderline::None | RunUnderline::Single => None,
+            style => Some(style),
+        }
+    }
+}
+
+impl Serialize for Font {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let style = self.underline_style();
+        let mut state = serializer.serialize_struct("Font", 7 + usize::from(style.is_some()))?;
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("size_pt", &self.size_pt)?;
+        state.serialize_field("bold", &self.bold)?;
+        state.serialize_field("italic", &self.italic)?;
+        state.serialize_field("underline", &(self.underline != RunUnderline::None))?;
+        match style {
+            Some(style) => state.serialize_field("underline_style", &style)?,
+            None => state.skip_field("underline_style")?,
+        }
+        state.serialize_field("strike", &self.strike)?;
+        state.serialize_field("color", &self.color)?;
+        state.end()
+    }
+}
+
+#[derive(Deserialize)]
+struct FontFields {
+    name: Option<String>,
+    size_pt: Option<f64>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    #[serde(default)]
+    underline_style: Option<RunUnderline>,
+    strike: bool,
+    color: Option<Color>,
+}
+
+impl From<FontFields> for Font {
+    fn from(fields: FontFields) -> Self {
+        let underline = match (fields.underline, fields.underline_style) {
+            (false, _) => RunUnderline::None,
+            (true, Some(style)) if style != RunUnderline::None => style,
+            (true, _) => RunUnderline::Single,
+        };
+        Font {
+            name: fields.name,
+            size_pt: fields.size_pt,
+            bold: fields.bold,
+            italic: fields.italic,
+            underline,
+            strike: fields.strike,
+            color: fields.color,
+        }
+    }
 }
 
 /// A cell fill.
@@ -574,7 +642,7 @@ struct FontKey<'a> {
     size_pt: Option<u64>,
     bold: bool,
     italic: bool,
-    underline: bool,
+    underline: RunUnderline,
     strike: bool,
     color: Option<ColorKey<'a>>,
 }
@@ -901,7 +969,7 @@ const DEFAULT_FONT: Font = Font {
     size_pt: None,
     bold: false,
     italic: false,
-    underline: false,
+    underline: RunUnderline::None,
     strike: false,
     color: None,
 };
@@ -1963,6 +2031,41 @@ mod tests {
     }
 
     #[test]
+    fn font_json_keeps_the_underline_boolean_and_adds_its_style() {
+        let json = |underline| {
+            serde_json::to_value(Font {
+                underline,
+                ..Font::default()
+            })
+            .unwrap()
+        };
+        assert_eq!(json(RunUnderline::None)["underline"], false);
+        assert_eq!(json(RunUnderline::Single)["underline"], true);
+        for underline in [RunUnderline::None, RunUnderline::Single] {
+            assert!(json(underline).get("underline_style").is_none());
+        }
+        for (underline, style) in [
+            (RunUnderline::Double, "double"),
+            (RunUnderline::SingleAccounting, "singleAccounting"),
+            (RunUnderline::DoubleAccounting, "doubleAccounting"),
+        ] {
+            let value = json(underline);
+            assert_eq!(value["underline"], true);
+            assert_eq!(value["underline_style"], style);
+            assert_eq!(
+                serde_json::from_value::<Font>(value).unwrap().underline,
+                underline
+            );
+        }
+        let mut cleared = json(RunUnderline::Double);
+        cleared["underline"] = false.into();
+        assert_eq!(
+            serde_json::from_value::<Font>(cleared).unwrap().underline,
+            RunUnderline::None
+        );
+    }
+
+    #[test]
     fn theme_slot_swaps_first_two_pairs() {
         let t = Theme::default();
         assert_eq!(t.slot(0), Some("#ffffff"));
@@ -2206,7 +2309,11 @@ mod tests {
                 ..base.clone()
             },
             Font {
-                underline: true,
+                underline: RunUnderline::Single,
+                ..base.clone()
+            },
+            Font {
+                underline: RunUnderline::Double,
                 ..base.clone()
             },
             Font {

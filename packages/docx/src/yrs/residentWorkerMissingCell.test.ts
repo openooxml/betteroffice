@@ -7,6 +7,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import { createYrsSession, type YrsCellLoc, type YrsSession } from './index';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
+import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 
 const path = (relative: string) => fileURLToPath(new URL(relative, import.meta.url));
 const WASM = path('../wasm/generated/edit/docx_edit_bg.wasm');
@@ -137,4 +138,16 @@ for (const [index, order] of (['synced', 'concurrent'] as const).entries()) test
   } finally {
     errors.mockRestore();
   }
+}, 60_000);
+
+test('a section read limited to a missing cell paragraph matches the full read', async () => {
+  const { main, story } = await danglingHost(12_100, 'synced');
+  const client = new DocxSourceWorkerClient(startWorker());
+  clients.push(client);
+  await client.openSource({ bytes: docx(), state: main.encodeState() });
+  const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+  const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [{ story, paraId: `${story}#p0` }] })).value;
+  expect(full.paragraphs.some((entry) => entry.story === story)).toBe(false);
+  expect(limited.paragraphs).toEqual([]);
+  expect(limited.sections).toEqual(full.sections);
 }, 60_000);

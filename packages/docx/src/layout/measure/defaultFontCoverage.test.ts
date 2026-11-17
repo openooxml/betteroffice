@@ -126,23 +126,25 @@ test('implicit fonts keep Latin currency, tabs and default ignorables on the nat
   expect(primitives.every((primitive: { kind: string }) => primitive.kind === 'glyphRun')).toBe(true);
 });
 
-test('stand-ins give an unknown family a chain and keep uncovered scripts on the no-provider path', async () => {
+test('stand-ins, on by default, give an unknown family a chain and keep uncovered scripts on the no-provider path', async () => {
   await wasm.preloadLayoutWasm();
-  const prepared = async (standIns: boolean) => {
+  const prepared = async (standIns?: boolean) => {
     const source = createRustMeasureSource({
       engine: { registerFont: wasm.registerMeasureFont, registerSubstituteFont: wasm.registerSubstituteMeasureFont, clearFonts() {} },
-      standIns,
+      ...(standIns !== undefined && { standIns }),
     });
     const requirements = [{ key: 'papyrus|0|0', family: 'Papyrus', bold: false, italic: false }];
     await source.prepareFontRequirements(requirements);
     return source.measurementConfigForRequirements(requirements)!.fontChains;
   };
   expect((await prepared(false))['papyrus|0|0']).toBeUndefined();
-  const chains = await prepared(true);
-  expect(chains['papyrus|0|0']?.length).toBeGreaterThan(0);
-  expect(chains[IMPLICIT_FONT_COVERAGE]?.length).toBeGreaterThan(0);
-  expect(measure(chains, 'Papyrus', 'Latin')).not.toBe('browser');
-  expect(measure(chains, 'Papyrus', '\u0928\u092e\u0938\u094d\u0924\u0947')).toBe('browser');
+  for (const standIns of [undefined, true]) {
+    const chains = await prepared(standIns);
+    expect(chains['papyrus|0|0']?.length).toBeGreaterThan(0);
+    expect(chains[IMPLICIT_FONT_COVERAGE]?.length).toBeGreaterThan(0);
+    expect(measure(chains, 'Papyrus', 'Latin')).not.toBe('browser');
+    expect(measure(chains, 'Papyrus', '\u0928\u092e\u0938\u094d\u0924\u0947')).toBe('browser');
+  }
 });
 
 test('a configured base URL decides the complete provider', async () => {

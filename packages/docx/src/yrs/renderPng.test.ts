@@ -1,10 +1,12 @@
 import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import * as enginePng from '../wasm/enginePng';
 import { engineKind } from '../wasm/enginePng';
-import { preloadEditWasm } from '../wasm/edit';
-import { preloadOpcWasm } from '../wasm/opc';
+import { resolveCompleteFontProvider } from '../layout/measure';
 import { createYrsSession, type YrsSession } from './index';
+import { ENGINES, preloadEngines, restoreBrowser, runsDocument, scriptDocument, stubBrowser } from './renderPngTestSupport';
+import { sessionInternals } from './sessionInternals';
 import type { PngDiagnostic } from '../../../../shared/office-session/pngExportError';
 import fixture from '../../../../crates/docx-edit/tests/fixtures/behind_objects.json';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
@@ -13,43 +15,8 @@ const root = resolve(import.meta.dir, '../../../..');
 const deck = new Uint8Array(readFileSync(resolve(root, 'apps/demo/public/betteroffice-demo.docx')));
 const native = engineKind === 'native';
 
-beforeAll(async () => {
-  await preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'))));
-  await preloadOpcWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/opc/ooxml_opc_bg.wasm'))));
-});
-
-let restore: (() => void) | undefined;
-afterEach(() => { restore?.(); restore = undefined; });
-
-function stubBrowser() {
-  const calls = { sizes: [] as [number, number][], fills: 0, encoded: 0, scales: [] as number[][], bitmaps: 0 };
-  class Canvas {
-    constructor(public width: number, public height: number) {}
-    getContext() {
-      if (calls.sizes.at(-1)?.[0] !== this.width || calls.sizes.at(-1)?.[1] !== this.height) calls.sizes.push([this.width, this.height]);
-      return new Proxy({} as Record<string, unknown>, {
-        get(target, property) {
-          if (property === 'fill') return () => { calls.fills++; };
-          if (property === 'scale') return (x: number, y: number) => { calls.scales.push([x, y]); };
-          if (property === 'measureText') return (text: string) => ({ width: text.length });
-          if (property === 'createLinearGradient' || property === 'createRadialGradient' || property === 'createPattern') return () => ({ addColorStop: () => undefined });
-          return property in target ? target[property as string] : () => undefined;
-        },
-        set(target, property, value) { target[property as string] = value; return true; },
-      });
-    }
-    convertToBlob(request: { type: string }) { calls.encoded++; return Promise.resolve(new Blob(['png'], { type: request.type })); }
-  }
-  class Path { moveTo() {} lineTo() {} quadraticCurveTo() {} bezierCurveTo() {} closePath() {} addPath() {} }
-  const scope = globalThis as Record<string, unknown>;
-  const saved = { OffscreenCanvas: scope.OffscreenCanvas, Path2D: scope.Path2D, Image: scope.Image, createImageBitmap: scope.createImageBitmap };
-  Object.assign(scope, {
-    OffscreenCanvas: Canvas, Path2D: Path, Image: undefined,
-    createImageBitmap: () => { calls.bitmaps++; return Promise.resolve({ width: 4, height: 4, close: () => undefined }); },
-  });
-  restore = () => { Object.assign(scope, saved); };
-  return calls;
-}
+beforeAll(preloadEngines);
+afterEach(restoreBrowser);
 
 const pngSize = (bytes: Uint8Array): [number, number] => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -72,6 +39,45 @@ const smartArtParts = (drawingRels = '<Relationships xmlns="http://schemas.openx
         ['word/diagrams/_rels/drawing1.xml.rels', toBytes(drawingRels)],
         ['word/media/image1.png', new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==', 'base64'))],
     ]);
+
+function withCanonicalFontIds(value: unknown, ids = new Map<number, number>()): unknown {
+  if (Array.isArray(value)) return value.map((item) => withCanonicalFontIds(item, ids));
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, field]) => {
+    if (key !== 'fontId' || typeof field !== 'number') return [key, withCanonicalFontIds(field, ids)];
+    if (!ids.has(field)) ids.set(field, ids.size);
+    return [key, ids.get(field)];
+  }));
+}
+
+async function exportScriptDocument(options: Parameters<YrsSession['renderPng']>[1] = {}): Promise<Uint8Array> {
+  const session = await createYrsSession();
+  try {
+    session.openDocx(scriptDocument(), true);
+    return await session.renderPng({ page: 0 }, options);
+  } finally { session.destroy(); }
+}
+
+async function drawnPrimitives(options: Parameters<YrsSession['renderPng']>[1] = {}): Promise<unknown> {
+  const drawing = spyOn(enginePng, 'renderPng');
+  try {
+    await exportScriptDocument(options);
+    expect(drawing).toHaveBeenCalledTimes(1);
+    return withCanonicalFontIds(drawing.mock.calls[0]![0].page.primitives);
+  } finally { drawing.mockRestore(); }
+}
+
+for (const { kind } of ENGINES) {
+  describe.skipIf(engineKind !== kind)(`renderPng default fonts on the ${kind} engine`, () => {
+    test('without fontProvider, script text draws the primitives the complete bundled provider draws', async () => {
+      stubBrowser();
+      const complete = await resolveCompleteFontProvider();
+      expect(complete).toBeDefined();
+      const pinned = await drawnPrimitives({ fontProvider: complete });
+      expect(await drawnPrimitives()).toEqual(pinned);
+    });
+  });
+}
 
 describe('YrsSession.renderPng', () => {
   test('draws an EMF picture that reaches the export as its media part', async () => {
@@ -210,7 +216,7 @@ describe('YrsSession.renderPng', () => {
         session.openDocx(new Uint8Array(rezipPartsToArrayBuffer(parts)), true);
         await session.renderPng({ page: 0 });
         return calls.scales;
-      } finally { session.destroy(); restore?.(); restore = undefined; }
+      } finally { session.destroy(); restoreBrowser(); }
     };
     expect(await scales('50')).toContainEqual([0.5, 1]);
     expect((await scales('0')).filter(([x]) => x === 0)).toEqual([]);
@@ -250,5 +256,120 @@ describe('YrsSession.renderPng', () => {
     const blank = await createYrsSession();
     try { await expect(blank.renderPng({ page: 0 })).rejects.toThrow('session opened from DOCX bytes'); }
     finally { blank.destroy(); }
+  });
+});
+
+const drawnText = (value: unknown): string => {
+  if (Array.isArray(value)) return value.map(drawnText).join('');
+  if (value === null || typeof value !== 'object') return '';
+  return Object.entries(value).map(([key, field]) => key === 'text' && typeof field === 'string' ? field : drawnText(field)).join('');
+};
+
+const sessionsWithoutSource: [string, () => Promise<YrsSession>][] = [
+  ['never opened', () => createYrsSession()],
+  ['loaded from state alone', async () => {
+    const source = await opened();
+    try {
+      const forked = await createYrsSession();
+      forked.loadState(source.encodeState());
+      return forked;
+    } finally { source.destroy(); }
+  }],
+  ['opened as a preview', async () => {
+    const session = await createYrsSession();
+    expect(session.openDocxPreview(deck, 3)).not.toBeNull();
+    expect(session.isDisplayOnly()).toBe(true);
+    return session;
+  }],
+];
+
+describe('YrsSession.renderPng source bytes', () => {
+  test.skipIf(engineKind !== 'native')('exports a session opened from bytes without materializing it on the native engine', async () => {
+    stubBrowser();
+    const session = await opened();
+    try {
+      const materialize = spyOn(session, 'materializeDocx');
+      await session.renderPng({ page: 0 });
+      expect(materialize).toHaveBeenCalledTimes(0);
+    } finally { session.destroy(); }
+  });
+
+  test.skipIf(engineKind !== 'wasm')('exports a session opened from bytes by materializing it on the wasm engine', async () => {
+    stubBrowser();
+    const session = await opened();
+    try {
+      const materialize = spyOn(session, 'materializeDocx');
+      await session.renderPng({ page: 0 });
+      expect(materialize).toHaveBeenCalledTimes(1);
+    } finally { session.destroy(); }
+  });
+
+  for (const [kind, create] of sessionsWithoutSource) {
+    test(`a session ${kind} asks for its materialized document and is refused`, async () => {
+      stubBrowser();
+      const session = await create();
+      try {
+        const materialize = spyOn(session, 'materializeDocx');
+        await expect(session.renderPng({ page: 0 })).rejects.toThrow('session opened from DOCX bytes');
+        expect(materialize).toHaveBeenCalledTimes(1);
+      } finally { session.destroy(); }
+    });
+  }
+
+  test('a compared session, whose source has no save keys, has its export refused after materializing it', async () => {
+    stubBrowser();
+    const session = await createYrsSession();
+    try {
+      const compared = JSON.parse(sessionInternals(session).compareDocx(
+        runsDocument({ family: 'Calibri', text: 'Original text' }),
+        runsDocument({ family: 'Calibri', text: 'Revised text' }),
+        JSON.stringify({ author: 'Reviewer', date: '2026-10-02T12:00:00Z' }),
+      ));
+      expect(compared).toMatchObject({ ok: true });
+      const materialize = spyOn(session, 'materializeDocx');
+      const refused = await session.renderPng({ page: 0 }).then(() => undefined, (error: unknown) => error);
+      expect(refused).toBeInstanceOf(Error);
+      expect((refused as Error).name).toBe('PeerMetadataError');
+      expect((refused as Error & { code?: string }).code).toBe('missing-source');
+      expect((refused as Error).message).toContain('peer metadata requires an indexed source and media');
+      expect(materialize).toHaveBeenCalledTimes(1);
+    } finally { session.destroy(); }
+  });
+
+  test('a destroyed session is refused before it is materialized', async () => {
+    stubBrowser();
+    const session = await opened();
+    const materialize = spyOn(session, 'materializeDocx');
+    session.destroy();
+    await expect(session.renderPng({ page: 0 })).rejects.toThrow('YrsSession is destroyed');
+    expect(materialize).toHaveBeenCalledTimes(0);
+  });
+
+  test('an edit made after open reaches the exported page', async () => {
+    stubBrowser();
+    const session = await opened();
+    const drawing = spyOn(enginePng, 'renderPng');
+    try {
+      session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'Quixotically ');
+      await session.renderPng({ page: 0 });
+      expect(drawing).toHaveBeenCalledTimes(1);
+      expect(drawnText(drawing.mock.calls[0]![0].page.primitives)).toContain('Quixotically');
+    } finally { drawing.mockRestore(); session.destroy(); }
+  });
+
+  test('an edited session draws the same page content on each export', async () => {
+    stubBrowser();
+    const session = await opened();
+    const drawing = spyOn(enginePng, 'renderPng');
+    try {
+      session.insertText({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 }, 'Quixotically ');
+      await session.renderPng({ page: 0 });
+      const first = structuredClone(drawing.mock.calls[0]![0].page.primitives);
+      await session.renderPng({ page: 0 });
+      expect(drawing).toHaveBeenCalledTimes(2);
+      expect(first.length).toBeGreaterThan(0);
+      expect(drawnText(first)).toContain('Quixotically');
+      expect(drawing.mock.calls[1]![0].page.primitives).toEqual(first);
+    } finally { drawing.mockRestore(); session.destroy(); }
   });
 });

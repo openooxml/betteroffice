@@ -74,6 +74,7 @@
     }
   },
   "include": [
-    "./*.tsx"
+    "./*.tsx",
+    "../../../scripts/docx-quality/virtual-fonts.d.ts"
   ]
 }

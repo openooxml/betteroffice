@@ -90,6 +90,8 @@ export interface XlsxPluginHost {
   selectionUnsettled(generation?: string | null): void;
   selectionSettled(source: 'pointer' | 'touch' | 'keyboard', generation?: string | null): void;
   focusChanged(focused: boolean): void;
+  /** The focus tracker's re-check; opening and closing run it, since either can replace the surface. */
+  setFocusCheck(check: (() => void) | null): void;
   localeChanged(locale: string): void;
   modeChanged(readOnly: boolean): void;
   proposalsChanged(signature: string): void;
@@ -214,6 +216,7 @@ export function createXlsxPluginHost(
   { editGate = true }: XlsxPluginHostOptions = {}
 ): XlsxPluginHost {
   let reporter: ((error: XlsxPluginError) => void) | undefined;
+  let focusCheck: (() => void) | null = null;
   let handle: object | null = null;
   let detachUpdates: (() => void) | null = null;
   let installed = false;
@@ -595,12 +598,14 @@ export function createXlsxPluginHost(
       generations += 1;
       runtime.open(`workbook-${generations}`);
       refuseEditGate();
+      focusCheck?.();
     },
 
     close(reason) {
       closeHandle();
       state.layout = null;
       runtime.close(reason);
+      focusCheck?.();
     },
 
     generation: () => runtime.generation(),
@@ -659,6 +664,10 @@ export function createXlsxPluginHost(
       state.focused = focused;
       const generation = runtime.generation();
       if (generation) notify({ type: 'focus-change', generation, focused });
+    },
+
+    setFocusCheck(check) {
+      focusCheck = check;
     },
 
     localeChanged(locale) {

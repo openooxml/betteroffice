@@ -40,7 +40,12 @@ export function usePeerlessPluginHost(run: PeerlessPresentation | null, commands
   useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
   useLayoutEffect(() => {
     if (!managed) return;
-    return trackFocus(() => stage.current ? [stage.current] : [], (focused) => host.focusChanged(focused));
+    const tracker = trackFocus(() => stage.current ? [stage.current] : [], (focused) => host.focusChanged(focused));
+    host.setFocusCheck(tracker.recheck);
+    return () => {
+      host.setFocusCheck(null);
+      tracker();
+    };
   }, [host, managed, stage]);
   useLayoutEffect(() => { host.setReporter(props.onPluginError); host.setGrants(props.pluginGrants); });
   useLayoutEffect(() => { host.modeChanged(Boolean(props.readOnly || run?.failure)); }, [host, props.readOnly, run?.failure]);

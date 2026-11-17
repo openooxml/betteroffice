@@ -72,6 +72,11 @@ export function preloadEditWasmFrom(source: Promise<WebAssembly.Module | null>):
 /**
  * Caps the bytes the editing core in this thread may allocate at once; an
  * allocation past the cap fails as if the memory were full. Undefined removes it.
+ *
+ * On a native engine a cap switches heap counting on for this thread's engine,
+ * which adds a measurable cost to every engine call; no cap costs nothing. The cap is checked at engine-call entry and exit and at progress
+ * checkpoints, so one large allocation between checkpoints can pass it before the
+ * call fails.
  */
 export function setEditWasmHeapLimit(bytes: number | undefined): void {
   editWasmState.ensure();

@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { preloadEditWasm } from './edit';
 import type { PngDiagnostic } from '../../../../shared/office-session/pngExportError';
 import type { DisplayList, DisplayPage } from '../layout/render/displayList';
 import { engineKind, renderPng, type DocxPngEngine } from './enginePng';
@@ -9,10 +11,15 @@ const glyphs = { kind: 'glyphRun', x: 0, y: 0, fontId: 1, size: 12, color: '#000
 const svg = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
 
 const engine = (drawn: DisplayPage, overrides: Partial<DocxPngEngine> = {}): DocxPngEngine => ({
-  displayList: { pages: [drawn] } as DisplayList, fontChains: {}, page: drawn, session: null,
+  displayList: { pages: [drawn] } as DisplayList, fontChains: {}, page: drawn,
+  session: { canvasSkippedEffects: (): number => 0 },
   outlineGlyph: () => JSON.stringify({ commands: [] }),
   media: () => ({ bytes: svg, mimeType: 'image/svg+xml' }),
   ...overrides,
+});
+
+beforeAll(async () => {
+  await preloadEditWasm(new Uint8Array(readFileSync(new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url))));
 });
 
 let restore: (() => void) | undefined;

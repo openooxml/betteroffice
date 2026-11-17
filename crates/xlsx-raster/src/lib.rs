@@ -3,9 +3,11 @@
 
 mod fmath;
 mod font;
+mod picture;
 use std::collections::{HashMap, hash_map::Entry};
 
 pub use font::measure_text;
+pub use picture::{ImageMap, MAX_FRAME_IMAGE_PIXELS, MAX_IMAGE_PIXELS};
 
 use tiny_skia::{
     Color, FillRule, IntRect, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, StrokeDash,
@@ -16,15 +18,23 @@ use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRe
 #[cfg(not(feature = "fonts"))]
 /// paint a display list and encode it as png bytes.
 pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
+    render_png_with_images(dl, &ImageMap::new())
+}
+
+#[cfg(not(feature = "fonts"))]
+/// [`render_png`], painting each image command from `images`.
+pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result<Vec<u8>, String> {
     let w = (dl.width.ceil() as u32).max(1);
     let h = (dl.height.ceil() as u32).max(1);
     let mut pixmap = Pixmap::new(w, h).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut clip_surface = ClipSurface::default();
     let mut patterns = HashMap::new();
+    let mut pictures = picture::Pictures::new(images);
 
     for cmd in &dl.commands {
         match cmd {
+            DrawCmd::Image { .. } => pictures.paint(&mut pixmap, &mut clip_surface, cmd)?,
             DrawCmd::PatternFill {
                 x,
                 y,
@@ -213,6 +223,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 bold,
                 italic,
                 underline,
+                underline_style,
                 strike,
                 highlight,
                 dashed_underline,
@@ -237,6 +248,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                     bold: *bold,
                     italic: *italic,
                     underline: *underline,
+                    double_underline: double_underline(*underline_style),
                     strike: *strike,
                     highlight: highlight.as_deref().map(parse_color).transpose()?,
                     dashed_underline: *dashed_underline,
@@ -634,6 +646,11 @@ fn path_coord(value: f64) -> Result<f32, String> {
         .ok_or_else(|| "path contains a non-finite coordinate".to_string())
 }
 
+fn double_underline(style: Option<xlsx_render::RunUnderline>) -> bool {
+    use xlsx_render::RunUnderline::{Double, DoubleAccounting};
+    matches!(style, Some(Double | DoubleAccounting))
+}
+
 /// parse a `#rrggbb` string into a tiny-skia color.
 fn parse_color(s: &str) -> Result<Color, String> {
     let hex = s
@@ -967,6 +984,7 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
+                    underline_style: None,
                     strike: false,
                     highlight: None,
                     dashed_underline: false,
@@ -1017,6 +1035,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline: false,
+                underline_style: None,
                 strike: false,
                 highlight: None,
                 dashed_underline: false,
@@ -1079,6 +1098,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 underline,
+                underline_style: None,
                 strike: underline,
                 highlight: None,
                 dashed_underline: false,
@@ -1132,6 +1152,7 @@ mod tests {
 
     #[test]
     fn vertical_header_defaults_to_the_padded_right_edge() {
+        const COL_WIDTH: f64 = 3.54296875;
         let mut bounds = Vec::new();
         for horizontal in [
             None,
@@ -1149,7 +1170,7 @@ mod tests {
                 ..Default::default()
             });
             let mut sheet = xlsx_model::Sheet::new("Sheet1");
-            sheet.col_widths.insert(0, 3.54296875);
+            sheet.col_widths.insert(0, COL_WIDTH);
             sheet.row_heights.insert(0, 213.5);
             sheet.set_cell(
                 xlsx_model::CellRef::new(0, 0),
@@ -1180,8 +1201,12 @@ mod tests {
             bounds[1].0 < bounds[2].0 && bounds[2].0 < bounds[3].0,
             "{bounds:?}"
         );
+        let col_px = xlsx_render::geometry::col_chars_to_px(COL_WIDTH) as u32;
+        let padded_right = col_px - 2;
         assert!(
-            bounds[0].0 + bounds[0].2 > 30 && bounds[0].2 < 28,
+            bounds[0].0 + bounds[0].2 > col_px
+                && bounds[0].2 < padded_right
+                && bounds[0].2 + 4 >= padded_right,
             "{bounds:?}"
         );
         assert!(bounds.iter().all(|b| b.3 < 283), "{bounds:?}");
@@ -1297,6 +1322,53 @@ mod tests {
             bottom - top < 40,
             "combined cluster should occupy two lines, ink {top}..{bottom}"
         );
+    }
+
+    #[test]
+    fn underline_kinds_paint_one_or_two_lines() {
+        use xlsx_render::RunUnderline;
+
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 160.0,
+            h: 80.0,
+        };
+        let underlined = |underline: bool, style: Option<RunUnderline>| {
+            let mut dl = text_dl("    ", cell, false, None, underline);
+            let DrawCmd::Text {
+                font_size,
+                underline_style,
+                strike,
+                ..
+            } = &mut dl.commands[0]
+            else {
+                unreachable!()
+            };
+            *font_size = 40.0;
+            *underline_style = style;
+            *strike = false;
+            dl
+        };
+        let bands = |underline: bool, style: Option<RunUnderline>| {
+            ink_row_bands(&underlined(underline, style)).len()
+        };
+        assert_eq!(bands(false, None), 0);
+        assert_eq!(bands(false, Some(RunUnderline::Double)), 0);
+        assert_eq!(bands(true, None), 1);
+        assert_eq!(bands(true, Some(RunUnderline::SingleAccounting)), 1);
+        assert_eq!(bands(true, Some(RunUnderline::Double)), 2);
+        assert_eq!(bands(true, Some(RunUnderline::DoubleAccounting)), 2);
+        for (accounting, plain) in [
+            (RunUnderline::SingleAccounting, None),
+            (RunUnderline::DoubleAccounting, Some(RunUnderline::Double)),
+        ] {
+            assert_eq!(
+                render_png(&underlined(true, Some(accounting))).unwrap(),
+                render_png(&underlined(true, plain)).unwrap(),
+                "{accounting:?} draws like {plain:?}"
+            );
+        }
     }
 
     #[test]
@@ -1539,7 +1611,10 @@ mod tests {
 #[cfg(feature = "fonts")]
 mod native;
 #[cfg(feature = "fonts")]
-pub use native::{RasterFonts, render_png, render_png_with_fonts};
+pub use native::{
+    RasterFonts, render_png, render_png_with_fonts, render_png_with_fonts_and_images,
+    render_png_with_images,
+};
 
 #[cfg(test)]
 mod shared_helper_tests {
