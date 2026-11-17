@@ -3176,7 +3176,12 @@ fn run_content_to_units(
                     .unwrap()
                     .insert("commentId".to_owned(), id.clone());
             }
-            vec![embed_unit("field", map_from_value(value), &[], 1)]
+            let revisions: Vec<Mark> = marks
+                .iter()
+                .filter(|mark| matches!(mark.name.as_str(), "insertion" | "deletion"))
+                .cloned()
+                .collect();
+            vec![embed_unit("field", map_from_value(value), &revisions, 1)]
         }
         "drawing" => vec![embed_unit(
             "image",
