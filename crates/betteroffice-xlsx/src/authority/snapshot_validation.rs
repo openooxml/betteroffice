@@ -2019,6 +2019,7 @@ impl SnapshotValidation {
                             || left.range != right.range
                             || left.header_rows != right.header_rows
                             || left.totals_rows != right.totals_rows
+                            || left.style != right.style
                             || left.columns.len() != right.columns.len()
                         {
                             return Err(invalid());

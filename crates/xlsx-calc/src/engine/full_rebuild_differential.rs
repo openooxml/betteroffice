@@ -763,6 +763,7 @@ fn a_rebuild_over_a_resized_table_matches_a_fresh_build() {
         header_rows: 1,
         totals_rows: 0,
         columns: vec!["Item".into(), "Qty".into()],
+        style: Vec::new(),
     });
     put_formula(&mut wb, s, "D1", "SUM(Sales[Qty])");
     put_formula(&mut wb, s, "D2", "D1*2");

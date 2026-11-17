@@ -13170,6 +13170,25 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
         {
             rect(x, y, w, h);
         }
+        let attrs = match primitive {
+            Primitive::Line(line) => Some(&mut line.attrs),
+            other => doc_attrs_mut(other),
+        };
+        if let Some(clip) = attrs
+            .and_then(|attrs| attrs.clip_group.as_deref_mut())
+            .and_then(|group| group.clip.as_mut())
+        {
+            let left = clip_number(&clip.x);
+            let top = clip_number(&clip.y);
+            let first = point(left, top);
+            let last = point(left + clip_number(&clip.w), top + clip_number(&clip.h));
+            *clip = ClipRect {
+                x: Some(px(first.0.min(last.0))),
+                y: Some(px(first.1.min(last.1))),
+                w: Some(px((last.0 - first.0).abs())),
+                h: Some(px((last.1 - first.1).abs())),
+            };
+        }
     }
 }
 
@@ -19259,6 +19278,43 @@ mod tests {
                     frame.h.clone()
                 ),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn rotated_cell_content_turns_a_line_clip() {
+        let clip = |x: f64, y: f64, w: f64, h: f64| ClipRect {
+            x: Some(px(x)),
+            y: Some(px(y)),
+            w: Some(px(w)),
+            h: Some(px(h)),
+        };
+        for (rotation, expected) in [
+            (90.0, clip(50.0, 10.0, 30.0, 40.0)),
+            (-90.0, clip(20.0, 150.0, 30.0, 40.0)),
+        ] {
+            let mut attrs = DocAttrs::default();
+            apply_clip_group(&mut attrs, "clip".to_owned(), clip(10.0, 20.0, 40.0, 30.0));
+            let mut prims = vec![Primitive::Line(LinePrimitive {
+                x1: px(10.0),
+                y1: px(20.0),
+                x2: px(50.0),
+                y2: px(20.0),
+                attrs,
+                ..LinePrimitive::contract_defaults()
+            })];
+            rotate_cell_content(&mut prims, (0.0, 0.0, 100.0, 200.0), rotation);
+            let Primitive::Line(line) = &prims[0] else {
+                unreachable!()
+            };
+            assert_eq!(
+                line.attrs
+                    .clip_group
+                    .as_ref()
+                    .and_then(|group| group.clip.clone()),
+                Some(expected),
+                "{rotation}"
             );
         }
     }

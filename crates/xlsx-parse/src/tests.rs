@@ -6396,6 +6396,261 @@ fn follows_a_drawing_named_by_two_relationships_once() {
     assert_eq!(charts[0].anchor_index, 0);
 }
 
+fn sheet_rels_naming_the_drawing(targets: &[String]) -> Vec<u8> {
+    let mut rels = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for (index, target) in targets.iter().enumerate() {
+        rels.push_str(&format!(
+            r#"<Relationship Id="rIdDrawing{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="{target}"/>"#
+        ));
+    }
+    rels.push_str("</Relationships>");
+    rels.into_bytes()
+}
+
+/// A package part name has no leading slash, so a target spelled with any
+/// number of them names the same drawing and is followed once.
+#[test]
+fn follows_a_drawing_named_with_extra_leading_slashes_once() {
+    let mut source = charted_package();
+    let drawing = String::from_utf8(DRAWING.to_vec()).unwrap().replace(
+        "</xdr:wsDr>",
+        r#"<xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp/><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#,
+    );
+    set_part(&mut source, "xl/drawings/drawing1.xml", drawing.as_bytes());
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&[
+            "../drawings/drawing1.xml".to_owned(),
+            "//xl/drawings/drawing1.xml".to_owned(),
+            "///xl/drawings/drawing1.xml".to_owned(),
+        ]),
+    );
+    let sheet = "xl/worksheets/sheet1.xml";
+    let drawings = crate::chart::sheet_drawings(&source, sheet).unwrap().len();
+    let anchors = crate::drawing_anchors::sheet_drawing_anchors(&source, sheet).len();
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let charts = parsed.workbook.sheets[0].charts.len();
+    let mut objects = 0;
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |_| {
+            objects += 1;
+            std::ops::ControlFlow::Continue(())
+        });
+    assert!(finished.is_continue());
+    assert_eq!(
+        (drawings, anchors, charts, objects),
+        (1, 1, 1, 2),
+        "drawing parts read, drawings with movable anchors, charts, inventoried objects"
+    );
+}
+
+/// One chart named through more spellings than the per-sheet chart cap is
+/// still one chart, so the workbook opens.
+#[test]
+fn opens_a_chart_whose_drawing_is_named_past_the_chart_cap() {
+    let mut source = charted_package();
+    let targets = (1..=crate::MAX_CHART_ANCHORS + 1)
+        .map(|slashes| format!("{}xl/drawings/drawing1.xml", "/".repeat(slashes)))
+        .collect::<Vec<_>>();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&targets),
+    );
+    assert_eq!(
+        parse_workbook_with_package(&source).map(|parsed| parsed.workbook.sheets[0].charts.len()),
+        Ok(1)
+    );
+}
+
+/// Opening a package parses a drawing and its relationships as often when
+/// several relationships name it as when one does.
+#[test]
+fn parses_a_drawing_named_by_several_relationships_as_often_as_one() {
+    let decodes = |source: &[(String, Vec<u8>)]| {
+        let bytes = |path: &str| {
+            source
+                .iter()
+                .find(|(name, _)| name == path)
+                .unwrap()
+                .1
+                .clone()
+        };
+        let drawing = bytes("xl/drawings/drawing1.xml");
+        let drawing_rels = bytes("xl/drawings/_rels/drawing1.xml.rels");
+        crate::tree::watch_decodes(&[&drawing, &drawing_rels]);
+        parse_workbook_with_package(source).unwrap();
+        crate::tree::watched_decodes()
+    };
+    let named_once = decodes(&charted_package());
+    let mut source = charted_package();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(
+            &[
+                "../drawings/drawing1.xml",
+                "../drawings/drawing1.xml",
+                "/xl/drawings/drawing1.xml",
+                "//xl/drawings/drawing1.xml",
+            ]
+            .map(str::to_owned),
+        ),
+    );
+    assert_eq!(
+        decodes(&source),
+        named_once,
+        "parses of the drawing, parses of its relationships"
+    );
+}
+
+/// Telling a new drawing name from one already seen costs one lookup per
+/// relationship, however many distinct drawings a sheet names.
+#[test]
+fn looks_up_each_drawing_name_once() {
+    let mut source = charted_package();
+    let targets = (0..2_000)
+        .map(|index| format!("../drawings/missing{index}.xml"))
+        .collect::<Vec<_>>();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&targets),
+    );
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    crate::xml::take_name_probes();
+    crate::chart::sheet_drawings(&source, "xl/worksheets/sheet1.xml").unwrap();
+    let chart_walk = crate::xml::take_name_probes();
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |_| std::ops::ControlFlow::Continue(()));
+    assert!(finished.is_continue());
+    let inventory = crate::xml::take_name_probes();
+    assert_eq!(
+        (chart_walk, inventory),
+        (2_000, 2_000),
+        "names looked up by the chart walk, by the inventory"
+    );
+}
+
+const REL_TABLE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/table";
+const REL_COMMENTS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+const SALES_TABLE: &str = r#"<table id="1" name="Sales" displayName="Sales" ref="B2:D12"><tableColumns count="3"><tableColumn id="1" name="Region"/><tableColumn id="2" name="Cost"/><tableColumn id="3" name="Units"/></tableColumns></table>"#;
+
+fn sheet_rels_naming(kind: &str, targets: &[&str]) -> Vec<u8> {
+    let mut rels = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for (index, target) in targets.iter().enumerate() {
+        rels.push_str(&format!(
+            r#"<Relationship Id="rIdNamed{index}" Type="{kind}" Target="{target}"/>"#
+        ));
+    }
+    rels.push_str("</Relationships>");
+    rels.into_bytes()
+}
+
+/// A table part a sheet relates several ways is one table, read once.
+#[test]
+fn reads_a_table_related_several_ways_once() {
+    let mut source = package_with_table(SALES_TABLE);
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(
+            REL_TABLE,
+            &[
+                "../tables/table1.xml",
+                "../tables/table1.xml",
+                "//xl/tables/table1.xml",
+            ],
+        ),
+    );
+    crate::read::take_table_parses();
+    let tables = parse_workbook(&source).unwrap().tables.len();
+    assert_eq!(
+        (tables, crate::read::take_table_parses()),
+        (1, 1),
+        "tables, table parses"
+    );
+}
+
+/// One table related more times than the table cap still opens as one table.
+#[test]
+fn opens_a_table_related_past_the_table_cap() {
+    let mut source = package_with_table(SALES_TABLE);
+    let targets = vec!["../tables/table1.xml"; crate::MAX_TABLES + 1];
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(REL_TABLE, &targets),
+    );
+    assert_eq!(
+        parse_workbook(&source).map(|workbook| workbook.tables.len()),
+        Ok(1)
+    );
+}
+
+/// A comments part a sheet relates several ways is counted once, and a
+/// missing one is reported once.
+#[test]
+fn counts_comments_related_several_ways_once() {
+    let inventory = |targets: &[&str]| {
+        let mut source = sources_package();
+        set_part(
+            &mut source,
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            &sheet_rels_naming(REL_COMMENTS, targets),
+        );
+        parse_workbook_with_package(&source)
+            .unwrap()
+            .package
+            .source_sheet_inventory(0, &mut ample())
+    };
+    let found = inventory(&["../comments1.xml", "../comments1.xml", "//xl/comments1.xml"]);
+    assert_eq!(
+        (found.comments, found.unreadable_parts.len()),
+        (2, 0),
+        "comments counted, unreadable parts"
+    );
+    let missing = inventory(&["../missing.xml", "/xl/missing.xml", "//xl/missing.xml"]);
+    assert_eq!(missing.unreadable_parts, ["xl/missing.xml"]);
+}
+
+/// The cell-move guard reads a table part a sheet relates several ways once.
+#[test]
+fn move_guard_reads_a_table_related_several_ways_once() {
+    let mut source = package_with_table(SALES_TABLE);
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(
+            REL_TABLE,
+            &[
+                "../tables/table1.xml",
+                "../tables/table1.xml",
+                "//xl/tables/table1.xml",
+            ],
+        ),
+    );
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    crate::package::take_move_guard_reads();
+    let blocked = parsed
+        .package
+        .range_move_unsupported_part(|_, _| false, |_, _| false, |_, _| false)
+        .map(str::to_owned);
+    assert_eq!(
+        (blocked, crate::package::take_move_guard_reads()),
+        (None, 1),
+        "blocking part, parts read by the guard"
+    );
+}
+
 /// One drawing anchor cannot hold two frames, so a model carrying one source
 /// frame twice has nothing to write back: the pair would collapse into one on
 /// reopen. The save is refused instead.

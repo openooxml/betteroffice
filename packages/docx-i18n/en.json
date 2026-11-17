@@ -730,6 +730,7 @@
     "linkRemoved": "Link removed",
     "linkCopied": "Link copied to clipboard",
     "pasteFailed": "The paste could not be completed. Nothing was changed.",
+    "cutRefused": "The selection holds objects that cannot be cut. Nothing was changed.",
     "failedToSave": "Failed to save document",
     "documentInput": "Document input",
     "documentPreview": "Document preview",
