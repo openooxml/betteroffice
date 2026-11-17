@@ -182,6 +182,25 @@ describe('a line break and a comment reference inside a tracked change', () => {
     expectReferenceBesideRange(await resolvedAndSaved(docx(source), INS, 'reject'));
   });
 
+  it('accepting the deletion of commented text removes its anchor and leaves the comment entry in the comments part', async () => {
+    const commentedReference = `<w:commentRangeStart w:id="5"/>${dt('noted')}<w:commentRangeEnd w:id="5"/>${COMMENT_REFERENCE}`;
+    const saved = await resolvedAndSaved(docx(paragraph(tracked(DEL, commentedReference))), DEL, 'accept');
+    const xml = part(saved, 'word/document.xml');
+    const open: string[] = [];
+    for (const [, closing, name, selfClosing] of xml.matchAll(/<(\/?)([\w:]+)\b[^>]*?(\/?)>/g)) {
+      if (selfClosing) continue;
+      if (closing) expect(open.pop()).toBe(name);
+      else open.push(name!);
+    }
+    expect(open).toEqual([]);
+    expect(render(body(xml))).toBe('Head tail');
+    expect(count(xml, /<w:delText\b/g)).toBe(0);
+    expect(count(xml, /<w:commentRange(Start|End)\b/g)).toBe(0);
+    expect(count(xml, /<w:commentReference\b/g)).toBe(0);
+    expect(count(xml, /<w:del\b/g)).toBe(0);
+    expect(part(saved, 'word/comments.xml')).toMatch(/<w:comment\b[^>]*w:id="5"[^>]*>[\s\S]*note body[\s\S]*<\/w:comment>/);
+  });
+
   it('saving without an edit writes the source document part unchanged', async () => {
     const bytes = docx(paragraph([
       COMMENTED,
