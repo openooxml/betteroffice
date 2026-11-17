@@ -144,6 +144,85 @@ test('content control handles re-read when the layout revision changes', async (
   } finally { hook.unmount(); h.controller.dispose(); }
 });
 
+type Geometry = NonNullable<ReturnType<Host['binding']['viewStore']['getSnapshot']>['geometry']>;
+
+const sheets = (unbuilt: readonly number[]) => [0, 1, 2].map(index => ({ page: { pageId: `page-${index}`, pageIndex: index },
+  bounds: { x: 0, y: index * 1100, width: 816, height: 1056 }, transform: [1, 0, 0, 1, 0, index * 1100],
+  displayPage: { unbuilt: unbuilt.includes(index) } })) as unknown as Geometry['pages'];
+
+async function installFrame(h: Host, change: Partial<Geometry> = {}) {
+  await act(async () => {
+    const store = h.binding.viewStore;
+    const geometry = store.getSnapshot().geometry!;
+    store.installFrameGeometry({ ...geometry, coversThroughSeq: store.getSnapshot().throughSeq, frameEpoch: geometry.frameEpoch + 1, ...change });
+  });
+  await settle();
+}
+
+async function pagedHost(request: DocxDocumentRead, change: Partial<Geometry> = {}) {
+  const h = proposalHost({ automatic: false });
+  await installFrame(h, { layoutEpoch: 1, pages: sheets([2]), ...change });
+  const hook = renderHook(() => useWorkerQuery(h.controller, request));
+  await waitFor(() => expect(hook.result.current).not.toBeNull());
+  await settle();
+  return { h, hook, initial: reads(h, request.kind) };
+}
+
+const layoutReads: [DocxDocumentRead, number][] = [
+  [{ kind: 'reviewSnapshot' }, 1], [{ kind: 'toolbarMetadata' }, 0], [{ kind: 'sidebar', commentIds: [], expectVersion: 'native-0' }, 0], [{ kind: 'contentControlHandles' }, 1],
+];
+
+for (const [request, rereads] of layoutReads) test(`${request.kind} ${rereads ? 're-reads once' : 'does not re-read'} when scrolling builds a page`, async () => {
+  const { h, hook, initial } = await pagedHost(request);
+  try {
+    await installFrame(h, { pages: sheets([]) });
+    expect(reads(h, request.kind) - initial).toBe(rereads);
+    await installFrame(h, { pages: sheets([]) });
+    expect(reads(h, request.kind) - initial).toBe(rereads);
+    await waitFor(() => expect(hook.result.current).not.toBeNull());
+  } finally { hook.unmount(); h.controller.dispose(); }
+});
+
+for (const [request, rereads] of layoutReads) test(`${request.kind} ${rereads ? 're-reads once' : 'does not re-read'} for a relayout at the same document version`, async () => {
+  const { h, hook, initial } = await pagedHost(request);
+  try {
+    await installFrame(h, { layoutEpoch: 2 });
+    expect(reads(h, request.kind) - initial).toBe(rereads);
+    await installFrame(h);
+    expect(reads(h, request.kind) - initial).toBe(rereads);
+    await waitFor(() => expect(hook.result.current).not.toBeNull());
+  } finally { hook.unmount(); h.controller.dispose(); }
+});
+
+for (const [request] of layoutReads) test(`${request.kind} issues no read for selection-only frames over built pages`, async () => {
+  const { h, hook, initial } = await pagedHost(request);
+  try {
+    for (let offset = 1; offset <= 6; offset++) {
+      await act(async () => {
+        const store = h.binding.viewStore;
+        const view = store.getSnapshot();
+        const throughSeq = view.throughSeq + 1;
+        store.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version, throughSeq,
+          presentedThroughSeq: view.presentedThroughSeq, editState: view.editState,
+          selection: { anchor: { story: 'body', paraId: 'p0', offset: 0 }, focus: { story: 'body', paraId: 'p0', offset } } });
+      });
+      await installFrame(h, { pages: sheets([2]), caret: { x: offset, y: 0, width: 1, height: 12 }, selectionRects: [{ x: 0, y: 0, width: offset, height: 12 }] });
+    }
+    expect(reads(h, request.kind) - initial).toBe(0);
+    expect(hook.result.current).not.toBeNull();
+  } finally { hook.unmount(); h.controller.dispose(); }
+});
+
+test('content control handles re-read once when the provisional layout completes', async () => {
+  const { h, hook, initial } = await pagedHost({ kind: 'contentControlHandles' }, { layoutProvisional: true });
+  try {
+    await installFrame(h, { layoutProvisional: false });
+    expect(reads(h, 'contentControlHandles') - initial).toBe(1);
+    await installFrame(h, { layoutProvisional: false });
+    expect(reads(h, 'contentControlHandles') - initial).toBe(1);
+  } finally { hook.unmount(); h.controller.dispose(); }
+});
+
 test('toolbar metadata queries do not repeat for paint-only frames', async () => {
   const h = proposalHost({ automatic: false });
   const query = spyOn(h.controller, 'query').mockImplementation((async () => ({ version: 'native', selection: null,

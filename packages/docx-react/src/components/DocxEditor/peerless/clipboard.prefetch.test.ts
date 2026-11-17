@@ -8,7 +8,8 @@ const fragment = { paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows
 
 function fixture(slice: DocxClipboardSlice = { text: 'bcd', fragment }, held?: () => boolean) {
   const listeners = new Set<() => void>();
-  let state = { identity: { session: 'clipboard', incarnation: 1, epoch: 1 }, version: 1, workerSelection: null as DocxCommandSelection | null, editState: { readOnly: false } };
+  let state = { identity: { session: 'clipboard', incarnation: 1, epoch: 1 }, version: 1, workerSelection: null as DocxCommandSelection | null, editState: { readOnly: false },
+    geometry: null as { layoutEpoch?: number } | null };
   let tail: unknown;
   const submit = mock((_intent: unknown) => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'applied' }) } }));
   const binding = {
@@ -148,6 +149,21 @@ test('a pointer drag reads no clipboard slice until pointer-up, then one; keyboa
     expect(f.prefetch.take()?.selection.focus.offset).toBe(offset);
   }
   expect(f.readClipboardSlice).toHaveBeenCalledTimes(4);
+  f.prefetch.dispose();
+});
+
+test('a relayout at one document version reads the slice again; frames that keep the layout do not', async () => {
+  const f = fixture();
+  f.publish({ workerSelection: range, geometry: { layoutEpoch: 1 } });
+  expect(await settled(f.prefetch)).not.toBeNull();
+  f.publish({ geometry: { layoutEpoch: 1 } });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(f.prefetch.take()).not.toBeNull();
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(1);
+  f.publish({ geometry: { layoutEpoch: 2 } });
+  expect(f.prefetch.take()).toBeNull();
+  expect(await settled(f.prefetch)).not.toBeNull();
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(2);
   f.prefetch.dispose();
 });
 
