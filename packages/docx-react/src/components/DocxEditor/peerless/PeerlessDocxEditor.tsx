@@ -173,6 +173,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const { t } = useTranslation();
   const [tableGridlines, setTableGridlines] = useState(props.showTableGridlines === true);
   const [dragSelecting, setDragSelecting] = useState(false);
+  const pointerSelecting = useRef(false);
   const [gridlinesProp, setGridlinesProp] = useState(props.showTableGridlines);
   if (gridlinesProp !== props.showTableGridlines) {
     setGridlinesProp(props.showTableGridlines);
@@ -361,8 +362,8 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     return () => { for (const type of typingEvents) element.removeEventListener(type, pause); };
   }, [opening, effectiveReadOnly]);
   const parts = useWorkerHeaderFooterEditing(controller, reportRecoverableError);
-  const propertyDialogs = useWorkerPropertyDialogs(controller, recoverableProps);
-  const rulers = useWorkerRulerControls(controller, reportRecoverableError, props.showRuler === true);
+  const propertyDialogs = useWorkerPropertyDialogs(controller, recoverableProps, dragSelecting);
+  const rulers = useWorkerRulerControls(controller, reportRecoverableError, props.showRuler === true, dragSelecting);
   const legacyRef = useRef<PagedEditorRef | null>(null);
   useKeyboardShortcuts({ commands: controller.commands, pagedEditorRef: legacyRef, containerRef: container,
     disableFindReplaceShortcuts: props.disableFindReplaceShortcuts ?? false, shortcuts: props.shortcuts, onShortcutIssue: props.onShortcutIssue, onError: reportRecoverableError });
@@ -1004,7 +1005,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         binding, requestedReadOnly: binding.session.state.editState?.readOnly ?? settings.current.readOnly,
         requestedRenderEnvironment: renderEnvironment.current.requested,
       };
-      active.current.clipboard = createClipboardPrefetch({ binding, isCurrent: () => active.current?.binding === binding,
+      active.current.clipboard = createClipboardPrefetch({ binding, isCurrent: () => active.current?.binding === binding, held: () => pointerSelecting.current,
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
         readClipboardSlice: (selection, cells) => controller.read({ kind: 'clipboardSlice', selection, cells }) });
     }
@@ -1013,6 +1014,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     updateFontEnvironment();
     if (fontRefresh.current.pending && !fontJob.current) { fontRefresh.current.pending = false; refreshFonts.current(); }
   }, [updateReadOnly, updateRenderEnvironment, updateFontEnvironment, controller, workerCollaboration.ready]);
+  const dragSelection = useCallback((dragging: boolean) => {
+    pointerSelecting.current = dragging;
+    setDragSelecting(dragging);
+    if (!dragging) active.current?.clipboard?.resume();
+  }, []);
   useLayoutEffect(updateReadOnly, [effectiveReadOnly, updateReadOnly]);
   useLayoutEffect(updateRenderEnvironment, [props.theme, props.showHiddenText, tableGridlines, reservations, updateRenderEnvironment]);
   useLayoutEffect(updateFontEnvironment, [props.fonts, measurementFontProvider, props.onFontsLoaded, updateFontEnvironment]);
@@ -1490,7 +1496,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <MirrorLinkRouteContext.Provider value={mirrorLinkRoute}><PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
           overlay={workerCollaboration.overlay(displayWindow)}
-          displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={setDragSelecting} pictures={pictureMoves} tables={tableResize}
+          displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={dragSelection} pictures={pictureMoves} tables={tableResize}
           pageMirror={props.pageMirror} unbuiltPageMirror={props.unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={navigation.scrollToPage} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} /></MirrorLinkRouteContext.Provider>
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
     </div>} />
