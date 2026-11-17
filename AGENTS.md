@@ -20,7 +20,9 @@ cargo test -p betteroffice-vsdx --test facade     # one crate or target; add --f
 The `.wasm` and `.js` glue under `packages/*/src/wasm/generated/` are gitignored build
 artifacts; the tracked `.d.ts` files must be regenerated and committed when the WASM API
 changes. `bun test <path>` does not build them, so `Cannot find module './generated/...'`
-means a missing bundle: run `bun run build:<format>-wasm`. CI pins `wasm-pack` 0.15.0.
+means a missing bundle: run `bun run build:<format>-wasm`. Every `bun test` also needs the
+fonts package built: `Cannot find module '@betteroffice/fonts/remote'` means
+`bun run build:fonts`. CI pins `wasm-pack` 0.15.0.
 Rust tests behind `#[cfg(target_arch = "wasm32")]` never compile under a normal
 `cargo test`; check what actually ran.
 

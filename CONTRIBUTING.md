@@ -76,6 +76,8 @@ Editor UI text lives in `packages/docx-i18n`, `packages/xlsx-i18n` and `packages
 bun test scripts/hardcoded-ui-strings.test.ts packages/docx-i18n packages/xlsx-i18n packages/pptx-i18n shared/i18n-glossary
 ```
 
+A bare `bun test`, unlike `bun run test`, needs the fonts package built first: `bun run build:fonts`.
+
 ## Reporting Bugs
 
 Open an issue at [github.com/openooxml/betteroffice/issues](https://github.com/openooxml/betteroffice/issues) with:
