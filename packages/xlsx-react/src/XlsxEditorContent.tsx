@@ -1988,7 +1988,7 @@ export function XlsxEditorContent({
         applyResult(target.handle.editCells(target.sheet, cleared));
         return true;
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        reportEditFailure(e);
         return false;
       }
     };
@@ -2024,7 +2024,7 @@ export function XlsxEditorContent({
       if (write) resolve(new Blob([decided.text], { type: 'text/plain' }));
       return clear(write ?? writeText(decided.text), decided.cleared);
     });
-  }, [captureTarget, cellClipboard, copyTarget, gatedClear, applyResult, readOnly, coordinator]);
+  }, [captureTarget, cellClipboard, copyTarget, gatedClear, applyResult, readOnly, coordinator, reportEditFailure]);
 
   const pasteSelection = useCallback((plain = false) => {
     const handle = handleRef.current;
