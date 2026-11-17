@@ -2577,6 +2577,11 @@ impl Workbook {
     ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, source)?;
         self.validate_bounded_range(sheet, destination)?;
+        self.ensure_cells_writable(
+            sheet,
+            cells_in(destination).filter(|at| !source.contains(*at)),
+            ProtectedSheets::Refuse,
+        )?;
         let ops = crate::fill::fill_range_ops(&self.model, sheet, source, destination)?;
         if let Some(package) = self.source_package.as_ref()
             && let Some(error) =
@@ -2584,11 +2589,6 @@ impl Workbook {
         {
             return Err(error);
         }
-        let written = ops.iter().filter_map(|op| match op {
-            Op::SetCell { at, .. } => Some(*at),
-            _ => None,
-        });
-        self.ensure_cells_writable(sheet, written, ProtectedSheets::Refuse)?;
         let target = self.sheet(sheet)?;
         let restyled = ops.iter().any(|op| match op {
             Op::SetCell { at, cell, .. } => {
