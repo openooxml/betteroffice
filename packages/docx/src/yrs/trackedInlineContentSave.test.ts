@@ -37,7 +37,7 @@ const SIMPLE_FIELD = `<w:fldSimple w:instr=" PAGE ">${t('1')}</w:fldSimple>`;
 const MATH = '<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>';
 const COMMENTED = '<w:commentRangeStart w:id="5"/><w:r><w:t>noted</w:t></w:r><w:commentRangeEnd w:id="5"/>';
 
-const textFor = (change: Change) => (change.kind === 'deletion' ? dt : t);
+const textFor = (change: Change) => (change === DEL ? dt : t);
 const paragraph = (inner: string) => `<w:p w14:paraId="1A2B3C01" w14:textId="1A2B3C01">${t('Head')}${inner}${t(' tail')}</w:p>`;
 const documentXml = (body: string) => `<w:document ${NAMESPACES}><w:body>${body}${SECTION}</w:body></w:document>`;
 
@@ -245,13 +245,13 @@ describe('a line break and a comment reference inside a tracked change', () => {
     expectCommentResolves(second);
   });
 
-  for (const [change, tag, side] of [[MOVE_FROM, 'del', 'deletion'], [MOVE_TO, 'ins', 'insertion']] as const) {
+  for (const [change, flattened, side] of [[MOVE_FROM, 'del', 'move source'], [MOVE_TO, 'ins', 'move destination']] as const) {
     it(`a comment reference inside a tracked ${change.tag} is saved inside the same ${side} as its text`, async () => {
       const text = textFor(change);
       const source = paragraph(`${COMMENTED}${tracked(change, `${text('left')}${COMMENT_REFERENCE}${text('right')}`)}`);
       const saved = await typedAndSaved(docx(source), 'X');
       const xml = part(saved, 'word/document.xml');
-      const wrappers = [...xml.matchAll(new RegExp(`<w:${tag}\\b([^>]*[^/])>([\\s\\S]*?)</w:${tag}>`, 'g'))]
+      const wrappers = [...xml.matchAll(new RegExp(`<w:${change.tag}\\b([^>]*[^/])>([\\s\\S]*?)</w:${change.tag}>`, 'g'))]
         .map(([, attributes, inner]) => ({
           revision: ['id', 'author', 'date'].map(name => attributes!.match(new RegExp(`w:${name}="([^"]*)"`))?.[1]),
           inner: inner!,
@@ -263,7 +263,9 @@ describe('a line break and a comment reference inside a tracked change', () => {
       expect(render(inner)).toBe('left[ref 5]right');
       expect(count(inner, /<w:commentReference\b/g)).toBe(1);
       expect(count(xml, /<w:commentReference\b/g)).toBe(1);
-      expect(count(xml, /<w:(moveFrom|moveTo)\b/g)).toBe(0);
+      expect(count(inner, /<w:t\b/g)).toBe(2);
+      expect(count(inner, /<w:delText\b/g)).toBe(0);
+      expect(count(xml, new RegExp(`<w:${flattened}\\b`, 'g'))).toBe(0);
       expect(render(body(xml))).toBe(`X${render(source)}`);
       expectCommentResolves(saved);
     });
@@ -295,7 +297,8 @@ describe('a line break and a comment reference inside a tracked change', () => {
       expect(String(revision.id)).toBe(change.id);
       expect(revision.author).toBe(change.author);
       expect(revision.date).toBe(change.date);
-      expect('isMovePair' in revision).toBe(false);
+      if (change === MOVE_FROM || change === MOVE_TO) expect(revision.isMovePair).toBe(true);
+      else expect('isMovePair' in revision).toBe(false);
       expect(reference(engine)).toEqual(attributes);
     }
   });
