@@ -35,13 +35,16 @@ test('worker queries preserve sticky bytes and deduplicate equal requests', asyn
   expect(query.mock.calls[1]![0]).toBe(changed);
 });
 
-test('review queries retain every frame without rendering for unchanged review data', async () => {
+test('review queries keep their placement across paint-only frames and re-read for a new layout', async () => {
   const h = proposalHost({ automatic: false });
   const base = await h.readAt({ kind: 'reviewSnapshot', expectPreviewVersion: 0 }, h.snapshot().version);
   if (base.status !== 'ok' || !base.value) throw new Error('Review unavailable');
   let commentGeometry = base.value.commentGeometry;
-  const query = spyOn(h.controller, 'query').mockImplementation((async () => ({ version: base.version, selection: null,
-    value: { ...base.value, frameEpoch: h.binding.viewStore.getSnapshot().geometry!.frameEpoch, commentGeometry } })) as never);
+  const query = spyOn(h.controller, 'query').mockImplementation((async () => {
+    const geometry = h.binding.viewStore.getSnapshot().geometry!;
+    return { version: base.version, selection: null,
+      value: { ...base.value, frameEpoch: geometry.frameEpoch, layoutRevision: geometry.layoutRevision, commentGeometry } };
+  }) as never);
   let renders = 0;
   const hook = renderHook(() => { renders++; return useWorkerQuery<'reviewSnapshot'>(h.controller, { kind: 'reviewSnapshot' }); });
   try {
@@ -53,13 +56,13 @@ test('review queries retain every frame without rendering for unchanged review d
       await act(async () => { h.binding.viewStore.installFrameGeometry({ ...geometry, frameEpoch: geometry.frameEpoch + 1 }); });
     }
     expect(renders - initialRenders).toBeLessThanOrEqual(2);
-    expect(query.mock.calls.length - initialReads).toBe(40);
-    hook.rerender();
-    expect(hook.result.current?.value?.frameEpoch).toBe(h.binding.viewStore.getSnapshot().geometry!.frameEpoch);
+    expect(query.mock.calls.length - initialReads).toBe(0);
+    expect(hook.result.current?.value).toBeTruthy();
     commentGeometry = { note: [{ pageIndex: 0, x: 1, y: 2, width: 10, height: 12 }] };
     const geometry = h.binding.viewStore.getSnapshot().geometry!;
-    await act(async () => { h.binding.viewStore.installFrameGeometry({ ...geometry, frameEpoch: geometry.frameEpoch + 1 }); });
-    expect(hook.result.current?.value?.commentGeometry).toBe(commentGeometry);
+    await act(async () => { h.binding.viewStore.installFrameGeometry({ ...geometry, frameEpoch: geometry.frameEpoch + 1, layoutRevision: geometry.layoutRevision + 1 }); });
+    await waitFor(() => expect(hook.result.current?.value?.commentGeometry).toBe(commentGeometry));
+    expect(query.mock.calls.length - initialReads).toBe(1);
   } finally { hook.unmount(); query.mockRestore(); h.controller.dispose(); }
 });
 

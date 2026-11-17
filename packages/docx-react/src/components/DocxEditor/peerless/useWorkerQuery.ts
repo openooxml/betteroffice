@@ -3,7 +3,14 @@ import type { DocxDocumentRead, DocxReviewSnapshot } from '@betteroffice/docx/yr
 import type { createPeerlessShellController, PeerlessWorkerQuery } from './shellController';
 import { sameShellValue } from './shellSnapshot';
 import type { PeerlessViewSnapshot } from './viewStore';
+import { reviewVersionOf } from './workerReview';
 
+const SELECTION_SCOPED = new Set<DocxDocumentRead['kind']>(['properties', 'sectionProperties']);
+
+const withBytes = (_key: string, value: unknown) => ArrayBuffer.isView(value)
+  ? { $type: value.constructor.name, $bytes: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) } : value;
+
+/** Reads `request` once per document version; selection-scoped kinds also re-read for each selection, content control handles for each layout. */
 export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: ReturnType<typeof createPeerlessShellController>, request: (DocxDocumentRead & { kind: K }) | null) {
   const frameBound = request?.kind === 'contentControlHandles';
   const state = useSyncExternalStore(frameBound ? controller.subscribe : controller.subscribeShell,
@@ -12,8 +19,10 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
   const latestResult = useRef(result);
   const latestRequest = useRef(request);
   latestRequest.current = request;
-  const key = JSON.stringify(request, (_key, value) => ArrayBuffer.isView(value)
-    ? { $type: value.constructor.name, $bytes: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) } : value) ?? 'null';
+  const shown = state.view;
+  const requestKey = JSON.stringify(request, withBytes) ?? 'null';
+  const key = request && SELECTION_SCOPED.has(request.kind) ? `${requestKey}|${JSON.stringify(shown?.workerSelection ?? null, withBytes)}` : requestKey;
+  const layout = request?.kind === 'contentControlHandles' ? `${shown?.geometry?.documentVersion}:${shown?.geometry?.layoutRevision}` : null;
   useEffect(() => {
     let current = true;
     const currentRequest = latestRequest.current;
@@ -36,16 +45,25 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
       const latest = controller.getSnapshot();
       if (latest.status !== 'ready' || !sameQueryView(state.view, latest.view) || frameEpoch === latest.view?.geometry?.frameEpoch) return;
       frameEpoch = latest.view?.geometry?.frameEpoch;
+      const held = latestResult.current;
+      if (held?.key === key && reviewPlaced(latest.view, held.query.value as DocxReviewSnapshot | null)) return;
       load();
     }) : undefined;
     return () => { current = false; remove?.(); };
-  }, [controller, state.status, state.view?.identity, state.view?.version, state.view?.throughSeq, state.view?.geometry, key]);
+  }, [controller, state.status, shown?.identity.session, shown?.identity.incarnation, shown?.identity.epoch, shown?.version, layout, key]);
   const latest = latestResult.current;
-  return key !== 'null' && state.status === 'ready' && latest?.key === key && sameQueryView(latest.view, state.view) ? latest.query : null;
+  return requestKey !== 'null' && state.status === 'ready' && latest?.key === key && sameQueryView(latest.view, state.view) ? latest.query : null;
 }
 
 function sameQueryView(first: PeerlessViewSnapshot | null, second: PeerlessViewSnapshot | null) {
-  return first?.version === second?.version && first?.throughSeq === second?.throughSeq && sameShellValue(first?.identity, second?.identity);
+  return first?.version === second?.version && sameShellValue(first?.identity, second?.identity);
+}
+
+function reviewPlaced(view: PeerlessViewSnapshot | null, review: DocxReviewSnapshot | null) {
+  if (!view?.geometry || !review) return false;
+  const { version, previewVersion } = reviewVersionOf(view);
+  return review.version === version && review.previewVersion === previewVersion && view.geometry.documentVersion === version &&
+    review.layoutRevision === view.geometry.layoutRevision;
 }
 
 function sameQuery(first: PeerlessWorkerQuery, second: PeerlessWorkerQuery, kind: DocxDocumentRead['kind']) {
