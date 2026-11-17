@@ -297,8 +297,9 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     const align = cmd.align ?? 'left';
     ctx.textAlign = ALIGN_TO_TEXT_ALIGN[align];
     const lines = wrapLines(cmd.text, wrap.width, (run) => ctx.measureText(run).width);
-    lines.forEach((line, index) => {
-      paintRun(ctx, { ...cmd, y: wrappedLineY(cmd.y, index, lines.length, wrap) }, line, cmd.x, align);
+    const count = Math.min(lines.length, wrap.maxLines ?? lines.length);
+    lines.slice(0, count).forEach((line, index) => {
+      paintRun(ctx, { ...cmd, y: wrappedLineY(cmd.y, index, count, wrap) }, line, cmd.x, align);
     });
   } else {
     const align = cmd.align ?? 'left';
