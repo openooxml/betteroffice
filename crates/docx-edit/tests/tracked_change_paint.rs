@@ -210,3 +210,45 @@ fn renumbered_list_items_show_original_and_final_numbers() {
         ]
     );
 }
+
+#[test]
+fn renumbered_right_to_left_list_items_show_original_and_final_numbers() {
+    docx_layout::clear_measure_fonts();
+    let right_to_left = |content: &str, mark: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:bidi/><w:rPr>{mark}</w:rPr></w:pPr>{content}</w:p>"#
+        )
+    };
+    let deleted_mark = revision("del", 9, "Ann", "");
+    let body = [
+        right_to_left(&text("one"), ""),
+        right_to_left(&revision("del", 10, "Ann", &deleted("two")), &deleted_mark),
+        right_to_left(&text("three"), ""),
+    ]
+    .concat();
+    let primitives = primitives(&document(&body));
+    let left_to_right = |kind: &str, field: &str| {
+        let mut parts: Vec<(f64, String, String)> = in_paragraph(&primitives, 2)
+            .into_iter()
+            .filter(|primitive| primitive["listMarker"] == true && primitive["kind"] == kind)
+            .map(|primitive| {
+                (
+                    primitive["x"].as_f64().unwrap(),
+                    primitive[field].as_str().unwrap().to_owned(),
+                    primitive["color"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        parts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        parts
+            .into_iter()
+            .map(|(_, value, color)| (value, color))
+            .collect::<Vec<_>>()
+    };
+    let pair = |value: &str| (value.to_owned(), "#0078D4".to_owned());
+    assert_eq!(left_to_right("text", "text"), [pair("2."), pair("3.")]);
+    assert_eq!(
+        left_to_right("decoration", "deco"),
+        [pair("underline"), pair("strike")]
+    );
+}
