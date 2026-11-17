@@ -204,6 +204,13 @@ test('paste options are offered only for formatted text without pictures', () =>
   expect(pasteOptionsApply({ paragraphs: [{ text: '', inlines: [{ image: { src: 'data:image/png;base64,AA==' } }] }] }, 'x')).toBe(false);
 });
 
+test('paste options are offered after an in-editor copy only when its runs carry formatting', () => {
+  const marked = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+  expect(pasteOptionsApply(marked, 'Bold')).toBe(true);
+  const unmarked = { paragraphs: [{ text: 'Plain', runs: [{ text: 'Plain', format: { other: {} } }] }] };
+  expect(pasteOptionsApply(unmarked, 'Plain')).toBe(false);
+});
+
 test('explicit blank lines survive a formatted paste', () => {
   expect(parseClipboardHtml('<p><b>A</b></p><p><br></p><p>B</p>')?.paragraphs.map((paragraph) => paragraph.text)).toEqual(['A', '', 'B']);
   expect(parseClipboardHtml('<p><b>A</b><br><br>B</p>')?.paragraphs.map((paragraph) => paragraph.text)).toEqual(['A', '', 'B']);

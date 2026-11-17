@@ -80,7 +80,41 @@ describe('mergeFormattingFragment', () => {
     expect(content[0]).toEqual({ kind: 'text', text: 'Cell', format: { bold: true } });
     expect(content[1]).toEqual({ kind: 'pilcrow', properties: { alignment: 'center' } });
   });
+
+  test('keeps the marks an in-editor copy carries as other run attributes', () => {
+    const merged = mergeFormattingFragment(editorCopyFragment());
+    expect(merged.paragraphs[0]!.runs).toEqual([
+      { text: 'Marked', format: { bold: true, italic: true, underline: { style: 'single' }, strike: { double: false } } },
+      { text: ' plain' },
+    ]);
+    expect(JSON.stringify(merged)).not.toContain('FF0000');
+    expect(JSON.stringify(merged)).not.toContain('Georgia');
+  });
 });
+
+function editorCopyFragment(): DocxClipboardFragment {
+  return {
+    paragraphs: [{
+      text: 'Marked plain',
+      runs: [
+        {
+          text: 'Marked',
+          format: {
+            other: {
+              bold: true,
+              italic: true,
+              underline: { style: 'single' },
+              strike: { double: false },
+              textColor: { rgb: 'FF0000' },
+              fontFamily: { ascii: 'Georgia' },
+            },
+          },
+        },
+        { text: ' plain', format: { other: {} } },
+      ],
+    }],
+  };
+}
 
 describe('textOnlyFragment', () => {
   test('keeps one plain paragraph per source paragraph with no formatting', () => {
@@ -134,5 +168,18 @@ describe('clipboardFragmentHasFormatting', () => {
     expect(clipboardFragmentHasFormatting({ paragraphs: [{ text: 'plain' }] })).toBe(false);
     expect(clipboardFragmentHasFormatting({ paragraphs: [{ text: 'x', runs: [{ text: 'x' }] }] })).toBe(false);
     expect(clipboardFragmentHasFormatting(null)).toBe(false);
+  });
+
+  test('counts formatting an in-editor copy carries only as other run attributes', () => {
+    expect(clipboardFragmentHasFormatting(editorCopyFragment())).toBe(true);
+    expect(clipboardFragmentHasFormatting({
+      paragraphs: [{ text: 'x', runs: [{ text: 'x', format: { other: { bold: true } } }] }],
+    })).toBe(true);
+  });
+
+  test('is false for an in-editor copy whose runs carry no attributes', () => {
+    expect(clipboardFragmentHasFormatting({
+      paragraphs: [{ text: 'ab', runs: [{ text: 'a', format: { other: {} } }, { text: 'b', format: { other: {} } }] }],
+    })).toBe(false);
   });
 });
