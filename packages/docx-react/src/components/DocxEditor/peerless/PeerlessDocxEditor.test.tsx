@@ -2794,6 +2794,27 @@ test('context paste refuses a target changed while clipboard permission is pendi
   expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
 });
 
+test('replacing a paste checks the replacement fragment and submits only an allowed one', async () => {
+  const allowed = spyOn(clipboard, 'isPasteFragmentAllowed')
+    .mockImplementation((_commands, fragment) => fragment !== undefined && fragment.paragraphs[0]?.text !== 'Refused');
+  restorers.push(() => allowed.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const replace = surface.mock.calls.at(-1)![0].onReplacePasteFragment!;
+  const at = { story: 'body', paraId: 'a', offset: 4 };
+  const refused: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Refused', runs: [{ text: 'Refused', format: { bold: true } }] }] };
+  const kept: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Kept', runs: [{ text: 'Kept', format: { bold: true } }] }] };
+  const replacements = () => requests.filter(request => request.type === 'edit' && request.command.kind === 'replacePasteFragment');
+  expect(replace(refused, { anchor: at, focus: at })).toBe(false);
+  expect(allowed).toHaveBeenLastCalledWith(expect.anything(), refused);
+  let outcome: Promise<boolean> | false = false;
+  await act(async () => { outcome = replace(kept, { anchor: at, focus: at }); });
+  expect(outcome).not.toBe(false);
+  expect(allowed).toHaveBeenLastCalledWith(expect.anything(), kept);
+  await waitFor(() => expect(replacements()).toHaveLength(1));
+  expect(replacements()[0]).toMatchObject({ command: { payload: { fragment: kept, selection: { anchor: at, focus: at } } } });
+});
+
 test('worker shell reserves the widest scaled page and retains host styling', async () => {
   const view = render(<DocxEditor {...peerlessProps} showToolbar={false} initialZoom={1.5} />);
   await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
