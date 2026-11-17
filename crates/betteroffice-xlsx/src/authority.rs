@@ -8281,6 +8281,7 @@ pub(crate) mod open_test_cases {
                 header_rows: 1,
                 totals_rows: 0,
                 columns: vec!["First".into(), "Second".into()],
+                style: Vec::new(),
             });
             model.sheets[0].charts.push(SheetChart {
                 raw_xml: None,

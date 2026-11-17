@@ -774,3 +774,105 @@ fn a_cell_refusal_keeps_its_kind_through_a_plain_message() {
         EngineErrorKind::Message
     );
 }
+
+fn control_package(body: &str) -> Vec<u8> {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let parts = [
+        (
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_owned(),
+        ),
+        (
+            "_rels/.rels",
+            format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="{REL}/officeDocument" Target="word/document.xml"/></Relationships>"#),
+        ),
+        (
+            "word/document.xml",
+            format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{W}"><w:body>{body}<w:sectPr/></w:body></w:document>"#),
+        ),
+    ];
+    let entries: Vec<(String, Vec<u8>)> = parts
+        .into_iter()
+        .map(|(name, content)| (name.to_owned(), content.into_bytes()))
+        .collect();
+    ooxml_opc::rezip_parts(&entries).unwrap()
+}
+
+#[test]
+fn control_targets_are_reused_until_a_story_their_controls_read_changes() {
+    let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    let paragraph = |id: &str, content: &str| {
+        format!(
+            r#"<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:paraId="{id}">{content}</w:p>"#
+        )
+    };
+    let inline = format!(
+        r#"{}<w:sdt><w:sdtPr><w:tag w:val="name"/><w:id w:val="7"/><w:text/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}"#,
+        run("Before "),
+        run("Ada"),
+        run(" after")
+    );
+    let block = format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="block"/><w:id w:val="8"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+        paragraph("10000002", &run("Inside the block"))
+    );
+    let table = format!(
+        r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+        paragraph("10000003", &run("Cell text"))
+    );
+    let body = format!(
+        "{}{block}{table}{}",
+        paragraph("10000001", &inline),
+        paragraph("10000004", &run("Tail"))
+    );
+    let session = core(31);
+    session
+        .open_docx(&control_package(&body), true, None, None)
+        .unwrap();
+    let fresh = |session: &EditSessionCore| {
+        let cached = session.control_targets.take();
+        let answer = session.content_control_targets_json().unwrap();
+        session.control_targets.replace(cached);
+        answer
+    };
+    let targets = |session: &EditSessionCore| {
+        crate::content_controls::INVENTORY_BUILDS.with(|builds| builds.set(0));
+        let answer = session.content_control_targets_json().unwrap();
+        let built = crate::content_controls::INVENTORY_BUILDS.with(|builds| builds.get());
+        assert_eq!(answer, fresh(session));
+        (answer, built)
+    };
+    let type_into = |session: &EditSessionCore, story: &str| {
+        let index = session.engine.doc().paragraph_index(story).unwrap();
+        let para = index.para_at(0).unwrap().para_id.to_string();
+        session
+            .insert_text(story, &para, 1, "x", None, None)
+            .unwrap();
+    };
+    let stories = session.story_ids();
+    let cell = stories
+        .iter()
+        .find(|story| story.contains(":t0:r0c0"))
+        .expect("a table cell story")
+        .clone();
+    let (first, built) = targets(&session);
+    let listed: Vec<Value> = serde_json::from_str(&first).unwrap();
+    assert_eq!((listed.len(), built), (2, 1), "{first}");
+    let block_story = stories
+        .iter()
+        .find(|story| *story != "body" && *story != &cell && !story.starts_with("hf:"))
+        .expect("the block control's story")
+        .clone();
+
+    assert_eq!(targets(&session).1, 0, "nothing changed");
+    type_into(&session, &cell);
+    assert_eq!(targets(&session).1, 0, "the cell holds no control");
+    type_into(&session, &block_story);
+    let (inside, built) = targets(&session);
+    assert_eq!(built, 1, "the block control reads its story");
+    assert_ne!(inside, first);
+    type_into(&session, "body");
+    assert_eq!(targets(&session).1, 1, "the body holds the inline control");
+    assert_eq!(targets(&session).1, 0);
+}

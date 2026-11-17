@@ -2,6 +2,7 @@
 //! attribute lookup, and opc path helpers. malformed input errors, never panics.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use quick_xml::Reader;
 use quick_xml::events::attributes::Attribute;
@@ -224,6 +225,63 @@ pub(crate) fn resolve_part_path(base_dir: &str, target: &str) -> String {
         }
     }
     segs.join("/")
+}
+
+/// [`resolve_part_path`] in the form [`find_part`] matches, so one part has one name.
+pub(crate) fn resolve_part_name(base_dir: &str, target: &str) -> String {
+    resolve_part_path(base_dir, target)
+        .trim_start_matches('/')
+        .to_owned()
+}
+
+#[cfg(test)]
+thread_local! {
+    static NAME_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn count_name_probe() {
+    NAME_PROBES.set(NAME_PROBES.get() + 1);
+}
+
+/// Part names looked at by duplicate checks since the last call.
+#[cfg(test)]
+pub(crate) fn take_name_probes() -> usize {
+    NAME_PROBES.replace(0)
+}
+
+/// Part names in the order first seen, each kept once.
+#[derive(Default)]
+pub(crate) struct PartNames {
+    order: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl PartNames {
+    /// Keeps `name` unless already seen, returning whether it was new.
+    pub(crate) fn push(&mut self, name: String) -> bool {
+        #[cfg(test)]
+        count_name_probe();
+        let new = self.seen.insert(name.clone());
+        if new {
+            self.order.push(name);
+        }
+        new
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<String> {
+        self.order
+    }
+}
+
+impl FromIterator<String> for PartNames {
+    fn from_iter<I: IntoIterator<Item = String>>(names: I) -> Self {
+        let mut part_names = Self::default();
+        for name in names {
+            part_names.push(name);
+        }
+        part_names
+    }
 }
 
 /// find a part by name, tolerating a leading slash on either side.
