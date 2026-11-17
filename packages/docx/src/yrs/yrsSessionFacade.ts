@@ -1766,8 +1766,11 @@ export function wrapSession(
       (session as unknown as { renderPngTarget(list: string, target: string, options: string): Uint8Array })
         .renderPngTarget(displayListJson, targetJson, optionsJson),
     renderPngTargetReport: (displayListJson, targetJson, optionsJson) =>
-      (session as unknown as { renderPngTargetReport(list: string, target: string, options: string): { png: Uint8Array; pictures: PngUnavailablePicture[] } })
+      (session as unknown as { renderPngTargetReport(list: string, target: string, options: string): { png: Uint8Array; pictures: PngUnavailablePicture[]; skippedEffects: string[] } })
         .renderPngTargetReport(displayListJson, targetJson, optionsJson),
+    canvasSkippedEffects: (pageIndex, unavailable) =>
+      (session as unknown as { canvasSkippedEffects(page: number, unavailable: Uint32Array): number })
+        .canvasSkippedEffects(pageIndex, unavailable),
     renderPng: async (target, options) => {
       if (destroyed) throw new Error('YrsSession is destroyed');
       if (!pngExporter) {

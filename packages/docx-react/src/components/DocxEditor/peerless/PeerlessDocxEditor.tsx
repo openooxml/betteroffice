@@ -52,6 +52,7 @@ import { PluginDock } from '../../../plugins/PluginPanels';
 import { useIsDark } from '../hooks/useIsDark';
 import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, type ClipboardCapture, isPasteFragmentAllowed } from './clipboard';
 import { submitPasteFragment } from './inputAdmission';
+import { DocxCutRefusedError } from '../internals/cutRefused';
 import type { DocxClipboardFragment, DocxReservationsPayload } from '@betteroffice/docx/yrs';
 import { useWorkerFileIO } from './useWorkerFileIO';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
@@ -68,6 +69,7 @@ import { useControllableBoolean } from '../hooks/useControllableBoolean';
 import { useWorkerNavigation } from './useWorkerNavigation';
 import { MirrorLinkRouteContext, useMirrorLinkRoute } from '../mirrorLinkRoute';
 import { createWorkerSearch } from './workerSearch';
+import { createDeferredRelease } from './deferredRelease';
 import { FindReplaceDialog } from '../../dialogs/FindReplaceDialog';
 import { WorkerDocumentReader } from './WorkerDocumentReader';
 import { DEFAULT_PAGE_WIDTH, pluginOverlaysStyles } from '../internals/styles';
@@ -252,15 +254,61 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const opened = fontSource.current;
       if (picked && opened === picked.source) { opened.requirements = picked.requirements; opened.covers = picked.covers; }
     } };
-  const [controller] = useState(() => createPeerlessShellController(controllerOptions));
-  const [search] = useState(() => createWorkerSearch(controller, (rect) => {
-    const element = scroller.current;
-    if (element) element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + rect.y * controller.ref.getZoom() - element.clientHeight / 2;
-  }));
+  const revealParagraph = useRef<ReturnType<typeof useWorkerNavigation>['revealParagraph']>(async () => false);
+  const createOwned = () => {
+    const controller = createPeerlessShellController(controllerOptions);
+    const search = createWorkerSearch(controller, (rect) => {
+      const element = scroller.current;
+      if (element) element.scrollTop += (host.current?.getBoundingClientRect().top ?? 0) - element.getBoundingClientRect().top + rect.y * controller.ref.getZoom() - element.clientHeight / 2;
+    });
+    const pluginGeometry = createWorkerPluginGeometry(controller, () => host.current, () => overlayRef.current, () => redrawGeometry(value => value + 1),
+      (target, focus, expectVersion) => revealParagraph.current(target.paraId, target.story, focus, expectVersion), () => sentReservationsRef.current(),
+      (overlay) => visibleViewport(scroller.current ?? overlay, container.current ?? overlay, overlay), () => pluginHost.flushSelection());
+    const pluginHost: DocxPluginHost = createDocxPluginHost({
+      readSelection: () => {
+        const view = controller.getSnapshot().view;
+        const toolbar = view?.workerSelection ? view.editState?.toolbar : null;
+        pluginHost.layoutChanged(pluginGeometry.layout());
+        return { selection: {
+          formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null,
+          displayRange: view?.workerSelection ? pluginGeometry.displaySelection() : null,
+        }, identity: pluginGeometry.selectionIdentity(), owner: active.current?.binding.session ?? controller,
+        ready: pluginGeometry.selectionMapped() };
+      },
+      selectionCause: () => controller.getSnapshot().view?.selectionCause,
+      selectionPublished: (key) => settleRef.current?.notifySelectionChange(key),
+      pagedEditorRef: { current: null }, writeMode: () => controller.environment().readOnly ? 'viewing' : controller.environment().mode,
+      commands: () => controller.commands, layout: () => ({ queries: null, complete: false, failed: false }),
+      subscribeLayout: controller.subscribe, geometry: pluginGeometry.geometry,
+      subscribeGeometry: listener => pluginGeometry.subscribe(() => {
+        pluginHost.markSelectionDirty('refresh');
+        listener();
+      }), translate: (key) => controller.environment().translate(key),
+      workerRead: {
+        version: async () => { const result = await controller.ref.readParagraphs({ view: 'accepted', paraIds: [] });
+          return 'version' in result ? { ok: true, version: result.version } : result; },
+        readParagraphs: controller.ref.readParagraphs, findText: controller.ref.findText, validateEdits: controller.ref.validateEdits,
+        listStories: () => controller.read({ kind: 'listStories' }),
+        readStories: (request) => controller.read({ kind: 'readStories', request }),
+      },
+      workerEdits: { applyEdits: (request, authorize, commit) => controller.applyEdits(request, authorize,
+        (view) => commit(() => pluginHost.workerChanged(workerDocumentVersion(view)))) },
+      workerNavigation: pluginGeometry.navigation,
+      workerRefusal: (error) => workerReadRefusal(controller, error),
+    });
+    const lifetime = createDeferredRelease(() => {
+      loadRequest.current?.reject(new Error('Editor was closed')); loadRequest.current = null;
+      pluginHost.close('unmounted'); pluginGeometry.dispose(); search.dispose(); controller.dispose();
+    });
+    return { controller, search, pluginGeometry, pluginHost, lifetime };
+  };
+  const [owned, renewOwned] = useState(createOwned);
+  const { controller, search, pluginGeometry, pluginHost } = owned;
   const searchState = useSyncExternalStore(search.subscribe, search.getSnapshot, search.getSnapshot);
   const fileIO = useWorkerFileIO(recoverableProps, controller.ref, loadBuffer, () => active.current?.binding ?? null);
   const getBinding = useCallback(() => active.current?.binding ?? null, []);
   const navigation = useWorkerNavigation(controller, getBinding, scroller, host, zoom, recoverableProps);
+  revealParagraph.current = navigation.revealParagraph;
   const mirrorLinkRoute = useMirrorLinkRoute();
   mirrorLinkRoute.followBookmark = (name) => {
     navigation.scrollToBookmark(name).then(() => focus(), error => reportRecoverableError(error instanceof Error ? error : new Error(String(error))));
@@ -322,46 +370,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const [geometryRevision, redrawGeometry] = useState(0);
   const sentReservationsRef = useRef<() => DocxReservationsPayload | null>(() => null);
-  const [pluginGeometry] = useState(() => createWorkerPluginGeometry(controller, () => host.current, () => overlayRef.current, () => redrawGeometry(value => value + 1),
-    (target, focus, expectVersion) => navigation.revealParagraph(target.paraId, target.story, focus, expectVersion), () => sentReservationsRef.current(),
-    (overlay) => visibleViewport(scroller.current ?? overlay, container.current ?? overlay, overlay), () => pluginHost.flushSelection()));
   const [displayWindow, setDisplayWindow] = useState<readonly [number, number]>([0, 3]);
   const showWindow = useCallback((next: readonly [number, number]) =>
     setDisplayWindow((current) => current[0] === next[0] && current[1] === next[1] ? current : next), []);
   useLayoutEffect(() => { pluginGeometry.setDisplayWindow(displayWindow); }, [pluginGeometry, displayWindow]);
   const setPluginLayer = useCallback((element: HTMLDivElement | null) => { overlayRef.current = element; setOverlayLayer(element); }, []);
-  const [pluginHost] = useState<DocxPluginHost>(() => createDocxPluginHost({
-    readSelection: () => {
-      const view = controller.getSnapshot().view;
-      const toolbar = view?.workerSelection ? view.editState?.toolbar : null;
-      pluginHost.layoutChanged(pluginGeometry.layout());
-      return { selection: {
-        formatting: toolbar ? yrsSelectionState({ context: toolbar, startParagraphIndex: -1, endParagraphIndex: -1 }) : null,
-        displayRange: view?.workerSelection ? pluginGeometry.displaySelection() : null,
-      }, identity: pluginGeometry.selectionIdentity(), owner: active.current?.binding.session ?? controller,
-      ready: pluginGeometry.selectionMapped() };
-    },
-    selectionCause: () => controller.getSnapshot().view?.selectionCause,
-    selectionPublished: (key) => settleRef.current?.notifySelectionChange(key),
-    pagedEditorRef: { current: null }, writeMode: () => controller.environment().readOnly ? 'viewing' : controller.environment().mode,
-    commands: () => controller.commands, layout: () => ({ queries: null, complete: false, failed: false }),
-    subscribeLayout: controller.subscribe, geometry: pluginGeometry.geometry,
-    subscribeGeometry: listener => pluginGeometry.subscribe(() => {
-      pluginHost.markSelectionDirty('refresh');
-      listener();
-    }), translate: (key) => controller.environment().translate(key),
-    workerRead: {
-      version: async () => { const result = await controller.ref.readParagraphs({ view: 'accepted', paraIds: [] });
-        return 'version' in result ? { ok: true, version: result.version } : result; },
-      readParagraphs: controller.ref.readParagraphs, findText: controller.ref.findText, validateEdits: controller.ref.validateEdits,
-      listStories: () => controller.read({ kind: 'listStories' }),
-      readStories: (request) => controller.read({ kind: 'readStories', request }),
-    },
-    workerEdits: { applyEdits: (request, authorize, commit) => controller.applyEdits(request, authorize,
-      (view) => commit(() => pluginHost.workerChanged(workerDocumentVersion(view)))) },
-    workerNavigation: pluginGeometry.navigation,
-    workerRefusal: (error) => workerReadRefusal(controller, error),
-  }));
   const locale = resolvedLocale(props.i18n?._lang);
   useLayoutEffect(() => { pluginHost.localeChanged(locale); }, [pluginHost, locale]);
   const managedPlugins = Boolean(props.plugins?.length);
@@ -401,10 +414,15 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     shellState.view?.identity.incarnation, shellState.view?.identity.epoch]);
   useLayoutEffect(() => {
     if (!managedPlugins) return;
-    return trackFocus(() => {
+    const tracker = trackFocus(() => {
       const surface = host.current?.querySelector('[data-docx-worker-editor]');
       return surface ? [surface] : [];
     }, (focused) => pluginHost.focusChanged(focused));
+    pluginHost.setFocusCheck(tracker.recheck);
+    return () => {
+      pluginHost.setFocusCheck(null);
+      tracker();
+    };
   }, [pluginHost, managedPlugins]);
   const activations = useSyncExternalStore(pluginHost.subscribe, pluginHost.activations, pluginHost.activations);
   const reservations = usePluginReservations(pluginHost, activations);
@@ -464,8 +482,10 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       scrollerElement?.removeEventListener('scroll', scroll); window.removeEventListener('resize', refresh);
     };
   }, [pluginHost, overlayLayer]);
-  useEffect(() => () => { loadRequest.current?.reject(new Error('Editor was closed')); loadRequest.current = null;
-    pluginHost.close('unmounted'); pluginGeometry.dispose(); search.dispose(); controller.dispose(); }, [controller, pluginHost, search]);
+  useEffect(() => {
+    if (!owned.lifetime.acquire()) renewOwned(createOwned());
+    return owned.lifetime.release;
+  }, [owned]);
   const identity = useRef<PeerlessViewIdentity | null>(null);
   const retained = useRef<RetainedFrame | null>(null);
   const pageIndexes = useRef(new Map<string, number>());
@@ -517,6 +537,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const sourceGeneration = useMemo(() => ({}), [documentBuffer, parsedDocument, replaced ? replacement : null]);
   const [loaded, setLoaded] = useState<{ generation: object; source: Uint8Array } | null>(null);
   const reportError = useCallback((error: Error) => { workerCollaboration.retire(); controller.fail(error); errorHandler.current?.(error); }, [controller, workerCollaboration.retire]);
+  const reportShellError = useCallback((error: Error) => { pluginHost.checkFocus(); reportError(error); }, [reportError, pluginHost]);
   const [previewJob, setPreviewJob] = useState<WorkerPreviewJob | null>(null);
   const onPreviewPresented = useCallback((frame: WorkerPreviewJob['frame']) => {
     controller.previewPresented(frame);
@@ -527,7 +548,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     if (documentBuffer instanceof Uint8Array) return new Uint8Array(documentBuffer);
     if (documentBuffer instanceof ArrayBuffer) return new Uint8Array(documentBuffer.slice(0));
     return loaded?.generation === sourceGeneration ? new Uint8Array(loaded.source) : null;
-  }, [documentBuffer, parsedDocument, sourceGeneration, loaded, workerCollaboration.reopenKey]);
+  }, [documentBuffer, parsedDocument, sourceGeneration, loaded, workerCollaboration.reopenKey, owned]);
 
   useEffect(() => {
     if (!documentBuffer || documentBuffer instanceof Uint8Array || documentBuffer instanceof ArrayBuffer) return;
@@ -985,7 +1006,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       };
       active.current.clipboard = createClipboardPrefetch({ binding, isCurrent: () => active.current?.binding === binding,
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
-        readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }) });
+        readClipboardSlice: (selection, cells) => controller.read({ kind: 'clipboardSlice', selection, cells }) });
     }
     updateReadOnly();
     updateRenderEnvironment();
@@ -1093,7 +1114,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           return completed && replay.written;
         },
         readSelection: (selection) => controller.read({ kind: 'rawSelectionInfo', selection }),
-        readClipboardSlice: (selection) => controller.read({ kind: 'clipboardSlice', selection }),
+        readClipboardSlice: (selection, cells) => controller.read({ kind: 'clipboardSlice', selection, cells }),
         write: (text) => navigator.clipboard.writeText(text),
         writeSlice: async (text, html) => {
           if (typeof ClipboardItem === 'undefined' || !navigator.clipboard.write) throw new Error('ClipboardItem unavailable');
@@ -1103,8 +1124,11 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           })]);
         } });
       if (copied) { if (cut) props.onCut?.(); else props.onCopy?.(); }
-    } catch (error) { reportRecoverableError(error instanceof Error ? error : new Error(String(error))); }
-  }, [controller, props.onCopy, props.onCut, reportRecoverableError]);
+    } catch (error) {
+      if (error instanceof DocxCutRefusedError) toast(t('editor.cutRefused'));
+      reportRecoverableError(error instanceof Error ? error : new Error(String(error)));
+    }
+  }, [controller, props.onCopy, props.onCut, reportRecoverableError, t]);
   const notifyPasteRefused = useCallback(() => { toast(t('editor.pasteFailed')); }, [t]);
   const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number): boolean => {
     const current = active.current;
@@ -1386,7 +1410,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const minLayoutWidth = pageWidth * zoom + 2 * outlineWidth + sidebarWidth;
   useLayoutEffect(() => { pluginHost.geometryChanged(); }, [pluginHost, minLayoutWidth, documentShift, outlineWidth, zoom]);
   return <DocxCommandProvider commands={controller.commands.store}>
-    <DocxEditorShell i18n={props.i18n} isDark={isDark} onEditorError={reportError}
+    <DocxEditorShell i18n={props.i18n} isDark={isDark} onEditorError={reportShellError}
       containerRef={container} scrollContainerRef={scroller} editorContentRef={content}
       className={className} containerStyle={{ display: 'flex', flexDirection: 'column', height: '100%', width: '100%', minHeight: 0, minWidth: 0, backgroundColor: 'var(--doc-bg)', ...style }}
       mainContentStyle={{ display: 'flex', flex: 1, minHeight: 0, minWidth: 0 }}

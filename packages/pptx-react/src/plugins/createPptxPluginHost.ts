@@ -76,6 +76,8 @@ export interface PptxPluginHost {
   version(): string;
   selectionChanged(selection: PptxPluginSelection, caretHint?: SelectionCaret): void;
   focusChanged(focused: boolean): void;
+  /** The focus tracker's re-check; opening and closing run it, since either can replace the surface. */
+  setFocusCheck(check: (() => void) | null): void;
   localeChanged(locale: string): void;
   modeChanged(readOnly: boolean): void;
   layoutChanged(layout: PptxPluginLayout | null): void;
@@ -152,6 +154,7 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
     return createPluginClients(invocation, access, grant, store);
   });
   let reporter: ((error: PptxPluginError) => void) | undefined;
+  let focusCheck: (() => void) | null = null;
   let handle: PptxPluginDocument | null = null;
   let detachUpdates: (() => void) | null = null;
   let installed = false;
@@ -403,12 +406,14 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       viewport = null;
       generations += 1;
       runtime.open(`presentation-${generations}`);
+      focusCheck?.();
     },
 
     close(reason) {
       closeHandle();
       state.layout = null;
       runtime.close(reason);
+      focusCheck?.();
     },
 
     generation: () => runtime.generation(),
@@ -434,6 +439,10 @@ export function createPptxPluginHost(access: PptxPluginHostAccess | PptxPluginVi
       state.focused = focused;
       const generation = runtime.generation();
       if (generation) notify({ type: 'focus-change', generation, focused });
+    },
+
+    setFocusCheck(check) {
+      focusCheck = check;
     },
 
     localeChanged(locale) {

@@ -20,6 +20,11 @@ function isVersion(value) {
   return typeof value === 'string' && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(value);
 }
 
+export const ABSENT = 'absent';
+const BASES = ['release-commit', 'latest-before-release'];
+const isAddonPin = (value) => value === ABSENT || isVersion(value);
+const isAddonBasis = (pin, basis) => pin !== undefined && (pin === ABSENT ? basis === ABSENT : BASES.includes(basis));
+
 function validateSample(sample) {
   if (
     !sample ||
@@ -34,7 +39,7 @@ function validateSample(sample) {
   validateReferenceMetadata(sample.metadata, sample.id);
 }
 
-export function createPlan({ source_sha, commit, versions, react_version, published_fonts, fonts_basis, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
+export function createPlan({ source_sha, commit, versions, react_version, published_fonts, fonts_basis, published_fonts_cjk, fonts_cjk_basis, published_fonts_intl, fonts_intl_basis, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
   if (!isSha(source_sha) || !isSha(commit))
     throw new Error('Invalid fidelity plan revision');
   if (
@@ -45,7 +50,15 @@ export function createPlan({ source_sha, commit, versions, react_version, publis
     (published_fonts !== undefined && (typeof published_fonts !== 'object' || published_fonts === null ||
       !Object.entries(published_fonts).every(([format, version]) => FONT_FORMATS.includes(format) && isVersion(version)))) ||
     (fonts_basis !== undefined && (typeof fonts_basis !== 'object' || fonts_basis === null ||
-      !Object.entries(fonts_basis).every(([format, basis]) => published_fonts?.[format] && ['release-commit', 'latest-before-release'].includes(basis))))
+      !Object.entries(fonts_basis).every(([format, basis]) => published_fonts?.[format] && ['release-commit', 'latest-before-release'].includes(basis)))) ||
+    (published_fonts_cjk !== undefined && (typeof published_fonts_cjk !== 'object' || published_fonts_cjk === null ||
+      !Object.entries(published_fonts_cjk).every(([format, version]) => published_fonts?.[format] && isAddonPin(version)))) ||
+    (fonts_cjk_basis !== undefined && (typeof fonts_cjk_basis !== 'object' || fonts_cjk_basis === null ||
+      !Object.entries(fonts_cjk_basis).every(([format, basis]) => isAddonBasis(published_fonts_cjk?.[format], basis)))) ||
+    (published_fonts_intl !== undefined && (typeof published_fonts_intl !== 'object' || published_fonts_intl === null ||
+      !Object.entries(published_fonts_intl).every(([format, version]) => format === 'docx' && published_fonts?.[format] && isAddonPin(version)))) ||
+    (fonts_intl_basis !== undefined && (typeof fonts_intl_basis !== 'object' || fonts_intl_basis === null ||
+      !Object.entries(fonts_intl_basis).every(([format, basis]) => isAddonBasis(published_fonts_intl?.[format], basis))))
   )
     throw new Error('Invalid fidelity plan versions');
   if (!Array.isArray(samples) || !samples.length || samples.length > MAX_SAMPLES)
@@ -73,6 +86,10 @@ export function createPlan({ source_sha, commit, versions, react_version, publis
     react_version,
     ...(published_fonts === undefined ? {} : { published_fonts }),
     ...(fonts_basis === undefined ? {} : { fonts_basis }),
+    ...(published_fonts_cjk === undefined ? {} : { published_fonts_cjk }),
+    ...(fonts_cjk_basis === undefined ? {} : { fonts_cjk_basis }),
+    ...(published_fonts_intl === undefined ? {} : { published_fonts_intl }),
+    ...(fonts_intl_basis === undefined ? {} : { fonts_intl_basis }),
     formats,
     samples,
     ...(docx_published_source_sha === undefined ? {} : { docx_published_source_sha }),
@@ -123,7 +140,7 @@ export async function mapPool(values, limit, task) {
   return results;
 }
 
-export const FONT_FORMATS = ['pptx', 'xlsx'];
+export const FONT_FORMATS = ['docx', 'pptx', 'xlsx'];
 
 const STABLE = /^\d+\.\d+\.\d+$/;
 const released = (version) => STABLE.test(version) && version !== '0.0.0';
@@ -133,17 +150,17 @@ const semverOrder = (left, right) => {
   return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 };
 
-export function releasedFonts(fonts, releases) {
+export function releasedFonts(fonts, releases, { packageName = '@betteroffice/fonts', releaseName = (format) => `@betteroffice/${format}` } = {}) {
   const versions = Object.entries(fonts?.versions ?? {});
   const fonts_basis = {};
   const published_fonts = {};
   for (const [format, release] of Object.entries(releases)) {
-    const label = `@betteroffice/${format}@${release?.version}`;
+    const label = `${releaseName(format)}@${release?.version}`;
     const sameCommit = versions
       .filter(([version, manifest]) => released(version) && /^[a-f0-9]{40}$/.test(release?.gitHead ?? '') && manifest?.gitHead === release.gitHead)
       .map(([version]) => version);
     if (sameCommit.length > 1)
-      throw new Error(`Expected at most one @betteroffice/fonts release from the release commit of ${label}, found ${sameCommit.length}`);
+      throw new Error(`Expected at most one ${packageName} release from the release commit of ${label}, found ${sameCommit.length}`);
     if (sameCommit.length === 1) {
       published_fonts[format] = sameCommit[0];
       fonts_basis[format] = 'release-commit';
@@ -153,13 +170,51 @@ export function releasedFonts(fonts, releases) {
     const earlier = versions
       .map(([version]) => version)
       .filter((version) => released(version) && Date.parse(fonts?.time?.[version] ?? '') < releasedAt)
-      .sort(semverOrder);
+      .sort((left, right) => Date.parse(fonts.time[left]) - Date.parse(fonts.time[right]) || semverOrder(left, right));
     if (!Number.isFinite(releasedAt) || !earlier.length)
-      throw new Error(`No @betteroffice/fonts release from the release commit of ${label} or published before it`);
+      throw new Error(`No ${packageName} release from the release commit of ${label} or published before it`);
     published_fonts[format] = earlier.at(-1);
     fonts_basis[format] = 'latest-before-release';
   }
   return { published_fonts, fonts_basis };
+}
+
+export const declaresAddon = (manifest, id) =>
+  ['dependencies', 'peerDependencies', 'optionalDependencies'].some((field) => manifest?.[field]?.[id] !== undefined);
+
+/** The @betteroffice/fonts release paired with each published format package, and each add-on that fonts release declares (else "absent"). */
+export async function releasedFontPackages(packument, releases) {
+  const fonts = await packument('@betteroffice/fonts');
+  const choice = releasedFonts(fonts, releases);
+  const fontsReleases = (formats) => Object.fromEntries(Object.entries(choice.published_fonts)
+    .filter(([format]) => formats.includes(format))
+    .map(([format, version]) => [format, { version, gitHead: fonts?.versions?.[version]?.gitHead, time: fonts?.time?.[version] }]));
+  const addon = async (name, formats) => {
+    const id = `@betteroffice/${name}`;
+    const all = fontsReleases(formats);
+    const declared = Object.fromEntries(Object.entries(all).filter(([, release]) => declaresAddon(fonts?.versions?.[release.version], id)));
+    let pinned = { published_fonts: {}, fonts_basis: {} };
+    if (Object.keys(declared).length) {
+      try {
+        pinned = releasedFonts(await packument(id), declared, { packageName: id, releaseName: () => '@betteroffice/fonts' });
+      } catch (error) {
+        const by = [...new Set(Object.values(declared).map((release) => `@betteroffice/fonts@${release.version}`))].join(', ');
+        throw new Error(`${by} declares ${id}, but the registry has no release of it to install: ${error instanceof Error ? error.message : error}`);
+      }
+    }
+    for (const format of Object.keys(all))
+      if (!declared[format]) {
+        pinned.published_fonts[format] = ABSENT;
+        pinned.fonts_basis[format] = ABSENT;
+      }
+    return pinned;
+  };
+  const cjk = await addon('fonts-cjk', FONT_FORMATS);
+  const intl = choice.published_fonts.docx ? await addon('fonts-intl', ['docx']) : undefined;
+  return {
+    ...choice, published_fonts_cjk: cjk.published_fonts, fonts_cjk_basis: cjk.fonts_basis,
+    ...(intl && { published_fonts_intl: intl.published_fonts, fonts_intl_basis: intl.fonts_basis }),
+  };
 }
 
 export function registryLoaders(download) {
@@ -197,7 +252,7 @@ export async function preparePlan(environment, dependencies) {
   ]);
   const fontFormats = FONT_FORMATS.filter((format) => samples.some((sample) => sample.format === format));
   const fontsChoice = fontFormats.length
-    ? releasedFonts(await packument('@betteroffice/fonts'), Object.fromEntries(await Promise.all(fontFormats.map(async (format) => {
+    ? await releasedFontPackages(packument, Object.fromEntries(await Promise.all(fontFormats.map(async (format) => {
         const release = published[FORMATS.indexOf(format)];
         const document = await packument(`@betteroffice/${format}`);
         return [format, { ...release, time: document?.time?.[release.version] }];
@@ -245,5 +300,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.env.QUALITY_OUTPUT ?? '.source/office-quality/plan',
     plan
   );
-  process.stdout.write(JSON.stringify({ path, formats: plan.formats }) + '\n');
+  const absent = Object.fromEntries(['fonts_cjk', 'fonts_intl']
+    .map((name) => [name.replace('_', '-'), Object.keys(plan[`published_${name}`] ?? {}).filter((format) => plan[`published_${name}`][format] === ABSENT)])
+    .filter(([, formats]) => formats.length));
+  process.stdout.write(JSON.stringify({ path, formats: plan.formats, absent_addons: absent }) + '\n');
 }

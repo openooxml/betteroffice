@@ -85,7 +85,8 @@ use ooxml_drawingml::chart::{
     PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
     PlotDataLabels, PlotGroup, PlotLegend, PlotLine, PlotMarker, PlotMarkerSymbol, PlotOp,
     PlotPoint, PlotRect, PlotSeries, PlotSink, PlotTextAlign, PlotTextStyle, blank_numbers,
-    chart_aria_label, chart_data, chart_plots_no_points, fallback_label_width, plot_chart_into,
+    chart_aria_label, chart_data, chart_plots_no_points, fallback_label_width, label_number_format,
+    plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -2781,6 +2782,8 @@ struct ChartDataLabelsIn {
     position: Option<String>,
     #[serde(default)]
     number_format: Option<String>,
+    #[serde(default)]
+    source_linked: Option<bool>,
     #[serde(default)]
     text: Option<ChartTextIn>,
 }
@@ -7665,8 +7668,10 @@ fn emit_line<'a>(
             attrs.and_then(|attrs| attrs.list_marker_font_size.or(attrs.default_font_size));
         let slot_width = if overrun > 0.0 {
             geom.hanging + overrun
+        } else if geom.hanging > 0.0 {
+            geom.hanging
         } else {
-            geom.hanging.max(font_px_of(&marker_format))
+            font_px_of(&marker_format)
         };
         let marker_x = if geom.is_rtl {
             pen_x + effective_line_width
@@ -10686,6 +10691,7 @@ fn plot_text_from(text: Option<&ChartTextIn>) -> PlotTextStyle<'_> {
 fn plot_labels_from<'a>(
     group: Option<&'a ChartDataLabelsIn>,
     series: Option<&'a ChartDataLabelsIn>,
+    cached: Option<&'a str>,
 ) -> Option<PlotDataLabels<'a>> {
     let levels = [series, group];
     levels.iter().copied().flatten().next()?;
@@ -10707,6 +10713,12 @@ fn plot_labels_from<'a>(
     let text = |read: fn(&ChartDataLabelsIn) -> Option<&str>| {
         series.and_then(read).or_else(|| group.and_then(read))
     };
+    let formats = levels.iter().copied().flatten().map(|labels| {
+        (
+            labels.number_format.as_deref(),
+            labels.source_linked == Some(true),
+        )
+    });
     Some(PlotDataLabels {
         show_value: switch(|labels| labels.show_value),
         show_category_name: switch(|labels| labels.show_category_name),
@@ -10716,7 +10728,7 @@ fn plot_labels_from<'a>(
         show_bubble_size: switch(|labels| labels.show_bubble_size),
         separator: text(|labels| labels.separator.as_deref()),
         position: text(|labels| labels.position.as_deref()),
-        number_format: text(|labels| labels.number_format.as_deref()),
+        number_format: label_number_format(formats, cached),
         text: plot_text_from(
             series
                 .and_then(|labels| labels.text.as_ref())
@@ -10770,12 +10782,11 @@ fn plot_series_from<'a>(
     series: &'a ChartSeriesIn,
     group_labels: Option<&'a ChartDataLabelsIn>,
 ) -> PlotSeries<'a> {
-    let mut labels = plot_labels_from(group_labels, series.data_labels.as_ref());
-    if let Some(spec) = labels.as_mut()
-        && spec.number_format.is_none()
-    {
-        spec.number_format = series.value_format.as_deref();
-    }
+    let labels = plot_labels_from(
+        group_labels,
+        series.data_labels.as_ref(),
+        series.value_format.as_deref(),
+    );
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,
@@ -12968,6 +12979,25 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
             .and_then(|chart| chart.frame.as_deref_mut())
         {
             rect(x, y, w, h);
+        }
+        let attrs = match primitive {
+            Primitive::Line(line) => Some(&mut line.attrs),
+            other => doc_attrs_mut(other),
+        };
+        if let Some(clip) = attrs
+            .and_then(|attrs| attrs.clip_group.as_deref_mut())
+            .and_then(|group| group.clip.as_mut())
+        {
+            let left = clip_number(&clip.x);
+            let top = clip_number(&clip.y);
+            let first = point(left, top);
+            let last = point(left + clip_number(&clip.w), top + clip_number(&clip.h));
+            *clip = ClipRect {
+                x: Some(px(first.0.min(last.0))),
+                y: Some(px(first.1.min(last.1))),
+                w: Some(px((last.0 - first.0).abs())),
+                h: Some(px((last.1 - first.1).abs())),
+            };
         }
     }
 }
@@ -17275,6 +17305,56 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_larger_than_its_hanging_indent_still_starts_at_the_hanging_edge() {
+        let input = json!({
+            "contractVersion": 1,
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "bullet",
+                    "runs": [{ "kind": "text", "text": "one" }],
+                    "attrs": {
+                        "listMarker": "•",
+                        "listMarkerFontSize": 22,
+                        "indent": { "left": 48, "hanging": 24 }
+                    }
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "totalHeight": 36,
+                    "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 3,
+                        "width": 30, "ascent": 26, "descent": 8, "lineHeight": 36
+                    }]
+                }
+            }],
+            "options": {},
+            "layout": {
+                "pages": [{
+                    "number": 1,
+                    "size": { "w": 400, "h": 400 },
+                    "margins": { "top": 20, "right": 20, "bottom": 20, "left": 20 },
+                    "fragments": [{
+                        "kind": "paragraph", "blockId": "bullet", "x": 20, "y": 20,
+                        "width": 360, "height": 36, "fromLine": 0, "toLine": 1
+                    }]
+                }]
+            }
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let primitives = output["pages"][0]["primitives"].as_array().unwrap();
+        let marker = primitives
+            .iter()
+            .find(|primitive| primitive["listMarker"] == true)
+            .unwrap();
+        assert_eq!(
+            (marker["x"].as_f64(), marker["width"].as_f64()),
+            (Some(44.0), Some(24.0))
+        );
+    }
+
+    #[test]
     fn underlined_tabs_paint_their_resolved_advance_without_a_leader() {
         for authoritative in [false, true] {
             for underline in [json!(true), json!({"style": "single", "color": "#123456"})] {
@@ -18181,21 +18261,21 @@ mod tests {
             show_value: Some(true),
             ..Default::default()
         };
-        assert!(plot_labels_from(Some(&group), Some(&series)).is_none());
+        assert!(plot_labels_from(Some(&group), Some(&series), None).is_none());
 
         let restoring = ChartDataLabelsIn {
             delete: Some(false),
             show_value: Some(true),
             ..Default::default()
         };
-        let resolved = plot_labels_from(Some(&group), Some(&restoring)).unwrap();
+        let resolved = plot_labels_from(Some(&group), Some(&restoring), None).unwrap();
         assert!(resolved.show_value);
 
         let series_only = ChartDataLabelsIn {
             delete: Some(true),
             ..Default::default()
         };
-        assert!(plot_labels_from(None, Some(&series_only)).is_none());
+        assert!(plot_labels_from(None, Some(&series_only), None).is_none());
     }
 
     #[test]
@@ -19008,6 +19088,43 @@ mod tests {
                     frame.h.clone()
                 ),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn rotated_cell_content_turns_a_line_clip() {
+        let clip = |x: f64, y: f64, w: f64, h: f64| ClipRect {
+            x: Some(px(x)),
+            y: Some(px(y)),
+            w: Some(px(w)),
+            h: Some(px(h)),
+        };
+        for (rotation, expected) in [
+            (90.0, clip(50.0, 10.0, 30.0, 40.0)),
+            (-90.0, clip(20.0, 150.0, 30.0, 40.0)),
+        ] {
+            let mut attrs = DocAttrs::default();
+            apply_clip_group(&mut attrs, "clip".to_owned(), clip(10.0, 20.0, 40.0, 30.0));
+            let mut prims = vec![Primitive::Line(LinePrimitive {
+                x1: px(10.0),
+                y1: px(20.0),
+                x2: px(50.0),
+                y2: px(20.0),
+                attrs,
+                ..LinePrimitive::contract_defaults()
+            })];
+            rotate_cell_content(&mut prims, (0.0, 0.0, 100.0, 200.0), rotation);
+            let Primitive::Line(line) = &prims[0] else {
+                unreachable!()
+            };
+            assert_eq!(
+                line.attrs
+                    .clip_group
+                    .as_ref()
+                    .and_then(|group| group.clip.clone()),
+                Some(expected),
+                "{rotation}"
             );
         }
     }

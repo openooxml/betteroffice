@@ -17,7 +17,7 @@ use xlsx_model::sort::sort_by_shared;
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, DifferentialFormat,
-    Sheet, SheetChart, SheetId, Workbook,
+    RunUnderline, Sheet, SheetChart, SheetId, Workbook,
 };
 
 use crate::ParseError;
@@ -3690,13 +3690,19 @@ fn write_hyperlinks(
 }
 
 fn write_sheet_views(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
-    let Some(pane) = sheet.freeze_pane else {
+    let hide = sheet.format.hide_gridlines;
+    if sheet.freeze_pane.is_none() && !hide {
         return Ok(());
-    };
+    }
     w.create_element("sheetViews").write_inner_content(|w| {
-        w.create_element("sheetView")
-            .with_attribute(("workbookViewId", "0"))
-            .write_inner_content(|w| write_pane(w, pane))?;
+        let view = w
+            .create_element("sheetView")
+            .with_attributes(hide.then_some(("showGridLines", "0")))
+            .with_attribute(("workbookViewId", "0"));
+        match sheet.freeze_pane {
+            Some(pane) => view.write_inner_content(|w| write_pane(w, pane))?,
+            None => view.write_empty()?,
+        };
         Ok(())
     })?;
     Ok(())
@@ -4384,8 +4390,19 @@ fn write_font(w: &mut Writer<Vec<u8>>, font: &Font) -> io::Result<()> {
         if font.italic {
             w.create_element("i").write_empty()?;
         }
-        if font.underline {
-            w.create_element("u").write_empty()?;
+        let underline = match font.underline {
+            RunUnderline::None => None,
+            RunUnderline::Single => Some(None),
+            RunUnderline::Double => Some(Some("double")),
+            RunUnderline::SingleAccounting => Some(Some("singleAccounting")),
+            RunUnderline::DoubleAccounting => Some(Some("doubleAccounting")),
+        };
+        if let Some(val) = underline {
+            let element = w.create_element("u");
+            match val {
+                Some(val) => element.with_attribute(("val", val)).write_empty()?,
+                None => element.write_empty()?,
+            };
         }
         if font.strike {
             w.create_element("strike").write_empty()?;

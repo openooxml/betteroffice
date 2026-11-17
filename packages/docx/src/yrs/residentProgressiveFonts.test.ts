@@ -1,6 +1,11 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { decodeFontFace } from '../../../fonts/src/decode';
+import {
+  NATIVE_ENGINE_OBJECT_FAILED,
+  NATIVE_MEMORY_BUDGET_EXCEEDED,
+  NATIVE_PANIC_CODE,
+} from '../../../../shared/office-session/trap';
 import { glyphsByFont, ResidentProgressiveFonts, type ProgressiveFontSpec } from './residentProgressiveFonts';
 
 const assets = new URL('../../../fonts-cjk/assets/', import.meta.url);
@@ -159,6 +164,22 @@ test('an engine refusal is reported for a whole-face reload and is never retried
   expect(calls).toBe(1);
   expect(logs.some((message) => message.includes('refused the outlines') && message.includes('tables differ'))).toBe(true);
   expect(hits.get(chunkFile(71))).toBeUndefined();
+});
+
+test.each([
+  ['a WebAssembly trap', () => new WebAssembly.RuntimeError('unreachable')],
+  ['a native budget failure', () => new Error(`${NATIVE_MEMORY_BUDGET_EXCEEDED} (64 bytes over a 0-byte budget)`)],
+  ['a native panic', () => Object.assign(new Error('panicked at engine'), { code: NATIVE_PANIC_CODE })],
+  ['a native failed object', () => new Error(NATIVE_ENGINE_OBJECT_FAILED)],
+] as const)('an engine trap from installing outlines (%s) is rethrown, not taken as a refusal', async (_, trap) => {
+  const thrown = trap();
+  const { resident } = fonts(() => {
+    throw thrown;
+  });
+  const refused: number[] = [];
+  resident.onRefused((fontId) => refused.push(fontId));
+  await expect(resident.ensure(new Map([[10, new Set([glyphIn(72)])]]))).rejects.toBe(thrown);
+  expect(refused).toEqual([]);
 });
 
 test('slots registered with the same sliced face share one outline state and install to every slot', async () => {

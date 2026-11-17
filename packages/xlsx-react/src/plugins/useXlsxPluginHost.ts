@@ -167,8 +167,13 @@ export function useXlsxPluginHost(options: UseXlsxPluginHostOptions): XlsxPlugin
   useLayoutEffect(() => { host.localeChanged(locale); }, [host, locale]);
   useLayoutEffect(() => {
     if (!managed) return;
-    return trackFocus(() => latest.current.focusRoot?.current ? [latest.current.focusRoot.current] : [],
+    const tracker = trackFocus(() => latest.current.focusRoot?.current ? [latest.current.focusRoot.current] : [],
       (focused) => host.focusChanged(focused));
+    host.setFocusCheck(tracker.recheck);
+    return () => {
+      host.setFocusCheck(null);
+      tracker();
+    };
   }, [host, managed]);
 
   /** Publishes the layout and geometry of the painted frame for the current version. */

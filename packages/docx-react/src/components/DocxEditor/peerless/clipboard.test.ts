@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'bun:test';
-import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, isPasteFragmentAllowed } from './clipboard';
+import { copyWorkerSelection, createClipboardPrefetch, writeClipboardCapture, isPasteFragmentAllowed, type ClipboardCapture } from './clipboard';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
 import { createYrsSession, readClipboardSlice, type DocxClipboardFragment, type YrsStorySegment } from '@betteroffice/docx/yrs';
 
@@ -53,7 +53,7 @@ for (const cut of [false, true]) {
           await expect(copyWorkerSelection({ binding, readSelection, cut, isCurrent: () => true, write, writeSlice,
             readClipboardSlice: async () => readClipboardSlice({ storySegments: story => stories[story] ?? [], tablePayload: () => null },
               { story: 'body', from: 0, to: 2 }),
-          })).rejects.toThrow('Picture selection contains unsupported clipboard objects');
+          })).rejects.toThrow(cut ? 'Cut refused: the clipboard cannot carry' : 'Picture selection contains unsupported clipboard objects');
           expect(write).not.toHaveBeenCalled();
           expect(writeSlice).not.toHaveBeenCalled();
           expect(submit).not.toHaveBeenCalled();
@@ -216,6 +216,32 @@ test('failed rich picture clipboard writes never cut the selection', async () =>
   expect(submit).not.toHaveBeenCalled();
 });
 
+
+test('a cut whose slice leaves objects out is refused before any write or delete through every capture path; a copy is unchanged', async () => {
+  for (const cut of [false, true]) {
+    for (const path of ['slice', 'capture', 'prefetched']) {
+      const { binding, readSelection, selection, submit } = fixture();
+      const slice = { text: 'bcd', fragment: null, leftOut: ['noteRef', 'math'] };
+      const capture = { selection, slice, version: 1, identity: {} as ClipboardCapture['identity'], html: null };
+      const values = new Map<string, string>();
+      const data = { setData: (type: string, value: string) => { values.set(type, value); } } as unknown as DataTransfer;
+      const write = mock(async (_text: string) => {});
+      const run = copyWorkerSelection({ binding, readSelection, cut, isCurrent: () => true, write,
+        ...(path === 'slice' ? { readClipboardSlice: async () => slice } :
+          path === 'capture' ? { readCapture: async () => capture } : { data, prefetched: capture }),
+      });
+      if (cut) {
+        await expect(run).rejects.toThrow('the clipboard cannot carry noteRef, math');
+        expect(write).not.toHaveBeenCalled();
+        expect(values.size).toBe(0);
+      } else {
+        expect(await run).toBe(true);
+        expect(path === 'prefetched' ? values.get('text/plain') : write.mock.calls[0]?.[0]).toBe('bcd');
+      }
+      expect(submit).not.toHaveBeenCalled();
+    }
+  }
+});
 
 test('table-only copy and cut fall back to plain text when rich writing fails or is unavailable', async () => {
   for (const cut of [false, true]) {

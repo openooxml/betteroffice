@@ -1,6 +1,28 @@
+use docx_layout::skipped_effects::{self, CANVAS};
+
 use super::{EditSessionCore, EngineError, EngineResult};
 
 impl EditSessionCore {
+    /// The canvas backend's skipped effects on resident page `page_index`, as effect bits.
+    pub fn display_canvas_skipped_effects(
+        &self,
+        page_index: u32,
+        unavailable: &[u32],
+    ) -> EngineResult<u32> {
+        let unavailable = skipped_effects::unpack_positions(unavailable);
+        let effects = self.engine.with_display_list(|list| {
+            let page = list
+                .pages
+                .iter()
+                .find(|page| page.page_index == u64::from(page_index))?;
+            let effects = skipped_effects::skipped_effects(page, &unavailable, &CANVAS);
+            Some(skipped_effects::effect_bits(&effects))
+        });
+        effects
+            .flatten()
+            .ok_or_else(|| EngineError::message("no resident display page"))
+    }
+
     /// Region-aware hit test against the resident display list, so no
     /// display-list JSON crosses the boundary. `x`/`y` are page-local px.
     /// Returns

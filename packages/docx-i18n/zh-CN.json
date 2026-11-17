@@ -730,6 +730,7 @@
     "linkRemoved": "链接已删除",
     "linkCopied": "链接已复制到剪贴板",
     "pasteFailed": "无法完成粘贴。未做任何更改。",
+    "cutRefused": "所选内容包含无法剪切的对象。未做任何更改。",
     "failedToSave": "保存文档失败",
     "documentInput": "文档输入",
     "documentPreview": "文档预览",

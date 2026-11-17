@@ -12,6 +12,7 @@ import type {
   YrsResolvedCommentAnchor,
   YrsRevisionInfo,
   YrsSelection,
+  YrsSelectionContext,
   YrsSelectionText,
   YrsSession,
   YrsStorySegment,
@@ -62,7 +63,7 @@ import type { ResidentControlTarget, ResidentControlPosition } from './residentC
 import { withPackageMetadata, type ResidentPackageMetadata } from './residentProperties';
 import { getDocumentWatermark } from '../docx/watermarkApi';
 import { resolvedFinalSectionProperties, updateFinalSectionProperties } from '../editor/finalSection';
-import { readSectionSnapshot, residentSectionPropertiesAt, sectionMarkKey, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionSnapshot } from './residentSections';
+import { nativeTabStops, readSectionSnapshot, residentSectionPropertiesAt, sectionMarkKey, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionParagraphs, type ResidentSectionSnapshot } from './residentSections';
 import { pageBreakTarget, splitSection } from './sectionBreak';
 
 /** @internal */
@@ -210,7 +211,8 @@ export type ResidentEngineSession = Pick<
   /** The `w:next` style a paragraph break at `at` gives the new paragraph, or null to keep the split's own. */
   nextParagraphStyle(at: YrsLoc): string | null;
   setPropertyDocument(document: Document): boolean;
-  sectionProperties(): ResidentSectionSnapshot;
+  /** Every section, with the tab stops of `paragraphs`, or of every paragraph when omitted. */
+  sectionProperties(paragraphs?: ResidentSectionParagraphs): ResidentSectionSnapshot;
   setSectionMargins(section: string, margins: DocxSectionMargins): boolean;
   updateComment(id: string, patch: DocxCommentPatch): void;
   commentProjection(fresh?: boolean): ResidentCommentProjection | null;
@@ -267,6 +269,8 @@ export type ResidentEngineSession = Pick<
   primeSaveSeedStates(maxParagraphs: number, maxInflatedBytes: number): boolean;
   /** One slice of {@link primeSaveSeedStates} digesting about `maxBytes` bytes: 0 known, 1 more to do, 2 declined. */
   primeSaveSeedStatesSlice(maxParagraphs: number, maxInflatedBytes: number, maxBytes: number): number;
+  /** What the last {@link primeSaveSeedStatesSlice} call charged against its `maxBytes`. */
+  primeLastSliceCost(): number;
   /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
   openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
   /** The whole document state as one yrs v1 update. */
@@ -319,6 +323,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
   const seededSectionMarks = new Map<string, string>();
   let sectionNames = { host: new Map<string, string>(), resident: new Map<string, string>() };
   let sectionLayout: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
+  let sectionSnapshot: { revision: string; sections: ResidentSectionSnapshot['sections'] } | null = null;
   const parsedMedia = new Map<string, string>();
   /** SVG pictures of a parsed document opened without media tokens, named by data URL. */
   let parsedSvg: string[] = [];
@@ -363,7 +368,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     return Object.keys(margins).length ? withSectionSnapshot(document, readSectionSnapshot(resident, document, margins, seededSectionMarks)) : document;
   };
   const mergeRemote = <T>(apply: () => T): T => {
-    sectionLayout = null;
+    sectionLayout = sectionSnapshot = null;
     const before = session.resident_section_revision().split(':')[1];
     const result = apply();
     if (session.resident_section_revision().split(':')[1] !== before) sectionsTouched = true;
@@ -412,8 +417,23 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     resident.setParagraphAttrs({ story: 'body', start: at, end: at }, { other: { sectPr, sectionBreakType: sectPr.sectionStart ?? null } });
     return session.version() !== version;
   };
-  const sectionProperties = (): ResidentSectionSnapshot => {
-    return readSectionSnapshot(resident, partDocument(), JSON.parse(session.section_margins_json()), seededSectionMarks, sectionsTouched);
+  const sectionProperties = (paragraphs?: ResidentSectionParagraphs): ResidentSectionSnapshot => {
+    const document = partDocument();
+    const margins = JSON.parse(session.section_margins_json()) as Record<string, DocxSectionMargins>;
+    if (!paragraphs) return readSectionSnapshot(resident, document, margins, seededSectionMarks, sectionsTouched);
+    const revision = JSON.stringify([session.resident_section_revision(), sectionsTouched, [...seededSectionMarks],
+      document.package.document.sections?.map(section => [section.id, section.properties]),
+      document.package.document.finalSectionProperties, margins]);
+    if (sectionSnapshot?.revision !== revision) sectionSnapshot = { revision,
+      sections: readSectionSnapshot(resident, document, margins, seededSectionMarks, sectionsTouched, []).sections };
+    const live = new Set(paragraphs.length > 0 ? geometryReader.storyIds() : []);
+    return { version: resident.proposalEngine.version(), sections: sectionSnapshot.sections,
+      paragraphs: paragraphs.flatMap(({ story, paraId }) => {
+        if (!live.has(story)) return [];
+        let context: YrsSelectionContext;
+        try { context = JSON.parse(session.selection_context(story, paraId, 0, paraId, 0)); } catch { return []; }
+        return context.paraId === paraId ? [{ story, paraId, tabs: nativeTabStops(context.paragraphProperties.tabs) }] : [];
+      }) };
   };
   session.set_local_lowering(true);
   const listeners = new Set<
@@ -659,13 +679,13 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       ensureUndo();
       const split = splitSection(resident, session, at, () => properties, start);
       sectionsTouched = true;
-      sectionLayout = null;
+      sectionLayout = sectionSnapshot = null;
       if (!split.closed) {
         const document = partDocument();
         const body = updateFinalSectionProperties(document.package.document, final => ({ ...final, sectionStart: start }));
         session.set_part_metadata(JSON.stringify(partMetadata({ ...document, package: { ...document.package, document: body } })), '[]');
         partsTouched = true;
-        sectionLayout = null;
+        sectionLayout = sectionSnapshot = null;
       }
       return split.at;
     },
@@ -693,16 +713,16 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     setSectionMargins: (section, margins) => {
       ensureUndo();
       const changed = session.set_section_margins(section, JSON.stringify(margins));
-      if (changed) { marginsTouched = true; sectionLayout = null; projectionStories.add('body'); }
+      if (changed) { marginsTouched = true; sectionLayout = sectionSnapshot = null; projectionStories.add('body'); }
       return changed;
     },
     propertyDocument: hostDocument,
     setPropertyDocument: input => {
-      sectionLayout = null;
+      sectionLayout = sectionSnapshot = null;
       const document = withSectionNames(input, sectionNames.resident);
       const margins = JSON.parse(session.section_margins_json()) as Record<string, DocxSectionMargins>;
       let changed = false;
-      for (const section of sectionProperties().sections.slice(0, -1)) {
+      for (const section of sectionProperties([]).sections.slice(0, -1)) {
         const desired = document.package.document.sections?.find(entry => entry.id === section.section)?.properties;
         if (desired && JSON.stringify(section.properties) !== JSON.stringify(desired)) changed = setSectionMark(section.section, desired) || changed;
       }
@@ -727,7 +747,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     partGeometry: frame => readPartGeometry(resident, frame),
     partStory: (id) => `hf:${(JSON.parse(session.header_footer_aliases_json()) as Record<string, string>)[id] ?? id}`,
     setPartDocument: (input, removeStories = []) => {
-      sectionLayout = null;
+      sectionLayout = sectionSnapshot = null;
       ensureUndo();
       const document = withSectionNames(input, sectionNames.resident);
       let changed = false;
@@ -986,13 +1006,14 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       partsTouched = false;
       marginsTouched = false;
       sectionsTouched = false;
-      sectionLayout = null;
+      sectionLayout = sectionSnapshot = null;
       markProjectionStories(session.story_ids());
       parsedStoryRevision = syncStoryRevisions();
     },
     primeSaveSeedStates: (maxParagraphs, maxInflatedBytes) => session.prime_save_seed_states(maxParagraphs, maxInflatedBytes),
     primeSaveSeedStatesSlice: (maxParagraphs, maxInflatedBytes, maxBytes) =>
       session.prime_save_seed_states_slice(maxParagraphs, maxInflatedBytes, maxBytes),
+    primeLastSliceCost: () => session.prime_last_slice_cost(),
     saveDocument: async (host, comments, record) => {
       if (!parsedFacade || !partBase) throw new Error('The document worker holds no parsed document');
       const { saveEditorDocument, mergeDocxHostMetadata } = await import('./editorSave');
@@ -1027,7 +1048,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       partsTouched = false;
       marginsTouched = false;
       sectionsTouched = false;
-      sectionLayout = null;
+      sectionLayout = sectionSnapshot = null;
       return json;
     },
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
@@ -1087,7 +1108,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       if (yieldSave) await yieldSave();
       let projectedHost = partsTouched || session.part_metadata_json() !== '{}'
         ? withPartMetadata(host ?? partDocument(), partMetadata(partDocument())) : host;
-      if (marginsTouched || sectionsTouched || session.section_margins_json() !== '{}') projectedHost = withSectionSnapshot(projectedHost ?? partDocument(), sectionProperties());
+      if (marginsTouched || sectionsTouched || session.section_margins_json() !== '{}') projectedHost = withSectionSnapshot(projectedHost ?? partDocument(), sectionProperties([]));
       return saveResidentDocument(
         session, clientId, source, hostJson, projectedHost, comments, record, projectionStories, stories, yieldSave
       );
@@ -1167,6 +1188,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
         projectionStories.add(story);
       } finally {
         if (session.version() !== version) {
+          sectionSnapshot = null;
           projectionStories.add(story);
           syncStoryRevisions();
           storyRevision += 1;
@@ -1190,7 +1212,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {
       geometryStories.clear();
-      sectionLayout = null;
+      sectionLayout = sectionSnapshot = null;
       session.load(update);
     },
     applyUpdate: (update) => mergeRemote(() => JSON.parse(session.apply_update_with_inference(update)) as CollaborationTextInsertion | null),

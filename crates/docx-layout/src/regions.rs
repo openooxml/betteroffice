@@ -173,7 +173,7 @@ pub struct NoteSettings {
     pub footnote_columns: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteProperties {
     #[serde(default, skip_serializing_if = "Option::is_none")]

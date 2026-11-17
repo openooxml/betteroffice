@@ -82,6 +82,7 @@ export class XlsxDocument {
      * Export the committed workbook with the version it was read at; nothing recalculates.
      */
     exportStructuredJson(options: string): string;
+    fillRangeJson(args: string): string;
     findTextJson(request: string): string;
     historyStateJson(): string;
     listDefinedNamesJson(request: string): string;
@@ -89,6 +90,10 @@ export class XlsxDocument {
      * the pending proposals: `{"proposals":[...]}`.
      */
     listProposalsJson(): string;
+    /**
+     * the encoded bytes of the image an `image` draw command names.
+     */
+    mediaBytes(asset_id: string): Uint8Array;
     mergedRangesJson(args: string): string;
     /**
      * slide a chart by a pixel delta as one undo step.
@@ -145,6 +150,10 @@ export class XlsxDocument {
      * reject a proposal by id; returns `{"removed":bool}`.
      */
     rejectProposalJson(args: string): string;
+    /**
+     * move a chart's edges by pixel deltas as one undo step.
+     */
+    resizeChartJson(args: string): string;
     /**
      * serialize the current workbook back to `.xlsx` bytes.
      */
@@ -283,10 +292,12 @@ export interface InitOutput {
     readonly xlsxdocument_endPeerSnapshot: (a: number) => void;
     readonly xlsxdocument_exportMarkdownJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly xlsxdocument_exportStructuredJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_fillRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listDefinedNamesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -309,6 +320,7 @@ export interface InitOutput {
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_resizeChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly xlsxdocument_saveWarningsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];

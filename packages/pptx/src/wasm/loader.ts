@@ -2,6 +2,7 @@ import { upgradeExportFaces } from './exportFaces';
 import initWasmModule, {
   decodeFontFace as decodePackedFontFace,
   decodeTiffPng,
+  engineKind,
   exportPptxMarkdownJson,
   exportPptxStructuredJson,
   parsePptxJson,
@@ -13,6 +14,7 @@ import initWasmModule, {
 } from './engine';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
+import { packagedWasmError, packagedWasmInput } from '../../../../shared/office-session/readWasmAsset';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { metafileImageBytes } from '../render/browserImage';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
@@ -504,17 +506,18 @@ export function isProposalsAvailable(): boolean {
 let initialization: Promise<void> | undefined;
 
 export function initWasm(
-  input: WasmInitInput = wasmAssetUrl()
+  input?: WasmInitInput
 ): Promise<void> {
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
-  initialization = initWasmModule({ module_or_path: input }).then(
+  let asset: URL | undefined;
+  initialization = initWasmModule({ module_or_path: input ?? packagedWasmInput(asset = wasmAssetUrl()) }).then(
     () => {
       initialized = true;
     },
     (error: unknown) => {
       initialization = undefined;
-      throw toError(error);
+      throw asset && engineKind !== 'native' ? packagedWasmError(asset, error) : toError(error);
     }
   );
   return initialization;

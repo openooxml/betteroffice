@@ -7,7 +7,7 @@ import type { ResidentPartGeometry, ResidentPartMetadata } from './residentParts
 import type { ResidentControlSnapshot } from './residentControls';
 import type { ResidentPropertyTarget, ResidentPropertySnapshot } from './residentProperties';
 import type { ResidentSectionSnapshot } from './residentSections';
-import type { YrsStoryRange } from './index';
+import type { YrsStoryRange, YrsTableRange } from './index';
 import type { DocxReviewSnapshot, DocxReviewTarget, DocxReviewTargetRanges } from './residentReview';
 import type { ResidentCommentInsertionRange } from './residentCommentProjection';
 import type { DocxToolbarMetadata } from './residentToolbarMetadata';
@@ -113,6 +113,10 @@ export type DocxDocumentRead = {
     target: ResidentPropertyTarget;
 } | {
     kind: 'sectionProperties';
+    paragraphs?: {
+        story: string;
+        paraId: string;
+    }[];
 } | {
     kind: 'exportStructuredWithPages';
     options: DocxPageExportOptions;
@@ -157,6 +161,8 @@ export type DocxDocumentRead = {
 } | {
     kind: 'clipboardSlice';
     selection: DocxCommandSelection;
+    /** The cell selection to copy in place of `selection`, null for none; omitted, the live one applies. */
+    cells?: YrsTableRange | null;
 } | {
     kind: 'listStories';
 } | {

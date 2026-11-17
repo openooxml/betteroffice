@@ -109,6 +109,36 @@ pub struct Table {
     pub header_rows: u32,
     pub totals_rows: u32,
     pub columns: Vec<String>,
+    /// The style elements its `tableStyleInfo` turns on, lowest precedence first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub style: Vec<TableStyleElement>,
+}
+
+/// A `tableStyleElement` type a table draws, declared in precedence order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableStyleElementType {
+    WholeTable,
+    FirstColumnStripe,
+    SecondColumnStripe,
+    FirstRowStripe,
+    SecondRowStripe,
+    LastColumn,
+    FirstColumn,
+    HeaderRow,
+    TotalRow,
+    FirstHeaderCell,
+    LastHeaderCell,
+    FirstTotalCell,
+    LastTotalCell,
+}
+
+/// One resolved element of a table style; `size` is a stripe's band height or width.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableStyleElement {
+    pub kind: TableStyleElementType,
+    pub size: u32,
+    pub format: crate::styles::DifferentialFormat,
 }
 
 impl Table {
@@ -221,6 +251,13 @@ pub struct SheetFormat {
     pub custom_height: bool,
     /// `zeroHeight`: rows without height, cells or row style are hidden.
     pub zero_height: bool,
+    /// `defaultColWidth`: the stored width of a column no `<col>` sizes.
+    pub default_col_width: Option<f64>,
+    /// `baseColWidth`: digits a default column holds before padding, when
+    /// `defaultColWidth` is absent.
+    pub base_col_width: Option<u32>,
+    /// `showGridLines="0"` on the first `sheetView`: the screen draws no gridlines.
+    pub hide_gridlines: bool,
 }
 
 /// A column run's default style for missing cells.
@@ -259,7 +296,8 @@ pub struct Sheet {
     pub row_heights: BTreeMap<RowId, f64>,
     pub hidden_col_widths: BTreeMap<ColId, f64>,
     pub hidden_row_heights: BTreeMap<RowId, f64>,
-    /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
+    /// parsed from `sheetFormatPr` and the first `sheetView`; read by the
+    /// renderer, never by the writer.
     pub format: SheetFormat,
     /// Column defaults in source order.
     pub col_styles: Vec<ColStyle>,
@@ -773,6 +811,26 @@ impl Sheet {
         self.hyperlinks.iter().find(|link| link.range.contains(at))
     }
 
+    /// the last row [`Sheet::used_range`] covers.
+    fn last_used_row(&self) -> Option<RowId> {
+        let cells = self
+            .cells
+            .first_key_value()
+            .zip(self.cells.last_key_value())
+            .map(|((&(first, _), _), (&(last, _), _))| (first, last));
+        let ranges = self
+            .hyperlinks
+            .iter()
+            .map(|link| link.range)
+            .chain(self.merges.iter().copied())
+            .map(|range| (range.start.row, range.end.row));
+        let (top, bottom) = cells
+            .into_iter()
+            .chain(ranges)
+            .reduce(|(top, bottom), (start, end)| (top.min(start), bottom.max(end)))?;
+        Some(top.max(bottom))
+    }
+
     pub fn used_range(&self) -> Option<CellRange> {
         #[cfg(feature = "test-counters")]
         USED_RANGE_SCANS.set(USED_RANGE_SCANS.get().wrapping_add(1));
@@ -1064,8 +1122,8 @@ impl CellProvider for Workbook {
 
     fn used_rows(&self, sheet: SheetId) -> RowId {
         self.sheet(sheet)
-            .and_then(Sheet::used_range)
-            .map_or(0, |range| range.end.row.saturating_add(1))
+            .and_then(Sheet::last_used_row)
+            .map_or(0, |row| row.saturating_add(1))
     }
 
     fn used_cols(&self, sheet: SheetId) -> ColId {
@@ -1473,5 +1531,261 @@ mod tests {
                 .hyperlink_at(CellRef::parse_a1("A1").unwrap())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn used_rows_ends_where_the_used_range_ends() {
+        fn check(sheet: &Sheet) {
+            let want = sheet.used_range().map_or(0, |range| range.end.row + 1);
+            let mut workbook = Workbook::default();
+            workbook.sheets.push(sheet.clone());
+            assert_eq!(workbook.used_rows(SheetId(0)), want, "{sheet:?}");
+        }
+        let number = |value: f64| Cell {
+            value: CellValue::Number { value },
+            ..Cell::default()
+        };
+        let mut sheet = Sheet::new("Data");
+        check(&sheet);
+        for a1 in ["C3", "A1", "Z2", "B9", "A9", "XFD1"] {
+            sheet.set_cell(CellRef::parse_a1(a1).unwrap(), number(1.0));
+            check(&sheet);
+        }
+        sheet.set_cell(CellRef::parse_a1("B1048576").unwrap(), number(2.0));
+        check(&sheet);
+        for a1 in ["B1048576", "A9", "B9"] {
+            sheet.set_cell(CellRef::parse_a1(a1).unwrap(), Cell::default());
+            check(&sheet);
+        }
+        sheet.merges.push(CellRange::parse_a1("D4:E40").unwrap());
+        check(&sheet);
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("F50:F60").unwrap(),
+            external_target: None,
+            location: Some("Data!A1".into()),
+            tooltip: None,
+            display: None,
+        });
+        check(&sheet);
+        sheet.merges.push(CellRange::parse_a1("A100:B120").unwrap());
+        check(&sheet);
+        let mut links_only = Sheet::new("Links");
+        links_only.hyperlinks = sheet.hyperlinks.clone();
+        check(&links_only);
+        let mut merges_only = Sheet::new("Merges");
+        merges_only.merges = sheet.merges.clone();
+        check(&merges_only);
+        assert_eq!(Workbook::default().used_rows(SheetId(3)), 0);
+    }
+
+    /// the used-row count as a full scan of the used range computes it.
+    fn scanned_used_rows(workbook: &Workbook, sheet: SheetId) -> RowId {
+        workbook
+            .sheet(sheet)
+            .and_then(Sheet::used_range)
+            .map_or(0, |range| range.end.row.saturating_add(1))
+    }
+
+    const FEATURES: [&str; 12] = [
+        "data",
+        "style-only cell",
+        "cleared cell",
+        "merge below",
+        "hyperlink below",
+        "row properties",
+        "conditional format below",
+        "spill extent",
+        "table below",
+        "reversed hyperlink",
+        "reversed merge",
+        "cell emptied in place",
+    ];
+
+    /// a range stored with its start below its end.
+    fn reversed(start: (RowId, ColId), end: (RowId, ColId)) -> CellRange {
+        CellRange {
+            start: CellRef::new(start.0, start.1),
+            end: CellRef::new(end.0, end.1),
+        }
+    }
+
+    /// a sheet with the features whose bits are set in `mask`, each placed
+    /// below the data, and the used-row count the scan gives.
+    fn featured(mask: u32) -> (Workbook, RowId) {
+        let at = |a1: &str| CellRef::parse_a1(a1).unwrap();
+        let mut sheet = Sheet::new("Data");
+        let mut workbook = Workbook::default();
+        let mut bounds: Vec<(RowId, RowId)> = Vec::new();
+        let has = |bit: u32| mask & (1 << bit) != 0;
+        if has(0) {
+            for a1 in ["A1", "C10", "B4"] {
+                sheet.set_cell(
+                    at(a1),
+                    Cell {
+                        value: CellValue::Number { value: 1.0 },
+                        ..Cell::default()
+                    },
+                );
+            }
+            bounds.push((0, 9));
+        }
+        if has(1) {
+            sheet.set_cell(
+                at("B30"),
+                Cell {
+                    style: Some(1),
+                    ..Cell::default()
+                },
+            );
+            bounds.push((29, 29));
+        }
+        if has(2) {
+            sheet.set_cell(
+                at("D50"),
+                Cell {
+                    value: CellValue::Text { value: "x".into() },
+                    ..Cell::default()
+                },
+            );
+            sheet.set_cell(at("D50"), Cell::default());
+        }
+        if has(3) {
+            sheet.merges.push(CellRange::parse_a1("E40:F60").unwrap());
+            bounds.push((39, 59));
+        }
+        if has(4) {
+            sheet.hyperlinks.push(Hyperlink {
+                range: CellRange::parse_a1("G70").unwrap(),
+                external_target: Some("https://example.com".into()),
+                location: None,
+                tooltip: None,
+                display: None,
+            });
+            bounds.push((69, 69));
+        }
+        if has(5) {
+            sheet.row_heights.insert(79, 30.0);
+            sheet.hidden_row_heights.insert(80, 15.0);
+            sheet.row_styles.insert(81, 1);
+        }
+        if has(6) {
+            sheet.conditional_formats.push(ConditionalFormatting {
+                sqref: "A90:C100".into(),
+                rules: Vec::new(),
+            });
+        }
+        if has(7) {
+            sheet.set_array_formula(at("H1"), CellRange::parse_a1("H1:H120").unwrap());
+        }
+        if has(8) {
+            workbook.tables.push(Table {
+                name: "Table1".into(),
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A130:C140").unwrap(),
+                header_rows: 1,
+                totals_rows: 0,
+                columns: vec!["a".into(), "b".into(), "c".into()],
+                style: Vec::new(),
+            });
+        }
+        if has(9) {
+            sheet.hyperlinks.push(Hyperlink {
+                range: reversed((149, 7), (0, 7)),
+                external_target: None,
+                location: Some("Data!A1".into()),
+                tooltip: None,
+                display: None,
+            });
+            bounds.push((149, 0));
+        }
+        if has(10) {
+            sheet.merges.push(reversed((159, 8), (2, 9)));
+            bounds.push((159, 2));
+        }
+        if has(11) {
+            sheet.set_cell(
+                at("I200"),
+                Cell {
+                    value: CellValue::Number { value: 3.0 },
+                    ..Cell::default()
+                },
+            );
+            *sheet.cell_mut(at("I200")).unwrap() = Cell::default();
+            bounds.push((199, 199));
+        }
+        workbook.sheets.push(sheet);
+        let expected = bounds
+            .into_iter()
+            .reduce(|(top, bottom), (start, end)| (top.min(start), bottom.max(end)))
+            .map_or(0, |(top, bottom)| top.max(bottom) + 1);
+        (workbook, expected)
+    }
+
+    #[test]
+    fn reversed_links_and_merges_count_as_the_scan_counts_them() {
+        let link = |range: CellRange| Hyperlink {
+            range,
+            external_target: None,
+            location: Some("Data!A1".into()),
+            tooltip: None,
+            display: None,
+        };
+        let cell = Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        };
+        let mut links_only = Sheet::new("Data");
+        links_only.hyperlinks.push(link(reversed((99, 0), (0, 0))));
+        let mut merges_only = Sheet::new("Data");
+        merges_only.merges.push(reversed((99, 0), (0, 1)));
+        let mut both = Sheet::new("Data");
+        both.set_cell(CellRef::new(4, 0), cell.clone());
+        both.set_cell(CellRef::new(7, 2), cell);
+        both.hyperlinks.push(link(reversed((99, 3), (0, 3))));
+        both.merges.push(reversed((120, 4), (1, 5)));
+        for (sheet, want) in [(links_only, 100), (merges_only, 100), (both, 8)] {
+            let mut workbook = Workbook::default();
+            workbook.sheets.push(sheet);
+            assert_eq!(scanned_used_rows(&workbook, SheetId(0)), want);
+            assert_eq!(workbook.used_rows(SheetId(0)), want);
+        }
+    }
+
+    #[test]
+    fn a_cell_emptied_through_cell_mut_still_counts_as_the_scan_counts_it() {
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(2, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(
+            CellRef::new(40, 1),
+            Cell {
+                value: CellValue::Text { value: "x".into() },
+                ..Cell::default()
+            },
+        );
+        *sheet.cell_mut(CellRef::new(40, 1)).unwrap() = Cell::default();
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(sheet);
+        assert_eq!(scanned_used_rows(&workbook, SheetId(0)), 41);
+        assert_eq!(workbook.used_rows(SheetId(0)), 41);
+    }
+
+    #[test]
+    fn used_rows_matches_the_used_range_scan_on_generated_sheets() {
+        for mask in 0..1u32 << FEATURES.len() {
+            let (workbook, expected) = featured(mask);
+            let names: Vec<&str> = (0..FEATURES.len())
+                .filter(|bit| mask & (1 << bit) != 0)
+                .map(|bit| FEATURES[bit])
+                .collect();
+            let scanned = scanned_used_rows(&workbook, SheetId(0));
+            assert_eq!(workbook.used_rows(SheetId(0)), scanned, "{names:?}");
+            assert_eq!(scanned, expected, "{names:?}");
+        }
     }
 }

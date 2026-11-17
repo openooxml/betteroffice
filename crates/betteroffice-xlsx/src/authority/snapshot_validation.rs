@@ -438,12 +438,20 @@ impl JsonWindow<'_> {
         for (key, value) in [
             (b",\"bold\":".as_slice(), font.bold),
             (b",\"italic\":".as_slice(), font.italic),
-            (b",\"underline\":".as_slice(), font.underline),
-            (b",\"strike\":".as_slice(), font.strike),
+            (
+                b",\"underline\":".as_slice(),
+                font.underline != xlsx_model::RunUnderline::None,
+            ),
         ] {
             self.raw(key)?;
             self.small(&value)?;
         }
+        if let Some(style) = font.underline_style() {
+            self.raw(b",\"underline_style\":")?;
+            self.small(&style)?;
+        }
+        self.raw(b",\"strike\":")?;
+        self.small(&font.strike)?;
         self.raw(b",\"color\":")?;
         self.optional_color(font.color.as_ref())?;
         self.raw(b"},\"fill\":")?;
@@ -2011,6 +2019,7 @@ impl SnapshotValidation {
                             || left.range != right.range
                             || left.header_rows != right.header_rows
                             || left.totals_rows != right.totals_rows
+                            || left.style != right.style
                             || left.columns.len() != right.columns.len()
                         {
                             return Err(invalid());
@@ -2045,6 +2054,9 @@ impl SnapshotValidation {
                         .formats
                         .get(base_sheet_index(key).unwrap_or(usize::MAX))
                         .unwrap_or(&default);
+                    if left.hide_gridlines != sheet.format.hide_gridlines {
+                        return Err(invalid());
+                    }
                     if !equal_record(
                         left,
                         &sheet.format,

@@ -8,24 +8,29 @@ import { describe, expect, test } from 'bun:test';
 import { canonicalFaceIds, dumpDisplayLists, firstDifferences, type DisplayListDump } from './displayListParity';
 
 const dumps = new Map<string, DisplayListDump>();
+const fixtures = ['demo', 'leaders', 'picture-corrupt', 'picture-drawn', 'picture-missing', 'picture-none', 'typography'];
 
-function dump(engine: 'wasm' | 'native', run: 1 | 2): DisplayListDump {
-  const key = `${engine} ${run}`;
+function dump(engine: 'wasm' | 'native', run: 1 | 2, fonts: 'pinned' | 'default' = 'pinned'): DisplayListDump {
+  const key = `${engine} ${run} ${fonts}`;
   let found = dumps.get(key);
   if (!found) {
-    found = dumpDisplayLists(engine, 'pinned');
+    found = dumpDisplayLists(engine, fonts);
     dumps.set(key, found);
   }
   return found;
 }
 
-test('with the same fonts, PNG export draws the same display list on the native and wasm engines', () => {
-  const wasm = dump('wasm', 1);
-  const native = dump('native', 1);
-  expect(Object.keys(wasm.pages).sort()).toEqual(['demo', 'leaders', 'picture-corrupt', 'picture-drawn', 'picture-missing', 'picture-none', 'typography']);
-  expect(Object.entries(wasm.pages).filter(([, pages]) => pages.length === 0).map(([name]) => name)).toEqual([]);
-  expect(firstDifferences(wasm, native)).toEqual([]);
-}, 240_000);
+for (const [fonts, label] of [['pinned', 'with the same fonts'], ['default', 'with no font provider']] as const) {
+  test(`${label}, PNG export draws the same display list on the native and wasm engines`, () => {
+    const wasm = dump('wasm', 1, fonts);
+    const native = dump('native', 1, fonts);
+    expect(wasm.fonts).toBe(fonts);
+    expect(native.fonts).toBe(fonts);
+    expect(Object.keys(wasm.pages).sort()).toEqual(fixtures);
+    expect(Object.entries(wasm.pages).filter(([, pages]) => pages.length === 0).map(([name]) => name)).toEqual([]);
+    expect(firstDifferences(wasm, native)).toEqual([]);
+  }, 240_000);
+}
 
 for (const engine of ['wasm', 'native'] as const) {
   test(`the ${engine} engine draws the same display list, font chains included, on every run`, () => {

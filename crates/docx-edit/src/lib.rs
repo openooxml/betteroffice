@@ -365,6 +365,12 @@ pub fn segments_digest(segments: &[StorySegment]) -> u128 {
             tail[..rest.len()].copy_from_slice(rest);
             self.add(u64::from_le_bytes(tail) ^ ((bytes.len() as u64) << 56));
         }
+        fn write_usize(&mut self, i: usize) {
+            self.write(&(i as u64).to_le_bytes());
+        }
+        fn write_isize(&mut self, i: isize) {
+            self.write(&(i as i64).to_le_bytes());
+        }
         fn finish(&self) -> u64 {
             self.finish128() as u64
         }
@@ -438,6 +444,84 @@ pub struct SeedParagraph {
     pub text: String,
     pub p_style: String,
     pub alignment: String,
+}
+
+/// A story's segments still to read.
+pub(crate) enum StorySegmentCursor {
+    Diffs(std::vec::IntoIter<PendingSegment>),
+    Segments(std::vec::IntoIter<StorySegment>),
+}
+
+/// One owned diff entry of a [`StorySegmentCursor`].
+pub(crate) struct PendingSegment {
+    insert: PendingInsert,
+    attributes: Option<Box<Attrs>>,
+}
+
+enum PendingInsert {
+    Value(Any),
+    Map(yrs::Hook<MapRef>),
+}
+
+impl PendingSegment {
+    fn new(diff: yrs::types::text::Diff<YChange>) -> Self {
+        let insert = match diff.insert {
+            Out::Any(value) => PendingInsert::Value(value),
+            Out::YMap(map) => PendingInsert::Map(yrs::SharedRef::hook(&map)),
+            _ => PendingInsert::Value(Any::Null),
+        };
+        Self {
+            insert,
+            attributes: diff.attributes,
+        }
+    }
+
+    /// The embedded map this entry holds, if it holds one.
+    pub(crate) fn map_hook(&self) -> Option<&yrs::Hook<MapRef>> {
+        match &self.insert {
+            PendingInsert::Map(hook) => Some(hook),
+            PendingInsert::Value(_) => None,
+        }
+    }
+}
+
+impl StorySegmentCursor {
+    /// The story's next `limit` segments.
+    pub(crate) fn next_chunk<T: ReadTxn>(
+        &mut self,
+        txn: &T,
+        limit: usize,
+    ) -> Option<Vec<StorySegment>> {
+        match self {
+            Self::Diffs(diffs) => diffs
+                .by_ref()
+                .take(limit)
+                .map(|pending| {
+                    ooxml_opc::progress::tick();
+                    let insert = match pending.insert {
+                        PendingInsert::Value(value) => Out::Any(value),
+                        PendingInsert::Map(hook) => Out::YMap(hook.get(txn)?),
+                    };
+                    Some(StorySegment {
+                        content: segment_content(insert, txn),
+                        attributes: ordered_attrs(pending.attributes.as_deref()),
+                    })
+                })
+                .collect(),
+            Self::Segments(segments) => Some(segments.by_ref().take(limit).collect()),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Diffs(diffs) => diffs.len(),
+            Self::Segments(segments) => segments.len(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -543,6 +627,31 @@ struct StoryRevisions {
     geometry: u64,
     sections: u64,
     stamped: HashMap<Arc<str>, u64>,
+    /// The revision that last changed each story by more than inserting plain
+    /// text: deleting, formatting, embedding, a tracked change or its entry.
+    /// Text inserted without revision marks leaves the story's paragraphs,
+    /// their properties and its tracked changes as they were.
+    marked: HashMap<Arc<str>, u64>,
+}
+
+/// Inserts plain text into a story's own text and nothing else: no deletion,
+/// formatting, embed or revision mark.
+fn inserts_plain_text(txn: &yrs::TransactionMut, event: &yrs::types::Event) -> bool {
+    let yrs::types::Event::Text(event) = event else {
+        return false;
+    };
+    event.path().len() == 1
+        && event.delta(txn).iter().all(|delta| match delta {
+            Delta::Retain(_, None) => true,
+            Delta::Inserted(Out::Any(Any::String(_)), attrs) => {
+                attrs.as_ref().is_none_or(|attrs| {
+                    !attrs
+                        .keys()
+                        .any(|key| matches!(key.as_ref(), INS | DEL | format::RPR_CHANGE))
+                })
+            }
+            _ => false,
+        })
 }
 
 impl StoryRevisions {
@@ -602,12 +711,16 @@ impl StoryRevisions {
             match event.path().front() {
                 Some(yrs::types::PathSegment::Key(story)) => {
                     self.stamped.insert(Arc::clone(story), self.current);
+                    if !inserts_plain_text(txn, event) {
+                        self.marked.insert(Arc::clone(story), self.current);
+                    }
                 }
                 Some(yrs::types::PathSegment::Index(_)) => {}
                 None => {
                     if let yrs::types::Event::Map(entries) = event {
                         for story in entries.keys(txn).keys() {
                             self.stamped.insert(Arc::clone(story), self.current);
+                            self.marked.insert(Arc::clone(story), self.current);
                         }
                     }
                 }
@@ -707,10 +820,15 @@ pub struct EditingDoc {
     save_story_states: Arc<Mutex<identity::StoryStateCache>>,
     /// A save seed state prime in progress; see [`EditingDoc::prime_save_seed_states_slice`].
     prime_progress: Mutex<Option<identity::PrimeProgress>>,
+    prime_last_slice_cost: AtomicU64,
+    /// The `max_bytes` the last prime slice left unspent.
+    #[cfg(test)]
+    prime_last_slice_left: AtomicU64,
     #[cfg(test)]
     save_story_cache_disabled: AtomicBool,
     sticky_positions: Mutex<sticky_positions::StickyPositions>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
+    revision_lists: Mutex<read_state::RevisionLists>,
     table_membership: Mutex<Option<TableMembership>>,
     resident_geometry: Mutex<HashMap<String, resident_geometry::ResidentGeometryIndex>>,
     shared_read_depth: AtomicU32,
@@ -818,10 +936,14 @@ impl EditingDoc {
             paragraph_indexes: Mutex::default(),
             save_story_states,
             prime_progress: Mutex::new(None),
+            prime_last_slice_cost: AtomicU64::new(0),
+            #[cfg(test)]
+            prime_last_slice_left: AtomicU64::new(0),
             #[cfg(test)]
             save_story_cache_disabled: AtomicBool::new(false),
             sticky_positions: Mutex::default(),
             chunk_snapshots: Mutex::default(),
+            revision_lists: Mutex::default(),
             table_membership: Mutex::default(),
             resident_geometry: Mutex::default(),
             shared_read_depth: AtomicU32::new(0),
@@ -1226,7 +1348,7 @@ impl EditingDoc {
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
-    #[cfg(all(test, feature = "wasm"))]
+    #[cfg(test)]
     pub(crate) fn forget_seeding(&self) {
         self.save_story_states.lock().unwrap().clear();
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
@@ -1794,6 +1916,31 @@ impl EditingDoc {
         }
     }
 
+    /// The story revision of the last commit that changed `story_id` by more
+    /// than inserting plain text, if any did.
+    pub(crate) fn story_mark(&self, story_id: &str) -> Option<u64> {
+        self.story_revisions
+            .lock()
+            .unwrap()
+            .marked
+            .get(story_id)
+            .copied()
+    }
+
+    /// The stories changed by more than inserting plain text after `since`.
+    pub(crate) fn stories_marked_since(&self, since: u64) -> HashSet<String> {
+        let revisions = self.story_revisions.lock().unwrap();
+        if since >= revisions.current {
+            return HashSet::new();
+        }
+        revisions
+            .marked
+            .iter()
+            .filter(|(_, revision)| **revision > since)
+            .map(|(story, _)| story.to_string())
+            .collect()
+    }
+
     /// The current story revision, and the stories that changed after `since`
     /// (created, edited, or deleted), sorted.
     pub fn stories_changed_since(&self, since: u64) -> (u64, Vec<String>) {
@@ -1861,26 +2008,35 @@ impl EditingDoc {
         txn: &T,
         story_id: &str,
     ) -> EditResult<Vec<StorySegment>> {
+        self.story_segment_cursor_in(txn, story_id)?
+            .next_chunk(txn, usize::MAX)
+            .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))
+    }
+
+    /// [`Self::story_segments_in`], read a chunk at a time from the story's diff.
+    pub(crate) fn story_segment_cursor_in<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story_id: &str,
+    ) -> EditResult<StorySegmentCursor> {
         let story = match story_ref(txn, story_id) {
             Ok(story) => story,
             Err(EditError::CellHasNoStory(_)) => {
                 return empty_cells::EmptyCell::new(story_id)
                     .doc()
-                    .story_segments(story_id);
+                    .story_segments(story_id)
+                    .map(|segments| StorySegmentCursor::Segments(segments.into_iter()));
             }
             Err(error) => return Err(error),
         };
-        Ok(story
-            .diff(txn, YChange::identity)
-            .into_iter()
-            .map(|diff| {
-                ooxml_opc::progress::tick();
-                StorySegment {
-                    content: segment_content(diff.insert, txn),
-                    attributes: ordered_attrs(diff.attributes.as_deref()),
-                }
-            })
-            .collect())
+        Ok(StorySegmentCursor::Diffs(
+            story
+                .diff(txn, YChange::identity)
+                .into_iter()
+                .map(PendingSegment::new)
+                .collect::<Vec<_>>()
+                .into_iter(),
+        ))
     }
 
     pub fn paragraphs(&self, story_id: &str) -> EditResult<Vec<ParagraphSnapshot>> {

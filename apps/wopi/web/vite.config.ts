@@ -40,5 +40,8 @@ export default defineConfig({
       },
     },
   },
-  worker: { format: "es" },
+  worker: {
+    format: "es",
+    rolldownOptions: { output: { codeSplitting: false } },
+  },
 });

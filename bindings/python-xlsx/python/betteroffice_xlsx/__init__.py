@@ -644,7 +644,7 @@ class Workbook:
         return json.loads(self._inner.read_cells_json(json.dumps(request)))
 
     def find_text(self, request: FindRequest) -> FindResult:
-        """Exact, case-sensitive search over display text, one match per cell."""
+        """Literal search over display text, one match per cell; case-insensitive by default."""
         return json.loads(self._inner.find_text_json(json.dumps(request)))
 
     def validate_edits(self, request: EditRequest) -> ValidationResult:

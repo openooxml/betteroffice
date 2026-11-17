@@ -2080,7 +2080,7 @@ function buildMirrorNoteArea(
     appendMirrorPrimitives(note, notePrimitives, doc, -(area.y ?? 0), ctx);
     // note → body reference backlink (W17): targets the doc-noteref anchor
     // the body reference mark registered. Labeled by the host-localized
-    // MirrorLabels.noteBacklink, falling back to the note's own label/number
+    // MirrorLabels.noteBacklink, falling back to the note's own label
     // (data, not hardcoded English). Pointer-inert like the rest of the
     // mirror; navigation UX belongs to the interactive overlay.
     if (meta && noteHasBacklink(area, noteId)) {
@@ -2088,8 +2088,8 @@ function buildMirrorNoteArea(
       backlink.className = MIRROR_CLASS_NAMES.noteBacklink;
       backlink.setAttribute('role', 'doc-backlink');
       backlink.setAttribute('href', `#oox-noteref-${groupId}`);
-      const label = ctx.labels?.noteBacklink ?? meta.label ?? String(noteId);
-      backlink.setAttribute('aria-label', label);
+      const label = ctx.labels?.noteBacklink ?? meta.label;
+      if (label !== undefined) backlink.setAttribute('aria-label', label);
       note.appendChild(backlink);
     }
     el.appendChild(note);

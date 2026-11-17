@@ -102,6 +102,7 @@ describe('buildA11yGrid', () => {
         rect: box,
         clip: box,
         movable: true,
+        resizable: true,
       },
     ];
     const g = buildA11yGrid(dl, null, 'Sheet1', strings);
@@ -122,6 +123,7 @@ describe('buildA11yGrid', () => {
         rect: box,
         clip: box,
         movable: true,
+        resizable: true,
       },
       {
         id: 'xl/charts/chart2.xml',
@@ -129,6 +131,7 @@ describe('buildA11yGrid', () => {
         rect: box,
         clip: box,
         movable: true,
+        resizable: true,
       },
     ];
     const g = buildA11yGrid(dl, null, 'Sheet1', strings);

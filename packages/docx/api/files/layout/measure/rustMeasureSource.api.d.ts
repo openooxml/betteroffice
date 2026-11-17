@@ -64,6 +64,6 @@ export declare function createRustMeasureSource(options: {
     };
     /** Register sliced script-fallback faces from their skeleton and core. */
     progressive?: boolean;
-    /** With the default provider, give families it doesn't carry the last-resort face. */
+    /** With the default provider, give families it doesn't carry the last-resort face. On unless `false`. */
     standIns?: boolean;
 }): RustMeasureSource;

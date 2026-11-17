@@ -45,6 +45,28 @@ fn zero_height_parts() -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
+fn sheet_format_reads_default_column_widths() {
+    for (format, default, base) in [
+        (
+            r#"<sheetFormatPr baseColWidth="10" defaultColWidth="10.66" defaultRowHeight="13"/>"#,
+            Some(10.66),
+            Some(10),
+        ),
+        (r#"<sheetFormatPr baseColWidth="12"/>"#, None, Some(12)),
+        (
+            r#"<sheetFormatPr defaultColWidth="300" baseColWidth="-1"/>"#,
+            None,
+            None,
+        ),
+    ] {
+        let parts = package(&format!("{format}<sheetData/>"), &[], false);
+        let sheet = &parse_workbook(&parts).unwrap().sheets[0];
+        assert_eq!(sheet.format.default_col_width, default, "{format}");
+        assert_eq!(sheet.format.base_col_width, base, "{format}");
+    }
+}
+
+#[test]
 fn zero_height_keeps_content_rows_visible_and_empty_rows_hidden() {
     let workbook = parse_workbook(&zero_height_parts()).unwrap();
     let sheet = &workbook.sheets[0];
@@ -3587,6 +3609,82 @@ fn dxf_fonts_stay_out_of_the_font_pool() {
     assert_eq!(parsed.workbook.styles.fonts.len(), 1);
 }
 
+#[test]
+fn font_underline_kinds_read_and_round_trip() {
+    use xlsx_model::RunUnderline;
+    let source = [
+        ("<u/>", RunUnderline::Single),
+        (r#"<u val="single"/>"#, RunUnderline::Single),
+        (r#"<u val="double"/>"#, RunUnderline::Double),
+        (
+            r#"<u val="singleAccounting"/>"#,
+            RunUnderline::SingleAccounting,
+        ),
+        (
+            r#"<u val="doubleAccounting"/>"#,
+            RunUnderline::DoubleAccounting,
+        ),
+        (r#"<u val="none"/>"#, RunUnderline::None),
+        (r#"<u val="none"></u>"#, RunUnderline::None),
+        ("", RunUnderline::None),
+    ];
+    let fonts: String = source
+        .iter()
+        .map(|(u, _)| format!(r#"<font>{u}<sz val="11"/></font>"#))
+        .collect();
+    let styles = format!(r#"<fonts count="{}">{fonts}</fonts>"#, source.len());
+    let parts = package_styled("<sheetData/>", Some(&styles), None);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let read: Vec<_> = parsed
+        .workbook
+        .styles
+        .fonts
+        .iter()
+        .map(|f| f.underline)
+        .collect();
+    assert_eq!(read, source.map(|(_, kind)| kind));
+    let unchanged = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    assert_eq!(
+        part_bytes(&unchanged, "xl/styles.xml"),
+        part_bytes(&parts, "xl/styles.xml")
+    );
+
+    let kinds = [
+        RunUnderline::Single,
+        RunUnderline::Double,
+        RunUnderline::SingleAccounting,
+        RunUnderline::DoubleAccounting,
+    ];
+    let mut workbook = parsed.workbook.clone();
+    for (col, underline) in kinds.into_iter().enumerate() {
+        let mut format = workbook.styles.cell_format(None);
+        format.font.bold = true;
+        format.font.underline = underline;
+        let style = workbook.styles.intern_cell_format(&format).unwrap();
+        workbook.sheets[0].set_cell(
+            CellRef::new(0, col as u32),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                style,
+                ..Cell::default()
+            },
+        );
+    }
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let xml = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+    assert!(xml.contains(r#"<font><b/><u val="double"/>"#), "{xml}");
+    let reopened = parse_workbook(&saved).unwrap();
+    for (col, underline) in kinds.into_iter().enumerate() {
+        let cell = reopened.sheets[0]
+            .cell(CellRef::new(0, col as u32))
+            .unwrap();
+        assert_eq!(
+            reopened.styles.cell_format(cell.style).font.underline,
+            underline
+        );
+    }
+}
+
 fn style_branch(content: &str, branch: &str) -> String {
     format!(
         r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:{branch}>{content}</mc:{branch}></mc:AlternateContent>"#
@@ -5890,6 +5988,106 @@ fn reads_the_chart_anchor_and_every_reference() {
     );
 }
 
+#[test]
+fn chart_colours_apply_their_drawingml_transforms() {
+    let fill = |color: &str| format!("<c:spPr><a:solidFill>{color}</a:solidFill></c:spPr>");
+    let series = |color: &str| {
+        format!(
+            r#"<c:ser>{}<c:val><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:val></c:ser>"#,
+            fill(color)
+        )
+    };
+    let part = format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart>{}{}{}{}{}"#,
+            r#"<c:axId val="1"/><c:axId val="2"/></c:barChart>"#,
+            r#"<c:catAx><c:axId val="1"/><c:txPr><a:bodyPr/><a:p><a:pPr><a:defRPr><a:solidFill>"#,
+            r#"<a:schemeClr val="tx1"><a:lumMod val="65000"/><a:lumOff val="35000"/></a:schemeClr>"#,
+            r#"</a:solidFill></a:defRPr></a:pPr></a:p></c:txPr><c:crossAx val="2"/></c:catAx>"#,
+            r#"<c:valAx><c:axId val="2"/><c:majorGridlines><c:spPr><a:ln w="9525"><a:solidFill>"#,
+            r#"<a:schemeClr val="tx1"><a:lumMod val="15000"/><a:lumOff val="85000"/></a:schemeClr>"#,
+            r#"</a:solidFill></a:ln></c:spPr></c:majorGridlines><c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart><c:spPr><a:solidFill><a:sysClr val="window" lastClr="FFFFFF">"#,
+            r#"<a:lumMod val="50000"/></a:sysClr></a:solidFill></c:spPr></c:chartSpace>"#,
+        ),
+        series(r#"<a:schemeClr val="accent1"><a:lumMod val="75000"/></a:schemeClr>"#),
+        series(r#"<a:schemeClr val="accent2"><a:shade val="50000"/></a:schemeClr>"#),
+        series(r#"<a:srgbClr val="4472C4"><a:tint val="40000"/></a:srgbClr>"#),
+        series(r#"<a:prstClr val="red"><a:alpha val="50000"/></a:prstClr>"#),
+        series(r#"<a:schemeClr val="accent1"/>"#),
+    );
+    let space = crate::chart_space(part.as_bytes(), &Default::default()).expect("chart");
+    let shared = |base: &str, transform| {
+        ooxml_drawingml::resolve_color_value_to_hex(Some(&ooxml_drawingml::ColorValue {
+            rgb: Some(base.to_owned()),
+            transforms: vec![transform],
+            ..Default::default()
+        }))
+        .unwrap()
+    };
+    let colors = space.plot_groups[0]
+        .series
+        .iter()
+        .map(|series| series.color.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        colors,
+        [
+            "#2F5597",
+            &shared("ED7D31", ooxml_drawingml::ColorTransform::Shade(0.5)),
+            &shared("4472C4", ooxml_drawingml::ColorTransform::Tint(0.4)),
+            "#FF000080",
+            "#4472C4",
+        ]
+    );
+    let axes = space.axis_list.as_ref().expect("axes");
+    assert_eq!(
+        axes[0].text.as_ref().and_then(|text| text.color.as_deref()),
+        Some("#595959")
+    );
+    assert_eq!(
+        axes[1]
+            .major_gridline_line
+            .as_ref()
+            .and_then(|line| line.color.as_deref()),
+        Some("#D9D9D9")
+    );
+    assert_eq!(
+        space.fill,
+        Some(ooxml_drawingml::chart::ChartFill::Solid {
+            color: "#808080".to_owned()
+        })
+    );
+}
+
+#[test]
+fn negative_luminance_offsets_darken_chart_colours() {
+    let series = |color: &str| {
+        format!(
+            r#"<c:ser><c:spPr><a:solidFill>{color}</a:solidFill></c:spPr><c:val><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:val></c:ser>"#
+        )
+    };
+    let part = format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart>{}{}"#,
+            r#"<c:axId val="1"/><c:axId val="2"/></c:barChart>"#,
+            r#"<c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart></c:chartSpace>"#,
+        ),
+        series(r#"<a:srgbClr val="FF0000"><a:lumOff val="-25000"/></a:srgbClr>"#),
+        series(
+            r#"<a:srgbClr val="4472C4"><a:lumMod val="75000"/><a:lumOff val="-25000"/></a:srgbClr>"#
+        ),
+    );
+    let space = crate::chart_space(part.as_bytes(), &Default::default()).expect("chart");
+    let colors = space.plot_groups[0]
+        .series
+        .iter()
+        .map(|series| series.color.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(colors, ["#800000", "#111E36"]);
+}
+
 /// Saving a charted workbook whose references moved patches the chart part in
 /// place: the reference and the cache beside it move together, and every byte
 /// neither owns is left alone.
@@ -6211,6 +6409,261 @@ fn follows_a_drawing_named_by_two_relationships_once() {
         .charts;
     assert_eq!(charts.len(), 1);
     assert_eq!(charts[0].anchor_index, 0);
+}
+
+fn sheet_rels_naming_the_drawing(targets: &[String]) -> Vec<u8> {
+    let mut rels = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for (index, target) in targets.iter().enumerate() {
+        rels.push_str(&format!(
+            r#"<Relationship Id="rIdDrawing{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="{target}"/>"#
+        ));
+    }
+    rels.push_str("</Relationships>");
+    rels.into_bytes()
+}
+
+/// A package part name has no leading slash, so a target spelled with any
+/// number of them names the same drawing and is followed once.
+#[test]
+fn follows_a_drawing_named_with_extra_leading_slashes_once() {
+    let mut source = charted_package();
+    let drawing = String::from_utf8(DRAWING.to_vec()).unwrap().replace(
+        "</xdr:wsDr>",
+        r#"<xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp/><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#,
+    );
+    set_part(&mut source, "xl/drawings/drawing1.xml", drawing.as_bytes());
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&[
+            "../drawings/drawing1.xml".to_owned(),
+            "//xl/drawings/drawing1.xml".to_owned(),
+            "///xl/drawings/drawing1.xml".to_owned(),
+        ]),
+    );
+    let sheet = "xl/worksheets/sheet1.xml";
+    let drawings = crate::chart::sheet_drawings(&source, sheet).unwrap().len();
+    let anchors = crate::drawing_anchors::sheet_drawing_anchors(&source, sheet).len();
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let charts = parsed.workbook.sheets[0].charts.len();
+    let mut objects = 0;
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |_| {
+            objects += 1;
+            std::ops::ControlFlow::Continue(())
+        });
+    assert!(finished.is_continue());
+    assert_eq!(
+        (drawings, anchors, charts, objects),
+        (1, 1, 1, 2),
+        "drawing parts read, drawings with movable anchors, charts, inventoried objects"
+    );
+}
+
+/// One chart named through more spellings than the per-sheet chart cap is
+/// still one chart, so the workbook opens.
+#[test]
+fn opens_a_chart_whose_drawing_is_named_past_the_chart_cap() {
+    let mut source = charted_package();
+    let targets = (1..=crate::MAX_CHART_ANCHORS + 1)
+        .map(|slashes| format!("{}xl/drawings/drawing1.xml", "/".repeat(slashes)))
+        .collect::<Vec<_>>();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&targets),
+    );
+    assert_eq!(
+        parse_workbook_with_package(&source).map(|parsed| parsed.workbook.sheets[0].charts.len()),
+        Ok(1)
+    );
+}
+
+/// Opening a package parses a drawing and its relationships as often when
+/// several relationships name it as when one does.
+#[test]
+fn parses_a_drawing_named_by_several_relationships_as_often_as_one() {
+    let decodes = |source: &[(String, Vec<u8>)]| {
+        let bytes = |path: &str| {
+            source
+                .iter()
+                .find(|(name, _)| name == path)
+                .unwrap()
+                .1
+                .clone()
+        };
+        let drawing = bytes("xl/drawings/drawing1.xml");
+        let drawing_rels = bytes("xl/drawings/_rels/drawing1.xml.rels");
+        crate::tree::watch_decodes(&[&drawing, &drawing_rels]);
+        parse_workbook_with_package(source).unwrap();
+        crate::tree::watched_decodes()
+    };
+    let named_once = decodes(&charted_package());
+    let mut source = charted_package();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(
+            &[
+                "../drawings/drawing1.xml",
+                "../drawings/drawing1.xml",
+                "/xl/drawings/drawing1.xml",
+                "//xl/drawings/drawing1.xml",
+            ]
+            .map(str::to_owned),
+        ),
+    );
+    assert_eq!(
+        decodes(&source),
+        named_once,
+        "parses of the drawing, parses of its relationships"
+    );
+}
+
+/// Telling a new drawing name from one already seen costs one lookup per
+/// relationship, however many distinct drawings a sheet names.
+#[test]
+fn looks_up_each_drawing_name_once() {
+    let mut source = charted_package();
+    let targets = (0..2_000)
+        .map(|index| format!("../drawings/missing{index}.xml"))
+        .collect::<Vec<_>>();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming_the_drawing(&targets),
+    );
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    crate::xml::take_name_probes();
+    crate::chart::sheet_drawings(&source, "xl/worksheets/sheet1.xml").unwrap();
+    let chart_walk = crate::xml::take_name_probes();
+    let finished = parsed
+        .package
+        .visit_source_sheet_objects(0, &mut ample(), |_| std::ops::ControlFlow::Continue(()));
+    assert!(finished.is_continue());
+    let inventory = crate::xml::take_name_probes();
+    assert_eq!(
+        (chart_walk, inventory),
+        (2_000, 2_000),
+        "names looked up by the chart walk, by the inventory"
+    );
+}
+
+const REL_TABLE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/table";
+const REL_COMMENTS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+const SALES_TABLE: &str = r#"<table id="1" name="Sales" displayName="Sales" ref="B2:D12"><tableColumns count="3"><tableColumn id="1" name="Region"/><tableColumn id="2" name="Cost"/><tableColumn id="3" name="Units"/></tableColumns></table>"#;
+
+fn sheet_rels_naming(kind: &str, targets: &[&str]) -> Vec<u8> {
+    let mut rels = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for (index, target) in targets.iter().enumerate() {
+        rels.push_str(&format!(
+            r#"<Relationship Id="rIdNamed{index}" Type="{kind}" Target="{target}"/>"#
+        ));
+    }
+    rels.push_str("</Relationships>");
+    rels.into_bytes()
+}
+
+/// A table part a sheet relates several ways is one table, read once.
+#[test]
+fn reads_a_table_related_several_ways_once() {
+    let mut source = package_with_table(SALES_TABLE);
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(
+            REL_TABLE,
+            &[
+                "../tables/table1.xml",
+                "../tables/table1.xml",
+                "//xl/tables/table1.xml",
+            ],
+        ),
+    );
+    crate::read::take_table_parses();
+    let tables = parse_workbook(&source).unwrap().tables.len();
+    assert_eq!(
+        (tables, crate::read::take_table_parses()),
+        (1, 1),
+        "tables, table parses"
+    );
+}
+
+/// One table related more times than the table cap still opens as one table.
+#[test]
+fn opens_a_table_related_past_the_table_cap() {
+    let mut source = package_with_table(SALES_TABLE);
+    let targets = vec!["../tables/table1.xml"; crate::MAX_TABLES + 1];
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(REL_TABLE, &targets),
+    );
+    assert_eq!(
+        parse_workbook(&source).map(|workbook| workbook.tables.len()),
+        Ok(1)
+    );
+}
+
+/// A comments part a sheet relates several ways is counted once, and a
+/// missing one is reported once.
+#[test]
+fn counts_comments_related_several_ways_once() {
+    let inventory = |targets: &[&str]| {
+        let mut source = sources_package();
+        set_part(
+            &mut source,
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            &sheet_rels_naming(REL_COMMENTS, targets),
+        );
+        parse_workbook_with_package(&source)
+            .unwrap()
+            .package
+            .source_sheet_inventory(0, &mut ample())
+    };
+    let found = inventory(&["../comments1.xml", "../comments1.xml", "//xl/comments1.xml"]);
+    assert_eq!(
+        (found.comments, found.unreadable_parts.len()),
+        (2, 0),
+        "comments counted, unreadable parts"
+    );
+    let missing = inventory(&["../missing.xml", "/xl/missing.xml", "//xl/missing.xml"]);
+    assert_eq!(missing.unreadable_parts, ["xl/missing.xml"]);
+}
+
+/// The cell-move guard reads a table part a sheet relates several ways once.
+#[test]
+fn move_guard_reads_a_table_related_several_ways_once() {
+    let mut source = package_with_table(SALES_TABLE);
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(
+            REL_TABLE,
+            &[
+                "../tables/table1.xml",
+                "../tables/table1.xml",
+                "//xl/tables/table1.xml",
+            ],
+        ),
+    );
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    crate::package::take_move_guard_reads();
+    let blocked = parsed
+        .package
+        .range_move_unsupported_part(|_, _| false, |_, _| false, |_, _| false)
+        .map(str::to_owned);
+    assert_eq!(
+        (blocked, crate::package::take_move_guard_reads()),
+        (None, 1),
+        "blocking part, parts read by the guard"
+    );
 }
 
 /// One drawing anchor cannot hold two frames, so a model carrying one source
@@ -7730,6 +8183,168 @@ fn three_d_charts_read_as_their_flat_families() {
         .expect("3-D chart");
         assert_eq!(deep, flat, "{deep_plot}");
     }
+}
+
+/// Every text a one-series chart over 3750 and 33750, cached as `"$"#,##0`,
+/// draws.
+fn chart_texts(plot: &str, labels: &str, value_axis: &str) -> Vec<String> {
+    let part = format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:{plot}><c:ser><c:idx val="0"/><c:order val="0"/>{labels}"#,
+            r#"<c:cat><c:strRef><c:f>S!$A$1:$A$2</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>North</c:v></c:pt><c:pt idx="1"><c:v>South</c:v></c:pt></c:strCache></c:strRef></c:cat>"#,
+            r##"<c:val><c:numRef><c:f>S!$B$1:$B$2</c:f><c:numCache><c:formatCode>"$"#,##0</c:formatCode><c:ptCount val="2"/>"##,
+            r#"<c:pt idx="0"><c:v>3750</c:v></c:pt><c:pt idx="1"><c:v>33750</c:v></c:pt></c:numCache></c:numRef></c:val>"#,
+            r#"</c:ser><c:axId val="1"/><c:axId val="2"/></c:{plot}>"#,
+            r#"<c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/>{value_axis}<c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart></c:chartSpace>"#,
+        ),
+        plot = plot,
+        labels = labels,
+        value_axis = value_axis,
+    );
+    part_texts(&part)
+}
+
+/// Every text a bar chart over 0.123 and 0.8 draws, its cache carrying
+/// `cache_format` (a `c:formatCode`, or nothing).
+fn fraction_texts(labels: &str, cache_format: &str) -> Vec<String> {
+    part_texts(&format!(
+        concat!(
+            r#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:order val="0"/>{labels}"#,
+            r#"<c:cat><c:strRef><c:f>S!$A$1:$A$2</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>North</c:v></c:pt><c:pt idx="1"><c:v>South</c:v></c:pt></c:strCache></c:strRef></c:cat>"#,
+            r#"<c:val><c:numRef><c:f>S!$B$1:$B$2</c:f><c:numCache>{cache_format}<c:ptCount val="2"/>"#,
+            r#"<c:pt idx="0"><c:v>0.123</c:v></c:pt><c:pt idx="1"><c:v>0.8</c:v></c:pt></c:numCache></c:numRef></c:val>"#,
+            r#"</c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart>"#,
+            r#"<c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx>"#,
+            r#"</c:plotArea></c:chart></c:chartSpace>"#,
+        ),
+        labels = labels,
+        cache_format = cache_format,
+    ))
+}
+
+/// Every text a chart part draws, through the xlsx chart parser.
+fn part_texts(part: &str) -> Vec<String> {
+    let space = crate::chart_space(part.as_bytes(), &Default::default()).expect("chart");
+    let rect = ooxml_drawingml::chart::PlotRect {
+        x: 0.0,
+        y: 0.0,
+        w: 400.0,
+        h: 300.0,
+    };
+    ooxml_drawingml::chart::plot_chart(&ooxml_drawingml::chart::PlotChart::from(&space), rect)
+        .into_iter()
+        .filter_map(|op| match op {
+            ooxml_drawingml::chart::PlotOp::Text { text, .. } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn source_linked_labels_and_value_axes_read_the_cached_cell_format() {
+    let linked = r#"<c:numFmt formatCode="General" sourceLinked="1"/>"#;
+    let texts = chart_texts(
+        "barChart",
+        &format!(r#"<c:dLbls>{linked}<c:showVal val="1"/></c:dLbls>"#),
+        linked,
+    );
+    assert!(texts.contains(&"$3,750".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"$33,750".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"$40,000".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn an_unlinked_label_number_format_wins_over_the_cached_cell_format() {
+    let texts = chart_texts(
+        "barChart",
+        r#"<c:dLbls><c:numFmt formatCode="0.0" sourceLinked="0"/><c:showVal val="1"/></c:dLbls>"#,
+        r#"<c:numFmt formatCode="General" sourceLinked="1"/>"#,
+    );
+    assert!(texts.contains(&"3750.0".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"33750.0".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"$40,000".to_owned()), "{texts:?}");
+    assert!(!texts.contains(&"$3,750".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn a_linked_label_without_a_cached_format_keeps_its_own_code() {
+    let texts = fraction_texts(
+        r#"<c:dLbls><c:numFmt formatCode="0.00%" sourceLinked="1"/><c:showVal val="1"/></c:dLbls>"#,
+        "",
+    );
+    assert!(texts.contains(&"12.30%".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"80.00%".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn a_linked_point_label_reads_the_cache_not_its_unlinked_parent() {
+    let texts = fraction_texts(
+        concat!(
+            r#"<c:dLbls><c:dLbl><c:idx val="0"/><c:numFmt formatCode="General" sourceLinked="1"/><c:showVal val="1"/></c:dLbl>"#,
+            r#"<c:numFmt formatCode="[$$-409]#,##0" sourceLinked="0"/><c:showVal val="1"/></c:dLbls>"#,
+        ),
+        "<c:formatCode>0%</c:formatCode>",
+    );
+    assert!(texts.contains(&"12%".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"$1".to_owned()), "{texts:?}");
+    assert!(!texts.contains(&"$0".to_owned()), "{texts:?}");
+}
+
+#[test]
+fn a_scatter_y_axis_linked_to_its_cells_reads_the_y_cache_format() {
+    let texts = part_texts(concat!(
+        r#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:scatterChart><c:scatterStyle val="lineMarker"/><c:ser><c:idx val="0"/><c:order val="0"/>"#,
+        r#"<c:xVal><c:numRef><c:f>S!$A$1:$A$2</c:f><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:xVal>"#,
+        r#"<c:yVal><c:numRef><c:f>S!$B$1:$B$2</c:f><c:numCache><c:formatCode>[$$-409]#,##0</c:formatCode><c:ptCount val="2"/>"#,
+        r#"<c:pt idx="0"><c:v>3750</c:v></c:pt><c:pt idx="1"><c:v>33750</c:v></c:pt></c:numCache></c:numRef></c:yVal>"#,
+        r#"</c:ser><c:axId val="1"/><c:axId val="2"/></c:scatterChart>"#,
+        r#"<c:valAx><c:axId val="1"/><c:axPos val="b"/><c:numFmt formatCode="0.0" sourceLinked="1"/><c:crossAx val="2"/></c:valAx>"#,
+        r#"<c:valAx><c:axId val="2"/><c:axPos val="l"/><c:numFmt formatCode="0.0" sourceLinked="1"/><c:crossAx val="1"/></c:valAx>"#,
+        r#"</c:plotArea></c:chart></c:chartSpace>"#,
+    ));
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.starts_with('$') && text.contains(',')),
+        "{texts:?}"
+    );
+    // The x axis plots `c:xVal`, which caches no format, so it keeps its own.
+    assert!(
+        texts.iter().any(|text| text == "1.0" || text == "2.0"),
+        "{texts:?}"
+    );
+}
+
+#[test]
+fn a_pie_share_reads_an_unlinked_label_code_but_not_the_cached_one() {
+    let share = |source_linked: &str| {
+        chart_texts(
+            "pieChart",
+            &format!(
+                r##"<c:dLbls><c:numFmt formatCode="#,##0" sourceLinked="{source_linked}"/><c:showVal val="0"/><c:showPercent val="1"/></c:dLbls>"##
+            ),
+            "",
+        )
+    };
+    let unlinked = share("0");
+    assert!(unlinked.contains(&"0".to_owned()), "{unlinked:?}");
+    assert!(unlinked.contains(&"1".to_owned()), "{unlinked:?}");
+    let linked = share("1");
+    assert!(linked.contains(&"10%".to_owned()), "{linked:?}");
+    assert!(linked.contains(&"90%".to_owned()), "{linked:?}");
+    assert!(!linked.contains(&"$0".to_owned()), "{linked:?}");
+}
+
+#[test]
+fn a_pie_percent_label_reads_its_own_number_format() {
+    let texts = chart_texts(
+        "pieChart",
+        r#"<c:dLbls><c:numFmt formatCode="0.0%" sourceLinked="0"/><c:showVal val="0"/><c:showPercent val="1"/></c:dLbls>"#,
+        "",
+    );
+    assert!(texts.contains(&"10.0%".to_owned()), "{texts:?}");
+    assert!(texts.contains(&"90.0%".to_owned()), "{texts:?}");
 }
 
 /// A reference carrying markup-significant characters must come back escaped,
