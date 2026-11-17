@@ -777,7 +777,7 @@ fn compile(source: &str, anchor: CellRef) -> Formula {
             i64::from(probe.row) - i64::from(anchor.row),
             i64::from(probe.col) - i64::from(anchor.col),
         );
-        shifts = shift(base, down, right) == *moved;
+        shifts = !relative_whole(base) && shift(base, down, right) == *moved;
     }
     if !shifts {
         counts.clear();
@@ -842,6 +842,17 @@ fn counts_each_cell(base: &Expr, shifted: &Expr) -> bool {
         && is_reference(&args[0])
         && matches!(args[1], Expr::Ref { .. })
         && args[1] != moved[1]
+}
+
+/// Whether `expr` holds a whole-row or whole-column reference with a relative
+/// end, which `shift` and `translate_formula` move apart near the sheet's edge.
+fn relative_whole(expr: &Expr) -> bool {
+    match expr {
+        Expr::ColumnRange { range, .. } => !range.abs_start || !range.abs_end,
+        Expr::RowRange { range, .. } => !range.abs_start || !range.abs_end,
+        Expr::RangeJoin { start, end } => relative_whole(start) || relative_whole(end),
+        other => children(other).into_iter().any(relative_whole),
+    }
 }
 
 fn is_reference(arg: &Expr) -> bool {
