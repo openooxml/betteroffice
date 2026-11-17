@@ -104,8 +104,18 @@ export interface SliceSource {
 const opened = new WeakMap<ProgressiveFontFace, [SliceRef, SliceIndex, SliceTransport]>();
 const sources = new WeakMap<ProgressiveFontFace, Promise<SliceSource>>();
 
+function parses(href: string, base?: string): URL | undefined {
+  try {
+    return new URL(href, base);
+  } catch {
+    return undefined;
+  }
+}
+
 function absoluteHref(url: URL): string {
-  return new URL(url.href, globalThis.location?.href).href;
+  const { href } = url;
+  if (parses(href)) return href;
+  return parses(href, globalThis.location?.href)?.href ?? href;
 }
 
 /** @internal The files of a face `openProgressiveFace` opened with a transport that names URLs. */
