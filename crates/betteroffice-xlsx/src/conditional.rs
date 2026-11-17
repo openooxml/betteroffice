@@ -630,7 +630,13 @@ fn operator(name: &str) -> Option<Op> {
 /// `source` parsed at `anchor`, with what shifting it by a row and a column
 /// leaves unchanged: the whole text, or calls over absolute references.
 fn compile(source: &str, anchor: CellRef) -> Formula {
-    let step = |index: u32, max: u32| if index + 1 < max { index + 1 } else { index - 1 };
+    let step = |index: u32, max: u32| {
+        if index + 1 < max {
+            index + 1
+        } else {
+            index - 1
+        }
+    };
     let probe = CellRef::new(step(anchor.row, MAX_ROWS), step(anchor.col, MAX_COLS));
     let at_anchor = xlsx_parse::translate_formula(source, anchor, anchor).ok();
     let shifted = xlsx_parse::translate_formula(source, anchor, probe).ok();
@@ -684,7 +690,10 @@ fn aggregates_absolute(expr: &Expr) -> bool {
     let reference = |arg: &Expr| {
         matches!(
             arg,
-            Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. }
+            Expr::Ref { .. }
+                | Expr::Range { .. }
+                | Expr::ColumnRange { .. }
+                | Expr::RowRange { .. }
         )
     };
     AGGREGATES.contains(&name)

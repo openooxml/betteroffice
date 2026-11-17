@@ -24,7 +24,7 @@ use std::ops::{Range, RangeInclusive};
 use serde::{Deserialize, Serialize};
 
 use xlsx_model::numfmt::{builtin_format_code, format_value};
-use xlsx_model::styles::{BorderEdge, BorderStyle, DifferentialFormat, FormatCode, Stylesheet};
+use xlsx_model::styles::{BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{

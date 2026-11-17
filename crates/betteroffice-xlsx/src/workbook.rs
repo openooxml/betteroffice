@@ -3705,7 +3705,10 @@ impl Workbook {
             None,
             &self.sheet_pictures(sheet),
             |chart| self.resolve_chart_space(&owner, chart),
-            |rows, cols| self.conditional_effects(sheet, rows, cols, Budget::Complete).0,
+            |rows, cols| {
+                self.conditional_effects(sheet, rows, cols, Budget::Complete)
+                    .0
+            },
         )?;
         let display_list = if options.scale == 1.0 {
             display_list
