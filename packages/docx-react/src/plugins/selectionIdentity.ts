@@ -48,3 +48,5 @@ export function subscribeSelectionActivity(owner: object, listener: () => void):
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 }
+
+export const pluginSelectionKeys = new WeakMap<object, string>();
