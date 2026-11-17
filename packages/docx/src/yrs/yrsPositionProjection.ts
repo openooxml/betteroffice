@@ -326,13 +326,6 @@ export class YrsPositionProjection {
     );
   }
 
-  /** Inline story units of paragraph `paraId` of `story` before display units `display` of its content; inside a control, its nearer edge. */
-  inlineStoryOffset(story: string, paraId: string, display: number): number | null {
-    const projected = this.stories.get(story);
-    const paragraph = projected ? this.paragraphIndex(projected).get(paraId) : undefined;
-    return paragraph ? controlStoryOffset(display, paragraph.controls) : null;
-  }
-
   /** The location of a block embed's start or end at `position`, in the offsets of the paragraph after it. */
   blockBoundaryAt(position: number): YrsLoc | null {
     return this.blockBoundaries.get(position) ?? null;
