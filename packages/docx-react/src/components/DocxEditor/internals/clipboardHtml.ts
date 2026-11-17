@@ -472,8 +472,41 @@ function normalizeTextPart(part: string): string {
   return part.replace(/[ \n\r\f\v\u00a0\u2028\u2029]+/g, ' ');
 }
 
+function normalizeParagraphText(raw: string): string {
+  const withSpaces = raw.split(NBSP).join(' ');
+  const parts = withSpaces.split('\t').map(normalizeTextPart);
+  const joined = parts.join('\t');
+  const trimmed = joined.replace(/^ +| +$/g, '');
+  if (trimmed === '') return '';
+  return trimmed;
+}
+
 function textNodeText(node: Text): string {
   return node.data.split(NBSP).join(' ');
+}
+
+function blockLines(block: Element): string[] {
+  const lines: string[] = [];
+  let current = '';
+  const visit = (node: Node) => {
+    if (node.nodeType === 8) return;
+    if (node.nodeType === 3) {
+      current += textNodeText(node as Text);
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const element = node as Element;
+    if (element.tagName.toUpperCase() === 'BR') {
+      lines.push(current);
+      current = '';
+      return;
+    }
+    if (element.tagName.toUpperCase() === 'TABLE') return;
+    for (const child of Array.from(element.childNodes)) visit(child);
+  };
+  for (const child of Array.from(block.childNodes)) visit(child);
+  lines.push(current);
+  return lines.map(normalizeParagraphText);
 }
 
 function containsTable(element: Element): boolean {
@@ -816,6 +849,105 @@ function blockExtra(element: Element): { pStyle?: string; list?: 'bullet' | 'num
   return {};
 }
 
+function parseRejectedPayloadFallback(body: HTMLElement): DocxClipboardFragment | null {
+  const paragraphs: DocxClipboardParagraph[] = [];
+  let activeTablePara: DocxClipboardParagraph | null = null;
+  const pushTextLines = (lines: string[]) => {
+    for (const line of lines) {
+      if (activeTablePara && activeTablePara.text === '') {
+        activeTablePara.text = line;
+        activeTablePara = null;
+      } else {
+        paragraphs.push({ text: line });
+      }
+    }
+  };
+  const pushTable = (table: DocxTableFragment) => {
+    if (activeTablePara) {
+      activeTablePara.tables!.push(table);
+    } else {
+      const paragraph: DocxClipboardParagraph = { tables: [table], text: '' };
+      paragraphs.push(paragraph);
+      activeTablePara = paragraph;
+    }
+  };
+  const collectInlineRaw = (node: Node, out: string[]) => {
+    if (node.nodeType === 8) return;
+    if (node.nodeType === 3) {
+      out.push(textNodeText(node as Text));
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const element = node as Element;
+    const tag = element.tagName.toUpperCase();
+    if (tag === 'BR') {
+      out.push(LINE_SEP);
+      return;
+    }
+    if (tag === 'TABLE' || SKIP_TAGS.has(tag)) return;
+    for (const child of Array.from(element.childNodes)) collectInlineRaw(child, out);
+  };
+  const walkTop = (nodes: Node[]) => {
+    let pendingInline: string[] = [];
+    const flushPendingInline = () => {
+      if (pendingInline.length === 0) return;
+      const raw = pendingInline.join('');
+      pendingInline = [];
+      const lines = raw.split(LINE_SEP).map(normalizeParagraphText).filter((line) => line !== '');
+      pushTextLines(lines);
+    };
+    for (const node of nodes) {
+      if (node.nodeType === 8) continue;
+      if (node.nodeType === 3) {
+        const raw = textNodeText(node as Text);
+        if (raw.trim() === '' && !raw.includes('\t')) continue;
+        pendingInline.push(raw);
+        continue;
+      }
+      if (node.nodeType !== 1) continue;
+      const element = node as Element;
+      const tag = element.tagName.toUpperCase();
+      if (SKIP_TAGS.has(tag)) continue;
+      if (tag === 'BR') {
+        pendingInline.push(LINE_SEP);
+        continue;
+      }
+      if (tag === 'TABLE') {
+        flushPendingInline();
+        pushTable(parseTableElement(element as HTMLTableElement));
+        continue;
+      }
+      if (BLOCK_TAGS.has(tag)) {
+        if (containsTable(element)) {
+          flushPendingInline();
+          walkTop(Array.from(element.childNodes));
+          continue;
+        }
+        flushPendingInline();
+        const lines = blockLines(element);
+        pushTextLines(lines.filter((line) => line !== ''));
+        continue;
+      }
+      if (containsTable(element)) {
+        flushPendingInline();
+        walkTop(Array.from(element.childNodes));
+        continue;
+      }
+      const parts: string[] = [];
+      collectInlineRaw(element, parts);
+      const raw = parts.join('');
+      if (raw.trim() === '' && !raw.includes('\t') && !raw.includes(LINE_SEP)) continue;
+      pendingInline.push(raw);
+    }
+    flushPendingInline();
+  };
+  walkTop(Array.from(body.childNodes));
+  const cleaned = paragraphs.filter((paragraph) => (paragraph.tables ?? []).length > 0 || paragraph.text !== '');
+  if (!cleaned.some((paragraph) => (paragraph.tables ?? []).length > 0)) return null;
+  const fragment: DocxClipboardFragment = { paragraphs: cleaned };
+  return validClipboardFragment(fragment) ? fragment : null;
+}
+
 /** Parsed table fragment from HTML, or null when the HTML holds no table. */
 export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
   if (html.length > MAX_HTML_LENGTH) return null;
@@ -849,9 +981,9 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
       }
     }
   }
-  const rejectedPayload = payloadElement !== null;
   const body = document_.body;
   if (!body) return null;
+  if (payloadElement) return parseRejectedPayloadFallback(body);
   const paragraphs: DocxClipboardParagraph[] = [];
   let activeTablePara: DocxClipboardParagraph | null = null;
   const pushParagraphs = (parsed: DocxClipboardParagraph[]) => {
@@ -957,12 +1089,10 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
   while (end > first && blank(paragraphs[end - 1]!)) end -= 1;
   const cleaned = paragraphs.slice(first, end);
   const hasRichContent = cleaned.some((paragraph) =>
-    (paragraph.tables ?? []).length > 0 || (!rejectedPayload && (paragraph.runs !== undefined ||
-    paragraph.pStyle !== undefined || paragraph.list !== undefined)));
+    (paragraph.tables ?? []).length > 0 || paragraph.runs !== undefined ||
+    paragraph.pStyle !== undefined || paragraph.list !== undefined);
   if (!hasRichContent) return null;
-  const fragment: DocxClipboardFragment = {
-    paragraphs: rejectedPayload ? cleaned.map(({ tables, text }) => (tables ? { tables, text } : { text })) : cleaned,
-  };
+  const fragment: DocxClipboardFragment = { paragraphs: cleaned };
   return validClipboardFragment(fragment) ? fragment : null;
 }
 
