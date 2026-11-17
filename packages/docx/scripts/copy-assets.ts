@@ -40,5 +40,4 @@ for (const { from, to } of assets) {
   console.log(`[copy-assets] ${from} → ${to}`);
 }
 
-await writeFile(resolve(root, 'dist/docxWorker.mjs'), "import './yrs/docxWorker.mjs';\n");
 await writeFile(resolve(root, 'dist/docxWorker.node.mjs'), "import './yrs/docxWorker.node.mjs';\n");

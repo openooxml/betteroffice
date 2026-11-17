@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'tsup';
 import { packageBoundary } from '../../scripts/package-boundary';
+import { buildWorkerStubs } from '../../scripts/worker-stub';
 
 export default defineConfig((options) => ({
   entry: {
@@ -10,7 +11,7 @@ export default defineConfig((options) => ({
     'wasm-preflight': 'src/wasm/preflight.ts',
     worker: 'src/worker.ts',
     collaboration: 'src/collaboration/index.ts',
-    pptxSessionWorker: 'src/session/worker.ts',
+    pptxWorkerStart: 'src/session/workerStart.ts',
     'pptxSessionWorker.node': 'src/session/worker.node.ts',
     'sessionWorker.node': 'src/session/sessionWorker.node.ts',
     'sessionWorker.missing': 'src/session/sessionWorker.missing.ts',
@@ -29,7 +30,7 @@ export default defineConfig((options) => ({
   },
   onSuccess: async () => {
     const out = options.outDir ?? 'dist';
-    await rename(join(out, 'pptxSessionWorker.js'), join(out, 'pptxSessionWorker.mjs'));
+    await buildWorkerStubs('pptx', out);
     await rename(join(out, 'pptxSessionWorker.node.js'), join(out, 'pptxSessionWorker.node.mjs'));
     await mkdir('dist/generated', { recursive: true });
     await mkdir(join(out, 'generated/preflight'), { recursive: true });
