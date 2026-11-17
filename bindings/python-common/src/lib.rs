@@ -118,7 +118,8 @@ pub fn font_packs() -> Option<(PathBuf, Vec<&'static str>)> {
 /// The substitution table entry for an Office family name as `(remote, generic)`, or None.
 #[pyfunction]
 pub fn font_substitute(family: &str) -> Option<(Option<String>, String)> {
-    resolve_word_family_substitute(family).map(|entry| (entry.remote.clone(), entry.generic.clone()))
+    resolve_word_family_substitute(family)
+        .map(|entry| (entry.remote.clone(), entry.generic.clone()))
 }
 
 /// Decodes a font pack face, returning font bytes and an optional transformed payload.
