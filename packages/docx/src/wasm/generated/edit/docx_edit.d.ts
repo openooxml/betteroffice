@@ -396,6 +396,16 @@ export class EditSession {
      */
     edit_text_resident(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text?: string | null): string;
     /**
+     * [`Self::edit_text_resident`] of `text` typed at the cursor with the
+     * cursor formatting `delta_json` (a [`Self::format_range`] delta), as
+     * one edit that leaves what typing it and then formatting it with the
+     * delta would. `undefined`, changing nothing, where it cannot go so (an
+     * empty text, a delta that sets nothing or is refused, an edit that
+     * spans paragraphs or whose paragraph resident input is not ready): the
+     * caller then types and formats it as two edits.
+     */
+    edit_text_resident_marked(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text: string, delta_json: string): string | undefined;
+    /**
      * [`EditSession::encode_diff`] as ordered updates for a sync that must
      * travel in bounded frames: the whole diff when it fits
      * `max_chunk_bytes`, otherwise causally ordered struct updates followed
@@ -1899,6 +1909,7 @@ export interface InitOutput {
     readonly editsession_drain_update_event: (a: number) => [number, number];
     readonly editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+    readonly editsession_edit_text_resident_marked: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_diff_chunks: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly editsession_encode_peer_metadata: (a: number) => [number, number, number, number];

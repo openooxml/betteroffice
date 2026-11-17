@@ -141,3 +141,33 @@ test('suggested_composition_steps_remove_their_own_insertion_instead_of_striking
   expect(removed.status).toBe('applied');
   expect(texts(arm)).toEqual(['abc']);
 }, TIMEOUT);
+
+test('keys_the_engine_cannot_type_with_stored_marks_are_typed_then_formatted', async () => {
+  // An engine that has not laid the document out takes no resident edit.
+  const arm = await openCommandEngine(['abc']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, command(arm, 'toggleMark', { mark: { type: 'bold' } })).status).toBe('noop');
+  const marked = spyOn(arm.native, 'edit_text_resident_marked').mockReturnValue(undefined);
+  const formatted = spyOn(arm.native, 'format_range');
+  try {
+    expect(step(arm, 'x').status).toBe('applied');
+    expect(texts(arm)).toEqual(['xabc']);
+    expect(arm.engine.selectionContext(storyRange(selection(id, 0, 1))).bold).toBe(true);
+    expect(marked).toHaveBeenCalledTimes(1);
+    expect(formatted).toHaveBeenCalledTimes(1);
+  } finally {
+    formatted.mockRestore();
+    marked.mockRestore();
+  }
+  // Suggested typing keeps the two edits: the formatting is tracked as its own change.
+  const suggestedMarked = spyOn(arm.native, 'edit_text_resident_marked');
+  const suggestedFormatted = spyOn(arm.native, 'format_range');
+  try {
+    expect(step(arm, 'y', undefined, { suggesting: WRITER }).status).toBe('applied');
+    expect(suggestedMarked).not.toHaveBeenCalled();
+    expect(suggestedFormatted).toHaveBeenCalledTimes(1);
+  } finally {
+    suggestedFormatted.mockRestore();
+    suggestedMarked.mockRestore();
+  }
+}, TIMEOUT);

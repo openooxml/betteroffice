@@ -182,6 +182,94 @@ pub(crate) fn merge_language(previous: Option<&Any>, patch: &Any) -> Any {
     Any::Map(Arc::new(slots))
 }
 
+/// Cursor formatting text typed at the cursor takes, as Word keeps it after Ctrl+B with nothing
+/// selected: what [`EditingDoc::format_range`] of the typed text with a delta would set, written
+/// as the text goes in so typing stays one edit.
+#[derive(Clone, Debug)]
+pub(crate) struct CaretMarks {
+    attrs: Attrs,
+}
+
+impl CaretMarks {
+    /// The marks of `delta`; `None` where typing with them cannot be one edit that leaves what
+    /// typing and then formatting would: a delta that sets nothing, or one format_range refuses.
+    pub(crate) fn new(delta: &InlineFormatDelta) -> Option<Self> {
+        let attrs = delta.to_attrs().ok()?;
+        (!attrs.is_empty()).then_some(Self { attrs })
+    }
+
+    /// What format_range of text typed with `formatting` writes over it: the delta's keys (null
+    /// removes) with a language merged over the typed one, and the formatting the text ends up
+    /// with. `None` where nothing would change.
+    pub(crate) fn over(&self, formatting: &[(String, Any)]) -> Option<(Attrs, Vec<(String, Any)>)> {
+        let value = |name: &str| {
+            formatting
+                .iter()
+                .find(|(key, _)| key == name)
+                .map_or(&Any::Null, |(_, value)| value)
+        };
+        if self
+            .attrs
+            .iter()
+            .all(|(name, wanted)| value(name) == wanted)
+        {
+            return None;
+        }
+        let written: Attrs = self
+            .attrs
+            .iter()
+            .map(|(name, wanted)| {
+                let wanted = match wanted {
+                    Any::Map(_) if name.as_ref() == "language" => {
+                        merge_language(Some(value(name)), wanted)
+                    }
+                    _ => wanted.clone(),
+                };
+                (name.clone(), wanted)
+            })
+            .collect();
+        let mut marked: Vec<(String, Any)> = formatting
+            .iter()
+            .filter(|(key, _)| !written.contains_key(key.as_str()))
+            .cloned()
+            .collect();
+        marked.extend(
+            written
+                .iter()
+                .filter(|(_, value)| **value != Any::Null)
+                .map(|(name, value)| (name.to_string(), value.clone())),
+        );
+        Some((written, marked))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Calls of [`EditingDoc::formatting_keeps_field_paragraph`], which reads the paragraph's
+    /// source.
+    pub(crate) static FIELD_PARAGRAPH_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl EditingDoc {
+    /// Whether format_range of text in the paragraph `key` names keeps it unchanged because
+    /// saving it rewritten would lose a field (the one paragraph case of
+    /// [`Self::format_range_keeping`]).
+    pub(crate) fn formatting_keeps_field_paragraph(&self, key: &str) -> bool {
+        #[cfg(test)]
+        FIELD_PARAGRAPH_CHECKS.with(|checks| checks.set(checks.get() + 1));
+        Keeper::new(self).rewrite_loss(key) == Some(KeptReason::Field)
+    }
+}
+
+/// The id of the paragraph of `story` that holds `at`, as format_range sees paragraphs: `None`
+/// past the last paragraph mark or where the mark has no id.
+pub(crate) fn paragraph_key_at<T: ReadTxn>(story: &TextRef, txn: &T, at: u32) -> Option<String> {
+    story_paragraphs(story, txn)
+        .into_iter()
+        .find(|paragraph| paragraph.start <= at && at < paragraph.end)
+        .and_then(|paragraph| paragraph.key)
+}
+
 /// Tri-state inline formatting patch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlineFormatDelta {

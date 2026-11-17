@@ -74,6 +74,7 @@ export const editsession_document_properties_json: (a: number) => [number, numbe
 export const editsession_drain_update_event: (a: number) => [number, number];
 export const editsession_echo_glyph_set_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+export const editsession_edit_text_resident_marked: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
 export const editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_encode_diff_chunks: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const editsession_encode_peer_metadata: (a: number) => [number, number, number, number];

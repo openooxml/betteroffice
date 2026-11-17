@@ -5544,6 +5544,20 @@ impl EngineSession {
         text: Option<&str>,
         lower_locally: bool,
     ) -> crate::OpResult<crate::Receipt> {
+        self.edit_resident_text_marked(range, text, lower_locally, None)
+    }
+
+    /// [`Self::edit_resident_text`], the typed text also taking the cursor's
+    /// `marks`: one edit that leaves what typing it and then
+    /// [`crate::EditingDoc::format_range`] of it with the marks' delta would.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn edit_resident_text_marked(
+        &self,
+        range: crate::StoryRange,
+        text: Option<&str>,
+        lower_locally: bool,
+        marks: Option<&crate::format::CaretMarks>,
+    ) -> crate::OpResult<crate::Receipt> {
         let range = match text {
             Some(_) if range.start == range.end => {
                 let start = self.doc.text_insert_index(
@@ -5634,19 +5648,40 @@ impl EngineSession {
         let ctx = crate::EditCtx::local("", "");
         let receipt = match text {
             Some(text) if replace => {
-                self.doc
-                    .replace_range_placed_observed(&ctx, range.clone(), text, |effective| {
-                        attrs = Some(effective.clone())
-                    })?
-                    .0
+                let observe = |effective: &yrs::types::Attrs| attrs = Some(effective.clone());
+                match marks {
+                    Some(marks) => self.doc.replace_range_marked_observed(
+                        &ctx,
+                        range.clone(),
+                        text,
+                        marks,
+                        observe,
+                    )?,
+                    None => self.doc.replace_range_placed_observed(
+                        &ctx,
+                        range.clone(),
+                        text,
+                        observe,
+                    )?,
+                }
+                .0
             }
-            Some(text) => self.doc.insert_text_observed(
-                &ctx,
-                crate::Position::new(&range.story, range.start),
-                text,
-                crate::FormatPolicy::Inherit,
-                |effective| attrs = Some(effective.clone()),
-            )?,
+            Some(text) => {
+                let at = crate::Position::new(&range.story, range.start);
+                let observe = |effective: &yrs::types::Attrs| attrs = Some(effective.clone());
+                match marks {
+                    Some(marks) => self
+                        .doc
+                        .insert_text_marked_observed(&ctx, at, text, marks, observe)?,
+                    None => self.doc.insert_text_observed(
+                        &ctx,
+                        at,
+                        text,
+                        crate::FormatPolicy::Inherit,
+                        observe,
+                    )?,
+                }
+            }
             None => self
                 .doc
                 .delete_range_observed(&ctx, range.clone(), |single| single_delete = single)?,

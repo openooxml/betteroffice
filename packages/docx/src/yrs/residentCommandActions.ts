@@ -1283,13 +1283,18 @@ function applyPreparedDocxCommand(
     case 'insertText': case 'replaceSelection': {
       // A composition step that empties the composition removes what it typed (one paragraph).
       const removal = command.kind === 'insertText' && command.payload.replaceBefore !== undefined && !command.payload.text;
-      const receipt = collapsed(range)
+      const stored = state.storedMarks;
+      // Text typed with cursor formatting goes in already formatted, as one edit, where the
+      // engine can; otherwise it is typed and then formatted.
+      const marked = stored && !stored.clear && command.payload.text && !command.payload.suggesting &&
+        Object.keys(stored.delta).length && engine.typeWithCaretMarks
+        ? engine.typeWithCaretMarks(range, command.payload.text, stored.delta) : null;
+      const receipt = marked ?? (collapsed(range)
         ? engine.insertText({ story: range.story, ...range.start }, command.payload.text, command.payload.suggesting)
         : removal ? engine.deleteRange(range, command.payload.suggesting)
-        : engine.replaceRange(range, command.payload.text, command.payload.suggesting);
+        : engine.replaceRange(range, command.payload.text, command.payload.suggesting));
       if (!receipt.range) throw new Error('Text receipt lacks range');
-      const stored = state.storedMarks;
-      if (stored && command.payload.text && !collapsed(receipt.range)) {
+      if (!marked && stored && command.payload.text && !collapsed(receipt.range)) {
         if (stored.clear) engine.clearFormatting(receipt.range);
         if (Object.keys(stored.delta).length) engine.formatRange(receipt.range, stored.delta);
       }

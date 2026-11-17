@@ -3181,6 +3181,7 @@ fn execute_direct(
                         Position::new(story, *at),
                         &runs,
                         FormatPolicy::Inherit,
+                        None,
                         |_| {},
                     )
                     .map_err(fail)?;

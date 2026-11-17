@@ -102,6 +102,36 @@ impl<'a> CommandHost<'a> {
         false
     }
 
+    /// A key typed with the cursor's `marks` on (Ctrl+B with nothing
+    /// selected) as the worker routes it where the engine takes it resident:
+    /// the one marked edit and the relayout of its story.
+    fn marked(
+        &mut self,
+        story: &str,
+        start: u32,
+        end: u32,
+        text: &str,
+        marks: &crate::format::CaretMarks,
+    ) {
+        let index = self.engine.doc().paragraph_index(story).unwrap();
+        let paragraph = |offset| index.para_at(offset).unwrap().para_id.to_string();
+        assert!(self.engine.takes_resident_text_edit(
+            story,
+            &paragraph(start),
+            &paragraph(end),
+            Some(text)
+        ));
+        self.engine
+            .edit_resident_text_marked(
+                crate::StoryRange::new(story, start, end),
+                Some(text),
+                true,
+                Some(marks),
+            )
+            .unwrap();
+        self.relayout(Some(story));
+    }
+
     fn relayout(&mut self, story: Option<&str>) {
         self.engine
             .layout_document_with_regions_after_edit(&self.request, story)
@@ -1670,6 +1700,140 @@ fn page_text_headings_are_reused_until_the_body_changes() {
         !Rc::ptr_eq(&headings, &engine.page_text_headings().unwrap()),
         "a body delete reads them again"
     );
+}
+
+/// Keys typed with the cursor's formatting on (Ctrl+B with nothing selected)
+/// go in as one marked edit each: they lay out on the path the same keys typed
+/// plain take, and as a full recompute does, in the body beside tables,
+/// floating tables and a floating shape, and in a table cell.
+#[test]
+fn keys_typed_with_caret_marks_lay_out_as_plain_keys_do_and_as_a_full_recompute_does() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let deltas = [
+        (
+            "bold",
+            "bold",
+            crate::InlineFormatDelta {
+                bold: crate::Patch::Set(true),
+                ..Default::default()
+            },
+        ),
+        (
+            "italic 14pt",
+            "italic",
+            crate::InlineFormatDelta {
+                italic: crate::Patch::Set(true),
+                font_size: crate::Patch::Set(14.0),
+                ..Default::default()
+            },
+        ),
+    ];
+    let fixtures = [
+        ("tables", 9770),
+        ("floating tables", 9771),
+        ("a floating shape", 9772),
+    ];
+    for (fixture, client_id) in fixtures {
+        let open = || match fixture {
+            "a floating shape" => {
+                let bytes = objects_package(&["table", "anchored"]);
+                (seeded_engine(client_id, &bytes), bytes)
+            }
+            _ => cell_tables_engine(client_id, fixture == "floating tables"),
+        };
+        for (name, key, delta) in &deltas {
+            let marks = crate::format::CaretMarks::new(delta).unwrap();
+            let (plain_engine, bytes) = open();
+            let (engine, _) = open();
+            // as a host does, before the font request lowers the body
+            plain_engine.set_local_lowering(true);
+            engine.set_local_lowering(true);
+            let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+            let mut plain = CommandHost::open_with(&plain_engine, request.clone())
+                .seeded(client_id, bytes.clone());
+            let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+            // (place, paragraph, in a cell, whether a plain key there patches the body in place)
+            let places: &[(&str, &str, bool, bool)] = match fixture {
+                // a plain key in the paragraph a floating shape anchors to lowers the body again
+                "a floating shape" => &[
+                    (
+                        "the paragraph the shape anchors to",
+                        "00000215",
+                        false,
+                        false,
+                    ),
+                    ("the paragraph after it", "00000216", false, true),
+                ],
+                _ => &[
+                    ("a body paragraph after the tables", "00000F51", false, true),
+                    ("a plain cell", "00000F01", true, true),
+                ],
+            };
+            for (place, id, in_cell, patched) in places {
+                let story = if *in_cell {
+                    cell_holding(&engine, id)
+                } else {
+                    "body".to_owned()
+                };
+                let at = engine
+                    .doc()
+                    .paragraph_index(&story)
+                    .unwrap()
+                    .para_span(id)
+                    .unwrap()
+                    .0
+                    + 3;
+                // two keys, then a Hangul composition's first step and the step typing over it
+                let keys = [
+                    (at, at, "x"),
+                    (at + 1, at + 1, "y"),
+                    (at + 2, at + 2, "가"),
+                    (at + 2, at + 3, "각"),
+                ];
+                for (start, end, text) in keys {
+                    let label = format!("{fixture}, {name}, {place}: {text:?} over {start}..{end}");
+                    let plain_work = keystroke_work(&plain_engine, || {
+                        assert!(plain.command(&story, start, end, Some(text)), "{label}");
+                    });
+                    let work =
+                        keystroke_work(&engine, || host.marked(&story, start, end, text, &marks));
+                    assert_eq!(
+                        (
+                            work.full_lowerings,
+                            work.full_paginations,
+                            work.full_display_builds
+                        ),
+                        (
+                            plain_work.full_lowerings,
+                            plain_work.full_paginations,
+                            plain_work.full_display_builds
+                        ),
+                        "{label}: marked {work:?}, plain {plain_work:?}"
+                    );
+                    // none lowers the whole body again, the first key after Ctrl+B included
+                    if *patched {
+                        assert_eq!(work.full_lowerings, 0, "{label}: {work:?}");
+                    }
+                    host.assert_matches_cold(&label);
+                }
+                let typed = engine
+                    .doc()
+                    .story_segments(&story)
+                    .unwrap()
+                    .into_iter()
+                    .find(|segment| {
+                        matches!(&segment.content, crate::SegmentContent::Text(text) if text == "xy각")
+                    });
+                assert_eq!(
+                    typed.and_then(|segment| segment.attributes.get(*key).cloned()),
+                    Some(Any::Bool(true)),
+                    "{fixture}, {name}, {place}: the typed text takes the marks"
+                );
+            }
+        }
+    }
 }
 
 mod equal_column_pictures;

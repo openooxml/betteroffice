@@ -965,3 +965,192 @@ fn empty_previous_and_current_properties_still_reopen_as_a_change() {
         .unwrap();
     assert!(engine.doc().list_revisions().unwrap().is_empty());
 }
+
+/// A body of every place typed text may take formatting from: a bold run beside a plain one,
+/// a hyperlink, a tracked insertion, a run with languages and a size, an empty paragraph, a
+/// table cell, and a paragraph of nested fields, which format_range keeps unchanged.
+fn typed_document() -> Vec<u8> {
+    document(concat!(
+        r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Bo</w:t></w:r><w:r><w:t>pl</w:t></w:r></w:p>"#,
+        r#"<w:p><w:r><w:t>a</w:t></w:r><w:hyperlink w:anchor="t"><w:r><w:t>li</w:t></w:r></w:hyperlink><w:r><w:t>c</w:t></w:r></w:p>"#,
+        r#"<w:p><w:ins w:id="1" w:author="Bo" w:date="2026-01-01T00:00:00Z"><w:r><w:t>in</w:t></w:r></w:ins><w:r><w:t>af</w:t></w:r></w:p>"#,
+        r#"<w:p><w:r><w:rPr><w:sz w:val="28"/><w:lang w:val="en-US" w:eastAsia="ko-KR"/></w:rPr><w:t>la</w:t></w:r></w:p>"#,
+        r#"<w:p/>"#,
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:rPr><w:i/></w:rPr><w:t>ce</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        r#"<w:p><w:r><w:t>f</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> IF 1 = 1 "</w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve">" "0" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>g</w:t></w:r></w:p>"#,
+        r#"<w:p><w:r><w:t>en</w:t></w:r></w:p>"#,
+    ))
+}
+
+#[test]
+fn typing_with_caret_marks_leaves_what_typing_then_formatting_leaves() {
+    use crate::Position;
+    let bytes = typed_document();
+    let seeded = |indexed: bool, story: &str| {
+        let engine = EngineSession::new(9302);
+        seed_from_docx(engine.doc(), &bytes).unwrap();
+        if indexed {
+            engine.doc().segment_index(story).unwrap();
+            engine.doc().segment_index(story).unwrap();
+        }
+        engine
+    };
+    let probe = seeded(false, "body");
+    let cell = probe
+        .doc()
+        .list_stories()
+        .stories
+        .into_iter()
+        .find(|story| story.kind == crate::StoryInfoKind::TableCell)
+        .unwrap()
+        .story;
+    let field = probe
+        .doc()
+        .paragraphs("body")
+        .unwrap()
+        .into_iter()
+        .find(|paragraph| {
+            probe
+                .doc()
+                .formatting_keeps_field_paragraph(&paragraph.para_id)
+        })
+        .expect("a paragraph format_range keeps unchanged")
+        .para_id;
+    let field_start = crate::session::args::loc_index(probe.doc(), "body", &field, 0).unwrap();
+    let ctx = EditCtx::local("", "");
+    let index_of = |doc: &EditingDoc, story: &str, loc: &crate::op::Loc| {
+        crate::session::args::loc_index(doc, story, &loc.para, loc.offset).unwrap()
+    };
+    let deltas = [
+        json!({"bold": true}),
+        json!({"bold": false}),
+        json!({"italic": true, "fontSize": 9}),
+        json!({"underline": {"style": "double"}, "color": {"rgb": "FF0000"}}),
+        json!({"language": {"lang": "de-DE", "eastAsia": null}}),
+        json!({"highlight": "yellow", "bold": null}),
+    ];
+    for story in ["body", cell.as_str()] {
+        // Typing reaches a story through a paragraph and an offset in it, so up to the last
+        // paragraph mark, never past it.
+        let len = probe.doc().story_len(story).unwrap() - 1;
+        for delta in &deltas {
+            let delta = parse_inline_format_delta(delta.as_object().unwrap()).unwrap();
+            let marks = CaretMarks::new(&delta).unwrap();
+            for start in 0..=len {
+                for (end, text) in [
+                    (start, "x"),
+                    (start, "가"),
+                    (start + 1, "y"),
+                    (start + 2, "가나"),
+                ] {
+                    if end > len {
+                        continue;
+                    }
+                    let range = StoryRange::new(story, start, end);
+                    let expected = seeded(false, story);
+                    let typed = if start == end {
+                        expected.doc().insert_text(
+                            &ctx,
+                            Position::new(story, start),
+                            text,
+                            FormatPolicy::Inherit,
+                        )
+                    } else {
+                        expected.doc().replace_range(&ctx, range.clone(), text)
+                    };
+                    // The worker formats what it typed unless the receipt range is collapsed.
+                    if let Ok(receipt) = &typed
+                        && receipt
+                            .range
+                            .as_ref()
+                            .is_some_and(|range| range.start != range.end)
+                    {
+                        let typed = receipt.range.as_ref().unwrap();
+                        let (from, to) = (
+                            index_of(expected.doc(), story, &typed.start),
+                            index_of(expected.doc(), story, &typed.end),
+                        );
+                        expected
+                            .doc()
+                            .format_range(&ctx, StoryRange::new(story, from, to), &delta)
+                            .unwrap_or_else(|error| panic!("{error:?} {story} {start}..{end} {text:?} {typed:?} {from}..{to}"));
+                    }
+                    for indexed in [false, true] {
+                        let actual = seeded(indexed, story);
+                        let marked = if start == end {
+                            actual.doc().insert_text_marked_observed(
+                                &ctx,
+                                Position::new(story, start),
+                                text,
+                                &marks,
+                                |_| {},
+                            )
+                        } else {
+                            actual
+                                .doc()
+                                .replace_range_marked_observed(
+                                    &ctx,
+                                    range.clone(),
+                                    text,
+                                    &marks,
+                                    |_| {},
+                                )
+                                .map(|(receipt, _)| receipt)
+                        };
+                        let place =
+                            format!("{story} {start}..{end} {text:?} {delta:?} indexed={indexed}");
+                        assert_eq!(marked, typed, "{place}");
+                        for story in [story, "body"] {
+                            assert_eq!(
+                                actual.doc().story_segments(story).unwrap(),
+                                expected.doc().story_segments(story).unwrap(),
+                                "{place}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Typed bold, the key stays plain in the paragraph format_range keeps and turns bold in
+    // the next one.
+    let bold = parse_inline_format_delta(json!({"bold": true}).as_object().unwrap()).unwrap();
+    let marks = CaretMarks::new(&bold).unwrap();
+    let typed = seeded(true, "body");
+    let next = crate::session::args::find_para_span(typed.doc(), "body", &field)
+        .unwrap()
+        .pilcrow
+        + 1;
+    for at in [next, field_start + 1] {
+        typed
+            .doc()
+            .insert_text_marked_observed(&ctx, Position::new("body", at), "z", &marks, |_| {})
+            .unwrap();
+    }
+    let bold_z: Vec<bool> = typed
+        .doc()
+        .story_segments("body")
+        .unwrap()
+        .into_iter()
+        .filter(|segment| matches!(&segment.content, crate::SegmentContent::Text(text) if text.contains('z')))
+        .map(|segment| segment.attributes.get("bold") == Some(&Any::Bool(true)))
+        .collect();
+    assert_eq!(bold_z, [false, true]);
+    // A key that takes the marks from the text before it already reads no paragraph source,
+    // as typing on after Ctrl+B does; one the marks change reads it once.
+    let checks = || crate::format::FIELD_PARAGRAPH_CHECKS.with(std::cell::Cell::get);
+    let zen = crate::session::args::find_para_span(typed.doc(), "body", &field)
+        .unwrap()
+        .pilcrow
+        + 1;
+    for (at, text, read) in [(zen + 1, "w", 0), (zen + 3, "v", 1)] {
+        let before = checks();
+        typed
+            .doc()
+            .insert_text_marked_observed(&ctx, Position::new("body", at), text, &marks, |_| {})
+            .unwrap();
+        assert_eq!(checks() - before, read, "{text:?} at {at}");
+    }
+}

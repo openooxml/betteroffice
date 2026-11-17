@@ -1660,6 +1660,37 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// [`Self::edit_text_resident`] of `text` typed at the cursor with the
+    /// cursor formatting `delta_json` (a [`Self::format_range`] delta), as
+    /// one edit that leaves what typing it and then formatting it with the
+    /// delta would. `undefined`, changing nothing, where it cannot go so (an
+    /// empty text, a delta that sets nothing or is refused, an edit that
+    /// spans paragraphs or whose paragraph resident input is not ready): the
+    /// caller then types and formats it as two edits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_text_resident_marked(
+        &self,
+        story: &str,
+        start_para: &str,
+        start_offset: u32,
+        end_para: &str,
+        end_offset: u32,
+        text: &str,
+        delta_json: &str,
+    ) -> Result<Option<String>, JsValue> {
+        self.core
+            .edit_text_resident_marked(
+                story,
+                start_para,
+                start_offset,
+                end_para,
+                end_offset,
+                text,
+                delta_json,
+            )
+            .map_err(JsValue::from)
+    }
+
     /// Deletes `[start, end)`. Because a range crossing a paragraph boundary
     /// includes the boundary pilcrow, a plain delete also merges those
     /// paragraphs. Suggesting mode removes nothing and stamps the content
@@ -5649,7 +5680,11 @@ mod tests {
     /// A session holding two body paragraphs and a header story whose body is
     /// laid out and shown, so resident input is ready for it.
     fn shown_text_session(client_id: f64) -> EditSession {
-        let session = EditSession::new(client_id).unwrap();
+        show_text(EditSession::new(client_id).unwrap())
+    }
+
+    /// `session` with two body paragraphs and a header laid out and shown.
+    fn show_text(session: EditSession) -> EditSession {
         let doc = session.core.engine.doc();
         doc.create_story("body", "Alpha beta", "Normal", "left")
             .unwrap();
@@ -5733,6 +5768,167 @@ mod tests {
                 resident.core.engine.doc().story_segments(story).unwrap(),
                 generic.core.engine.doc().story_segments(story).unwrap(),
                 "{story}"
+            );
+        }
+    }
+
+    /// Types `text` over `start..end` of `para` in `story` as the worker did
+    /// before: typing it, then formatting the typed range with `delta`.
+    #[allow(clippy::too_many_arguments)]
+    fn type_then_format(
+        session: &EditSession,
+        story: &str,
+        para: &str,
+        start: u32,
+        end: u32,
+        text: &str,
+        delta: &str,
+    ) -> String {
+        let receipt = if start == end {
+            session.insert_text(story, para, start, text, None, None)
+        } else {
+            session.replace_range(story, para, start, para, end, text, None, None)
+        }
+        .unwrap();
+        let range = &envelope(&receipt)["range"];
+        let loc = |end: &str| {
+            (
+                range[end]["paraId"].as_str().unwrap().to_owned(),
+                range[end]["offset"].as_u64().unwrap() as u32,
+            )
+        };
+        let ((from_para, from), (to_para, to)) = (loc("start"), loc("end"));
+        session
+            .format_range(story, &from_para, from, &to_para, to, delta, None, None)
+            .unwrap();
+        receipt
+    }
+
+    #[test]
+    fn typing_with_caret_marks_edits_resident_text_as_typing_then_formatting_does() {
+        let resident = shown_text_session(81.0);
+        let generic = shown_text_session(81.0);
+        let paragraphs = resident.core.engine.doc().paragraphs("body").unwrap();
+        let (first, second) = (&paragraphs[0].para_id, &paragraphs[1].para_id);
+        let header = &resident.core.engine.doc().paragraphs("hf:rId1").unwrap()[0].para_id;
+        for session in [&resident, &generic] {
+            session
+                .format_range("body", first, 3, first, 5, r#"{"bold":true}"#, None, None)
+                .unwrap();
+        }
+        // A first key that changes the formatting, keys that already carry it,
+        // composition steps over the step before, and typing over bold text.
+        for (start, end, text, delta) in [
+            (1, 1, "x", r#"{"bold":true}"#),
+            (2, 2, "y", r#"{"bold":true}"#),
+            (3, 3, "\u{3131}", r#"{"bold":true,"italic":true}"#),
+            (3, 4, "\u{AC00}", r#"{"bold":true,"italic":true}"#),
+            (3, 4, "\u{AC01}", r#"{"bold":true,"italic":true}"#),
+            (0, 0, "a", r#"{"fontSize":14,"color":{"rgb":"FF0000"}}"#),
+            (5, 7, "Q", r#"{"bold":false}"#),
+            (6, 6, "q", r#"{"bold":null,"underline":{"style":"double"}}"#),
+            (
+                1,
+                1,
+                "l",
+                r#"{"language":{"lang":"de-DE","eastAsia":null}}"#,
+            ),
+        ] {
+            let typed = resident
+                .edit_text_resident_marked("body", first, start, first, end, text, delta)
+                .unwrap();
+            assert_eq!(
+                typed.as_deref(),
+                Some(type_then_format(&generic, "body", first, start, end, text, delta).as_str()),
+                "{start}..{end} {delta}"
+            );
+            assert!(resident.core.resident_text_edit.borrow().is_some());
+            assert_eq!(
+                resident.core.engine.doc().story_segments("body").unwrap(),
+                generic.core.engine.doc().story_segments("body").unwrap(),
+                "{start}..{end} {delta}"
+            );
+        }
+        let segments = resident.core.engine.doc().story_segments("body").unwrap();
+        let attributes = |piece: &str| {
+            segments
+                .iter()
+                .find(|segment| matches!(&segment.content, crate::SegmentContent::Text(text) if text.contains(piece)))
+                .map(|segment| segment.attributes.clone())
+                .unwrap()
+        };
+        assert_eq!(attributes("x").get("bold"), Some(&yrs::Any::Bool(true)));
+        assert_eq!(
+            attributes("\u{AC01}").get("italic"),
+            Some(&yrs::Any::Bool(true))
+        );
+        // Where it cannot be one resident edit it changes nothing: a story
+        // without resident input, a range across paragraphs, a delta that sets
+        // nothing or that formatting refuses, empty text.
+        let before = resident.core.engine.doc().story_segments("body").unwrap();
+        for (story, start_para, start, end_para, end, text, delta) in [
+            ("hf:rId1", header, 1, header, 1, "y", r#"{"bold":true}"#),
+            ("body", first, 2, second, 1, "w", r#"{"bold":true}"#),
+            ("body", first, 1, first, 1, "w", r#"{}"#),
+            (
+                "body",
+                first,
+                1,
+                first,
+                1,
+                "w",
+                r#"{"other":{"hyperlink":"x"}}"#,
+            ),
+            ("body", first, 1, first, 1, "", r#"{"bold":true}"#),
+        ] {
+            assert_eq!(
+                resident
+                    .edit_text_resident_marked(story, start_para, start, end_para, end, text, delta)
+                    .unwrap(),
+                None,
+                "{story} {start}..{end} {delta}"
+            );
+        }
+        assert_eq!(
+            resident.core.engine.doc().story_segments("body").unwrap(),
+            before
+        );
+        assert_eq!(
+            resident
+                .core
+                .engine
+                .doc()
+                .story_segments("hf:rId1")
+                .unwrap(),
+            generic.core.engine.doc().story_segments("hf:rId1").unwrap()
+        );
+    }
+
+    #[test]
+    fn undoing_a_key_typed_with_caret_marks_removes_it_as_typing_then_formatting_does() {
+        // Undo grouping reads the host clock, which only wasm provides.
+        let deterministic = || {
+            show_text(EditSession {
+                core: EditSessionCore::new(82, crate::session::Host::deterministic()),
+                update_observer: None,
+            })
+        };
+        let (resident, generic) = (deterministic(), deterministic());
+        let first = &resident.core.engine.doc().paragraphs("body").unwrap()[0].para_id;
+        let original = resident.core.engine.doc().story_segments("body").unwrap();
+        for session in [&resident, &generic] {
+            session.track_undo();
+        }
+        resident
+            .edit_text_resident_marked("body", first, 2, first, 2, "x", r#"{"bold":true}"#)
+            .unwrap()
+            .unwrap();
+        type_then_format(&generic, "body", first, 2, 2, "x", r#"{"bold":true}"#);
+        for session in [&resident, &generic] {
+            assert!(session.undo());
+            assert_eq!(
+                session.core.engine.doc().story_segments("body").unwrap(),
+                original
             );
         }
     }
