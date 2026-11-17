@@ -155,6 +155,24 @@ test('preloading loads one face at a time and stops once the editor is busy', as
   fonts.dispose();
 });
 
+test('a preload with a byte budget makes no remote font request; an unbudgeted load does', async () => {
+  const { added } = browser();
+  const { remoteLoads, remoteImported } = provider();
+  const fonts = createDefaultFontPainter(decoder(), mock(() => {}));
+  let checks = 0;
+  fonts.preload(display({ family: 'Tahoma' }), () => { checks++; return true; });
+  for (let tick = 0; tick < 50 && checks === 0; tick++) await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(checks).toBeGreaterThan(0);
+  expect(remoteImported).not.toHaveBeenCalled();
+  expect(remoteLoads).not.toHaveBeenCalled();
+  expect(added).toEqual([]);
+  await fonts.load(display({ family: 'Tahoma' }));
+  expect(remoteLoads).toHaveBeenCalledTimes(1);
+  expect(added).toEqual([expect.objectContaining({ family: 'Tahoma', remote: 'Open Sans' })]);
+  fonts.dispose();
+});
+
 test('uses bundled family names and italic descriptors', async () => {
   const { added } = browser();
   provider();
