@@ -2566,7 +2566,8 @@ impl Workbook {
     /// left alone. This is copy tiling only — there is no series detection —
     /// and an array formula, a partially covered merged range, an Excel table,
     /// or a chart anchored in either rectangle is refused before anything
-    /// mutates.
+    /// mutates. On a protected sheet a locked destination refuses the whole
+    /// fill, and so does a copied style unless the sheet allows formatting.
     pub fn fill_range(
         &mut self,
         sheet: SheetId,
@@ -2582,6 +2583,21 @@ impl Workbook {
                 crate::fill::preserved_fill_refusal(package.materialize()?, &self.preserved, sheet)
         {
             return Err(error);
+        }
+        let written = ops.iter().filter_map(|op| match op {
+            Op::SetCell { at, .. } => Some(*at),
+            _ => None,
+        });
+        self.ensure_cells_writable(sheet, written, ProtectedSheets::Refuse)?;
+        let target = self.sheet(sheet)?;
+        let restyled = ops.iter().any(|op| match op {
+            Op::SetCell { at, cell, .. } => {
+                cell.style.unwrap_or(0) != target.effective_style(*at).unwrap_or(0)
+            }
+            _ => true,
+        });
+        if restyled {
+            self.ensure_cells_formattable(sheet, ProtectedSheets::Refuse)?;
         }
         self.apply_carried_ops(ops, options)
     }
@@ -3506,7 +3522,8 @@ impl Workbook {
     ///
     /// A frame is one element in one drawing part, and two sheets may both
     /// anchor it. Every sheet holding it is repinned together, or the save
-    /// would refuse a drawing its sheets no longer agree on.
+    /// would refuse a drawing its sheets no longer agree on. The move is
+    /// refused if any sheet holding the frame is protected.
     pub fn move_chart(
         &mut self,
         sheet: SheetId,
@@ -3542,26 +3559,45 @@ impl Workbook {
                     "chart {frame} is pinned to the sheet and cannot be moved"
                 ))
             })?;
-        let ops = self
+        let ops = self.repinned_frame_ops(frame, to, protection)?;
+        self.apply_carried_ops(ops, options)
+    }
+
+    /// The anchor writes that repin `frame` to `to` on every sheet holding it,
+    /// refused when any of those sheets is protected.
+    fn repinned_frame_ops(
+        &self,
+        frame: &str,
+        to: ChartAnchor,
+        protection: ProtectedSheets,
+    ) -> Result<Vec<Op>> {
+        let owners: Vec<SheetId> = self
             .model
             .sheets
             .iter()
             .enumerate()
-            .flat_map(|(index, sheet)| {
-                sheet
+            .filter(|(_, sheet)| sheet.charts.iter().any(|held| held.frame_id() == frame))
+            .map(|(index, _)| SheetId(index as u32))
+            .collect();
+        for &owner in &owners {
+            self.ensure_objects_movable(owner, protection)?;
+        }
+        Ok(owners
+            .into_iter()
+            .flat_map(|owner| {
+                self.model.sheets[owner.0 as usize]
                     .charts
                     .iter()
                     .filter(|held| held.frame_id() == frame)
                     .map(move |held| Op::SetChartAnchor {
-                        sheet: SheetId(index as u32),
+                        sheet: owner,
                         frame: frame.to_owned(),
                         part: held.part.clone(),
                         from: held.anchor,
                         to,
                     })
             })
-            .collect();
-        self.apply_carried_ops(ops, options)
+            .collect())
     }
 
     /// Resize the chart frame `frame` names — a `ChartRegion` id — by moving
@@ -3575,7 +3611,8 @@ impl Workbook {
     ///
     /// A frame is one element in one drawing part, and two sheets may both
     /// anchor it. Every sheet holding it is repinned together, or the save
-    /// would refuse a drawing its sheets no longer agree on.
+    /// would refuse a drawing its sheets no longer agree on. The resize is
+    /// refused if any sheet holding the frame is protected.
     pub fn resize_chart(
         &mut self,
         sheet: SheetId,
@@ -3617,25 +3654,7 @@ impl Workbook {
             };
             Error::InvalidOperation(message)
         })?;
-        let ops = self
-            .model
-            .sheets
-            .iter()
-            .enumerate()
-            .flat_map(|(index, sheet)| {
-                sheet
-                    .charts
-                    .iter()
-                    .filter(|held| held.frame_id() == frame)
-                    .map(move |held| Op::SetChartAnchor {
-                        sheet: SheetId(index as u32),
-                        frame: frame.to_owned(),
-                        part: held.part.clone(),
-                        from: held.anchor,
-                        to,
-                    })
-            })
-            .collect();
+        let ops = self.repinned_frame_ops(frame, to, protection)?;
         self.apply_carried_ops(ops, options)
     }
 
