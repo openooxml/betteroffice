@@ -17,7 +17,7 @@ const SECTIONS = [{ section: 's0', properties: { marginLeft: 1 } }, { section: '
 function controllerOf() {
   const getCurrentPage = mock(() => 30);
   const pages = Array.from({ length: 40 }, (_, pageIndex) => ({ page: { pageIndex }, displayPage: { sectionIndex: pageIndex < 20 ? 0 : 1 } }));
-  const snapshot = { status: 'ready', view: { geometry: { pages } } };
+  const snapshot = { status: 'ready', view: { identity: { session: 's', incarnation: 0, epoch: 0 }, geometry: { pages } } };
   const value = {
     query: async (request: { kind: string }) => request.kind === 'partSnapshot' ? { value: { metadata: { body: { sections: [{}, {}, {}] } } } }
       : request.kind === 'sectionProperties' ? { version: 'v1', selection: null, value: { sections: SECTIONS, paragraphs: [] } } : { value: request },
