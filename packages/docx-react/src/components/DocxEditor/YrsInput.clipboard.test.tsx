@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createRef } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   applyClipboardFragment,
@@ -14,7 +15,7 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import { YrsInput } from './YrsInput';
+import { YrsInput, type YrsInputRef } from './YrsInput';
 import { clipboardFragmentHtml } from './internals/clipboardHtml';
 import { yrsCellStory } from './yrsCommands';
 
@@ -449,4 +450,102 @@ test('suggesting mode pastes plain text', async () => {
   await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
   expect(session.storySegments('body').some((segment) => segment.kind === 'embed')).toBe(false);
   expect(session.paragraphs('body').map((p) => p.text).join('\n')).toContain('hello');
+});
+
+async function mountWithPasteOptions(text: string, select: [number, number], suggesting: boolean) {
+  const session = await createYrsSession();
+  sessions.push(session);
+  const { paraId } = session.createStory('body', text);
+  session.setSelection({ story: 'body', paraId, offset: select[0] }, { story: 'body', paraId, offset: select[1] });
+  const map = (story = 'body') =>
+    createYrsInputPositionMap(
+      story,
+      session.paragraphs(story).map((p) => ({ paraId: p.paraId, length: p.text.length }))
+    );
+  const host = document.createElement('div');
+  const page = document.createElement('div');
+  page.className = 'canvas-page';
+  page.dataset.pageIndex = '0';
+  page.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+  host.append(page);
+  document.body.append(host);
+  const queries = {
+    isReady: () => true,
+    caretRect: (position: number) => ({ pageIndex: 0, x: position, y: 10, width: 1, height: 20 }),
+    anchorRect: (position: number) => ({ pageIndex: 0, x: position, y: 10, width: 1, height: 20 }),
+    pageCount: () => 1,
+    pageSize: () => ({ width: 800, height: 1000 }),
+    visualLines: () => [],
+    visualLinesOnPage: () => [],
+    visualLineExtent: () => null,
+    verticalMove: () => null,
+  };
+  const input = createRef<YrsInputRef>();
+  const view = render(
+    <YrsInput
+      ref={input}
+      enabled
+      readOnly={false}
+      isSuggesting={suggesting}
+      author="Ada"
+      session={session}
+      canvasHostRef={{ current: host }}
+      displayListQueries={queries as unknown as DisplayListQueries}
+      inputPositionMap={map}
+      displayPositionToLoc={(position) => displayPositionToYrsLoc(map(), position)}
+      locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(loc.story), loc)}
+      onStateChange={() => {}}
+      onDirectInput={() => {}}
+    />
+  );
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  return { session, paraId, host, input, view, textarea };
+}
+
+for (const selected of [true, false]) {
+  test(`suggesting keep text only ${selected ? 'over a selection leaves the struck original unformatted' : 'at a caret formats exactly the inserted text'}`, async () => {
+    const { session, paraId, host, input, view, textarea } = await mountWithPasteOptions('a orig b', selected ? [2, 6] : [2, 2], true);
+    try {
+      act(() => input.current!.applyStoredFormatting({ type: 'set', delta: { bold: true } }));
+      const fragment: DocxClipboardFragment = {
+        paragraphs: [{ text: 'NEW', runs: [{ text: 'NEW', format: { other: { italic: true } } }] }],
+      };
+      pasteWith(textarea, clipboardFragmentHtml(fragment), 'NEW');
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+      fireEvent.click(await view.findByRole('button', { name: 'Paste Options (Ctrl)' }));
+      fireEvent.click(view.getByRole('menuitemradio', { name: 'Keep Text Only' }));
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+      const texts = () => session.storySegments('body').filter((segment) => segment.kind === 'text');
+      const inserted = texts().filter((segment) => segment.kind === 'text' && segment.text === 'NEW');
+      expect(inserted).toHaveLength(1);
+      expect(inserted[0]!.kind === 'text' ? inserted[0]!.attributes.ins : undefined).toMatchObject({ author: 'Ada' });
+      expect(inserted[0]!.kind === 'text' ? inserted[0]!.attributes.italic : undefined).not.toBe(true);
+      expect(texts().filter((segment) => segment.kind === 'text' && segment.attributes.bold === true)
+        .map((segment) => segment.kind === 'text' ? segment.text : '')).toEqual(['NEW']);
+      if (selected) {
+        const struck = texts().filter((segment) => segment.kind === 'text' && segment.attributes.del);
+        expect(struck.map((segment) => segment.kind === 'text' ? segment.text : '')).toEqual(['orig']);
+        expect(struck[0]!.kind === 'text' ? struck[0]!.attributes.bold : undefined).not.toBe(true);
+        const length = session.paragraphs('body')[0]!.text.length;
+        session.rejectChange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: length } });
+        expect(session.paragraphs('body').map((p) => p.text)).toEqual(['a orig b']);
+        expect(texts().some((segment) => segment.kind === 'text' && segment.attributes.bold === true)).toBe(false);
+      }
+    } finally {
+      host.remove();
+    }
+  });
+}
+
+test('a rejected clipboard payload pastes its plain text without formatting', async () => {
+  const { session, textarea } = await mount(false);
+  const payload = JSON.stringify({ v: 1, fragment: { paragraphs: [{ text: 'text', runs: [
+    { text: 'text', format: { other: { runStyle: { styleId: 'Evil' } } } },
+  ] }] } }).replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+  pasteWith(textarea, `<div data-betteroffice-docx="${payload}"><b>text</b></div>`, 'text');
+  await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+  await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+  expect(session.paragraphs('body').map((p) => p.text)).toEqual(['text text']);
+  expect(session.storySegments('body').some((segment) => segment.kind === 'text' && segment.attributes.bold === true)).toBe(false);
 });

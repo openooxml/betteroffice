@@ -2799,6 +2799,30 @@ test('context paste refuses a target changed while clipboard permission is pendi
   expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true');
 });
 
+test('a formatted context paste records the paste for paste options', async () => {
+  const allowed = spyOn(clipboard, 'isPasteFragmentAllowed').mockImplementation(() => true);
+  const read = spyOn(navigator.clipboard, 'read').mockImplementation(async () => [{
+    types: ['text/html'],
+    getType: async () => ({ text: async () => '<b>Bold</b>' }),
+  }] as unknown as ClipboardItem[]);
+  restorers.push(() => allowed.mockRestore(), () => read.mockRestore());
+  const view = render(<DocxEditor {...peerlessProps} showToolbar={false} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const recorded = mock((_fragment: yrs.DocxClipboardFragment, _plainText: string) => {});
+  const recorder = (surface.mock.calls.at(-1)![0] as { pasteRecorder?: { current: unknown } }).pasteRecorder;
+  if (recorder) recorder.current = recorded;
+  const snapshot = binding!.viewStore.getSnapshot();
+  snapshot.workerSelection = { anchor: { story: 'body', paraId: 'a', offset: 0 }, focus: { story: 'body', paraId: 'a', offset: 3 } };
+  fireEvent.contextMenu(view.getByTestId('docx-worker-paged-editor'));
+  fireEvent.click(view.getByRole('menuitem', { name: /^Paste$/ }));
+  await waitFor(() => expect(requests.some(request => request.type === 'edit' && request.command.kind === 'pasteFragment')).toBe(true));
+  await waitFor(() => expect(recorded).toHaveBeenCalledTimes(1));
+  const [fragment, plainText] = recorded.mock.calls[0]!;
+  expect(fragment.paragraphs.map(paragraph => paragraph.text)).toEqual(['Bold']);
+  expect(fragment.paragraphs[0]!.runs?.[0]?.format?.other?.bold).toBe(true);
+  expect(plainText).toBe('Bold');
+});
+
 test('replacing a paste checks the replacement fragment and submits only an allowed one', async () => {
   const allowed = spyOn(clipboard, 'isPasteFragmentAllowed')
     .mockImplementation((_commands, fragment) => fragment !== undefined && fragment.paragraphs[0]?.text !== 'Refused');

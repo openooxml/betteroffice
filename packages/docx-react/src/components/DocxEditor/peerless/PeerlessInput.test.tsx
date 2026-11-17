@@ -1437,6 +1437,61 @@ test('paste_fragment_callback_false_falls_back_to_text', () => {
   }
 });
 
+test('a rejected clipboard payload pastes as its plain text', () => {
+  let calls = 0;
+  const input = mount(false, { onPasteFragment: () => { calls += 1; return true; } });
+  try {
+    const payload = JSON.stringify({ v: 1, fragment: { paragraphs: [{ text: 'text', runs: [
+      { text: 'text', format: { other: { runStyle: { styleId: 'Evil' } } } },
+    ] }] } }).replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+    pasteWith(input, `<div data-betteroffice-docx="${payload}"><b>text</b></div>`, 'text');
+    expect(calls).toBe(0);
+    expect(input.submitted).toEqual(['replaceSelection']);
+    expect(input.entries.map(({ payload: submitted }) => submitted)).toEqual([{ text: 'text' }]);
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+  }
+});
+
+test('a paste recorded from outside the input offers paste options until the next edit', async () => {
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  document.body.appendChild(host);
+  host.getBoundingClientRect = () => ({ x: 0, y: 100, top: 100, bottom: 700, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
+  const recorder: { current: ((fragment: DocxClipboardFragment, plainText: string) => void) | null } = { current: null };
+  const input = mount(false, { caretHostRef: { current: host }, ...({ pasteRecorder: recorder } as object) });
+  const control = () => host.querySelector<HTMLElement>('[data-paste-options]');
+  try {
+    const geometry: PeerlessFrameGeometry = {
+      identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+      pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
+    };
+    act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
+    expect(typeof recorder.current).toBe('function');
+    const end = { story: 'body', paraId: 'a', offset: 4 };
+    const settle = (version: number, frameEpoch: number) => act(() => {
+      input.snapshot.version = version;
+      input.snapshot.workerSelection = { anchor: end, focus: end };
+      input.viewStore.installFrameGeometry({ ...geometry, frameEpoch });
+      input.refresh();
+    });
+    act(() => recorder.current?.({ paragraphs: [{ text: 'Plain' }] }, 'Plain'));
+    settle(1, 2);
+    expect(control()).toBeNull();
+    const bold: DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+    act(() => recorder.current?.(bold, 'Bold'));
+    settle(2, 3);
+    await waitFor(() => expect(control()).not.toBeNull());
+    beforeinput(input.textarea, 'insertText', 'x');
+    expect(control()).toBeNull();
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+    host.remove();
+  }
+});
+
 test('the paste options control follows a window scroll only while it is shown', async () => {
   const host = document.createElement('div');
   host.style.position = 'relative';

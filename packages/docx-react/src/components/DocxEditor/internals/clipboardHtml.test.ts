@@ -245,6 +245,26 @@ test('a crafted payload is refused and nothing of it reaches a paste', () => {
   }
 });
 
+test('a rejected payload reads as plain text even around formatted markup', () => {
+  const payload = JSON.stringify({ v: 1, fragment: { paragraphs: [{ text: 'text', runs: [
+    { text: 'text', format: { other: { runStyle: { styleId: 'Evil' } } } },
+  ] }] } }).replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+  expect(parseClipboardHtml(`<div data-betteroffice-docx="${payload}"><b>text</b></div>`)).toBeNull();
+  expect(parseClipboardHtml(`<p><i>before</i></p><div data-betteroffice-docx="${payload}"><b>text</b></div>`)).toBeNull();
+  expect(parseClipboardHtml(`<div data-betteroffice-docx="${payload}">text</div>`)).toBeNull();
+});
+
+test('a valid payload beside external markup reads as the payload', () => {
+  const fragment: DocxClipboardFragment = { paragraphs: [{ text: 'Kept', runs: [{ text: 'Kept', format: { other: { italic: true } } }] }] };
+  expect(parseClipboardHtml(`<p><b>outside</b></p>${clipboardFragmentHtml(fragment)}`)).toEqual(fragment);
+});
+
+test('external bold markup without a payload still reads as bold', () => {
+  const parsed = parseClipboardHtml('<b>text</b>');
+  expect(parsed?.paragraphs.map((paragraph) => paragraph.text)).toEqual(['text']);
+  expect(parsed?.paragraphs[0]?.runs?.[0]?.format?.other?.bold).toBe(true);
+});
+
 test('external html without a payload pastes only allow-listed formatting', () => {
   const parsed = parseClipboardHtml(
     '<p><b class="loud" style="color:red;position:absolute;margin-left:4px">bold</b> ' +

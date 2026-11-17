@@ -525,6 +525,97 @@ test('keep text only over several lines matches a plain paste with the same typi
   }
 }, TIMEOUT);
 
+for (const option of ['keep source', 'merge formatting', 'keep text only'] as const) {
+  test(`${option} after pasting a link ${option === 'keep text only' ? 'drops the link' : 'keeps the link and its tooltip'}`, async () => {
+    const { client, engine } = await openTableWorker();
+    try {
+      let version = 0;
+      let seq = 0;
+      const paragraphs = engine.paragraphs('body');
+      const last = paragraphs[paragraphs.length - 1]!;
+      const lastSpan = engine.geometryReader.locateParagraph('body', last.paraId);
+      const split = engine.splitParagraph({ story: 'body', paraId: last.paraId, offset: lastSpan.end - lastSpan.start });
+      const at = { story: 'body', paraId: split.secondParaId, offset: 0 };
+      const source: DocxClipboardFragment = { paragraphs: [{ text: 'Link', runs: [
+        { text: 'Link', format: { other: { bold: true } }, href: 'https://example.test/', tooltip: 'Tip' },
+      ] }] };
+      const pasted = await client.edit(intent(++seq, version, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment: source }));
+      expect(pasted.outcomes[0]?.status).toBe('applied');
+      version = pasted.version;
+      const end = pasted.selection!.focus;
+      const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
+        selection: { anchor: end, focus: end },
+        ...(option === 'merge formatting' ? { fragment: mergeFormattingFragment(source), merge: true as const }
+          : option === 'keep text only' ? { fragment: { paragraphs: [{ text: 'Link' }] }, plain: true as const }
+            : { fragment: source }),
+      }));
+      expect(replaced.outcomes[0]?.status).toBe('applied');
+      const linked = engine.storySegments('body').filter((segment) => segment.kind === 'text' && segment.text === 'Link');
+      expect(linked).toHaveLength(1);
+      const hyperlink = linked[0]!.kind === 'text' ? linked[0]!.attributes.hyperlink : undefined;
+      if (option === 'keep text only') expect(hyperlink).toBeUndefined();
+      else expect(hyperlink).toMatchObject({ href: 'https://example.test/', tooltip: 'Tip' });
+    } finally {
+      client.destroy();
+    }
+  }, TIMEOUT);
+}
+
+for (const selected of [true, false]) {
+  test(`suggesting keep text only ${selected ? 'over a selection leaves the struck original as it was' : 'at a caret formats only the inserted text'}`, async () => {
+    const { client, engine } = await openTableWorker();
+    try {
+      let version = 0;
+      let seq = 0;
+      const author = { name: 'Ada', date: '2026-01-01T00:00:00Z' };
+      const paragraphs = engine.paragraphs('body');
+      const last = paragraphs[paragraphs.length - 1]!;
+      const lastSpan = engine.geometryReader.locateParagraph('body', last.paraId);
+      const split = engine.splitParagraph({ story: 'body', paraId: last.paraId, offset: lastSpan.end - lastSpan.start });
+      const paraId = split.secondParaId;
+      engine.insertText({ story: 'body', paraId, offset: 0 }, 'a orig b');
+      const start = { story: 'body', paraId, offset: 2 };
+      const selection = { anchor: start, focus: selected ? { ...start, offset: 6 } : start };
+      if (!selected) {
+        const toggled = await client.edit(intent(++seq, version, 'toggleMark', { selection, mark: { type: 'bold' } }));
+        version = toggled.version;
+      }
+      const pasted = await client.edit(intent(++seq, version, 'pasteFragment', {
+        selection,
+        suggesting: author,
+        fragment: { paragraphs: [{ text: 'NEW', runs: [{ text: 'NEW', format: { other: { italic: true } } }] }] },
+      }));
+      expect(pasted.outcomes[0]?.status).toBe('applied');
+      version = pasted.version;
+      const end = pasted.selection!.focus;
+      const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
+        selection: { anchor: end, focus: end },
+        suggesting: author,
+        fragment: { paragraphs: [{ text: 'NEW' }] },
+        plain: true,
+      }));
+      expect(replaced.outcomes[0]?.status).toBe('applied');
+      const texts = () => engine.storySegments('body').filter((segment) => segment.kind === 'text');
+      const inserted = texts().filter((segment) => segment.kind === 'text' && segment.text === 'NEW');
+      expect(inserted).toHaveLength(1);
+      expect(inserted[0]!.kind === 'text' ? inserted[0]!.attributes.ins : undefined).toMatchObject({ author: 'Ada' });
+      expect(inserted[0]!.kind === 'text' ? inserted[0]!.attributes.italic : undefined).not.toBe(true);
+      expect(texts().filter((segment) => segment.kind === 'text' && segment.attributes.bold === true)
+        .map((segment) => segment.kind === 'text' ? segment.text : '')).toEqual(selected ? [] : ['NEW']);
+      if (selected) {
+        const struck = texts().filter((segment) => segment.kind === 'text' && segment.attributes.del);
+        expect(struck.map((segment) => segment.kind === 'text' ? segment.text : '')).toEqual(['orig']);
+        const length = engine.paragraphs('body').find((paragraph) => paragraph.paraId === paraId)!.text.length;
+        engine.rejectChange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: length } });
+        expect(engine.paragraphs('body').find((paragraph) => paragraph.paraId === paraId)?.text).toBe('a orig b');
+        expect(texts().some((segment) => segment.kind === 'text' && (segment.attributes.bold === true || segment.attributes.italic === true))).toBe(false);
+      }
+    } finally {
+      client.destroy();
+    }
+  }, TIMEOUT);
+}
+
 test('paste replays text, tables and splits across paragraphs', async () => {
   const { client, engine } = await openTableWorker();
   try {

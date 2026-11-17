@@ -55,6 +55,16 @@ describe('mergeFormattingFragment', () => {
     expect(validClipboardFragment(merged)).toBe(true);
   });
 
+  test('keeps the tooltip of a linked run', () => {
+    const linked: DocxClipboardFragment = { paragraphs: [{ text: 'Link', runs: [
+      { text: 'Link', format: { other: { bold: true } }, href: 'https://example.test/', tooltip: 'Tip' },
+    ] }] };
+    expect(mergeFormattingFragment(linked).paragraphs[0]!.runs).toEqual([
+      { text: 'Link', format: { other: { bold: true } }, href: 'https://example.test/', tooltip: 'Tip' },
+    ]);
+    expect(textOnlyFragment(linked).paragraphs).toEqual([{ text: 'Link' }]);
+  });
+
   test('does not mutate the source fragment', () => {
     const source = richFragment();
     mergeFormattingFragment(source);
