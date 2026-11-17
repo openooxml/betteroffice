@@ -12980,6 +12980,21 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
         {
             rect(x, y, w, h);
         }
+        if let Some(clip) = doc_attrs_mut(primitive)
+            .and_then(|attrs| attrs.clip_group.as_deref_mut())
+            .and_then(|group| group.clip.as_mut())
+        {
+            let left = clip_number(&clip.x);
+            let top = clip_number(&clip.y);
+            let first = point(left, top);
+            let last = point(left + clip_number(&clip.w), top + clip_number(&clip.h));
+            *clip = ClipRect {
+                x: Some(px(first.0.min(last.0))),
+                y: Some(px(first.1.min(last.1))),
+                w: Some(px((last.0 - first.0).abs())),
+                h: Some(px((last.1 - first.1).abs())),
+            };
+        }
     }
 }
 
