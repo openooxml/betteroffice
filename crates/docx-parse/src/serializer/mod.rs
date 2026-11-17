@@ -28,7 +28,9 @@ mod text_box;
 pub mod watermark;
 pub mod xml_writer;
 
-pub use context::SerializerContext;
+pub use context::{
+    DroppedParagraph, DroppedStructure, KeptParagraph, S13SaveReport, SerializerContext,
+};
 pub use foundation::{
     BorderSide, serialize_border, serialize_conditional_format_style, serialize_table_grid,
 };
@@ -60,7 +62,7 @@ pub use s12::{S12SerializeRequest, S12SerializeResponse, serialize_s12_wire};
 pub use s13::{
     S13SaveOptions, S13SaveRequest, S13SelectiveSave, S13SourceParagraph, S13SourceParagraphs,
     build_patched_document_xml, element_span, update_core_properties, write_docx_s13,
-    write_docx_s13_parts, write_docx_s13_with_warnings,
+    write_docx_s13_parts, write_docx_s13_parts_with_report, write_docx_s13_with_warnings,
 };
 pub use sdt::{serialize_block_content, serialize_block_sdt};
 pub use section::serialize_section_properties;
