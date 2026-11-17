@@ -9527,6 +9527,120 @@ mod tests {
         }
     }
 
+    fn band_style(borders: Value, regions: [&str; 2], sides: Value) -> Value {
+        let parts: Vec<Value> = regions
+            .iter()
+            .map(|region| json!({ "type": region, "tcPr": { "borders": sides } }))
+            .collect();
+        json!({ "styles": [{
+            "type": "table", "styleId": "Bands",
+            "tblPr": { "styleRowBandSize": 1, "styleColBandSize": 1, "borders": borders },
+            "tblStylePr": parts
+        }] })
+    }
+
+    fn row_band_look() -> Value {
+        json!({
+            "firstRow": false, "lastRow": false, "firstColumn": false, "lastColumn": false,
+            "noVBand": true
+        })
+    }
+
+    fn merged_cell(merge: &str) -> Value {
+        json!({ "type": "tableCell", "formatting": { "vMerge": merge }, "content": [] })
+    }
+
+    #[test]
+    fn a_band_clears_the_bottom_of_a_merged_cell_above_the_last_row() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "rows": [
+                { "cells": [merged_cell("restart"), plain] },
+                { "cells": [merged_cell("continue"), plain] }
+            ]
+        });
+        for cleared in ["nil", "none"] {
+            let definitions = band_style(
+                json!({ "bottom": { "style": "nil" }, "insideH": line }),
+                ["band1Horz", "band2Horz"],
+                json!({ "bottom": { "style": cleared } }),
+            );
+            let cells = seeded_cells(&definitions, &table);
+            assert_eq!(cells[0][0]["rowspan"], json!(2));
+            assert!(cells[0][0]["borders"]["bottom"]["size"].is_null(), "{cleared}");
+        }
+    }
+
+    #[test]
+    fn a_band_clears_the_right_of_a_cell_short_of_the_grid() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "columnWidths": [2000, 2000, 2000],
+            "rows": [{ "formatting": { "gridBefore": 1 }, "cells": [plain, plain] }]
+        });
+        for cleared in ["nil", "none"] {
+            let definitions = band_style(
+                json!({ "right": line, "insideV": line }),
+                ["band1Horz", "band2Horz"],
+                json!({ "right": { "style": cleared } }),
+            );
+            let cells = seeded_cells(&definitions, &table);
+            assert!(cells[0][1]["borders"]["right"]["size"].is_null(), "{cleared}");
+        }
+    }
+
+    #[test]
+    fn a_band_clears_the_sides_of_a_right_to_left_table() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let nil = json!({ "style": "nil" });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look(), "bidi": true },
+            "rows": [{ "cells": [plain, plain] }]
+        });
+        let definitions = band_style(
+            json!({ "left": line, "right": line, "insideV": nil }),
+            ["band1Horz", "band2Horz"],
+            json!({ "left": nil, "right": nil }),
+        );
+        let cells = seeded_cells(&definitions, &table);
+        assert!(cells[0][1]["borders"]["right"]["size"].is_null());
+        assert!(cells[0][0]["borders"]["left"]["size"].is_null());
+    }
+
+    #[test]
+    fn vertical_band_nil_borders_keep_the_table_sides() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let nil = json!({ "style": "nil" });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": {
+                "styleId": "Bands",
+                "look": {
+                    "firstRow": false, "lastRow": false, "firstColumn": false,
+                    "lastColumn": false, "noHBand": true
+                }
+            },
+            "rows": [{ "cells": [plain, plain, plain] }]
+        });
+        let definitions = band_style(
+            json!({ "left": line, "right": line }),
+            ["band1Vert", "band2Vert"],
+            json!({ "left": nil, "right": nil }),
+        );
+        let cells = seeded_cells(&definitions, &table);
+        assert_eq!(cells[0][0]["borders"]["left"]["size"], json!(8));
+        assert_eq!(cells[0][2]["borders"]["right"]["size"], json!(8));
+    }
+
     #[test]
     fn replayed_drawings_capture_source_properties_and_seed_attributes() {
         let formatting = json!({"hidden": true, "position": 20});

@@ -579,3 +579,70 @@ it('draws the header rule of a three-line table in both seeders', async () => {
     expect([size(1, 0, 'bottom'), size(1, 1, 'bottom')]).toEqual([12, 12]);
   }
 });
+
+const single = (side: string) => `<w:${side} w:val="single" w:sz="8" w:space="0" w:color="000000"/>`;
+const cleared = (side: string, value = 'nil') => `<w:${side} w:val="${value}"/>`;
+const bandStyles = (tableBorders: string, regions: string[], sides: string) =>
+  '<w:style w:type="table" w:styleId="Bands"><w:tblPr><w:tblStyleRowBandSize w:val="1"/><w:tblStyleColBandSize w:val="1"/>' +
+  `<w:tblBorders>${tableBorders}</w:tblBorders></w:tblPr>` +
+  regions
+    .map((region) => `<w:tblStylePr w:type="${region}"><w:tcPr><w:tcBorders>${sides}</w:tcBorders></w:tcPr></w:tblStylePr>`)
+    .join('') +
+  '</w:style>';
+const edgeSize = (cells: SeededCell[][], row: number, column: number, side: string) =>
+  cells[row]![column]!.borders?.[side]?.size ?? null;
+
+it('lets a band clear the bottom of a merged cell above the last row in both seeders', async () => {
+  for (const value of ['nil', 'none']) {
+    const styles = bandStyles(
+      cleared('bottom') + single('insideH'),
+      ['band1Horz', 'band2Horz'],
+      cleared('bottom', value)
+    );
+    const body = styledTable('Bands', flagsOff, [['<w:vMerge w:val="restart"/>', ''], ['<w:vMerge/>', '']], 2);
+    const seeded = await seedBoth(body, styles);
+    for (const engine of ['projected', 'native']) {
+      const cells = seeded[engine]![0]!;
+      expect(cells[0]![0]!.rowspan).toBe(2);
+      expect(edgeSize(cells, 0, 0, 'bottom')).toBeNull();
+    }
+  }
+});
+
+it('lets a band clear the right of a cell short of the grid in both seeders', async () => {
+  for (const value of ['nil', 'none']) {
+    const styles = bandStyles(single('right') + single('insideV'), ['band1Horz', 'band2Horz'], cleared('right', value));
+    const body =
+      `<w:tbl><w:tblPr><w:tblStyle w:val="Bands"/>${flagsOff}</w:tblPr><w:tblGrid>${'<w:gridCol w:w="2000"/>'.repeat(3)}</w:tblGrid>` +
+      `<w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr><w:tc>${paragraph('c0')}</w:tc><w:tc>${paragraph('c1')}</w:tc></w:tr></w:tbl>`;
+    const seeded = await seedBoth(body, styles);
+    for (const engine of ['projected', 'native']) {
+      expect(edgeSize(seeded[engine]![0]!, 0, 1, 'right')).toBeNull();
+    }
+  }
+});
+
+it('lets a band clear the sides of a right-to-left table in both seeders', async () => {
+  const styles = bandStyles(
+    single('left') + single('right') + cleared('insideV'),
+    ['band1Horz', 'band2Horz'],
+    cleared('left') + cleared('right')
+  );
+  const seeded = await seedBoth(styledTable('Bands', `<w:bidiVisual/>${flagsOff}`, [['', '']], 2), styles);
+  for (const engine of ['projected', 'native']) {
+    const cells = seeded[engine]![0]!;
+    expect(edgeSize(cells, 0, 1, 'right')).toBeNull();
+    expect(edgeSize(cells, 0, 0, 'left')).toBeNull();
+  }
+});
+
+it('keeps the table sides where a vertical band clears its own in both seeders', async () => {
+  const styles = bandStyles(single('left') + single('right'), ['band1Vert', 'band2Vert'], cleared('left') + cleared('right'));
+  const look =
+    '<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="0"/>';
+  const seeded = await seedBoth(styledTable('Bands', look, [['', '', '']], 3), styles);
+  for (const engine of ['projected', 'native']) {
+    const cells = seeded[engine]![0]!;
+    expect([edgeSize(cells, 0, 0, 'left'), edgeSize(cells, 0, 2, 'right')]).toEqual([8, 8]);
+  }
+});
