@@ -107,15 +107,39 @@ async function buildFixture(): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
+async function buildConditionalFixture(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  const date = new Date('2024-01-01T00:00:00Z');
+  const rows = Array.from({ length: 2000 }, (_, index) => {
+    const row = index + 1;
+    return `<row r="${row}">${[...'ABCDEFGHIJ'].map((col) => `<c r="${col}${row}"><v>${row}</v></c>`).join('')}</row>`;
+  }).join('');
+  const parts: Record<string, string> = {
+    '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+      `<Override PartName="/${MAIN_PART}" ContentType="${OFFICE}.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="${OFFICE}.spreadsheetml.worksheet+xml"/>` +
+      `<Override PartName="/xl/styles.xml" ContentType="${OFFICE}.spreadsheetml.styles+xml"/></Types>`,
+    '_rels/.rels': rels([['rId1', 'officeDocument', MAIN_PART]]),
+    [MAIN_PART]: `<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    'xl/_rels/workbook.xml.rels': rels([['rId1', 'worksheet', 'worksheets/sheet1.xml'], ['rId2', 'styles', 'styles.xml']]),
+    'xl/styles.xml': `<styleSheet xmlns="${MAIN}"><cellXfs count="1"><xf/></cellXfs><dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>`,
+    'xl/worksheets/sheet1.xml': `<worksheet xmlns="${MAIN}"><sheetData>${rows}</sheetData><conditionalFormatting sqref="A1:J2000">` +
+      '<cfRule type="expression" dxfId="0" priority="1"><formula>AND(MOD(A1,3)=0,SUM(A$1:A$2000)&gt;0)</formula></cfRule></conditionalFormatting></worksheet>',
+  };
+  for (const [name, content] of Object.entries(parts)) zip.file(name, content, { date });
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}
+
 const wasmEngine: XlsxEngine = { ...wasmXlsx, font_preflight: wasmFontPreflight };
 const nativeEngine = createRequire(import.meta.url)('../xlsx-native/index.js') as XlsxEngine;
 const ENGINES = [['wasm', wasmEngine], ['native', nativeEngine]] as const;
 let fixture: Uint8Array;
+let conditionalFixture: Uint8Array;
 
 beforeAll(async () => {
   await initWasm({ module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)) });
   await initPreflight({ module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/preflight/xlsx_preflight_bg.wasm', import.meta.url)) });
   fixture = await buildFixture();
+  conditionalFixture = await buildConditionalFixture();
 });
 
 // documentVersion() is "{nonce:32 hex}-{epoch}"; the nonce is minted per open.
@@ -709,6 +733,21 @@ const rows: Row<Xlsx>[] = [
       if (wraps.length === 0 || wraps.some((wrap) => wrap.maxLines === undefined)) throw new Error(`no line limit: ${JSON.stringify(wraps)}`);
       return wraps;
     },
+  },
+  {
+    method: 'XlsxDocument.displayListJson',
+    name: 'XlsxDocument.displayListJson (conditional formats left pending across frames)',
+    call: ({ engine }) => scoped(engine.XlsxDocument.openWithCalculationJson(conditionalFixture, CONTEXT), (d) => {
+      const viewport = json({ x: 0, y: 0, width: 640, height: 600 });
+      const pending: (number | undefined)[] = [];
+      let list: { commands: unknown[]; conditionalPending?: number };
+      do {
+        list = JSON.parse(d.displayListJson(viewport)) as typeof list;
+        pending.push(list.conditionalPending);
+      } while (list.conditionalPending && pending.length < 10);
+      if (!(pending[0]! > 0) || list.conditionalPending) throw new Error(`conditional formats did not settle over frames: ${json(pending)}`);
+      return { pending, settled: list.commands, export: d.pngDisplayListJson(viewport) };
+    }),
   },
   { method: 'XlsxDocument.displayListForJson', call: ({ doc }) => doc.displayListForJson(1, VIEWPORT) },
   { method: 'XlsxDocument.pngDisplayListJson', call: ({ doc }) => doc.pngDisplayListJson(VIEWPORT) },
