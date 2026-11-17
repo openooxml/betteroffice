@@ -141,6 +141,7 @@ export function mergeFormattingFragment(fragment: DocxClipboardFragment): DocxCl
               text: run.text,
               format: mergeRunFormat(run.format),
               ...(run.href ? { href: run.href } : {}),
+              ...(run.href && run.tooltip ? { tooltip: run.tooltip } : {}),
             })),
           }
         : {}),
