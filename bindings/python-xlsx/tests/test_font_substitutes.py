@@ -7,7 +7,10 @@ CASES = Path(__file__).resolve().parents[3] / "crates" / "betteroffice-fonts" / 
 
 
 def test_font_substitutes_match_the_typescript_table():
-    cases = [case for case in json.loads(CASES.read_text(encoding="utf-8")) if "family" in case["query"]]
+    rows = json.loads(CASES.read_text(encoding="utf-8"))
+    cases = [case for case in rows if "family" in case["query"] and "script" not in case["query"]]
+    assert len(cases) == sum("script" not in case["query"] for case in rows)
+    assert len(cases) > 500
     assert any(case["answer"]["wordFamilySubstitute"] for case in cases)
     for case in cases:
         expected = case["answer"]["wordFamilySubstitute"]
