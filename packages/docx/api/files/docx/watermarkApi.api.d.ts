@@ -26,6 +26,8 @@
 import type { Document, Watermark } from '../types/document';
 /** Read the document's watermark (the first header that carries one). */
 export declare function getDocumentWatermark(doc: Document | null | undefined): Watermark | undefined;
+/** Each header's own watermark, by relationship id. */
+export declare function getHeaderWatermarks(doc: Document | null | undefined): Record<string, Watermark> | undefined;
 /**
  * Return a new `Document` with the watermark applied to all headers, or removed
  * when `watermark` is null. Creates the header parts a section needs but lacks
