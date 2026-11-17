@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, expect, test } from 'bun:test';
-import type { DocxClipboardFragment, DocxTableFragment, DocxTableFragmentCell } from '@betteroffice/docx/yrs';
+import { validClipboardFragment, type DocxClipboardFragment, type DocxTableFragment, type DocxTableFragmentCell } from '@betteroffice/docx/yrs';
 import { clipboardFragmentHtml, parseClipboardHtml } from './clipboardHtml';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -245,6 +245,24 @@ test('a crafted payload is refused and nothing of it reaches a paste', () => {
   }
 });
 
-test('external html without a payload stays plain text', () => {
-  expect(parseClipboardHtml('<p><b style="color:red">bold</b> <a href="https://example.test">link</a></p>')).toBeNull();
+test('external html without a payload pastes only allow-listed formatting', () => {
+  const parsed = parseClipboardHtml(
+    '<p><b class="loud" style="color:red;position:absolute;margin-left:4px">bold</b> ' +
+    '<a href="https://example.test" target="_blank">link</a></p>'
+  );
+  expect(parsed).toEqual({ paragraphs: [{ text: 'bold link', runs: [
+    { text: 'bold', format: { other: { bold: true, textColor: { rgb: 'FF0000' } } } },
+    { text: ' ', format: { other: {} } },
+    { text: 'link', format: { other: {} }, href: 'https://example.test' },
+  ] }] });
+  expect(validClipboardFragment(parsed)).toBe(true);
+  const allowed = new Set(['bold', 'italic', 'underline', 'strike', 'textColor', 'fontSize', 'fontFamily', 'highlight']);
+  for (const run of parsed!.paragraphs[0]!.runs!) {
+    expect(Object.keys(run.format!)).toEqual(['other']);
+    expect(Object.keys(run.format!.other!).every((key) => allowed.has(key))).toBe(true);
+  }
+  const serialized = JSON.stringify(parsed);
+  for (const dropped of ['loud', 'absolute', 'margin', '_blank', 'target', 'class', 'position']) {
+    expect(serialized).not.toContain(dropped);
+  }
 });
