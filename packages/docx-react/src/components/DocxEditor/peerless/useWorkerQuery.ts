@@ -11,7 +11,8 @@ const withBytes = (_key: string, value: unknown) => ArrayBuffer.isView(value)
   ? { $type: value.constructor.name, $bytes: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) } : value;
 
 /**
- * Reads `liveRequest` once per document version; selection-scoped kinds also re-read for each selection, content control handles for each layout.
+ * Reads `liveRequest` once per document version; selection-scoped kinds also re-read for each selection, content control handles and
+ * the review snapshot for each layout or built page set.
  * While `held`, the request and selection last seen unheld stay in effect.
  */
 export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: ReturnType<typeof createPeerlessShellController>,
@@ -30,7 +31,7 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
   const { request, requestKey, key } = held ? settled.current : live;
   const latestRequest = useRef(request);
   latestRequest.current = request;
-  const layout = frameBound ? `${shown?.geometry?.documentVersion}:${shown?.geometry?.layoutRevision}` : null;
+  const layout = frameBound ? frameLayoutKey(shown) : null;
   useEffect(() => {
     let current = true;
     const currentRequest = latestRequest.current;
@@ -54,7 +55,8 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
       if (latest.status !== 'ready' || !sameQueryView(state.view, latest.view) || frameEpoch === latest.view?.geometry?.frameEpoch) return;
       frameEpoch = latest.view?.geometry?.frameEpoch;
       const held = latestResult.current;
-      if (held?.key === key && reviewPlaced(latest.view, held.query.value as DocxReviewSnapshot | null)) return;
+      if (held?.key === key && reviewPlaced(latest.view, held.query.value as DocxReviewSnapshot | null) &&
+        frameLayoutKey(held.view) === frameLayoutKey(latest.view)) return;
       load();
     }) : undefined;
     return () => { current = false; remove?.(); };
@@ -65,6 +67,13 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
 
 function sameQueryView(first: PeerlessViewSnapshot | null, second: PeerlessViewSnapshot | null) {
   return first?.version === second?.version && sameShellValue(first?.identity, second?.identity);
+}
+
+/** The pagination run, font environment and built pages a frame shows; selection and paint-only frames keep it. */
+function frameLayoutKey(view: PeerlessViewSnapshot | null | undefined) {
+  const geometry = view?.geometry;
+  return geometry ? JSON.stringify([geometry.documentVersion, geometry.layoutRevision, geometry.layoutEpoch ?? null, geometry.layoutProvisional === true,
+    geometry.pages.flatMap(({ page, displayPage }) => displayPage?.unbuilt ? [] : [page.pageId])]) : null;
 }
 
 function reviewPlaced(view: PeerlessViewSnapshot | null, review: DocxReviewSnapshot | null) {
