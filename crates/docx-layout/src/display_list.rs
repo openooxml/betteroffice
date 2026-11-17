@@ -7857,7 +7857,6 @@ fn emit_line<'a>(
         marker_attrs.list_marker_revision = marker_revision;
         let previous_len = attrs
             .and_then(|attrs| attrs.list_marker_previous_len)
-            .filter(|_| !geom.is_rtl)
             .map(|len| {
                 marker
                     .char_indices()
@@ -7875,22 +7874,35 @@ fn emit_line<'a>(
         };
         if let Some(split) = previous_len {
             let (previous, current) = marker.split_at(split);
-            let previous_width = paint.emit(prims, previous, marker_x, None);
-            paint.emit(prims, current, marker_x + previous_width, None);
+            let (previous_x, previous_width, current_x, current_width) = if geom.is_rtl {
+                let current_width = paint.emit(prims, current, marker_x, None);
+                let previous_x = marker_x + current_width;
+                let previous_width = paint.emit(prims, previous, previous_x, None);
+                (previous_x, previous_width, marker_x, current_width)
+            } else {
+                let previous_width = paint.emit(prims, previous, marker_x, None);
+                paint.emit(prims, current, marker_x + previous_width, None);
+                (
+                    marker_x,
+                    previous_width,
+                    marker_x + previous_width,
+                    (slot_width - previous_width).max(0.0),
+                )
+            };
             let font_px = font_px_of(&marker_format);
             let thickness = (font_px / 16.0).round().max(1.0);
             for (deco, x, y, w) in [
                 (
                     DecoKind::Strike,
-                    marker_x,
+                    previous_x,
                     baseline - (font_px * 0.3).round(),
                     previous_width,
                 ),
                 (
                     DecoKind::Underline,
-                    marker_x + previous_width,
+                    current_x,
                     baseline + (font_px * 0.1875).round(),
-                    (slot_width - previous_width).max(0.0),
+                    current_width,
                 ),
             ] {
                 prims.push(Primitive::Decoration(DecorationPrimitive {
