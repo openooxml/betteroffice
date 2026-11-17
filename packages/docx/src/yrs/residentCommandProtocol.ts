@@ -360,7 +360,12 @@ export interface DocxCommandPayloads {
   navigate: DocxNavigationIntent;
   selectPoint: DocxSelectionPointIntent;
   extendSelection: DocxSelectionPointIntent;
-  insertText: DocxSelectionIntent & { text: string };
+  /**
+   * With `replaceBefore`, the text right before a collapsed caret in its paragraph is expected to be exactly that, and
+   * the insertion replaces it in one edit that keeps the caret's stored formatting; the command is refused when other
+   * text is there. An input method's composition is typed this way, a step at a time.
+   */
+  insertText: DocxSelectionIntent & { text: string; replaceBefore?: string };
   replaceSelection: DocxSelectionIntent & { text: string };
   deleteBackward: DocxSelectionIntent & { count?: number };
   deleteForward: DocxSelectionIntent & { count?: number };
