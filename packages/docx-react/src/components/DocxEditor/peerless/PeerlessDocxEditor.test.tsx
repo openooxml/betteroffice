@@ -2857,7 +2857,7 @@ test('replacing a paste checks the replacement fragment and submits only an allo
   const replacements = () => requests.filter(request => request.type === 'edit' && request.command.kind === 'replacePasteFragment');
   expect(replace(refused, { anchor: at, focus: at })).toBe(false);
   expect(allowed).toHaveBeenLastCalledWith(expect.anything(), refused);
-  let outcome: Promise<boolean> | false = false;
+  let outcome: unknown = false;
   await act(async () => { outcome = replace(kept, { anchor: at, focus: at }); });
   expect(outcome).not.toBe(false);
   expect(allowed).toHaveBeenLastCalledWith(expect.anything(), kept);

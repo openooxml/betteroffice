@@ -534,8 +534,8 @@ export function createInputAdmission(_options: PeerlessInputAdmissionOptions): P
 }
 
 /**
- * Submits a clipboard fragment paste and calls `onRefused` when the worker refuses it, so a paste
- * that does not land is never silent.
+ * Submits a clipboard fragment paste, returns its submission and calls `onRefused` when the worker
+ * refuses it, so a paste that does not land is never silent.
  * @internal
  */
 export function submitPasteFragment(
@@ -543,7 +543,7 @@ export function submitPasteFragment(
   fragment: DocxClipboardFragment,
   options: PeerlessAdmissionOptions,
   onRefused: () => void
-): void {
+): PeerlessAdmissionResult {
   const watch = (result: PeerlessAdmissionResult): void => {
     if (result.status === 'submitted') {
       void result.ticket.ack.then((outcome) => { if (outcome.status === 'refused') onRefused(); }, () => {});
@@ -551,7 +551,22 @@ export function submitPasteFragment(
       void result.released.then(watch, () => {});
     }
   };
-  watch(admitIntent(admission, { kind: 'pasteFragment', payload: { fragment } }, options));
+  const submission = admitIntent(admission, { kind: 'pasteFragment', payload: { fragment } }, options);
+  watch(submission);
+  return submission;
+}
+
+/**
+ * The submission's ticket once the worker applied it, or null when it was refused, cancelled, ignored or a no-op;
+ * a held submission counts as applied when its released admission is.
+ * @internal
+ */
+export function appliedTicket(submission: PeerlessAdmissionResult): Promise<CommandTicket | null> {
+  if (submission.status === 'submitted') {
+    return submission.ticket.ack.then((outcome) => outcome.status === 'applied' ? submission.ticket : null, () => null);
+  }
+  if (submission.status === 'held') return submission.released.then(appliedTicket, () => null);
+  return Promise.resolve(null);
 }
 
 /** @internal */

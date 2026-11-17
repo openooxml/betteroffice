@@ -1138,28 +1138,23 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   }, [controller, props.onCopy, props.onCut, reportRecoverableError, t]);
   const notifyPasteRefused = useCallback(() => { toast(t('editor.pasteFailed')); }, [t]);
   const pasteRecorder = useRef<PeerlessPasteRecorder | null>(null);
-  const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number): boolean => {
+  const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number, plainText: string): boolean => {
     const current = active.current;
     if (!current) return false;
     if (!isPasteFragmentAllowed(controller.commands.store, fragment)) return false;
-    submitPasteFragment(current.binding.admission, fragment, { inputTime, source: 'paste', fence: true }, notifyPasteRefused);
+    const submission = submitPasteFragment(current.binding.admission, fragment, { inputTime, source: 'paste', fence: true }, notifyPasteRefused);
+    pasteRecorder.current?.(fragment, plainText, submission);
     props.onPaste?.();
     return true;
   }, [controller, notifyPasteRefused, props.onPaste]);
-  const onReplacePasteFragment = useCallback((fragment: DocxClipboardFragment, selection: DocxCommandSelection, variant?: 'plain' | 'merge'): Promise<boolean> | false => {
+  const onReplacePasteFragment = useCallback((fragment: DocxClipboardFragment, selection: DocxCommandSelection, variant?: 'plain' | 'merge'): PeerlessAdmissionResult | false => {
     const current = active.current;
     if (!current) return false;
     if (!isPasteFragmentAllowed(controller.commands.store, fragment)) return false;
-    const applied = (result: PeerlessAdmissionResult): Promise<boolean> =>
-      result.status === 'submitted'
-        ? result.ticket.ack.then((outcome) => outcome.status === 'applied', () => false)
-        : result.status === 'held'
-          ? result.released.then(applied, () => false)
-          : Promise.resolve(false);
-    return applied(submitInputIntent(current.binding.admission, { kind: 'replacePasteFragment', payload: {
+    return submitInputIntent(current.binding.admission, { kind: 'replacePasteFragment', payload: {
       fragment, selection, ...(variant === 'plain' ? { plain: true as const } : variant === 'merge' ? { merge: true as const } : {}),
     } },
-      { inputTime: performance.now(), source: 'paste', fence: true }));
+      { inputTime: performance.now(), source: 'paste', fence: true });
   }, [controller]);
   const selectionAnchor = useCallback(() => {
     const frame = controller.getSnapshot().view?.geometry;
@@ -1191,7 +1186,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
-    onPaste: props.onPaste, onPasteRefused: notifyPasteRefused, recordPaste: (fragment, plainText) => pasteRecorder.current?.(fragment, plainText), onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
+    onPaste: props.onPaste, onPasteRefused: notifyPasteRefused, recordPaste: (fragment, plainText, submission) => pasteRecorder.current?.(fragment, plainText, submission), onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
   inputCommand.current = contextMenu.input;
   useLayoutEffect(() => {
     active.current?.clipboard?.dispose();

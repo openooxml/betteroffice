@@ -169,8 +169,8 @@ export function useWorkerContextMenu(options: {
         if (!sameContextTarget(action, opened, latest)) throw new Error('Context menu target changed');
         if (options.environment().readOnly || options.environment().mode === 'viewing') return;
         if (isPasteFragmentAllowed(options.commands, fragment)) {
-          submitPasteFragment(current.admission, fragment, { source: 'paste', fence: true }, () => options.onPasteRefused?.());
-          options.recordPaste?.(fragment, clipboardFragmentPlainText(fragment));
+          const submission = submitPasteFragment(current.admission, fragment, { source: 'paste', fence: true }, () => options.onPasteRefused?.());
+          options.recordPaste?.(fragment, clipboardFragmentPlainText(fragment), submission);
           options.onPaste?.();
           return;
         }
