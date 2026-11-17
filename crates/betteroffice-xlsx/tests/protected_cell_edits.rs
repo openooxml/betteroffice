@@ -62,7 +62,11 @@ fn fixture(protected: bool) -> Workbook {
         protection,
         ..CellFormat::default()
     };
-    let locked_red = model.styles.intern_cell_format(&red(None)).unwrap().unwrap();
+    let locked_red = model
+        .styles
+        .intern_cell_format(&red(None))
+        .unwrap()
+        .unwrap();
     let unlocked_red = model
         .styles
         .intern_cell_format(&red(Some(Protection {
@@ -393,7 +397,13 @@ fn fill_refuses_a_locked_destination_that_only_takes_a_format() {
     );
     assert_eq!(book.version(), version);
     assert!(!book.can_undo());
-    assert!(book.model().sheet(BANDED).unwrap().cell(cell("B1")).is_none());
+    assert!(
+        book.model()
+            .sheet(BANDED)
+            .unwrap()
+            .cell(cell("B1"))
+            .is_none()
+    );
 }
 
 #[test]
@@ -406,7 +416,10 @@ fn fill_formats_unlocked_destinations_on_a_protected_sheet() {
     );
     let sheet = book.model().sheet(BANDED).unwrap();
     assert!(sheet.cell(cell("E1")).is_some());
-    assert_ne!(sheet.effective_style(cell("E1")), sheet.inherited_style(cell("E1")));
+    assert_ne!(
+        sheet.effective_style(cell("E1")),
+        sheet.inherited_style(cell("E1"))
+    );
 }
 
 #[test]
