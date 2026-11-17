@@ -33,7 +33,7 @@ export interface PeerlessInputProps {
   onClipboard?(cut: boolean, data?: DataTransfer | null): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
-  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection, plain?: boolean): Promise<boolean> | false;
+  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: DocxCommandSelection, variant?: 'plain' | 'merge'): Promise<boolean> | false;
   caretHostRef?: RefObject<HTMLDivElement | null>;
   zoom?: number;
   onNavigateCell?(direction: 'forward' | 'backward'): void;
@@ -91,7 +91,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const outcome = callbacks.current.onReplacePasteFragment?.(variant, {
       anchor: { ...record.end },
       focus: { ...record.end },
-    }, option === 'text-only');
+    }, option === 'text-only' ? 'plain' : option === 'merge' ? 'merge' : undefined);
     if (!outcome) {
       pasteReplacingRef.current = false;
       pasteRecordRef.current = null;

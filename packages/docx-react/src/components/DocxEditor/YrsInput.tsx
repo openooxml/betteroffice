@@ -831,7 +831,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             }
           }
         } else {
-          caret = applyClipboardFragment(session, record.range, variant!, suggestingAuthor());
+          caret = applyClipboardFragment(session, record.range, variant!, suggestingAuthor(), option === 'merge');
         }
         session.setSelection(caret);
         finishMutation();

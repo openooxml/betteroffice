@@ -138,7 +138,9 @@ export declare function readClipboardSlice(reader: ClipboardTableReader, target:
 /**
  * Pastes a fragment over a story range, returning the caret. Deletes a
  * non-collapsed range first, then replays each paragraph: splits for
- * paragraphs after the first, inserts tables, then text.
+ * paragraphs after the first, inserts tables, then text. With
+ * `keepInherited`, pasted runs keep the formatting at the paste point and
+ * set only their own bold, italic, underline and strikethrough.
  * @internal
  */
-export declare function applyClipboardFragment(engine: ClipboardPasteEngine, range: YrsStoryRange, fragment: DocxClipboardFragment, suggesting?: YrsAuthor): YrsLoc;
+export declare function applyClipboardFragment(engine: ClipboardPasteEngine, range: YrsStoryRange, fragment: DocxClipboardFragment, suggesting?: YrsAuthor, keepInherited?: boolean): YrsLoc;

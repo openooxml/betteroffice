@@ -240,7 +240,7 @@ const DOCX_COMMAND_POLICIES = {
   formatSelection: { keys: ['delta'] }, toggleStrike: { keys: [] }, toggleList: { keys: ['kind'] },
   changeIndent: { keys: ['direction', 'preserveNumbering'] },
   insertImage: { keys: ['image'] }, insertTable: { keys: ['rows', 'columns'] }, pasteFragment: { keys: ['fragment'] },
-  replacePasteFragment: { keys: ['fragment', 'plain'] },
+  replacePasteFragment: { keys: ['fragment', 'plain', 'merge'] },
   insertPageBreak: { keys: [] }, insertSectionBreak: { keys: ['type'] },
   insertTableRow: { keys: ['side'] }, insertTableColumn: { keys: ['side'] },
   deleteTableRow: { keys: [] }, deleteTableColumn: { keys: [] }, deleteTable: { keys: [] },
@@ -418,7 +418,8 @@ function validCommandIntent(
       if (!validClipboardFragment(payload.fragment)) return refuse('invalid-payload');
       break;
     case 'replacePasteFragment':
-      if (!validClipboardFragment(payload.fragment) || (payload.plain !== undefined && payload.plain !== true)) return refuse('invalid-payload');
+      if (!validClipboardFragment(payload.fragment) || (payload.plain !== undefined && payload.plain !== true) ||
+        (payload.merge !== undefined && payload.merge !== true) || (payload.plain && payload.merge)) return refuse('invalid-payload');
       break;
     case 'insertTableRow':
       if (!oneOf('above', 'below')(payload.side)) return refuse('invalid-payload');
@@ -1383,7 +1384,7 @@ function applyPreparedDocxCommand(
       }
       pastedOver = structuredClone(last.range);
       pastedMarks = last.storedMarks;
-      const after = applyClipboardFragment(engine, last.range, command.payload.fragment, command.payload.suggesting);
+      const after = applyClipboardFragment(engine, last.range, command.payload.fragment, command.payload.suggesting, command.payload.merge === true);
       caret(after);
       if (command.payload.plain && pastedMarks && (after.paraId !== start.paraId || after.offset !== start.offset)) {
         const typed = { story, start, end: { paraId: after.paraId, offset: after.offset } };

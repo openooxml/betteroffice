@@ -385,6 +385,7 @@ export interface DocxCommandPayloads {
     replacePasteFragment: DocxSelectionIntent & {
         fragment: DocxClipboardFragment;
         plain?: true;
+        merge?: true;
     };
     insertPageBreak: DocxSelectionIntent;
     insertSectionBreak: DocxSelectionIntent & {

@@ -272,7 +272,7 @@ function PeerlessReady({ binding, canvasForPage, zoom, autoFocus, onRecoverableT
   onClipboard?(cut: boolean): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
-  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, plain?: boolean): Promise<boolean> | false;
+  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, variant?: 'plain' | 'merge'): Promise<boolean> | false;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
   onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean | { bodyY: number };
@@ -1014,7 +1014,7 @@ export interface PeerlessPagedEditorProps {
   onClipboard?(cut: boolean): Promise<void>;
   onPasteFragment?(fragment: DocxClipboardFragment, inputTime: number): boolean;
   pasteOptions?: boolean;
-  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, plain?: boolean): Promise<boolean> | false;
+  onReplacePasteFragment?(fragment: DocxClipboardFragment, selection: import('@betteroffice/docx/yrs').DocxCommandSelection, variant?: 'plain' | 'merge'): Promise<boolean> | false;
   highlights?: readonly (DocxEchoRect & { current: boolean })[];
   onNavigateCell?(direction: 'forward' | 'backward'): void;
   onPartPoint?(point: { page: PageGeometry; x: number; y: number; clickCount: number; intent: import('@betteroffice/docx/yrs').DocxSelectionPointIntent }): boolean | { bodyY: number };
