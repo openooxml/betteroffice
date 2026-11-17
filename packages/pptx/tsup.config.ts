@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'tsup';
 import { packageBoundary } from '../../scripts/package-boundary';
-import { buildWorkerStub } from '../../scripts/worker-stub';
+import { buildWorkerStubs } from '../../scripts/worker-stub';
 
 export default defineConfig((options) => ({
   entry: {
@@ -30,7 +30,7 @@ export default defineConfig((options) => ({
   },
   onSuccess: async () => {
     const out = options.outDir ?? 'dist';
-    await buildWorkerStub({ entry: 'src/session/worker.ts', outfile: join(out, 'pptxSessionWorker.mjs'), start: './pptxWorkerStart.js' });
+    await buildWorkerStubs('pptx', out);
     await rename(join(out, 'pptxSessionWorker.node.js'), join(out, 'pptxSessionWorker.node.mjs'));
     await mkdir('dist/generated', { recursive: true });
     await mkdir(join(out, 'generated/preflight'), { recursive: true });
