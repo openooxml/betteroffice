@@ -16,8 +16,8 @@ use crate::formula::SharedFormulas;
 use crate::styles::parse_stylesheet;
 use crate::table_style::TableStyleInfo;
 use crate::xml::{
-    attr, collect_text, find_part, local_name, next_event, reader, resolve_entity,
-    resolve_part_path, xml_err,
+    PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_entity,
+    resolve_part_name, resolve_part_path, xml_err,
 };
 use crate::{
     MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAME_BYTES, MAX_HYPERLINKS, MAX_ROW_STYLES,
@@ -436,11 +436,15 @@ fn collect_tables(
     out: &mut Vec<(Table, Option<TableStyleInfo>)>,
 ) -> Result<(), ParseError> {
     let base = worksheet_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let mut seen = PartNames::default();
     for relationship in sheet_rels.values() {
         if relationship.external || !relationship.is_table() {
             continue;
         }
-        let path = resolve_part_path(base, &relationship.target);
+        let path = resolve_part_name(base, &relationship.target);
+        if !seen.push(path.clone()) {
+            continue;
+        }
         let Some(bytes) = find_part(parts, &path) else {
             continue;
         };
@@ -454,12 +458,25 @@ fn collect_tables(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static TABLE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Table parts parsed since the last call.
+#[cfg(test)]
+pub(crate) fn take_table_parses() -> usize {
+    TABLE_PARSES.replace(0)
+}
+
 /// One `xl/tables/tableN.xml` part. `headerRowCount` defaults to 1 and
 /// `totalsRowCount` to 0, both clamped to the rows the `ref` actually spans.
 fn parse_table(
     data: &[u8],
     sheet: SheetId,
 ) -> Result<Option<(Table, Option<TableStyleInfo>)>, ParseError> {
+    #[cfg(test)]
+    TABLE_PARSES.set(TABLE_PARSES.get() + 1);
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
