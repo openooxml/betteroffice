@@ -183,7 +183,10 @@ fn apply(doc: &EditingDoc, undo: &UndoSession, steps: Vec<EditStep>) -> EditAppl
 fn assert_tracked_conflict(doc: &EditingDoc, steps: Vec<EditStep>) {
     let held = request(doc, steps, EditHistory::None);
     let refused = apply_request(doc, &held, &UndoSession::new()).unwrap_err();
-    assert_eq!(refused.failure.code, EditFailureCode::TrackedRevisionConflict);
+    assert_eq!(
+        refused.failure.code,
+        EditFailureCode::TrackedRevisionConflict
+    );
 }
 
 fn apply_request(
