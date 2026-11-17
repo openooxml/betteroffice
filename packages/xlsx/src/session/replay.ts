@@ -174,8 +174,11 @@ function guard(value: unknown): boolean {
   });
 }
 
+const EDIT_REQUEST_KEYS: readonly string[] = ['expectVersion', 'steps', 'source', 'history', 'calculation'];
+
 function editRequest(value: unknown): boolean {
-  if (!record(value) || typeof value.expectVersion !== 'string' || !Array.isArray(value.steps)) {
+  if (!record(value) || typeof value.expectVersion !== 'string' || !Array.isArray(value.steps) ||
+    !Object.keys(value).every((key) => EDIT_REQUEST_KEYS.includes(key))) {
     return false;
   }
   return optionalFields(value, {
