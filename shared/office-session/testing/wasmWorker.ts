@@ -28,6 +28,10 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
             contents: `import * as client from ${JSON.stringify(entry)}; testHarness.client = client;`,
             loader: 'js',
           }));
+          build.onLoad({ filter: /\/session\/worker\.ts$/ }, () => ({
+            contents: "import { startSessionWorker } from './workerStart';\nstartSessionWorker(self);\n",
+            loader: 'ts',
+          }));
           build.onLoad({ filter: /\/wasm\/asset\.ts$/ }, () => ({
             contents: `export const shipsWasmAsset = true;
               export const wasmAssetUrl = (png = true) => new URL(png
