@@ -114,6 +114,7 @@ fn generated(seed: u64, extras: bool) -> WorkbookModel {
         header_rows: 1,
         totals_rows: 0,
         columns: vec!["Item".into(), "Amount".into()],
+        style: Vec::new(),
     });
     model.sheets.push(table);
     let mut spill = Sheet::new("Spill");

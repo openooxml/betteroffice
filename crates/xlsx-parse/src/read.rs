@@ -14,6 +14,7 @@ use xlsx_model::{
 
 use crate::formula::SharedFormulas;
 use crate::styles::parse_stylesheet;
+use crate::table_style::TableStyleInfo;
 use crate::xml::{
     attr, collect_text, find_part, local_name, next_event, reader, resolve_entity,
     resolve_part_path, xml_err,
@@ -135,6 +136,7 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
+    let tables = crate::table_style::resolve_tables(tables, styles_bytes, &styles)?;
     if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
         styles.cell_xfs.push(xlsx_model::Xf::default());
     }
@@ -431,7 +433,7 @@ fn collect_tables(
     worksheet_path: &str,
     sheet_rels: &BTreeMap<String, Relationship>,
     sheet: SheetId,
-    out: &mut Vec<Table>,
+    out: &mut Vec<(Table, Option<TableStyleInfo>)>,
 ) -> Result<(), ParseError> {
     let base = worksheet_path.rsplit_once('/').map_or("", |(dir, _)| dir);
     for relationship in sheet_rels.values() {
@@ -454,11 +456,15 @@ fn collect_tables(
 
 /// One `xl/tables/tableN.xml` part. `headerRowCount` defaults to 1 and
 /// `totalsRowCount` to 0, both clamped to the rows the `ref` actually spans.
-fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError> {
+fn parse_table(
+    data: &[u8],
+    sheet: SheetId,
+) -> Result<Option<(Table, Option<TableStyleInfo>)>, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
     let mut table: Option<Table> = None;
+    let mut style = None;
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) if local_name(&e) == b"table" && table.is_none() => {
@@ -481,7 +487,11 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError>
                     header_rows,
                     totals_rows,
                     columns: Vec::new(),
+                    style: Vec::new(),
                 });
+            }
+            Event::Start(e) if local_name(&e) == b"tableStyleInfo" && table.is_some() => {
+                style = TableStyleInfo::parse(&e)?;
             }
             Event::Start(e) if local_name(&e) == b"tableColumn" => {
                 if let Some(table) = table.as_mut() {
@@ -498,7 +508,7 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError>
             _ => {}
         }
     }
-    Ok(table)
+    Ok(table.map(|table| (table, style)))
 }
 
 fn row_count_attr(
