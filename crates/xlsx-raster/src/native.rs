@@ -419,11 +419,12 @@ pub fn render_png_with_fonts_and_images(
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text_with_fonts(run.faces, run.stack, line, *font_size)
                     });
-                    for (index, line) in lines.iter().enumerate() {
+                    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+                    for (index, line) in lines.iter().take(count).enumerate() {
                         font::paint_text(
                             &mut pixmap,
                             &font::TextRun {
-                                y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
+                                y: xlsx_render::wrap::wrapped_line_y(*y, index, count, wrap),
                                 text: line,
                                 ..run
                             },
