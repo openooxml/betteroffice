@@ -405,6 +405,7 @@ impl SnapshotGraphBuilder {
                             header_rows: table.header_rows,
                             totals_rows: table.totals_rows,
                             columns,
+                            style: Vec::new(),
                         });
                         self.column = 0;
                         return Ok((false, 1, bytes));

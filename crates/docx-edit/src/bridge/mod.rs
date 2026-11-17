@@ -1219,6 +1219,12 @@ fn walk_story_chunks<T: ReadTxn>(
                         local,
                     )?;
                     let rows_shown = !lowered.rows.is_empty();
+                    if story_id == "body"
+                        && active_stories.len() == 1
+                        && let BlockId::Str(id) = &lowered.id
+                    {
+                        local.table_embeds.insert(id.clone(), table.clone());
+                    }
                     if rows_shown && !hidden {
                         blocks.push(LayoutBlock::Table(lowered));
                     } else if rows_shown
@@ -2659,7 +2665,8 @@ fn resolve_auto_text_color(
 fn automatic_text_needs_white(color: &str) -> bool {
     let Some(value) = color
         .strip_prefix('#')
-        .filter(|value| value.len() == 6)
+        .filter(|value| matches!(value.len(), 6 | 8))
+        .and_then(|value| value.get(..6))
         .and_then(|value| u32::from_str_radix(value, 16).ok())
     else {
         return false;
@@ -6675,6 +6682,11 @@ mod tests {
     fn yrs_attrs(value: Value) -> Attrs {
         let value = crate::seed::any_from_value(value).unwrap();
         attrs_from_any(Some(&value))
+    }
+
+    #[test]
+    fn hostile_colour_value_does_not_panic() {
+        assert!(!automatic_text_needs_white("#abcde\u{20ac}"));
     }
 
     #[test]

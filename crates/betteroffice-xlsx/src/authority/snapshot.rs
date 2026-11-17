@@ -6,6 +6,7 @@ use xlsx_model::styles::{
 };
 use xlsx_model::{
     AnchorCell, AutoFilter, ChartRefKind, ConditionalFormatRule, DifferentialFormat, RunUnderline,
+    TableStyleElement, TableStyleElementType,
 };
 
 use crate::snapshot::growth::Growth;
@@ -1053,7 +1054,21 @@ struct_codec!(Table {
     header_rows,
     totals_rows,
     columns
+}; style = Vec::new());
+enum_codec!(TableStyleElementType {
+    WholeTable = 0, FirstColumnStripe = 1, SecondColumnStripe = 2, FirstRowStripe = 3,
+    SecondRowStripe = 4, LastColumn = 5, FirstColumn = 6, HeaderRow = 7, TotalRow = 8,
+    FirstHeaderCell = 9, LastHeaderCell = 10, FirstTotalCell = 11, LastTotalCell = 12,
 });
+struct_codec!(TableStyleElement { kind, size, format });
+
+/// A table as a `STYLED_TABLE_TAG` record lays it out: its `Table` record,
+/// then its style.
+pub(crate) type StyledTable = (Table, Vec<TableStyleElement>);
+
+pub(crate) fn styled_table((table, style): StyledTable) -> Table {
+    Table { style, ..table }
+}
 struct_codec!(Hyperlink {
     range,
     external_target,
@@ -1661,6 +1676,9 @@ const SIZED_FORMAT_TAG: usize = 28;
 const GRIDLESS_FORMAT_TAG: usize = 29;
 const FILL_RECORD: usize = 18;
 const BORDER_RECORD: usize = 19;
+/// Tags a table section record that carries the table's style; a record
+/// tagged with the section itself predates it.
+const STYLED_TABLE_TAG: usize = 30;
 
 fn base_section(tag: usize) -> usize {
     match tag {
@@ -1670,6 +1688,7 @@ fn base_section(tag: usize) -> usize {
         21 => ROW_STYLE_SECTION,
         XF_V2_TAG => XF_SECTION,
         CHART_XML_TAG => 7,
+        STYLED_TABLE_TAG => 16,
         SIZED_FORMAT_TAG | GRIDLESS_FORMAT_TAG => 4,
         FILL_RECORD => 11,
         BORDER_RECORD => 12,
@@ -1875,6 +1894,7 @@ impl BaseCursor {
             && charts[self.index]
                 .iter()
                 .any(|chart| chart.raw_xml.is_some());
+        let styled = self.section == 16 && !tables[self.index].style.is_empty();
         let gridless = self.section == 4 && formats[self.index].hide_gridlines;
         let sized = self.section == 4
             && (formats[self.index].default_col_width.is_some()
@@ -1890,6 +1910,7 @@ impl BaseCursor {
             12 => BORDER_RECORD,
             XF_SECTION if !released => XF_V2_TAG,
             7 if edited => CHART_XML_TAG,
+            16 if styled => STYLED_TABLE_TAG,
             4 if gridless => GRIDLESS_FORMAT_TAG,
             4 if sized => SIZED_FORMAT_TAG,
             section => section,
@@ -1930,7 +1951,12 @@ impl BaseCursor {
             13 => styles.cell_xfs[index].write(&mut w),
             14 => styles.num_fmts[index].write(&mut w),
             15 => styles.indexed_colors[index].write(&mut w),
-            16 => tables[index].write(&mut w),
+            16 => {
+                tables[index].write(&mut w);
+                if styled {
+                    tables[index].style.write(&mut w);
+                }
+            }
             17 => row_styles[index].write(&mut w),
             AUTO_FILTER_SECTION => auto_filters.write(&mut w),
             CONDITIONAL_FORMATS_SECTION if italic => {
@@ -2247,6 +2273,7 @@ impl BaseRecord {
             XF_V2_TAG => r.value::<Xf>()?,
             14 => r.value::<(u16, String)>()?,
             16 => r.value::<Table>()?,
+            STYLED_TABLE_TAG => r.value::<StyledTable>()?,
             21 => r.value::<BTreeMap<u32, u32>>()?,
             FILL_RECORD => r.value::<Fill>()?,
             BORDER_RECORD => r.value::<Border>()?,
@@ -2285,6 +2312,7 @@ impl BaseRecord {
             XF_V2_TAG => Xf::decode_cost(),
             14 => <(u16, String)>::decode_cost(),
             16 => Table::decode_cost(),
+            STYLED_TABLE_TAG => StyledTable::decode_cost(),
             21 => <BTreeMap<u32, u32>>::decode_cost(),
             FILL_RECORD => Fill::decode_cost(),
             BORDER_RECORD => Border::decode_cost(),
@@ -2353,6 +2381,7 @@ impl BaseRecord {
             14 => Self::NumberFormat(r.value()?),
             15 => Self::Color(r.value()?),
             16 => Self::Table(r.value()?),
+            STYLED_TABLE_TAG => Self::Table(styled_table(r.value()?)),
             21 => Self::Rows(r.value()?),
             FILL_RECORD => Self::Fill(r.value()?),
             BORDER_RECORD => Self::Border(r.value()?),
@@ -2603,6 +2632,7 @@ impl BaseBuilder {
                 14 => base.styles.num_fmts.push(Codec::read(&mut r)?),
                 15 => base.styles.indexed_colors.push(Codec::read(&mut r)?),
                 16 => base.tables.push(Codec::read(&mut r)?),
+                STYLED_TABLE_TAG => base.tables.push(styled_table(Codec::read(&mut r)?)),
                 21 => base.row_styles.push(Codec::read(&mut r)?),
                 FILL_RECORD => base.styles.fills.push(Codec::read(&mut r)?),
                 BORDER_RECORD => base.styles.borders.push(Codec::read(&mut r)?),
@@ -4066,6 +4096,15 @@ mod tests {
             header_rows: 0,
             totals_rows: u32::MAX,
             columns: vec!["second".into(), String::new(), "second".into()],
+            style: vec![TableStyleElement {
+                kind: TableStyleElementType::HeaderRow,
+                size: 1,
+                format: DifferentialFormat {
+                    bold: Some(true),
+                    fill: Some("#4472c4".into()),
+                    ..Default::default()
+                },
+            }],
         }];
         let budget = SnapshotBudget::new(1, 128).unwrap();
         let mut encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
@@ -4755,7 +4794,7 @@ mod tests {
             unknown
                 .iter_mut()
                 .find(|record| usize::from(record[0]) == tag)
-                .unwrap()[0] = GRIDLESS_FORMAT_TAG as u8 + 1;
+                .unwrap()[0] = STYLED_TABLE_TAG as u8 + 1;
             let mut whole = BaseBuilder::default();
             assert!(
                 unknown

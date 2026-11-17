@@ -210,6 +210,10 @@ fn deferred_since(before: (usize, usize)) -> (usize, usize) {
     (now.0 - before.0, now.1 - before.1)
 }
 
+/// Every keystroke these tests type in a body paragraph whose seed is current
+/// patches in place, the paragraphs right after a table included: a fallback
+/// means the stored text with the keystroke applied disagreed with the
+/// paragraph's text.
 fn assert_deferred((patched, fallbacks): (usize, usize), expected: usize, label: &str) {
     assert!(patched > 0, "{label}: no deferred patch was applied");
     assert_eq!(fallbacks, expected, "{label}: deferred fallbacks");
@@ -607,14 +611,19 @@ fn type_all_generated(check: fn(&CommandHost, &str)) -> (usize, usize) {
 
 #[test]
 fn typing_in_formatted_paragraphs_lays_out_as_a_fresh_session_does() {
-    assert_deferred(type_fixed(resident_matches_fresh), 1, "fixed typing");
+    assert_deferred(type_fixed(resident_matches_fresh), 0, "fixed typing");
 }
+
+/// Fallbacks the generated typing takes. A body keystroke right after a cell
+/// keystroke patches in place: the cell keystroke re-lowers only its table,
+/// which leaves the body's stored paragraphs current.
+const GENERATED_FALLBACKS: usize = 0;
 
 #[test]
 fn generated_typing_lays_out_as_a_fresh_session_does() {
     assert_deferred(
         type_all_generated(resident_matches_fresh),
-        100,
+        GENERATED_FALLBACKS,
         "generated typing",
     );
 }
@@ -639,16 +648,235 @@ fn typing_across_run_boundaries_lays_out_as_a_fresh_session_does() {
 
 #[test]
 fn typing_after_a_peer_formats_the_paragraph_lays_out_as_a_fresh_session_does() {
-    assert_deferred(peer_formats_between_keys(false), 1, "peer, no relayout");
-    assert_deferred(peer_formats_between_keys(true), 1, "peer, relayout");
+    assert_deferred(peer_formats_between_keys(false), 0, "peer, no relayout");
+    assert_deferred(peer_formats_between_keys(true), 0, "peer, relayout");
+}
+
+/// A paragraph led by a page break, which it keeps as a property, and one
+/// led by a column break, which stays an embed ahead of its text, between
+/// plain ones.
+fn break_package() -> Vec<u8> {
+    use lowering_fixture::{para, run};
+    let led = |id: &str, kind: &str, text: &str| {
+        format!(
+            r#"<w:p w14:paraId="{id}"><w:r><w:br w:type="{kind}"/></w:r>{}</w:p>"#,
+            run(text)
+        )
+    };
+    let body = [
+        para("00003001", &run("Before the breaks.")),
+        led("00003002", "page", "After a page break."),
+        para("00003003", &run("Between them.")),
+        led("00003004", "column", "After a column break."),
+        para("00003005", &run("Closing words.")),
+    ]
+    .concat();
+    package(&body)
+}
+
+/// Keystrokes after one typed into the last paragraph ahead of the layout
+/// that follows a keystroke in the paragraph between the breaks, so the body
+/// patches deferred.
+const AFTER_BREAK_TYPING: [(At, Option<&str>); 6] = [
+    (At::Body("00003004", 0), Some("x")),
+    (At::BodyEnd("00003004", 0), Some("y")),
+    (At::Body("00003004", 6), None),
+    (At::Body("00003004", 3), Some("😀")),
+    (At::Body("00003002", 0), Some("한")),
+    (At::BodyEnd("00003002", 2), None),
+];
+
+#[test]
+fn typing_ahead_of_layout_beside_a_column_break_lays_out_as_a_fresh_session_does() {
+    let before = deferred_patches();
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let bytes = break_package();
+    let engine = seeded_engine(9814, &bytes);
+    let segments = engine.doc().story_segments("body").unwrap();
+    assert!(
+        segments.iter().any(|segment| matches!(
+            &segment.content,
+            crate::SegmentContent::OtherEmbed { kind, .. } if &**kind == "columnBreak"
+        )),
+        "the column break leads its paragraph as an embed"
+    );
+    // A host turns local lowering on as it creates the session, before the
+    // font request lowers the body.
+    engine.set_local_lowering(true);
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request).seeded(9814, bytes);
+    resident_matches_fresh(&host, "break typing, opened");
+
+    let ahead = typing_key(&engine, (At::Body("00003005", 2), Some("b")));
+    let range = crate::StoryRange::new(&ahead.story, ahead.start, ahead.end);
+    engine.edit_resident_text(range, ahead.text, true).unwrap();
+    let key = typing_key(&engine, (At::Body("00003003", 3), Some("c")));
+    assert!(host.command(&key.story, key.start, key.end, key.text));
+    resident_matches_fresh(&host, "break typing, keystroke typed ahead of the layout");
+
+    for (step, key) in AFTER_BREAK_TYPING.into_iter().enumerate() {
+        let key = typing_key(&engine, key);
+        let label = format!("break typing, keystroke {} [{}]", step + 1, key.describe());
+        let work = keystroke_work(&engine, || {
+            assert!(host.command(&key.story, key.start, key.end, key.text));
+        });
+        assert_eq!(work.full_lowerings, 0, "{label}: {work:?}");
+        resident_matches_fresh(&host, &label);
+    }
+    assert_deferred(deferred_since(before), 0, "break typing");
 }
 
 #[test]
 fn fresh_sessions_agree_on_every_typed_state() {
-    assert_deferred(type_fixed(fresh_matches_fresh), 1, "fixed typing");
+    assert_deferred(type_fixed(fresh_matches_fresh), 0, "fixed typing");
     assert_deferred(
         type_all_generated(fresh_matches_fresh),
-        100,
+        GENERATED_FALLBACKS,
         "generated typing",
+    );
+}
+
+/// A whitespace-only paragraph ending in `breaks`, after a two-cell table or
+/// after a plain paragraph, between plain ones.
+fn blank_paragraph_package(after_table: bool, breaks: &[&str]) -> Vec<u8> {
+    use lowering_fixture::{para, run};
+    let breaks: String = breaks
+        .iter()
+        .map(|kind| format!(r#"<w:br w:type="{kind}"/>"#))
+        .collect();
+    let lead = if after_table {
+        table(&[[
+            para("00004101", &run("North")),
+            para("00004102", &run("South")),
+        ]])
+    } else {
+        para("00004001", &run("Opening words."))
+    };
+    let body = [
+        para("00004000", &run("Before the blank paragraph.")),
+        lead,
+        format!(
+            r#"<w:p w14:paraId="00004002"><w:r><w:t xml:space="preserve">   </w:t>{breaks}</w:r></w:p>"#
+        ),
+        para("00004003", &run("After the breaks.")),
+        para("00004004", &run("Closing words.")),
+    ]
+    .concat();
+    package(&body)
+}
+
+const BLANK_TYPING: [(At, Option<&str>); 5] = [
+    (At::Body("00004002", 0), Some("x")),
+    (At::BodyEnd("00004002", 0), Some("y")),
+    (At::Body("00004002", 0), None),
+    (At::BodyEnd("00004002", 1), None),
+    (At::Body("00004002", 1), Some(" ")),
+];
+
+/// Types into the blank paragraph with local lowering on and compares the
+/// resident layout with a fresh one after every keystroke.
+fn type_into_blank_paragraph(name: &str, client_id: u64, bytes: Vec<u8>) {
+    type_into_blank_paragraph_with(name, client_id, bytes, false);
+}
+
+/// [`type_into_blank_paragraph`], with the first break after the blank
+/// paragraph deleted as a tracked change and laid out accepted when
+/// `delete_first_break`.
+fn type_into_blank_paragraph_with(
+    name: &str,
+    client_id: u64,
+    bytes: Vec<u8>,
+    delete_first_break: bool,
+) {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let engine = seeded_engine(client_id, &bytes);
+    engine.set_local_lowering(true);
+    let mut request = lowering_pages::region_request(&engine, &bytes, font);
+    if delete_first_break {
+        let pilcrow = story_paras(&engine, "body")
+            .into_iter()
+            .find(|para| para.id == "00004002")
+            .unwrap()
+            .pilcrow;
+        let receipt = engine
+            .doc()
+            .delete_range(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::StoryRange::new("body", pilcrow + 1, pilcrow + 2),
+            )
+            .unwrap();
+        request["renderEnv"]["revisionPreview"] = json!({});
+        request["renderEnv"]["revisionPreview"][&receipt.revision_ids[0]] = json!("accepted");
+    }
+    let request = request.to_string();
+    let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+    resident_matches_fresh(&host, &format!("{name}, opened"));
+    for (step, key) in BLANK_TYPING.into_iter().enumerate() {
+        let key = typing_key(&engine, key);
+        host.command(&key.story, key.start, key.end, key.text);
+        resident_matches_fresh(
+            &host,
+            &format!("{name}, keystroke {} [{}]", step + 1, key.describe()),
+        );
+    }
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_after_a_table_before_column_and_page_breaks_matches_fresh() {
+    type_into_blank_paragraph(
+        "table, column and page breaks",
+        9861,
+        blank_paragraph_package(true, &["column", "page"]),
+    );
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_after_a_table_before_a_page_break_matches_a_fresh_layout() {
+    type_into_blank_paragraph(
+        "table, page break",
+        9862,
+        blank_paragraph_package(true, &["page"]),
+    );
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_after_a_table_before_a_column_break_matches_a_fresh_layout() {
+    type_into_blank_paragraph(
+        "table, column break",
+        9863,
+        blank_paragraph_package(true, &["column"]),
+    );
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_before_column_and_page_breaks_matches_a_fresh_layout() {
+    type_into_blank_paragraph(
+        "paragraph, column and page breaks",
+        9864,
+        blank_paragraph_package(false, &["column", "page"]),
+    );
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_before_a_deleted_column_break_and_a_page_break_matches_fresh() {
+    type_into_blank_paragraph_with(
+        "paragraph, deleted column break, page break",
+        9865,
+        blank_paragraph_package(false, &["column", "page"]),
+        true,
+    );
+}
+
+#[test]
+fn typing_in_a_blank_paragraph_before_a_deleted_page_break_and_a_page_break_matches_fresh() {
+    type_into_blank_paragraph_with(
+        "paragraph, deleted page break, page break",
+        9866,
+        blank_paragraph_package(false, &["page", "page"]),
+        true,
     );
 }
