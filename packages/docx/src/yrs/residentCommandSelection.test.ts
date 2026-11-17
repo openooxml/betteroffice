@@ -1404,3 +1404,23 @@ test('shift_click_and_drag_extend_put_the_focus_at_the_story_offset_before_a_con
       .toEqual(selection('body-1', 5, offset));
   }
 });
+
+test('positions_table_build_looks_up_one_node_per_plain_paragraph_and_scans_only_the_control_paragraph', () => {
+  const plain = Array.from({ length: 50 }, (): ControlPart[] => ['x'.repeat(40)]);
+  const arm = controlArm({ body: [...plain, ['ab', CHECKBOX, 'cd']] });
+  const click = pointer(arm);
+  const nodes = spyOn(YrsPositionProjection.prototype, 'nodeAt');
+  try {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(50 * 42 + 1 + 4).selection).toEqual(selection('body-50', 3));
+    const cold = nodes.mock.calls.length;
+    arm.state.selection = selection('body-0', 2);
+    expect(click(50 * 42 + 1 + 4).selection).toEqual(selection('body-50', 3));
+    const warm = nodes.mock.calls.length - cold;
+    expect(cold - warm).toBe(50 + 1 + 5 + 1);
+    arm.state.selection = selection('body-0', 2);
+    expect(click(10 * 42 + 1 + 7).selection).toEqual(selection('body-10', 7));
+  } finally {
+    nodes.mockRestore();
+  }
+});
