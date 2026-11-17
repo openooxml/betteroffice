@@ -284,6 +284,52 @@ test('a face opened with file URLs names every slice file and the fetch timeout 
   expect(sliceSourceOf(await openProgressiveFace(jpRef, transport([])))).toBeUndefined();
 });
 
+test('a file URL whose href is a path resolves against this realm, so a worker can fetch it', async () => {
+  const pathOnly = (file: string) => ({ href: `/_next/static/media/${file}` }) as URL;
+  const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { value: { href: 'https://app.example/ko/room/1' }, configurable: true });
+  try {
+    const face = await openProgressiveFace(jpRef, { ...transport([]), url: async (file) => pathOnly(file) });
+    const source = await sliceSourceOf(face)!;
+    expect(source.urls[jpRef.index]).toBe(`https://app.example/_next/static/media/${jpRef.index}`);
+    expect(Object.values(source.urls).every((href) => href.startsWith('https://app.example/_next/static/media/'))).toBe(true);
+  } finally {
+    if (location) Object.defineProperty(globalThis, 'location', location);
+    else delete (globalThis as { location?: unknown }).location;
+  }
+});
+
+async function withLocation<T>(href: string | undefined, run: () => Promise<T>): Promise<T> {
+  const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  if (href === undefined) delete (globalThis as { location?: unknown }).location;
+  else Object.defineProperty(globalThis, 'location', { value: { href }, configurable: true });
+  try {
+    return await run();
+  } finally {
+    if (location) Object.defineProperty(globalThis, 'location', location);
+    else delete (globalThis as { location?: unknown }).location;
+  }
+}
+
+async function sourceUrls(href: (file: string) => string) {
+  const face = await openProgressiveFace(jpRef, { ...transport([]), url: async (file) => ({ href: href(file) }) as URL });
+  return sliceSourceOf(face)!.then((source) => source.urls);
+}
+
+for (const location of [undefined, 'blob:https://app.example/3f1c2b7e-0d4a-4b6e-9a1f-2c8e5d7b6a90']) {
+  test(`a path-only file URL with ${location ? 'a blob: location' : 'no location'} is sent as it was`, async () => {
+    await expect(withLocation(location, () => sourceUrls((file) => `/_next/static/media/${file}`)))
+      .resolves.toMatchObject({ [jpRef.index]: `/_next/static/media/${jpRef.index}` });
+  });
+}
+
+for (const location of [undefined, 'https://app.example/ko/room/1']) {
+  test(`an absolute file URL is sent byte for byte ${location ? 'with' : 'without'} a location`, async () => {
+    await expect(withLocation(location, () => sourceUrls((file) => `HTTPS://CDN.Example:443/fonts/./media/${file}`)))
+      .resolves.toMatchObject({ [jpRef.index]: `HTTPS://CDN.Example:443/fonts/./media/${jpRef.index}` });
+  });
+}
+
 test('a location without file URLs cannot open, so callers fall back to the whole face', async () => {
   const { slices } = createFontProvider({ baseUrl: assets }).resolveScriptFallback('cjk-jp', false, false)!;
   const { url: _url, ...withoutUrl } = slices!;
