@@ -5264,6 +5264,22 @@ fn table_cell_style_formatting(
     result
 }
 
+/// Whether a cell takes its top, bottom, left and right border from the table's outer sides.
+fn cell_outer_edges(
+    rows: usize,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    total_columns: usize,
+) -> [bool; 4] {
+    [
+        row_index == 0,
+        row_index + 1 == rows,
+        start_column == 0,
+        end_column == total_columns,
+    ]
+}
+
 /// The shading and edge borders a cell takes from its table style's `tcPr` and active
 /// conditional parts.
 fn table_cell_style_properties(
@@ -5274,6 +5290,7 @@ fn table_cell_style_properties(
     end_column: usize,
     columns: usize,
     rowspan: usize,
+    outer: [bool; 4],
 ) -> Option<Value> {
     let parts = array(field(style, "tblStylePr"));
     if field(style, "tcPr").is_none()
@@ -5290,7 +5307,8 @@ fn table_cell_style_properties(
         columns,
         rowspan,
     );
-    let outer = regions.first().map_or([false; 4], |(_, edges)| *edges);
+    let ltr = !truthy(field(field(Some(table), "formatting"), "bidi"));
+    let outer = [outer[0], outer[1], outer[2] && ltr, outer[3] && ltr];
     let mut shading = field(field(style, "tcPr"), "shading");
     let layers = regions
         .into_iter()
@@ -5523,6 +5541,7 @@ fn project_row<'a>(
         if span.is_some_and(|(_, skip)| *skip) {
             continue;
         }
+        let outer = cell_outer_edges(rows.len(), row_index, start_column, column, total_columns);
         let style_cell = table_cell_style_properties(
             table,
             style_context.style,
@@ -5531,6 +5550,7 @@ fn project_row<'a>(
             column,
             style_context.column_count,
             span.map(|(rowspan, _)| *rowspan).unwrap_or(1),
+            outer,
         );
         let mut projected = project_cell(
             cell,
@@ -5542,10 +5562,10 @@ fn project_row<'a>(
                     )),
                 rowspan: span.map(|(rowspan, _)| *rowspan).unwrap_or(1),
                 grid_width,
-                first_row: row_index == 0,
-                last_row: row_index + 1 == rows.len(),
-                first_column: start_column == 0,
-                last_column: column == total_columns,
+                first_row: outer[0],
+                last_row: outer[1],
+                first_column: outer[2],
+                last_column: outer[3],
                 table_borders: style_context.borders,
                 style_cell: style_cell.as_ref(),
                 default_margins: style_context.margins,
@@ -5586,6 +5606,7 @@ fn project_row<'a>(
                 "content": [{ "type": "paragraph", "content": [] }]
             })
         };
+        let outer = cell_outer_edges(rows.len(), row_index, 0, total_columns, total_columns);
         let style_cell = table_cell_style_properties(
             table,
             style_context.style,
@@ -5594,6 +5615,7 @@ fn project_row<'a>(
             total_columns,
             style_context.column_count,
             1,
+            outer,
         );
         let projected = project_cell(
             &synthetic,
@@ -5605,10 +5627,10 @@ fn project_row<'a>(
                     )),
                 rowspan: 1,
                 grid_width: (total_width > 0.0).then_some(100.0),
-                first_row: row_index == 0,
-                last_row: row_index + 1 == rows.len(),
-                first_column: true,
-                last_column: true,
+                first_row: outer[0],
+                last_row: outer[1],
+                first_column: outer[2],
+                last_column: outer[3],
                 table_borders: style_context.borders,
                 style_cell: style_cell.as_ref(),
                 default_margins: style_context.margins,

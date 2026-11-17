@@ -38,6 +38,7 @@ import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
 import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeStyleRunFormatting, mergeTextFormatting } from '../utils/textFormattingMerge';
 import {
+  cellOuterEdges,
   tableCellParagraphFormatting,
   tableCellRunFormatting,
   tableCellStyleProperties,
@@ -1638,6 +1639,7 @@ function projectRow(
     }
     column += colspan;
     if (rowSpan?.skip) return;
+    const outer = cellOuterEdges(table.rows.length, rowIndex, startColumn, column, totalColumns);
     cells.push({
       extraRunFormatting: tableCellRunFormatting(table, tableStyle, rowIndex, startColumn, column, styleColumns),
       paragraphFormatting: tableCellParagraphFormatting(
@@ -1652,10 +1654,10 @@ function projectRow(
         isHeader: rowIndex === 0 && !!table.formatting?.look?.firstRow,
         rowspan: rowSpan?.rowSpan ?? 1,
         gridWidth,
-        firstRow: rowIndex === 0,
-        lastRow: rowIndex === table.rows.length - 1,
-        firstColumn: startColumn === 0,
-        lastColumn: column === totalColumns,
+        firstRow: outer[0],
+        lastRow: outer[1],
+        firstColumn: outer[2],
+        lastColumn: outer[3],
         tableBorders,
         styleCell: tableCellStyleProperties(
           table,
@@ -1664,7 +1666,8 @@ function projectRow(
           startColumn,
           column,
           styleColumns,
-          rowSpan?.rowSpan ?? 1
+          rowSpan?.rowSpan ?? 1,
+          outer
         ),
         defaultMargins,
         theme,
@@ -1673,6 +1676,7 @@ function projectRow(
     });
   });
   if (cells.length === 0) {
+    const outer = cellOuterEdges(table.rows.length, rowIndex, 0, totalColumns, totalColumns);
     cells.push({
       extraRunFormatting: tableCellRunFormatting(table, tableStyle, rowIndex, 0, totalColumns, styleColumns),
       paragraphFormatting: tableCellParagraphFormatting(
@@ -1693,12 +1697,12 @@ function projectRow(
           isHeader: rowIndex === 0 && !!table.formatting?.look?.firstRow,
           rowspan: 1,
           gridWidth: totalWidth > 0 ? 100 : undefined,
-          firstRow: rowIndex === 0,
-          lastRow: rowIndex === table.rows.length - 1,
-          firstColumn: true,
-          lastColumn: true,
+          firstRow: outer[0],
+          lastRow: outer[1],
+          firstColumn: outer[2],
+          lastColumn: outer[3],
           tableBorders,
-          styleCell: tableCellStyleProperties(table, tableStyle, rowIndex, 0, totalColumns, styleColumns),
+          styleCell: tableCellStyleProperties(table, tableStyle, rowIndex, 0, totalColumns, styleColumns, 1, outer),
           defaultMargins,
           theme,
           tableBidi: Boolean(table.formatting?.bidi),

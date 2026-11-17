@@ -10,7 +10,7 @@ import type { Style } from '../types/styles';
 import { mergeParagraphFormatting } from '../utils/paragraphFormattingMerge';
 import { mergeTextFormatting } from '../utils/textFormattingMerge';
 
-type RegionEdges = [top: boolean, bottom: boolean, left: boolean, right: boolean];
+export type RegionEdges =[top: boolean, bottom: boolean, left: boolean, right: boolean];
 
 type NamedLookFlag = Exclude<keyof TableLook, 'value'>;
 
@@ -45,6 +45,17 @@ export function tableCellRunFormatting(
   return tableCellStyleFormatting(table, style, rowIndex, startColumn, endColumn, columns, 'rPr');
 }
 
+/** Whether a cell takes its top, bottom, left and right border from the table's outer sides. */
+export function cellOuterEdges(
+  rows: number,
+  rowIndex: number,
+  startColumn: number,
+  endColumn: number,
+  totalColumns: number
+): RegionEdges {
+  return [rowIndex === 0, rowIndex === rows - 1, startColumn === 0, endColumn === totalColumns];
+}
+
 /** The shading and edge borders a cell takes from its table style's `tcPr` and active conditional parts. */
 export function tableCellStyleProperties(
   table: Table,
@@ -53,11 +64,15 @@ export function tableCellStyleProperties(
   startColumn: number,
   endColumn: number,
   columns: number,
-  rowspan = 1
+  rowspan: number,
+  outer: RegionEdges
 ): Pick<TableCellFormatting, 'shading' | 'borders'> | undefined {
   if (!style?.tcPr && !style?.tblStylePr?.some((part) => part.tcPr)) return undefined;
   const regions = tableStyleRegions(table, style, rowIndex, startColumn, endColumn, columns, rowspan);
-  const [outerTop, outerBottom, outerLeft, outerRight] = regions[0]![1];
+  const ltr = !table.formatting?.bidi;
+  const [outerTop, outerBottom] = outer;
+  const outerLeft = outer[2] && ltr;
+  const outerRight = outer[3] && ltr;
   const layers: Array<[TableCellFormatting | undefined, RegionEdges, boolean]> = [
     [style.tcPr && { shading: style.tcPr.shading }, [true, true, true, true], false],
     ...regions
