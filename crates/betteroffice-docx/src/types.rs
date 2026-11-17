@@ -8,6 +8,7 @@ use docx_parse::media::MediaFile;
 use docx_parse::notes::Note;
 use docx_parse::numbering::NumberingDefinitions;
 use docx_parse::relationships::Relationship;
+use docx_parse::serializer::{DroppedStructure, KeptParagraph};
 use docx_parse::settings::DocumentSettings;
 use docx_parse::styles::StyleDefinitions;
 use docx_parse::theme::Theme;
@@ -61,6 +62,21 @@ impl Default for SaveOptions {
             modified_by: None,
         }
     }
+}
+
+/// The bytes a save writes and the structure it kept or dropped.
+#[derive(Clone, Debug)]
+pub struct SaveReport {
+    pub bytes: Vec<u8>,
+    pub kept_unchanged: Option<KeptUnchanged>,
+    pub structure_dropped: Option<Vec<DroppedStructure>>,
+}
+
+/// Paragraphs a save wrote as their source bytes, counted, with the first ones described.
+#[derive(Clone, Debug)]
+pub struct KeptUnchanged {
+    pub structure: u32,
+    pub paragraphs: Vec<KeptParagraph>,
 }
 
 #[derive(Debug, Clone)]

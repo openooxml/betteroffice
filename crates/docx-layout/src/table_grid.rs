@@ -825,10 +825,11 @@ fn autofit_column_widths(
         .as_deref()
         .or(table_block.column_widths.as_deref())
         .map_or(0.0, |grid| grid.iter().sum());
-    let limit = if explicit_width_px.is_some() {
-        budget
-    } else {
-        budget.max(stated.min(grid_total))
+    let absolute = resolved_table_width_type(table_block, content_width) != Some("pct");
+    let limit = match explicit_width_px {
+        Some(width) if absolute => budget.max(width),
+        Some(_) => budget,
+        None => budget.max(stated.min(grid_total)),
     };
     let target = limit.min(
         min_total.max(explicit_width_px.unwrap_or(if max_total > 0.0 {
@@ -1675,7 +1676,7 @@ mod tests {
     }
 
     #[test]
-    fn non_percentage_widths_keep_the_text_width_autofit_limit() {
+    fn non_percentage_widths_ignore_the_compat_cell_margin_basis() {
         for mode in [14, 15] {
             for algorithm in [None, Some("autofit"), Some("fixed")] {
                 for width_type in [None, Some("dxa"), Some("auto")] {
@@ -1695,12 +1696,12 @@ mod tests {
                                  "padding": {"top": 0, "bottom": 0, "left": 0, "right": 7.2}}
                             ]}]
                         })).unwrap();
-                        let expected = if algorithm == Some("autofit") {
-                            554.2
-                        } else if width_type == Some("auto") {
-                            200.0
-                        } else {
+                        let expected = if width_type != Some("auto") {
                             2000.0 / 3.0
+                        } else if algorithm == Some("autofit") {
+                            554.2
+                        } else {
+                            200.0
                         };
                         let actual: f64 = resolve_table_column_widths(&table, 554.2).iter().sum();
                         assert_close_to(actual, expected, 6);
@@ -2393,7 +2394,7 @@ mod tests {
             for bidi in [false, true] {
                 let mut block: TableBlock = serde_json::from_value(json!({
                     "id": 0, "layoutMode": "autofit", "gridWidths": [300, 300],
-                    "preferredWidth": {"value": 9000, "type": "dxa"},
+                    "preferredWidth": {"value": 5000, "type": "pct"},
                     "indent": 100, "justification": justification, "bidi": bidi,
                     "rows": [{"id": 0, "cells": [
                         {"id": 0, "blocks": [], "minContentWidth": 40, "maxContentWidth": 40},
@@ -2648,6 +2649,68 @@ mod tests {
             assert_eq!(
                 resolve_table_column_widths(&block, 600.0),
                 vec![600.0, 600.0]
+            );
+        }
+    }
+
+    fn autofit_table_with_width(value: f64, width_type: &str, indent: f64) -> TableBlock {
+        serde_json::from_value(json!({
+            "id": 0, "tableLayout": "autofit", "indent": indent,
+            "preferredWidth": {"value": value, "type": width_type},
+            "gridWidths": [450, 450], "columnWidths": [450, 450],
+            "rows": [{"id": 0, "cells": [
+                {"id": 0, "blocks": [], "preferredWidth": {"value": 6750, "type": "dxa"}},
+                {"id": 1, "blocks": [], "preferredWidth": {"value": 6750, "type": "dxa"}}
+            ]}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn autofit_table_keeps_explicit_dxa_width_wider_than_text_area() {
+        let content = vec![vec![Some((20.0, 100.0)); 2]];
+        for indent in [0.0, 100.0] {
+            let block = autofit_table_with_width(13500.0, "dxa", indent);
+            assert_eq!(
+                resolve_content_fitted_column_widths(&block, 600.0, Some(&content)),
+                (vec![450.0, 450.0], true),
+                "indent {indent}"
+            );
+        }
+    }
+
+    #[test]
+    fn autofit_table_with_unknown_content_keeps_explicit_dxa_width_wider_than_text_area() {
+        let block = autofit_table_with_width(13500.0, "dxa", 0.0);
+        let content = vec![vec![None, Some((20.0, 100.0))]];
+        assert_eq!(
+            resolve_content_fitted_column_widths(&block, 600.0, Some(&content)),
+            (vec![450.0, 450.0], false)
+        );
+    }
+
+    #[test]
+    fn autofit_table_shrinks_stated_cells_to_explicit_dxa_width_narrower_than_text_area() {
+        let block = autofit_table_with_width(7500.0, "dxa", 0.0);
+        let content = vec![vec![Some((20.0, 100.0)); 2]];
+        assert_eq!(
+            resolve_content_fitted_column_widths(&block, 600.0, Some(&content)),
+            (vec![250.0, 250.0], true)
+        );
+    }
+
+    #[test]
+    fn autofit_table_clamps_pct_width_to_text_area_and_lets_auto_width_follow_stated_cells() {
+        let content = vec![vec![Some((20.0, 100.0)); 2]];
+        for (value, width_type, expected) in [
+            (7500.0, "pct", vec![300.0, 300.0]),
+            (0.0, "auto", vec![450.0, 450.0]),
+        ] {
+            let block = autofit_table_with_width(value, width_type, 0.0);
+            assert_eq!(
+                resolve_content_fitted_column_widths(&block, 600.0, Some(&content)),
+                (expected, true),
+                "{width_type}"
             );
         }
     }
