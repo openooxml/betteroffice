@@ -3,18 +3,19 @@
 use ooxml_drawingml::SymbolFont;
 use serde::{Deserialize, Serialize};
 
-use crate::block::{StoryContext, transparent_children};
+use crate::block::{StoryContext, direction_scoped_children};
 use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
     ParagraphFormatting, ParagraphFrame, SpacingExplicit, parse_paragraph_properties,
 };
 use crate::image::{is_text_box_drawing, parse_drawing};
 use crate::inline::{
-    ContentPosition, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation, MathType,
-    OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType, StructuredFieldContent,
-    StructuredFieldTree, absorb_beyond_field_nesting, check_container_beyond_field_nesting,
-    field_depth_error, has_bookmark_id, parse_bookmark_end, parse_bookmark_start, parse_field_type,
-    parse_hyperlink, parse_run, parse_sdt_properties, run_content_length,
+    ContentPosition, DirectionScope, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation,
+    MathType, OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType,
+    StructuredFieldContent, StructuredFieldTree, absorb_beyond_field_nesting,
+    check_container_beyond_field_nesting, field_depth_error, has_bookmark_id, parse_bookmark_end,
+    parse_bookmark_start, parse_field_type, parse_hyperlink, parse_run, parse_sdt_properties,
+    run_content_length,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -410,6 +411,7 @@ pub(crate) fn parse_paragraph_with_story_context(
         smart_art: &mut *context.smart_art,
         group_text_boxes: Some(&mut enrich),
     });
+    let enclosing_scopes = budget.begin_direction_scopes();
     paragraph.content = parse_paragraph_contents(
         element,
         relationships,
@@ -423,7 +425,9 @@ pub(crate) fn parse_paragraph_with_story_context(
         false,
         false,
         context.watermark_claimed_separately,
+        &[],
     )?;
+    budget.end_direction_scopes(enclosing_scopes);
     apply_list_rendering(&mut paragraph, properties, styles, numbering);
     Ok(paragraph)
 }
@@ -573,6 +577,7 @@ fn parse_paragraph_contents(
     deletion: bool,
     in_control: bool,
     watermark_claimed_separately: bool,
+    scopes: &[DirectionScope],
 ) -> Result<Vec<ParagraphContent>, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let tracked_context = if deletion {
@@ -584,7 +589,9 @@ fn parse_paragraph_contents(
     let mut fields: Vec<OpenComplexField> = Vec::new();
     let mut beyond_nesting = 0;
     let mut runs = Vec::new();
-    for child in transparent_children(element, false) {
+    let children = direction_scoped_children(element, &mut || budget.next_direction_scope());
+    for (inner, child) in children {
+        let scopes = [scopes, inner.as_slice()].concat();
         let normalized;
         let child = if tracked_context == TrackedContext::Deletion
             && (in_control || matches!(child.local_name(), "r" | "sdt"))
@@ -597,7 +604,7 @@ fn parse_paragraph_contents(
         check_container_beyond_field_nesting(beyond_nesting, child, part)?;
         match child.local_name() {
             "r" => {
-                let run = parse_run_with_context(
+                let mut run = parse_run_with_context(
                     child,
                     relationships,
                     theme,
@@ -608,6 +615,7 @@ fn parse_paragraph_contents(
                     in_control || !element.matches_name("w", "p"),
                     watermark_claimed_separately,
                 )?;
+                run.direction_scopes = scopes;
                 let before = output.len();
                 process_field_run(run, &mut fields, &mut beyond_nesting, &mut output, part)?;
                 runs.push(
@@ -632,6 +640,7 @@ fn parse_paragraph_contents(
                     depth + 1,
                     in_control,
                     watermark_claimed_separately,
+                    &scopes,
                 )?;
                 if let Some(active) = fields.last_mut() {
                     active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)));
@@ -674,6 +683,7 @@ fn parse_paragraph_contents(
                     depth + 1,
                     in_control,
                     watermark_claimed_separately,
+                    &scopes,
                 )?;
                 if let Some(active) = fields.last_mut() {
                     active.absorb(InlineNode::SimpleField(Box::new(field)));
@@ -698,6 +708,7 @@ fn parse_paragraph_contents(
                         tracked_context == TrackedContext::Deletion,
                         true,
                         watermark_claimed_separately,
+                        &scopes,
                     )?;
                     output.push(ParagraphContent::Inline(InlineNode::InlineSdt(Box::new(
                         InlineSdt {
@@ -727,6 +738,7 @@ fn parse_paragraph_contents(
                     is_deletion,
                     in_control,
                     watermark_claimed_separately,
+                    &scopes,
                 )?;
                 let content = if in_control {
                     filter_field_inline(content, true)
@@ -793,8 +805,11 @@ fn parse_paragraph_contents(
             ))),
             // Paragraph properties are handled by the orchestrator.
             "pPr" | "proofErr" | "permStart" | "permEnd" => {}
+            "smartTagPr" | "customXmlPr" if child.namespace_prefix() == Some("w") => {}
             _ => {
-                if let Some(raw) = crate::inline::raw_foreign_node(child, budget) {
+                if let Some(raw) = crate::inline::raw_foreign_node(child, budget)
+                    .or_else(|| crate::inline::unmodeled_word_node(child, budget))
+                {
                     output.push(ParagraphContent::Inline(InlineNode::RawXml(Box::new(raw))));
                 }
             }
@@ -889,6 +904,7 @@ fn parse_simple_field_composed(
     depth: usize,
     in_control: bool,
     watermark_claimed_separately: bool,
+    scopes: &[DirectionScope],
 ) -> Result<SimpleField, ParseError> {
     let instruction = element
         .attribute(Some("w"), "instr")
@@ -908,6 +924,7 @@ fn parse_simple_field_composed(
             false,
             in_control,
             watermark_claimed_separately,
+            scopes,
         )?,
         false,
     );
@@ -957,6 +974,7 @@ fn parse_hyperlink_composed(
     depth: usize,
     in_control: bool,
     watermark_claimed_separately: bool,
+    scopes: &[DirectionScope],
 ) -> Result<Hyperlink, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let mut hyperlink = parse_hyperlink(
@@ -970,19 +988,25 @@ fn parse_hyperlink_composed(
     )?;
     let mut children = Vec::new();
     let mut structured = Vec::new();
-    for child in element.child_elements().take(10_000) {
+    let scoped = direction_scoped_children(element, &mut || budget.next_direction_scope());
+    for (inner, child) in scoped.into_iter().take(10_000) {
+        let scopes = [scopes, inner.as_slice()].concat();
         let node = match child.local_name() {
-            "r" => Some(InlineNode::Run(parse_run_with_context(
-                child,
-                relationships,
-                theme,
-                styles,
-                doc_defaults,
-                budget,
-                drawing.as_deref_mut(),
-                true,
-                watermark_claimed_separately,
-            )?)),
+            "r" => {
+                let mut run = parse_run_with_context(
+                    child,
+                    relationships,
+                    theme,
+                    styles,
+                    doc_defaults,
+                    budget,
+                    drawing.as_deref_mut(),
+                    true,
+                    watermark_claimed_separately,
+                )?;
+                run.direction_scopes = scopes;
+                Some(InlineNode::Run(run))
+            }
             "bookmarkStart" => has_bookmark_id(child)
                 .then(|| InlineNode::BookmarkStart(parse_bookmark_start(child))),
             "bookmarkEnd" => {
@@ -1001,6 +1025,7 @@ fn parse_hyperlink_composed(
                     depth + 1,
                     in_control,
                     watermark_claimed_separately,
+                    &scopes,
                 )?,
             ))),
             "sdt" => parse_inline_sdt_composed(
@@ -1015,15 +1040,22 @@ fn parse_hyperlink_composed(
                 depth + 1,
                 false,
                 watermark_claimed_separately,
+                &scopes,
             )?
             .map(|sdt| InlineNode::InlineSdt(Box::new(sdt))),
             "oMath" | "oMathPara" => Some(InlineNode::Math(parse_math(child))),
-            _ => None,
+            "proofErr" | "permStart" | "permEnd" | "smartTagPr" | "customXmlPr"
+            | "commentRangeStart" | "commentRangeEnd" => None,
+            _ => crate::inline::unmodeled_word_node(child, budget)
+                .map(|raw| InlineNode::RawXml(Box::new(raw))),
         };
         if let Some(node) = node {
             if matches!(
                 node,
-                InlineNode::Run(_) | InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)
+                InlineNode::Run(_)
+                    | InlineNode::BookmarkStart(_)
+                    | InlineNode::BookmarkEnd(_)
+                    | InlineNode::RawXml(_)
             ) {
                 children.push(node.clone());
             }
@@ -1051,6 +1083,7 @@ fn parse_inline_sdt_composed(
     depth: usize,
     property_theme: bool,
     watermark_claimed_separately: bool,
+    scopes: &[DirectionScope],
 ) -> Result<Option<InlineSdt>, ParseError> {
     let Some(container) = element.child("w", "sdtContent") else {
         return Ok(None);
@@ -1069,6 +1102,7 @@ fn parse_inline_sdt_composed(
             false,
             true,
             watermark_claimed_separately,
+            scopes,
         )?,
         true,
     );
@@ -2079,6 +2113,8 @@ pub fn paragraph_starts_with_rendered_page_break(element: &XmlElement) -> bool {
                     | "sdtContent"
                     | "fldSimple"
                     | "customXml"
+                    | "dir"
+                    | "bdo"
                     | "ins"
                     | "del"
                     | "moveFrom"

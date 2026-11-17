@@ -33,12 +33,90 @@ pub struct Run {
     #[serde(rename = "propertyChanges", skip_serializing_if = "Option::is_none")]
     pub property_changes: Option<Vec<RunPropertyChange>>,
     pub content: Vec<RunContent>,
+    /// The `w:dir` and `w:bdo` elements around the run, outermost first.
+    #[serde(rename = "directionScopes", default, skip_serializing_if = "Vec::is_empty")]
+    pub direction_scopes: Vec<DirectionScope>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunType {
     #[serde(rename = "run")]
     Run,
+}
+
+/// One `w:dir` or `w:bdo` element. Runs inside the same element share its `id`, an ordinal
+/// unique within the paragraph.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectionScope {
+    pub kind: DirectionKind,
+    pub val: String,
+    pub id: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<crate::paragraph::RawAttribute>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DirectionKind {
+    Dir,
+    Bdo,
+}
+
+impl DirectionKind {
+    pub fn element(self) -> &'static str {
+        match self {
+            Self::Dir => "w:dir",
+            Self::Bdo => "w:bdo",
+        }
+    }
+}
+
+pub(crate) fn direction_scope(element: &XmlElement, id: u32) -> Option<DirectionScope> {
+    let kind = if element.matches_name("w", "dir") {
+        DirectionKind::Dir
+    } else if element.matches_name("w", "bdo") {
+        DirectionKind::Bdo
+    } else {
+        return None;
+    };
+    Some(DirectionScope {
+        kind,
+        val: element
+            .attribute(Some("w"), "val")
+            .unwrap_or_default()
+            .to_owned(),
+        id,
+        extra: element
+            .attributes
+            .iter()
+            .filter(|(name, _)| !matches!(name.as_str(), "w:val" | "val"))
+            .map(|(name, value)| crate::paragraph::RawAttribute {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// The characters in the `w:t`, `w:delText` and `w:instrText` descendants of `element`.
+pub(crate) fn word_text_chars(element: &XmlElement) -> usize {
+    element
+        .child_elements()
+        .map(|child| {
+            if matches!(child.local_name(), "t" | "delText" | "instrText") {
+                child.text_content().chars().count()
+            } else {
+                word_text_chars(child)
+            }
+        })
+        .sum()
+}
+
+pub(crate) fn has_word_text(element: &XmlElement) -> bool {
+    element.child_elements().any(|child| {
+        matches!(child.local_name(), "t" | "delText" | "instrText") || has_word_text(child)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -267,6 +345,7 @@ pub fn parse_run(
         formatting,
         property_changes,
         content: parse_run_contents(element),
+        direction_scopes: Vec::new(),
     };
     let mut resolved_formatting = resolve_run_formatting(&run, styles, doc_defaults);
     if theme.is_some()
@@ -990,6 +1069,27 @@ pub(crate) fn raw_foreign_node(
         raw.source_ordinal = element.first_paragraph_ordinal();
     }
     Some(*raw)
+}
+
+/// A `w:` inline element no walker models, kept as raw XML. One holding text is recorded for
+/// the parse warnings.
+pub(crate) fn unmodeled_word_node(
+    element: &crate::xml::XmlElement,
+    budget: &mut crate::xml::ParseBudget<'_>,
+) -> Option<RawInlineXml> {
+    if element.namespace_prefix() != Some("w") {
+        return None;
+    }
+    if has_word_text(element) {
+        budget.record_unmodeled_inline(&element.name, word_text_chars(element));
+    }
+    Some(RawInlineXml {
+        node_type: RawInlineXmlType::RawXml,
+        xml: element.to_raw_inline_xml(),
+        source_ordinal: element
+            .first_paragraph_ordinal()
+            .filter(|_| budget.records_source_ordinals()),
+    })
 }
 
 /// Whether `element` is foreign markup the model keeps as raw XML, read from its name alone.

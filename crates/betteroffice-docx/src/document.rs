@@ -1190,6 +1190,7 @@ fn replace_plain_run(paragraph: &mut Paragraph, text: String, template: RunTempl
             preserve_space: (text.trim() != text).then_some(true),
             text,
         }],
+        direction_scopes: Vec::new(),
     }))];
 }
 

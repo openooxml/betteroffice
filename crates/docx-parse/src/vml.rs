@@ -1685,6 +1685,7 @@ mod tests {
             content: vec![crate::inline::RunContent::HorizontalRule {
                 rule: Box::new(rule.clone()),
             }],
+            direction_scopes: Vec::new(),
         };
         let mut context =
             crate::serializer::SerializerContext::new(&crate::serializer::SerializerDeterminism {
@@ -1742,6 +1743,7 @@ mod tests {
             content: vec![crate::inline::RunContent::HorizontalRule {
                 rule: Box::new(rule.clone()),
             }],
+            direction_scopes: Vec::new(),
         };
         let mut context =
             crate::serializer::SerializerContext::new(&crate::serializer::SerializerDeterminism {

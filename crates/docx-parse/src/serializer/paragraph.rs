@@ -5,8 +5,8 @@ use crate::formatting::{
     NumberingProperties, ParagraphCnfStyle, ParagraphFormatting, ParagraphFrame,
 };
 use crate::inline::{
-    BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation, Run,
-    RunContent, SdtProperties, SimpleField, field_runs,
+    BookmarkEnd, BookmarkStart, ComplexField, DirectionScope, Hyperlink, InlineNode, InlineSdt,
+    MathEquation, Run, RunContent, SdtProperties, SimpleField, field_runs,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -16,7 +16,7 @@ use crate::paragraph_identity::W14_NAMESPACE;
 use crate::section::SectionProperties;
 use crate::xml::ParseError;
 
-use super::context::{DeferredFormData, SerializerContext};
+use super::context::{DeferredFormData, SerializerContext, shared_direction_prefix};
 use super::foundation::{BorderSide, write_border};
 use super::raw::{
     validate_form_field_data, validate_math_subtree, validate_raw_subtree,
@@ -44,7 +44,9 @@ pub fn serialize_paragraph(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     context.enter_paragraph(paragraph.rendered_page_break_before == Some(true));
+    let enclosing = std::mem::take(&mut context.direction);
     let result = serialize_paragraph_inner(paragraph, context);
+    context.direction = enclosing;
     context.leave_paragraph();
     result.map(
         |xml| match context.record_paragraph(paragraph.source_ordinal, &xml) {
@@ -158,6 +160,10 @@ fn serialize_paragraph_inner(
                 .end_element();
             generated_comment_references.push(marker.id);
         }
+    }
+    let closing = context.direction.close_all();
+    if !closing.is_empty() {
+        append_generated(&mut writer, &closing);
     }
     writer.end_element();
     Ok(writer.finish())
@@ -340,11 +346,82 @@ pub(super) fn serialize_bookmark_end(bookmark: &BookmarkEnd) -> String {
 }
 
 fn serialize_context_run(run: &Run, context: &mut SerializerContext) -> Result<String, ParseError> {
-    if context.deletion {
-        serialize_deleted_run(run, context)
+    serialize_scoped_run(run, context.deletion, context)
+}
+
+fn serialize_scoped_run(
+    run: &Run,
+    deletion: bool,
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
+    let opened = context.direction.transition(&run.direction_scopes);
+    let xml = if deletion {
+        serialize_deleted_run(run, context)?
     } else {
-        serialize_run(run, context)
+        serialize_run(run, context)?
+    };
+    Ok(prefixed(opened, xml))
+}
+
+fn prefixed(mut before: String, xml: String) -> String {
+    if before.is_empty() {
+        return xml;
     }
+    before.push_str(&xml);
+    before
+}
+
+fn merge_run_direction_scopes<'a>(run: &'a Run, shared: &mut Option<&'a [DirectionScope]>) {
+    let scopes = run.direction_scopes.as_slice();
+    *shared = Some(match *shared {
+        Some(current) => &current[..shared_direction_prefix(current, scopes)],
+        None => scopes,
+    });
+}
+
+fn merge_direction_scopes<'a>(node: &'a InlineNode, shared: &mut Option<&'a [DirectionScope]>) {
+    match node {
+        InlineNode::Run(run) => merge_run_direction_scopes(run, shared),
+        InlineNode::Hyperlink(link) => {
+            let children = link.structured_children.as_ref().unwrap_or(&link.children);
+            for child in children {
+                merge_direction_scopes(child, shared);
+            }
+        }
+        InlineNode::SimpleField(field) => {
+            for run in &field.content {
+                merge_run_direction_scopes(run, shared);
+            }
+        }
+        InlineNode::ComplexField(field) => {
+            for run in field.field_code.iter().chain(&field.field_result) {
+                merge_run_direction_scopes(run, shared);
+            }
+        }
+        InlineNode::InlineSdt(sdt) => {
+            for child in &sdt.content {
+                merge_direction_scopes(child, shared);
+            }
+        }
+        InlineNode::Tracked(change) => {
+            for child in &change.content {
+                merge_direction_scopes(child, shared);
+            }
+        }
+        InlineNode::BookmarkStart(_)
+        | InlineNode::BookmarkEnd(_)
+        | InlineNode::Math(_)
+        | InlineNode::RawXml(_) => {}
+    }
+}
+
+/// The `w:dir`/`w:bdo` scopes every run in `nodes` sits in, outermost first; `None` without runs.
+fn shared_direction_scopes(nodes: &[InlineNode]) -> Option<&[DirectionScope]> {
+    let mut shared = None;
+    for node in nodes {
+        merge_direction_scopes(node, &mut shared);
+    }
+    shared
 }
 
 fn serialize_hyperlink(
@@ -359,7 +436,11 @@ fn serialize_hyperlink(
                 .iter()
                 .any(|child| child.has_tracked_control(false, context.in_revision))
     });
-    for child in nested.unwrap_or(&hyperlink.children) {
+    let written = nested.unwrap_or(&hyperlink.children);
+    let (before, base) = context
+        .direction
+        .enter_wrapper(shared_direction_scopes(written));
+    for child in written {
         match child {
             _ if expanded => children.push_str(&serialize_inline_node(child, context)?),
             InlineNode::Run(run) => children.push_str(&serialize_context_run(run, context)?),
@@ -372,9 +453,16 @@ fn serialize_hyperlink(
             InlineNode::InlineSdt(_) if child.has_tracked_control(false, context.in_revision) => {
                 children.push_str(&serialize_inline_node(child, context)?);
             }
+            InlineNode::RawXml(_) => children.push_str(&serialize_inline_node(child, context)?),
             _ => {}
         }
     }
+    children.push_str(&context.direction.leave_wrapper(base));
+    let xml = serialize_hyperlink_element(hyperlink, children);
+    Ok(prefixed(before, xml))
+}
+
+fn serialize_hyperlink_element(hyperlink: &Hyperlink, children: String) -> String {
     let has_attributes = nonempty(hyperlink.relationship_id.as_deref()).is_some()
         || nonempty(hyperlink.anchor.as_deref()).is_some()
         || nonempty(hyperlink.tooltip.as_deref()).is_some()
@@ -382,7 +470,7 @@ fn serialize_hyperlink(
         || hyperlink.history.is_some()
         || nonempty(hyperlink.doc_location.as_deref()).is_some();
     if !has_attributes && nonempty(hyperlink.href.as_deref()).is_none() {
-        return Ok(children);
+        return children;
     }
     let mut writer = XmlWriter::with_capacity(children.len() + 128);
     writer.start_element("w:hyperlink");
@@ -400,14 +488,18 @@ fn serialize_hyperlink(
     );
     append_generated(&mut writer, &children);
     writer.end_element();
-    Ok(writer.finish())
+    writer.finish()
 }
 
 fn serialize_simple_field(
     field: &SimpleField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    let mut output = String::new();
+    let mut shared = None;
+    for run in &field.content {
+        merge_run_direction_scopes(run, &mut shared);
+    }
+    let (mut output, base) = context.direction.enter_wrapper(shared);
     output.push_str("<w:fldSimple w:instr=\"");
     output.push_str(&super::xml_writer::escape_xml(&field.instruction));
     output.push('"');
@@ -421,6 +513,7 @@ fn serialize_simple_field(
     for run in &field.content {
         output.push_str(&serialize_context_run(run, context)?);
     }
+    output.push_str(&context.direction.leave_wrapper(base));
     output.push_str("</w:fldSimple>");
     Ok(output)
 }
@@ -598,7 +691,14 @@ fn serialize_complex_field(
         .and_then(|run| run.formatting.as_ref())
         .or(field.formatting.as_ref());
     let properties = serialize_text_formatting(formatting);
-    let mut output = String::new();
+    let mut shared = None;
+    for run in field.field_code.iter().chain(&field.field_result) {
+        merge_run_direction_scopes(run, &mut shared);
+    }
+    let mut output = match shared {
+        Some(scopes) => context.direction.transition(scopes),
+        None => String::new(),
+    };
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"begin\"");
@@ -715,6 +815,9 @@ pub fn serialize_inline_sdt(
     append_generated(&mut writer, &properties);
     append_generated(&mut writer, &end_properties);
     writer.start_element("w:sdtContent");
+    let (before, base) = context
+        .direction
+        .enter_wrapper(shared_direction_scopes(&sdt.content));
     let previous = std::mem::replace(&mut context.in_control, true);
     let result = sdt.content.iter().try_for_each(|item| {
         append_generated(&mut writer, &serialize_inline_node(item, context)?);
@@ -722,8 +825,12 @@ pub fn serialize_inline_sdt(
     });
     context.in_control = previous;
     result?;
+    let closing = context.direction.leave_wrapper(base);
+    if !closing.is_empty() {
+        append_generated(&mut writer, &closing);
+    }
     writer.end_element().end_element();
-    Ok(writer.finish())
+    Ok(prefixed(before, writer.finish()))
 }
 
 fn form_field_name(field: &ComplexField, raw: &str) -> String {
@@ -895,6 +1002,9 @@ fn serialize_tracked_change(
         "moveTo" => ("w:moveTo", false),
         _ => return Ok(String::new()),
     };
+    let (before, base) = context
+        .direction
+        .enter_wrapper(shared_direction_scopes(&change.content));
     let mut writer = XmlWriter::with_capacity(256);
     writer
         .start_element(element)
@@ -914,13 +1024,7 @@ fn serialize_tracked_change(
     let result = change.content.iter().try_for_each(|item| {
         let xml = match item {
             _ if context.in_control => serialize_inline_node(item, context)?,
-            InlineNode::Run(run) => {
-                if deletion {
-                    serialize_deleted_run(run, context)?
-                } else {
-                    serialize_run(run, context)?
-                }
-            }
+            InlineNode::Run(run) => serialize_scoped_run(run, deletion, context)?,
             InlineNode::Hyperlink(link) => serialize_hyperlink(link, context)?,
             InlineNode::InlineSdt(_) => {
                 context.deletion = deletion;
@@ -939,8 +1043,12 @@ fn serialize_tracked_change(
     context.in_revision = previous_revision;
     context.deletion = previous_deletion;
     result?;
+    let closing = context.direction.leave_wrapper(base);
+    if !closing.is_empty() {
+        append_generated(&mut writer, &closing);
+    }
     writer.end_element();
-    Ok(writer.finish())
+    Ok(prefixed(before, writer.finish()))
 }
 
 fn serialize_range_start(marker: &RangeStart) -> Result<String, ParseError> {
@@ -1351,6 +1459,7 @@ mod tests {
                     text: "3".to_owned(),
                     preserve_space: None,
                 }],
+                direction_scopes: Vec::new(),
             }],
             fld_lock: Some(true),
             dirty: Some(true),
@@ -1391,6 +1500,7 @@ mod tests {
                     text: "hello & goodbye".to_owned(),
                     preserve_space: None,
                 }],
+                direction_scopes: Vec::new(),
             }))],
             list_rendering: None,
             rendered_page_break_before: Some(true),
@@ -1427,6 +1537,7 @@ mod tests {
                         text: "A".to_owned(),
                         preserve_space: None,
                     }],
+                    direction_scopes: Vec::new(),
                 }))],
                 list_rendering: None,
                 rendered_page_break_before: None,

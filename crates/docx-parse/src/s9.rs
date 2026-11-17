@@ -773,6 +773,7 @@ fn parse_s9_package_impl(
         .then(|| extract_all_template_variables(&body.content));
     warnings.extend(media_warnings);
     warnings.extend(smart_art.warnings);
+    warnings.extend(budget.take_unmodeled_inline_warnings());
     let warnings = (!warnings.is_empty()).then_some(warnings);
 
     let mut document = S9DocumentWire {

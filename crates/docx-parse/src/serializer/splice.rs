@@ -800,10 +800,12 @@ fn layout<'s>(
 pub(crate) const KEPT_UNCHANGED: &str = "kept:structure";
 
 /// The elements whose count a paragraph whose run formatting alone changed must keep.
-const STRUCTURE: [&str; 29] = [
+const STRUCTURE: [&str; 31] = [
     "w:hyperlink",
     "w:smartTag",
     "w:customXml",
+    "w:dir",
+    "w:bdo",
     "w:sdt",
     "w:fldSimple",
     "w:fldChar",

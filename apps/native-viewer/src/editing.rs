@@ -2143,6 +2143,7 @@ fn set_paragraph_text(paragraph: &mut Paragraph, target: &str) -> Result<(), Str
                 formatting: None,
                 property_changes: None,
                 content: Vec::new(),
+                direction_scopes: Vec::new(),
             });
         paragraph.content = vec![ParagraphContent::Inline(InlineNode::Run(run_with_text(
             &template,
@@ -2180,6 +2181,7 @@ fn set_paragraph_text(paragraph: &mut Paragraph, target: &str) -> Result<(), Str
                 formatting: None,
                 property_changes: None,
                 content: Vec::new(),
+                direction_scopes: Vec::new(),
             });
         output.push(run_with_text(&template, replacement));
     }
