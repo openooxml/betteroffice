@@ -98,8 +98,11 @@ function inputSettled(binding: PeerlessEditSessionBinding): boolean {
   return !admission || (!admission.tail && admission.compositionSlot === null && admission.heldIntents === 0);
 }
 
-/** @internal Reads the settled selection's clipboard slice ahead of a copy so the copy event can fill its clipboardData. */
-export function createClipboardPrefetch(options: ClipboardSliceRead) {
+/**
+ * @internal Reads the settled selection's clipboard slice ahead of a copy so the copy event can fill its clipboardData.
+ * Nothing is read ahead while `held` answers true; `resume` reads the selection it then shows.
+ */
+export function createClipboardPrefetch(options: ClipboardSliceRead & { held?(): boolean }) {
   const { binding } = options;
   let cached: { key: string; capture: ClipboardCapture | null; error?: unknown } | null = null;
   let reading: { key: string; capture: Promise<ClipboardCapture | null> } | null = null;
@@ -109,17 +112,20 @@ export function createClipboardPrefetch(options: ClipboardSliceRead) {
     unsubscribe();
     cached = null;
   };
+  const layoutOf = () => binding.viewStore.getSnapshot().geometry?.layoutEpoch ?? null;
+  const laidOut = (key: string | null, layout: number | null) => key && `${key}|${layout}`;
   const schedule = () => {
     if (disposed) return;
     if (!options.isCurrent()) { dispose(); return; }
-    const key = snapshotKey(binding);
+    const layout = layoutOf();
+    const key = laidOut(snapshotKey(binding), layout);
     if (cached && key !== cached.key) cached = null;
-    if (!key || key === cached?.key || reading) return;
+    if (!key || key === cached?.key || reading || options.held?.()) return;
     const capture = readWorkerClipboardSlice(options);
     reading = { key, capture };
     void capture.then(captured => {
       if (disposed) return;
-      const capturedKey = captured ? selectionKey(captured.identity, captured.version, captured.selection) : key;
+      const capturedKey = captured ? laidOut(selectionKey(captured.identity, captured.version, captured.selection), layout) : key;
       if (capturedKey) cached = { key: capturedKey, capture: (captured?.slice.text || captured?.slice.fragment || captured?.slice.leftOut?.length) ? captured : null };
     }, error => {
       if (!disposed) cached = { key, capture: null, error };
@@ -127,19 +133,21 @@ export function createClipboardPrefetch(options: ClipboardSliceRead) {
   };
   const unsubscribe = binding.viewStore.subscribe(schedule);
   const take = (): ClipboardCapture | null =>
-    !disposed && cached && options.isCurrent() && inputSettled(binding) && snapshotKey(binding) === cached.key
+    !disposed && cached && options.isCurrent() && inputSettled(binding) && laidOut(snapshotKey(binding), layoutOf()) === cached.key
       ? cached.capture : null;
   schedule();
   return {
     take,
+    resume: schedule,
     /** Reads the selection as it stood at the call, whatever the selection does while the read runs; a cut rechecks it before acting. */
     async read(): Promise<ClipboardCapture | null> {
       await settleEarlierInput(binding);
       if (disposed || !options.isCurrent()) return null;
       const state = binding.viewStore.getSnapshot();
       const key = selectionKey(state.identity, state.version, state.workerSelection);
-      if (key && cached?.key === key && !cached.error) return cached.capture;
-      if (key && reading?.key === key) {
+      const current = laidOut(key, state.geometry?.layoutEpoch ?? null);
+      if (current && cached?.key === current && !cached.error) return cached.capture;
+      if (current && reading?.key === current) {
         const captured = await reading.capture.catch(() => null);
         if (captured && selectionKey(captured.identity, captured.version, captured.selection) === key) return captured;
       }
