@@ -19087,4 +19087,41 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn rotated_cell_content_turns_a_line_clip() {
+        let clip = |x: f64, y: f64, w: f64, h: f64| ClipRect {
+            x: Some(px(x)),
+            y: Some(px(y)),
+            w: Some(px(w)),
+            h: Some(px(h)),
+        };
+        for (rotation, expected) in [
+            (90.0, clip(50.0, 10.0, 30.0, 40.0)),
+            (-90.0, clip(20.0, 150.0, 30.0, 40.0)),
+        ] {
+            let mut attrs = DocAttrs::default();
+            apply_clip_group(&mut attrs, "clip".to_owned(), clip(10.0, 20.0, 40.0, 30.0));
+            let mut prims = vec![Primitive::Line(LinePrimitive {
+                x1: px(10.0),
+                y1: px(20.0),
+                x2: px(50.0),
+                y2: px(20.0),
+                attrs,
+                ..LinePrimitive::contract_defaults()
+            })];
+            rotate_cell_content(&mut prims, (0.0, 0.0, 100.0, 200.0), rotation);
+            let Primitive::Line(line) = &prims[0] else {
+                unreachable!()
+            };
+            assert_eq!(
+                line.attrs
+                    .clip_group
+                    .as_ref()
+                    .and_then(|group| group.clip.clone()),
+                Some(expected),
+                "{rotation}"
+            );
+        }
+    }
 }
