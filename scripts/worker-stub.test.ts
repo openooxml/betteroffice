@@ -1,6 +1,7 @@
 import { afterAll, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { buildWorkerStub as BuildWorkerStub } from './worker-stub';
@@ -40,7 +41,10 @@ test('a docx build into another directory writes both worker stubs there and non
   const docx = join(packages, 'docx');
   const out = join(directory, 'docx-out');
   const published = ['dist/docxWorker.mjs', 'dist/yrs/docxWorker.mjs'].map((file) => join(docx, file));
-  const snapshot = () => Promise.all(published.map((file) => stat(file).then(({ mtimeMs, size }) => ({ mtimeMs, size }), () => null)));
+  const snapshot = () => Promise.all(published.map((file) => readFile(file).then(
+    (bytes) => createHash('sha256').update(bytes).digest('hex'),
+    () => null,
+  )));
   const before = await snapshot();
   const build = spawnSync(process.execPath, ['x', 'tsup', '--out-dir', out], {
     cwd: docx,
