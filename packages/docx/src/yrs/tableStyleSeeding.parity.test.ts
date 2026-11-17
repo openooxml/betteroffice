@@ -301,9 +301,14 @@ it('applies conditional cell shading and borders identically for both seeders', 
 
 type SeededCell = { backgroundColor: string | null; borders: Record<string, any> | null; rowspan: number };
 
-async function seedBoth(body: string, styles: string): Promise<Record<string, SeededCell[][][]>> {
+async function seedBoth(
+  body: string,
+  styles: string,
+  edit?: (parsed: Awaited<ReturnType<typeof parseDocx>>) => void
+): Promise<Record<string, SeededCell[][][]>> {
   const bytes = documentFixture(body, styles);
   const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+  edit?.(parsed);
   const projected = await createYrsSession({ clientId: 74221 });
   const native = await createYrsSession({ clientId: 74221 });
   try {
@@ -637,12 +642,126 @@ it('lets a band clear the sides of a right-to-left table in both seeders', async
 });
 
 it('keeps the table sides where a vertical band clears its own in both seeders', async () => {
-  const styles = bandStyles(single('left') + single('right'), ['band1Vert', 'band2Vert'], cleared('left') + cleared('right'));
+  const styles = bandStyles(
+    single('left') + single('right') + single('insideV'),
+    ['band1Vert', 'band2Vert'],
+    cleared('left') + cleared('right')
+  );
   const look =
     '<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="0"/>';
-  const seeded = await seedBoth(styledTable('Bands', look, [['', '', '']], 3), styles);
+  const body = styledTable('Bands', look, [['', '', '']], 3);
+  const seeded = await seedBoth(body, styles);
+  const unbanded = await seedBoth(withoutBands(body), styles);
   for (const engine of ['projected', 'native']) {
     const cells = seeded[engine]![0]!;
+    const plain = unbanded[engine]![0]!;
     expect([edgeSize(cells, 0, 0, 'left'), edgeSize(cells, 0, 2, 'right')]).toEqual([8, 8]);
+    expect(edgeSize(cells, 0, 1, 'left')).toBeNull();
+    expect(edgeSize(plain, 0, 1, 'left')).toBe(8);
+    expect(cells[0]![1]!.borders?.left ?? null).not.toEqual(plain[0]![1]!.borders?.left ?? null);
+  }
+});
+
+const withoutBands = (body: string) =>
+  body.replace(/w:noHBand="\d"/g, 'w:noHBand="1"').replace(/w:noVBand="\d"/g, 'w:noVBand="1"');
+const sized = (side: string, size: number) =>
+  `<w:${side} w:val="single" w:sz="${size}" w:space="0" w:color="000000"/>`;
+const bothBands =
+  '<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="0" w:noVBand="0"/>';
+const layeredBandStyles = (tableBorders: string, parts: Array<[string, string]>) =>
+  '<w:style w:type="table" w:styleId="Bands"><w:tblPr><w:tblStyleRowBandSize w:val="1"/><w:tblStyleColBandSize w:val="1"/>' +
+  `<w:tblBorders>${tableBorders}</w:tblBorders></w:tblPr>` +
+  parts
+    .map(([region, sides]) => `<w:tblStylePr w:type="${region}"><w:tcPr><w:tcBorders>${sides}</w:tcBorders></w:tcPr></w:tblStylePr>`)
+    .join('') +
+  '</w:style>';
+const offsetBandTable =
+  `<w:tbl><w:tblPr><w:tblStyle w:val="Bands"/>${bothBands}</w:tblPr><w:tblGrid>${'<w:gridCol w:w="2000"/>'.repeat(3)}</w:tblGrid>` +
+  `<w:tr><w:tc>${paragraph('a')}</w:tc><w:tc>${paragraph('b')}</w:tc><w:tc>${paragraph('c')}</w:tc></w:tr>` +
+  `<w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr><w:tc>${paragraph('d')}</w:tc><w:tc>${paragraph('e')}</w:tc></w:tr></w:tbl>`;
+const layeredBands = (value = 'nil') =>
+  layeredBandStyles(sized('left', 4), [
+    ['band2Horz', sized('insideV', 8)],
+    ['band2Vert', cleared('left', value)],
+  ]);
+
+it('leaves no earlier band layer behind on a skipped band edge in both seeders', async () => {
+  for (const value of ['nil', 'none']) {
+    const seeded = await seedBoth(offsetBandTable, layeredBands(value));
+    for (const engine of ['projected', 'native']) {
+      expect(edgeSize(seeded[engine]![0]!, 1, 0, 'left')).toBe(4);
+    }
+  }
+});
+
+it('shows the table side where a vertical band clears a horizontal band edge in both seeders', async () => {
+  const styles = layeredBandStyles(sized('left', 4), [
+    ['band1Horz', sized('left', 12)],
+    ['band1Vert', cleared('left')],
+  ]);
+  const seeded = await seedBoth(styledTable('Bands', bothBands, [['', '']], 2), styles);
+  for (const engine of ['projected', 'native']) {
+    expect(edgeSize(seeded[engine]![0]!, 0, 0, 'left')).toBe(4);
+  }
+});
+
+it('takes the band edges of an explicit empty grid from the widest row in both seeders', async () => {
+  const styles = bandStyles(single('right') + single('insideV'), ['band1Horz', 'band2Horz'], cleared('right'));
+  const body =
+    `<w:tbl><w:tblPr><w:tblStyle w:val="Bands"/>${flagsOff}</w:tblPr><w:tblGrid/>` +
+    `<w:tr><w:tc>${paragraph('c0')}</w:tc></w:tr></w:tbl>`;
+  const seeded = await seedBoth(body, styles, (parsed) => {
+    for (const block of parsed.package.document.content) {
+      if (block.type === 'table') block.columnWidths = [];
+    }
+  });
+  expect(seeded.projected![0]![0]![0]!.borders).toEqual(seeded.native![0]![0]![0]!.borders);
+  expect(edgeSize(seeded.native![0]!, 0, 0, 'right')).toBe(8);
+});
+
+it('gives a skipped band edge the border of the same table without bands in both seeders', async () => {
+  const ruled =
+    '<w:style w:type="table" w:styleId="Ruled"><w:tblPr><w:tblStyleRowBandSize w:val="1"/>' +
+    `<w:tblBorders>${single('top')}${single('left')}${single('bottom')}${single('right')}</w:tblBorders></w:tblPr>` +
+    `<w:tblStylePr w:type="band1Horz"><w:tcPr><w:tcBorders>${cleared('top')}${cleared('bottom')}</w:tcBorders></w:tcPr></w:tblStylePr>` +
+    `<w:tblStylePr w:type="firstCol"><w:tcPr><w:tcBorders>${cleared('bottom')}</w:tcBorders></w:tcPr></w:tblStylePr></w:style>`;
+  const ruledLook =
+    '<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>';
+  const offsetTable =
+    `<w:tbl><w:tblPr><w:tblStyle w:val="Bands"/>${flagsOff}</w:tblPr><w:tblGrid>${'<w:gridCol w:w="2000"/>'.repeat(3)}</w:tblGrid>` +
+    `<w:tr><w:trPr><w:gridBefore w:val="1"/></w:trPr><w:tc>${paragraph('c0')}</w:tc><w:tc>${paragraph('c1')}</w:tc></w:tr></w:tbl>`;
+  const constructions: Array<[string, string, Array<[number, number, string]>]> = [
+    [
+      styledTable('Ruled', ruledLook, Array.from({ length: 3 }, () => ['', '', '']), 3),
+      ruled,
+      [
+        [0, 1, 'top'],
+        [0, 2, 'top'],
+        [2, 1, 'bottom'],
+        [2, 2, 'bottom'],
+      ],
+    ],
+    [
+      styledTable('Bands', flagsOff, [['<w:vMerge w:val="restart"/>', ''], ['<w:vMerge/>', '']], 2),
+      bandStyles(cleared('bottom') + single('insideH'), ['band1Horz', 'band2Horz'], cleared('bottom')),
+      [[1, 0, 'bottom']],
+    ],
+    [
+      offsetTable,
+      bandStyles(single('left') + single('insideV'), ['band1Horz', 'band2Horz'], cleared('insideV')),
+      [[0, 0, 'left']],
+    ],
+    [offsetBandTable, layeredBands(), [[1, 0, 'left']]],
+  ];
+  for (const [body, styles, edges] of constructions) {
+    const banded = await seedBoth(body, styles);
+    const unbanded = await seedBoth(withoutBands(body), styles);
+    for (const engine of ['projected', 'native']) {
+      for (const [row, column, side] of edges) {
+        const edge = (seeded: Record<string, SeededCell[][][]>) =>
+          seeded[engine]![0]![row]![column]!.borders?.[side] ?? null;
+        expect(edge(banded)).toEqual(edge(unbanded));
+      }
+    }
   }
 });

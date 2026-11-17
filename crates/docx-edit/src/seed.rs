@@ -9675,19 +9675,211 @@ mod tests {
                 "styleId": "Bands",
                 "look": {
                     "firstRow": false, "lastRow": false, "firstColumn": false,
-                    "lastColumn": false, "noHBand": true
+                    "lastColumn": false, "noHBand": true, "noVBand": false
                 }
             },
             "rows": [{ "cells": [plain, plain, plain] }]
         });
         let definitions = band_style(
-            json!({ "left": line, "right": line }),
+            json!({ "left": line, "right": line, "insideV": line }),
             ["band1Vert", "band2Vert"],
             json!({ "left": nil, "right": nil }),
         );
         let cells = seeded_cells(&definitions, &table);
+        let unbanded = seeded_cells(&definitions, &without_bands(&table));
         assert_eq!(cells[0][0]["borders"]["left"]["size"], json!(8));
         assert_eq!(cells[0][2]["borders"]["right"]["size"], json!(8));
+        assert!(cells[0][1]["borders"]["left"]["size"].is_null());
+        assert_eq!(unbanded[0][1]["borders"]["left"]["size"], json!(8));
+        assert_ne!(cells[0][1]["borders"]["left"], unbanded[0][1]["borders"]["left"]);
+    }
+
+    fn both_bands_look() -> Value {
+        json!({
+            "firstRow": false, "lastRow": false, "firstColumn": false, "lastColumn": false,
+            "noHBand": false, "noVBand": false
+        })
+    }
+
+    fn layered_band_style(table_borders: Value, parts: [(&str, Value); 2]) -> Value {
+        let parts: Vec<Value> = parts
+            .iter()
+            .map(|(region, sides)| json!({ "type": region, "tcPr": { "borders": sides } }))
+            .collect();
+        json!({ "styles": [{
+            "type": "table", "styleId": "Bands",
+            "tblPr": { "styleRowBandSize": 1, "styleColBandSize": 1, "borders": table_borders },
+            "tblStylePr": parts
+        }] })
+    }
+
+    fn offset_band_table() -> Value {
+        let plain = json!({ "type": "tableCell", "content": [] });
+        json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": both_bands_look() },
+            "columnWidths": [2000, 2000, 2000],
+            "rows": [
+                { "cells": [plain, plain, plain] },
+                { "formatting": { "gridBefore": 1 }, "cells": [plain, plain] }
+            ]
+        })
+    }
+
+    fn sized_line(size: u32) -> Value {
+        json!({ "style": "single", "size": size, "color": { "rgb": "000000" } })
+    }
+
+    #[test]
+    fn a_skipped_band_edge_leaves_no_earlier_band_layer_behind() {
+        for cleared in ["nil", "none"] {
+            let definitions = layered_band_style(
+                json!({ "left": sized_line(4) }),
+                [
+                    ("band2Horz", json!({ "insideV": sized_line(8) })),
+                    ("band2Vert", json!({ "left": { "style": cleared } })),
+                ],
+            );
+            let cells = seeded_cells(&definitions, &offset_band_table());
+            assert_eq!(cells[1][0]["borders"]["left"]["size"], json!(4), "{cleared}");
+        }
+    }
+
+    #[test]
+    fn a_cleared_vertical_band_edge_shows_the_table_side_over_a_horizontal_band() {
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": both_bands_look() },
+            "rows": [{ "cells": [plain, plain] }]
+        });
+        let definitions = layered_band_style(
+            json!({ "left": sized_line(4) }),
+            [
+                ("band1Horz", json!({ "left": sized_line(12) })),
+                ("band1Vert", json!({ "left": { "style": "nil" } })),
+            ],
+        );
+        let cells = seeded_cells(&definitions, &table);
+        assert_eq!(cells[0][0]["borders"]["left"]["size"], json!(4));
+    }
+
+    #[test]
+    fn an_empty_grid_takes_its_band_edges_from_the_widest_row() {
+        let line = sized_line(8);
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "columnWidths": [],
+            "rows": [{ "cells": [{ "type": "tableCell", "content": [] }] }]
+        });
+        let definitions = band_style(
+            json!({ "right": line, "insideV": line }),
+            ["band1Horz", "band2Horz"],
+            json!({ "right": { "style": "nil" } }),
+        );
+        let cells = seeded_cells(&definitions, &table);
+        assert_eq!(cells[0][0]["borders"]["right"]["size"], json!(8));
+    }
+
+    fn without_bands(table: &Value) -> Value {
+        let mut table = table.clone();
+        table["formatting"]["look"]["noHBand"] = json!(true);
+        table["formatting"]["look"]["noVBand"] = json!(true);
+        table
+    }
+
+    #[test]
+    fn a_skipped_band_edge_matches_the_same_table_without_bands() {
+        let line = sized_line(8);
+        let nil = json!({ "style": "nil" });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let ruled = json!({ "styles": [{
+            "type": "table", "styleId": "Ruled",
+            "tblPr": {
+                "styleRowBandSize": 1,
+                "borders": { "top": line, "bottom": line, "left": line, "right": line }
+            },
+            "tblStylePr": [
+                { "type": "band1Horz", "tcPr": { "borders": { "top": nil, "bottom": nil } } },
+                { "type": "firstCol", "tcPr": { "borders": { "bottom": nil } } }
+            ]
+        }] });
+        let ruled_table = json!({
+            "type": "table",
+            "formatting": {
+                "styleId": "Ruled",
+                "look": {
+                    "firstRow": false, "lastRow": false, "firstColumn": true, "noVBand": true
+                }
+            },
+            "rows": [
+                { "cells": [plain, plain, plain] },
+                { "cells": [plain, plain, plain] },
+                { "cells": [plain, plain, plain] }
+            ]
+        });
+        let merged_table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "rows": [
+                { "cells": [merged_cell("restart"), plain] },
+                { "cells": [merged_cell("continue"), plain] }
+            ]
+        });
+        let offset_table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "columnWidths": [2000, 2000, 2000],
+            "rows": [{ "formatting": { "gridBefore": 1 }, "cells": [plain, plain] }]
+        });
+        let constructions = [
+            (
+                ruled,
+                ruled_table,
+                vec![(0, 1, "top"), (0, 2, "top"), (2, 1, "bottom"), (2, 2, "bottom")],
+            ),
+            (
+                band_style(
+                    json!({ "bottom": nil, "insideH": line }),
+                    ["band1Horz", "band2Horz"],
+                    json!({ "bottom": nil }),
+                ),
+                merged_table,
+                vec![(1, 0, "bottom")],
+            ),
+            (
+                band_style(
+                    json!({ "left": line, "insideV": line }),
+                    ["band1Horz", "band2Horz"],
+                    json!({ "insideV": nil }),
+                ),
+                offset_table,
+                vec![(0, 0, "left")],
+            ),
+            (
+                layered_band_style(
+                    json!({ "left": sized_line(4) }),
+                    [
+                        ("band2Horz", json!({ "insideV": sized_line(8) })),
+                        ("band2Vert", json!({ "left": nil })),
+                    ],
+                ),
+                offset_band_table(),
+                vec![(1, 0, "left")],
+            ),
+        ];
+        for (definitions, table, edges) in constructions {
+            let banded = seeded_cells(&definitions, &table);
+            let unbanded = seeded_cells(&definitions, &without_bands(&table));
+            for (row, column, side) in edges {
+                assert_eq!(
+                    banded[row][column]["borders"][side],
+                    unbanded[row][column]["borders"][side],
+                    "{row} {column} {side}"
+                );
+            }
+        }
     }
 
     #[test]
