@@ -370,6 +370,79 @@ test('merge formatting keeps the source marks and the destination run formatting
   }
 });
 
+test('merge formatting chosen from the paste options keeps the destination run formatting', async () => {
+  const session = await createYrsSession();
+  sessions.push(session);
+  const { paraId } = session.createStory('body', 'ab');
+  session.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 2 } }, {
+    other: { fontFamily: { ascii: 'Arial', hAnsi: 'Arial' }, textColor: { rgb: '0000FF' }, fontSize: { size: 24, sizeCs: 24 } },
+  });
+  session.setSelection({ story: 'body', paraId, offset: 1 });
+  const map = (story = 'body') =>
+    createYrsInputPositionMap(
+      story,
+      session.paragraphs(story).map((p) => ({ paraId: p.paraId, length: p.text.length }))
+    );
+  const host = document.createElement('div');
+  const page = document.createElement('div');
+  page.className = 'canvas-page';
+  page.dataset.pageIndex = '0';
+  page.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+  host.append(page);
+  document.body.append(host);
+  const queries = {
+    isReady: () => true,
+    caretRect: (position: number) => ({ pageIndex: 0, x: position, y: 10, width: 1, height: 20 }),
+    anchorRect: (position: number) => ({ pageIndex: 0, x: position, y: 10, width: 1, height: 20 }),
+    pageCount: () => 1,
+    pageSize: () => ({ width: 800, height: 1000 }),
+    visualLines: () => [],
+    visualLinesOnPage: () => [],
+    visualLineExtent: () => null,
+    verticalMove: () => null,
+  };
+  try {
+    const view = render(
+      <YrsInput
+        enabled
+        readOnly={false}
+        session={session}
+        canvasHostRef={{ current: host }}
+        displayListQueries={queries as unknown as DisplayListQueries}
+        inputPositionMap={map}
+        displayPositionToLoc={(position) => displayPositionToYrsLoc(map(), position)}
+        locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(loc.story), loc)}
+        onStateChange={() => {}}
+        onDirectInput={() => {}}
+      />
+    );
+    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    const fragment: DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{
+      text: 'Bold',
+      format: { other: { bold: true, textColor: { rgb: 'FF0000' }, fontSize: { size: 40, sizeCs: 40 }, fontFamily: { ascii: 'Georgia', hAnsi: 'Georgia' } } },
+    }] }] };
+    pasteWith(textarea, clipboardFragmentHtml(fragment), 'Bold');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(session.paragraphs('body').map((p) => p.text)).toEqual(['aBoldb']);
+    fireEvent.click(await view.findByRole('button', { name: 'Paste Options (Ctrl)' }));
+    fireEvent.click(view.getByRole('menuitemradio', { name: 'Merge Formatting' }));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(session.paragraphs('body').map((p) => p.text)).toEqual(['aBoldb']);
+    const bold = session.storySegments('body').filter((segment) => segment.kind === 'text' && segment.text === 'Bold');
+    expect(bold).toHaveLength(1);
+    const attributes = bold[0]!.kind === 'text' ? bold[0]!.attributes : {};
+    expect(attributes).toMatchObject({
+      bold: true, fontFamily: { ascii: 'Arial' }, textColor: { rgb: '0000FF' }, fontSize: { size: 24 },
+    });
+    expect(JSON.stringify(attributes)).not.toContain('FF0000');
+    expect(JSON.stringify(attributes)).not.toContain('Georgia');
+    expect(JSON.stringify((attributes as { fontSize?: unknown }).fontSize)).not.toContain('40');
+  } finally {
+    host.remove();
+  }
+});
+
 test('suggesting mode pastes plain text', async () => {
   const { session, textarea } = await mount(false, true);
   pasteWith(textarea, clipboardFragmentHtml(tableFragment()), 'hello');
