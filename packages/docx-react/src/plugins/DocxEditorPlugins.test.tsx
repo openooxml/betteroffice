@@ -37,9 +37,13 @@ import {
   EditorToolbar,
   ToolbarCommandButton,
   defineDocxPlugin,
+  placeFloating,
   useDocxCommand,
   useDocxCommands,
+  useDocxSelectionPlacement,
   type DocxCommandResult,
+  type DocxPluginRect,
+  type DocxSelectionPlacement,
   type DocxAsyncEditorProps,
   type DocxEditorBaseProps,
   type DocxEditorPluginProps,
@@ -67,6 +71,7 @@ import * as docxBindings from './useDocxPluginHost';
 import { selectionClock, selectionWindow } from '../../../../e2e/browser/plugin-host/selection-clock';
 import { storyAnchorsDocx } from './__fixtures__/storyAnchorsDocx';
 import { scopePluginGeometry } from './geometry';
+import * as pluginGeometry from './geometry';
 import * as canvasReplay from '../components/DocxEditor/canvasReplay';
 import * as headerFooterEditing from '../components/DocxEditor/hooks/useHeaderFooterEditing';
 import {
@@ -3067,7 +3072,8 @@ async function removeRemoteHeader(peer: YrsSession, buffer: ArrayBuffer) {
   } finally { remote.destroy(); }
 }
 
-async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapping?: { reject(): boolean; rejected(): void }, controlledClock = false) {
+async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapping?: { reject(): boolean; rejected(): void }, controlledClock = false,
+  extra: Pick<DocxPluginDefinition<null>, 'overlay'> = {}) {
   const canvasContext = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => new Proxy({} as Record<string, unknown>, {
     get(target, key) {
       if (key === 'measureText') return () => ({ width: 0 });
@@ -3099,8 +3105,9 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       }
       if (event.type === 'selection-settle') settles.push({ context, at: Date.now(),
         anchor: context.geometry?.getAnchorGeometry({ kind: 'selection' }) ?? null });
-    } });
+    }, ...extra });
   let host!: pluginHosts.DocxPluginHost;
+  let shownViewport: { mockRestore(): void } | null = null;
   let controller: ReturnType<typeof shellControllers.createPeerlessShellController> | null = null;
   let workerGeometry: ReturnType<typeof workerPluginGeometry.createWorkerPluginGeometry> | null = null;
   let binding: Parameters<ReturnType<typeof shellControllers.createPeerlessShellController>['attach']>[0] | null = null;
@@ -3293,6 +3300,12 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
       controller: () => controller,
       session: () => mounted.ref.current!.getEditorRef()!.getYrsSession()!,
       binding: () => binding,
+      async setViewport(viewport: DocxPluginRect | null) {
+        shownViewport?.mockRestore();
+        shownViewport = viewport ? spyOn(pluginGeometry, 'visibleViewport').mockReturnValue(viewport) : null;
+        await act(async () => { host.geometryChanged(); });
+        await host.notificationsIdle();
+      },
       async remote(edit: (session: YrsSession) => void | Promise<void>, path: 'update' | 'chunks' | 'pipe' = 'update') {
         const transport: CollaborationReplica = engine === 'DI' ? this.session() : replica!;
         expect(transport).not.toBeNull();
@@ -3382,7 +3395,7 @@ async function matrixEditor(engine: MatrixEngine, buffer = documentBytes(), mapp
         });
         await host.notificationsIdle();
       },
-      dispose() { try { mounted.view.unmount(); for (const restore of restores) restore(); canvasContext.mockRestore(); bounds.mockRestore(); } finally { restoreClock(); } },
+      dispose() { try { mounted.view.unmount(); for (const restore of restores) restore(); shownViewport?.mockRestore(); canvasContext.mockRestore(); bounds.mockRestore(); } finally { restoreClock(); } },
     };
   } catch (error) { try { cleanup(); canvasContext.mockRestore(); bounds.mockRestore(); } finally { restoreClock(); } throw error; }
   finally { captureHost.mockRestore(); captureController.mockRestore(); captureBinding.mockRestore(); captureParts.mockRestore(); capturePointer.mockRestore(); captureGeometry.mockRestore(); }
@@ -4512,4 +4525,122 @@ for (const engine of ['DI', 'DL', 'DP', 'DV'] as const) test(`T15/B9: ${engine} 
     expect(read.paragraphs.map(paragraph => paragraph.text).join('\n')).toContain('Body text');
     expect(read.paragraphs.map(paragraph => paragraph.text).join('\n')).not.toMatch(/Box label|Comment label/);
   } finally { h.dispose(); }
+});
+
+function selectionBox(result: DocxAnchorGeometryResult): DocxPluginRect {
+  if (!result.ok) throw new Error(`Selection anchor failed: ${result.failure.code}`);
+  const onPage = result.rects.filter(rect => rect.pageIndex === result.anchor.pageIndex);
+  const rects = onPage.length ? onPage : [result.anchor];
+  const x = Math.min(...rects.map(rect => rect.x));
+  const y = Math.min(...rects.map(rect => rect.y));
+  return { x, y, width: Math.max(...rects.map(rect => rect.x + rect.width)) - x, height: Math.max(...rects.map(rect => rect.y + rect.height)) - y };
+}
+
+function placementRecorder() {
+  const placed: Array<{ placement: DocxSelectionPlacement | null; zoom: number; range: DocxPluginSelection['displayRange'] }> = [];
+  const overlay: NonNullable<DocxPluginDefinition<null>['overlay']> = ({ context, geometry }) => {
+    placed.push({ placement: useDocxSelectionPlacement(context, { width: 120, height: 30, geometry }),
+      zoom: geometry.layout.zoom, range: context.snapshot.selection.displayRange });
+    return null;
+  };
+  return { placed, overlay, last: () => placed.at(-1)?.placement ?? null };
+}
+
+for (const engine of ['DI', 'DP'] as const) describe(`selection placement ${engine}`, () => {
+  test('the placement follows the selection, the viewport and a new zoom', async () => {
+    const recorder = placementRecorder();
+    const h = await matrixEditor(engine, documentBytes(), undefined, false, { overlay: recorder.overlay });
+    try {
+      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      const box = selectionBox(h.anchor());
+      await until(() => JSON.stringify(recorder.last()?.anchor) === JSON.stringify(box));
+      expect(recorder.last()).toMatchObject({ kept: false, width: 120, height: 30 });
+
+      await h.setViewport({ x: box.x - 500, y: box.y - 10, width: 2000, height: 2000 });
+      await until(() => recorder.last()?.side === 'below');
+      expect(recorder.last()).toMatchObject({ side: 'below', flipped: true, hidden: false, kept: false });
+      expect(recorder.last()!.y).toBeCloseTo(box.y + box.height + 8, 6);
+      expect(recorder.last()!.x).toBeCloseTo(box.x + box.width / 2 - 60, 6);
+
+      await h.setViewport({ x: box.x - 500, y: box.y - 500, width: 2000, height: 2000 });
+      await until(() => recorder.last()?.side === 'above');
+      expect(recorder.last()).toMatchObject({ side: 'above', flipped: false, hidden: false });
+      expect(recorder.last()!.y).toBeCloseTo(box.y - 38, 6);
+
+      await h.setViewport({ x: box.x - 500, y: box.y + 1000, width: 2000, height: 2000 });
+      await until(() => recorder.last()?.hidden === true);
+      expect(recorder.last()).toMatchObject({ hidden: true, clamped: true });
+
+      await h.setViewport({ x: box.x - 500, y: box.y - 500, width: 8000, height: 8000 });
+      await act(async () => { h.ref.current!.setZoom(1.5); });
+      await until(() => h.context().snapshot.layout?.zoom === 1.5);
+      await h.selectionLayout();
+      await h.quiet();
+      const shown = h.anchor();
+      const zoomed = selectionBox(shown);
+      if (engine === 'DP') expect(zoomed).not.toEqual(box);
+      await until(() => JSON.stringify(recorder.last()?.anchor) === JSON.stringify(zoomed));
+      expect(recorder.placed.at(-1)).toMatchObject({ zoom: 1.5, placement: { kept: false } });
+      const expected = placeFloating({ anchor: zoomed, page: shown.ok ? shown.pageRect : null,
+        viewport: h.context().geometry!.viewport, size: { width: 120, height: 30 } });
+      expect(recorder.last()).toMatchObject({ side: expected.side, hidden: false });
+      expect(Math.abs(recorder.last()!.x - expected.x)).toBeLessThanOrEqual(1);
+      expect(Math.abs(recorder.last()!.y - expected.y)).toBeLessThanOrEqual(1);
+    } finally { h.dispose(); }
+  });
+
+  test('a cleared selection has no placement', async () => {
+    const recorder = placementRecorder();
+    const h = await matrixEditor(engine, documentBytes(), undefined, false, { overlay: recorder.overlay });
+    try {
+      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      await until(() => recorder.last() !== null);
+      await h.clearSelection();
+      await until(() => recorder.placed.at(-1)?.placement === null);
+      expect(recorder.last()).toBeNull();
+    } finally { h.dispose(); }
+  });
+
+  if (engine === 'DP') test('a relayout that leaves the range null keeps a placement until the selection changes', async () => {
+    const recorder = placementRecorder();
+    const h = await matrixEditor(engine, documentBytes(), undefined, false, { overlay: recorder.overlay });
+    try {
+      await h.selection('body', h.first.paraId, 1, 3);
+      await h.selectionLayout();
+      await h.quiet();
+      const box = selectionBox(h.anchor());
+      await until(() => JSON.stringify(recorder.last()?.anchor) === JSON.stringify(box));
+      const held = h.holdDisplayRange();
+      const from = recorder.placed.length;
+      await act(async () => { h.ref.current!.setZoom(1.5); });
+      await until(() => recorder.placed.slice(from).some(entry => entry.zoom === 1.5 && entry.range === null));
+      await h.host.notificationsIdle();
+      expect(h.context().snapshot.selection.displayRange).toBeNull();
+      const edited = h.remote(peer => {
+        const paragraph = peer.paragraphs('body').find(candidate => candidate.paraId !== h.first.paraId)!;
+        peer.insertText({ story: 'body', paraId: paragraph.paraId, offset: paragraph.text.length }, 'remote');
+      });
+      await until(() => recorder.placed.slice(from).some(entry => entry.placement?.kept === true));
+      const during = recorder.placed.slice(from);
+      expect(during.filter(entry => entry.placement === null)).toEqual([]);
+      expect(during.filter(entry => entry.placement!.kept).length).toBeGreaterThan(0);
+      let placed = recorder.placed[from - 1]!.placement!.anchor;
+      for (const { placement } of during) {
+        if (placement!.kept) expect(placement!.anchor).toEqual(placed);
+        else placed = placement!.anchor;
+      }
+      held.release();
+      await edited;
+
+      const again = h.holdDisplayRange();
+      await h.selection('body', h.first.paraId, 0, 2, false);
+      await until(() => recorder.placed.at(-1)?.placement === null);
+      expect(h.context().snapshot.selection.displayRange).toBeNull();
+      again.release();
+    } finally { h.dispose(); }
+  });
 });

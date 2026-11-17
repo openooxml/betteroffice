@@ -77,6 +77,9 @@ pub struct HeaderFooterVariant {
     pub visual_bottom: f64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub field_widths: Vec<HeaderFooterFieldWidths>,
+    /// The header part's own watermark.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -97,6 +100,9 @@ pub struct HeaderFooterPayload {
     pub variants: Vec<HeaderFooterVariant>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watermark: Option<serde_json::Value>,
+    /// Some header part carries its own text watermark.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub header_watermarks: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -166,6 +172,7 @@ pub fn measure_header_footer(
         visual_top,
         visual_bottom,
         field_widths: Vec::new(),
+        watermark: None,
     }))
 }
 
@@ -1834,6 +1841,7 @@ mod tests {
                 visual_top: 0.0,
                 visual_bottom: 0.0,
                 field_widths: Vec::new(),
+                watermark: None,
             }],
             ..HeaderFooterPayload::default()
         };
@@ -1892,6 +1900,7 @@ mod tests {
                 visual_top: 0.0,
                 visual_bottom: 0.0,
                 field_widths: Vec::new(),
+                watermark: None,
             }],
             ..HeaderFooterPayload::default()
         };

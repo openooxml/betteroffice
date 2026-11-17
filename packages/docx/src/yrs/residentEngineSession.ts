@@ -61,7 +61,7 @@ import type { RetainedFrame } from '../layout/render/frameDelta';
 import type { DisplayListHitRegion, DisplayListRect } from '../layout/render/displayListQueries';
 import type { ResidentControlTarget, ResidentControlPosition } from './residentControls';
 import { withPackageMetadata, type ResidentPackageMetadata } from './residentProperties';
-import { getDocumentWatermark } from '../docx/watermarkApi';
+import { getDocumentWatermark, getHeaderWatermarks } from '../docx/watermarkApi';
 import { resolvedFinalSectionProperties, updateFinalSectionProperties } from '../editor/finalSection';
 import { nativeTabStops, readSectionSnapshot, residentSectionPropertiesAt, sectionMarkKey, withSectionIds, withSectionNames, withSectionSnapshot, type DocxSectionMargins, type ResidentSectionParagraphs, type ResidentSectionSnapshot } from './residentSections';
 import { pageBreakTarget, splitSection } from './sectionBreak';
@@ -387,7 +387,8 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     const contents = [...(document.package.footnotes ?? []).map(note => ({ id: note.id, noteKind: 'footnote', height: 0 })),
       ...(document.package.endnotes ?? []).map(note => ({ id: note.id, noteKind: 'endnote', height: 0 }))];
     const watermark = getDocumentWatermark(document);
-    return JSON.stringify({ ...request, regions: { ...request.regions, sections, watermark,
+    const headerWatermarks = getHeaderWatermarks(document);
+    return JSON.stringify({ ...request, regions: { ...request.regions, sections, watermark, headerWatermarks,
       headersFooters: request.regions?.headersFooters ? { ...request.regions.headersFooters, watermark } : undefined }, notes: { ...request.notes, contents },
       ...(request.workerOwned ? { workerHeadersFooters: { ...request.workerHeadersFooters, variants } } : {}) });
   };

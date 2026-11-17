@@ -161,6 +161,10 @@ beforeAll(async () => {
       {
         name: 'isolated-worker-dependencies',
         setup(build) {
+          build.onLoad({ filter: /\/docxWorker\.browser\.ts$/ }, () => ({
+            contents: "import { startWorker } from './residentEngineWorker';\nstartWorker(self);\n",
+            loader: 'ts',
+          }));
           build.onLoad({ filter: /\/rustDisplayList\.ts$/ }, () => ({
             contents: `
               export const encodeDisplayListFrameExtras = (...args) => testHarness.encodeDisplayListFrameExtras(...args);

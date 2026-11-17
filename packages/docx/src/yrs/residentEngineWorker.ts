@@ -1483,7 +1483,12 @@ function reportProgress(): void {
 }
 Object.assign(globalThis, { __betterofficeEngineProgress: reportProgress });
 
+const WORKER_STARTED = Symbol.for('betteroffice.docx.worker.started');
+
 export function startWorker(workerScope: DedicatedWorkerGlobalScope): void {
+  const flags = workerScope as unknown as Record<symbol, unknown>;
+  if (flags[WORKER_STARTED]) return;
+  flags[WORKER_STARTED] = true;
   scope = workerScope;
   scope.onmessage = (
     event: MessageEvent<DocxEngineWorkerRequest | DocxEngineWorkerHostModule>

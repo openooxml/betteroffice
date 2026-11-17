@@ -1,6 +1,7 @@
 import { test, expect, type Page } from 'playwright/test';
 import { selectionClock } from './selection-clock';
 import JSZip from 'jszip';
+import { placeFloating } from '../../../shared/plugin-host/floatingPlacement';
 
 type ProbeRect = { x: number; y: number; width: number; height: number };
 type ProbeEvent = { type: string; focused?: boolean; source?: string; viewport?: ProbeRect | null };
@@ -19,8 +20,8 @@ interface DocxProbe {
 
 let peerless = false;
 
-async function open(page: Page) {
-  await page.goto(peerless ? '/?peerless=1' : '/');
+async function open(page: Page, query = peerless ? '/?peerless=1' : '/') {
+  await page.goto(query);
   await expect(page.locator('canvas[data-page-index="0"]')).toBeVisible({ timeout: 120_000 });
   await expect(page.locator('[data-probe-page="0"]')).toBeAttached({ timeout: 60_000 });
   if (await page.locator('.canvas-pages__column').count() === 0) return;
@@ -874,3 +875,60 @@ test('a header anchor has a rect in the header band of every page at 100% and 15
 
   });
 }
+
+test('a selection placement follows the selection to a new zoom on the in-thread editor', async ({ page }) => {
+  peerless = false;
+  const messages: string[] = [];
+  page.on('console', (message) => messages.push(message.text()));
+  await open(page, '/?engine=in-thread');
+  const word = await operate(page, async () => {
+    const probe = (window as unknown as { __probe: DocxProbe }).__probe;
+    const read = await probe.editor.readParagraphs({ story: 'body', view: 'accepted' });
+    if (!read.ok) throw new Error('Paragraph read failed');
+    const paragraph = read.paragraphs.find((value) => /[A-Za-z]{3,}/.test(value.text))!;
+    const match = /[A-Za-z]{3,}/.exec(paragraph.text)!;
+    const [result] = await probe.geometry.readAnchorGeometries([{ kind: 'range', version: read.version,
+      range: { story: 'body', view: 'accepted', start: { paraId: paragraph.paraId, offset: match.index },
+        end: { paraId: paragraph.paraId, offset: match.index + match[0].length } } }]);
+    if (!result?.ok || !result.rects[0]) throw new Error('Word has no painted box');
+    const rect = result.rects[0];
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { x: layer.left + rect.x, y: layer.top + rect.y, width: rect.width, height: rect.height };
+  });
+  await page.mouse.dblclick(word.x + word.width / 2, word.y + word.height / 2);
+  const sample = () => page.evaluate(() => {
+    type Rect = { x: number; y: number; width: number; height: number };
+    type Answer = { ok: true; rects: (Rect & { pageIndex: number })[]; anchor: Rect & { pageIndex: number }; pageRect: Rect } | { ok: false };
+    const probe = (window as unknown as { __probe: { geometry: { viewport: Rect; layout: { zoom: number }; getAnchorGeometry(target: unknown): Answer } } }).__probe;
+    const element = document.querySelector<HTMLElement>('[data-testid="probe-placement"]');
+    const result = probe.geometry.getAnchorGeometry({ kind: 'selection' });
+    if (!element || !result.ok) return null;
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    const box = element.getBoundingClientRect();
+    const rects = result.rects.filter((rect) => rect.pageIndex === result.anchor.pageIndex);
+    const x = Math.min(...rects.map((rect) => rect.x));
+    const y = Math.min(...rects.map((rect) => rect.y));
+    return {
+      zoom: probe.geometry.layout.zoom,
+      kept: element.dataset.kept,
+      placed: { x: box.left - layer.left, y: box.top - layer.top },
+      anchor: { x, y, width: Math.max(...rects.map((rect) => rect.x + rect.width)) - x,
+        height: Math.max(...rects.map((rect) => rect.y + rect.height)) - y },
+      page: result.pageRect,
+      viewport: probe.geometry.viewport,
+    };
+  });
+  const offBy = (read: NonNullable<Awaited<ReturnType<typeof sample>>>) => {
+    const expected = placeFloating({ anchor: read.anchor, page: read.page, viewport: read.viewport, size: { width: 120, height: 30 } });
+    return Math.max(Math.abs(read.placed.x - expected.x), Math.abs(read.placed.y - expected.y));
+  };
+  await expect.poll(async () => { const read = await sample(); return read && read.zoom === 1 && read.kept === 'false' ? offBy(read) : Infinity; })
+    .toBeLessThanOrEqual(1);
+  const before = (await sample())!;
+  await page.evaluate(() => (window as unknown as { __probe: { editor: { setZoom(zoom: number): void } } }).__probe.editor.setZoom(1.5));
+  await expect.poll(async () => { const read = await sample(); return read && read.zoom === 1.5 && read.kept === 'false' ? offBy(read) : Infinity; },
+    { timeout: 30_000 }).toBeLessThanOrEqual(1);
+  const after = (await sample())!;
+  expect(Math.abs(after.anchor.width - before.anchor.width * 1.5), JSON.stringify({ before, after })).toBeLessThanOrEqual(1);
+  expect(messages.filter((text) => text.includes('hybrid synchronous API'))).toEqual([]);
+});
