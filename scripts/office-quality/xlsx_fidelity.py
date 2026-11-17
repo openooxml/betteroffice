@@ -8,10 +8,10 @@ import zipfile
 from pathlib import Path
 from xml.dom import minidom
 
-import fitz
 from PIL import Image
 
 from compare import Pages, compare
+from raster import RASTERIZER, open_pdf, page_size_pt, render_page
 from docx_benchmark import edge_adjust, execute, font_environment, lo_command, sha256, write_json
 from xlsx_calc import NS as XLSX_NS, address, package, sheets
 
@@ -132,13 +132,13 @@ def libreoffice_xlsx_fidelity(sample, root, soffice, version):
             execute(lo_command(soffice, root / 'profile-fidelity', directory, prepared,
                                'pdf:calc_pdf_Export:{"SinglePageSheets":{"type":"boolean","value":false}}'),
                     timeout=180, log=directory / 'convert.log')
-            with fitz.open(directory / 'input.pdf') as pdf:
+            with open_pdf(directory / 'input.pdf') as pdf:
                 if len(pdf) != 1:
                     raise ValueError(f"Range {page['range']} produced {len(pdf)} pages; expected one at the recorded scale")
-                if abs(pdf[0].rect.width - page['width_pt']) > 0.1 or abs(pdf[0].rect.height - page['height_pt']) > 0.1:
+                width_pt, height_pt = page_size_pt(pdf, 0)
+                if abs(width_pt - page['width_pt']) > 0.1 or abs(height_pt - page['height_pt']) > 0.1:
                     raise ValueError('LibreOffice paper dimensions differ from the recorded reference')
-                pixmap = pdf[0].get_pixmap(dpi=150, alpha=False)
-                image = Image.frombytes('RGB', (pixmap.width, pixmap.height), pixmap.samples)
+                image = render_page(pdf, 0, 150)
                 with Image.open(root / 'reference' / f'page_{index:04d}.png') as expected:
                     if expected.size != (page['width_px'], page['height_px']):
                         raise ValueError('Reference PNG dimensions differ from the capture profile')
@@ -151,7 +151,7 @@ def libreoffice_xlsx_fidelity(sample, root, soffice, version):
                 exports.append(dict(page=index, sheet=page['sheet'], range=page['range'],
                                     prepared_sha256=sha256(prepared), pdf_sha256=sha256(directory / 'input.pdf')))
         write_json(actual / 'result.json', dict(status='ok', sha256=sample['metadata']['source']['sha256'],
-                   dpi=150, pages=len(pages), engine='LibreOffice ' + version, rasterizer='PyMuPDF ' + fitz.VersionBind,
+                   dpi=150, pages=len(pages), engine='LibreOffice ' + version, rasterizer=RASTERIZER,
                    capture_profile=profile, exports=exports, edge_adjustments=adjustments))
         stage = 'compare'
         result.update(compare(Pages(root / 'reference', 150), Pages(actual, 150), root / 'lo-comparison', gallery=False))
@@ -171,7 +171,7 @@ def main():
     version = re.search(r'LibreOffice (\d+(?:\.\d+){2,3})\b', version_text)[1]
     report = dict(schema_version=1, plan_sha256=job['plan_sha256'], shard=job['shard'], samples=[], benchmark=dict(
         method=job['method'], dpi=150, source_sha=job['source_sha'], libreoffice_version=version,
-        libreoffice_build=version_text.strip(), fonts_sha256=fonts_hash, rasterizer='PyMuPDF ' + fitz.VersionBind,
+        libreoffice_build=version_text.strip(), fonts_sha256=fonts_hash, rasterizer=RASTERIZER,
         font_policy='bundled-fontconfig' if platform.system() == 'Linux' else 'system-fonts'))
     for index, sample in enumerate(job['samples'], 1):
         directory = root / sample['id']

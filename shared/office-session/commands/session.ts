@@ -136,7 +136,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   let connection: ConnectionRecord<P, S, E, F> | undefined;
   let state: EditSessionState<S, E> = {
     epoch, version: initial.version, throughSeq: initial.throughSeq,
-    presentedThroughSeq: -1, selection: initial.selection, editState: initial.editState,
+    presentedThroughSeq: -1, selection: initial.selection, selectionCause: initial.cause, editState: initial.editState,
   };
   let disposed = false;
   let terminal: SessionFailure | undefined;
@@ -150,6 +150,7 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
   let disposal: Promise<void> | undefined;
   let recoveryAttempt = 0;
   let selectionThroughSeq = initial.throughSeq;
+  let selectionVersion = initial.version;
   let editStateThroughSeq = initial.throughSeq;
   let revisionsThroughSeq = initial.throughSeq;
   let knownSelection = initial.revisions?.selection ?? 0;
@@ -561,9 +562,11 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
           (ack.throughSeq === state.throughSeq && ack.version >= state.version)) {
           state = { ...state, throughSeq: ack.throughSeq, version: ack.version };
         }
-        if ('selection' in ack && ack.throughSeq >= selectionThroughSeq) {
-          state = { ...state, selection: ack.selection };
+        if ('selection' in ack && (ack.throughSeq > selectionThroughSeq ||
+          ack.throughSeq === selectionThroughSeq && ack.version >= selectionVersion)) {
+          state = { ...state, selection: ack.selection, selectionCause: ack.cause };
           selectionThroughSeq = ack.throughSeq;
+          selectionVersion = ack.version;
         }
         if ('editState' in ack && ack.throughSeq >= editStateThroughSeq) {
           state = { ...state, editState: ack.editState };
@@ -819,9 +822,10 @@ export function createWorkerEditSession<O, P, S, E, F, X, Q extends QueryTable =
         }
         state = {
           epoch, version: opened.version, throughSeq: opened.throughSeq,
-          presentedThroughSeq: -1, selection: opened.selection, editState: opened.editState,
+          presentedThroughSeq: -1, selection: opened.selection, selectionCause: opened.cause, editState: opened.editState,
         };
         selectionThroughSeq = opened.throughSeq;
+        selectionVersion = opened.version;
         editStateThroughSeq = opened.throughSeq;
         revisionsThroughSeq = opened.throughSeq;
         knownSelection = opened.revisions?.selection ?? 0;

@@ -134,3 +134,34 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_call_past_its_budget_fails_its_checks_and_the_next_call_within_it_passes() {
+        std::thread::spawn(|| {
+            let budget = live() + (64 << 10);
+            set_budget(budget);
+            assert!(begin_call(true));
+            assert!(!over_budget());
+            let block = std::hint::black_box(vec![1u8; 1 << 20]);
+            assert!(over_budget());
+            assert!(!begin_call(false));
+            let expected = format!("{EXCEEDED} ({} bytes over a {budget}-byte budget)", 1 << 20);
+            assert_eq!(exceeded(), expected);
+            drop(block);
+            assert!(over_budget());
+            assert!(begin_call(true));
+            assert!(!over_budget());
+            let small = std::hint::black_box(vec![1u8; 1 << 10]);
+            assert!(!over_budget());
+            assert!(begin_call(false));
+            drop(small);
+            set_budget(0);
+        })
+        .join()
+        .unwrap();
+    }
+}

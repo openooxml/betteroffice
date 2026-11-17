@@ -17,8 +17,11 @@ import { createPortal } from 'react-dom';
 import {
   applyClipboardFragment,
   clipboardFragmentIsTextOnly,
+  isCellHasNoStoryRefusal,
   sameYrsSelection,
   tableBoundaryDeleteTarget,
+  withYrsSelectionCause,
+  yrsSelectionCause,
   type YrsAuthor,
   type YrsInputPositionMap,
   type YrsInlineFormatDelta,
@@ -46,11 +49,13 @@ import {
   yrsTableSelectionRange,
 } from './yrsCommands';
 import { clipboardFragmentHtml, parseClipboardHtml } from './internals/clipboardHtml';
+import { cutRefusalFrom, DocxCutRefusedError } from './internals/cutRefused';
+import { toast } from 'sonner';
 import { InputOperationQueue } from './inputOperationQueue';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
 import { requestQueuedOpeningInput } from './internals/queuedOpeningInput';
 import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
-import { sourceVersionOf } from './internals/layoutProvenance';
+import { readSessionVersion, sourceVersionOf } from './internals/layoutProvenance';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 import {
@@ -123,6 +128,7 @@ export interface YrsStoredFormatting {
 }
 
 export interface YrsInputProps {
+  id?: string;
   enabled: boolean;
   readOnly: boolean;
   holdInput?: boolean;
@@ -184,6 +190,8 @@ export interface YrsInputProps {
   onCaretInputDispatched?(): void;
   /** Selection-only move or IME start (immediate swap to the DOM blink caret). */
   onCaretInterrupt?(): void;
+  /** A cut was refused because the clipboard cannot carry part of the selection; nothing was deleted. */
+  onCutRefused?(error: Error): void;
 }
 
 const BASE_STYLE: CSSProperties = {
@@ -293,6 +301,20 @@ function toRange(selection: YrsSelection, map: YrsInputPositionMap): YrsStoryRan
   };
 }
 
+/** Runs `operation`; the engine's refusal of a write into a table cell with no story is dropped when nothing was written. */
+function declineCellRefusal(session: YrsSession | null, operation: () => void | Promise<void>): void | Promise<void> {
+  const version = readSessionVersion(session);
+  const decline = (error: unknown): void => {
+    if (version === null || !isCellHasNoStoryRefusal(error) || readSessionVersion(session) !== version) throw error;
+  };
+  try {
+    const result = operation();
+    return result instanceof Promise ? result.catch(decline) : result;
+  } catch (error) {
+    decline(error);
+  }
+}
+
 /** The body or a table cell or control story laid out with it: resident input can apply there. */
 function isBodyFlowStory(story: string): boolean {
   return story === 'body' || story.startsWith('body:');
@@ -300,6 +322,7 @@ function isBodyFlowStory(story: string): boolean {
 
 const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInput(
   {
+    id,
     enabled,
     readOnly,
     holdInput = false,
@@ -336,6 +359,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     onCaretInput,
     onCaretInputDispatched,
     onCaretInterrupt,
+    onCutRefused,
   },
   ref
 ) {
@@ -390,7 +414,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
       return true;
     },
-    [holdInput, readOnly, requestOpeningPeer]
+    [holdInput, readOnly, requestOpeningPeer, session]
   );
   const queuedSessionRef = useRef(session);
   if (!inputOperationQueueRef.current || queuedSessionRef.current !== session) {
@@ -527,10 +551,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       openingInput = kind === 'mutation'
     ): void => {
       sealInputBatches();
+      const declining = (waited: boolean) => declineCellRefusal(session, () => operation(waited));
       const replay = heldReplayBatchRef.current;
       if (replay) {
         try {
-          replay.operations.push(Promise.resolve(operation(false)));
+          replay.operations.push(Promise.resolve(declining(false)));
         } catch (error) {
           replay.operations.push(Promise.reject(error));
         }
@@ -553,7 +578,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         const apply = () => {
           if (!isCurrentInput(admitted, queue)) return onDropped?.();
           if (replicaReadyRef?.current !== false) replicaInputRef.current.applyPendingSelection?.();
-          return operation(false);
+          return declining(false);
         };
         queue?.enqueue(() => pendingSelectionsRef.current.length > 0
           ? preparePendingSelections(admitted, queue).then(apply)
@@ -584,7 +609,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (pendingSelectionsRef.current.length > 0) await preparePendingSelections(admitted, queue);
         if (!isCurrentInput(admitted, queue)) return onDropped?.();
         replicaInputRef.current.applyPendingSelection?.();
-        await operation(true);
+        await declining(true);
         if (scrolled && isCurrentInput(admitted, queue)) {
           quietSelectionRef.current = admitted?.selection() ?? null;
         }
@@ -649,10 +674,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const first = inputPositionMap(story)?.paragraphs[0];
     if (!first) return null;
     const loc = { story, paraId: first.paraId, offset: 0 };
-    session.setSelection(loc);
+    const currentStory = session.selection()?.head.story;
+    const cause = currentStory && !belongsToRootStory(currentStory) ? undefined : yrsSelectionCause(session) ?? 'seed';
+    withYrsSelectionCause(session, cause, () => session.setSelection(loc));
     defaultCaretRef.current = { anchor: loc, head: loc };
     return { anchor: loc, head: loc };
-  }, [inputPositionMap, readSelection, session, story]);
+  }, [belongsToRootStory, inputPositionMap, readSelection, session, story]);
 
   const displaySelection = useCallback((): YrsDisplaySelection | null => {
     if (holdInput) return null;
@@ -719,7 +746,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       onDirectInput(dirtyStories);
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
-    [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal]
+    [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal, session]
   );
 
   const finishResidentMutation = useCallback(
@@ -1355,6 +1382,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       holdOperation,
       readOnly,
       replicaReadyRef,
+      session,
     ]
   );
 
@@ -1594,6 +1622,24 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     });
   }, [session]);
 
+  const notifyCutRefused = useCallback((error: DocxCutRefusedError): void => {
+    toast(t('editor.cutRefused'));
+    onCutRefused?.(error);
+  }, [onCutRefused, t]);
+
+  const refuseCut = useCallback((): boolean => {
+    let refusal: DocxCutRefusedError | null;
+    try {
+      const leftOut = session ? yrsClipboardSlice(session, themeColors).leftOut : undefined;
+      refusal = leftOut?.length ? new DocxCutRefusedError(leftOut) : null;
+    } catch (error) {
+      refusal = cutRefusalFrom(error);
+    }
+    if (!refusal) return false;
+    notifyCutRefused(refusal);
+    return true;
+  }, [notifyCutRefused, session, themeColors]);
+
   // A copy asked before the edit peer loads writes the selection it then has.
   const copyAfterReplica = useCallback((cut = false): CutCopy | null => {
     const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard;
@@ -1605,16 +1651,24 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const result: CutCopy = { written: false };
     const copied = session;
     let written: Promise<void>;
-    const hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session, themeColors).fragment;
+    let hasFragment = false;
+    try {
+      hasFragment = !session.isDisplayOnly() && !!yrsClipboardSlice(session, themeColors).fragment;
+    } catch (error) {
+      if (!cut) throw error;
+    }
     const slice = new Promise<ReturnType<typeof yrsClipboardSlice>>((resolve, reject) => {
       const apply = (source: YrsSession): void | Promise<void> => {
         try {
           if (cut && source.cellSelection()) throw new Error('A cut over table cells is unavailable');
           const captured = yrsClipboardSlice(source, themeColors);
+          if (cut && captured.leftOut?.length) throw new DocxCutRefusedError(captured.leftOut);
           if (captured.text) resolve(captured);
           else reject(new Error('Nothing is selected to copy'));
         } catch (error) {
-          reject(error);
+          const refusal = cut ? cutRefusalFrom(error) : null;
+          if (refusal) notifyCutRefused(refusal);
+          reject(refusal ?? error);
         }
         if (cut) return written;
       };
@@ -1639,7 +1693,40 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       : text.then((blob) => blob.text()).then((value) => clipboard.writeText(value));
     written = write.then(() => { result.written = true; }, () => {});
     return result;
-  }, [enqueueInputOperation, holdInput, holdOperation, readOnly, replicaReadyRef, session, themeColors]);
+  }, [enqueueInputOperation, holdInput, holdOperation, notifyCutRefused, readOnly, replicaReadyRef, session, themeColors]);
+
+  const copyWrittenRef = useRef(false);
+  const copyOrCut = useCallback((cut: boolean): boolean => {
+    if (cut && (session?.cellSelection() || !hasTextRange())) return false;
+    const copied = copyAfterReplica(cut);
+    if (copied) {
+      if (cut) deleteSelection(true, copied);
+      return true;
+    }
+    if (cut && refuseCut()) return false;
+    textareaRef.current?.focus();
+    primeCopy();
+    copyWrittenRef.current = false;
+    document.execCommand('copy');
+    if (!copyWrittenRef.current) return false;
+    if (cut) deleteSelection();
+    return true;
+  }, [copyAfterReplica, deleteSelection, hasTextRange, primeCopy, refuseCut, session]);
+
+  const cutOrDeleteForward = useCallback((): void => {
+    const queued = !holdInput && !!inputOperationQueueRef.current?.hasPending();
+    const copied = queued ? copyAfterReplica(true) : null;
+    if (queued && (copied || !hasTextRange())) {
+      enqueueInputOperation(async () => {
+        if (!hasTextRange()) await deleteUnits('forward', 1);
+        else if (copied?.written) deleteSelection(false, copied);
+      }, 'mutation');
+    } else if (hasTextRange()) {
+      copyOrCut(true);
+    } else {
+      deleteDirection('forward');
+    }
+  }, [copyAfterReplica, copyOrCut, deleteDirection, deleteSelection, deleteUnits, enqueueInputOperation, hasTextRange, holdInput]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -1666,6 +1753,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       } else if (event.key === 'Backspace') {
         event.preventDefault();
         deleteDirection('backward');
+      } else if (event.key === 'Delete' && event.shiftKey && !mod && !event.altKey && !readOnly) {
+        event.preventDefault();
+        cutOrDeleteForward();
       } else if (event.key === 'Delete') {
         event.preventDefault();
         deleteDirection('forward');
@@ -1687,10 +1777,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     },
     [
       copyAfterReplica,
+      cutOrDeleteForward,
       deleteDirection,
       handleTab,
       moveSelection,
       primeCopy,
+      readOnly,
       selectAll,
       splitParagraph,
     ]
@@ -1780,7 +1872,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
-  const copyWrittenRef = useRef(false);
   const handleCopy = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (takeClipboardGesture(event.currentTarget) === 'ignore') {
@@ -1883,9 +1974,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         event.preventDefault();
         return;
       }
+      if (refuseCut()) {
+        primedCopyRef.current = null;
+        event.preventDefault();
+        return;
+      }
       if (writeCutEvent(event)) deleteSelection();
     },
-    [copyAfterReplica, deleteSelection, hasTextRange, holdInput, readOnly, replicaReadyRef, session, writeCutEvent]
+    [copyAfterReplica, deleteSelection, hasTextRange, holdInput, readOnly, refuseCut, replicaReadyRef, session, writeCutEvent]
   );
 
   const hasHeldInput = useCallback(
@@ -2114,21 +2210,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       insertText,
       deleteSelection,
       pasteContent,
-      copySelection(cut) {
-        if (cut && (session?.cellSelection() || !hasTextRange())) return false;
-        const copied = copyAfterReplica(cut);
-        if (copied) {
-          if (cut) deleteSelection(true, copied);
-          return true;
-        }
-        textareaRef.current?.focus();
-        primeCopy();
-        copyWrittenRef.current = false;
-        document.execCommand('copy');
-        if (!copyWrittenRef.current) return false;
-        if (cut) deleteSelection();
-        return true;
-      },
+      copySelection: copyOrCut,
       selectAll() {
         advanceInteractionEpoch();
         selectAll();
@@ -2138,6 +2220,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       advanceInteractionEpoch,
       applyStoredFormatting,
       copyAfterReplica,
+      copyOrCut,
       displayPositionToLoc,
       displaySelection,
       ensureSelection,
@@ -2177,7 +2260,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (seedSelection) ensureSelection();
     const initializing = seededSessionRef.current !== session;
     if (emitSelection(false, false, false, false, initializing)) seededSessionRef.current = session;
-  }, [emitSelection, enabled, ensureSelection, holdInput, seedSelection, session, replicaReady]);
+  }, [emitSelection, enabled, ensureSelection, holdInput, seedSelection, session, replicaReady, story]);
 
   const focusedSessionRef = useRef<YrsSession | null>(null);
   useEffect(() => {
@@ -2303,6 +2386,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   if (!enabled) return null;
   const textarea = (
     <textarea
+      id={id}
       ref={textareaRef}
       // Preserve the editor focus-target contract while the implementation is
       // yrs-owned. This is only a compatibility class on the hidden textarea;

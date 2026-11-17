@@ -235,7 +235,7 @@
       "gestureActive": "Beenden Sie zuerst die Zeigergeste.",
       "commandFailed": "Der Befehl ist fehlgeschlagen.",
       "permissionDenied": "Die Host-Anwendung hat diesem Plugin diesen Befehl nicht erlaubt.",
-      "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
+      "unsupportedPolicy": "Dieser Befehl erfordert eine Benutzeraktion in der eigenen Oberfläche des Plugins.",
       "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
       "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde.",
       "clipboardUnavailable": "Der Zugriff auf die Zwischenablage ist nicht verfügbar oder wurde verweigert.",

@@ -57,6 +57,10 @@ pub enum Error {
         max: u64,
     },
     InvalidViewport,
+    /// A face supplied for one export that cannot paint.
+    FontUnavailable {
+        family: String,
+    },
     DisplayTooLarge {
         cells: u64,
         max: u64,
@@ -153,6 +157,7 @@ impl fmt::Display for Error {
                 write!(f, "range {rows}x{cols} exceeds the {max}-cell copy cap")
             }
             Self::InvalidViewport => f.write_str("viewport must have finite positive dimensions"),
+            Self::FontUnavailable { family } => write!(f, "png-font-unavailable: {family}"),
             Self::DisplayTooLarge { cells, max } => write!(
                 f,
                 "requested viewport spans {cells} cells, exceeds the {max}-cell display-list cap"

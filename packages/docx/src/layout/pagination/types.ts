@@ -135,6 +135,8 @@ export type RunFormatting = {
    * threshold, the painter enables font-kerning: normal.
    */
   kerningMinPt?: number;
+  ligatures?: string;
+  contextualAlternates?: boolean;
   /** Engraved/imprint effect (OOXML w:imprint, §17.3.2.18). */
   imprint?: boolean;
   /** Embossed/raised effect (OOXML w:emboss, §17.3.2.13). */
@@ -623,6 +625,13 @@ export type TableRow = {
    * page rather than splitting its content.
    */
   cantSplit?: boolean;
+  /**
+   * `w:hidden` (§17.4.20). With hidden text not shown, the engine leaves out
+   * marked rows whose cells show nothing; marked rows with visible content stay.
+   */
+  hidden?: boolean;
+  /** The source row held only vanished runs when read; a hidden row without this is never left out. */
+  hiddenContentOnly?: boolean;
   /** Leading omitted grid columns (`w:gridBefore`). Undefined = 0. */
   gridBefore?: number;
   /** Trailing omitted grid columns (`w:gridAfter`). Undefined = 0. */

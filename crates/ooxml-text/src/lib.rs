@@ -93,11 +93,13 @@ pub use measure::{
 pub use ooxml_drawingml::symbol_font;
 pub use outline::{GlyphOutline, PathCmd};
 pub use scripts::{
-    han_script_for_language, paragraph_scripts_with_han_fallback, paragraph_scripts_with_languages,
+    han_script_for_language, is_joining_or_indic, paragraph_scripts_with_han_fallback,
+    paragraph_scripts_with_languages,
 };
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};
 pub use symbol_font::SymbolFont;
 pub use word_metrics::{
     CompatFlags, LineBox, LineSpacingRule, apply_spacing_rule, kern_enabled, kern_features,
-    line_is_justified, single_line_box, snap_line_box, snap_line_height, stretch_spaces,
+    ligature_features, line_is_justified, single_line_box, snap_line_box, snap_line_height,
+    stretch_spaces, word_typography_mask,
 };

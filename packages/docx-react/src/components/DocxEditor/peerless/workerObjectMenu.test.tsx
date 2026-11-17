@@ -2,6 +2,9 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { en } from '@betteroffice/docx-i18n';
 import { useWorkerContextMenu } from './useWorkerContextMenu';
+import { loadMenuList } from '../../../../../../shared/react-toolbar/menuListLoader';
+
+await loadMenuList();
 
 const translate = (key: string) => {
   const value = key.split('.').reduce<unknown>((node, part) => (node as Record<string, unknown> | undefined)?.[part], en);

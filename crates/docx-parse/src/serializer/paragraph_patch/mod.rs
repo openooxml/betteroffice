@@ -6,6 +6,8 @@ mod text;
 mod verify;
 
 #[cfg(test)]
+mod inherited_tests;
+#[cfg(test)]
 mod language_tests;
 #[cfg(test)]
 mod tests;
@@ -226,6 +228,7 @@ fn patch_inner(
             &patch.para_inherit,
             &properties,
             &patch.seed.inherit.paragraph,
+            patch.inheritance.is_current(),
         )?;
         output = if let Some(at) = ppr {
             apply_bytes(&output, vec![(xml.nodes[at].span.clone(), replacement)])?
@@ -241,6 +244,7 @@ fn patch_inner(
     }
     let verified = lower::lower(&output, context, &units, properties::language_only(patch))?;
     drawing::bind(&output, &verified, &units)?;
+    verify::visible_text(source, &lowered, &patch.text_edits, &output, &verified)?;
     verify::markers(
         &output,
         &verified,

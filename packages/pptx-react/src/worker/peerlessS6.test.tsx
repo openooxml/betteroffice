@@ -1,6 +1,7 @@
 import './peerlessTestCapabilities';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, expect, mock, spyOn } from 'bun:test';
+import { budgetedTest, budgetedWaitFor } from '../../../../shared/office-session/testing/loadBudget';
 import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import type { TextBoxPrimitive } from '@betteroffice/pptx';
@@ -20,7 +21,9 @@ import * as i18n from '../i18n';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, createEvent, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, createEvent, fireEvent, render, waitFor: waitForCondition } = await import('@testing-library/react');
+const waitFor = budgetedWaitFor(waitForCondition);
+const test = budgetedTest();
 const restorers: (() => void)[] = [];
 let client: PresentationCommandClient;
 let commands: PresentationCommandEnvelope[];

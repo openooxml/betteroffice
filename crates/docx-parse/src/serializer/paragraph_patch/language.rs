@@ -98,7 +98,9 @@ fn insert_child(source: &str, xml: &Xml, child: &str, fragment: &str) -> Result<
         .iter()
         .map(|at| &xml.nodes[*at])
         .find(|node| {
-            node.namespace == WORD && rank(&root.local, &node.local) > rank(&root.local, child)
+            (node.namespace == WORD && rank(&root.local, &node.local) > rank(&root.local, child))
+                || (root.local == "rPr"
+                    && node.namespace == crate::paragraph_identity::W14_NAMESPACE)
         })
         .map_or(root.close.start, |node| node.span.start);
     apply_bytes(source, vec![(at..at, fragment.to_owned())])

@@ -207,6 +207,10 @@ pub struct RunFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kerning_min_pt: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ligatures: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contextual_alternates: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub imprint: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emboss: Option<bool>,
@@ -305,7 +309,11 @@ pub struct ImageRunPosition {
     pub use_simple_pos: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simple_pos: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::relative_height"
+    )]
     pub relative_height: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub behind_doc: Option<bool>,
@@ -315,6 +323,9 @@ pub struct ImageRunPosition {
 #[serde(rename_all = "camelCase")]
 pub struct ImageRun {
     pub src: String,
+    /// The picture's relationship id, which names it when `src` resolves to nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_id: Option<String>,
     pub width: f64,
     pub height: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -756,7 +767,11 @@ pub struct SdtGroup {
     pub bound: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repeating_item: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::control_id"
+    )]
     pub control_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pos: Option<i64>,
@@ -888,9 +903,32 @@ pub struct TableRow {
     pub is_header: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cant_split: Option<bool>,
+    /// `w:trPr/w:hidden` (§17.4.20). Layout draws such a row as usual; a view
+    /// that hides hidden text removes it first with
+    /// [`crate::table_grid::drop_hidden_rows`] when none of its cells shows
+    /// anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    /// The source row held only vanished runs when the document was read. A
+    /// hidden row without this mark is never removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_content_only: Option<bool>,
+    /// The row's index in the source table, set on every row kept when hidden
+    /// rows were removed; display cell refs report it instead of the layout
+    /// index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_row: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::grid_before"
+    )]
     pub grid_before: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::grid_after"
+    )]
     pub grid_after: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width_before: Option<PreferredWidth>,
@@ -1004,7 +1042,11 @@ pub struct ImageAnchor {
     pub behind_doc: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<ImageRunPosition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::relative_height"
+    )]
     pub relative_height: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_overlap: Option<bool>,
@@ -1025,6 +1067,9 @@ pub struct ImageBlock {
     pub sdt_groups: Option<Vec<SdtGroup>>,
     pub id: BlockId,
     pub src: String,
+    /// The picture's relationship id, which names it when `src` resolves to nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_id: Option<String>,
     pub width: f64,
     pub height: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1105,7 +1150,11 @@ pub struct ShapeBlock {
     pub wrap_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::relative_height"
+    )]
     pub relative_height: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub behind_doc: Option<bool>,
@@ -1140,7 +1189,11 @@ pub struct ChartBlock {
     pub wrap_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::relative_height"
+    )]
     pub relative_height: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub behind_doc: Option<bool>,
@@ -1434,6 +1487,7 @@ impl PartialEq for ImageRun {
     fn eq(&self, other: &Self) -> bool {
         let Self {
             src: _,
+            relationship_id: _,
             width: _,
             height: _,
             alt: _,
@@ -1478,6 +1532,7 @@ impl PartialEq for ImageRun {
             pm_end: _,
         } = other;
         self.src == other.src
+            && self.relationship_id == other.relationship_id
             && self.width == other.width
             && self.height == other.height
             && self.alt == other.alt
@@ -1664,6 +1719,7 @@ impl PartialEq for ImageBlock {
             sdt_groups: _,
             id: _,
             src: _,
+            relationship_id: _,
             width: _,
             height: _,
             alt: _,
@@ -1687,6 +1743,7 @@ impl PartialEq for ImageBlock {
         self.sdt_groups == other.sdt_groups
             && self.id == other.id
             && self.src == other.src
+            && self.relationship_id == other.relationship_id
             && self.width == other.width
             && self.height == other.height
             && self.alt == other.alt
@@ -2140,7 +2197,11 @@ pub struct SectionPageMargins {
     pub first: Option<PageMargins>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub even: Option<PageMargins>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::whole_number::page_restart"
+    )]
     pub restart: Option<u64>,
 }
 
@@ -2944,6 +3005,9 @@ pub struct PositionedGlyphContractMetadata {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayTextContractMetadata {
+    /// Enabled optional switches; empty selects DOCX defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub font_features: Vec<ooxml_text::ShapeFeature>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_glyphs: Option<LeaderGlyphContract>,
     /// Modern w14 text effects payload.

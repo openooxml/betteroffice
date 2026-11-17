@@ -415,6 +415,76 @@ describe('wasm loader', () => {
     }
   });
 
+  it('reports which chart anchors a resize can write back', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const charts = handle.displayList(viewport).charts ?? [];
+      expect(charts.map((chart) => [chart.movable, chart.resizable])).toEqual([
+        [true, true],
+        [true, false],
+        [false, false],
+        [true, true],
+      ]);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('resizes a two-cell chart by edge deltas that survive save and undo', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const before = (handle.displayList(viewport).charts ?? [])[0];
+      const depth = handle.historyState().undoDepth;
+      expect(handle.resizeChart(0, before.id, { left: 0, top: 0, right: 96, bottom: 48 }).applied)
+        .toBe(true);
+      expect(handle.historyState().undoDepth).toBe(depth + 1);
+
+      const resized = (handle.displayList(viewport).charts ?? [])[0];
+      expect(resized.rect.x).toBeCloseTo(before.rect.x, 1);
+      expect(resized.rect.y).toBeCloseTo(before.rect.y, 1);
+      expect(resized.rect.w).toBeCloseTo(before.rect.w + 96, 1);
+      expect(resized.rect.h).toBeCloseTo(before.rect.h + 48, 1);
+
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect((reopened.displayList(viewport).charts ?? [])[0].rect).toEqual(resized.rect);
+      } finally {
+        reopened.dispose();
+      }
+
+      handle.undo();
+      expect((handle.displayList(viewport).charts ?? [])[0].rect).toEqual(before.rect);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('refuses to resize a one-cell or an absolute chart without changing the workbook', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const charts = handle.displayList(viewport).charts ?? [];
+      const oneCell = charts.find((chart) => chart.movable && !chart.resizable)!;
+      const absolute = charts.find((chart) => !chart.movable)!;
+      const version = handle.version();
+      const saved = handle.save();
+      const history = handle.historyState();
+      expect(() =>
+        handle.resizeChart(0, oneCell.id, { left: 0, top: 0, right: 24, bottom: 24 })
+      ).toThrow(/one-cell extent/);
+      expect(() =>
+        handle.resizeChart(0, absolute.id, { left: 0, top: 0, right: 24, bottom: 24 })
+      ).toThrow(/pinned/);
+      expect(handle.version()).toBe(version);
+      expect(handle.historyState()).toEqual(history);
+      expect(handle.save()).toEqual(saved);
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('refuses a row insert inside a multi-level chart range before it applies', async () => {
     const zip = await JSZip.loadAsync(chartBytes());
     const chart = await zip.file('xl/charts/chart1.xml')!.async('string');
@@ -632,6 +702,36 @@ describe('wasm loader', () => {
     } finally {
       author.dispose();
       peer.dispose();
+    }
+  });
+
+  it('fills a copied range with translated formulas and one undo', () => {
+    const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5034 });
+    try {
+      handle.editCells(0, [
+        { row: 9, col: 0, input: '10' },
+        { row: 9, col: 1, input: '=A10+$A$10' },
+      ]);
+      const before = handle.historyState().undoDepth;
+      const originalA11 = handle.cell(0, 10, 0).input;
+      const originalB12 = handle.cell(0, 11, 1).input;
+      expect(handle.fillRange(0, 'A10:B10', 'A10:B12').applied).toBe(true);
+      expect(handle.historyState().undoDepth).toBe(before + 1);
+      expect(handle.cell(0, 10, 0).input).toBe('10');
+      expect(handle.cell(0, 10, 1).input).toBe('=A11+$A$10');
+      expect(handle.cell(0, 11, 1).input).toBe('=A12+$A$10');
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect(reopened.cell(0, 11, 1).input).toBe('=A12+$A$10');
+      } finally {
+        reopened.dispose();
+      }
+      handle.undo();
+      expect(handle.cell(0, 10, 0).input).toBe(originalA11);
+      expect(handle.cell(0, 11, 1).input).toBe(originalB12);
+      expect(handle.cell(0, 9, 1).input).toBe('=A10+$A$10');
+    } finally {
+      handle.dispose();
     }
   });
 

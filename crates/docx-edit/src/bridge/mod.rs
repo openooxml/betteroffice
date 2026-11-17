@@ -59,6 +59,8 @@ use crate::sticky_positions::sticky_offset;
 
 pub(crate) mod group_pictures;
 mod group_transforms;
+#[cfg(test)]
+mod hidden_rows_tests;
 pub(crate) mod local;
 pub(crate) mod preview;
 pub mod reservations;
@@ -126,6 +128,10 @@ pub struct RenderEnv {
     /// sections. `None` disables snapping.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_grid_pitch_px: Option<f64>,
+    /// Each region section's note numbering, which the body's note reference marks follow.
+    /// Empty numbers them in decimal from 1.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub note_numbering: Vec<docx_layout::footnotes::SectionNoteNumbering>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
     /// Resolved paragraph style chain font size in pt, keyed by style id.
@@ -441,6 +447,10 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
+    if crate::empty_cells::is_empty_cell(&doc.yrs_doc().transact(), story_id) {
+        let cell = crate::empty_cells::EmptyCell::new(story_id);
+        return yrs_doc_to_mapped_layout_blocks(cell.doc(), story_id, env);
+    }
     let mut local = local::LocalLowering::new(false);
     yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None, &mut local, &mut None)
 }
@@ -563,6 +573,9 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             &mut blocks,
             opaque_sequences,
         );
+    }
+    if story_id == "body" {
+        docx_layout::footnotes::number_note_references(&mut blocks, &env.note_numbering);
     }
     map.finish();
     Ok((blocks, map.map))
@@ -1166,32 +1179,50 @@ fn walk_story_chunks<T: ReadTxn>(
                         detail: "table embed interrupts paragraph content".to_owned(),
                     });
                 }
-                let previewed_out = env.revision_hidden(attributes);
-                let hidden = previewed_out
-                    || shared_map_string(table, txn, "blockId")
-                        .is_some_and(|id| hidden_field_blocks.contains(&id));
-                map.tables.push((pm_cursor, story_slot, table_ordinal));
-                table_ordinal += 1;
-                let mut unnumbered = previewed_out.then(|| list_state.clone());
-                let (lowered, node_size) = lower_table(
-                    table,
-                    txn,
-                    story_id,
-                    story_index,
-                    pm_cursor,
-                    env,
-                    active_stories,
-                    unnumbered.as_mut().unwrap_or(&mut *list_state),
-                    map,
-                    opaque_sequences,
-                    revealable,
-                    local,
-                )?;
-                if !hidden {
-                    blocks.push(LayoutBlock::Table(lowered));
-                } else if !previewed_out && let Some(revealed) = revealable {
-                    revealed.push(LayoutBlock::Table(lowered));
-                }
+                let payload = crate::unavailable_tables::table_payload(table, txn);
+                let node_size = if let Some(payload) = payload {
+                    let previewed_out = env.revision_hidden(attributes);
+                    let hidden = previewed_out
+                        || shared_map_string(table, txn, "blockId")
+                            .is_some_and(|id| hidden_field_blocks.contains(&id));
+                    map.tables.push((pm_cursor, story_slot, table_ordinal));
+                    table_ordinal += 1;
+                    let mut unnumbered = previewed_out.then(|| list_state.clone());
+                    let (lowered, node_size) = lower_table(
+                        &payload,
+                        txn,
+                        story_id,
+                        story_index,
+                        pm_cursor,
+                        env,
+                        active_stories,
+                        unnumbered.as_mut().unwrap_or(&mut *list_state),
+                        map,
+                        opaque_sequences,
+                        revealable,
+                        local,
+                    )?;
+                    let rows_shown = !lowered.rows.is_empty();
+                    if story_id == "body"
+                        && active_stories.len() == 1
+                        && let BlockId::Str(id) = &lowered.id
+                    {
+                        local.table_embeds.insert(id.clone(), table.clone());
+                    }
+                    if rows_shown && !hidden {
+                        blocks.push(LayoutBlock::Table(lowered));
+                    } else if rows_shown
+                        && !previewed_out
+                        && let Some(revealed) = revealable
+                    {
+                        revealed.push(LayoutBlock::Table(lowered));
+                    }
+                    node_size
+                } else {
+                    map.tables.push((pm_cursor, story_slot, table_ordinal));
+                    table_ordinal += 1;
+                    UNAVAILABLE_TABLE_NODE_SIZE
+                };
                 story_index += 1;
                 paragraph_start = story_index;
                 pm_cursor += node_size;
@@ -1633,6 +1664,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shapes::inline_native_shape(&block) {
                     let image = ImageRun {
                         src: String::new(),
+                        relationship_id: None,
                         width: block.width,
                         height: block.height,
                         alt: block.description.clone().or_else(|| block.title.clone()),
@@ -2174,9 +2206,13 @@ fn note_ref_label(id: f64) -> String {
     }
 }
 
+/// Display units of a table embed that lost its payload: an empty table node, so display
+/// positions after it match the editor projection, which counts it as a table without rows.
+const UNAVAILABLE_TABLE_NODE_SIZE: u64 = 2;
+
 #[allow(clippy::too_many_arguments)]
 fn lower_table<T: ReadTxn>(
-    table: &MapRef,
+    payload: &crate::unavailable_tables::TablePayload,
     txn: &T,
     parent_story: &str,
     story_index: u32,
@@ -2189,11 +2225,15 @@ fn lower_table<T: ReadTxn>(
     revealable: &mut Option<Vec<LayoutBlock>>,
     local: &mut local::LocalLowering,
 ) -> Result<(TableBlock, u64), BridgeError> {
-    let tbl_pr_value = shared_any(table, txn, "tblPr")
+    let plain = |value: &Out| match value {
+        Out::Any(value) => Some(value.clone()),
+        _ => None,
+    };
+    let tbl_pr_value = plain(&payload.tbl_pr)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
     let tbl_pr = any_map(&tbl_pr_value)
         .ok_or_else(|| malformed_table(parent_story, story_index, "tblPr must be a map"))?;
-    let grid_value = shared_any(table, txn, "grid")
+    let grid_value = plain(&payload.grid)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing grid"))?;
     let grid = match &grid_value {
         Any::Array(values) => values,
@@ -2205,7 +2245,7 @@ fn lower_table<T: ReadTxn>(
             ));
         }
     };
-    let rows_value = shared_any(table, txn, "rows")
+    let rows_value = plain(&payload.rows)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing rows"))?;
     let row_values = match &rows_value {
         Any::Array(values) => values,
@@ -2313,22 +2353,42 @@ fn lower_table<T: ReadTxn>(
                     format!("row {row_index} cell {cell_index} is missing story"),
                 )
             })?;
-            let (mut blocks, content_size) = lower_story(
-                txn,
-                &cell_story,
-                env,
-                cell_pm_start + 1,
-                active_stories,
-                list_state,
-                CellEdges {
-                    before: true,
-                    after: true,
-                },
-                map,
-                opaque_sequences,
-                revealable,
-                local,
-            )?;
+            let cell_edges = CellEdges {
+                before: true,
+                after: true,
+            };
+            let (mut blocks, content_size) = if crate::story_text(txn, &cell_story).is_some() {
+                lower_story(
+                    txn,
+                    &cell_story,
+                    env,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    cell_edges,
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?
+            } else {
+                local.block(true);
+                let cell = crate::empty_cells::EmptyCell::new(&cell_story);
+                let scratch = cell.doc().yrs_doc().transact();
+                lower_story(
+                    &scratch,
+                    &cell_story,
+                    env,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    cell_edges,
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?
+            };
 
             for block in &mut blocks {
                 if let LayoutBlock::Paragraph(paragraph) = block
@@ -2431,6 +2491,13 @@ fn lower_table<T: ReadTxn>(
             cant_split: row_formatting
                 .and_then(|value| map_bool(value, "cantSplit"))
                 .filter(|value| *value),
+            hidden: row_formatting
+                .and_then(|value| map_bool(value, "hidden"))
+                .filter(|value| *value),
+            hidden_content_only: row_formatting
+                .and_then(|value| map_bool(value, "hiddenContentOnly"))
+                .filter(|value| *value),
+            source_row: None,
             grid_before,
             grid_after,
             width_before: grid_before
@@ -2483,35 +2550,36 @@ fn lower_table<T: ReadTxn>(
         (twips > 0.0).then(|| twips_to_pixels(twips))
     };
 
-    Ok((
-        TableBlock {
-            sdt_groups: None,
-            id: BlockId::Str(table_id),
-            rows,
-            column_widths: (!column_widths.is_empty()).then_some(column_widths),
-            grid_widths: None,
-            width: map_number(tbl_pr, "width"),
-            width_type: map_string(tbl_pr, "widthType"),
-            preferred_width: None,
-            layout_mode: None,
-            table_layout: Some(layout_mode.unwrap_or_else(|| "autofit".to_owned())),
-            width_algorithm: None,
-            style_cascade: None,
-            background: None,
-            justification: map_string(tbl_pr, "justification"),
-            bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
-            indent,
-            floating,
-            compatibility_mode,
-            cell_margin_left: table_margin("left"),
-            cell_margin_right: table_margin("right"),
-            gridlines: env.show_table_gridlines.then_some(true),
-            first_column: table_look_first_column(tbl_pr).then_some(true),
-            pm_start: Some(pm_start as f64),
-            pm_end: Some((pm_start + node_size) as f64),
-        },
-        node_size,
-    ))
+    let mut block = TableBlock {
+        sdt_groups: None,
+        id: BlockId::Str(table_id),
+        rows,
+        column_widths: (!column_widths.is_empty()).then_some(column_widths),
+        grid_widths: None,
+        width: map_number(tbl_pr, "width"),
+        width_type: map_string(tbl_pr, "widthType"),
+        preferred_width: None,
+        layout_mode: None,
+        table_layout: Some(layout_mode.unwrap_or_else(|| "autofit".to_owned())),
+        width_algorithm: None,
+        style_cascade: None,
+        background: None,
+        justification: map_string(tbl_pr, "justification"),
+        bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
+        indent,
+        floating,
+        compatibility_mode,
+        cell_margin_left: table_margin("left"),
+        cell_margin_right: table_margin("right"),
+        gridlines: env.show_table_gridlines.then_some(true),
+        first_column: table_look_first_column(tbl_pr).then_some(true),
+        pm_start: Some(pm_start as f64),
+        pm_end: Some((pm_start + node_size) as f64),
+    };
+    if !env.show_hidden_text {
+        docx_layout::table_grid::drop_hidden_rows(&mut block);
+    }
+    Ok((block, node_size))
 }
 
 /// The table's own `w:tblLook` asks for first-column formatting, by its
@@ -2580,7 +2648,8 @@ fn resolve_auto_text_color(
 fn automatic_text_needs_white(color: &str) -> bool {
     let Some(value) = color
         .strip_prefix('#')
-        .filter(|value| value.len() == 6)
+        .filter(|value| matches!(value.len(), 6 | 8))
+        .and_then(|value| value.get(..6))
         .and_then(|value| u32::from_str_radix(value, 16).ok())
     else {
         return false;
@@ -2758,6 +2827,7 @@ fn lower_image_values(
             Some(Any::String(src)) => env.media.token(src).unwrap_or_else(|| src.to_string()),
             value => value_string(value).unwrap_or_default(),
         },
+        relationship_id: map_string(values, "rId").filter(|id| !id.is_empty()),
         width,
         height,
         alt: map_string(values, "alt"),
@@ -4244,6 +4314,7 @@ fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun 
     };
     let image = ImageRun {
         src: String::new(),
+        relationship_id: None,
         width,
         height,
         alt,
@@ -5189,6 +5260,10 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
     lower_font_size(attributes, &mut result);
     lower_language(attributes, &mut result);
     lower_character_spacing(attributes, &mut result);
+    if let Some(Any::Map(map)) = attribute(attributes, "typography") {
+        result.ligatures = map_string(map, "ligatures");
+        result.contextual_alternates = map_bool(map, "contextualAlternates");
+    }
 
     result.superscript = mark_bool(attributes, "superscript");
     result.subscript = mark_bool(attributes, "subscript");
@@ -6523,6 +6598,11 @@ mod tests {
     }
 
     #[test]
+    fn hostile_colour_value_does_not_panic() {
+        assert!(!automatic_text_needs_white("#abcde\u{20ac}"));
+    }
+
+    #[test]
     fn chart_theme_typefaces_lower_to_the_theme_fonts() {
         let mut theme = docx_parse::Theme::default();
         theme.font_scheme.major_font.latin = "Theme Major".to_owned();
@@ -7667,7 +7747,7 @@ mod tests {
             yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
         )
         .unwrap();
-        assert_eq!(body[0]["runs"][1]["text"], json!("5"));
+        assert_eq!(body[0]["runs"][1]["text"], json!("1"));
         assert_eq!(body[0]["runs"][1]["footnoteRefId"], json!(5.0));
         assert_eq!(body[0]["runs"][1]["superscript"], json!(true));
 
@@ -7710,17 +7790,136 @@ mod tests {
         )
         .unwrap();
         replace_story_with_paragraph(&doc, "fn:12", "fn-p", "Footnote text");
+        let env = RenderEnv {
+            note_numbering: vec![docx_layout::footnotes::SectionNoteNumbering {
+                footnote: docx_layout::regions::NoteProperties {
+                    num_start: Some(12),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..RenderEnv::default()
+        };
 
-        let body = serde_json::to_value(
-            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
-        )
-        .unwrap();
+        let body =
+            serde_json::to_value(yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap()).unwrap();
         assert_eq!(body[0]["runs"][1]["text"], json!("12"));
         assert_eq!(body[0]["runs"][1]["pmStart"], json!(2.0));
         assert_eq!(body[0]["runs"][1]["pmEnd"], json!(3.0));
         assert_eq!(body[0]["runs"][2]["text"], json!("B"));
         assert_eq!(body[0]["runs"][2]["pmStart"], json!(3.0));
         assert_eq!(body[0]["pmEnd"], json!(5.0));
+    }
+
+    fn note_ref_embed(index: u32, key: &str, id: f64) -> RawOp {
+        RawOp::InsertEmbed {
+            index,
+            kind: "noteRef".to_owned(),
+            payload: vec![(key.to_owned(), Any::Number(id))],
+            attrs: Attrs::new(),
+        }
+    }
+
+    fn inline_control_note_ref(index: u32, key: &'static str, id: f64) -> RawOp {
+        RawOp::InsertEmbed {
+            index,
+            kind: "sdt".to_owned(),
+            payload: vec![(
+                "content".to_owned(),
+                Any::Array(Arc::from([any_map([
+                    ("kind", Any::from("noteRef")),
+                    ("payload", any_map([(key, Any::Number(id))])),
+                ])])),
+            )],
+            attrs: Attrs::new(),
+        }
+    }
+
+    fn note_ref_doc(
+        client_id: u64,
+        embeds: impl Fn(u32, usize) -> RawOp,
+        count: usize,
+    ) -> EditingDoc {
+        let doc = EditingDoc::new(client_id);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
+        let mut cursor = 0;
+        for slot in 0..count {
+            ops.push(RawOp::Insert {
+                index: cursor,
+                text: "ab".to_owned(),
+                attrs: Attrs::new(),
+            });
+            ops.push(embeds(cursor + 2, slot));
+            cursor += 3;
+        }
+        ops.push(RawOp::InsertEmbed {
+            index: cursor,
+            kind: "pilcrow".to_owned(),
+            payload: vec![("paraId".to_owned(), Any::from("body-p"))],
+            attrs: Attrs::new(),
+        });
+        doc.apply_raw_ops("body", ops, &EditCtx::local("", DATE))
+            .unwrap();
+        doc
+    }
+
+    fn note_ref_marks(doc: &EditingDoc) -> Vec<String> {
+        yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default())
+            .unwrap()
+            .into_iter()
+            .flat_map(|block| match block {
+                LayoutBlock::Paragraph(paragraph) => paragraph.runs,
+                _ => Vec::new(),
+            })
+            .filter_map(|run| match run {
+                Run::Text(text)
+                    if text.fmt.footnote_ref_id.is_some() || text.fmt.endnote_ref_id.is_some() =>
+                {
+                    Some(text.text)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_lone_note_ref_marks_its_ordinal_not_its_id() {
+        for key in ["footnoteRefId", "endnoteRefId"] {
+            let doc = note_ref_doc(7301, |index, _| note_ref_embed(index, key, 2.0), 1);
+            assert_eq!(note_ref_marks(&doc), ["1"], "{key}");
+            let doc = note_ref_doc(7302, |index, _| inline_control_note_ref(index, key, 2.0), 1);
+            assert_eq!(note_ref_marks(&doc), ["1"], "inline control {key}");
+        }
+    }
+
+    #[test]
+    fn note_refs_out_of_id_order_mark_their_document_order() {
+        let ids = [7.0, 3.0, 5.0];
+        for key in ["footnoteRefId", "endnoteRefId"] {
+            let doc = note_ref_doc(7303, |index, slot| note_ref_embed(index, key, ids[slot]), 3);
+            assert_eq!(note_ref_marks(&doc), ["1", "2", "3"], "{key}");
+        }
+        let doc = note_ref_doc(
+            7304,
+            |index, slot| inline_control_note_ref(index, "footnoteRefId", ids[slot]),
+            3,
+        );
+        assert_eq!(note_ref_marks(&doc), ["1", "2", "3"]);
+    }
+
+    #[test]
+    fn footnote_and_endnote_refs_count_apart() {
+        let doc = note_ref_doc(
+            7305,
+            |index, slot| match slot {
+                0 => note_ref_embed(index, "footnoteRefId", 4.0),
+                1 => note_ref_embed(index, "endnoteRefId", 9.0),
+                _ => note_ref_embed(index, "footnoteRefId", 6.0),
+            },
+            3,
+        );
+        assert_eq!(note_ref_marks(&doc), ["1", "1", "2"]);
     }
 
     #[test]

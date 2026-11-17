@@ -48,6 +48,7 @@ type Engine = Pick<
 >;
 
 const binding = createRequire(import.meta.url)('../index.js') as Engine;
+binding.install_panic_hook();
 
 export const build_display_list_json = binding.build_display_list_json;
 export const clear_measure_fonts = binding.clear_measure_fonts;

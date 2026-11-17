@@ -20,13 +20,13 @@ const workerEntries: Record<Format, string> = { xlsx: 'dist/worker.js', pptx: 'd
 const extension: Record<Format, string> = { xlsx: 'js', pptx: 'js', docx: 'mjs' };
 const cdn = (name: string, file: string) => `/npm/@betteroffice/${name}/${file}`;
 
-function importMap(mapInternal: boolean): string {
-  const imports: Record<string, string> = {
+function importMap(mapInternal: boolean, mapFonts: boolean): string {
+  const imports: Record<string, string> = mapFonts ? {
     '@betteroffice/fonts': cdn('fonts', 'dist/index.js'),
     '@betteroffice/fonts-latin': cdn('fonts-latin', 'dist/index.js'),
     '@betteroffice/fonts-intl': cdn('fonts-intl', 'dist/index.js'),
     '@betteroffice/fonts-cjk': cdn('fonts-cjk', 'dist/index.js'),
-  };
+  } : {};
   for (const format of Object.keys(workerEntries) as Format[]) imports[`@betteroffice/${format}/worker`] = cdn(format, workerEntries[format]);
   const scopes: Record<string, Record<string, string>> = {};
   if (mapInternal) {
@@ -48,7 +48,7 @@ test.beforeAll(async () => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     try {
       if (url.pathname === '/') {
-        const map = importMap(url.searchParams.get('internal') === '1');
+        const map = importMap(url.searchParams.get('internal') === '1', url.searchParams.get('fonts') !== '0');
         return response.writeHead(200, { 'content-type': 'text/html' })
           .end(`<!doctype html><title>unbundled</title><script type="importmap">${map}</script>`);
       }
@@ -111,6 +111,16 @@ for (const format of ['xlsx', 'pptx', 'docx'] as const) {
 
   test(`${format} worker session opens from raw dist with the internal imports also mapped`, async ({ page }) => {
     await page.goto(`${origin}/?internal=1`);
+    const outcome = await open(page, format);
+    expect(outcome).toMatchObject({ ok: true });
+    expect((outcome as { count: number }).count).toBeGreaterThan(0);
+  });
+}
+
+for (const format of ['xlsx', 'pptx'] as const) {
+  test(`${format} worker session opens with the fonts package unresolvable`, async ({ page }) => {
+    await page.context().route(/\/npm\/@betteroffice\/fonts(-[a-z]+)?\//, (route) => route.abort());
+    await page.goto(`${origin}/?fonts=0`);
     const outcome = await open(page, format);
     expect(outcome).toMatchObject({ ok: true });
     expect((outcome as { count: number }).count).toBeGreaterThan(0);

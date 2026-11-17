@@ -9,6 +9,7 @@ pub use open_options::OpenOptions;
 
 mod authority;
 mod error;
+mod fill;
 #[cfg(all(feature = "fonts", feature = "raster"))]
 mod font;
 mod move_range;
@@ -47,9 +48,10 @@ pub use structured::{
 };
 pub use types::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
-    EditStage, HistoryState, MutationResult, NumberFormatKind, PngTarget, ProposalAcceptance,
-    ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SaveWarning, SaveWarningCode,
-    SelectionFormatting, SheetInfo, TextSearchMatch, UnevaluatedCell, UpdateEvent, UpdateOrigin,
+    EditStage, HistoryState, MutationResult, NumberFormatKind, PngFontFace, PngTarget,
+    ProposalAcceptance, ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng,
+    SaveWarning, SaveWarningCode, SelectionFormatting, SheetInfo, TextSearchMatch, UnevaluatedCell,
+    UpdateEvent, UpdateOrigin,
 };
 #[doc(hidden)]
 pub use workbook::PeerHydration;
@@ -57,7 +59,8 @@ pub use workbook::batch::{
     CalculationRequest, CellGuard, DocumentVersion, EditApplication, EditCalculation, EditFailure,
     EditFailureCode, EditHistory, EditOperation, EditOutcome, EditPreview, EditReceipt,
     EditRefusal, EditRequest, EditSource, EditStep, EditValidation, MAX_REQUEST_BYTES,
-    MAX_RESPONSE_BYTES, StepGuard, ValidationOutcome, outcome_json,
+    MAX_RESPONSE_BYTES, RefusedCell, ReplaceLookIn, ReplaceStats, ReplaceWithin, StepGuard,
+    ValidationOutcome, outcome_json,
 };
 #[doc(hidden)]
 pub use workbook::reads::SheetInfoWire;
@@ -99,9 +102,10 @@ pub use xlsx_ops::{
 };
 pub use xlsx_parse::translate_formula;
 pub use xlsx_render::{
-    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridGeometry, GridMeta,
-    HyperlinkRegion, PathStroke, PrintMetrics, Rect, RenderError, Viewport, viewport_for_range,
-    viewport_for_used_range, viewport_for_used_range_within,
+    Align, ChartA11yAttrs, ChartRegion, ChartResize, DisplayList, DrawCmd, GridGeometry, GridMeta,
+    HyperlinkRegion, ImageCrop, PathStroke, PrintMetrics, Rect, RenderError, Viewport,
+    resolve_chart_anchor, viewport_for_range, viewport_for_used_range,
+    viewport_for_used_range_within,
 };
 
 pub type Result<T> = std::result::Result<T, Error>;

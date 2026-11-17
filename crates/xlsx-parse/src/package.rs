@@ -10,8 +10,8 @@ use xlsx_model::{CellRef, SheetId, Workbook};
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
-    attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
-    text_attribute, utf8_bom_len, xml_err,
+    PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_part_name,
+    resolve_part_path, text_attribute, utf8_bom_len, xml_err,
 };
 use crate::{MAX_DEPTH, ParseError};
 
@@ -36,6 +36,8 @@ pub struct PreservedPackage {
     pub(crate) original_workbook: Workbook,
     pub(crate) active_sheet: SheetId,
     pub(crate) unpatchable_references: Vec<UnpatchableReference>,
+    /// Per source sheet, the drawings holding anchors no chart claims; read on first use.
+    pub(crate) drawing_anchors: Arc<OnceLock<Vec<Vec<crate::drawing_anchors::SheetDrawing>>>>,
     pub(crate) rich_shared_strings: BTreeSet<usize>,
     pub(crate) text_runs: Arc<OnceLock<crate::rich_text::RichTextIndex>>,
 }
@@ -190,6 +192,7 @@ impl PreservedPackage {
             original_workbook: workbook.clone(),
             active_sheet,
             unpatchable_references,
+            drawing_anchors: Arc::new(OnceLock::new()),
             rich_shared_strings,
             text_runs: Arc::new(OnceLock::new()),
         })
@@ -236,6 +239,56 @@ impl PreservedPackage {
     #[doc(hidden)]
     pub fn unpatchable_references(&self) -> &[UnpatchableReference] {
         &self.unpatchable_references
+    }
+
+    /// What a row or column `shift` on the source sheet `sheet` does to the pictures and shapes
+    /// of its drawings, with the sheet's rows and columns where `axes` says they are now: `Err`
+    /// names a drawing a save could not place, `Ok(true)` says something moves.
+    #[doc(hidden)]
+    pub fn drawings_after_shift(
+        &self,
+        sheet: usize,
+        axes: Option<&crate::SheetAxes>,
+        shift: crate::GridShift,
+    ) -> Result<bool, &str> {
+        let mut moves = false;
+        for drawing in self.sheet_drawings().get(sheet).into_iter().flatten() {
+            match crate::drawing_anchors::verdict(drawing, axes, shift) {
+                crate::drawing_anchors::Verdict::Refused => return Err(drawing.part.as_str()),
+                crate::drawing_anchors::Verdict::Moves => moves = true,
+                crate::drawing_anchors::Verdict::Still => {}
+            }
+        }
+        Ok(moves)
+    }
+
+    /// The first drawing of the source sheet `sheet` that holds pictures or shapes.
+    #[doc(hidden)]
+    pub fn drawing_part(&self, sheet: usize) -> Option<&str> {
+        self.sheet_drawings()
+            .get(sheet)?
+            .first()
+            .map(|drawing| drawing.part.as_str())
+    }
+
+    pub(crate) fn sheet_drawings(&self) -> &[Vec<crate::drawing_anchors::SheetDrawing>] {
+        self.drawing_anchors.get_or_init(|| {
+            let mut drawings = self
+                .sheets
+                .iter()
+                .map(|sheet| {
+                    crate::drawing_anchors::sheet_drawing_anchors(&self.parts, &sheet.path)
+                })
+                .collect::<Vec<_>>();
+            let mut owners: HashMap<String, usize> = HashMap::new();
+            for drawing in drawings.iter().flatten() {
+                *owners.entry(drawing.part.clone()).or_default() += 1;
+            }
+            for drawing in drawings.iter_mut().flatten() {
+                drawing.shared = owners.get(&drawing.part).is_some_and(|owners| *owners > 1);
+            }
+            drawings
+        })
     }
 
     /// Returns a preserved part whose references cannot be patched.
@@ -344,6 +397,8 @@ impl PreservedPackage {
                 },
                 None => continue,
             };
+            let mut table_parts = PartNames::default();
+            let mut comment_parts = PartNames::default();
             for relationship in relationships {
                 let table = relationship.has_type("table");
                 let comments =
@@ -361,10 +416,20 @@ impl PreservedPackage {
                     return Some(&sheet.path);
                 }
                 let base = sheet.path.rsplit_once('/').map_or("", |(base, _)| base);
-                let path = resolve_part_path(base, target);
+                let path = resolve_part_name(base, target);
+                let seen = if table {
+                    &mut table_parts
+                } else {
+                    &mut comment_parts
+                };
+                if !seen.push(path.clone()) {
+                    continue;
+                }
                 let Some(bytes) = find_part(&self.parts, &path) else {
                     return Some(&sheet.path);
                 };
+                #[cfg(test)]
+                MOVE_GUARD_READS.set(MOVE_GUARD_READS.get() + 1);
                 let unsupported = if table {
                     table_move_unsupported(bytes, |formula| formula_affected(index, formula))
                 } else {
@@ -376,6 +441,35 @@ impl PreservedPackage {
             }
         }
         None
+    }
+
+    /// What of source sheet `index` a fill cannot keep, if anything.
+    #[doc(hidden)]
+    pub fn fill_unsupported_feature(&self, index: usize, exact: bool) -> Option<&'static str> {
+        let sheet = self.sheets.get(index)?;
+        let Some(bytes) = find_part(&self.parts, &sheet.path).filter(|bytes| !bytes.contains(&0))
+        else {
+            return Some("data validations");
+        };
+        match source_fill_blocker(bytes, exact) {
+            Ok(None) => {}
+            Ok(Some(feature)) => return Some(feature),
+            Err(_) => return Some("data validations"),
+        }
+        let relationships = match find_part(&self.parts, &relationship_part_path(&sheet.path)) {
+            Some(bytes) if bytes.contains(&0) => return Some("comments"),
+            Some(bytes) => match parse_relationships(bytes) {
+                Ok(relationships) => relationships,
+                Err(_) => return Some("comments"),
+            },
+            None => return None,
+        };
+        relationships
+            .iter()
+            .any(|relationship| {
+                relationship.has_type("comments") || relationship.has_type("threadedComment")
+            })
+            .then_some("comments")
     }
 
     fn stranded(&self, disturbed: impl Fn(&UnpatchableReference) -> bool) -> Option<&str> {
@@ -534,6 +628,17 @@ impl PreservedPackage {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static MOVE_GUARD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Table and comments parts the cell-move guard read since the last call.
+#[cfg(test)]
+pub(crate) fn take_move_guard_reads() -> usize {
+    MOVE_GUARD_READS.replace(0)
+}
+
 fn table_move_unsupported(
     bytes: &[u8],
     affected: impl Fn(&str) -> bool,
@@ -585,6 +690,25 @@ fn comment_move_unsupported(
                 }
             }
             Event::Eof => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
+/// The first worksheet element that refuses a fill, named as its feature.
+fn source_fill_blocker(bytes: &[u8], exact: bool) -> Result<Option<&'static str>, ParseError> {
+    let mut xml = reader(bytes);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    loop {
+        match next_event(&mut xml, &mut buffer, &mut depth)? {
+            Event::Start(start) => match local_name(&start).as_slice() {
+                b"dataValidations" | b"dataValidation" => return Ok(Some("data validations")),
+                b"extLst" | b"AlternateContent" => return Ok(Some("conditional formats")),
+                b"conditionalFormatting" if !exact => return Ok(Some("conditional formats")),
+                _ => {}
+            },
+            Event::Eof => return Ok(None),
             _ => {}
         }
     }

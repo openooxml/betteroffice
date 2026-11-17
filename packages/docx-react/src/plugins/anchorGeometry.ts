@@ -32,7 +32,7 @@ export function hiddenRanges(session: AnchorSession, version: string) {
 
 export function resolveAnchorTarget(
   session: AnchorSession,
-  target: Exclude<DocxGeometryTarget, { kind: 'reservation' }>,
+  target: Exclude<DocxGeometryTarget, { kind: 'reservation' | 'selection' }>,
   version: string
 ) {
   return readAnchorTarget(

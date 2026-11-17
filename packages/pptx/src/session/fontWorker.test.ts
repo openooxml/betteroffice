@@ -1,12 +1,19 @@
-import { afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { resolve } from 'node:path';
 import { sessionWasmFactory } from '../../../../shared/office-session/testing/wasmWorker';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { configureFontCdn } from '@betteroffice/fonts';
 
 type Client = typeof import('./fontWorker');
 let factory: Awaited<ReturnType<typeof sessionWasmFactory<Client>>>;
 
 const restorers: (() => void)[] = [];
+beforeEach(() => {
+  const previous = getFontCdnConfiguration();
+  setFontCdnConfiguration(undefined);
+  restorers.push(() => setFontCdnConfiguration(previous));
+});
 afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
 
 beforeAll(async () => {
@@ -134,6 +141,18 @@ test('preparation starts the opening slide coverage faces on the prepared worker
     for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
     expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp']]]);
   } finally { prepared.release(); }
+});
+
+test('coverage prefetch forwards configured CDN and explicit disable state', async () => {
+  for (const baseUrl of ['https://prefetch-fonts.example/root/', false] as const) {
+    configureFontCdn({ baseUrl, timeoutMs: 6789 });
+    const h = factory();
+    const prepared = h.client.preparePresentationFontDecoder(await kanaDeck(), { activeSlideIndex: 1 });
+    try {
+      for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
+      expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp'], false, { baseUrl, timeoutMs: 6789 }]]);
+    } finally { prepared.release(); }
+  }
 });
 
 test('preparation skips the coverage prefetch without default fonts or coverage text', async () => {

@@ -161,8 +161,22 @@ impl FontManager {
         scripts: &[String],
         office: LastResortOffice,
     ) -> Vec<FontFaceHandle> {
+        let (faces, _) = self.resolve_with_glyph_fallback(family, bold, italic, scripts, office);
+        faces
+    }
+
+    /// [`Self::resolve`] and the index of the face it resolved as the glyph fallback.
+    #[doc(hidden)]
+    pub fn resolve_with_glyph_fallback(
+        &self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        scripts: &[String],
+        office: LastResortOffice,
+    ) -> (Vec<FontFaceHandle>, Option<usize>) {
         let Some(provider) = &self.provider else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let mut faces = Vec::new();
         let mut push = |face: FontFaceHandle| {
@@ -170,15 +184,17 @@ impl FontManager {
                 && crate::resolve_bundled_family_face(&face.family, face.bold, face.italic)
                     .is_none_or(|entry| !packs.contains(&entry.pack))
             {
-                return;
+                return None;
             }
-            if !faces.iter().any(|known: &FontFaceHandle| {
+            if faces.iter().any(|known: &FontFaceHandle| {
                 known.family == face.family
                     && known.bold == face.bold
                     && known.italic == face.italic
             }) {
-                faces.push(face);
+                return None;
             }
+            faces.push(face);
+            Some(faces.len() - 1)
         };
         let primary = provider.resolve_family(family, bold, italic);
         let has_primary = primary.is_some();
@@ -192,14 +208,14 @@ impl FontManager {
                 push(face);
             }
         }
-        if let Some(face) = provider.resolve_glyph_fallback(family, bold, italic, office) {
-            push(face);
-        }
+        let glyph = provider
+            .resolve_glyph_fallback(family, bold, italic, office)
+            .and_then(&mut push);
         let face = provider.resolve_last_resort(family, bold, italic, office);
         if !face.only_if_primary_fails || !has_primary {
             push(face);
         }
-        faces
+        (faces, glyph)
     }
 }
 

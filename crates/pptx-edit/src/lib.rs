@@ -36,6 +36,9 @@ mod story;
 pub mod structured;
 mod table;
 mod target;
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub mod test_counters;
 mod undo;
 
 pub use batch::{

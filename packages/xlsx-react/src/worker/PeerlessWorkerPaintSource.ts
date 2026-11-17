@@ -87,6 +87,7 @@ export class PeerlessWorkerPaintSource {
   private revision = 0;
   private paintedRevision = -1;
   private pending: PendingFrame | null = null;
+  private inFlight: WorkerPaintRequest | null = null;
   private running = false;
   private lastPaint: WorkerPaintResult | null = null;
   private lastFrameSequence = 0;
@@ -100,6 +101,16 @@ export class PeerlessWorkerPaintSource {
 
   get painted(): WorkerPaintResult | null { return this.lastPaint; }
   get coversThroughSeq(): number { return this.commandCoverage; }
+
+  selectionPaintReady(sheet: number, activeSheet: number): () => boolean {
+    const revision = this.revision;
+    const previous = this.lastPaint;
+    const pending = this.current && !this.failed &&
+      (this.raf !== null && activeSheet === sheet || this.pipeFrame?.request.sheet === sheet ||
+        this.pending?.request.sheet === sheet || this.inFlight?.sheet === sheet);
+    return () => !pending || (this.lastPaint !== previous && this.lastPaint?.request.sheet === sheet &&
+      !this.lastPaint.provisional && this.paintedRevision >= revision);
+  }
 
   registerPaintTransaction(transaction: WorkerPaintTransaction): () => void {
     if (this.disposed) return () => {};
@@ -278,6 +289,7 @@ export class PeerlessWorkerPaintSource {
     const previous = this.lastPaint;
     const previousSequence = this.lastFrameSequence;
     const previousCoverage = this.commandCoverage;
+    const revision = this.revision;
     this.lastPaint = painted;
     if (!provisional) this.lastFrameSequence = Math.max(this.lastFrameSequence, sequence);
     if (coversThroughSeq !== undefined) this.commandCoverage = coversThroughSeq;
@@ -296,7 +308,7 @@ export class PeerlessWorkerPaintSource {
       }
       throw error;
     }
-    if (!provisional) this.paintedRevision = this.revision;
+    if (!provisional) this.paintedRevision = revision;
     if (this.pipeFrame && coversThroughSeq !== undefined &&
       coversThroughSeq >= this.pipeFrame.frame.coversThroughSeq) this.cancelPipeFrame();
     this.options.onInstalled?.(painted);
@@ -315,6 +327,7 @@ export class PeerlessWorkerPaintSource {
           continue;
         }
         const { request } = pending;
+        this.inFlight = request;
         let frame: WorkbookFrame;
         try {
           frame = await this.options.requestFrame(snapshot(request));
@@ -345,6 +358,6 @@ export class PeerlessWorkerPaintSource {
           }, frame.sequence, coverage);
         } catch (error) { this.fail(error); }
       }
-    } finally { this.running = false; }
+    } finally { this.running = false; this.inFlight = null; }
   }
 }

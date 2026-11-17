@@ -1,6 +1,35 @@
 import { expect, test } from 'bun:test';
 import { createPeerlessViewStore, geometryMatchesDocument, type PeerlessFrameGeometry } from './viewStore';
 
+test('remote attribution follows the accepted selection, including null, until an unmarked selection replaces it', () => {
+  const identity = { session: 'view', incarnation: 1, epoch: 1 };
+  const point = { story: 'body', paraId: 'p', offset: 2 };
+  const selected = { anchor: point, focus: point };
+  const store = createPeerlessViewStore({ identity, version: 0, throughSeq: 0, presentedThroughSeq: 0,
+    workerSelection: selected, anchors: null, editState: undefined, geometry: null });
+  try {
+    store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 1, presentedThroughSeq: 0,
+      selection: null, selectionCause: 'remote', editState: undefined });
+    expect(store.getSnapshot()).toMatchObject({ workerSelection: null, selectionCause: 'remote' });
+    store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 2, presentedThroughSeq: 0,
+      selection: undefined, editState: undefined });
+    expect(store.getSnapshot()).toMatchObject({ workerSelection: null, selectionCause: 'remote' });
+    store.acceptWorkerState(identity, { epoch: 1, version: 0, throughSeq: 0, presentedThroughSeq: 0,
+      selection: selected, selectionCause: 'remote', editState: undefined });
+    expect(store.getSnapshot().workerSelection).toBeNull();
+    store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 3, presentedThroughSeq: 0,
+      selection: selected, editState: undefined });
+    expect(store.getSnapshot().workerSelection).toEqual(selected);
+    expect(store.getSnapshot().selectionCause).toBeUndefined();
+    store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 3, presentedThroughSeq: 0,
+      selection: selected, selectionCause: 'remote', editState: undefined });
+    expect(store.getSnapshot().selectionCause).toBe('remote');
+    store.acceptWorkerState(identity, { epoch: 1, version: 1, throughSeq: 3, presentedThroughSeq: 0,
+      selection: selected, editState: undefined });
+    expect(store.getSnapshot().selectionCause).toBeUndefined();
+  } finally { store.dispose(); }
+});
+
 test('d2a_ack_selection_waits_for_matching_frame_geometry', () => {
   const identity = { session: 'view', incarnation: 1, epoch: 1 };
   const selection = (offset: number) => ({

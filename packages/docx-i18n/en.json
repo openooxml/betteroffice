@@ -730,6 +730,7 @@
     "linkRemoved": "Link removed",
     "linkCopied": "Link copied to clipboard",
     "pasteFailed": "The paste could not be completed. Nothing was changed.",
+    "cutRefused": "The selection holds objects that cannot be cut. Nothing was changed.",
     "failedToSave": "Failed to save document",
     "documentInput": "Document input",
     "documentPreview": "Document preview",
@@ -799,10 +800,13 @@
   },
   "a11y": {
     "pageLabel": "Page {number}",
+    "unbuiltPagesNotMirrored": "Pages {from} to {to} are not in the reading view yet.",
+    "goToPage": "Go to page {number}",
     "headerLabel": "Page header",
     "footerLabel": "Page footer",
     "chartNoData": "No data",
     "pictureName": "Picture",
+    "bulletMarker": "bullet",
     "selected": "Selected",
     "selectionCleared": "Selection cleared",
     "commentedText": "Commented text",
@@ -861,7 +865,7 @@
       "targetChanged": "The content this action was opened for changed before it could be applied.",
       "commandFailed": "The command could not be completed.",
       "permissionDenied": "The host application has not allowed this plugin to use this command.",
-      "unsupportedPolicy": "Plugins can't run this command yet. Use an edit batch instead.",
+      "unsupportedPolicy": "This command needs a user gesture in the plugin's own UI.",
       "pluginUnavailable": "The plugin is no longer active.",
       "aborted": "The plugin action was cancelled before the command ran."
     }

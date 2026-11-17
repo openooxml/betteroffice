@@ -81,6 +81,8 @@ export interface MirrorLabels {
   chartNoData?: string;
   /** name of a picture without alternative text, e.g. "Picture"; without it such a picture gets no image role */
   picture?: string;
+  /** word a visible list bullet reads as, e.g. "bullet"; without it a bullet stays hidden */
+  bullet?: string;
 }
 
 /** per-page build state threaded through the mirror walk */
@@ -600,6 +602,7 @@ function renderMirrorPage(
         if (prims.some((p) => p.kind === 'image' && !p.altText && !p.ariaLabel && !p.ariaDescription && !p.decorative && !p.hiddenObject)) {
           parts.push(labels?.picture ?? '');
         }
+        if (prims.some((p) => 'listMarkerBullet' in p && p.listMarkerBullet)) parts.push(labels?.bullet ?? '');
         sig = parts.join('\n');
       } catch {
         sig = `\u0000${++unmatchedSignatures}`;
@@ -1103,7 +1106,9 @@ function chartTable(data: ChartData, doc: Document): HTMLElement | null {
   return table;
 }
 
-/** Whether `node` holds anything assistive technology can read: text, or a named object such as a picture. */
+const BULLET_WORD_ATTRIBUTE = 'data-list-bullet';
+
+/** Whether `node` names what holds it: text, or a named object such as a picture, but not the word for a bullet. */
 function mirrorHasName(node: Node): boolean {
   for (const child of Array.from(node.childNodes)) {
     if (child.nodeType === 3) {
@@ -1113,6 +1118,7 @@ function mirrorHasName(node: Node): boolean {
     if (child.nodeType !== 1) continue;
     const element = child as Element;
     if (element.getAttribute('aria-hidden') === 'true' || element.hasAttribute('inert')) continue;
+    if (element.hasAttribute(BULLET_WORD_ATTRIBUTE)) continue;
     if (element.getAttribute('aria-label')?.trim() || mirrorHasName(element)) return true;
   }
   return false;
@@ -1136,10 +1142,22 @@ function populateParagraphBlock(
   for (const p of inLogicalOrder(prims)) {
     const child = renderMirrorPrimitive(p, doc, offsetY, ctx);
     const textRun = p.kind === 'glyphRun' || p.kind === 'text';
-    if (textRun && open && (joinTextRunElement(open, child) || joinNumberedMarker(open, child))) continue;
-    el.appendChild(child);
-    if (textRun) open = child;
-    else if (p.kind !== 'decoration' && p.kind !== 'rect') open = null;
+    const separator = textRun ? p.separatorBefore : undefined;
+    if (separator) {
+      el.appendChild(doc.createTextNode(separator));
+      open = null;
+    }
+    const joined = textRun && open && (joinTextRunElement(open, child) || joinListMarker(open, child));
+    if (!joined) {
+      el.appendChild(child);
+      if (textRun) open = child;
+      else if (p.kind !== 'decoration' && p.kind !== 'rect') open = null;
+    }
+    const after = textRun ? p.separatorAfter : undefined;
+    if (after) {
+      el.appendChild(doc.createTextNode(after));
+      open = null;
+    }
   }
   const pmarkRevision = findStructuralRevision(prims, 'pmark');
   if (pmarkRevision) applyStructuralRevisionAttrs(el, pmarkRevision);
@@ -1207,13 +1225,15 @@ function joinTouchingBox(open: HTMLElement, next: HTMLElement): boolean {
   return true;
 }
 
-/** Reads a number shaped run by run, such as "3", ".", "2", as one number. */
-function joinNumberedMarker(open: HTMLElement, next: HTMLElement): boolean {
-  const numbered = (run: HTMLElement) =>
+/** Reads a number shaped run by run, such as "3", ".", "2", as one number, and a bullet so shaped as one word. */
+function joinListMarker(open: HTMLElement, next: HTMLElement): boolean {
+  const exposed = (run: HTMLElement) =>
     run.classList.contains(MIRROR_CLASS_NAMES.listMarker) && !run.hasAttribute('aria-hidden');
-  if (!numbered(open) || !numbered(next) || open.tagName !== next.tagName) return false;
+  if (!exposed(open) || !exposed(next) || open.tagName !== next.tagName) return false;
+  const bullet = open.hasAttribute(BULLET_WORD_ATTRIBUTE);
+  if (bullet !== next.hasAttribute(BULLET_WORD_ATTRIBUTE)) return false;
   if (!joinTouchingBox(open, next)) return false;
-  open.textContent = `${open.textContent ?? ''}${next.textContent ?? ''}`;
+  if (!bullet) open.textContent = `${open.textContent ?? ''}${next.textContent ?? ''}`;
   return true;
 }
 
@@ -1335,7 +1355,9 @@ function nestTableBlocks(blocks: Map<number | string, BlockGroup>): void {
   // A header needs something to read, which a table nested in it can supply.
   for (const group of blocks.values()) {
     for (const cell of group.cells ?? []) {
-      if (cell.headerRole && mirrorHasName(cell.el)) cell.el.setAttribute('role', cell.headerRole);
+      if (!cell.headerRole) continue;
+      if (mirrorHasName(cell.el)) cell.el.setAttribute('role', cell.headerRole);
+      else cell.el.querySelectorAll(`[${BULLET_WORD_ATTRIBUTE}]`).forEach((word) => word.setAttribute('aria-hidden', 'true'));
     }
   }
 }
@@ -1402,11 +1424,18 @@ function inLogicalOrder<T extends BlockGroup['prims']>(prims: T): T {
 
 function applyListMarker(
   el: HTMLElement,
-  p: { listMarker?: boolean; listMarkerNumbered?: boolean; listMarkerRevision?: 'ins' | 'del' }
+  p: { listMarker?: boolean; listMarkerNumbered?: boolean; listMarkerBullet?: boolean; listMarkerRevision?: 'ins' | 'del' },
+  ctx: MirrorBuildCtx
 ): void {
   if (!p.listMarker) return;
   el.classList.add(MIRROR_CLASS_NAMES.listMarker);
-  if (!p.listMarkerNumbered) el.setAttribute('aria-hidden', 'true');
+  const word = p.listMarkerBullet ? ctx.labels?.bullet : undefined;
+  if (word) {
+    el.textContent = word;
+    el.setAttribute(BULLET_WORD_ATTRIBUTE, '');
+  } else if (!p.listMarkerNumbered) {
+    el.setAttribute('aria-hidden', 'true');
+  }
   if (p.listMarkerRevision) {
     el.style.color = p.listMarkerRevision === 'ins' ? 'rgb(46, 125, 50)' : 'rgb(198, 40, 40)';
   }
@@ -1510,7 +1539,7 @@ function createMirrorPrimitive(
         }
         el.setAttribute('aria-hidden', 'true');
       }
-      applyListMarker(el, p);
+      applyListMarker(el, p, ctx);
       applyDocAttrs(el, p);
       return el;
     }
@@ -1534,7 +1563,7 @@ function createMirrorPrimitive(
         p.rotationDeg,
         p.horizontalScale
       );
-      applyListMarker(el, p);
+      applyListMarker(el, p, ctx);
       applyDocAttrs(el, p);
       return el;
     }
@@ -2051,7 +2080,7 @@ function buildMirrorNoteArea(
     appendMirrorPrimitives(note, notePrimitives, doc, -(area.y ?? 0), ctx);
     // note → body reference backlink (W17): targets the doc-noteref anchor
     // the body reference mark registered. Labeled by the host-localized
-    // MirrorLabels.noteBacklink, falling back to the note's own label/number
+    // MirrorLabels.noteBacklink, falling back to the note's own label
     // (data, not hardcoded English). Pointer-inert like the rest of the
     // mirror; navigation UX belongs to the interactive overlay.
     if (meta && noteHasBacklink(area, noteId)) {
@@ -2059,8 +2088,8 @@ function buildMirrorNoteArea(
       backlink.className = MIRROR_CLASS_NAMES.noteBacklink;
       backlink.setAttribute('role', 'doc-backlink');
       backlink.setAttribute('href', `#oox-noteref-${groupId}`);
-      const label = ctx.labels?.noteBacklink ?? meta.label ?? String(noteId);
-      backlink.setAttribute('aria-label', label);
+      const label = ctx.labels?.noteBacklink ?? meta.label;
+      if (label !== undefined) backlink.setAttribute('aria-label', label);
       note.appendChild(backlink);
     }
     el.appendChild(note);

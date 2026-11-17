@@ -1,3 +1,4 @@
+import { fontPreflightFixture } from '../../packages/pptx/src/wasm/__fixtures__/fontPreflight';
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import * as wasm from '../../packages/pptx/src/index';
@@ -131,4 +132,12 @@ describe('font pack diagnostics', () => {
       }
     }
   });
+});
+
+test('standalone font preflight matches through both package entries', async () => {
+  const bytes = await fontPreflightFixture();
+  const wasmCore = await import('../../packages/pptx/src/index');
+  const nativeCore = await import('./dist/index.js') as unknown as typeof wasmCore;
+  await nativeCore.preloadPreflightWasm();
+  expect(await nativeCore.fontPreflight(bytes)).toEqual(await wasmCore.fontPreflight(bytes));
 });

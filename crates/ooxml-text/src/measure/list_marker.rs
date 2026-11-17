@@ -137,6 +137,7 @@ fn marker_text_width(
         base,
         input.font_chains,
         (attrs.list_marker_bold, attrs.list_marker_italic, family),
+        &[],
     )?;
     Ok((natural_width, size_px))
 }

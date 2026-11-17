@@ -416,25 +416,28 @@ function PluginCommandButton({
   children?: ReactNode;
 }) {
   const command = useXlsxCommand(id);
+  const store = useXlsxCommands();
   if (command.descriptor === null) return null;
   const state = command.state;
   const name = label ?? command.label;
   const toggle = state.active !== undefined;
   return (
-    <ToolbarButtonBase
-      active={toggle ? state.active : undefined}
-      toggle={toggle}
-      disabled={!state.enabled}
-      description={state.enabled ? undefined : state.disabledReason.message}
-      title={name}
-      shortcut={command.shortcut}
-      ariaShortcut={command.ariaShortcut}
-      className={className}
-      style={children ? undefined : { padding: '0 8px' }}
-      onClick={() => void command.execute()}
-    >
-      {children ?? name}
-    </ToolbarButtonBase>
+    <span data-plugin-activation={xlsxCommandController(store)?.pluginActivation(id)} style={{ display: 'contents' }}>
+      <ToolbarButtonBase
+        active={toggle ? state.active : undefined}
+        toggle={toggle}
+        disabled={!state.enabled}
+        description={state.enabled ? undefined : state.disabledReason.message}
+        title={name}
+        shortcut={command.shortcut}
+        ariaShortcut={command.ariaShortcut}
+        className={className}
+        style={children ? undefined : { padding: '0 8px' }}
+        onClick={() => void command.execute()}
+      >
+        {children ?? name}
+      </ToolbarButtonBase>
+    </span>
   );
 }
 

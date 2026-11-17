@@ -20,63 +20,51 @@ const MAX_ABS_NORMALIZED_PATH_NUMBER: f64 = 10_000.0;
 
 pub fn parse_color_element(element: Option<&XmlElement>) -> Option<ColorValue> {
     let element = element?;
-    if let Some(color) = element.child_by_full_name("a:srgbClr") {
-        if let Some(value) = color.attribute(None, "val") {
-            return Some(apply_color_modifiers(
-                ColorValue {
-                    rgb: Some(value.to_owned()),
-                    ..ColorValue::default()
-                },
-                color,
-            ));
-        }
-    }
-    if let Some(color) = element.child_by_full_name("a:schemeClr") {
-        if let Some(value) = color.attribute(None, "val") {
-            return Some(apply_color_modifiers(
-                ColorValue {
-                    theme_color: Some(scheme_color(value).to_owned()),
-                    ..ColorValue::default()
-                },
-                color,
-            ));
-        }
-    }
-    if let Some(color) = element.child_by_full_name("a:sysClr") {
-        return Some(apply_color_modifiers(
-            ColorValue {
-                rgb: Some(
-                    color
-                        .attribute(None, "lastClr")
-                        .unwrap_or("000000")
-                        .to_owned(),
-                ),
-                ..ColorValue::default()
-            },
-            color,
-        ));
-    }
-    if let Some(color) = element.child_by_full_name("a:prstClr") {
-        let rgb = match color.attribute(None, "val")? {
-            "black" => "000000",
-            "white" => "FFFFFF",
-            "red" => "FF0000",
-            "green" => "00FF00",
-            "blue" => "0000FF",
-            "yellow" => "FFFF00",
-            "cyan" => "00FFFF",
-            "magenta" => "FF00FF",
-            _ => return None,
-        };
-        return Some(apply_color_modifiers(
-            ColorValue {
-                rgb: Some(rgb.to_owned()),
-                ..ColorValue::default()
-            },
-            color,
-        ));
-    }
-    None
+    ["a:srgbClr", "a:schemeClr", "a:sysClr", "a:prstClr"]
+        .into_iter()
+        .find_map(|name| element.child_by_full_name(name).and_then(parse_color))
+}
+
+/// One `a:srgbClr`, `a:schemeClr`, `a:sysClr` or `a:prstClr` element.
+pub(crate) fn parse_color(color: &XmlElement) -> Option<ColorValue> {
+    let base = match color.local_name() {
+        "srgbClr" => ColorValue {
+            rgb: Some(color.attribute(None, "val")?.to_owned()),
+            ..ColorValue::default()
+        },
+        "schemeClr" => ColorValue {
+            theme_color: Some(scheme_color(color.attribute(None, "val")?).to_owned()),
+            ..ColorValue::default()
+        },
+        "sysClr" => ColorValue {
+            rgb: Some(
+                color
+                    .attribute(None, "lastClr")
+                    .unwrap_or("000000")
+                    .to_owned(),
+            ),
+            ..ColorValue::default()
+        },
+        "prstClr" => ColorValue {
+            rgb: Some(
+                match color.attribute(None, "val")? {
+                    "black" => "000000",
+                    "white" => "FFFFFF",
+                    "red" => "FF0000",
+                    "green" => "00FF00",
+                    "blue" => "0000FF",
+                    "yellow" => "FFFF00",
+                    "cyan" => "00FFFF",
+                    "magenta" => "FF00FF",
+                    _ => return None,
+                }
+                .to_owned(),
+            ),
+            ..ColorValue::default()
+        },
+        _ => return None,
+    };
+    Some(apply_color_modifiers(base, color))
 }
 
 fn apply_color_modifiers(mut color: ColorValue, element: &XmlElement) -> ColorValue {
@@ -254,7 +242,29 @@ pub fn parse_preset_geometry_path(
             }
         }
     }
-    preset_geometry_to_path(shape_type, &adjustments, aspect_ratio)
+    preset_outline(shape_type, &adjustments, aspect_ratio)
+}
+
+/// A preset's outline; a multi-path preset contributes its filled layers, or
+/// every layer when none fills.
+pub fn preset_outline(
+    shape_type: &str,
+    adjustments: &HashMap<String, f64>,
+    aspect_ratio: f64,
+) -> Option<Vec<GeometryPathCommand>> {
+    if let Some(path) = preset_geometry_to_path(shape_type, adjustments, aspect_ratio) {
+        return Some(path);
+    }
+    let layers = ooxml_drawingml::preset_geometry_layers(shape_type, adjustments, aspect_ratio)?;
+    let filled = layers
+        .iter()
+        .any(|layer| layer.fill != ooxml_drawingml::PresetPathFill::None);
+    let commands: Vec<_> = layers
+        .into_iter()
+        .filter(|layer| !filled || layer.fill != ooxml_drawingml::PresetPathFill::None)
+        .flat_map(|layer| layer.commands)
+        .collect();
+    (!commands.is_empty()).then_some(commands)
 }
 
 pub fn parse_custom_geometry_path(

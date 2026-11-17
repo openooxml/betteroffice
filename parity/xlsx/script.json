@@ -936,6 +936,14 @@
       }
     },
     { "op": "selectionFormatting", "args": { "sheet": 0, "range": "B1:B1" } },
+    { "op": "save", "args": {} },
+    { "op": "open", "args": { "fixture": "packages/xlsx/test-fixtures/whole-sheet-columns.xlsx" } },
+    { "op": "applyOps", "args": { "ops": [{ "type": "insertCols", "sheet": 0, "at": 2, "count": 1 }] } },
+    { "op": "applyOps", "args": { "ops": [{ "type": "insertCols", "sheet": 0, "at": 0, "count": 1 }] } },
+    {
+      "op": "readCells",
+      "args": { "ranges": [{ "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A1:G1" } }] }
+    },
     { "op": "save", "args": {} }
   ]
 }

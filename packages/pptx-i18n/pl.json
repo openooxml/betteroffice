@@ -235,7 +235,7 @@
       "gestureActive": "Najpierw dokończ gest wskaźnika.",
       "commandFailed": "Polecenie nie powiodło się.",
       "permissionDenied": "Aplikacja hosta nie zezwoliła tej wtyczce na użycie tego polecenia.",
-      "unsupportedPolicy": "Wtyczki nie mogą jeszcze uruchamiać tego polecenia. Użyj zamiast tego pakietu edycji.",
+      "unsupportedPolicy": "To polecenie wymaga działania użytkownika we własnym interfejsie wtyczki.",
       "pluginUnavailable": "Wtyczka nie jest już aktywna.",
       "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia.",
       "clipboardUnavailable": "Dostęp do schowka jest niedostępny lub został odrzucony.",

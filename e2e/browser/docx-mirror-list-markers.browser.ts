@@ -36,13 +36,13 @@ async function open(page: Page, worker: boolean) {
 }
 
 for (const worker of [false, true]) {
-  test(`docx mirror lists read their numbers and labels, not their bullets (${worker ? 'worker' : 'in-thread'} editor)`, async ({ page }) => {
+  test(`docx mirror lists read their numbers, labels and the word for a bullet (${worker ? 'worker' : 'in-thread'} editor)`, async ({ page }) => {
     await open(page, worker);
     const exposed = page.locator('.canvas-page-mirror .layout-list-marker:not([aria-hidden="true"])');
-    await expect(exposed).toHaveText(['3.', '3.2', 'Appendix 1'].map((text) => new RegExp(`^${text.replace('.', '\\.')}\\s*$`)));
-    await expect(page.locator('.canvas-page-mirror .layout-list-marker[aria-hidden="true"]')).toHaveCount(1);
+    await expect(exposed).toHaveText(['3.', '3.2', 'Appendix 1', 'bullet'].map((text) => new RegExp(`^${text.replace('.', '\\.')}\\s*$`)));
+    await expect(page.locator('.canvas-page-mirror .layout-list-marker[aria-hidden="true"]')).toHaveCount(0);
     const snapshot = await page.locator('.canvas-page-mirror').first().ariaSnapshot();
-    for (const text of ['3.', '3.2', 'Appendix 1', 'Alpha', 'Beta', 'Gamma', 'Delta']) expect(snapshot).toContain(text);
+    for (const text of ['3.', '3.2', 'Appendix 1', 'bullet', 'Alpha', 'Beta', 'Gamma', 'Delta']) expect(snapshot).toContain(text);
     expect(snapshot).not.toContain('\u2022');
   });
 
@@ -58,6 +58,7 @@ for (const worker of [false, true]) {
     const copied = await page.evaluate(() => (window as unknown as { copied: string }).copied);
     expect(copied).not.toContain('Appendix');
     expect(copied).not.toContain('3.2');
+    expect(copied).not.toContain('bullet');
   });
 
   test(`docx find does not match a list number (${worker ? 'worker' : 'in-thread'} editor)`, async ({ page }) => {
@@ -72,6 +73,9 @@ for (const worker of [false, true]) {
     const find = dialog.getByRole('textbox', { name: 'Find text', exact: true });
     const status = dialog.locator('.docx-find-replace-dialog-status');
     await find.fill('Appendix');
+    await find.press('Enter');
+    await expect(status).toHaveText('No results found');
+    await find.fill('bullet');
     await find.press('Enter');
     await expect(status).toHaveText('No results found');
     await find.fill('Gamma');

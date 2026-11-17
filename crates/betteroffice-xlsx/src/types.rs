@@ -254,6 +254,15 @@ pub enum PngTarget {
     },
 }
 
+/// A face one PNG export paints with, matched to the sheet's fonts by family and style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PngFontFace<'a> {
+    pub family: &'a str,
+    pub bold: bool,
+    pub italic: bool,
+    pub bytes: &'a [u8],
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderOptions {
     pub range: Option<CellRange>,

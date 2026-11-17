@@ -6,16 +6,21 @@ import type { ResidentFontRequirement } from '@betteroffice/docx/layout';
 import { cleanupGuard } from './cleanup';
 import { DocumentToolError, type DocumentRenderer } from './types';
 
+const placeholderWarning = (count: number) => count === 1
+  ? '1 picture could not be drawn; the preview shows a placeholder in its place.'
+  : `${count} pictures could not be drawn; the preview shows a placeholder in their place.`;
+
 const previewWarning = 'Preview uses BetterOffice layout and bundled substitute fonts; compare with the target Office application when exact fidelity matters.';
 
 export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
   try {
-    const png = await session.renderPng({ page: pageNumber - 1 });
+    let placeholders = 0;
+    const png = await session.renderPng({ page: pageNumber - 1 }, { onDiagnostic: (diagnostic) => { if (diagnostic.code === 'picture-unavailable') placeholders += diagnostic.pictures.length; } });
     const prepared = await layoutDocxPage(session);
     const release = cleanupGuard(prepared.dispose);
     try {
       const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
-      return { png, page: pageNumber, pageCount: prepared.layout.pages.length, width: view.getUint32(16), height: view.getUint32(20), warnings: [previewWarning, ...(!prepared.notesConverged ? ['Footnote pagination did not converge.'] : [])] };
+      return { png, page: pageNumber, pageCount: prepared.layout.pages.length, width: view.getUint32(16), height: view.getUint32(20), warnings: [previewWarning, ...(!prepared.notesConverged ? ['Footnote pagination did not converge.'] : []), ...(placeholders ? [placeholderWarning(placeholders)] : [])] };
     } catch (error) { throw release.failed(error); } finally { release.run(); }
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
@@ -29,20 +34,22 @@ export const renderDocxPage: DocumentRenderer = async (session, pageNumber) => {
   }
 };
 
+/** Lays out a private copy, so a caller's session keeps its layout and display state. */
 async function layoutDocxPage(original: YrsSession) {
   const { module } = await engines.load('docx');
-  let session = original;
-  const sourceDocument = session.materializeDocx();
+  const sourceDocument = original.materializeDocx();
   if (!sourceDocument) throw new DocumentToolError('UNSUPPORTED', 'Rendering requires a session opened from DOCX bytes.');
-  if (!module.yrs.sessionSourcePackage(session) && sourceDocument.originalBuffer) {
-    session = await module.yrs.createYrsSession();
-    try {
+  const session = await module.yrs.createYrsSession();
+  try {
+    if (sourceDocument.originalBuffer) {
       const bytes = new Uint8Array(sourceDocument.originalBuffer);
       const host = session.openDocx(bytes, false);
       session.bootstrapPeer(original.encodeState(), original.encodePeerMetadata(), bytes, host);
-    } catch (error) { throw cleanupGuard(() => session.destroy()).failed(error); }
-  }
-  const dispose = () => { if (session !== original) session.destroy(); };
+    } else {
+      session.loadState(original.encodeState());
+    }
+  } catch (error) { throw cleanupGuard(() => session.destroy()).failed(error); }
+  const dispose = () => session.destroy();
   try {
     const document = session.materializeDocx()!;
     const bundled = module.layout.hasConfiguredFontSource()
@@ -65,14 +72,13 @@ async function layoutDocxPage(original: YrsSession) {
 const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
   const { createCanvas, loadImage, Path2D } = await loadCanvas();
   const prepared = await layoutDocxPage(original);
-  const { session, module, document, measurement, layout, notesConverged } = prepared;
-  const { buildRustDisplayList, drawDisplayPage, GlyphCache } = module.render;
+  const { session, module, document, measurement, notesConverged } = prepared;
+  const { openPagedDisplay, drawDisplayPage, GlyphCache } = module.render;
   const release = cleanupGuard(prepared.dispose);
   try {
-    const kernel = module.editor.getLayoutKernelInputs(layout)!;
-    const display = await buildRustDisplayList({ ...kernel, layout, fontChains: measurement.fontChains }, session);
-    const page = display.pages[pageNumber - 1];
-    if (!page) throw new DocumentToolError('PAGE_OUT_OF_RANGE', `Choose a page from 1 to ${display.pages.length}.`, { pageCount: display.pages.length });
+    const display = openPagedDisplay(session, measurement.fontChains);
+    const page = display.page(pageNumber - 1);
+    if (!page) throw new DocumentToolError('PAGE_OUT_OF_RANGE', `Choose a page from 1 to ${display.pageCount}.`, { pageCount: display.pageCount });
     if (!Number.isFinite(page.width) || !Number.isFinite(page.height) || page.width <= 0 || page.height <= 0 || Math.ceil(page.width) * Math.ceil(page.height) > 16_000_000) {
       throw new DocumentToolError('PAGE_TOO_LARGE', 'Page exceeds the 16 megapixel render limit.');
     }
@@ -91,8 +97,10 @@ const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
       provider: (font, glyph) => session.outlineGlyphJson(font, glyph),
       createPath: () => new Path2D() as unknown as globalThis.Path2D,
     });
+    let placeholders = 0;
     await drawDisplayPage(canvas.getContext('2d') as unknown as CanvasRenderingContext2D, { ...page, background: page.background ?? '#ffffff' }, {
       glyphCache,
+      onPictureUnavailable: () => { placeholders++; },
       resolveImage: async (id) => {
         if (images.has(id)) return images.get(id) as unknown as CanvasImageSource | null;
         const relationship = document.package.relationships?.get(id);
@@ -116,6 +124,7 @@ const renderDocxPageCanvas: DocumentRenderer = async (original, pageNumber) => {
         } catch (error) { warnings.add(error instanceof DocumentToolError ? error.message : 'An embedded image could not be decoded.'); images.set(id, null); return null; }
       },
     });
-    return { png: await canvas.encode('png'), page: pageNumber, pageCount: display.pages.length, width: canvas.width, height: canvas.height, warnings: [...warnings] };
+    if (placeholders) warnings.add(placeholderWarning(placeholders));
+    return { png: await canvas.encode('png'), page: pageNumber, pageCount: display.pageCount, width: canvas.width, height: canvas.height, warnings: [...warnings] };
   } catch (error) { throw release.failed(error); } finally { release.run(); }
 };

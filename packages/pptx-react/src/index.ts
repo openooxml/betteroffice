@@ -113,7 +113,9 @@ export type {
   PluginCleanupReason,
   PluginGrant,
   PluginLoadReason,
+  PptxAnchorGeometryResult,
   PptxEditorPluginProps,
+  PptxGeometryTarget,
   PptxPlugin,
   PptxPluginCommand,
   PptxPluginCommandClient,
@@ -123,6 +125,8 @@ export type {
   PptxPluginError,
   PptxPluginErrorPhase,
   PptxPluginEvent,
+  PptxPluginFocusChangeEvent,
+  PptxPluginLocaleChangeEvent,
   PptxPluginFailureCode,
   PptxPluginGeometry,
   PptxPluginGrant,
@@ -138,6 +142,7 @@ export type {
   PptxPluginRefusal,
   PptxPluginSelection,
   PptxPluginSnapshot,
+  PptxPluginViewportChangeEvent,
 } from './plugins/types';
 
 export type { PptxExportList, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter } from '@betteroffice/pptx';

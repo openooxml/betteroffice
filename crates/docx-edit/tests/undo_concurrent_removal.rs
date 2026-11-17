@@ -276,7 +276,9 @@ fn undoing_a_table_edit_keeps_a_previously_removed_cell_hidden() {
         assert!(undo.undo());
         exchange(&actor, &peer);
         for engine in [&actor, &peer] {
-            assert!(engine.doc().story_len(&cell).is_err());
+            let paragraphs = engine.doc().paragraphs(&cell).unwrap();
+            assert_eq!(paragraphs.len(), 1);
+            assert_eq!(paragraphs[0].text, "");
             assert!(
                 engine
                     .doc()

@@ -392,6 +392,130 @@ fn default_space_shrink_limit_preserves_non_docx_measurement() {
     }
 }
 
+fn measure_aligned(text: &str, alignment: &str, width: f64) -> Value {
+    let input = json!({
+        "block": {"kind": "paragraph", "runs": [{"kind": "text", "text": text}],
+                  "attrs": {"alignment": alignment}},
+        "maxWidth": width, "fontChains": {"liberation sans|0|0": [0]},
+        "defaults": {"fontFamily": "Liberation Sans", "fontSize": 12},
+        "authoritativeShaping": true
+    });
+    serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap()).unwrap()
+}
+
+const SIX_WORDS_THEN_SHORT: &str = "000 000 000 000 000 000 0";
+
+fn short_word_overflow_width(overflow: f64) -> f64 {
+    19.0 * W0 + 6.0 * SP - overflow
+}
+
+#[test]
+fn justified_short_word_moves_down_when_overflow_exceeds_half_the_stretch() {
+    let width = short_word_overflow_width(1.25 * SP);
+    let v = measure_aligned(SIX_WORDS_THEN_SHORT, "justify", width);
+    assert_eq!(spans(&v), vec![(0, 0, 0, 24), (0, 24, 0, 25)]);
+    let first = &v["lines"][0];
+    approx(
+        first["clusterAdvances"][3]["advance"].as_f64().unwrap(),
+        SP,
+        "pushed-down word leaves the spaces uncompressed",
+    );
+    approx(
+        v["lines"][1]["width"].as_f64().unwrap(),
+        W0,
+        "last line keeps its natural width",
+    );
+}
+
+#[test]
+fn justified_short_word_stays_by_compressing_when_overflow_is_small() {
+    let width = short_word_overflow_width(0.5 * SP);
+    let v = measure_aligned(SIX_WORDS_THEN_SHORT, "justify", width);
+    assert_eq!(spans(&v), vec![(0, 0, 0, 25)]);
+    let line = &v["lines"][0];
+    approx(line["width"].as_f64().unwrap(), width, "compressed width");
+    approx(
+        line["clusterAdvances"][3]["advance"].as_f64().unwrap(),
+        SP - 0.5 * SP / 6.0,
+        "compressed space",
+    );
+}
+
+#[test]
+fn justified_acceptance_excludes_the_line_trailing_space() {
+    let width = short_word_overflow_width(0.85 * SP);
+    let v = measure_aligned(SIX_WORDS_THEN_SHORT, "justify", width);
+    assert_eq!(spans(&v), vec![(0, 0, 0, 25)]);
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        width,
+        "compressed width",
+    );
+}
+
+#[test]
+fn justified_acceptance_excludes_the_word_trailing_space() {
+    let width = short_word_overflow_width(0.5 * SP);
+    let v = measure_aligned("000 000 000 000 000 000 0 000", "justify", width);
+    assert_eq!(spans(&v), vec![(0, 0, 0, 26), (0, 26, 0, 29)]);
+    approx(
+        v["lines"][0]["clusterAdvances"][3]["advance"]
+            .as_f64()
+            .unwrap(),
+        SP - 0.5 * SP / 6.0,
+        "compressed space",
+    );
+}
+
+#[test]
+fn justified_acceptance_keeps_a_word_split_across_runs_together() {
+    let width = 20.0 * W0 + 6.0 * SP - 0.85 * SP;
+    let measure_runs = |runs: Value| {
+        let input = json!({
+            "block": {"kind": "paragraph", "runs": runs, "attrs": {"alignment": "justify"}},
+            "maxWidth": width, "fontChains": {"liberation sans|0|0": [0]},
+            "defaults": {"fontFamily": "Liberation Sans", "fontSize": 12},
+            "authoritativeShaping": true
+        });
+        let out = measure_paragraph_json(&store(), &input.to_string()).unwrap();
+        serde_json::from_str::<Value>(&out).unwrap()
+    };
+    let whole = measure_runs(json!([{"kind": "text", "text": "000 000 000 000 000 000 00"}]));
+    let split = measure_runs(json!([
+        {"kind": "text", "text": "000 000 000 000 000 000 0"},
+        {"kind": "text", "text": "0"}
+    ]));
+    assert_eq!(spans(&whole), vec![(0, 0, 0, 26)]);
+    assert_eq!(spans(&split), vec![(0, 0, 1, 1)]);
+}
+
+#[test]
+fn natural_fit_keeps_the_exact_slack_comparison() {
+    let v = measure_aligned(SIX_WORDS_THEN_SHORT, "left", f64::from(195.741_18_f32));
+    assert_eq!(spans(&v), vec![(0, 0, 0, 25)]);
+}
+
+#[test]
+fn shrink_acceptance_leaves_unjustified_and_natural_lines_alone() {
+    for overflow in [0.5 * SP, 1.25 * SP] {
+        let width = short_word_overflow_width(overflow);
+        let v = measure_aligned(SIX_WORDS_THEN_SHORT, "left", width);
+        assert_eq!(spans(&v), vec![(0, 0, 0, 24), (0, 24, 0, 25)]);
+    }
+    let natural = short_word_overflow_width(0.0);
+    for alignment in ["left", "justify"] {
+        let v = measure_aligned(SIX_WORDS_THEN_SHORT, alignment, natural);
+        assert_eq!(spans(&v), vec![(0, 0, 0, 25)], "{alignment}");
+        approx(
+            v["lines"][0]["clusterAdvances"][3]["advance"]
+                .as_f64()
+                .unwrap(),
+            SP,
+            "natural space",
+        );
+    }
+}
+
 // 3. overlong unbreakable word hard-breaks mid-word, minimum 1 char/line
 #[test]
 fn overlong_word_hard_breaks() {

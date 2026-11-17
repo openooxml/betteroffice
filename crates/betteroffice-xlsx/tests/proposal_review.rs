@@ -817,3 +817,44 @@ fn moving_sheets_preserves_reviewed_dependency_ghosts() {
         .unwrap();
     assert_eq!(workbook.cell(SheetId(0), cell("C1")).unwrap().input, "42");
 }
+
+#[cfg(feature = "unstable-track-moves")]
+#[test]
+fn an_identity_track_move_leaves_pending_proposals_untouched() {
+    let mut workbook = Workbook::from_model(model()).unwrap();
+    apply(
+        &mut workbook,
+        Op::SetCell {
+            sheet: SheetId(0),
+            at: cell("A1"),
+            cell: betteroffice_xlsx::CellState {
+                value: betteroffice_xlsx::CellValue::Number { value: 1.0 },
+                ..Default::default()
+            },
+        },
+    );
+    let id = stage(&mut workbook, "=A1+1");
+    let before = workbook.proposals()[0].clone();
+    // the gap before column B is where column A already sits: nothing moves
+    apply(
+        &mut workbook,
+        Op::MoveCols {
+            sheet: SheetId(0),
+            col: 0,
+            count: 1,
+            before: 1,
+        },
+    );
+    assert_eq!(
+        workbook.proposals()[0],
+        before,
+        "a no-op move rebases nothing"
+    );
+    workbook
+        .accept_proposal(&id, false, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(
+        workbook.cell(SheetId(0), cell("C1")).unwrap().input,
+        "=A1+1"
+    );
+}

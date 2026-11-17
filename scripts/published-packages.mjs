@@ -18,7 +18,7 @@ function readManifest(directory) {
 }
 
 /** Every workspace directory and manifest, from the same globs Bun and Changesets expand. */
-function workspaceEntries() {
+export function workspaceEntries() {
   const entries = [];
   for (const pattern of readManifest('.').workspaces) {
     if (pattern.includes('*') && !pattern.endsWith('/*')) {

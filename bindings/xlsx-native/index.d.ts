@@ -34,8 +34,10 @@ export declare class XlsxDocument {
   rangePngDisplayListJson(args: string): string
   displayListProfiledJson(viewportJson: string): string
   chartAtPointJson(args: string): string
+  mediaBytes(assetId: string): Uint8Array
   moveChartJson(args: string): string
-  renderPngTarget(targetJson: string, optionsJson: string): Uint8Array
+  resizeChartJson(args: string): string
+  renderPngTarget(targetJson: string, optionsJson: string, fonts?: Array<PngFontFace> | undefined | null): Uint8Array
   sheetInfoJson(): string
   sheetCount(): number
   sheetInfoForJson(sheet: number): string
@@ -50,6 +52,7 @@ export declare class XlsxDocument {
   /** @internal */
   translateFormulasJson(args: string): string
   moveRangeJson(args: string): string
+  fillRangeJson(args: string): string
   applyOpsJson(transactionJson: string): string
   chartsJson(sheet: number): string
   editChartsJson(edits: string): string
@@ -129,8 +132,20 @@ export declare function exportXlsxMarkdownJson(bytes: Uint8Array, options: strin
 
 export declare function exportXlsxStructuredJson(bytes: Uint8Array, options: string): string
 
+export declare function font_preflight(bytes: Uint8Array): string
+
 /** Internal: the installed font packs `configureFontPacks` left out, and why, as JSON. */
 export declare function fontPackDiagnosticsJson(): string
+
+export declare function install_panic_hook(): void
+
+/** A face one PNG export paints with. */
+export interface PngFontFace {
+  family: string
+  bold?: boolean
+  italic?: boolean
+  bytes: Uint8Array
+}
 
 export declare function renderXlsxMarkdownJson(content: string, options: string): string
 

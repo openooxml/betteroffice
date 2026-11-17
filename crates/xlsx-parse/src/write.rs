@@ -17,7 +17,7 @@ use xlsx_model::sort::sort_by_shared;
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, DifferentialFormat,
-    Sheet, SheetChart, SheetId, Workbook,
+    RunUnderline, Sheet, SheetChart, SheetId, Workbook,
 };
 
 use crate::ParseError;
@@ -640,7 +640,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             parts.remove(&relationship_part_path(&calc_chain.path));
         }
     }
-    let chart_refreshes = patch_chart_parts(wb, package, origins, &mut parts)?;
+    let chart_refreshes = patch_chart_parts(wb, package, origins, sheet_axes, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;
@@ -891,6 +891,7 @@ fn patch_chart_parts(
     wb: &Workbook,
     package: &PreservedPackage,
     origins: &[Option<usize>],
+    sheet_axes: &[Option<SheetAxes>],
     parts: &mut PartStore<'_>,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     if let Some((drawing, _, first, second)) = crate::chart::conflicting_drawing_anchor(wb) {
@@ -984,22 +985,69 @@ fn patch_chart_parts(
             parts.set(path.to_owned(), rewritten)?;
         }
     }
+    let followed = followed_drawings(package, origins, sheet_axes)?;
+    let mut drawings: BTreeMap<&str, Vec<(usize, ChartAnchor)>> =
+        followed.keys().map(|path| (*path, Vec::new())).collect();
     for (path, claims) in anchors {
-        let moved = claims
-            .into_iter()
-            .filter(|(_, claim)| claim.moved)
-            .map(|(index, claim)| (index, claim.anchor))
-            .collect::<Vec<_>>();
-        if moved.is_empty() {
+        drawings.entry(path).or_default().extend(
+            claims
+                .into_iter()
+                .filter(|(_, claim)| claim.moved)
+                .map(|(index, claim)| (index, claim.anchor)),
+        );
+    }
+    for (path, moved) in drawings {
+        let axes = followed.get(path).copied();
+        if moved.is_empty() && axes.is_none() {
             continue;
         }
         let source = package.part_bytes(path).ok_or_else(|| missing_part(path))?;
-        parts.set(
-            path.to_owned(),
-            crate::chart::patch_drawing_anchors(source, &moved)?,
-        )?;
+        let patched = crate::chart::patch_drawing_anchors(source, &moved, axes)?;
+        if patched != source {
+            parts.set(path.to_owned(), patched)?;
+        }
     }
     Ok(refreshes)
+}
+
+/// The drawings whose unclaimed anchors follow a row or column edit, each with the axes of the
+/// sheet that holds it. A drawing two edited sheets share must follow both the same way, and a
+/// drawing the edit-time check could not read is never moved silently.
+fn followed_drawings<'a>(
+    package: &'a PreservedPackage,
+    origins: &[Option<usize>],
+    sheet_axes: &'a [Option<SheetAxes>],
+) -> Result<BTreeMap<&'a str, &'a SheetAxes>, ParseError> {
+    let mut owners: BTreeMap<&str, Option<&SheetAxes>> = BTreeMap::new();
+    for (index, origin) in origins.iter().enumerate() {
+        let Some(origin) = origin else {
+            continue;
+        };
+        let axes = sheet_axes
+            .get(index)
+            .and_then(Option::as_ref)
+            .filter(|axes| !axes.is_identity());
+        for drawing in package.sheet_drawings().get(*origin).into_iter().flatten() {
+            if axes.is_some() && drawing.anchors.is_none() {
+                return Err(ParseError::UnsupportedEdit(format!(
+                    "{} cannot follow the row and column edits on its sheet",
+                    drawing.part
+                )));
+            }
+            if let Some(other) = owners.insert(drawing.part.as_str(), axes)
+                && other != axes
+            {
+                return Err(ParseError::UnsupportedEdit(format!(
+                    "{} is drawn on two sheets whose rows and columns moved differently",
+                    drawing.part
+                )));
+            }
+        }
+    }
+    Ok(owners
+        .into_iter()
+        .filter_map(|(part, axes)| Some((part, axes?)))
+        .collect())
 }
 
 fn refreshed_chart_bytes(
@@ -3642,13 +3690,19 @@ fn write_hyperlinks(
 }
 
 fn write_sheet_views(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
-    let Some(pane) = sheet.freeze_pane else {
+    let hide = sheet.format.hide_gridlines;
+    if sheet.freeze_pane.is_none() && !hide {
         return Ok(());
-    };
+    }
     w.create_element("sheetViews").write_inner_content(|w| {
-        w.create_element("sheetView")
-            .with_attribute(("workbookViewId", "0"))
-            .write_inner_content(|w| write_pane(w, pane))?;
+        let view = w
+            .create_element("sheetView")
+            .with_attributes(hide.then_some(("showGridLines", "0")))
+            .with_attribute(("workbookViewId", "0"));
+        match sheet.freeze_pane {
+            Some(pane) => view.write_inner_content(|w| write_pane(w, pane))?,
+            None => view.write_empty()?,
+        };
         Ok(())
     })?;
     Ok(())
@@ -4336,8 +4390,19 @@ fn write_font(w: &mut Writer<Vec<u8>>, font: &Font) -> io::Result<()> {
         if font.italic {
             w.create_element("i").write_empty()?;
         }
-        if font.underline {
-            w.create_element("u").write_empty()?;
+        let underline = match font.underline {
+            RunUnderline::None => None,
+            RunUnderline::Single => Some(None),
+            RunUnderline::Double => Some(Some("double")),
+            RunUnderline::SingleAccounting => Some(Some("singleAccounting")),
+            RunUnderline::DoubleAccounting => Some(Some("doubleAccounting")),
+        };
+        if let Some(val) = underline {
+            let element = w.create_element("u");
+            match val {
+                Some(val) => element.with_attribute(("val", val)).write_empty()?,
+                None => element.write_empty()?,
+            };
         }
         if font.strike {
             w.create_element("strike").write_empty()?;

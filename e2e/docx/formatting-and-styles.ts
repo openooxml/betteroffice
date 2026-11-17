@@ -85,6 +85,14 @@ export const formattingAndStyles: DocxScenario = {
     recorder.op('setParagraphAttrs', () =>
       session.setParagraphAttrs(whole, { alignment: 'center' })
     );
+    const styled = recorder.op('selectionContext:styled', () =>
+      session.selectionContext({
+        story: STORY,
+        start: { paraId: target.paraId, offset: 0 },
+        end: range.start,
+      })
+    );
+    expect(styled.bold).not.toBe('mixed');
 
     const laid = regionLayout(
       editor,
@@ -103,8 +111,9 @@ export const formattingAndStyles: DocxScenario = {
     const cleared = recorder.op('selectionContext:cleared', () =>
       session.selectionContext(range)
     );
-    expect(cleared.bold).toBe(false);
+    expect(cleared.bold).toBe(styled.bold);
     expect(cleared.color).not.toBe('CC2244');
+    expect(cleared.fontSize).not.toBe(36);
 
     expect(recorder.op('undo:clear', () => session.undo())).toBe(true);
     expect(

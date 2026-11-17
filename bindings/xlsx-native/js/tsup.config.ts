@@ -11,6 +11,7 @@ const browser = 'throw new Error("@betteroffice/xlsx-native runs on Node.js, Bun
 export default defineConfig({
   entry: {
     index: `${source}/src/index.ts`,
+    'wasm-preflight': `${source}/src/wasm/preflight.ts`,
     headless: `${source}/src/headless.ts`,
     worker: `${source}/src/worker.ts`,
     collaboration: `${source}/src/collaboration/index.ts`,

@@ -10,6 +10,19 @@ use napi::{Env, Error, JsValue, Result, Status, Unknown, ValueType};
 use napi_derive::napi;
 use xlsx_engine::{Document, EngineError, ErrorKind, Host, SnapshotBuilder};
 
+#[napi(catch_unwind, js_name = "font_preflight")]
+pub fn font_preflight(env: Env, bytes: Uint8Array) -> Result<String> {
+    ooxml_font_preflight::xlsx_font_preflight(&bytes)
+        .map(|result| result.to_json())
+        .map_err(|error| {
+            let message = error.to_string();
+            match env.throw(&message) {
+                Ok(()) => Error::new(Status::PendingException, message),
+                Err(error) => error,
+            }
+        })
+}
+
 /// Internal, called by the package loader.
 #[napi(catch_unwind, js_name = "configureFontPacks")]
 pub fn configure_font_packs(
@@ -259,6 +272,15 @@ fn map_error(env: Env, error: EngineError) -> Error {
         Ok(()) => Error::new(Status::PendingException, error.message),
         Err(error) => error,
     }
+}
+
+/// A face one PNG export paints with.
+#[napi(object)]
+pub struct PngFontFace {
+    pub family: String,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub bytes: Uint8Array,
 }
 
 #[napi]
@@ -572,10 +594,27 @@ impl XlsxDocument {
     }
 
     #[napi(catch_unwind)]
+    pub fn media_bytes(&self, env: Env, asset_id: String) -> Result<Uint8Array> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .media_bytes(&asset_id)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(catch_unwind)]
     pub fn move_chart_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
             .move_chart_json(&args)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
+    pub fn resize_chart_json(&mut self, env: Env, args: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document_mut(env)?
+            .resize_chart_json(&args)
             .map_err(|error| map_error(env, error))
     }
 
@@ -585,10 +624,22 @@ impl XlsxDocument {
         env: Env,
         target_json: String,
         options_json: String,
+        fonts: Option<Vec<PngFontFace>>,
     ) -> Result<Uint8Array> {
         let _call = EngineCall::new(env);
+        let faces: Option<Vec<_>> = fonts.as_ref().map(|fonts| {
+            fonts
+                .iter()
+                .map(|face| xlsx_engine::PngFontFace {
+                    family: &face.family,
+                    bold: face.bold.unwrap_or(false),
+                    italic: face.italic.unwrap_or(false),
+                    bytes: &face.bytes,
+                })
+                .collect()
+        });
         self.document(env)?
-            .render_png_target(&target_json, &options_json)
+            .render_png_target_with_faces(&target_json, &options_json, faces.as_deref())
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
     }
@@ -693,6 +744,14 @@ impl XlsxDocument {
         let _call = EngineCall::new(env);
         self.document_mut(env)?
             .move_range_json(&args)
+            .map_err(|error| map_error(env, error))
+    }
+
+    #[napi(catch_unwind)]
+    pub fn fill_range_json(&mut self, env: Env, args: String) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document_mut(env)?
+            .fill_range_json(&args)
             .map_err(|error| map_error(env, error))
     }
 
@@ -1057,6 +1116,37 @@ pub fn allocation_failure() -> f64 {
     0.0
 }
 
+#[napi(catch_unwind, js_name = "install_panic_hook")]
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            #[cfg(unix)]
+            write_panic_line(&panic_line(&info.to_string()));
+            prev(info);
+        }));
+    });
+}
+
+#[cfg(unix)]
+fn panic_line(text: &str) -> String {
+    let mut line = format!("[xlsx-native] panic: {text}")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n");
+    line.push('\n');
+    line
+}
+
+#[cfg(unix)]
+fn write_panic_line(line: &str) {
+    use std::io::Write;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let fd = std::io::stderr().as_raw_fd();
+    let mut stderr = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    let _ = stderr.write_all(line.as_bytes());
+}
+
 /// @internal Test hook: the calling thread's live engine bytes.
 #[napi(catch_unwind, js_name = "engineHeapLiveBytes")]
 pub fn engine_heap_live_bytes() -> f64 {
@@ -1111,4 +1201,22 @@ pub fn render_xlsx_markdown_json(env: Env, content: String, options: String) -> 
 pub fn engine_version(env: Env) -> String {
     let _call = EngineCall::new(env);
     env!("CARGO_PKG_VERSION").to_owned()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panic_line_escapes_the_message_into_one_prefixed_line() {
+        let prefix = "[xlsx-native] panic: ";
+        let line = panic_line(&format!("loc\nx\r\n{prefix}forged"));
+        assert_eq!(line.matches('\n').count(), 1);
+        assert!(line.ends_with('\n'));
+        assert!(line.starts_with(prefix));
+        assert_eq!(line.matches(prefix).count(), 2);
+        assert_eq!(line.lines().filter(|l| l.starts_with(prefix)).count(), 1);
+        assert!(line.contains("\\n"));
+        assert!(line.contains("\\r"));
+    }
 }

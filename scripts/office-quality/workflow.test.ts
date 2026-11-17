@@ -3,7 +3,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'bun:test';
-import { CHANNELS, ENGINE_TIMEOUT, HELPER_TIMEOUT, PARALLELISM, SHARD_SIZE } from './roundtrip.mjs';
+import { JOB_TIMEOUT_MINUTES } from './shards.mjs';
+import { CHANNELS, ENGINE_TIMEOUT, HELPER_TIMEOUT, PARALLELISM, SHARD_SIZE, ROUNDTRIP_MATRICES, MAX_MATRIX_JOBS, roundtripMatrices, roundtripShards } from './roundtrip.mjs';
 
 const workflow = Bun.YAML.parse(
   await readFile(
@@ -25,6 +26,7 @@ test('one frozen plan feeds independent format jobs at the same source revision'
     .toContain('measure-shards=${JSON.stringify(measureMatrix(plan))}');
   expect(measure.strategy).toEqual({
     'fail-fast': false,
+    'max-parallel': "${{ fromJSON(needs.prepare.outputs.parallel)['measure'] }}",
     matrix: { include: '${{ fromJSON(needs.prepare.outputs.measure-shards) }}' },
   });
   const checkout = measure.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
@@ -49,7 +51,7 @@ test('every job feeding the report runs on the runner image the plan recorded', 
 });
 
 test('only the reconciler publishes reports and renders after every format succeeds', () => {
-  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'roundtrip-b']);
+  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'roundtrip-b', 'timing']);
   expect(publish.if).not.toContain('always()');
   expect(
     measure.steps.some((step: any) => step.run?.includes('publish-renders.mjs'))
@@ -86,6 +88,7 @@ test('every measure shard has its own artifacts, and the reconciler collects the
     ['visual-fidelity-renders-*', '${{ runner.temp }}/fidelity-parts', "inputs.publish_renders && inputs.corpus_origin == ''"],
     ['docx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
     ['xlsx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
+    ['pptx-benchmark-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
     ['xlsx-fidelity-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
     ['roundtrip-report-*', '${{ runner.temp }}/fidelity-parts', expect.any(String)],
   ]);
@@ -104,7 +107,7 @@ test('native builds and paired DOCX shards are isolated from browser measurement
   expect(build.needs).toBe('prepare');
   expect(build.strategy.matrix.channel).toEqual(['published', 'commit']);
   expect(build.steps[1].with.ref).toContain('needs.prepare.outputs.docx-published-source');
-  expect(benchmark.needs).toEqual(['prepare', 'native-build']);
+  expect(benchmark.needs).toEqual(['prepare', 'native-build', 'libreoffice-archive']);
   expect(benchmark.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.docx-shards) }}');
   expect(benchmark['runs-on']).toBe('ubuntu-24.04');
   expect(benchmark.steps.some((step: any) => step.run?.includes('playwright'))).toBe(false);
@@ -118,9 +121,16 @@ test('native builds and paired DOCX shards are isolated from browser measurement
 test('XLSX calculation and PPTX LibreOffice run independently and gate publication', () => {
   const xlsx = workflow.jobs['xlsx-benchmark'];
   const pptx = workflow.jobs['pptx-benchmark'];
-  expect(xlsx.needs).toEqual(['prepare', 'xlsx-native-build']);
+  expect(xlsx.needs).toEqual(['prepare', 'xlsx-native-build', 'libreoffice-archive']);
   expect(xlsx.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}');
-  expect(pptx.needs).toEqual(['prepare', 'pptx-native-build']);
+  expect(pptx.needs).toEqual(['prepare', 'pptx-native-build', 'libreoffice-archive']);
+  expect(pptx.strategy).toEqual({ 'fail-fast': false, 'max-parallel': "${{ fromJSON(needs.prepare.outputs.parallel)['pptx-benchmark'] }}",
+    matrix: { shard: '${{ fromJSON(needs.prepare.outputs.pptx-shards) }}' } });
+  expect(prepare.outputs['pptx-shards']).toBe('${{ steps.plan.outputs.pptx-shards }}');
+  expect(pptx.steps.find((step: any) => String(step.run ?? '').includes('pptx-benchmark.mjs')).env.QUALITY_SHARD).toBe('${{ matrix.shard }}');
+  expect(pptx.steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@')).map((step: any) => step.with.name))
+    .toEqual(['pptx-benchmark-report-${{ matrix.shard }}', 'pptx-benchmark-diagnostics-${{ matrix.shard }}']);
+  expect(publish.steps.find((step: any) => step.with?.pattern === 'pptx-benchmark-report-*')).toBeDefined();
   expect(workflow.jobs['pptx-native-build'].steps[1].with.ref).toContain('needs.prepare.outputs.pptx-published-source');
   expect(pptx.steps.find((step: any) => step.run?.includes('pptx_benchmark.py')).env.QUALITY_NATIVE).toBe('${{ runner.temp }}/native');
   expect(publish.if).toContain("needs.xlsx-benchmark.result == 'success'");
@@ -136,7 +146,7 @@ test('XLSX calculation and PPTX LibreOffice run independently and gate publicati
 
 test('XLSX fidelity covers every planned workbook independently of calculation workers', () => {
   const fidelity = workflow.jobs['xlsx-fidelity'];
-  expect(fidelity.needs).toBe('prepare');
+  expect(fidelity.needs).toEqual(['prepare', 'libreoffice-archive']);
   expect(fidelity.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.xlsx-fidelity-shards) }}');
   expect(fidelity.if).toBe("contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')");
   expect(publish.if).toContain("needs.xlsx-fidelity.result == 'success'");
@@ -153,8 +163,9 @@ test('native parse/edit/save probes run independently and gate the final report'
   const [first, second] = ['a', 'b'].map(half => {
     const probe = workflow.jobs[`roundtrip-${half}`];
     expect(prepare.outputs[`roundtrip-shards-${half}`]).toBe(`\${{ steps.plan.outputs.roundtrip-shards-${half} }}`);
-    expect(probe.needs).toEqual(['prepare', 'roundtrip-build']);
-    expect(probe.strategy).toEqual({'fail-fast': false, matrix: {include: `\${{ fromJSON(needs.prepare.outputs.roundtrip-shards-${half}) }}`}});
+    expect(probe.needs).toEqual(['prepare', 'roundtrip-build', 'libreoffice-archive']);
+    expect(probe.strategy).toEqual({'fail-fast': false, 'max-parallel': `\${{ fromJSON(needs.prepare.outputs.parallel)['roundtrip-${half}'] }}`,
+      matrix: {include: `\${{ fromJSON(needs.prepare.outputs.roundtrip-shards-${half}) }}`}});
     expect(probe.env.LO_PYTHON).toBe('/opt/libreoffice26.2/program/python');
     expect(probe.steps.some((step: any) => step.run?.includes('install-libreoffice.sh'))).toBe(true);
     return probe;
@@ -201,8 +212,9 @@ test('a custom corpus origin never publishes renders, and a dispatch asking for 
 const steps = Object.entries<any>(workflow.jobs).flatMap(([job, definition]) =>
   (definition.steps ?? []).map((step: any) => ({ job, step })));
 const CORPUS_FREE = new Set(['build-native.mjs', 'build-format.mjs', 'build-roundtrip.mjs', 'native-fonts.ts',
-  'install-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs']);
+  'install-libreoffice.sh', 'fetch-libreoffice.sh', 'asset-cache.mjs', 'publish-renders.mjs', 'private-store.mjs', 'shards.mjs']);
 const BINARY_ARTIFACTS = /^(docx-native-\$\{\{ matrix\.channel \}\}|docx-native-fonts|xlsx-native-\$\{\{ matrix\.channel \}\}|pptx-native-\$\{\{ matrix\.channel \}\}|roundtrip-native-\$\{\{ matrix\.format \}\}-\$\{\{ matrix\.channel \}\})$/;
+const README = "${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}";
 const PRIVATE_OFF = /(^|&& |^\$\{\{ )!inputs\.private_corpus( &&|$| \}\}$)/;
 
 test('private corpus runs are an explicit input that refuses sample lists and render publishing', () => {
@@ -229,12 +241,12 @@ test('every step that reads the corpus runs through the private-step wrapper', (
     for (const line of String(step.run ?? '').split('\n')) {
       const invoked = [...line.matchAll(/\b(?:node|python3?|bun|bash) scripts\/office-quality\/([\w.-]+\.(?:mjs|py|ts|sh))/g)].map((match) => match[1]);
       if (!invoked.length || invoked.every((name) => CORPUS_FREE.has(name))) continue;
-      const wrapped = line.trim().match(/^node scripts\/office-quality\/private-step\.mjs ([a-z0-9-]+) -- (node|python) scripts\/office-quality\/[\w.-]+$/);
+      const wrapped = line.trim().match(/^node scripts\/office-quality\/private-step\.mjs ([a-z0-9-]+) -- (node|python|bun) scripts\/office-quality\/[\w.-]+$/);
       expect({ job, line: line.trim(), wrapped: Boolean(wrapped) }).toEqual({ job, line: line.trim(), wrapped: true });
       labels.push(`${job}/${wrapped![1]}`);
     }
   }
-  expect(labels.length).toBe(15);
+  expect(labels.length).toBe(18);
   expect(new Set(labels).size).toBe(labels.length);
 });
 
@@ -251,8 +263,9 @@ test('private runs upload no per-document artifact and touch no asset cache, ren
     }
     if (uses.startsWith('actions/cache') && step.with.path.includes('fidelity-assets') || step.id === 'asset-cache' || String(step.run ?? '').includes('publish-renders.mjs') ||
         ['oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6'].includes(uses) && job === 'publish' ||
-        ['Replace the generated README section', 'Detect a changed report'].includes(step.name))
+        false)
       expect({ job, name: step.name ?? uses, if: step.if }).toEqual({ job, name: step.name ?? uses, if: expect.stringMatching(PRIVATE_OFF) });
+    if (['Replace the generated README section', 'Detect a changed report'].includes(step.name)) expect(step.if).toBe(README);
     const cache = step.env?.QUALITY_ASSET_CACHE;
     if (cache !== undefined) expect(cache).toStartWith('${{ !inputs.private_corpus && ');
   }
@@ -281,7 +294,7 @@ test('private runs take their secrets from a main-only environment without deplo
   const corpusJobs = Object.entries<any>(workflow.jobs).filter(([, job]) =>
     (job.steps ?? []).some((step: any) => /private-(step|store)\.mjs/.test(String(step.run ?? ''))));
   expect(corpusJobs.map(([name]) => name).sort()).toEqual(
-    ['docx-benchmark', 'measure', 'prepare', 'publish', 'pptx-benchmark', 'roundtrip-a', 'roundtrip-b', 'xlsx-benchmark', 'xlsx-fidelity'].sort());
+    ['docx-benchmark', 'measure', 'prepare', 'publish', 'pptx-benchmark', 'roundtrip-a', 'roundtrip-b', 'timing', 'xlsx-benchmark', 'xlsx-fidelity'].sort());
   for (const [, job] of corpusJobs) expect(job.environment).toEqual(ENVIRONMENT);
   for (const [name, job] of Object.entries<any>(workflow.jobs))
     if (!corpusJobs.some(([corpus]) => corpus === name)) expect({ name, environment: job.environment }).toEqual({ name, environment: undefined });
@@ -311,7 +324,7 @@ test('read keys reach only corpus readers and bucket reads, write keys only buck
       readers += 1;
     }
   }
-  expect(readers).toBe(8);
+  expect(readers).toBe(9);
   const checks = measure.steps.find((step: any) => step.name === 'Check benchmark scripts');
   expect(checks.env).toEqual({ QUALITY_PRIVATE: 'false' });
 });
@@ -331,7 +344,7 @@ test('every per-document artifact has a private bundle of the same name and dire
   }
   const puts = stores.filter((store) => store.mode === 'put').map((store) => `${store.job}/${store.name}`);
   expect(new Set(puts).size).toBe(puts.length);
-  for (const job of ['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'publish'])
+  for (const job of ['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'timing', 'publish'])
     expect(stores.some((store) => store.job === job && store.mode === 'put' && store.name.startsWith('logs-') &&
       store.step.if === 'always() && inputs.private_corpus')).toBe(true);
 });
@@ -383,7 +396,18 @@ test('the pin step refuses private runs on another branch or commit', async () =
 });
 
 const AGGREGATE_ONLY = '${{ runner.temp }}/fidelity-report/section.md\n${{ runner.temp }}/fidelity-report/aggregate.json\n';
-const README = "${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}";
+test('a private run commits the README only when publish_readme asks for it', () => {
+  expect(workflow.on.workflow_dispatch.inputs.publish_readme).toEqual({
+    description: "Private corpus run: commit this run's aggregate-only section to the README",
+    default: false, required: false, type: 'boolean',
+  });
+  const guard = prepare.steps.find((step: any) => step.name === 'Keep README publishing to private runs');
+  expect(guard.if).toBe('inputs.publish_readme && (!inputs.private_corpus || inputs.report_only)');
+  expect(guard.run).toContain('exit 1');
+  expect(prepare.steps.indexOf(guard)).toBeLessThan(prepare.steps.findIndex((step: any) => step.id === 'plan'));
+  const merge = publish.steps.find((step: any) => String(step.run ?? '').includes('merge.mjs'));
+  expect(merge.env?.QUALITY_PRIVATE ?? workflow.env.QUALITY_PRIVATE).toBe("${{ inputs.private_corpus && 'true' || 'false' }}");
+});
 
 test('only a default showcase run commits the README; report-only runs publish nothing', () => {
   expect(workflow.on.workflow_dispatch.inputs.report_only).toEqual({
@@ -408,4 +432,158 @@ test('the reconciled artifact always carries the aggregate, and the private bund
   ]);
   const keep = publish.steps.find((step: any) => step.name === 'Keep the reconciled report in the private bucket');
   expect(keep.run).toContain('private-store.mjs" put visual-fidelity report.json section.md aggregate.json failures.json');
+});
+
+test('private runs time a seeded sample per format, sequentially on one runner each, and gate the report on it', () => {
+  const timing = workflow.jobs.timing;
+  expect(timing.needs).toEqual(['prepare', 'native-build', 'xlsx-native-build', 'pptx-native-build', 'libreoffice-archive']);
+  expect(timing.if).toContain('inputs.private_corpus');
+  expect(timing.if).toContain("needs.prepare.outputs.timing-formats != '[]'");
+  expect(timing.if).toStartWith('!cancelled()');
+  expect(prepare.outputs['timing-formats']).toBe('${{ steps.plan.outputs.timing-formats }}');
+  expect(prepare.steps.find((step: any) => step.id === 'plan').run).toContain('timing-formats=${JSON.stringify(timingFormats(plan))}');
+  expect(timing.strategy).toEqual({ 'fail-fast': false, 'max-parallel': "${{ fromJSON(needs.prepare.outputs.parallel)['timing'] }}",
+    matrix: { format: '${{ fromJSON(needs.prepare.outputs.timing-formats) }}' } });
+  const downloads = timing.steps.filter((step: any) => step.uses?.startsWith('actions/download-artifact@')).map((step: any) => step.with.name);
+  expect(downloads).toEqual(['${{ matrix.format }}-native-published', '${{ matrix.format }}-native-commit']);
+  const measured = timing.steps.find((step: any) => String(step.run ?? '').includes('timing.py'));
+  expect(measured.run).toBe('node scripts/office-quality/private-step.mjs timing -- python scripts/office-quality/timing.py');
+  expect(timing.steps.some((step: any) => step.uses?.startsWith('actions/upload-artifact@'))).toBe(false);
+  expect(publish.if).toContain("(!inputs.private_corpus || needs.prepare.outputs.timing-formats == '[]' || needs.timing.result == 'success')");
+  const merge = publish.steps.find((step: any) => step.run?.includes('merge.mjs'));
+  expect(merge.env.QUALITY_REQUIRE_TIMING).toBe('${{ inputs.private_corpus }}');
+  const fetch = publish.steps.find((step: any) => step.name === 'Fetch the format reports from the private bucket');
+  expect(fetch.run).toContain(`node "$store" get 'timing-report-*' "$parts"`);
+  expect(stores.some((store) => store.job === 'timing' && store.mode === 'put' && store.name === 'timing-report-${{ matrix.format }}')).toBe(true);
+});
+
+test('the roundtrip matrices cover every file of a corpus-sized plan for all three channels', () => {
+  const ids = (format: string, count: number) => Array.from({ length: count }, (_, index) => ({ id: `${format}-${index}`, format }));
+  for (const sizes of [{ docx: 1776, pptx: 656, xlsx: 3297 }, { docx: 1823, pptx: 674, xlsx: 3526 }, { docx: 2667, pptx: 2667, xlsx: 2666 }]) {
+    const samples = Object.entries(sizes).flatMap(([format, count]) => ids(format, count));
+    const plan = { formats: Object.keys(sizes), samples };
+    const shards = roundtripShards(plan);
+    expect(shards.every((shard: any) => shard.ids.length >= 1 && shard.ids.length <= SHARD_SIZE)).toBe(true);
+    expect(shards.flatMap((shard: any) => shard.ids).sort()).toEqual(samples.map((sample) => sample.id).sort());
+    const matrices = roundtripMatrices(plan);
+    expect(matrices).toHaveLength(ROUNDTRIP_MATRICES);
+    for (const matrix of matrices) expect(matrix.length).toBeLessThanOrEqual(MAX_MATRIX_JOBS);
+    const jobs = matrices.flat().map(({ format, shard }: any) => `${format}/${shard}`);
+    expect(new Set(jobs).size).toBe(shards.length);
+    expect(jobs.sort()).toEqual(shards.map(({ format, shard }: any) => `${format}/${shard}`).sort());
+  }
+  expect(CHANNELS).toEqual(['published', 'commit', 'libreoffice']);
+});
+
+test('planning prints every benchmark job shard count and planned minutes against the timeout', () => {
+  const plan = prepare.steps.find((step: any) => step.id === 'plan').run;
+  expect(plan).toContain('benchmarkShardPlan(plan)');
+  expect(plan).toContain('GITHUB_STEP_SUMMARY');
+  expect(plan).toContain('pptx-shards=${JSON.stringify(pptxShards(plan).map((_, index) => index))}');
+  for (const name of ['docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity'])
+    expect({ name, timeout: workflow.jobs[name]['timeout-minutes'] }).toEqual({ name, timeout: JOB_TIMEOUT_MINUTES });
+});
+
+test('every benchmark job prints its wall time next to its planned work, even when a step fails', () => {
+  for (const name of ['docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity']) {
+    const steps = workflow.jobs[name].steps;
+    expect(steps[1]).toEqual({ name: 'Record the job start', run: 'echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"' });
+    expect(steps.at(-1)).toEqual({ name: 'Compare the wall time with the planned work', if: 'always()',
+      env: { QUALITY_PLAN: '${{ runner.temp }}/fidelity-plan/plan.json' }, run: `node scripts/office-quality/shards.mjs wall ${name} "\${{ matrix.shard }}"` });
+  }
+});
+
+test('a private run bounds its concurrent benchmark jobs by max_parallel; public runs are unbounded', () => {
+  expect(workflow.on.workflow_dispatch.inputs.max_parallel).toEqual({
+    description: "Private corpus run: most benchmark jobs held at once, leaving the rest of the plan's concurrent jobs to pull request CI",
+    default: 12, required: false, type: 'number',
+  });
+  const plan = prepare.steps.find((step: any) => step.id === 'plan');
+  expect(plan.env.MAX_PARALLEL).toBe('${{ inputs.max_parallel }}');
+  expect(plan.run).toContain("parallelPlan(plan, { privateRun: process.env.QUALITY_PRIVATE === 'true', total: Number(process.env.MAX_PARALLEL) })");
+  expect(plan.run).toContain('parallelSummary(plan, parallel)');
+  expect(prepare.outputs.parallel).toBe('${{ steps.plan.outputs.parallel }}');
+  for (const name of ['measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip-a', 'roundtrip-b', 'timing'])
+    expect({ name, cap: workflow.jobs[name].strategy['max-parallel'] }).toEqual({ name, cap: `\${{ fromJSON(needs.prepare.outputs.parallel)['${name}'] }}` });
+});
+
+test('the reconciler fails on a channel that scored nothing, and the summary leads with scored counts even when it fails', () => {
+  const reconcile = publish.steps.find((step: any) => step.name === 'Reconcile the format reports');
+  expect(reconcile.env.QUALITY_REQUIRE_COVERAGE).toBe('true');
+  expect(reconcile.env.QUALITY_COVERAGE).toBe('${{ runner.temp }}/coverage.md');
+  expect(reconcile.run).toBe('node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs');
+  const summary = publish.steps[publish.steps.indexOf(reconcile) + 1];
+  expect(summary.name).toBe('Summarise scored documents and the generated section');
+  expect(summary.if).toBe('always()');
+  expect(summary.run.indexOf('coverage.md')).toBeLessThan(summary.run.indexOf('section.md'));
+});
+
+test('planning states which font package each channel renders with', () => {
+  const plan = prepare.steps.find((step: any) => step.id === 'plan').run;
+  expect(plan).toContain("published channel: @betteroffice/fonts@${version}, ${plan.fonts_basis?.[format] === 'release-commit' ? 'the fonts release from the same release commit as' : 'the latest fonts release published before'} @betteroffice/${format}@${plan.versions[format]}");
+  expect(plan).toContain('commit channel: the font packages of this checkout');
+  expect(plan).toContain('### Font sources');
+});
+
+test('one job fetches the LibreOffice archive into a cache every LibreOffice job restores before installing', () => {
+  const CACHE = 'actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
+  const archive = workflow.jobs['libreoffice-archive'];
+  expect(archive.needs).toBeUndefined();
+  expect(archive.if).toBe("github.ref == 'refs/heads/main'");
+  expect(archive['runs-on']).toBe('ubuntu-24.04');
+  expect(archive['timeout-minutes']).toBe(130);
+  expect(archive.outputs.key).toBe('${{ steps.pin.outputs.key }}');
+  const names = archive.steps.map((step: any) => step.name ?? step.uses);
+  const restore = archive.steps.find((step: any) => step.id === 'restore');
+  const fetch = archive.steps.find((step: any) => String(step.run ?? '').includes('fetch-libreoffice.sh'));
+  const save = archive.steps.find((step: any) => String(step.uses ?? '').startsWith('actions/cache/save@'));
+  expect(archive.steps.find((step: any) => step.id === 'pin').run).toContain('key=libreoffice-${LO_VERSION}-${LO_SHA256}');
+  expect(restore).toMatchObject({ uses: CACHE, with: { path: '~/.cache/libreoffice-archive', key: '${{ steps.pin.outputs.key }}' } });
+  expect(fetch.if).toBe("steps.restore.outputs.cache-hit != 'true'");
+  expect(save).toMatchObject({ if: fetch.if, with: { path: '~/.cache/libreoffice-archive', key: '${{ steps.pin.outputs.key }}' } });
+  expect(names.indexOf(save.name)).toBe(names.indexOf(fetch.name) + 1);
+  const installers = Object.entries<any>(workflow.jobs).filter(([, job]) =>
+    (job.steps ?? []).some((step: any) => String(step.run ?? '').includes('install-libreoffice.sh')));
+  expect(installers.map(([name]) => name).sort()).toEqual(
+    ['docx-benchmark', 'pptx-benchmark', 'roundtrip-a', 'roundtrip-b', 'timing', 'xlsx-benchmark', 'xlsx-fidelity']);
+  for (const [name, job] of installers) {
+    expect({ name, needs: job.needs }).toEqual({ name, needs: expect.arrayContaining(['prepare', 'libreoffice-archive']) });
+    expect(job['runs-on']).toBe(archive['runs-on']);
+    const install = job.steps.findIndex((step: any) => String(step.run ?? '').includes('install-libreoffice.sh'));
+    expect({ name, restore: job.steps[install - 2] }).toEqual({ name, restore: {
+      name: 'Restore the LibreOffice archive', id: 'restore-libreoffice', uses: CACHE,
+      with: { path: '~/.cache/libreoffice-archive', key: '${{ needs.libreoffice-archive.outputs.key }}' } } });
+    const fallback = job.steps[install - 1];
+    expect({ name, fallback: fallback.name, if: fallback.if, env: fallback.env }).toEqual({
+      name, fallback: 'Fetch and verify the LibreOffice archive on a cache miss', if: undefined, env: {
+        CACHE_HIT: '${{ steps.restore-libreoffice.outputs.cache-hit }}', CACHE_KEY: '${{ needs.libreoffice-archive.outputs.key }}',
+        LO_FETCH_BUDGET: '1200' } });
+    expect(fallback['timeout-minutes'] * 60).toBeGreaterThan(Number(fallback.env.LO_FETCH_BUDGET));
+    expect(fallback.run).toContain('if [ "$CACHE_HIT" = "true" ]; then');
+    expect(fallback.run).toContain('echo "LibreOffice archive $CACHE_KEY restored from cache"');
+    expect(fallback.run).toContain('echo "::warning::cache miss for $CACHE_KEY: fetching and verifying the pinned archive"');
+    expect(fallback.run.indexOf('bash scripts/office-quality/fetch-libreoffice.sh')).toBeGreaterThan(fallback.run.indexOf('else'));
+  }
+});
+
+test('every restore of the LibreOffice archive falls back to the verified fetch on a miss and only the archive job saves it', () => {
+  const uses = (step: any, action: string) => String(step.uses ?? '').startsWith(`actions/cache/${action}@`)
+    && step.with?.path === '~/.cache/libreoffice-archive';
+  const jobs = Object.entries<any>(workflow.jobs).map(([name, job]) => ({ name, steps: job.steps ?? [] }));
+  for (const { steps } of jobs)
+    for (const step of steps) expect({ name: step.name, failOnMiss: step.with?.['fail-on-cache-miss'] }).toEqual({ name: step.name, failOnMiss: undefined });
+  const restores = jobs.flatMap(({ name, steps }) => steps.flatMap((step: any, index: number) => uses(step, 'restore') ? [{ name, steps, index }] : []));
+  expect(restores.length).toBe(8);
+  for (const { name, steps, index } of restores) {
+    const restore = steps[index];
+    const fetch = steps[index + 1];
+    expect({ name, fetches: String(fetch.run ?? '').includes('bash scripts/office-quality/fetch-libreoffice.sh') }).toEqual({ name, fetches: true });
+    const gate = name === 'libreoffice-archive' ? fetch.if : fetch.env?.CACHE_HIT;
+    const expected = name === 'libreoffice-archive'
+      ? `steps.${restore.id}.outputs.cache-hit != 'true'`
+      : `\${{ steps.${restore.id}.outputs.cache-hit }}`;
+    expect({ name, gate }).toEqual({ name, gate: expected });
+  }
+  const savers = jobs.filter(({ steps }) => steps.some((step: any) => uses(step, 'save'))).map(({ name }) => name);
+  expect(savers).toEqual(['libreoffice-archive']);
 });

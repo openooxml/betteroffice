@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use docx_parse::paragraph_patch::{
-    AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, LegacyParagraphV1,
-    ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1,
-    canonical_json_v1, result_sha256, unit_sha256,
+    AttrDeltaV1, Attrs, DonorV1, InheritanceStateV1, InheritanceV1, InsertedTextV1,
+    LegacyParagraphV1, ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1,
+    UnitV1, canonical_json_v1, result_sha256, unit_sha256,
 };
 use serde_json::{Value, json};
 use yrs::Any;
@@ -253,6 +253,7 @@ fn run_key(path: &[String]) -> bool {
         "fontSize" => Some(&["size", "sizeCs"]),
         "language" => Some(&["latin", "val", "eastAsia", "bidi"]),
         "characterSpacing" => Some(&["spacing", "position", "scale", "kerning"]),
+        "typography" => Some(&["ligatures", "contextualAlternates"]),
         "fontFamily" => Some(&[
             "ascii",
             "hAnsi",
@@ -949,6 +950,7 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
             } => {
                 let comment = atom_kind == "field"
                     && payload.get("modelKind").and_then(Value::as_str) == Some("commentReference");
+                let exempt = comment || (atom_kind == "field" && closed_complex_field(payload));
                 if !matches!(
                     atom_kind.as_str(),
                     "break"
@@ -959,7 +961,7 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
                         | "chart"
                         | "opaqueDrawing"
                         | "horizontalRule"
-                ) && !comment
+                ) && !exempt
                 {
                     let kind = match atom_kind.as_str() {
                         "field" => "field",
@@ -992,6 +994,35 @@ fn unsupported(snapshot: &Snapshot) -> Option<String> {
         return Some("tc: paragraph revision".to_owned());
     }
     None
+}
+
+fn closed_complex_field(payload: &Attrs) -> bool {
+    let data = payload
+        .get("fieldData")
+        .and_then(Value::as_str)
+        .and_then(|data| serde_json::from_str::<Value>(data).ok());
+    payload.get("modelKind").and_then(Value::as_str) == Some("field")
+        && payload.get("fieldKind").and_then(Value::as_str) == Some("complex")
+        && ![
+            "fieldCodeMarks",
+            "fieldCodeTarget",
+            "fieldResultBlocks",
+            "resultProjection",
+        ]
+        .iter()
+        .any(|key| payload.contains_key(*key))
+        && data.is_some_and(|data| {
+            ["structuredCode", "structuredResult"].iter().all(|key| {
+                data.get(*key)
+                    .and_then(|content| content.get("blocks"))
+                    .is_none_or(Value::is_null)
+            })
+        })
+}
+
+fn complex_field(token: &Token) -> bool {
+    matches!(&token.content, Content::Atom(kind, payload)
+        if kind == "field" && payload.get("modelKind").and_then(Value::as_str) == Some("field"))
 }
 
 fn has_run_revisions(snapshot: &Snapshot) -> bool {
@@ -1583,6 +1614,21 @@ fn plan_paragraph(
         if i != previous.0 || j != previous.1 {
             let removed = &old[previous.0..i];
             let inserted = &new[previous.1..j];
+            if removed.iter().chain(inserted).any(complex_field) {
+                return Err(context.legacy(
+                    PatchErrorCode::UnsupportedStructure,
+                    "field: edit touches a field",
+                ));
+            }
+            if i == previous.0
+                && (old[..i].last().is_some_and(complex_field)
+                    || old.get(i).is_some_and(complex_field))
+            {
+                return Err(context.legacy(
+                    PatchErrorCode::UnsupportedStructure,
+                    "field: insertion at field edge",
+                ));
+            }
             if removed.iter().chain(inserted).any(|token| !token.is_text()) {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
@@ -1757,7 +1803,17 @@ fn plan_paragraph(
             "tc: run property revision",
         ));
     }
-    validate_markers(&before, &after, &text_edits, &context)?;
+    validate_markers(&before, &after, &text_edits, &context).map_err(|legacy| {
+        // A field paragraph declines as one so the save keeps its source.
+        if old.iter().any(complex_field) {
+            context.legacy(
+                PatchErrorCode::UnsupportedStructure,
+                "field: markers around a field",
+            )
+        } else {
+            legacy
+        }
+    })?;
     let mut seed_properties = verification_properties(&before, context.seeded_markers);
     let mut result_properties = verification_properties(&after, context.live_markers);
     let para_deltas = if patchable_restyle && plain_restyle {
@@ -1800,6 +1856,11 @@ fn plan_paragraph(
         para_inherit,
         mark_inherit,
         result_sha256: result_sha256(&units(&replay), &result_properties),
+        inheritance: if context.metadata.is_some() {
+            InheritanceStateV1::Current
+        } else {
+            InheritanceStateV1::Unknown
+        },
     })
 }
 

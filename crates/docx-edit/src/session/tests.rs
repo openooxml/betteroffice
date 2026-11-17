@@ -92,6 +92,60 @@ fn paragraph_texts(session: &EditSessionCore) -> Vec<String> {
 }
 
 #[test]
+fn an_empty_read_answers_with_the_version_of_a_full_read() {
+    fn read(
+        session: &EditSessionCore,
+        story: Option<&str>,
+        para_ids: Option<Vec<String>>,
+    ) -> Result<crate::ReadParagraphsResponse, crate::EditRefusal> {
+        session
+            .engine
+            .doc()
+            .read_paragraphs(&ReadParagraphsRequest {
+                story: story.map(str::to_owned),
+                para_ids,
+                view: EditTextView::Accepted,
+            })
+    }
+    let same = |session: &EditSessionCore| {
+        let empty = read(session, None, Some(Vec::new())).unwrap();
+        let full = read(session, None, None).unwrap();
+        assert_eq!(empty.version, full.version);
+        assert!(empty.paragraphs.is_empty());
+        assert!(!full.paragraphs.is_empty());
+        full.version
+    };
+    let session = core(1);
+    let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
+    let para_id = seeded["body"][0].as_str().unwrap().to_owned();
+    session.track_undo();
+    let opened = same(&session);
+    session
+        .insert_text("body", &para_id, 5, "!", None, None)
+        .unwrap();
+    let edited = same(&session);
+    assert_ne!(edited, opened);
+    assert!(session.undo());
+    let undone = same(&session);
+    assert_ne!(undone, edited);
+    let remote = core(2);
+    let doc = session.engine.doc();
+    remote
+        .engine
+        .doc()
+        .apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
+    remote
+        .insert_text("body", &para_id, 0, "r", None, None)
+        .unwrap();
+    doc.apply_update_v1(&remote.engine.doc().encode_state_as_update_v1())
+        .unwrap();
+    assert_ne!(same(&session), undone);
+    assert!(read(&session, Some("missing"), Some(Vec::new())).is_err());
+    assert!(read(&session, Some("missing"), None).is_err());
+}
+
+#[test]
 fn text_edits_marks_and_raw_ops_run_without_wasm() {
     let session = core(1);
     let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
@@ -271,6 +325,62 @@ fn unknown_selection_story_matches_shim_error() {
 }
 
 #[test]
+fn a_resident_frame_paints_an_arabic_word_from_its_measured_glyphs() {
+    let session = core(1);
+    session
+        .load_json(r#"[{"storyId":"body","paragraphs":[{"text":"مرحبا بالعالم"}]}]"#)
+        .unwrap();
+    let font = session
+        .register_measure_font(include_bytes!(
+            "../../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf"
+        ))
+        .unwrap();
+    let request = serde_json::json!({
+        "bodyStory": "body",
+        "regions": {"sections": [{
+            "sectionId": "main",
+            "properties": {
+                "pageWidth": 4320,
+                "pageHeight": 2880,
+                "marginTop": 300,
+                "marginRight": 300,
+                "marginBottom": 300,
+                "marginLeft": 300
+            }
+        }]},
+        "measurement": {
+            "fontChains": {"calibri|0|0": [font]},
+            "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+            "authoritativeShaping": true
+        },
+        "renderEnv": {}
+    });
+    session
+        .layout_document_with_regions_json(&request.to_string())
+        .unwrap();
+    session
+        .build_display_list_frame(
+            &serde_json::json!({"fontChains": {"calibri|0|0": [font]}}).to_string(),
+            0.0,
+        )
+        .unwrap();
+    let texts = session
+        .engine
+        .with_display_list(|list| {
+            list.pages[0]
+                .primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    docx_layout::display_list::Primitive::GlyphRun(run) => Some(run.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    assert_eq!(texts, ["مرحبا بالعالم"]);
+}
+
+#[test]
 fn fonts_layout_frames_and_resident_input_run_without_wasm() {
     let session = core(1);
     let seeded: Value = serde_json::from_str(&session.load_json(BODY).unwrap()).unwrap();
@@ -393,4 +503,376 @@ fn invalid_resident_frame_epoch_matches_shim_error_before_mutation() {
         "expected_frame_epoch must be a non-negative safe integer"
     );
     assert_eq!(session.encode_state(), before);
+}
+
+/// A session whose body table names cell (0, 2) while its story is missing: one replica split
+/// a cell, another inserted a row, the first undid its split, after the row reached it when
+/// `synced`. With `select_early` the session placed its caret in that cell while it still had
+/// its story.
+fn missing_cell_session(synced: bool, select_early: bool) -> (EditSessionCore, String) {
+    let ctx = crate::EditCtx::local("Ada", "2026-11-10T00:00:00Z");
+    let origin = crate::EditingDoc::new(100);
+    origin
+        .create_story("body", "Hello", "Normal", "left")
+        .unwrap();
+    origin
+        .insert_table(&ctx, crate::Position::new("body", 0), 1, 2)
+        .unwrap();
+    let state = origin.encode_state_as_update_v1();
+    let open = |client| {
+        let doc = crate::EditingDoc::new(client);
+        doc.apply_update_v1(&state).unwrap();
+        doc
+    };
+    let (splitter, peer) = (open(91), open(92));
+    let exchange = || {
+        let from_splitter = splitter.encode_state_as_update_v1();
+        let from_peer = peer.encode_state_as_update_v1();
+        peer.apply_update_v1(&from_splitter).unwrap();
+        splitter.apply_update_v1(&from_peer).unwrap();
+    };
+    let mut undo = splitter.undo_manager();
+    splitter
+        .split_cell_grid(
+            &ctx,
+            &crate::CellLoc::new("body", 0, 0, 1),
+            Some(1),
+            Some(2),
+        )
+        .unwrap();
+    exchange();
+    let session = core(93);
+    if select_early {
+        session
+            .apply_update(&splitter.encode_state_as_update_v1())
+            .unwrap();
+        let payload = session
+            .engine
+            .doc()
+            .table_payload(&crate::TableLocator::new("body", 0))
+            .unwrap();
+        let rows = serde_json::to_value(&payload["rows"]).unwrap();
+        let cell = rows[0]["cells"][2]["story"].as_str().unwrap().to_owned();
+        let paragraphs = session.engine.doc().paragraphs(&cell).unwrap();
+        let para = paragraphs[0].para_id.clone();
+        session.set_selection(&cell, &para, 0, &para, 0).unwrap();
+    }
+    peer.insert_row(&ctx, &crate::CellLoc::new("body", 0, 0, 0), true)
+        .unwrap();
+    if synced {
+        exchange();
+    }
+    assert!(undo.undo());
+    exchange();
+    session
+        .apply_update(&splitter.encode_state_as_update_v1())
+        .unwrap();
+    let payload = session
+        .engine
+        .doc()
+        .table_payload(&crate::TableLocator::new("body", 0))
+        .unwrap();
+    let rows = serde_json::to_value(&payload["rows"]).unwrap();
+    let cell = rows[0]["cells"][2]["story"].as_str().unwrap().to_owned();
+    assert!(!session.story_ids().contains(&cell), "{cell}");
+    (session, cell)
+}
+
+#[test]
+fn every_write_aimed_at_a_cell_without_its_story_is_refused_before_its_argument_checks() {
+    for synced in [true, false] {
+        refuses_every_write(synced);
+    }
+}
+
+fn refuses_every_write(synced: bool) {
+    let (session, cell) = missing_cell_session(synced, false);
+    let key = format!("{cell}#p0");
+    let collapsed = serde_json::json!([{
+        "story": cell, "startPara": key, "startOffset": 0, "endPara": key, "endOffset": 0,
+    }])
+    .to_string();
+    let before = (session.encode_state_vector(), session.encode_state());
+    let (c, k) = (cell.as_str(), key.as_str());
+    let results: Vec<(&str, Result<(), super::EngineError>)> = vec![
+        (
+            "insert_text with a break",
+            session.insert_text(c, k, 0, "a\nb", None, None).map(drop),
+        ),
+        (
+            "edit_text_resident",
+            session
+                .edit_text_resident(c, k, 0, k, 0, Some("x".to_owned()))
+                .map(drop),
+        ),
+        (
+            "edit_text_resident over a range",
+            session.edit_text_resident(c, k, 0, k, 0, None).map(drop),
+        ),
+        (
+            "collapsed delete_range",
+            session.delete_range(c, k, 0, k, 0, None, None).map(drop),
+        ),
+        (
+            "collapsed replace_range with no text",
+            session
+                .replace_range(c, k, 0, k, 0, "", None, None)
+                .map(drop),
+        ),
+        (
+            "collapsed toggle_mark",
+            session
+                .toggle_mark(c, k, 0, k, 0, r#"{"type":"bold"}"#, None, None)
+                .map(drop),
+        ),
+        (
+            "collapsed format_range",
+            session
+                .format_range(c, k, 0, k, 0, r#"{"bold":true}"#, None, None)
+                .map(drop),
+        ),
+        (
+            "collapsed set_hyperlink",
+            session
+                .set_hyperlink(c, k, 0, k, 0, r#"{"url":"x"}"#, None, None)
+                .map(drop),
+        ),
+        (
+            "collapsed clear_formatting",
+            session
+                .clear_formatting(c, k, 0, k, 0, None, None)
+                .map(drop),
+        ),
+        (
+            "merge_paragraphs on the last paragraph",
+            session.merge_paragraphs(c, k, None, None).map(drop),
+        ),
+        (
+            "insert_image with a malformed payload",
+            session
+                .insert_image(c, k, 0, "not json", None, None)
+                .map(drop),
+        ),
+        (
+            "insert_section_break",
+            session.insert_section_break(c, k, 0, "nextPage"),
+        ),
+        (
+            "insert_watermark",
+            session.insert_watermark(c, k, 0, r#"{"text":"DRAFT"}"#),
+        ),
+        ("insert_page_break", session.insert_page_break(c, k, 0)),
+        (
+            "collapsed add_comment",
+            session
+                .add_comment(&collapsed, "Ada", "2026-11-10T00:00:00Z", "\"note\"")
+                .map(drop),
+        ),
+        (
+            "collapsed set_comment_ranges",
+            session.set_comment_ranges("missing", &collapsed),
+        ),
+        ("apply_raw_ops", session.apply_raw_ops(c, "not json")),
+    ];
+    for (what, result) in results {
+        let error = result.expect_err(what);
+        assert!(error.message.contains("has no story"), "{what}: {error}");
+        assert_eq!(error.kind, EngineErrorKind::CellHasNoStory, "{what}");
+    }
+    assert_eq!(
+        (session.encode_state_vector(), session.encode_state()),
+        before
+    );
+}
+
+#[test]
+fn a_caret_placed_before_the_cell_lost_its_story_reads_at_its_empty_paragraph() {
+    for synced in [true, false] {
+        let (session, cell) = missing_cell_session(synced, true);
+        let before = (session.encode_state_vector(), session.encode_state());
+        let selection: Value = serde_json::from_str(&session.selection().unwrap()).unwrap();
+        for end in ["anchor", "head"] {
+            assert_eq!(selection[end]["story"], cell.as_str(), "synced={synced}");
+            assert_eq!(selection[end]["paraId"], format!("{cell}#p0"));
+            assert_eq!(selection[end]["offset"], 0);
+        }
+        assert_eq!(
+            (session.encode_state_vector(), session.encode_state()),
+            before
+        );
+    }
+}
+
+#[test]
+fn loading_stories_that_include_a_cell_without_its_story_seeds_none_of_them() {
+    for synced in [true, false] {
+        let (session, cell) = missing_cell_session(synced, false);
+        let before = (session.encode_state_vector(), session.encode_state());
+        let request = serde_json::json!([
+            {"storyId": "fresh", "paragraphs": [{"text": "first"}]},
+            {"storyId": cell, "paragraphs": [{"text": "second"}]},
+        ])
+        .to_string();
+        let error = session.load_json(&request).unwrap_err();
+        assert_eq!(error.kind, EngineErrorKind::CellHasNoStory, "{error}");
+        assert!(!session.story_ids().contains(&"fresh".to_owned()));
+        assert_eq!(
+            (session.encode_state_vector(), session.encode_state()),
+            before
+        );
+    }
+}
+
+#[test]
+fn resident_input_and_delete_in_a_cell_without_its_story_refuse_with_its_kind() {
+    for synced in [true, false] {
+        let (session, cell) = missing_cell_session(synced, true);
+        let key = format!("{cell}#p0");
+        let before = (session.encode_state_vector(), session.encode_state());
+        let results: Vec<(&str, Result<(), super::EngineError>)> = vec![
+            ("apply_input", session.apply_input("x", 0.0).map(drop)),
+            (
+                "apply_input_profiled",
+                session.apply_input_profiled("x", 0.0).map(drop),
+            ),
+            (
+                "apply_delete",
+                session.apply_delete("backward", 0.0, 1).map(drop),
+            ),
+            (
+                "apply_delete_profiled",
+                session.apply_delete_profiled("forward", 0.0, 1).map(drop),
+            ),
+            (
+                "edit_text_resident",
+                session
+                    .edit_text_resident(&cell, &key, 0, &key, 0, Some("x".to_owned()))
+                    .map(drop),
+            ),
+        ];
+        for (what, result) in results {
+            let error = result.expect_err(what);
+            assert_eq!(error.kind, EngineErrorKind::CellHasNoStory, "{what}");
+        }
+        assert_eq!(
+            (session.encode_state_vector(), session.encode_state()),
+            before
+        );
+    }
+}
+
+#[test]
+fn a_cell_refusal_keeps_its_kind_through_a_plain_message() {
+    let refusal = crate::OpError::CellHasNoStory("body:t0:r0c2~7".to_owned());
+    assert_eq!(
+        super::EngineError::message(refusal).kind,
+        EngineErrorKind::CellHasNoStory
+    );
+    let missing = crate::EditError::StoryNotFound("table cell \"x\" has no story".to_owned());
+    assert_eq!(
+        super::EngineError::message(missing).kind,
+        EngineErrorKind::Message
+    );
+}
+
+fn control_package(body: &str) -> Vec<u8> {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let parts = [
+        (
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_owned(),
+        ),
+        (
+            "_rels/.rels",
+            format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="{REL}/officeDocument" Target="word/document.xml"/></Relationships>"#),
+        ),
+        (
+            "word/document.xml",
+            format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{W}"><w:body>{body}<w:sectPr/></w:body></w:document>"#),
+        ),
+    ];
+    let entries: Vec<(String, Vec<u8>)> = parts
+        .into_iter()
+        .map(|(name, content)| (name.to_owned(), content.into_bytes()))
+        .collect();
+    ooxml_opc::rezip_parts(&entries).unwrap()
+}
+
+#[test]
+fn control_targets_are_reused_until_a_story_their_controls_read_changes() {
+    let run = |text: &str| format!(r#"<w:r><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    let paragraph = |id: &str, content: &str| {
+        format!(
+            r#"<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:paraId="{id}">{content}</w:p>"#
+        )
+    };
+    let inline = format!(
+        r#"{}<w:sdt><w:sdtPr><w:tag w:val="name"/><w:id w:val="7"/><w:text/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}"#,
+        run("Before "),
+        run("Ada"),
+        run(" after")
+    );
+    let block = format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="block"/><w:id w:val="8"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+        paragraph("10000002", &run("Inside the block"))
+    );
+    let table = format!(
+        r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+        paragraph("10000003", &run("Cell text"))
+    );
+    let body = format!(
+        "{}{block}{table}{}",
+        paragraph("10000001", &inline),
+        paragraph("10000004", &run("Tail"))
+    );
+    let session = core(31);
+    session
+        .open_docx(&control_package(&body), true, None, None)
+        .unwrap();
+    let fresh = |session: &EditSessionCore| {
+        let cached = session.control_targets.take();
+        let answer = session.content_control_targets_json().unwrap();
+        session.control_targets.replace(cached);
+        answer
+    };
+    let targets = |session: &EditSessionCore| {
+        crate::content_controls::INVENTORY_BUILDS.with(|builds| builds.set(0));
+        let answer = session.content_control_targets_json().unwrap();
+        let built = crate::content_controls::INVENTORY_BUILDS.with(|builds| builds.get());
+        assert_eq!(answer, fresh(session));
+        (answer, built)
+    };
+    let type_into = |session: &EditSessionCore, story: &str| {
+        let index = session.engine.doc().paragraph_index(story).unwrap();
+        let para = index.para_at(0).unwrap().para_id.to_string();
+        session
+            .insert_text(story, &para, 1, "x", None, None)
+            .unwrap();
+    };
+    let stories = session.story_ids();
+    let cell = stories
+        .iter()
+        .find(|story| story.contains(":t0:r0c0"))
+        .expect("a table cell story")
+        .clone();
+    let (first, built) = targets(&session);
+    let listed: Vec<Value> = serde_json::from_str(&first).unwrap();
+    assert_eq!((listed.len(), built), (2, 1), "{first}");
+    let block_story = stories
+        .iter()
+        .find(|story| *story != "body" && *story != &cell && !story.starts_with("hf:"))
+        .expect("the block control's story")
+        .clone();
+
+    assert_eq!(targets(&session).1, 0, "nothing changed");
+    type_into(&session, &cell);
+    assert_eq!(targets(&session).1, 0, "the cell holds no control");
+    type_into(&session, &block_story);
+    let (inside, built) = targets(&session);
+    assert_eq!(built, 1, "the block control reads its story");
+    assert_ne!(inside, first);
+    type_into(&session, "body");
+    assert_eq!(targets(&session).1, 1, "the body holds the inline control");
+    assert_eq!(targets(&session).1, 0);
 }

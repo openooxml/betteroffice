@@ -575,9 +575,10 @@ impl SourceMetadata {
     }
 
     pub(crate) fn prepare_patch_table_styles(&self, story: &str, source: &SourceIndex) {
-        if crate::structured::source::cell_table(story).is_some()
-            && self.structure.patch_table_styles.is_empty()
-        {
+        let in_cell = std::iter::once(story)
+            .chain(story.match_indices(':').map(|(at, _)| &story[..at]))
+            .any(|prefix| crate::structured::source::cell_table(prefix).is_some());
+        if in_cell && self.structure.patch_table_styles.is_empty() {
             self.peer_patch_table_styles
                 .get_or_init(|| source.patch_table_styles().clone());
         }
@@ -1450,13 +1451,92 @@ pub(crate) fn any_from_value(value: Value) -> Result<Any, String> {
     }
 }
 
-fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
-    let mut entries = values
-        .into_iter()
-        .map(|(key, value)| Ok((Arc::<str>::from(key), any_from_value(value)?)))
-        .collect::<Result<Vec<_>, String>>()?;
-    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    Ok(entries.into_iter().collect())
+/// One seed's attribute and embed keys and values, so equal ones share an allocation.
+#[derive(Default)]
+pub(crate) struct SeedAttrs {
+    strings: HashSet<Arc<str>>,
+    composites: HashMap<String, Any>,
+    #[cfg(test)]
+    unshared: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static UNSHARED_SEED_ATTRS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl SeedAttrs {
+    #[cfg(not(test))]
+    pub(crate) fn for_seed() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_seed() -> Self {
+        Self {
+            unshared: UNSHARED_SEED_ATTRS.with(std::cell::Cell::get),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(not(test))]
+    fn unshared(&self) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn unshared(&self) -> bool {
+        self.unshared
+    }
+
+    pub(crate) fn text(&mut self, value: String) -> Arc<str> {
+        if self.unshared() {
+            return Arc::from(value);
+        }
+        if let Some(shared) = self.strings.get(value.as_str()) {
+            return Arc::clone(shared);
+        }
+        let shared = Arc::<str>::from(value);
+        self.strings.insert(Arc::clone(&shared));
+        shared
+    }
+
+    fn value(&mut self, value: Value) -> Result<Any, String> {
+        if self.unshared() {
+            return any_from_value(value);
+        }
+        match value {
+            Value::String(value) => Ok(Any::String(self.text(value))),
+            Value::Array(_) | Value::Object(_) => {
+                // JSON text keeps 1, 1.0, -0.0, "1" and true apart.
+                let text = value.to_string();
+                if let Some(shared) = self.composites.get(&text) {
+                    return Ok(shared.clone());
+                }
+                let shared = any_from_value(value)?;
+                self.composites.insert(text, shared.clone());
+                Ok(shared)
+            }
+            value => any_from_value(value),
+        }
+    }
+
+    fn attrs(&mut self, values: JsonObject) -> Result<Attrs, String> {
+        let mut entries = values
+            .into_iter()
+            .map(|(key, value)| Ok((self.text(key), self.value(value)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        Ok(entries.into_iter().collect())
+    }
+
+    /// An embed's payload; its keys are shared when the embed is written.
+    fn payload(&mut self, values: JsonObject) -> Result<Vec<(String, Any)>, String> {
+        values
+            .into_iter()
+            .map(|(key, value)| Ok((key, self.value(value)?)))
+            .collect()
+    }
 }
 
 pub(crate) fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
@@ -2180,6 +2260,21 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
             ]),
         ));
     }
+    if ["ligatures", "contextualAlternates"]
+        .iter()
+        .any(|key| formatting.contains_key(*key))
+    {
+        marks.push(mark(
+            "typography",
+            ordered_object([
+                ("ligatures", nullish(formatting.get("ligatures"))),
+                (
+                    "contextualAlternates",
+                    nullish(formatting.get("contextualAlternates")),
+                ),
+            ]),
+        ));
+    }
     if let Some(value) = string(formatting.get("emphasisMark")).filter(|value| *value != "none") {
         marks.push(mark(
             "emphasisMark",
@@ -2217,7 +2312,9 @@ pub(crate) fn mark_run_attrs(defaults: &Any) -> Vec<(String, Any)> {
 }
 
 /// Run attributes held as one field of a mark: (attribute, field, `defaultTextFormatting` key).
-const MARK_FIELDS: [(&str, &str, &str); 10] = [
+const MARK_FIELDS: [(&str, &str, &str); 12] = [
+    ("typography", "ligatures", "ligatures"),
+    ("typography", "contextualAlternates", "contextualAlternates"),
     ("fontSize", "size", "fontSize"),
     ("fontSize", "sizeCs", "fontSizeCs"),
     ("characterSpacing", "spacing", "spacing"),
@@ -3079,7 +3176,12 @@ fn run_content_to_units(
                     .unwrap()
                     .insert("commentId".to_owned(), id.clone());
             }
-            vec![embed_unit("field", map_from_value(value), &[], 1)]
+            let revisions: Vec<Mark> = marks
+                .iter()
+                .filter(|mark| matches!(mark.name.as_str(), "insertion" | "deletion"))
+                .cloned()
+                .collect();
+            vec![embed_unit("field", map_from_value(value), &revisions, 1)]
         }
         "drawing" => vec![embed_unit(
             "image",
@@ -6422,6 +6524,7 @@ fn units_to_raw_ops(
     units: Vec<InlineUnit>,
     referenced_fonts: &mut BTreeSet<String>,
     mut script_fonts: Option<&mut ScriptFontUse>,
+    shared: &mut SeedAttrs,
 ) -> Result<Vec<RawOp>, String> {
     let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
     let mut index = 0u32;
@@ -6430,7 +6533,8 @@ fn units_to_raw_ops(
     let flush = |ops: &mut Vec<RawOp>,
                  index: &mut u32,
                  text: &mut String,
-                 attrs: &mut JsonObject|
+                 attrs: &mut JsonObject,
+                 shared: &mut SeedAttrs|
      -> Result<(), String> {
         if text.is_empty() {
             return Ok(());
@@ -6440,7 +6544,7 @@ fn units_to_raw_ops(
         ops.push(RawOp::Insert {
             index: *index,
             text: inserted,
-            attrs: yrs_attrs(std::mem::take(attrs))?,
+            attrs: shared.attrs(std::mem::take(attrs))?,
         });
         *index += len;
         Ok(())
@@ -6468,7 +6572,7 @@ fn units_to_raw_ops(
                 if text.is_empty() {
                     attrs = unit.attrs;
                 } else if unit.attrs != attrs {
-                    flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+                    flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
                     attrs = unit.attrs;
                 }
                 text.push_str(&value);
@@ -6477,24 +6581,33 @@ fn units_to_raw_ops(
                 kind,
                 payload: values,
             } => {
-                flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+                flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
                 ops.push(RawOp::InsertEmbed {
                     index,
                     kind,
-                    payload: payload(values)?,
-                    attrs: yrs_attrs(unit.attrs)?,
+                    payload: shared.payload(values)?,
+                    attrs: shared.attrs(unit.attrs)?,
                 });
                 index += 1;
             }
         }
     }
-    flush(&mut ops, &mut index, &mut text, &mut attrs)?;
+    flush(&mut ops, &mut index, &mut text, &mut attrs, shared)?;
     Ok(ops)
 }
 
+#[cfg(test)]
 fn seed_plan(
     plan: StoryPlan,
     script_fonts: Option<&mut ScriptFontUse>,
+) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
+    seed_plan_sharing(plan, script_fonts, &mut SeedAttrs::default())
+}
+
+fn seed_plan_sharing(
+    plan: StoryPlan,
+    script_fonts: Option<&mut ScriptFontUse>,
+    shared: &mut SeedAttrs,
 ) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
     let StoryPlan {
         story_id,
@@ -6503,7 +6616,7 @@ fn seed_plan(
         ..
     } = plan;
     let mut referenced_fonts = BTreeSet::new();
-    let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts)?;
+    let mut ops = units_to_raw_ops(units, &mut referenced_fonts, script_fonts, shared)?;
     if !comment_coverage.is_empty() {
         ops.extend(
             comment_coverage
@@ -6838,8 +6951,10 @@ fn seed_lowered(
         .map_err(|error| error.to_string())?;
     let mut batches = Vec::with_capacity(context.plans.len());
     let mut deletes = Vec::with_capacity(context.plans.len());
+    let mut shared = SeedAttrs::for_seed();
     for plan in context.plans {
-        let (story_id, mut ops, fonts) = seed_plan(plan, script_fonts.as_mut())?;
+        let (story_id, mut ops, fonts) =
+            seed_plan_sharing(plan, script_fonts.as_mut(), &mut shared)?;
         deletes.push((story_id.clone(), vec![ops.remove(0)]));
         batches.push((story_id, ops));
         referenced_fonts.extend(fonts);
@@ -7048,8 +7163,9 @@ pub(crate) fn seed_blocks(
     .map_err(|error| error.to_string())?;
     let mut provenance = std::mem::take(&mut context.provenance);
     let mut batches = Vec::with_capacity(context.plans.len());
+    let mut shared = SeedAttrs::for_seed();
     for plan in context.plans {
-        let (story_id, ops, _) = seed_plan(plan, None)?;
+        let (story_id, ops, _) = seed_plan_sharing(plan, None, &mut shared)?;
         batches.push((story_id, ops));
     }
     let ranges = doc
@@ -7335,8 +7451,9 @@ pub(crate) fn seed_parsed_docx(
 /// generation, so its session anchors are its own; see
 /// [`EditingDoc::begin_opening`].
 pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     seed_stories(document, bytes)?;
-    document.begin_opening(None);
+    begin_seeded_opening(document, None, fresh_seed);
     Ok(())
 }
 
@@ -7347,9 +7464,19 @@ pub fn seed_from_docx_with_generation(
     bytes: &[u8],
     generation: &str,
 ) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     seed_stories(document, bytes)?;
-    document.begin_opening(Some(generation));
+    begin_seeded_opening(document, Some(generation), fresh_seed);
     Ok(())
+}
+
+/// Starts the opening and, when the stories were seeded into an empty replica,
+/// records them as a fresh seed of the retained package.
+fn begin_seeded_opening(document: &EditingDoc, generation: Option<&str>, fresh_seed: bool) {
+    document.begin_opening(generation);
+    if fresh_seed {
+        document.mark_seeded();
+    }
 }
 
 /// Seeds every story of a DOCX without starting an opening.
@@ -7474,6 +7601,7 @@ fn retain_referenced_body_stories(plans: &mut Vec<StoryPlan>) {
 /// stories, tokens in layout.
 #[cfg(test)]
 pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     let source = PackageBytes::from(bytes);
     let digest = package_digest(&source);
     let (envelope, parts, media) = parse_docx_package_with_media(source.clone(), digest.clone())?;
@@ -7489,7 +7617,7 @@ pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Re
         },
     )?;
     document.install_media(media);
-    document.begin_opening(None);
+    begin_seeded_opening(document, None, fresh_seed);
     Ok(())
 }
 
@@ -8248,6 +8376,77 @@ mod tests {
     }
 
     #[test]
+    fn seeding_skips_the_merge_continuations_the_serializer_exempts() {
+        type Rows<'a> = &'a [&'a [(u32, Option<&'a str>)]];
+        let skipped = |rows: Rows<'_>| {
+            let table = json!({
+                "type": "table",
+                "rows": rows.iter().map(|cells| json!({
+                    "type": "tableRow",
+                    "cells": cells.iter().map(|(span, merge)| json!({
+                        "type": "tableCell",
+                        "formatting": {"gridSpan": span, "vMerge": merge},
+                        "content": []
+                    })).collect::<Vec<_>>()
+                })).collect::<Vec<_>>()
+            });
+            super::source_cells(&table)
+                .iter()
+                .zip(rows)
+                .map(|(kept, cells)| {
+                    (0..cells.len())
+                        .map(|index| !kept.contains(&index))
+                        .collect()
+                })
+                .collect::<Vec<Vec<bool>>>()
+        };
+        let cases: [(Rows<'_>, &[&[bool]]); 6] = [
+            (
+                &[
+                    &[(1, Some("restart")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                ],
+                &[&[false, false], &[true, false]],
+            ),
+            (
+                &[&[(1, Some("continue")), (1, None)], &[(1, None), (1, None)]],
+                &[&[false, false], &[false, false]],
+            ),
+            (
+                &[&[(1, None), (1, None)], &[(1, Some("continue")), (1, None)]],
+                &[&[false, false], &[false, false]],
+            ),
+            (
+                &[
+                    &[(1, Some("restart")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                ],
+                &[&[false, false], &[true, false], &[true, false]],
+            ),
+            (
+                &[
+                    &[(1, None), (1, Some("restart")), (1, None)],
+                    &[(2, None), (1, Some("continue"))],
+                    &[(1, None), (1, Some("continue")), (1, None)],
+                ],
+                &[
+                    &[false, false, false],
+                    &[false, false],
+                    &[false, true, false],
+                ],
+            ),
+            (
+                &[&[(2, Some("restart"))], &[(2, Some("continue"))]],
+                &[&[false], &[false]],
+            ),
+        ];
+        for (rows, expected) in cases {
+            assert_eq!(skipped(rows), expected, "{rows:?}");
+        }
+    }
+
+    #[test]
     fn seeded_grid_percentages_follow_horizontal_and_vertical_spans() {
         let document = seed_body(&[json!({
             "type": "table", "columnWidths": [1500, 3000, 4500],
@@ -8777,6 +8976,37 @@ mod tests {
                 assert!(!payload.contains_key("sourceRun"));
             }
         }
+    }
+
+    #[test]
+    fn tracked_comment_references_keep_revision_marks() {
+        let info = json!({"id": 11, "author": "Ada", "date": "2024-01-01T00:00:00Z"});
+        let reference = |id: u32| json!({"type": "run", "formatting": {"bold": true}, "content": [{"type": "commentReference", "id": id}]});
+        let tracked = |node_type: &str, id: u32| json!({"type": node_type, "info": info, "content": [reference(id)]});
+        let paragraph = json!({"content": [
+            tracked("insertion", 3),
+            tracked("deletion", 4),
+            reference(5),
+        ]});
+        let styles = StyleResolver::new(None);
+        let ParagraphUnits { units, .. } =
+            paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        assert_eq!(units.len(), 3);
+        for (unit, id) in units.iter().zip([3, 4, 5]) {
+            let UnitContent::Embed { kind, payload } = &unit.content else {
+                panic!("expected comment reference embed");
+            };
+            assert_eq!(kind, "field");
+            assert_eq!(payload["modelKind"], json!("commentReference"));
+            assert_eq!(payload["commentId"], json!(id));
+        }
+        let keys = |unit: &InlineUnit| unit.attrs.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&units[0]), ["ins"]);
+        assert_eq!(units[0].attrs["ins"]["author"], json!("Ada"));
+        assert_eq!(units[0].attrs["ins"]["id"], json!(11));
+        assert_eq!(keys(&units[1]), ["del"]);
+        assert_eq!(units[1].attrs["del"]["author"], json!("Ada"));
+        assert!(keys(&units[2]).is_empty());
     }
 
     #[test]
@@ -9998,6 +10228,229 @@ mod tests {
     }
 
     use super::*;
+
+    fn seeded_sharing(bytes: &[u8], sharing: bool, generation: Option<&str>) -> EditingDoc {
+        let doc = EditingDoc::new(1);
+        UNSHARED_SEED_ATTRS.with(|unshared| unshared.set(!sharing));
+        let seeded = match generation {
+            Some(generation) => seed_from_docx_with_generation(&doc, bytes, generation),
+            None => seed_from_docx(&doc, bytes),
+        };
+        UNSHARED_SEED_ATTRS.with(|unshared| unshared.set(false));
+        seeded.unwrap();
+        doc
+    }
+
+    const GENERATION: &str = "shared-attributes";
+
+    fn seed_bytes(bytes: &[u8], sharing: bool, generation: Option<&str>) -> Vec<u8> {
+        seeded_sharing(bytes, sharing, generation).encode_state_as_update_v1()
+    }
+
+    fn body_attributes(doc: &EditingDoc, text: &str) -> Attrs {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .find_map(|op| match op.insert {
+                Out::Any(Any::String(chunk)) if chunk.contains(text) => {
+                    Some(op.attributes.map(|attrs| *attrs).unwrap_or_default())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no body text holds {text:?}"))
+    }
+
+    fn font_family(doc: &EditingDoc, text: &str) -> Arc<HashMap<String, Any>> {
+        match body_attributes(doc, text).remove("fontFamily") {
+            Some(Any::Map(font)) => font,
+            other => panic!("{text}: fontFamily is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seeded_bytes_match_with_and_without_shared_attributes() {
+        let formatted = concat!(
+            r#"<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/><w:color w:val="C00000"/>"#,
+            r#"<w:sz w:val="28"/><w:highlight w:val="yellow"/><w:u w:val="single" w:color="00B050"/>"#,
+            r#"<w:rPrChange w:id="8" w:author="A" w:date="2024-01-01T00:00:00Z"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>"#,
+        );
+        let other = r#"<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/><w:i/><w:color w:val="0000FF"/></w:rPr>"#;
+        let spaced =
+            r#"<w:pPr><w:spacing w:before="120" w:after="240"/><w:ind w:left="720"/></w:pPr>"#;
+        let body = [
+            fixture::para(
+                "00000001",
+                &format!(
+                    r#"{spaced}<w:r>{formatted}<w:t>First</w:t></w:r>{plain}<w:r>{formatted}<w:t>Second</w:t></w:r><w:r>{other}<w:t>Other</w:t></w:r><w:r>{formatted}<w:br/></w:r>{image}"#,
+                    plain = fixture::run(" plain "),
+                    image = fixture::image("rIdImage", "Picture"),
+                ),
+            ),
+            fixture::para(
+                "00000002",
+                &format!(
+                    r#"{spaced}<w:r>{formatted}<w:t>Third</w:t></w:r><w:r>{other}<w:t>Again</w:t></w:r>"#
+                ),
+            ),
+            fixture::para(
+                "00000003",
+                &format!(
+                    r#"<w:ins w:id="7" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>{formatted}<w:t>Inserted</w:t></w:r></w:ins>"#
+                ),
+            ),
+        ]
+        .concat();
+        let custom = fixture::Package::new(&body)
+            .rel("rIdImage", "image", "media/image1.png")
+            .bytes();
+        for bytes in [custom.clone(), fixture::principal_docx()] {
+            assert_eq!(
+                seed_bytes(&bytes, true, Some(GENERATION)),
+                seed_bytes(&bytes, false, Some(GENERATION)),
+                "sharing attribute allocations changed the seeded bytes"
+            );
+        }
+        assert_ne!(
+            seed_bytes(&custom, false, None),
+            seed_bytes(&custom, false, None),
+            "fresh generations no longer make independent seeds differ"
+        );
+        assert_eq!(
+            seed_bytes(&custom, false, Some(GENERATION)),
+            seed_bytes(&custom, false, Some(GENERATION)),
+            "a fixed generation does not make unshared seeds identical"
+        );
+        let shared = seeded_sharing(&custom, true, Some(GENERATION));
+        let shared_first = font_family(&shared, "First");
+        let shared_third = font_family(&shared, "Third");
+        assert!(Arc::ptr_eq(&shared_first, &shared_third));
+        let unshared = seeded_sharing(&custom, false, Some(GENERATION));
+        let unshared_first = font_family(&unshared, "First");
+        let unshared_third = font_family(&unshared, "Third");
+        assert_eq!(unshared_first, unshared_third);
+        assert!(!Arc::ptr_eq(&unshared_first, &unshared_third));
+    }
+
+    /// The body paragraph marks' `key` entries: the stored key's address and its map value.
+    fn mark_maps(doc: &EditingDoc, key: &str) -> Vec<(usize, Arc<HashMap<String, Any>>)> {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .filter_map(|op| match op.insert {
+                Out::YMap(mark) if crate::is_pilcrow(&mark, &txn) => {
+                    let entry = YrsMap::iter(&mark, &txn)
+                        .find(|(name, _)| *name == key)
+                        .map(|(name, value)| (name.as_ptr() as usize, value));
+                    match entry {
+                        Some((address, Out::Any(Any::Map(value)))) => Some((address, value)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every entry of each body paragraph mark.
+    fn mark_entries(doc: &EditingDoc) -> Vec<HashMap<String, Any>> {
+        let txn = doc.yrs_doc().transact();
+        let body = crate::story_ref(&txn, "body").unwrap();
+        yrs::Text::diff(&body, &txn, yrs::types::text::YChange::identity)
+            .into_iter()
+            .filter_map(|op| match op.insert {
+                Out::YMap(mark) if crate::is_pilcrow(&mark, &txn) => Some(
+                    YrsMap::iter(&mark, &txn)
+                        .map(|(key, value)| match value {
+                            Out::Any(value) => (key.to_owned(), value),
+                            _ => panic!("{key}: the mark holds a shared type"),
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn seeded_bytes_match_with_and_without_shared_embed_values() {
+        let styles = format!(
+            r#"<w:styles {}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Shared"><w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:b/></w:rPr></w:style></w:styles>"#,
+            fixture::namespaces()
+        );
+        let body = ["00000001", "00000002", "00000003"]
+            .map(|id| {
+                fixture::para(
+                    id,
+                    r#"<w:pPr><w:pStyle w:val="Shared"/><w:spacing w:before="120" w:after="240"/></w:pPr><w:r><w:t>Styled</w:t></w:r>"#,
+                )
+            })
+            .concat();
+        let custom = fixture::Package::new(&body).styles(&styles).bytes();
+        for bytes in [custom.clone(), fixture::principal_docx()] {
+            assert_eq!(
+                seed_bytes(&bytes, true, Some(GENERATION)),
+                seed_bytes(&bytes, false, Some(GENERATION)),
+                "sharing embed payload allocations changed the seeded bytes"
+            );
+        }
+        let shared_doc = seeded_sharing(&custom, true, Some(GENERATION));
+        let shared = mark_maps(&shared_doc, "_originalFormatting");
+        assert_eq!(shared.len(), 3);
+        for (address, value) in &shared[1..] {
+            assert_eq!(*address, shared[0].0);
+            assert!(Arc::ptr_eq(value, &shared[0].1));
+        }
+        let unshared_doc = seeded_sharing(&custom, false, Some(GENERATION));
+        let unshared = mark_maps(&unshared_doc, "_originalFormatting");
+        assert_eq!(unshared.len(), 3);
+        for (address, value) in &unshared[1..] {
+            assert_ne!(*address, unshared[0].0);
+            assert_eq!(value, &unshared[0].1);
+            assert!(!Arc::ptr_eq(value, &unshared[0].1));
+        }
+        let lowered = lower_docx(parse_docx_for_edit(&custom).unwrap(), None).unwrap();
+        let expected: Vec<HashMap<String, Any>> = lowered
+            .context
+            .plans
+            .iter()
+            .filter(|plan| plan.story_id == "body")
+            .flat_map(|plan| &plan.units)
+            .filter_map(|unit| match &unit.content {
+                UnitContent::Embed { kind, payload } if kind == crate::PILCROW_KIND => Some(
+                    payload
+                        .iter()
+                        .map(|(key, value)| (key.clone(), any_from_value(value.clone()).unwrap()))
+                        .chain([(crate::KIND_KEY.to_owned(), Any::from(crate::PILCROW_KIND))])
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        let pinned = [
+            (crate::KIND_KEY, Any::from(crate::PILCROW_KIND)),
+            ("pStyle", Any::from("Shared")),
+            ("alignment", Any::from("center")),
+            ("spaceBefore", Any::Number(120.0)),
+            ("spaceAfter", Any::Number(240.0)),
+            (
+                "defaultTextFormatting",
+                Any::Map(Arc::new(HashMap::from([(
+                    "bold".to_owned(),
+                    Any::Bool(true),
+                )]))),
+            ),
+        ];
+        assert_eq!(expected.len(), 3);
+        for mark in &expected {
+            for (key, value) in &pinned {
+                assert_eq!(mark.get(*key), Some(value), "{key}");
+            }
+        }
+        assert_eq!(mark_entries(&shared_doc), expected);
+        assert_eq!(mark_entries(&unshared_doc), expected);
+    }
 
     #[test]
     fn a_passed_package_digest_parses_like_the_parser_hashing_it() {

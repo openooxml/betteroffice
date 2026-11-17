@@ -67,6 +67,7 @@ import type {
   SectionProperties,
 } from '../types/document';
 import type { YrsRunInheritance, YrsSession, YrsTableInheritance } from './index';
+import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
 
@@ -460,6 +461,12 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   }
 
   const modern = asObject(attributes.modernTextEffects);
+  const typography = asObject(attributes.typography);
+  const ligatures = asString(typography?.ligatures);
+  if (ligatures !== undefined) formatting.ligatures = ligatures;
+  if (typeof typography?.contextualAlternates === 'boolean') {
+    formatting.contextualAlternates = typography.contextualAlternates;
+  }
   if (modern?.effects) formatting.modernEffects = modern.effects as TextFormatting['modernEffects'];
 
   if (attributes.language !== undefined) formatting.language = liveLanguage(undefined, attributes.language);
@@ -495,7 +502,9 @@ const ON_OFF_RUN_PROPERTIES = new Set<string>([
   'outline', 'shadow', 'emboss', 'imprint', 'hidden', 'rtl', 'boldCs', 'italicCs',
 ]);
 
-const SOURCE_RUN_PROPERTIES = ['bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily'] as const;
+const SOURCE_RUN_PROPERTIES = [
+  'bold', 'italic', 'fontSize', 'boldCs', 'italicCs', 'fontSizeCs', 'language', 'fontFamily', 'snapToGrid',
+] as const;
 
 const lentByLinkStyle = (mark: unknown): boolean => asObject(mark)?.inheritedHyperlink === true;
 
@@ -549,7 +558,9 @@ function relativeFormatting(attributes: Attrs, inherited: TextFormatting, theme?
     if (key === 'fontFamily') continue;
     const value = source?.[key];
     if (value === undefined) continue;
-    const live = ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
+    if (key === 'snapToGrid' && value !== false) continue;
+    const live = key === 'snapToGrid' ? attributes.snapToGrid
+      : ON_OFF_RUN_PROPERTIES.has(key) ? formatting[key] ?? false : formatting[key];
     if ((key === 'language' && attributes.language === undefined) || sameJson(value, live) ||
       ((key === 'boldCs' || key === 'italicCs') && attributes[key] === undefined)) {
       result[key] = value;
@@ -1314,7 +1325,10 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo, inCont
   else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
     child = opaqueDrawingRunFromPayload(item.payload, item.attributes, format) ?? { type: 'run', content: [] };
   else if (item.kind === 'text') child = createTextRun(item.text, item.attributes, format);
-  else child = { type: 'run', content: [] };
+  else
+    child =
+      (inlineContentForItem(item, recovery, format) as TrackedWrapper['content'][number] | null) ??
+      { type: 'run', content: [] };
 
   if (item.kind === 'embed' && item.embedKind === 'chart' && child.type === 'run' && child.content.length === 0) return null;
   if (child.type === 'run') Object.assign(child, runPropertyChanges(item.attributes, format));
@@ -4188,6 +4202,7 @@ class SaveContext {
       }
 
       if (segment.embedKind === 'table') {
+        if (isUnavailableTablePayload(segment.payload)) throw tableUnavailableError();
         const payload = segment.payload as TablePayload;
         this.prepareTable(payload, storyId);
         const inputs = [segment.attributes, payload] as const;
@@ -4357,12 +4372,15 @@ function projectDocument(
   options: YrsToDocumentOptions,
   revisionIds?: RevisionIds
 ): Document {
+  const scanned = refuseUnavailableTables(session, base);
   const previous = projectedMedia;
   projectedMedia = (token) => session.mediaDataUrl?.(token) ?? null;
   let context: SaveContext | undefined;
   try {
     context = new SaveContext(session, base, options.commentIds, revisionIds);
-    return projectStories(context, session, base, options);
+    const projected = projectStories(context, session, base, options);
+    markGated(session, projected, scanned);
+    return projected;
   } finally {
     context?.dispose();
     projectedMedia = previous;

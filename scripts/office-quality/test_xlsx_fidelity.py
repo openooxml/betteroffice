@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 from xml.dom import minidom
 
-import fitz
+import pypdfium2 as pdfium
 
 from test_xlsx_calc import fixture
 from xlsx_calc import NS, package, results
@@ -85,10 +85,11 @@ class XlsxFidelityTests(unittest.TestCase):
             (root / 'source.xlsx').write_bytes(fixture())
             sample = dict(id='sample', metadata=dict(source=dict(sha256='a' * 64), reference=dict(pages=1, capture_profile=dict(PROFILE, pages=[PAGE]))))
             def export(command, **kwargs):
-                with fitz.open() as pdf:
-                    pdf.new_page()
-                    pdf.new_page()
-                    pdf.save(Path(command[-1]).with_suffix('.pdf'))
+                pdf = pdfium.PdfDocument.new()
+                for _ in range(2):
+                    pdf.new_page(612, 792).close()
+                pdf.save(str(Path(command[-1]).with_suffix('.pdf')))
+                pdf.close()
             with patch('xlsx_fidelity.execute', side_effect=export):
                 result = libreoffice_xlsx_fidelity(sample, root, 'unused', '26.2.3.2')
             self.assertEqual(result['status'], 'failed')

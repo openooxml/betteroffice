@@ -868,8 +868,8 @@ impl PyWorkbook {
     }
 
     #[getter]
-    fn client_id(&self) -> u64 {
-        self.inner.client_id()
+    fn client_id(&self) -> PyResult<u64> {
+        self.inner.try_client_id().map_err(map_error)
     }
 
     #[getter]
@@ -878,13 +878,18 @@ impl PyWorkbook {
     }
 
     /// This replica's state vector, to hand a peer so it can compute a diff.
-    fn state_vector<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.inner.encode_state_vector_v1())
+    fn state_vector<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let state_vector = self.inner.try_encode_state_vector_v1().map_err(map_error)?;
+        Ok(PyBytes::new(py, &state_vector))
     }
 
     /// The whole document as one update, for a peer joining from nothing.
-    fn state_as_update<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new(py, &self.inner.encode_state_as_update_v1())
+    fn state_as_update<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let update = self
+            .inner
+            .try_encode_state_as_update_v1()
+            .map_err(map_error)?;
+        Ok(PyBytes::new(py, &update))
     }
 
     /// The update carrying everything the peer's state vector is missing.

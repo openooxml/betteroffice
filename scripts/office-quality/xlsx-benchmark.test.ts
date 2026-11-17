@@ -34,9 +34,9 @@ test('failed calculations stay in accuracy totals and timings use only jointly c
   const result = mergeXlsxBenchmarks(plan(), {samples}, inputs, hash);
   const summary = calculationSummary(result.samples);
   expect(summary.common).toBe(1);
-  expect(summary.channels.published).toEqual({correct:25,total:50,mean_ms:10});
-  expect(summary.channels.commit).toEqual({correct:35,total:50,mean_ms:10});
-  expect(summary.channels.libreoffice).toEqual({correct:50,total:50,mean_ms:20});
+  expect(summary.channels.published).toEqual({correct:25,total:50,fully_matching:1,mean_ms:10});
+  expect(summary.channels.commit).toEqual({correct:35,total:50,fully_matching:1,mean_ms:10});
+  expect(summary.channels.libreoffice).toEqual({correct:50,total:50,fully_matching:2,mean_ms:20});
   expect(result.xlsx_benchmark.reference_coverage).toEqual({total:2,measured:2,no_formulas:[],missing_reference:[]});
 });
 

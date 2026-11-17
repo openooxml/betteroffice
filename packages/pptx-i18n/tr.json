@@ -235,7 +235,7 @@
       "gestureActive": "Önce işaretçi hareketini tamamlayın.",
       "commandFailed": "Komut başarısız oldu.",
       "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
-      "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
+      "unsupportedPolicy": "Bu komut, eklentinin kendi arayüzünde bir kullanıcı işlemi gerektirir.",
       "pluginUnavailable": "Eklenti artık etkin değil.",
       "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi.",
       "clipboardUnavailable": "Pano erişimi kullanılamıyor veya reddedildi.",

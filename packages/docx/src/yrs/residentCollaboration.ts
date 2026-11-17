@@ -106,8 +106,8 @@ export function createResidentCollaboration(engine: ResidentEngineSession, optio
             pipe.run(command.payload);
             if (engine.proposalEngine.version() === before) return { status: 'noop', ...state() };
             engine.markProjectionStories(engine.storiesChangedSince(since).stories);
-            hooks.afterRemoteMerge?.(context);
-            return { status: 'applied', ...state() };
+            const attribution = hooks.afterRemoteMerge?.(context);
+            return { status: 'applied', ...state(), cause: attribution ? attribution.cause : 'remote' };
           }
           try {
             if (command.kind === 'applyRemoteUpdateChunks') engine.applyUpdateChunks(command.payload.updates.map(update => new Uint8Array(update)));
@@ -119,8 +119,8 @@ export function createResidentCollaboration(engine: ResidentEngineSession, optio
               remember(insertion);
             }
             if (engine.proposalEngine.version() === before) return { status: 'noop', ...state() };
-            hooks.afterRemoteMerge?.(context);
-            return { status: 'applied', ...state() };
+            const attribution = hooks.afterRemoteMerge?.(context);
+            return { status: 'applied', ...state(), cause: attribution ? attribution.cause : 'remote' };
           } catch (error) {
             if (isEngineTrap(error) || engine.proposalEngine.version() !== before) throw error;
             return { status: 'refused', reason: 'invalid-update', ...state() };

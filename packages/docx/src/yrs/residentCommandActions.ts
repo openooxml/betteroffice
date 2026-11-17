@@ -1,5 +1,7 @@
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { applyCommandBatch, commandBatchRequest } from './residentCommandBatches';
+import { isTableUnavailableRefusal } from './tableUnavailable';
+import { isCellHasNoStoryRefusal } from './cellRefusal';
 import { createProposalRegistry } from './proposals';
 import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, reviewCommandKeys, type ReviewCommand } from './residentReviewCommands';
 import { planResidentListChanges } from './residentCommandLists';
@@ -587,7 +589,7 @@ export function preflightDocxCommand(
     if ('suggesting' in command.payload && command.payload.suggesting !== undefined) return refuse('unsupported-suggesting');
     if (command.payload.expectVersion !== engine.proposalEngine.version()) return refuse('stale-version');
     if (command.kind === 'setSectionMargins') {
-      if (!engine.sectionProperties().sections.some(section => section.section === command.payload.section)) return refuse('unknown-section');
+      if (!engine.sectionProperties([]).sections.some(section => section.section === command.payload.section)) return refuse('unknown-section');
       return { status: 'ready', prepared: { command: structuredClone(command), selection: state.selection, range: null } };
     }
   }
@@ -913,12 +915,24 @@ export function applyDocxCommand(
   environment?: DocxCommandHooksEnvironment
 ): DocxCommandApplyResult {
   const { inputTime, lastInputTime } = prepared.command;
-  if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
-  engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
+  const version = engine.proposalEngine.version();
   try {
-    return applyPreparedDocxCommand(engine, state, prepared, context, environment);
-  } finally {
-    engine.setUndoInputTime(null);
+    if (inputTime === undefined) return applyPreparedDocxCommand(engine, state, prepared, context, environment);
+    engine.setUndoInputTime([inputTime, lastInputTime ?? inputTime]);
+    try {
+      return applyPreparedDocxCommand(engine, state, prepared, context, environment);
+    } finally {
+      engine.setUndoInputTime(null);
+    }
+  } catch (error) {
+    // The engine refuses an operation on an unavailable table, and a write into a table cell
+    // that has no story, before it writes anything; no command writes before its first table
+    // operation (TABLE-COMMANDS.md).
+    const unavailable = isTableUnavailableRefusal(error);
+    if (!unavailable && (!isCellHasNoStoryRefusal(error) || engine.proposalEngine.version() !== version)) throw error;
+    const corrected = state.selection ? readCommandSelection(engine, state) : null;
+    return { status: 'refused', reason: unavailable ? 'table-unavailable' : 'unsupported', selection: corrected?.ok ? corrected.selection : null,
+      editState: projectDocxEditState(engine, state, corrected) };
   }
 }
 
@@ -1432,6 +1446,7 @@ export const createResidentDocxCommandHooks: DocxCommandHooksFactory = (engine, 
       state.storedMarks = survived && storedMarks && state.selection && sameSelection({ anchor: state.selection.anchor, focus: state.selection.anchor }, state.selection)
         ? { ...storedMarks, story: state.selection.focus.story, paraId: state.selection.focus.paraId }
         : null;
+      return { cause: 'remote' };
     },
     selection: () => projected().selection,
     editState: () => projected().editState,

@@ -8,6 +8,13 @@ const SINGLE_UNIT = ['--config', 'profile.release.codegen-units=1'];
 
 await buildWasmModules([
   {
+    crate: 'ooxml-font-preflight',
+    name: 'xlsx_preflight',
+    generated: 'packages/xlsx/src/wasm/generated/preflight',
+    cargoArgs: ['--locked', '--no-default-features', '--features', 'wasm,xlsx'],
+    variant: 'xlsx',
+  },
+  {
     crate: 'xlsx-wasm',
     name: 'xlsx_wasm',
     generated: 'packages/xlsx/src/wasm/generated',

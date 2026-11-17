@@ -93,11 +93,13 @@ export const PluginRowGutter = memo(function PluginRowGutter({
   index,
   painted: store,
   zoom,
+  top = 0,
 }: {
   host: XlsxPluginHost;
   index: RowGutterIndex;
   painted: PaintedGridStore;
   zoom: number;
+  top?: number;
 }) {
   const { t } = useTranslation();
   const painted = useSyncExternalStore(store.subscribe, store.get, () => null);
@@ -137,6 +139,7 @@ export const PluginRowGutter = memo(function PluginRowGutter({
             key={`${entry.key}\u0000${entry.item.id}`}
             type="button"
             data-plugin-id={entry.pluginId}
+            data-plugin-activation={entry.activationId}
             data-decoration-id={entry.item.id}
             aria-label={label}
             title={entry.item.tooltip}
@@ -173,7 +176,7 @@ export const PluginRowGutter = memo(function PluginRowGutter({
         data-testid="xlsx-row-gutter"
         style={{
           position: 'absolute',
-          top: 0,
+          top,
           left: 0,
           width: inner + GUTTER_BORDER,
           height: painted ? painted.frame.height * scale : 0,

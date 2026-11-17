@@ -38,6 +38,16 @@ on:
         default: false
         required: false
         type: boolean
+      publish_readme:
+        description: "Private corpus run: commit this run's aggregate-only section to the README"
+        default: false
+        required: false
+        type: boolean
+      max_parallel:
+        description: "Private corpus run: most benchmark jobs held at once, leaving the rest of the plan's concurrent jobs to pull request CI"
+        default: 12
+        required: false
+        type: number
 
 permissions:
   contents: read
@@ -49,6 +59,10 @@ env:
 concurrency:
   group: visual-fidelity-${{ inputs.branch }}
   cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   prepare:
@@ -72,6 +86,9 @@ jobs:
       xlsx-shards: ${{ steps.plan.outputs.xlsx-shards }}
       xlsx-fidelity-shards: ${{ steps.plan.outputs.xlsx-fidelity-shards }}
       xlsx-published-source: ${{ steps.plan.outputs.xlsx-published-source }}
+      pptx-shards: ${{ steps.plan.outputs.pptx-shards }}
+      timing-formats: ${{ steps.plan.outputs.timing-formats }}
+      parallel: ${{ steps.plan.outputs.parallel }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -114,6 +131,12 @@ jobs:
           echo "::error::A report-only run cannot publish renders. Re-run with publish_renders off."
           exit 1
 
+      - name: Keep README publishing to private runs
+        if: inputs.publish_readme && (!inputs.private_corpus || inputs.report_only)
+        run: |
+          echo "::error::publish_readme is for private corpus runs that are not report-only"
+          exit 1
+
       - name: Keep private runs aggregate-only
         if: inputs.private_corpus
         env:
@@ -130,13 +153,14 @@ jobs:
         id: runner
         run: echo "image=$ImageVersion" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
       - name: Freeze the corpus and package versions
         id: plan
         env:
+          MAX_PARALLEL: ${{ inputs.max_parallel }}
           QUALITY_SAMPLES: ${{ inputs.samples }}
           QUALITY_COLLECTION: ${{ inputs.collection }}
           QUALITY_OUTPUT: ${{ runner.temp }}/fidelity-plan
@@ -152,6 +176,10 @@ jobs:
           import { roundtripMatrices } from './scripts/office-quality/roundtrip.mjs';
           import { xlsxFidelityShards } from './scripts/office-quality/xlsx-fidelity.mjs';
           import { xlsxShards } from './scripts/office-quality/xlsx-benchmark.mjs';
+          import { timingFormats } from './scripts/office-quality/timing.mjs';
+          import { pptxShards } from './scripts/office-quality/pptx-benchmark.mjs';
+          import { benchmarkShardPlan } from './scripts/office-quality/shards.mjs';
+          import { parallelPlan, parallelSummary } from './scripts/office-quality/parallel.mjs';
           const plan = JSON.parse(await readFile(`${process.env.QUALITY_OUTPUT}/plan.json`, 'utf8'));
           const builds = plan.formats.flatMap(format => ['published', 'commit'].map(channel =>
             ({ format, channel, source: channel === 'commit' ? plan.source_sha : plan[`${format}_published_source_sha`] })));
@@ -167,6 +195,28 @@ jobs:
           await appendFile(process.env.GITHUB_OUTPUT, `xlsx-shards=${JSON.stringify(xlsxShards(plan).map((_, index) => index))}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `xlsx-published-source=${plan.xlsx_published_source_sha ?? ''}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `pptx-published-source=${plan.pptx_published_source_sha ?? ''}\n`);
+          await appendFile(process.env.GITHUB_OUTPUT, `timing-formats=${JSON.stringify(timingFormats(plan))}\n`);
+          await appendFile(process.env.GITHUB_OUTPUT, `pptx-shards=${JSON.stringify(pptxShards(plan).map((_, index) => index))}\n`);
+          const shardPlan = benchmarkShardPlan(plan).join('\n');
+          console.log(shardPlan);
+          await appendFile(process.env.GITHUB_STEP_SUMMARY, `### Benchmark shards\n\n${shardPlan.replace(/^/gm, '- ')}\n`);
+          const fontSources = [
+            ...Object.entries(plan.published_fonts ?? {}).map(([format, version]) =>
+              `${format.toUpperCase()} published channel: @betteroffice/fonts@${version}, ${plan.fonts_basis?.[format] === 'release-commit' ? 'the fonts release from the same release commit as' : 'the latest fonts release published before'} @betteroffice/${format}@${plan.versions[format]}`),
+            ...[['fonts-cjk', plan.published_fonts_cjk], ['fonts-intl', plan.published_fonts_intl]].flatMap(([name, pins]) =>
+              Object.entries(pins ?? {}).filter(([, pin]) => pin === 'absent').map(([format]) =>
+                `${format.toUpperCase()} published channel: @betteroffice/${name} absent, @betteroffice/fonts@${plan.published_fonts[format]} does not declare it`)),
+            'commit channel: the font packages of this checkout',
+          ];
+          console.log(fontSources.join('\n'));
+          await appendFile(process.env.GITHUB_STEP_SUMMARY, `### Font sources\n\n${fontSources.map((line) => `- ${line}`).join('\n')}\n`);
+          const parallel = parallelPlan(plan, { privateRun: process.env.QUALITY_PRIVATE === 'true', total: Number(process.env.MAX_PARALLEL) });
+          await appendFile(process.env.GITHUB_OUTPUT, `parallel=${JSON.stringify(parallel)}\n`);
+          if (process.env.QUALITY_PRIVATE === 'true') {
+            const lines = parallelSummary(plan, parallel).join('\n');
+            console.log(lines);
+            await appendFile(process.env.GITHUB_STEP_SUMMARY, `### Concurrent benchmark jobs (at most ${process.env.MAX_PARALLEL})\n\n${lines.replace(/^/gm, '- ')}\n`);
+          }
           JS
 
       - if: ${{ !inputs.private_corpus }}
@@ -192,6 +242,42 @@ jobs:
         env: *private-write
         run: cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-prepare private-logs
 
+  libreoffice-archive:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 130
+    outputs:
+      key: ${{ steps.pin.outputs.key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/office-quality
+
+      - name: Read the LibreOffice pin
+        id: pin
+        run: |
+          source scripts/office-quality/libreoffice-pin.sh
+          echo "key=libreoffice-${LO_VERSION}-${LO_SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the LibreOffice archive
+        id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/libreoffice-archive
+          key: ${{ steps.pin.outputs.key }}
+
+      - name: Fetch and verify the LibreOffice archive
+        if: steps.restore.outputs.cache-hit != 'true'
+        run: bash scripts/office-quality/fetch-libreoffice.sh
+
+      - name: Save the LibreOffice archive
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/libreoffice-archive
+          key: ${{ steps.pin.outputs.key }}
+
   measure:
     needs: prepare
     runs-on: ubuntu-24.04
@@ -199,6 +285,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['measure'] }}
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.measure-shards) }}
     steps:
@@ -245,11 +332,11 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.13"
 
@@ -288,8 +375,23 @@ jobs:
           bun install --frozen-lockfile
           bun run build:fonts
           bun run "build:$QUALITY_FORMAT"
-          bunx playwright install --with-deps chromium
+          bunx playwright install chromium
           python -m pip install -r scripts/office-quality/requirements.txt
+
+      - name: Install the Chromium system packages
+        run: |
+          echo 'Acquire::Retries "1"; Acquire::http::Timeout "20"; Acquire::https::Timeout "20"; DPkg::Lock::Timeout "60";' | sudo tee /etc/apt/apt.conf.d/80-ci-retries >/dev/null
+          for attempt in 1 2 3; do
+            if bunx playwright install-deps chromium; then exit 0; fi
+            echo "::warning::Chromium system packages failed to install (attempt $attempt of 3)"
+            if [ "$attempt" = 1 ]; then sleep 30; elif [ "$attempt" = 2 ]; then sleep 90; fi
+          done
+          echo "::group::Resolver diagnosis"
+          cat /etc/resolv.conf || true
+          resolvectl status 2>/dev/null | head -20 || true
+          getent hosts archive.ubuntu.com || echo "lookup failed"
+          echo "::endgroup::"
+          exit 1
 
       - name: Check benchmark scripts
         env:
@@ -380,7 +482,7 @@ jobs:
           path: .source/native-source
           persist-credentials: false
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
@@ -473,7 +575,7 @@ jobs:
           PY
 
   docx-benchmark:
-    needs: [prepare, native-build]
+    needs: [prepare, native-build, libreoffice-archive]
     if: contains(fromJSON(needs.prepare.outputs.formats), 'docx')
     runs-on: ubuntu-24.04
     environment: *private-environment
@@ -482,6 +584,7 @@ jobs:
       SOFFICE: /opt/libreoffice26.2/program/soffice
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['docx-benchmark'] }}
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.docx-shards) }}
     steps:
@@ -493,6 +596,9 @@ jobs:
             echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
+
+      - name: Record the job start
+        run: echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -525,13 +631,36 @@ jobs:
           name: docx-native-fonts
           path: ${{ runner.temp }}/native-fonts
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.13"
+
+      - &restore-libreoffice
+        name: Restore the LibreOffice archive
+        id: restore-libreoffice
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/libreoffice-archive
+          key: ${{ needs.libreoffice-archive.outputs.key }}
+
+      - &fetch-libreoffice-on-miss
+        name: Fetch and verify the LibreOffice archive on a cache miss
+        timeout-minutes: 25
+        env:
+          CACHE_HIT: ${{ steps.restore-libreoffice.outputs.cache-hit }}
+          CACHE_KEY: ${{ needs.libreoffice-archive.outputs.key }}
+          LO_FETCH_BUDGET: "1200"
+        run: |
+          if [ "$CACHE_HIT" = "true" ]; then
+            echo "LibreOffice archive $CACHE_KEY restored from cache"
+          else
+            echo "::warning::cache miss for $CACHE_KEY: fetching and verifying the pinned archive"
+            bash scripts/office-quality/fetch-libreoffice.sh
+          fi
 
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
@@ -561,11 +690,86 @@ jobs:
           PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
         run: node scripts/office-quality/private-step.mjs docx-benchmark-stage -- node scripts/office-quality/docx-benchmark.mjs
 
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.4.3"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm-docx
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Build this checkout's DOCX package and install the published one
+        timeout-minutes: 30
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+        run: |
+          bun install --frozen-lockfile
+          bun run build:fonts
+          bun run build:docx
+          packages=("@betteroffice/docx@$(jq -r '.versions.docx' "$QUALITY_PLAN")")
+          fonts=$(jq -r '.published_fonts.docx // empty' "$QUALITY_PLAN")
+          cjk=$(jq -r '.published_fonts_cjk.docx // empty' "$QUALITY_PLAN")
+          intl=$(jq -r '.published_fonts_intl.docx // empty' "$QUALITY_PLAN")
+          if [ -z "$fonts" ] || [ -z "$cjk" ] || [ -z "$intl" ]; then
+            echo "::error::The plan pins no @betteroffice/fonts, @betteroffice/fonts-cjk or @betteroffice/fonts-intl release for published docx"
+            exit 1
+          fi
+          packages+=("@betteroffice/fonts@$fonts")
+          for pin in "fonts-intl=$intl" "fonts-cjk=$cjk"; do
+            if [ "${pin#*=}" = absent ]; then
+              echo "@betteroffice/${pin%%=*} absent: @betteroffice/fonts@$fonts does not declare it, so it is not installed"
+            else
+              packages+=("@betteroffice/${pin%%=*}@${pin#*=}")
+            fi
+          done
+          npm install --prefix "$RUNNER_TEMP/docx-published" --no-save --no-package-lock --ignore-scripts --no-audit --no-fund "${packages[@]}"
+          report() {
+            # shellcheck disable=SC2016 # JavaScript source: its ${} are template literals for node, not shell expansions
+            node --input-type=module -e '
+            import { createRequire } from "node:module";
+            import { readFileSync } from "node:fs";
+            const version = (from, name) => {
+              try { return JSON.parse(readFileSync(createRequire(from).resolve(`${name}/package.json`), "utf8")).version; } catch { return "absent"; }
+            };
+            const fonts = createRequire(process.argv[1] + "/package.json").resolve("@betteroffice/fonts/package.json");
+            console.log(`- ${process.argv[2]}: @betteroffice/fonts@${version(process.argv[1] + "/package.json", "@betteroffice/fonts")}, fonts-latin ${version(fonts, "@betteroffice/fonts-latin")}, fonts-intl ${version(fonts, "@betteroffice/fonts-intl")}, fonts-cjk ${version(fonts, "@betteroffice/fonts-cjk")}`);
+            ' "$1" "$2"
+          }
+          {
+            echo "### DOCX font add-ons"
+            echo
+            report "$RUNNER_TEMP/docx-published/node_modules/@betteroffice/docx" "published (plan: fonts $fonts, fonts-intl $intl, fonts-cjk $cjk)"
+            report "$GITHUB_WORKSPACE/packages/docx" "commit (workspace)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Record the font chains the product's registry builds per document
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          QUALITY_OUTPUT: ${{ runner.temp }}/docx-benchmark
+          QUALITY_NATIVE: ${{ runner.temp }}/native
+          QUALITY_CHAINS: ${{ runner.temp }}/native-chains
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+          QUALITY_PRODUCT_PUBLISHED: ${{ runner.temp }}/docx-published/node_modules/@betteroffice/docx
+          QUALITY_PRODUCT_COMMIT: ${{ github.workspace }}/packages/docx
+        run: node scripts/office-quality/private-step.mjs docx-native-chains -- bun scripts/office-quality/native-chains.ts
+
       - name: Measure native CLI times and LibreOffice fidelity
         env:
           QUALITY_OUTPUT: ${{ runner.temp }}/docx-benchmark
           QUALITY_NATIVE: ${{ runner.temp }}/native
           QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
+          QUALITY_CHAINS: ${{ runner.temp }}/native-chains
         run: node scripts/office-quality/private-step.mjs docx-benchmark -- python scripts/office-quality/docx_benchmark.py
 
       - if: ${{ !inputs.private_corpus }}
@@ -606,6 +810,12 @@ jobs:
           fi
           cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-docx-benchmark-${{ matrix.shard }} private-logs
 
+      - name: Compare the wall time with the planned work
+        if: always()
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+        run: node scripts/office-quality/shards.mjs wall docx-benchmark "${{ matrix.shard }}"
+
   xlsx-native-build:
     needs: prepare
     if: needs.prepare.outputs.xlsx-shards != '[]'
@@ -625,7 +835,7 @@ jobs:
           ref: ${{ matrix.channel == 'published' && needs.prepare.outputs.xlsx-published-source || needs.prepare.outputs.source-sha }}
           path: .source/native-source
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - uses: dtolnay/rust-toolchain@stable
@@ -648,7 +858,7 @@ jobs:
           retention-days: 7
 
   xlsx-benchmark:
-    needs: [prepare, xlsx-native-build]
+    needs: [prepare, xlsx-native-build, libreoffice-archive]
     if: needs.prepare.outputs.xlsx-shards != '[]'
     runs-on: ubuntu-24.04
     environment: *private-environment
@@ -657,6 +867,7 @@ jobs:
       SOFFICE: /opt/libreoffice26.2/program/soffice
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['xlsx-benchmark'] }}
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}
     steps:
@@ -668,6 +879,9 @@ jobs:
             echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
+
+      - name: Record the job start
+        run: echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -691,12 +905,14 @@ jobs:
         with:
           name: xlsx-native-commit
           path: ${{ runner.temp }}/native/commit
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.13"
+      - *restore-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -752,6 +968,12 @@ jobs:
           fi
           cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-xlsx-benchmark-${{ matrix.shard }} private-logs
 
+      - name: Compare the wall time with the planned work
+        if: always()
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+        run: node scripts/office-quality/shards.mjs wall xlsx-benchmark "${{ matrix.shard }}"
+
   pptx-native-build:
     needs: prepare
     if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
@@ -771,7 +993,7 @@ jobs:
           ref: ${{ matrix.channel == 'published' && needs.prepare.outputs.pptx-published-source || needs.prepare.outputs.source-sha }}
           path: .source/native-source
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - uses: dtolnay/rust-toolchain@stable
@@ -794,13 +1016,18 @@ jobs:
           retention-days: 7
 
   pptx-benchmark:
-    needs: [prepare, pptx-native-build]
+    needs: [prepare, pptx-native-build, libreoffice-archive]
     if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
     runs-on: ubuntu-24.04
     environment: *private-environment
     timeout-minutes: 90
     env:
       SOFFICE: /opt/libreoffice26.2/program/soffice
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['pptx-benchmark'] }}
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.pptx-shards) }}
     steps:
       - name: Require the planned runner image
         env:
@@ -810,6 +1037,9 @@ jobs:
             echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
+
+      - name: Record the job start
+        run: echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -833,15 +1063,17 @@ jobs:
         with:
           name: pptx-native-commit
           path: ${{ runner.temp }}/native/commit
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.13"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.4.3"
+      - *restore-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -853,6 +1085,7 @@ jobs:
         env:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
           QUALITY_OUTPUT: ${{ runner.temp }}/pptx-benchmark
+          QUALITY_SHARD: ${{ matrix.shard }}
           QUALITY_ASSET_CACHE: ${{ !inputs.private_corpus && inputs.corpus_origin == '' && inputs.collection == 'office-quality' && format('{0}/fidelity-assets', runner.temp) || '' }}
           PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
           PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
@@ -867,7 +1100,7 @@ jobs:
       - if: ${{ !inputs.private_corpus }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: pptx-benchmark-report
+          name: pptx-benchmark-report-${{ matrix.shard }}
           path: ${{ runner.temp }}/pptx-benchmark/report.json
           if-no-files-found: error
           retention-days: 7
@@ -875,7 +1108,7 @@ jobs:
         if: always() && !inputs.private_corpus
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: pptx-benchmark-diagnostics
+          name: pptx-benchmark-diagnostics-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/pptx-benchmark/report.json
             ${{ runner.temp }}/pptx-benchmark/*/timing/*
@@ -889,7 +1122,7 @@ jobs:
         env: *private-write
         run: |
           cd "$RUNNER_TEMP/pptx-benchmark"
-          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put pptx-benchmark-report report.json
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put pptx-benchmark-report-${{ matrix.shard }} report.json
 
       - name: Keep the diagnostics and logs in the private bucket
         if: always() && inputs.private_corpus
@@ -897,12 +1130,18 @@ jobs:
         run: |
           shopt -s nullglob
           if cd "$RUNNER_TEMP/pptx-benchmark" 2>/dev/null; then
-            node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional pptx-benchmark-diagnostics report.json ./*/timing/* ./*/libreoffice/* ./*/lo-comparison/score.json
+            node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional pptx-benchmark-diagnostics-${{ matrix.shard }} report.json ./*/timing/* ./*/libreoffice/* ./*/lo-comparison/score.json
           fi
-          cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-pptx-benchmark private-logs
+          cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-pptx-benchmark-${{ matrix.shard }} private-logs
+
+      - name: Compare the wall time with the planned work
+        if: always()
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+        run: node scripts/office-quality/shards.mjs wall pptx-benchmark "${{ matrix.shard }}"
 
   xlsx-fidelity:
-    needs: prepare
+    needs: [prepare, libreoffice-archive]
     if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
     runs-on: ubuntu-24.04
     environment: *private-environment
@@ -911,6 +1150,7 @@ jobs:
       SOFFICE: /opt/libreoffice26.2/program/soffice
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['xlsx-fidelity'] }}
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.xlsx-fidelity-shards) }}
     steps:
@@ -922,6 +1162,9 @@ jobs:
             echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
             exit 1
           fi
+
+      - name: Record the job start
+        run: echo "QUALITY_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -937,15 +1180,17 @@ jobs:
         if: inputs.private_corpus
         env: *private-read
         run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.13"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.4.3"
+      - *restore-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install LibreOffice and comparison tools
         timeout-minutes: 15
         run: |
@@ -1003,6 +1248,12 @@ jobs:
           fi
           cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-xlsx-fidelity-${{ matrix.shard }} private-logs
 
+      - name: Compare the wall time with the planned work
+        if: always()
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+        run: node scripts/office-quality/shards.mjs wall xlsx-fidelity "${{ matrix.shard }}"
+
   roundtrip-build:
     needs: prepare
     runs-on: ubuntu-24.04
@@ -1021,7 +1272,7 @@ jobs:
           ref: ${{ matrix.source }}
           path: .source/roundtrip-source
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
       - uses: dtolnay/rust-toolchain@stable
@@ -1044,7 +1295,7 @@ jobs:
           retention-days: 7
 
   roundtrip-a:
-    needs: [prepare, roundtrip-build]
+    needs: [prepare, roundtrip-build, libreoffice-archive]
     runs-on: ubuntu-24.04
     environment: *private-environment
     timeout-minutes: 90
@@ -1053,6 +1304,7 @@ jobs:
       LO_PYTHON: /opt/libreoffice26.2/program/python
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['roundtrip-a'] }}
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.roundtrip-shards-a) }}
     steps: &roundtrip-steps
@@ -1087,12 +1339,14 @@ jobs:
         with:
           name: roundtrip-native-${{ matrix.format }}-commit
           path: ${{ runner.temp }}/roundtrip-native/commit
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: "3.13"
+      - *restore-libreoffice
+      - *fetch-libreoffice-on-miss
       - name: Install the pinned LibreOffice release
         timeout-minutes: 15
         run: bash scripts/office-quality/install-libreoffice.sh
@@ -1156,7 +1410,7 @@ jobs:
           cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-roundtrip-${{ matrix.format }}-${{ matrix.shard }} private-logs
 
   roundtrip-b:
-    needs: [prepare, roundtrip-build]
+    needs: [prepare, roundtrip-build, libreoffice-archive]
     if: needs.prepare.outputs.roundtrip-shards-b != '[]'
     runs-on: ubuntu-24.04
     environment: *private-environment
@@ -1164,12 +1418,112 @@ jobs:
     env: *roundtrip-env
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['roundtrip-b'] }}
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.roundtrip-shards-b) }}
     steps: *roundtrip-steps
 
+  timing:
+    needs: [prepare, native-build, xlsx-native-build, pptx-native-build, libreoffice-archive]
+    if: >-
+      !cancelled() && inputs.private_corpus && needs.prepare.result == 'success' &&
+      needs.prepare.outputs.timing-formats != '[]'
+    runs-on: ubuntu-24.04
+    environment: *private-environment
+    timeout-minutes: 300
+    env:
+      SOFFICE: /opt/libreoffice26.2/program/soffice
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.parallel)['timing'] }}
+      matrix:
+        format: ${{ fromJSON(needs.prepare.outputs.timing-formats) }}
+    steps:
+      - name: Require the planned runner image
+        env:
+          PLANNED_IMAGE: ${{ needs.prepare.outputs.runner-image }}
+        run: |
+          if [ "$ImageVersion" != "$PLANNED_IMAGE" ]; then
+            echo "::error::Runner image $ImageVersion differs from the planned $PLANNED_IMAGE; re-run the failed jobs, or the whole run once that image is no longer served"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+
+      - name: Fetch the plan from the private bucket
+        if: inputs.private_corpus
+        env: *private-read
+        run: node scripts/office-quality/private-store.mjs get visual-fidelity-plan "$RUNNER_TEMP/fidelity-plan"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ matrix.format }}-native-published
+          path: ${{ runner.temp }}/native/published
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ${{ matrix.format }}-native-commit
+          path: ${{ runner.temp }}/native/commit
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.13"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.4.3"
+
+      - *restore-libreoffice
+      - *fetch-libreoffice-on-miss
+
+      - name: Install LibreOffice and comparison tools
+        timeout-minutes: 15
+        env:
+          FORMAT: ${{ matrix.format }}
+        run: |
+          bash scripts/office-quality/install-libreoffice.sh
+          python -m pip install -r scripts/office-quality/requirements.txt
+          chmod +x "${RUNNER_TEMP}/native/published/${FORMAT}-native-bench" "${RUNNER_TEMP}/native/commit/${FORMAT}-native-bench"
+          bun scripts/office-quality/native-fonts.ts "${RUNNER_TEMP}/native-fonts"
+
+      - name: Download the seeded timing sample
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+          QUALITY_FORMAT: ${{ matrix.format }}
+          QUALITY_OUTPUT: ${{ runner.temp }}/timing
+          PRIVATE_R2_ENDPOINT: ${{ secrets.PRIVATE_R2_ENDPOINT }}
+          PRIVATE_R2_READ_KEY_ID: ${{ secrets.PRIVATE_R2_READ_KEY_ID }}
+          PRIVATE_R2_READ_SECRET: ${{ secrets.PRIVATE_R2_READ_SECRET }}
+        run: node scripts/office-quality/private-step.mjs timing-stage -- node scripts/office-quality/timing.mjs
+
+      - name: Time every engine sequentially on this runner
+        env:
+          QUALITY_OUTPUT: ${{ runner.temp }}/timing
+          QUALITY_NATIVE: ${{ runner.temp }}/native
+          QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
+        run: node scripts/office-quality/private-step.mjs timing -- python scripts/office-quality/timing.py
+
+      - name: Keep the report in the private bucket
+        if: inputs.private_corpus
+        env: *private-write
+        run: |
+          cd "$RUNNER_TEMP/timing"
+          node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put timing-report-${{ matrix.format }} report.json
+
+      - name: Keep the private logs
+        if: always() && inputs.private_corpus
+        env: *private-write
+        run: cd "$RUNNER_TEMP" && node "$GITHUB_WORKSPACE/scripts/office-quality/private-store.mjs" put --optional logs-timing-${{ matrix.format }} private-logs
+
   publish:
-    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark, xlsx-fidelity, roundtrip-a, roundtrip-b]
+    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark, xlsx-fidelity, roundtrip-a, roundtrip-b, timing]
     if: >-
       !cancelled() && github.ref == 'refs/heads/main' &&
       needs.prepare.result == 'success' && needs.measure.result == 'success' && needs.roundtrip-a.result == 'success' &&
@@ -1177,7 +1531,8 @@ jobs:
       (!contains(fromJSON(needs.prepare.outputs.formats), 'docx') || needs.docx-benchmark.result == 'success') &&
       (needs.prepare.outputs.xlsx-shards == '[]' || needs.xlsx-benchmark.result == 'success') &&
       (!contains(fromJSON(needs.prepare.outputs.formats), 'pptx') || needs.pptx-benchmark.result == 'success') &&
-      (!contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') || needs.xlsx-fidelity.result == 'success')
+      (!contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') || needs.xlsx-fidelity.result == 'success') &&
+      (!inputs.private_corpus || needs.prepare.outputs.timing-formats == '[]' || needs.timing.result == 'success')
     runs-on: ubuntu-latest
     environment: *private-environment
     timeout-minutes: 30
@@ -1192,7 +1547,7 @@ jobs:
           SOURCE_SHA: ${{ needs.prepare.outputs.source-sha }}
         run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
 
@@ -1234,8 +1589,8 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: ${{ !inputs.private_corpus && contains(fromJSON(needs.prepare.outputs.formats), 'pptx') }}
         with:
-          name: pptx-benchmark-report
-          path: ${{ runner.temp }}/fidelity-parts/pptx-benchmark-report
+          pattern: pptx-benchmark-report-*
+          path: ${{ runner.temp }}/fidelity-parts
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: ${{ !inputs.private_corpus && contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') }}
@@ -1258,9 +1613,10 @@ jobs:
           node "$store" get 'visual-fidelity-report-*' "$parts"
           if ${{ contains(fromJSON(needs.prepare.outputs.formats), 'docx') }}; then node "$store" get 'docx-benchmark-report-*' "$parts"; fi
           if ${{ needs.prepare.outputs.xlsx-shards != '[]' }}; then node "$store" get 'xlsx-benchmark-report-*' "$parts"; fi
-          if ${{ contains(fromJSON(needs.prepare.outputs.formats), 'pptx') }}; then node "$store" get pptx-benchmark-report "$parts/pptx-benchmark-report"; fi
+          if ${{ contains(fromJSON(needs.prepare.outputs.formats), 'pptx') }}; then node "$store" get 'pptx-benchmark-report-*' "$parts"; fi
           if ${{ contains(fromJSON(needs.prepare.outputs.formats), 'xlsx') }}; then node "$store" get 'xlsx-fidelity-report-*' "$parts"; fi
           node "$store" get 'roundtrip-report-*' "$parts"
+          if ${{ needs.prepare.outputs.timing-formats != '[]' }}; then node "$store" get 'timing-report-*' "$parts"; fi
 
       - name: Reconcile the format reports
         env:
@@ -1273,9 +1629,16 @@ jobs:
           QUALITY_REQUIRE_XLSX_BENCHMARK: 'true'
           QUALITY_REQUIRE_XLSX_FIDELITY: 'true'
           QUALITY_REQUIRE_ROUNDTRIP: 'true'
+          QUALITY_REQUIRE_TIMING: ${{ inputs.private_corpus }}
+          QUALITY_COVERAGE: ${{ runner.temp }}/coverage.md
+          QUALITY_REQUIRE_COVERAGE: 'true'
+        run: node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs
+
+      - name: Summarise scored documents and the generated section
+        if: always()
         run: |
-          node scripts/office-quality/private-step.mjs merge -- node scripts/office-quality/merge.mjs
-          cat "${QUALITY_OUTPUT}/section.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/coverage.md" ]; then cat "$RUNNER_TEMP/coverage.md" >> "$GITHUB_STEP_SUMMARY"; fi
+          if [ -f "$RUNNER_TEMP/fidelity-report/section.md" ]; then cat "$RUNNER_TEMP/fidelity-report/section.md" >> "$GITHUB_STEP_SUMMARY"; fi
 
       - if: ${{ !inputs.private_corpus }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -1326,7 +1689,7 @@ jobs:
         run: bun scripts/office-quality/publish-renders.mjs
 
       - name: Replace the generated README section
-        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
+        if: ${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}
         run: |
           python3 - <<'PY'
           import os
@@ -1349,7 +1712,7 @@ jobs:
 
       - name: Detect a changed report
         id: changed
-        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
+        if: ${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}
         run: |
           if git diff --quiet -- README.md; then
             echo "value=false" >> "$GITHUB_OUTPUT"
@@ -1360,7 +1723,7 @@ jobs:
       - name: Mint the bot token
         if: steps.changed.outputs.value == 'true'
         id: bot
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
         with:
           app-id: ${{ secrets.OPENOOXML_BOT_APP_ID }}
           private-key: ${{ secrets.OPENOOXML_BOT_PRIVATE_KEY }}

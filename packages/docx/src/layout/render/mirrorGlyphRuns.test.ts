@@ -129,3 +129,20 @@ test('a list marker shaped as glyph runs mirrors as a hidden marker, apart from 
   expect(runs(mirror).filter((run) => !run.classList.contains('layout-list-marker')).map((run) => run.textContent))
     .toEqual(['Item']);
 });
+
+test('a run painted with ligature glyphs mirrors its characters, joined with the clusters around it', () => {
+  const ligature: DisplayPrimitive = {
+    kind: 'glyphRun', fontId: 1, size: 16, color: '#000000', text: 'office',
+    glyphs: [
+      { id: 1, x: 96, y: 140, cluster: 0, advance: ADVANCE },
+      { id: 2, x: 96 + ADVANCE, y: 140, cluster: 1, advance: 2 * ADVANCE },
+      { id: 3, x: 96 + 3 * ADVANCE, y: 140, cluster: 4, advance: ADVANCE },
+      { id: 4, x: 96 + 4 * ADVANCE, y: 140, cluster: 5, advance: ADVANCE },
+    ],
+    blockKey: 'p1', docStart: 10, docEnd: 16, logicalOrder: 10, bidiLevel: 0,
+  } as DisplayPrimitive;
+  const mirror = buildMirrorPage(page([ligature, ...clusters('p1', 16, ' fifty', 96 + 5 * ADVANCE, 140)]), options);
+  expect(runs(mirror).map((run) => [run.textContent, run.dataset.docStart, run.dataset.docEnd]))
+    .toEqual([['office fifty', '10', '22']]);
+  expect(mirror.querySelector('.layout-paragraph')!.textContent).toBe('office fifty');
+});

@@ -730,6 +730,7 @@
     "linkRemoved": "链接已删除",
     "linkCopied": "链接已复制到剪贴板",
     "pasteFailed": "无法完成粘贴。未做任何更改。",
+    "cutRefused": "所选内容包含无法剪切的对象。未做任何更改。",
     "failedToSave": "保存文档失败",
     "documentInput": "文档输入",
     "documentPreview": "文档预览",
@@ -799,10 +800,13 @@
   },
   "a11y": {
     "pageLabel": "第 {number} 页",
+    "unbuiltPagesNotMirrored": "第 {from} 页至第 {to} 页尚未包含在阅读视图中。",
+    "goToPage": "转到第 {number} 页",
     "headerLabel": "页眉",
     "footerLabel": "页脚",
     "chartNoData": "无数据",
     "pictureName": "图片",
+    "bulletMarker": "项目符号",
     "selected": "已选",
     "selectionCleared": "已清除选择",
     "commentedText": "带批注的文本",
@@ -861,7 +865,7 @@
       "targetChanged": "此操作针对的内容在应用前已更改。",
       "commandFailed": "命令无法完成。",
       "permissionDenied": "宿主应用未允许此插件使用此命令。",
-      "unsupportedPolicy": "插件尚不能运行此命令，请改用编辑批处理。",
+      "unsupportedPolicy": "此命令需要用户在该插件自己的界面中进行操作。",
       "pluginUnavailable": "插件已不再处于活动状态。",
       "aborted": "插件操作在命令运行前已取消。"
     }

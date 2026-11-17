@@ -17,9 +17,12 @@ import type {
   PluginError,
   PluginErrorPhase,
   PluginFailureCode,
+  PluginFocusChangeEvent,
   PluginGrant,
   PluginLoadReason,
+  PluginLocaleChangeEvent,
   PluginRefusal,
+  PluginSelectionSettleEvent,
 } from '../../../../shared/host-contracts/plugins';
 import type {
   XlsxCommandArgs,
@@ -138,7 +141,10 @@ export interface XlsxPluginCellPosition extends XlsxPointPosition {
   layoutId: string;
 }
 
-export type XlsxGeometryTarget = { kind: 'proposal'; id: string };
+export type XlsxGeometryTarget =
+  | { kind: 'proposal'; id: string }
+  /** @experimental Selection anchors are live-only; use getRangeRect to keep a cell range. */
+  | { kind: 'selection' };
 
 export type XlsxAnchorGeometryResult =
   | {
@@ -162,10 +168,13 @@ export type XlsxAnchorGeometryResult =
  * Geometry of the painted grid. Rectangles are in pixels of the overlay layer, already zoomed
  * and clipped to the visible grid. Cell and range queries return null for unpainted layouts
  * and cells outside the visible sheet; anchor queries return a typed failure.
+ * A `selection` target answers `layout-unavailable` once the context's selection is superseded.
  */
 export interface XlsxPluginGeometry {
   layout: XlsxPluginLayout;
   getAnchorGeometry(target: XlsxGeometryTarget): XlsxAnchorGeometryResult;
+  /** @experimental Reads every target in order. */
+  readAnchorGeometries(targets: readonly XlsxGeometryTarget[]): Promise<XlsxAnchorGeometryResult[]>;
   /** One grid cell, without merge expansion; zero-based `row` and `col`. */
   getCellRect(target: { sheetId: string; row: number; col: number }): XlsxPluginRect | null;
   /** The visible part of an inclusive range, such as a merged area. */
@@ -191,12 +200,18 @@ export type XlsxPluginSelection = {
 } | null;
 
 export interface XlsxPluginSnapshot {
+  /** @experimental Focus inside the document surface. */
+  focused: boolean;
+  /** @experimental The editor's resolved locale tag. */
+  locale: string;
   /** The open workbook; changes when a workbook replaces it. */
   generation: string;
   version: string;
   readOnly: boolean;
   grant: XlsxPluginGrant;
   selection: XlsxPluginSelection;
+  /** @experimental Whether the selection has finished changing. */
+  selectionSettled: boolean;
   /** Null while no painted frame shows `version`. */
   layout: XlsxPluginLayout | null;
 }
@@ -243,8 +258,20 @@ export interface XlsxPluginNavigation {
   ): Promise<XlsxPluginNavigationResult>;
 }
 
+/** @experimental The plugin API may change in minor releases. */
+export type XlsxPluginFocusChangeEvent = PluginFocusChangeEvent;
+
+/** @experimental The plugin API may change in minor releases. */
+export type XlsxPluginLocaleChangeEvent = PluginLocaleChangeEvent;
+
+/** @experimental The plugin API may change in minor releases. */
+export type XlsxPluginSelectionSettleEvent = PluginSelectionSettleEvent<XlsxPluginSelection>;
+
 /** Lifecycle notifications describe current state; several changes may arrive as one. */
 export type XlsxPluginEvent =
+  | XlsxPluginSelectionSettleEvent
+  | XlsxPluginFocusChangeEvent
+  | XlsxPluginLocaleChangeEvent
   | { type: 'load'; generation: string; version: string; reason: PluginLoadReason }
   | { type: 'document-change'; generation: string; version: string }
   | { type: 'proposal-change'; generation: string; version: string; previewVersion: number }

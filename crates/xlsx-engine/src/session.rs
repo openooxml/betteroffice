@@ -85,6 +85,13 @@ struct MoveRangeArgs {
 }
 
 #[derive(Deserialize)]
+struct FillRangeArgs {
+    sheet: u32,
+    source: String,
+    destination: String,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CellEditInput {
     row: u32,
@@ -171,6 +178,22 @@ struct MoveChartArgs {
     chart: String,
     dx: f32,
     dy: f32,
+}
+
+/// Pixel movement of each frame edge; an omitted edge stays put.
+#[derive(Deserialize)]
+struct ResizeChartArgs {
+    sheet: u32,
+    /// a `ChartRegion` id: the frame, not the chart part backing it.
+    chart: String,
+    #[serde(default)]
+    left: f32,
+    #[serde(default)]
+    top: f32,
+    #[serde(default)]
+    right: f32,
+    #[serde(default)]
+    bottom: f32,
 }
 
 #[derive(Deserialize)]
@@ -576,6 +599,12 @@ impl Session {
         serde_json::to_string(&hit).map_err(|error| error.to_string())
     }
 
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>, String> {
+        self.workbook
+            .media_bytes(asset_id)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn move_chart_json(
         &mut self,
         args: &str,
@@ -590,6 +619,30 @@ impl Session {
                 &args.chart,
                 args.dx,
                 args.dy,
+                self.calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn resize_chart_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: ResizeChartArgs = serde_json::from_str(args)
+            .map_err(|error| format!("bad chart resize args: {error}"))?;
+        let result = self
+            .workbook
+            .resize_chart(
+                SheetId(args.sheet),
+                &args.chart,
+                betteroffice_xlsx::ChartResize {
+                    left: args.left,
+                    top: args.top,
+                    right: args.right,
+                    bottom: args.bottom,
+                },
                 self.calculation_options(now_serial),
             )
             .map_err(|error| error.to_string())?;
@@ -618,6 +671,17 @@ impl Session {
         &self,
         target_json: &str,
         options_json: &str,
+    ) -> Result<Vec<u8>, String> {
+        self.render_png_target_with_faces(target_json, options_json, None)
+    }
+
+    /// [`Self::render_png_target`]. `Some` paints with those faces alone, for this export only.
+    #[cfg(feature = "raster")]
+    pub fn render_png_target_with_faces(
+        &self,
+        target_json: &str,
+        options_json: &str,
+        faces: Option<&[betteroffice_xlsx::PngFontFace<'_>]>,
     ) -> Result<Vec<u8>, String> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -681,7 +745,7 @@ impl Session {
         {
             return self
                 .workbook
-                .render_sheet(sheet(*index)?, &options)
+                .render_sheet_with_faces(sheet(*index)?, &options, faces)
                 .map(|rendered| rendered.bytes)
                 .map_err(|error| error.to_string());
         }
@@ -701,7 +765,7 @@ impl Session {
             },
         };
         self.workbook
-            .render_png(target, &options)
+            .render_png_with_faces(target, &options, faces)
             .map(|rendered| rendered.bytes)
             .map_err(|error| error.to_string())
     }
@@ -919,6 +983,28 @@ impl Session {
         let result = self
             .workbook
             .move_range(
+                SheetId(args.sheet),
+                source,
+                destination,
+                self.calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    /// Copies `source` over the filled rectangle `destination` as one undo step.
+    pub fn fill_range_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: FillRangeArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad fill args: {error}"))?;
+        let source = parse_range(&args.source)?;
+        let destination = parse_range(&args.destination)?;
+        let result = self
+            .workbook
+            .fill_range(
                 SheetId(args.sheet),
                 source,
                 destination,
@@ -2236,6 +2322,68 @@ mod tests {
     }
 
     #[test]
+    fn fill_range_json_commits_one_undoable_formula_aware_edit() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session
+            .edit_cells_json(
+                r#"{"sheet":0,"edits":[{"row":0,"col":2,"input":"5"},{"row":1,"col":2,"input":"=C1+$C$1"}]}"#,
+                None,
+            )
+            .unwrap();
+        let before = session.workbook.history_state().undo_depth;
+        let result = session
+            .fill_range_json(
+                r#"{"sheet":0,"source":"C1:C2","destination":"C1:C4"}"#,
+                None,
+            )
+            .unwrap();
+        assert!(result.contains(r#""applied":true"#));
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(2, 2))
+                .unwrap()
+                .input,
+            "5"
+        );
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(3, 2))
+                .unwrap()
+                .input,
+            "=C3+$C$1"
+        );
+        assert!(
+            session
+                .fill_range_json(
+                    r#"{"sheet":0,"source":"C1:C2","destination":"C2:C4"}"#,
+                    None,
+                )
+                .is_err()
+        );
+        assert_eq!(session.workbook.history_state().undo_depth, before + 1);
+        session.undo_json(None).unwrap();
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(3, 2))
+                .unwrap()
+                .input,
+            ""
+        );
+        assert_eq!(
+            session
+                .workbook
+                .cell(SheetId(0), CellRef::new(1, 2))
+                .unwrap()
+                .input,
+            "=C1+$C$1"
+        );
+    }
+
+    #[test]
     fn quoted_text_and_batch_undo_keep_wire_behavior() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         session
@@ -2699,6 +2847,53 @@ mod tests {
                 .unwrap()
                 .contains(r#""input":"=SUM(A1:A2)""#)
         );
+    }
+
+    #[test]
+    fn track_moves_are_refused_before_the_batch_applies() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let saved = session.save().unwrap();
+        let set = r#"{"type":"setCell","sheet":0,"at":{"row":0,"col":2},"cell":{"value":{"kind":"text","value":"Probe"}}}"#;
+        for mv in [
+            r#"{"type":"moveCols","sheet":0,"col":0,"count":1,"before":2}"#,
+            r#"{"type":"moveRows","sheet":0,"row":0,"count":1,"before":2}"#,
+        ] {
+            let transaction = format!(r#"{{"ops":[{set},{mv}]}}"#);
+            for result in [
+                session.apply_ops_json(&transaction, None),
+                session.apply_ops_profiled_json(&transaction, None, &mut || 0.0),
+            ] {
+                assert_eq!(
+                    result.unwrap_err(),
+                    "cannot move sheet 0 tracks: moving rows or columns is not supported yet"
+                );
+                assert!(
+                    !session
+                        .cell_json(r#"{"sheet":0,"row":0,"col":2}"#)
+                        .unwrap()
+                        .contains(r#""input":"Probe""#)
+                );
+            }
+            assert!(
+                session
+                    .cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
+                    .unwrap()
+                    .contains(r#""input":"Hello""#)
+            );
+            assert!(
+                session
+                    .cell_json(r#"{"sheet":0,"row":1,"col":1}"#)
+                    .unwrap()
+                    .contains(r#""input":"42""#)
+            );
+            assert!(
+                session
+                    .undo_json(None)
+                    .unwrap()
+                    .contains(r#""applied":false"#)
+            );
+            assert_eq!(session.save().unwrap(), saved);
+        }
     }
 
     #[test]

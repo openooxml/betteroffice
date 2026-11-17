@@ -81,6 +81,7 @@ export {
 export {
   buildRustDisplayList,
   buildRustDisplayFrame,
+  openPagedDisplay,
   loadRustDisplayListQueryEngine,
   loadedRustDisplayListQueryEngine,
   type DisplayListBuildInputs,
@@ -216,6 +217,7 @@ export {
   deriveDisplayListSelectedCellRects,
   deriveDisplayListTableFragments,
   deriveDisplayListTableFragmentsOnPages,
+  displayListTableFragmentEndsTable,
   type DisplayListTableInsertHoverHit,
   type DisplayListTableInsertHoverInput,
   type DisplayListSelectedCellRect,

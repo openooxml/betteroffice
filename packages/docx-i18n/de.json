@@ -730,6 +730,7 @@
     "linkRemoved": "Link entfernt",
     "linkCopied": "Link in Zwischenablage kopiert",
     "pasteFailed": "Das Einfügen konnte nicht abgeschlossen werden. Es wurde nichts geändert.",
+    "cutRefused": "Die Auswahl enthält Objekte, die nicht ausgeschnitten werden können. Es wurde nichts geändert.",
     "failedToSave": "Dokument konnte nicht gespeichert werden",
     "documentInput": "Dokumenteingabe",
     "documentPreview": "Dokumentvorschau",
@@ -799,10 +800,13 @@
   },
   "a11y": {
     "pageLabel": "Seite {number}",
+    "unbuiltPagesNotMirrored": "Die Seiten {from} bis {to} sind noch nicht in der Leseansicht.",
+    "goToPage": "Zu Seite {number} gehen",
     "headerLabel": "Kopfzeile",
     "footerLabel": "Fußzeile",
     "chartNoData": "Keine Daten",
     "pictureName": "Bild",
+    "bulletMarker": "Aufzählungszeichen",
     "selected": "Ausgewählt",
     "selectionCleared": "Auswahl aufgehoben",
     "commentedText": "Kommentierter Text",
@@ -861,7 +865,7 @@
       "targetChanged": "Der Inhalt, für den diese Aktion geöffnet wurde, hat sich geändert, bevor sie angewendet werden konnte.",
       "commandFailed": "Der Befehl konnte nicht abgeschlossen werden.",
       "permissionDenied": "Die Host-Anwendung hat diesem Plugin die Verwendung dieses Befehls nicht gestattet.",
-      "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
+      "unsupportedPolicy": "Dieser Befehl erfordert eine Benutzeraktion in der eigenen Oberfläche des Plugins.",
       "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
       "aborted": "Die Pluginaktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
     }

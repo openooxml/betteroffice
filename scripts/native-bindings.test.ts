@@ -217,7 +217,10 @@ describe('native package release wiring', () => {
   ) as any;
 
   test('keeps native publishing outside the main release job', () => {
-    const job = release.jobs.release;
+    const job = structuredClone(release.jobs.release);
+    const npmCheck = job.steps.find((step: any) => step.name === 'Check npm publish targets');
+    expect(npmCheck.env).toEqual({ RELEASE_SKIP_NATIVE: '${{ vars.RELEASE_SKIP_NATIVE }}' });
+    delete npmCheck.env;
     expect(job['timeout-minutes']).toBe(90);
     expect(JSON.stringify(job)).not.toContain('native');
     expect(JSON.stringify(job)).not.toContain('withhold');
@@ -463,7 +466,7 @@ describe('native package release wiring', () => {
     const job = ci.jobs.native;
     expect(job.name).toBe('Native gate');
     expect(job['runs-on']).toBe('ubuntu-latest');
-    expect(job['timeout-minutes']).toBe(60);
+    expect(job['timeout-minutes']).toBe(90);
     expect(job.strategy).toBeUndefined();
     expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
     const bun = job.steps.find((step: any) => step.uses === 'oven-sh/setup-bun@v2');
@@ -478,8 +481,16 @@ describe('native package release wiring', () => {
     expect(wasmCache.with.key).toBe('wasm-pack-${{ steps.wasm.outputs.key }}');
     const runtime = job.steps.find((step: any) => step.uses?.startsWith('actions/setup-node@'));
     expect(runtime.with['node-version']).toBe('24');
+    expect(job.env.DENO_VERSION).toBe('2.9.0');
     const deno = job.steps.find((step: any) => step.uses === 'denoland/setup-deno@v2');
-    expect(deno.with['deno-version']).toBe('v2.9.0');
+    expect(deno.with['deno-version']).toBe('${{ env.DENO_VERSION }}');
+    const denoCache = job.steps.find((step: any) => step.name === 'Restore the Deno binary');
+    expect(denoCache.uses).toBe('actions/cache@v6.1.0');
+    expect(denoCache.with).toEqual({
+      path: '${{ runner.tool_cache }}/deno/${{ env.DENO_VERSION }}',
+      key: 'deno-${{ runner.os }}-${{ runner.arch }}-${{ env.DENO_VERSION }}',
+    });
+    expect(job.steps.indexOf(denoCache)).toBe(job.steps.indexOf(deno) - 1);
     expect(job.steps.some((step: any) => step.run === 'bun install --frozen-lockfile')).toBe(true);
     const build = job.steps.find((step: any) => step.name === 'Build and test');
     expect(build.run).toContain('for package in $(node scripts/native-bindings.mjs --paths); do');
@@ -494,8 +505,8 @@ describe('native package release wiring', () => {
     expect(nativeDeclarations.run).toContain('(cd packages/xlsx && bunx tsup)');
     expect(nativeDeclarations.run).toContain('cmp "packages/xlsx/dist/$file" "bindings/xlsx-native/dist/$file"');
     expect(nativeDeclarations.run).toContain('(cd packages/pptx && bunx tsup)');
-    expect(nativeDeclarations.run).toContain('ls packages/pptx/dist/*.d.ts');
-    expect(nativeDeclarations.run).toContain('ls bindings/pptx-native/dist/*.d.ts');
+    expect(nativeDeclarations.run).toContain('declarations packages/pptx/dist >');
+    expect(nativeDeclarations.run).toContain('declarations bindings/pptx-native/dist >');
     expect(nativeDeclarations.run).toContain('cmp "packages/pptx/dist/$file" "bindings/pptx-native/dist/$file"');
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(nativeDeclarations));
     const wasm = job.steps.find((step: any) => step.name === 'Build wasm for parity');
@@ -504,15 +515,21 @@ describe('native package release wiring', () => {
     expect(wasm.run).toContain('bun run --filter @betteroffice/docx build:wasm');
     const parity = job.steps.find((step: any) => step.name === 'Check native and wasm parity');
     expect(parity.run).toBe(
-      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/pptx-native/png.test.ts'
+      'bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts bindings/engine-parity/docx.test.ts bindings/engine-parity/xlsx.test.ts bindings/engine-parity/pptx.test.ts bindings/engine-parity/harness.test.ts\nbun test bindings/raw-surface.test.ts\n'
     );
     expect(job.steps.indexOf(wasm)).toBeLessThan(job.steps.indexOf(build));
     expect(job.steps.indexOf(build)).toBeLessThan(job.steps.indexOf(parity));
+    const crateSave = job.steps.find((step: any) => step.name === 'Check the crate save against the product save');
+    expect(crateSave.env).toEqual({ DOCX_CRATE_PARITY_DIR: '${{ runner.temp }}/docx-crate-parity' });
+    expect(crateSave.run).toBe(
+      'bun test bindings/engine-parity/docx-crate-save.test.ts\ncargo test --locked -p betteroffice-docx --test wasm_parity -- --ignored\n'
+    );
+    expect(job.steps.indexOf(crateSave)).toBe(job.steps.indexOf(parity) + 1);
     const xlsx = job.steps.find(
       (step: any) => step.name === 'Test the xlsx packages on the native engine'
     );
     expect(xlsx.run).toContain(
-      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx packages/xlsx-react scripts/parity/parity.test.ts scripts/native-engine.test.ts'
+      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx/ packages/xlsx-i18n/ packages/xlsx-react scripts/parity/parity.test.ts scripts/native-engine.test.ts'
     );
     expect(xlsx.run).toContain('bun run build:docx-wasm');
     expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(parity));
@@ -520,14 +537,14 @@ describe('native package release wiring', () => {
       (step: any) => step.name === 'Test the docx packages on the native engine'
     );
     expect(docx.run).toBe(
-      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-react/'
+      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-i18n/ packages/docx-react/'
     );
     expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(docx));
     const pptx = job.steps.find(
       (step: any) => step.name === 'Test the pptx packages on the native engine'
     );
     expect(pptx.run).toContain(
-      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/ packages/pptx-react/'
+      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/ packages/pptx-i18n/ packages/pptx-react/'
     );
     const agents = job.steps.find(
       (step: any) => step.name === 'Test the agents package on the native engine'
