@@ -1,7 +1,9 @@
+use std::cell::Cell;
+
 use betteroffice_xlsx::{
-    CONDITIONAL_FRAME_BUDGET, CONDITIONAL_RESULT_CAP, CalculationOptions, CellInput, CellRange,
-    CellRef, DifferentialFormat, DisplayList, DrawCmd, GridGeometry, Op, RenderOptions, SheetId,
-    Viewport, Workbook,
+    CONDITIONAL_FRAME_BUDGET, CONDITIONAL_FRAME_MS, CONDITIONAL_RESULT_CAP, CalculationOptions,
+    CellInput, CellRange, CellRef, DifferentialFormat, DisplayList, DrawCmd, FrameClock,
+    GridGeometry, Op, RenderOptions, SheetId, Viewport, Workbook,
 };
 
 const RED: &str = "#ffc7ce";
@@ -523,4 +525,115 @@ fn decided_cells_stay_within_the_cap_across_a_long_scroll() {
         "{stats:?}"
     );
     assert!(stats.cached_cells <= CONDITIONAL_RESULT_CAP);
+}
+
+#[test]
+fn a_rule_formula_is_parsed_once_per_epoch_across_its_cells() {
+    let book = |formula: &str| {
+        workbook(&sheet(
+            rows(200, numbers(4, |row, col| row + col)),
+            expression("A1:D200", 1, formula),
+        ))
+    };
+    let mut workbook = book("A1+$B$1&gt;50");
+    let viewport = view(0.0, 2000.0);
+    let start = workbook.conditional_stats();
+    let first = frame(&workbook, &viewport);
+    let stats = workbook.conditional_stats();
+    assert_eq!(first.conditional_pending, 0);
+    assert!(stats.evaluated_cells - start.evaluated_cells >= 200, "{stats:?}");
+    assert!(stats.formula_parses - start.formula_parses <= 2, "{stats:?}");
+    let reference = workbook_with_threshold("48");
+    assert_eq!(
+        painted(&first),
+        painted(&reference.display_list(&viewport).unwrap())
+    );
+    assert!(!painted(&first).is_empty());
+    edit(&mut workbook, SheetId(0), &[(150, 3, "0")]);
+    let edited = frame(&workbook, &viewport);
+    let after = workbook.conditional_stats();
+    assert_eq!(edited.conditional_pending, 0);
+    assert!(after.formula_parses - stats.formula_parses <= 2, "{after:?}");
+    assert_eq!(painted(&edited), painted(&first));
+}
+
+/// The `A1+$B$1>50` workbook of the parse test as a cellIs rule over the
+/// same values: `$B$1` holds 2.
+fn workbook_with_threshold(value: &str) -> Workbook {
+    workbook(&sheet(
+        rows(200, numbers(4, |row, col| row + col)),
+        greater_than("A1:D200", value),
+    ))
+}
+
+#[test]
+fn a_countif_of_each_cell_over_a_fixed_range_reads_the_range_once() {
+    let value = |row: u32| if row <= 20 { row * 1000 } else { row % 50 };
+    let book = |formula: &str| {
+        workbook(&sheet(
+            rows(2000, numbers(1, move |row, _| value(row))),
+            expression("A1:A2000", 1, formula),
+        ))
+    };
+    let workbook = book("COUNTIF($A$1:$A$2000,A1)&gt;1");
+    let viewport = view(0.0, 600.0);
+    let start = workbook.conditional_stats();
+    let list = frame(&workbook, &viewport);
+    let stats = workbook.conditional_stats();
+    let cells = stats.evaluated_cells - start.evaluated_cells;
+    assert_eq!(list.conditional_pending, 0);
+    let reference = book("COUNTIF(INDIRECT(\"$A$1:$A$2000\"),A1)&gt;1");
+    let expected = painted(&reference.display_list(&viewport).unwrap());
+    assert_eq!(painted(&list), expected);
+    assert!(!expected.is_empty() && (expected.len() as u64) < cells);
+    assert!(stats.units <= 2_000 + 8 * cells, "{stats:?}");
+}
+
+/// A clock that moves a quarter of a frame each time it is read.
+struct Ticks(Cell<f64>);
+
+impl FrameClock for Ticks {
+    fn now_ms(&self) -> f64 {
+        let now = self.0.get() + CONDITIONAL_FRAME_MS / 4.0;
+        self.0.set(now);
+        now
+    }
+}
+
+#[test]
+fn a_timed_frame_stops_when_its_clock_runs_out() {
+    let book = || {
+        workbook(&sheet(
+            rows(30, numbers(4, |row, col| row + col)),
+            greater_than("A1:D30", "0"),
+        ))
+    };
+    let workbook = book();
+    let viewport = view(0.0, 800.0);
+    let reference = painted(&book().display_list(&viewport).unwrap());
+    assert_eq!(reference.len(), 120);
+    assert_eq!(frame(&book(), &viewport).conditional_pending, 0);
+    let clock = Ticks(Cell::new(0.0));
+    let timed = || {
+        workbook
+            .display_list_frame_timed(SheetId(0), &viewport, &clock)
+            .unwrap()
+    };
+    let first = timed();
+    assert!(first.conditional_pending > 0);
+    let partial = painted(&first);
+    assert!(partial.iter().all(|at| reference.contains(at)));
+    assert_eq!(
+        partial.len() + first.conditional_pending as usize,
+        reference.len()
+    );
+    let mut frames = 1;
+    let mut last = first;
+    while last.conditional_pending > 0 {
+        assert!(frames < 40, "still pending after {frames} timed frames");
+        last = timed();
+        frames += 1;
+    }
+    assert!(frames > 1);
+    assert_eq!(painted(&last), reference);
 }

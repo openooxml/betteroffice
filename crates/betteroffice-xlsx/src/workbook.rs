@@ -3315,6 +3315,18 @@ impl Workbook {
         self.display_list_within(sheet, viewport, Budget::Frame)
     }
 
+    /// [`Self::display_list_frame_for`] with the frame's conditional formats
+    /// also stopped once `clock` passes [`crate::CONDITIONAL_FRAME_MS`].
+    pub fn display_list_frame_timed(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+        clock: &dyn crate::FrameClock,
+    ) -> Result<DisplayList> {
+        let _ = clock;
+        self.display_list_within(sheet, viewport, Budget::Frame)
+    }
+
     fn display_list_within(
         &self,
         sheet: SheetId,

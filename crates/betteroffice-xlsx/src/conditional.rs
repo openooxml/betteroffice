@@ -13,6 +13,8 @@ use xlsx_render::CellFormats;
 
 /// Rule checks plus cell visits one frame on screen spends deciding cells.
 pub const CONDITIONAL_FRAME_BUDGET: u64 = 200_000;
+/// Milliseconds one timed frame on screen spends deciding cells.
+pub const CONDITIONAL_FRAME_MS: f64 = 10.0;
 /// Decided cells kept per model epoch; past it, cells outside the frame go.
 pub const CONDITIONAL_RESULT_CAP: usize = 262_144;
 /// Parsed shifted formulas kept across epochs; cleared when full.
@@ -52,6 +54,18 @@ const AGGREGATES: &[&str] = &[
     "VAR.S",
 ];
 
+/// A monotonic clock in milliseconds that bounds a frame's conditional-format
+/// work; the host supplies it, since the engine reads no clock of its own.
+pub trait FrameClock {
+    fn now_ms(&self) -> f64;
+}
+
+impl<F: Fn() -> f64> FrameClock for F {
+    fn now_ms(&self) -> f64 {
+        self()
+    }
+}
+
 /// How much evaluation a display list spends on conditional formats.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Budget {
@@ -73,6 +87,10 @@ pub struct ConditionalStats {
     pub aggregate_builds: u64,
     /// Visible cells the last display list left undecided.
     pub pending: u32,
+    /// Rule formula texts parsed into expressions.
+    pub formula_parses: u64,
+    /// Rule checks plus cell visits the last display list spent.
+    pub units: u64,
     /// Decided cells held.
     pub cached_cells: usize,
     /// Model epoch the cache holds.
@@ -146,6 +164,8 @@ struct Formula {
     relative: bool,
     /// Paths in `base` of the calls whose value is the same for every cell.
     constants: Vec<Vec<usize>>,
+    /// Texts parsed to compile it.
+    parses: u8,
 }
 
 /// What one rule reads from its whole range, once per epoch.
@@ -201,13 +221,19 @@ impl Cache {
             self.aggregates.clear();
             self.results.clear();
         }
-        let rules = Arc::clone(
-            self.rules
-                .entry(sheet)
-                .or_insert_with(|| rules(model, sheet).into()),
-        );
+        if !self.rules.contains_key(&sheet) {
+            let built: Arc<[Rule]> = rules(model, sheet).into();
+            self.stats.formula_parses += built
+                .iter()
+                .flat_map(|rule| &rule.formulas)
+                .map(|formula| u64::from(formula.parses))
+                .sum::<u64>();
+            self.rules.insert(sheet, built);
+        }
+        let rules = Arc::clone(&self.rules[&sheet]);
         let mut formats = CellFormats::new();
         self.stats.pending = 0;
+        self.stats.units = 0;
         if rules.is_empty() {
             return (formats, 0);
         }
@@ -268,6 +294,7 @@ impl Cache {
             }
         }
         self.stats.pending = pending;
+        self.stats.units = spent;
         (formats, pending)
     }
 
@@ -465,6 +492,7 @@ impl Cache {
         if self.parsed.len() >= PARSED_CAP {
             self.parsed.clear();
         }
+        self.stats.formula_parses += 1;
         let parsed = parse_formula(&text).ok().map(Arc::new);
         self.parsed.insert(text, parsed.clone());
         parsed
@@ -657,6 +685,7 @@ fn compile(source: &str, anchor: CellRef) -> Formula {
         base,
         relative,
         constants,
+        parses: u8::from(at_anchor.is_some()) + u8::from(shifted.is_some()),
     }
 }
 
