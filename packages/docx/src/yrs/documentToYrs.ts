@@ -352,7 +352,6 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
         id: mark.attrs.revisionId,
         author: mark.attrs.author,
         date: mark.attrs.date,
-        ...(mark.attrs.isMovePair === true ? { isMovePair: true } : {}),
       });
     } else {
       attrs[mark.name] = dropNulls(mark.attrs);

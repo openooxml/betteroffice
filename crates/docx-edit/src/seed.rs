@@ -2461,21 +2461,17 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
                     .map(|(_, value)| value.clone())
                     .unwrap_or(Value::Null)
             };
-            let mut revision = drop_nulls(json!({
-                "id": get("revisionId"),
-                "author": get("author"),
-                "date": get("date")
-            }));
-            if get("isMovePair") == Value::Bool(true) {
-                revision["isMovePair"] = Value::Bool(true);
-            }
             attrs.insert(
                 if mark.name == "insertion" {
                     "ins".to_owned()
                 } else {
                     "del".to_owned()
                 },
-                revision,
+                drop_nulls(json!({
+                    "id": get("revisionId"),
+                    "author": get("author"),
+                    "date": get("date")
+                })),
             );
         } else {
             attrs.insert(mark.name.clone(), drop_nulls(mark_attrs(mark)));
