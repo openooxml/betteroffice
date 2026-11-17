@@ -8,6 +8,7 @@ import {
   createYrsInputPositionMap,
   createYrsSession,
   displayPositionToYrsLoc,
+  mergeFormattingFragment,
   yrsLocToDisplayPosition,
   type DocxClipboardFragment,
   type YrsSession,
@@ -337,6 +338,35 @@ test('pasted runs keep their own formatting instead of the previous run\'s', asy
     .filter((segment) => segment.kind === 'text')
     .map((segment) => segment.kind === 'text' ? [segment.text, segment.attributes.bold === true, segment.attributes.italic === true] : []);
   expect(runs).toEqual([['A', true, false], [' b ', false, false], ['C', false, true], [' d', false, false]]);
+});
+
+test('merge formatting keeps the source marks and the destination run formatting', async () => {
+  const session = await createYrsSession();
+  sessions.push(session);
+  const { paraId } = session.createStory('body', '');
+  session.insertText({ story: 'body', paraId, offset: 0 }, 'ab');
+  session.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 2 } }, {
+    other: { fontFamily: { ascii: 'Arial', hAnsi: 'Arial' }, textColor: { rgb: '0000FF' }, fontSize: { size: 24, sizeCs: 24 } },
+  });
+  const source: DocxClipboardFragment = { paragraphs: [{ text: 'Bold tail', runs: [
+    { text: 'Bold', format: { other: { bold: true, textColor: { rgb: 'FF0000' }, fontSize: { size: 40, sizeCs: 40 }, fontFamily: { ascii: 'Georgia', hAnsi: 'Georgia' } } } },
+    { text: ' tail', format: { other: {} } },
+  ] }] };
+  const at = { paraId, offset: 1 };
+  applyClipboardFragment(session, { story: 'body', start: at, end: at }, mergeFormattingFragment(source), undefined, true);
+  const segments = session.storySegments('body').filter((segment) => segment.kind === 'text');
+  const attributesOf = (text: string) => {
+    const found = segments.find((segment) => segment.kind === 'text' && segment.text === text);
+    return found?.kind === 'text' ? found.attributes : undefined;
+  };
+  const destination = { fontFamily: { ascii: 'Arial' }, textColor: { rgb: '0000FF' }, fontSize: { size: 24 } };
+  expect(attributesOf('Bold')).toMatchObject({ bold: true, ...destination });
+  expect(attributesOf(' tail')).toMatchObject(destination);
+  expect(attributesOf(' tail')?.bold).not.toBe(true);
+  for (const text of ['Bold', ' tail']) {
+    expect(JSON.stringify(attributesOf(text))).not.toContain('FF0000');
+    expect(JSON.stringify(attributesOf(text))).not.toContain('Georgia');
+  }
 });
 
 test('suggesting mode pastes plain text', async () => {

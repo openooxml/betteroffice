@@ -8,6 +8,7 @@ import { residentWorkerFactory } from './__fixtures__/residentWorker';
 import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import type { DocxCommandEnvelope, DocxCommandInitRequest } from './residentCommandProtocol';
 import type { DocxClipboardFragment } from './clipboardFragment';
+import { mergeFormattingFragment } from './clipboardFragmentTransforms';
 import type { YrsCellLoc } from './index';
 
 const TIMEOUT = 20_000;
@@ -383,6 +384,48 @@ test('replacePasteFragment after a later edit is refused and keeps both edits', 
     }));
     expect(replaced.outcomes[0]).toMatchObject({ status: 'refused', reason: 'paste-changed' });
     expect(paragraphText()).toBe('BAR!');
+  } finally {
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('merge formatting keeps the source marks and the destination run formatting', async () => {
+  const { client, engine } = await openTableWorker();
+  try {
+    let version = 0;
+    let seq = 0;
+    const paragraphs = engine.paragraphs('body');
+    const last = paragraphs[paragraphs.length - 1]!;
+    const lastSpan = engine.geometryReader.locateParagraph('body', last.paraId);
+    const split = engine.splitParagraph({ story: 'body', paraId: last.paraId, offset: lastSpan.end - lastSpan.start });
+    const paraId = split.secondParaId;
+    engine.insertText({ story: 'body', paraId, offset: 0 }, 'ab');
+    engine.formatRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 2 } }, {
+      other: { fontFamily: { ascii: 'Arial', hAnsi: 'Arial' }, textColor: { rgb: '0000FF' }, fontSize: { size: 24, sizeCs: 24 } },
+    });
+    const at = { story: 'body', paraId, offset: 1 };
+    const source: DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{
+      text: 'Bold',
+      format: { other: { bold: true, textColor: { rgb: 'FF0000' }, fontSize: { size: 40, sizeCs: 40 }, fontFamily: { ascii: 'Georgia', hAnsi: 'Georgia' } } },
+    }] }] };
+    const pasted = await client.edit(intent(++seq, version, 'pasteFragment', { selection: { anchor: at, focus: at }, fragment: source }));
+    expect(pasted.outcomes[0]?.status).toBe('applied');
+    version = pasted.version;
+    const end = pasted.selection!.focus;
+    const replaced = await client.edit(intent(++seq, version, 'replacePasteFragment', {
+      selection: { anchor: end, focus: end },
+      fragment: mergeFormattingFragment(source),
+      merge: true,
+    }));
+    expect(replaced.outcomes[0]?.status).toBe('applied');
+    const bold = engine.storySegments('body').filter((segment) => segment.kind === 'text' && segment.text === 'Bold');
+    expect(bold).toHaveLength(1);
+    const attributes = bold[0]!.kind === 'text' ? bold[0]!.attributes : {};
+    expect(attributes).toMatchObject({
+      bold: true, fontFamily: { ascii: 'Arial' }, textColor: { rgb: '0000FF' }, fontSize: { size: 24 },
+    });
+    expect(JSON.stringify(attributes)).not.toContain('FF0000');
+    expect(JSON.stringify(attributes)).not.toContain('Georgia');
   } finally {
     client.destroy();
   }
