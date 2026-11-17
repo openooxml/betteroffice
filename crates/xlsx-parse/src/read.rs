@@ -454,12 +454,25 @@ fn collect_tables(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static TABLE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Table parts parsed since the last call.
+#[cfg(test)]
+pub(crate) fn take_table_parses() -> usize {
+    TABLE_PARSES.replace(0)
+}
+
 /// One `xl/tables/tableN.xml` part. `headerRowCount` defaults to 1 and
 /// `totalsRowCount` to 0, both clamped to the rows the `ref` actually spans.
 fn parse_table(
     data: &[u8],
     sheet: SheetId,
 ) -> Result<Option<(Table, Option<TableStyleInfo>)>, ParseError> {
+    #[cfg(test)]
+    TABLE_PARSES.set(TABLE_PARSES.get() + 1);
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;

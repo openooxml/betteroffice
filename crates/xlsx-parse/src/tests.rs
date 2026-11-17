@@ -6537,6 +6537,120 @@ fn looks_up_each_drawing_name_once() {
     );
 }
 
+const REL_TABLE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/table";
+const REL_COMMENTS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+const SALES_TABLE: &str = r#"<table id="1" name="Sales" displayName="Sales" ref="B2:D12"><tableColumns count="3"><tableColumn id="1" name="Region"/><tableColumn id="2" name="Cost"/><tableColumn id="3" name="Units"/></tableColumns></table>"#;
+
+fn sheet_rels_naming(kind: &str, targets: &[&str]) -> Vec<u8> {
+    let mut rels = String::from(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+    );
+    for (index, target) in targets.iter().enumerate() {
+        rels.push_str(&format!(
+            r#"<Relationship Id="rIdNamed{index}" Type="{kind}" Target="{target}"/>"#
+        ));
+    }
+    rels.push_str("</Relationships>");
+    rels.into_bytes()
+}
+
+/// A table part a sheet relates several ways is one table, read once.
+#[test]
+fn reads_a_table_related_several_ways_once() {
+    let mut source = package_with_table(SALES_TABLE);
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(
+            REL_TABLE,
+            &[
+                "../tables/table1.xml",
+                "../tables/table1.xml",
+                "//xl/tables/table1.xml",
+            ],
+        ),
+    );
+    crate::read::take_table_parses();
+    let tables = parse_workbook(&source).unwrap().tables.len();
+    assert_eq!(
+        (tables, crate::read::take_table_parses()),
+        (1, 1),
+        "tables, table parses"
+    );
+}
+
+/// One table related more times than the table cap still opens as one table.
+#[test]
+fn opens_a_table_related_past_the_table_cap() {
+    let mut source = package_with_table(SALES_TABLE);
+    let targets = vec!["../tables/table1.xml"; crate::MAX_TABLES + 1];
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(REL_TABLE, &targets),
+    );
+    assert_eq!(
+        parse_workbook(&source).map(|workbook| workbook.tables.len()),
+        Ok(1)
+    );
+}
+
+/// A comments part a sheet relates several ways is counted once, and a
+/// missing one is reported once.
+#[test]
+fn counts_comments_related_several_ways_once() {
+    let inventory = |targets: &[&str]| {
+        let mut source = sources_package();
+        set_part(
+            &mut source,
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            &sheet_rels_naming(REL_COMMENTS, targets),
+        );
+        parse_workbook_with_package(&source)
+            .unwrap()
+            .package
+            .source_sheet_inventory(0, &mut ample())
+    };
+    let found = inventory(&["../comments1.xml", "../comments1.xml", "//xl/comments1.xml"]);
+    assert_eq!(
+        (found.comments, found.unreadable_parts.len()),
+        (2, 0),
+        "comments counted, unreadable parts"
+    );
+    let missing = inventory(&["../missing.xml", "/xl/missing.xml", "//xl/missing.xml"]);
+    assert_eq!(missing.unreadable_parts, ["xl/missing.xml"]);
+}
+
+/// The cell-move guard reads a table part a sheet relates several ways once.
+#[test]
+fn move_guard_reads_a_table_related_several_ways_once() {
+    let mut source = package_with_table(SALES_TABLE);
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        &sheet_rels_naming(
+            REL_TABLE,
+            &[
+                "../tables/table1.xml",
+                "../tables/table1.xml",
+                "//xl/tables/table1.xml",
+            ],
+        ),
+    );
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    crate::package::take_move_guard_reads();
+    let blocked = parsed
+        .package
+        .range_move_unsupported_part(|_, _| false, |_, _| false, |_, _| false)
+        .map(str::to_owned);
+    assert_eq!(
+        (blocked, crate::package::take_move_guard_reads()),
+        (None, 1),
+        "blocking part, parts read by the guard"
+    );
+}
+
 /// One drawing anchor cannot hold two frames, so a model carrying one source
 /// frame twice has nothing to write back: the pair would collapse into one on
 /// reopen. The save is refused instead.

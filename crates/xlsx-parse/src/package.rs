@@ -418,6 +418,8 @@ impl PreservedPackage {
                 let Some(bytes) = find_part(&self.parts, &path) else {
                     return Some(&sheet.path);
                 };
+                #[cfg(test)]
+                MOVE_GUARD_READS.set(MOVE_GUARD_READS.get() + 1);
                 let unsupported = if table {
                     table_move_unsupported(bytes, |formula| formula_affected(index, formula))
                 } else {
@@ -614,6 +616,17 @@ impl PreservedPackage {
                     })
                 })
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static MOVE_GUARD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Table and comments parts the cell-move guard read since the last call.
+#[cfg(test)]
+pub(crate) fn take_move_guard_reads() -> usize {
+    MOVE_GUARD_READS.replace(0)
 }
 
 fn table_move_unsupported(
