@@ -430,6 +430,11 @@ function preedit(textarea: HTMLTextAreaElement, type: 'compositionstart' | 'comp
   event(textarea, { data });
 }
 
+function overlays(container: HTMLElement) {
+  return [...container.querySelectorAll<HTMLElement>('[aria-hidden="true"]')]
+    .map((element) => `${element.dataset.testid ?? element.tagName}:${element.textContent}`);
+}
+
 function beforeinput(textarea: HTMLTextAreaElement, inputType: string, data: string) {
   act(() => { textarea.dispatchEvent(new InputEvent('beforeinput', {
     bubbles: true, cancelable: true, inputType, data,
@@ -478,6 +483,52 @@ test('refused_ime_retains_recoverable_draft', async () => {
   expect(editor.textarea.value).toBe('');
 });
 
+test('active_composition_paints_its_preedit_at_the_caret_until_it_commits', async () => {
+  const editor = await mount();
+  const shown = () => editor.queryByTestId('docx-preedit');
+  preedit(editor.textarea, 'compositionstart');
+  expect(shown()).toBeNull();
+  preedit(editor.textarea, 'compositionupdate', 'ㅎ');
+  expect(shown()?.textContent).toBe('ㅎ');
+  preedit(editor.textarea, 'compositionupdate', '한');
+  expect(shown()?.textContent).toBe('한');
+  expect([shown()!.style.left, shown()!.style.top, shown()!.style.lineHeight]).toEqual(['10px', '0px', '20px']);
+  expect(editor.commands).toEqual([]);
+  preedit(editor.textarea, 'compositionend', '한');
+  expect(shown()).toBeNull();
+  await waitFor(() => { expect(editor.commands).toHaveLength(1); });
+  expect(editor.commands[0]!.payload).toMatchObject({ text: '한' });
+});
+
+for (const backward of [false, true]) {
+  test(`range_composition_paints_its_preedit_at_the_selection_start_${backward ? 'backward' : 'forward'}`, async () => {
+    const editor = await mount(true, false, false, candidate => ({
+      identity, coversThroughSeq: candidate.coversThroughSeq, frameEpoch: candidate.revision,
+      layoutRevision: candidate.payload.layoutRevision,
+      pages: [{ page, bounds: { x: 0, y: 0, width: 200, height: 40 }, transform: [1, 0, 0, 1, 0, 0] }],
+      caret: null, selectionFocus: { x: backward ? 10 : 30, y: 0, width: 1, height: 20 },
+      selectionRects: [{ x: 10, y: 0, width: 20, height: 20 }],
+    }));
+    const start = { story: 'body', paraId: 'worker', offset: 1 };
+    const end = { story: 'body', paraId: 'worker', offset: 3 };
+    const selection = backward ? { anchor: end, focus: start } : { anchor: start, focus: end };
+    fireEvent.keyDown(editor.textarea, { key: backward ? 'ArrowLeft' : 'ArrowRight', code: backward ? 'ArrowLeft' : 'ArrowRight', shiftKey: true });
+    await editor.acknowledge(0, 'applied', { selection });
+    editor.present(frame(2, editor.commands[0]!.seq));
+    expect(editor.binding.viewStore.getSnapshot().workerSelection).toEqual(selection);
+    const shown = () => editor.queryByTestId('docx-preedit');
+    preedit(editor.textarea, 'compositionstart');
+    preedit(editor.textarea, 'compositionupdate', 'あ');
+    expect(shown()?.textContent).toBe('あ');
+    expect([shown()!.style.left, shown()!.style.top, shown()!.style.lineHeight]).toEqual(['10px', '0px', '20px']);
+    preedit(editor.textarea, 'compositionend', 'あ');
+    expect(shown()).toBeNull();
+    await waitFor(() => { expect(editor.commands).toHaveLength(2); });
+    expect(editor.commands[1]!.kind).toBe('replaceSelection');
+    expect(editor.commands[1]!.payload).toEqual({ text: 'あ', selection });
+  });
+}
+
 test('synthetic_composition_payload_commits_and_recovers_through_paged_editor', async () => {
   const editor = await mount();
   fireEvent.compositionStart(editor.textarea);
@@ -500,7 +551,7 @@ test('synthetic_composition_payload_commits_and_recovers_through_paged_editor', 
   expect(editor.commands[1]!.kind).toBe('insertText');
 });
 
-test('delayed_composition_refusal_retains_draft_without_exposing_active_preedit_overlays', async () => {
+test('delayed_composition_refusal_retains_draft_and_paints_the_preedit_once_its_predecessor_is_presented', async () => {
   const editor = await mount(true);
   preedit(editor.textarea, 'compositionstart');
   preedit(editor.textarea, 'compositionupdate', '先');
@@ -510,7 +561,7 @@ test('delayed_composition_refusal_retains_draft_without_exposing_active_preedit_
   preedit(editor.textarea, 'compositionupdate', '未確定');
   fireEvent.input(editor.textarea, { inputType: 'insertCompositionText', isComposing: true,
     target: { value: '未確定' } });
-  expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(0);
+  expect(overlays(editor.container)).toEqual([]);
   await editor.acknowledge(0, 'refused');
   expect((editor.getByRole('textbox', { name: 'Recoverable document text' }) as HTMLTextAreaElement).value).toBe('先');
   editor.present(frame(2, editor.commands[0]!.seq));
@@ -518,7 +569,44 @@ test('delayed_composition_refusal_retains_draft_without_exposing_active_preedit_
   expect(editor.binding.admission.getSnapshot().compositionSlot).not.toBeNull();
   expect(editor.textarea.value).toBe('未確定');
   expect(editor.commands).toHaveLength(1);
-  expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(0);
+  expect(overlays(editor.container)).toEqual(['docx-preedit:未確定']);
+});
+
+test('composition_after_an_unpresented_commit_waits_for_its_frame', async () => {
+  const editor = await mount(false, false, false, undefined, (revision) => revision === 1 ? 10 : 30);
+  const shown = () => editor.queryByTestId('docx-preedit');
+  preedit(editor.textarea, 'compositionstart');
+  preedit(editor.textarea, 'compositionupdate', '先');
+  preedit(editor.textarea, 'compositionend', '先');
+  await waitFor(() => { expect(editor.commands).toHaveLength(1); });
+  preedit(editor.textarea, 'compositionstart');
+  preedit(editor.textarea, 'compositionupdate', '未');
+  expect(shown()).toBeNull();
+  await editor.acknowledge(0, 'applied');
+  expect(shown()).toBeNull();
+  editor.present(frame(2, editor.commands[0]!.seq));
+  expect(shown()?.textContent).toBe('未');
+  expect(shown()!.style.left).toBe('30px');
+});
+
+test('composition_after_typing_held_behind_an_inflight_insert_waits_for_its_frame', async () => {
+  const editor = await mount(false, false, false, undefined, (revision) => revision === 1 ? 10 : 30);
+  const shown = () => editor.queryByTestId('docx-preedit');
+  beforeinput(editor.textarea, 'insertText', 'x');
+  await waitFor(() => { expect(editor.commands).toHaveLength(1); });
+  beforeinput(editor.textarea, 'insertText', 'y');
+  preedit(editor.textarea, 'compositionstart');
+  preedit(editor.textarea, 'compositionupdate', '未');
+  expect(editor.commands).toHaveLength(1);
+  expect(shown()).toBeNull();
+  await editor.acknowledge(0, 'applied');
+  await waitFor(() => { expect(editor.commands).toHaveLength(2); });
+  expect(editor.commands[1]!.payload).toEqual({ text: 'y' });
+  expect(shown()).toBeNull();
+  await editor.acknowledge(1, 'applied');
+  editor.present(frame(2, editor.commands[1]!.seq));
+  expect(shown()?.textContent).toBe('未');
+  expect(shown()!.style.left).toBe('30px');
 });
 
 test('recoverable_drafts_remain_until_individually_dismissed', async () => {
@@ -603,7 +691,7 @@ test('worker_frame_installs_through_frame_presentation_and_retires_echo', async 
   expect(editor.container.querySelector('[data-page-id="1"] canvas')).toBe(editor.canvas);
   expect(editor.textarea.value).toBe('未確定');
   expect(editor.commands).toHaveLength(1);
-  expect(editor.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(0);
+  expect(overlays(editor.container)).toEqual(['docx-preedit:未確定']);
 });
 
 test('worker caret blinks on the hybrid interval only while the input is focused', async () => {

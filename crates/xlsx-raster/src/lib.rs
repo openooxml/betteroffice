@@ -3,9 +3,11 @@
 
 mod fmath;
 mod font;
+mod picture;
 use std::collections::{HashMap, hash_map::Entry};
 
 pub use font::measure_text;
+pub use picture::{ImageMap, MAX_FRAME_IMAGE_PIXELS, MAX_IMAGE_PIXELS};
 
 use tiny_skia::{
     Color, FillRule, IntRect, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, StrokeDash,
@@ -16,15 +18,23 @@ use xlsx_render::{Align, DisplayList, DrawCmd, GeometryPathCommand, Rect as DlRe
 #[cfg(not(feature = "fonts"))]
 /// paint a display list and encode it as png bytes.
 pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
+    render_png_with_images(dl, &ImageMap::new())
+}
+
+#[cfg(not(feature = "fonts"))]
+/// [`render_png`], painting each image command from `images`.
+pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result<Vec<u8>, String> {
     let w = (dl.width.ceil() as u32).max(1);
     let h = (dl.height.ceil() as u32).max(1);
     let mut pixmap = Pixmap::new(w, h).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut clip_surface = ClipSurface::default();
     let mut patterns = HashMap::new();
+    let mut pictures = picture::Pictures::new(images);
 
     for cmd in &dl.commands {
         match cmd {
+            DrawCmd::Image { .. } => pictures.paint(&mut pixmap, &mut clip_surface, cmd)?,
             DrawCmd::PatternFill {
                 x,
                 y,
@@ -1601,7 +1611,10 @@ mod tests {
 #[cfg(feature = "fonts")]
 mod native;
 #[cfg(feature = "fonts")]
-pub use native::{RasterFonts, render_png, render_png_with_fonts};
+pub use native::{
+    RasterFonts, render_png, render_png_with_fonts, render_png_with_fonts_and_images,
+    render_png_with_images,
+};
 
 #[cfg(test)]
 mod shared_helper_tests {

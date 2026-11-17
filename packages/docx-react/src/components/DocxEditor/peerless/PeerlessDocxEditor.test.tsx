@@ -1,6 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
-import { createRef, Profiler, startTransition, Suspense, useEffect, useLayoutEffect, useState } from 'react';
+import { createRef, Profiler, startTransition, StrictMode, Suspense, useEffect, useLayoutEffect, useState } from 'react';
 import * as measurement from '@betteroffice/docx/layout';
 import * as utils from '@betteroffice/docx/utils';
 import * as yrs from '@betteroffice/docx/yrs';
@@ -377,8 +377,9 @@ beforeEach(() => {
   restorers.push(() => coreSession.mockRestore(), () => surface.mockRestore());
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
   for (const restore of restorers.splice(0).reverse()) restore();
   resetEngineChoiceForTests();
 });
@@ -3383,3 +3384,167 @@ for (const refused of [false, true]) {
     else expect(onError).not.toHaveBeenCalled();
   });
 }
+
+function stubSearchMatch(query: string) {
+  const post = FakeWorker.prototype.postMessage;
+  const spy = spyOn(FakeWorker.prototype, 'postMessage').mockImplementation(function (this: FakeWorker, message) {
+    if (!('id' in message) || message.type !== 'documentRead' || message.read.kind !== 'searchText') return post.call(this, message);
+    requests.push(message);
+    const response = { id: message.id, ok: true, read: { version: 'worker-version', value: {
+      matches: [{ story: 'body', paraId: 'a', start: 0, displayFrom: 1, displayTo: 1 + query.length }], carried: -1 } } };
+    queueMicrotask(() => this.onmessage?.({ data: response } as MessageEvent<DocxEngineWorkerResponse>));
+  });
+  restorers.push(() => spy.mockRestore());
+}
+
+function settled<T>(promise: Promise<T>) {
+  return promise.then(value => value, (error: Error) => error.message);
+}
+
+test('the worker editor searches after a strict mode remount', async () => {
+  stubSearchMatch('Hello');
+  const ref = createRef<DocxEditorRef>();
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={ref} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  let found!: Promise<unknown>;
+  await act(async () => {
+    found = settled(ref.current!.search('Hello'));
+    await found;
+  });
+  await expect(found).resolves.toEqual(expect.objectContaining({ query: 'Hello', total: 1, current: 0 }));
+});
+
+test('the worker editor runs commands after a strict mode remount', async () => {
+  const ref = createRef<DocxEditorRef>();
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={ref} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  let result: unknown;
+  await act(async () => { result = await ref.current!.commands.execute('editingMode', { mode: 'viewing' }); });
+  expect(result).toMatchObject({ ok: true });
+  await waitFor(() => expect(binding!.admission.getSnapshot().readOnly).toBe(true));
+  expect(requests.some(request => request.type === 'edit' && request.command.kind === 'setReadOnly' &&
+    (request.command.payload as { readOnly: boolean }).readOnly)).toBe(true);
+});
+
+test('the worker editor applies typing after a strict mode remount', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const onDocumentChange = mock(() => {});
+  render(<StrictMode><DocxEditor {...peerlessProps} onDocumentChange={onDocumentChange} showToolbar={false} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  await act(async () => {
+    const submitted = binding!.commands.submit({ kind: 'insertText', payload: { text: 'x' } });
+    if (submitted.status !== 'submitted') throw new Error(`edit not submitted: ${JSON.stringify(submitted)}`);
+    expect((await submitted.ticket.ack).status).toBe('applied');
+  });
+  expect(workers.filter(worker => worker.initial).at(-1)!.text).toBe('x');
+  await waitFor(() => expect(onDocumentChange).toHaveBeenCalledTimes(1));
+});
+
+test('the worker editor completes layout after a strict mode remount', async () => {
+  const ref = createRef<DocxEditorRef>();
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={ref} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  const view = binding!.viewStore.getSnapshot();
+  view.geometry = { identity: view.identity, coversThroughSeq: view.throughSeq, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: null, selectionRects: [] };
+  let complete!: Promise<number | string>;
+  await act(async () => {
+    complete = settled(ref.current!.whenLayoutComplete({ timeoutMs: 2000 }));
+    await complete;
+  });
+  await expect(complete).resolves.toBe(0);
+});
+
+test('the worker editor keeps a search listener registered before a strict mode remount', async () => {
+  stubSearchMatch('Hello');
+  const listener = mock((_state: unknown) => {});
+  const editor = createRef<DocxEditorRef>() as { current: DocxEditorRef | null };
+  let registered = false;
+  const attach = (instance: DocxEditorRef | null) => {
+    editor.current = instance ?? editor.current;
+    if (instance && !registered) {
+      registered = true;
+      instance.onSearchChange(listener);
+    }
+  };
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={attach} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  expect(registered).toBe(true);
+  let found!: Promise<unknown>;
+  await act(async () => {
+    found = settled(editor.current!.search('Hello'));
+    await found;
+  });
+  expect(listener).toHaveBeenCalledWith(expect.objectContaining({ query: 'Hello', total: 1 }));
+  await expect(found).resolves.toEqual(expect.objectContaining({ total: 1 }));
+});
+
+test('the worker editor keeps change listeners registered before a strict mode remount', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const documentListener = mock((_change: unknown) => {});
+  const selectionListener = mock((_selection: unknown) => {});
+  let registered = false;
+  const attach = (instance: DocxEditorRef | null) => {
+    if (instance && !registered) {
+      registered = true;
+      instance.onDocumentChange(documentListener);
+      instance.onSelectionChange(selectionListener);
+    }
+  };
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={attach} showToolbar={false} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  expect(registered).toBe(true);
+  await act(async () => {
+    const edit = binding!.commands.submit({ kind: 'insertText', payload: { text: 'x' } });
+    if (edit.status === 'submitted') await edit.ticket.ack;
+    const at = { story: 'body', paraId: 'a', offset: 0 };
+    const select = binding!.commands.submit({ kind: 'select', payload: { selection: { anchor: at, focus: at } } });
+    if (select.status === 'submitted') await select.ticket.ack;
+  });
+  await waitFor(() => expect(documentListener).toHaveBeenCalledWith(expect.objectContaining({ version: expect.any(String) })));
+  await waitFor(() => expect(selectionListener).toHaveBeenCalledWith(expect.objectContaining({ hasSelection: true })));
+});
+
+test('a real unmount of the worker editor releases it within one task', async () => {
+  const ref = createRef<DocxEditorRef>();
+  const view = render(<DocxEditor {...peerlessProps} ref={ref} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  const editor = ref.current!;
+  holdInitial = true;
+  let outcome = 'pending';
+  act(() => { editor.loadDocumentBuffer(Uint8Array.of(8, 9)).catch((error: Error) => { outcome = error.message; }); });
+  await waitFor(() => expect(requests.filter(({ type }) => type === 'commandInit')).toHaveLength(2));
+  view.unmount();
+  await Promise.resolve();
+  expect(outcome).toBe('pending');
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
+  expect(outcome).toBe('Editor was closed');
+  await expect(editor.commands.execute('editingMode', { mode: 'viewing' })).resolves
+    .toMatchObject({ ok: false, failure: { code: 'editor-unavailable' } });
+  await waitFor(() => expect(workers.at(-1)!.terminate).toHaveBeenCalled());
+});
+
+test('a plain mount opens the document once', async () => {
+  const view = render(<DocxEditor {...peerlessProps} />);
+  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
+  expect(workers).toHaveLength(1);
+  expect(requests.filter(({ type }) => type === 'openSource')).toHaveLength(1);
+  expect(requests.filter(({ type }) => type === 'commandInit')).toHaveLength(1);
+});

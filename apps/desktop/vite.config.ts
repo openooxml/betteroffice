@@ -13,5 +13,8 @@ export default defineConfig({
     }],
   },
   build: { target: "safari16.4" },
-  worker: { format: "es" },
+  worker: {
+    format: "es",
+    rolldownOptions: { output: { codeSplitting: false } },
+  },
 });
