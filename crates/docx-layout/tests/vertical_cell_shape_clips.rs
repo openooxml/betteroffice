@@ -122,6 +122,7 @@ fn group_shape_text_in_a_tbrl_cell_keeps_a_visible_clip() {
     let texts = turned(&group_shape_in_a_vertical_cell("tbRl"), 90.0);
     assert_eq!(texts.len(), 1);
     assert_visible(&texts);
+    assert_eq!(texts[0].clip, Some((83.0, 150.0, 60.0, 200.0)));
 }
 
 #[test]
@@ -129,4 +130,5 @@ fn group_shape_text_in_a_btlr_cell_keeps_a_visible_clip() {
     let texts = turned(&group_shape_in_a_vertical_cell("btLr"), -90.0);
     assert_eq!(texts.len(), 1);
     assert_visible(&texts);
+    assert_eq!(texts[0].clip, Some((57.0, 250.0, 60.0, 200.0)));
 }
