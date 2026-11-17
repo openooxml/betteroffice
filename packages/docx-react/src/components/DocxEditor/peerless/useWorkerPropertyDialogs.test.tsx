@@ -102,7 +102,7 @@ test('clicking an object still reads its properties', async () => {
   expect(hook.result.current.dialogs.imageState).toEqual({ wrap: 'inline' });
 });
 
-test('a one-unit selection over ordinary text still asks for object properties and shows none when the worker answers null', async () => {
+test('pins: a one-unit selection over ordinary text asks for object properties and shows none when the worker answers null', async () => {
   const { hook, select, reads } = selectionFixture(null);
   await act(async () => {});
   const properties = reads('properties');
