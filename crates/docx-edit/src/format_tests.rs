@@ -968,9 +968,10 @@ fn empty_previous_and_current_properties_still_reopen_as_a_change() {
 
 /// A body of every place typed text may take formatting from: a bold run beside a plain one,
 /// a hyperlink, a tracked insertion, a run with languages and a size, an empty paragraph, a
-/// table cell, and a paragraph of nested fields, which format_range keeps unchanged.
+/// table cell, a paragraph of nested fields, which format_range keeps unchanged, and a
+/// paragraph whose style is bold.
 fn typed_document() -> Vec<u8> {
-    document(concat!(
+    styled_document(concat!(
         r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Bo</w:t></w:r><w:r><w:t>pl</w:t></w:r></w:p>"#,
         r#"<w:p><w:r><w:t>a</w:t></w:r><w:hyperlink w:anchor="t"><w:r><w:t>li</w:t></w:r></w:hyperlink><w:r><w:t>c</w:t></w:r></w:p>"#,
         r#"<w:p><w:ins w:id="1" w:author="Bo" w:date="2026-01-01T00:00:00Z"><w:r><w:t>in</w:t></w:r></w:ins><w:r><w:t>af</w:t></w:r></w:p>"#,
@@ -981,7 +982,19 @@ fn typed_document() -> Vec<u8> {
         r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
         r#"<w:r><w:instrText xml:space="preserve">" "0" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>g</w:t></w:r></w:p>"#,
         r#"<w:p><w:r><w:t>en</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:pStyle w:val="Strong"/></w:pPr><w:r><w:t>st</w:t></w:r></w:p>"#,
     ))
+}
+
+/// [`document`] with a styles part holding the bold paragraph style `Strong`.
+fn styled_document(body: &str) -> Vec<u8> {
+    ooxml_opc::rezip_parts(&[
+        ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#.to_vec()),
+        ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+        ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec()),
+        ("word/styles.xml".to_owned(), br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Strong"><w:name w:val="Strong"/><w:rPr><w:b/></w:rPr></w:style></w:styles>"#.to_vec()),
+        ("word/document.xml".to_owned(), format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#).into_bytes()),
+    ]).unwrap()
 }
 
 #[test]
@@ -998,6 +1011,16 @@ fn typing_with_caret_marks_leaves_what_typing_then_formatting_leaves() {
         engine
     };
     let probe = seeded(false, "body");
+    assert!(
+        probe
+            .doc()
+            .story_segments("body")
+            .unwrap()
+            .iter()
+            .any(|segment| matches!(&segment.content, crate::SegmentContent::Pilcrow(mark)
+                if mark.values.values().any(|value| matches!(value, Any::String(style) if &**style == "Strong")))),
+        "the bold paragraph style is seeded"
+    );
     let cell = probe
         .doc()
         .list_stories()
