@@ -9613,7 +9613,10 @@ mod tests {
             );
             let cells = seeded_cells(&definitions, &table);
             assert_eq!(cells[0][0]["rowspan"], json!(2));
-            assert!(cells[0][0]["borders"]["bottom"]["size"].is_null(), "{cleared}");
+            assert!(
+                cells[0][0]["borders"]["bottom"]["size"].is_null(),
+                "{cleared}"
+            );
         }
     }
 
@@ -9634,7 +9637,10 @@ mod tests {
                 json!({ "right": { "style": cleared } }),
             );
             let cells = seeded_cells(&definitions, &table);
-            assert!(cells[0][1]["borders"]["right"]["size"].is_null(), "{cleared}");
+            assert!(
+                cells[0][1]["borders"]["right"]["size"].is_null(),
+                "{cleared}"
+            );
         }
     }
 
