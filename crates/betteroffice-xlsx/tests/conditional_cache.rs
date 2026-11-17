@@ -620,6 +620,92 @@ fn a_relative_whole_row_or_column_rule_parses_each_cell() {
     }
 }
 
+/// The `(row, col)` of each cell a display list from the sheet's top-left
+/// corner paints red, sorted.
+fn cells(geometry: &GridGeometry, list: &DisplayList) -> Vec<(u32, u32)> {
+    let at = |offset: f32, start: fn(&GridGeometry, u32) -> f32| {
+        (0..1000)
+            .rfind(|&index| start(geometry, index) <= offset + 0.5)
+            .unwrap()
+    };
+    let mut cells: Vec<(u32, u32)> = painted(list)
+        .into_iter()
+        .map(|(x, y)| {
+            (
+                at(f32::from_bits(y), GridGeometry::row_y),
+                at(f32::from_bits(x), GridGeometry::col_x),
+            )
+        })
+        .collect();
+    cells.sort_unstable();
+    cells
+}
+
+#[test]
+fn one_shot_renders_decide_every_cell_of_rules_on_the_general_path() {
+    let formats = [
+        expression("A1:D200", 1, "A1*1000&lt;SUM($D:E)"),
+        expression("A1:D200", 2, "AND(MOD(A1,7)=0,SUM(D:D)=0)"),
+        expression("A1:D200", 3, "MOD(SUM(1:1),5)=0"),
+    ]
+    .concat();
+    let book = || {
+        workbook(&sheet(
+            rows(200, numbers(4, |row, col| row + col)),
+            formats.clone(),
+        ))
+    };
+    let expected: Vec<(u32, u32)> = (1..=200u32)
+        .flat_map(|row| (0..4u32).map(move |col| (row, col)))
+        .filter(|&(row, col)| {
+            let value = row + col;
+            value <= 20 || (col > 0 && value.is_multiple_of(7)) || row % 5 == 1
+        })
+        .map(|(row, col)| (row - 1, col))
+        .collect();
+    assert!(expected.contains(&(19, 0)));
+    assert!(expected.contains(&(26, 1)));
+    assert!(!expected.contains(&(21, 0)));
+    assert!(!expected.contains(&(27, 0)));
+    let workbook = book();
+    let geometry = GridGeometry::new(
+        workbook.sheet(SheetId(0)).unwrap(),
+        &workbook.model().styles,
+    );
+    let viewport = view(0.0, geometry.row_y(200));
+    let start = workbook.conditional_stats();
+    assert!(frame(&workbook, &viewport).conditional_pending > 0);
+    assert_eq!(
+        workbook.conditional_stats().slow_rules,
+        start.slow_rules + 3
+    );
+    for list in [
+        workbook.display_list(&viewport).unwrap(),
+        workbook.display_list_for(SheetId(0), &viewport).unwrap(),
+        workbook
+            .png_display_list_for(SheetId(0), &viewport)
+            .unwrap()
+            .0,
+    ] {
+        assert_eq!(list.conditional_pending, 0);
+        assert_eq!(cells(&geometry, &list), expected);
+    }
+    let (range, _, _) = book()
+        .range_png_display_list_for(
+            SheetId(0),
+            &RenderOptions {
+                range: Some(CellRange::parse_a1("A1:D200").unwrap()),
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(range.conditional_pending, 0);
+    assert_eq!(cells(&geometry, &range), expected);
+    let (settled, frames) = settle(&book(), &viewport, 64);
+    assert!(frames > 1);
+    assert_eq!(cells(&geometry, &settled), expected);
+}
+
 /// The `A1+$B$1>50` workbook of the parse test as a cellIs rule over the
 /// same values: `$B$1` holds 2.
 fn workbook_with_threshold(value: &str) -> Workbook {
