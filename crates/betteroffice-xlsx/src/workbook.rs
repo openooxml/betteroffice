@@ -3230,6 +3230,9 @@ impl Workbook {
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
             self.ensure_cells_writable(edit.sheet, [edit.cell], ProtectedSheets::Refuse)?;
+            if edit.number_format.is_some() {
+                self.ensure_cells_formattable(edit.sheet, ProtectedSheets::Refuse)?;
+            }
             let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -3344,6 +3347,9 @@ impl Workbook {
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
             self.ensure_cells_writable(sheet, [cell], ProtectedSheets::Refuse)?;
+            if edit.number_format.is_some() {
+                self.ensure_cells_formattable(sheet, ProtectedSheets::Refuse)?;
+            }
             let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
