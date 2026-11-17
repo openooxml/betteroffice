@@ -255,8 +255,8 @@ fn right_to_left_text_watermark_keeps_the_text_run() {
 }
 
 fn mark_centre(run: &Value) -> (f64, f64) {
-    let painted = painted_run(run);
-    (painted.pivot_x, painted.baseline - 0.2 * em_px(run))
+    let [left, top, right, bottom] = rotated_em_box_points(run);
+    ((left + right) / 1.5, (top + bottom) / 1.5)
 }
 
 fn margin_box_rows(page: &Value) -> (f64, f64) {
@@ -282,7 +282,10 @@ fn text_watermark_moves_down_with_the_margin_box_a_header_taller_than_the_top_ma
     assert!(overflow > 20.0, "{pushed_top}");
     let plain = mark_centre(&plain_page["primitives"][0]);
     let under_tall_header = mark_centre(&tall_page["primitives"][0]);
-    assert!((plain.1 - (plain_top + plain_bottom) / 2.0).abs() < 0.07, "{plain:?}");
+    assert!(
+        (plain.1 - (plain_top + plain_bottom) / 2.0).abs() < 0.07,
+        "{plain:?}"
+    );
     assert!(
         (under_tall_header.1 - (pushed_top + pushed_bottom) / 2.0).abs() < 0.07,
         "{under_tall_header:?} vs margin box {pushed_top}..{pushed_bottom}"
