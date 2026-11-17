@@ -59,3 +59,35 @@ test('scoped plain-text paste starts the clipboard read synchronously', async ()
     else Reflect.deleteProperty(navigator, 'clipboard');
   }
 });
+
+test('a bad-target refusal reports that the target changed', async () => {
+  const view = {
+    selection: null, composition: null, pending: [], waitingInputCount: 0,
+    confirmed: { frame: { slideId: 'slide' } },
+    editState: { readOnly: false, canUndo: false, canRedo: false,
+      toolbar: { target: null, formatting: null, alignment: null, table: null } },
+  };
+  const dispatch = mock(async () => ({
+    outcomes: [{ seq: 1, status: 'refused', reason: 'bad-target', committed: false }],
+    editState: view.editState,
+  }));
+  const run = {
+    current: true, require() {},
+    client: { state: { version: 'v1', slides: [{ id: 'slide', layoutPartPath: null }, { id: 'other', layoutPartPath: null }] } },
+    store: {
+      getSnapshot: () => view,
+      dispatch,
+      subscribeEditState: () => () => {},
+      subscribePresentation: () => () => {},
+    },
+  } as unknown as PeerlessPresentation;
+  const hook = renderHook(() => usePeerlessCommandBinding(run, {
+    tool: 'select', setTool() {}, openPicture() {}, save: async () => {}, focus() {},
+    zoom: 1, setZoom() {}, review: { open: false, selectedId: null, diff: false, presenting: false },
+    proposals: [], setReview() {}, exportPng: async () => {},
+  }));
+  expect(await hook.result.current.execute('deleteSlide', null)).toMatchObject({
+    ok: false, failure: { code: 'target-changed' },
+  });
+  expect(dispatch).toHaveBeenCalledTimes(1);
+});
