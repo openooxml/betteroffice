@@ -3,11 +3,12 @@ use betteroffice_xlsx::{
     NumberFormatMutation, ProposalEditInput, ProposalRequest, ProtectedSheets, Sheet, SheetId,
     StylePatch, Workbook, WorkbookModel,
 };
-use xlsx_model::{CellFormat, Protection, Xf};
+use xlsx_model::{CellFormat, ColStyle, Color, Fill, Protection, Xf};
 
 const FORM: SheetId = SheetId(0);
 const OPEN: SheetId = SheetId(1);
 const STYLED: SheetId = SheetId(2);
+const BANDED: SheetId = SheetId(3);
 
 fn cell(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
@@ -29,7 +30,8 @@ fn put(sheet: &mut Sheet, address: &str, value: f64, style: Option<u32>) {
 }
 
 /// Form is protected with A1 locked and B1:B2 unlocked, Open is unprotected and Styled is
-/// protected but lets users format cells.
+/// protected but lets users format cells. Banded is protected, lets users format cells and
+/// has blank columns with a red fill: B locked and E unlocked, and a locked D2.
 fn workbook() -> Workbook {
     fixture(true)
 }
@@ -55,11 +57,38 @@ fn fixture(protected: bool) -> Workbook {
     let mut styled = Sheet::new("Styled");
     put(&mut styled, "A1", 6.0, None);
     put(&mut styled, "B1", 7.0, Some(1));
-    model.sheets.extend([form, open, styled]);
+    let red = |protection| CellFormat {
+        fill: Fill::Solid(Color::Rgb("#ff0000".into())),
+        protection,
+        ..CellFormat::default()
+    };
+    let locked_red = model.styles.intern_cell_format(&red(None)).unwrap().unwrap();
+    let unlocked_red = model
+        .styles
+        .intern_cell_format(&red(Some(Protection {
+            locked: false,
+            hidden: false,
+        })))
+        .unwrap()
+        .unwrap();
+    let mut banded = Sheet::new("Banded");
+    banded.col_styles.push(ColStyle {
+        first: 1,
+        last: 1,
+        xf: locked_red,
+    });
+    banded.col_styles.push(ColStyle {
+        first: 4,
+        last: 4,
+        xf: unlocked_red,
+    });
+    put(&mut banded, "D2", 8.0, None);
+    model.sheets.extend([form, open, styled, banded]);
     let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
     let protections = [
         ("xl/worksheets/sheet1.xml", r#"sheet="1""#),
         ("xl/worksheets/sheet3.xml", r#"sheet="1" formatCells="0""#),
+        ("xl/worksheets/sheet4.xml", r#"sheet="1" formatCells="0""#),
     ];
     for (part, attributes) in protections.into_iter().filter(|_| protected) {
         let sheet = parts.iter_mut().find(|(name, _)| name == part).unwrap();
@@ -352,6 +381,44 @@ fn fill_writes_unlocked_destinations_and_unprotected_sheets() {
             .applied
     );
     assert_eq!(input(&open, FORM, "C1"), "1");
+}
+
+#[test]
+fn fill_refuses_a_locked_destination_that_only_takes_a_format() {
+    let mut book = workbook();
+    let version = book.version();
+    assert_eq!(
+        locked(book.fill_range(BANDED, range("A1"), range("A1:B1"), options())),
+        r#"B1 is locked on protected sheet "Banded""#
+    );
+    assert_eq!(book.version(), version);
+    assert!(!book.can_undo());
+    assert!(book.model().sheet(BANDED).unwrap().cell(cell("B1")).is_none());
+}
+
+#[test]
+fn fill_formats_unlocked_destinations_on_a_protected_sheet() {
+    let mut book = workbook();
+    assert!(
+        book.fill_range(BANDED, range("D1"), range("D1:E1"), options())
+            .unwrap()
+            .applied
+    );
+    let sheet = book.model().sheet(BANDED).unwrap();
+    assert!(sheet.cell(cell("E1")).is_some());
+    assert_ne!(sheet.effective_style(cell("E1")), sheet.inherited_style(cell("E1")));
+}
+
+#[test]
+fn fill_from_a_locked_source_writes_unlocked_destinations() {
+    let mut book = workbook();
+    assert!(
+        book.fill_range(BANDED, range("D2"), range("D2:E2"), options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(input(&book, BANDED, "D2"), "8");
+    assert_eq!(input(&book, BANDED, "E2"), "8");
 }
 
 #[test]
