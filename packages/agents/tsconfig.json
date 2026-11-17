@@ -25,8 +25,7 @@
       "@betteroffice/xlsx/worker": ["../xlsx/src/worker.ts"],
       "@betteroffice/pptx": ["../pptx/src/index.ts"],
       "@betteroffice/fonts": ["../fonts/src/index.ts"],
-      "@betteroffice/fonts/progressive": ["../fonts/src/progressive-entry.ts"],
-      "@betteroffice/fonts/remote": ["../fonts/src/remote.ts"]
+      "@betteroffice/fonts/progressive": ["../fonts/src/progressive-entry.ts"]
     }
   },
   "include": ["src", "test"]

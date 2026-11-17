@@ -44,9 +44,6 @@
       "@betteroffice/fonts/progressive": [
         "../../../packages/fonts/src/progressive-entry.ts"
       ],
-      "@betteroffice/fonts/remote": [
-        "../../../packages/fonts/src/remote.ts"
-      ],
       "@betteroffice/fonts-cjk": [
         "../../../packages/fonts-cjk/src/index.ts"
       ],
