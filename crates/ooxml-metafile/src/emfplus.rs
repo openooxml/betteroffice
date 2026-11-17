@@ -1613,29 +1613,52 @@ fn parse_image<const FULL: bool>(player: &mut Player<FULL>, data: &[u8]) -> Opti
             } else {
                 return None;
             };
+            let (source, repeat) = player.source_id(&[b"emf+", data]);
+            if let Some(bitmap) = player.cache.plus_images.get(&source) {
+                return Some(PlusImage::Bitmap(Arc::clone(bitmap)));
+            }
+            if player.cache.failed_sources.contains(&source) {
+                return None;
+            }
             let pixels = u64::from(width) * u64::from(height);
             let budget = player
                 .limits
                 .bitmap_pixels
                 .saturating_sub(player.bitmap_pixels);
-            if pixels > budget.min(crate::dib::MAX_BITMAP_PIXELS) {
+            let limit = if repeat { u64::MAX } else { budget };
+            if pixels > limit.min(crate::dib::MAX_BITMAP_PIXELS) {
                 player.refuse::<()>("the metafile's bitmaps exceed the pixel budget");
                 return None;
             }
-            player.charge(0, pixels)?;
+            let charged = if repeat { 0 } else { pixels };
+            let owed = pixels - charged;
+            let work = if repeat {
+                crate::player::repeat_work(pixels)
+            } else {
+                0
+            };
+            player.charge(work, charged)?;
             let pixels = match mime {
                 Some(mime) => Pixels::Encoded {
                     mime,
                     bytes: bits.to_vec(),
                 },
-                None => Pixels::Rgba(pixel_data(bits, width, height, stride, format)?),
+                None => match pixel_data(bits, width, height, stride, format) {
+                    Some(rgba) => Pixels::Rgba(rgba),
+                    None => {
+                        player.cache.failed_sources.insert(source);
+                        return None;
+                    }
+                },
             };
             let bitmap = Bitmap {
                 width,
                 height,
                 pixels,
             };
-            Some(PlusImage::Bitmap(Arc::new(bitmap)))
+            let bitmap = player.share_bitmap(bitmap, charged, owed)?;
+            player.cache.plus_images.insert(source, Arc::clone(&bitmap));
+            Some(PlusImage::Bitmap(bitmap))
         }
         2 => {
             let size = u32_at(data, 12)? as usize;

@@ -1,0 +1,8 @@
+{
+  "contextMenu": {
+    "text": "Text menu",
+    "shape": "Shape menu",
+    "table": "Table menu",
+    "slide": "Slide menu"
+  }
+}

@@ -8,7 +8,13 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.mts",
-      "import": "./dist/index.mjs"
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./shortcuts": {
+      "types": "./dist/shortcuts.d.mts",
+      "import": "./dist/shortcuts.mjs",
+      "default": "./dist/shortcuts.mjs"
     },
     "./styles.css": "./dist/styles.css"
   },
@@ -21,7 +27,7 @@
     "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
-    "build": "tsup && bun run build:css",
+    "build": "tsup && tsup --config tsup.shortcuts.config.ts && bun run build:css",
     "build:css": "tailwindcss -c ./tailwind.config.js -i ./src/styles/editor.css -o ./dist/styles.css --minify",
     "typecheck": "tsc --noEmit"
   },

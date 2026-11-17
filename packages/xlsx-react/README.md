@@ -77,7 +77,7 @@ workbook, and its command store is shared with the toolbar and host controls.
 | `validateEdits`, `applyEdits` | Validate or apply version-checked batches; refuse while read-only. |
 | `save()` | Commit input, return bytes and call `onSave` without downloading or consulting `onSaveRequest`. |
 | `focus()` | Focus the editor. |
-| `renderPng`, `renderRangePng`, `printDisplayList` | Render asynchronously. |
+| `renderPng`, `printDisplayList` | Render asynchronously. `renderPng` takes `{ sheet, viewport }` or `{ sheet, range }`. |
 | `exportStructured`, `exportMarkdown` | Export content asynchronously. |
 | `proposeChanges` | Optional method for staging tracked cell edits on worker editors. |
 | `collaboration` | Asynchronous collaboration replica, or `null`. |
@@ -114,6 +114,39 @@ overlays, and commands through restricted clients; their read and edit
 clients support version-checked operations. See
 [Host XLSX editor plugins](https://docs.betteroffice.dev/docs/javascript#host-xlsx-editor-plugins)
 and [Edit XLSX in version-checked batches](https://docs.betteroffice.dev/docs/javascript#edit-xlsx-in-version-checked-batches).
+
+Plugins read `snapshot.focused` and `snapshot.locale`, and receive
+`focus-change` and `locale-change`. Focus covers the document surface; docked panels
+and toolbar controls are outside. Locale is the canonical `i18n._lang`, defaulting to `en`.
+`layout.viewport` remains the grid viewport in sheet pixels.
+
+`proposal-change` carries `generation`, `version` and `previewVersion` when host
+proposals or their stale-decision state change, including committed edits while
+proposals remain. `geometry.getAnchorGeometry({ kind: 'proposal', id })` returns
+visible cell `rects`, their bounding `anchor` and the grid's `pageRect` in overlay
+pixels, alongside `version`, `previewVersion` and `layoutId`. XLSX does not expose
+`layout.previewVersion`; use the event's or anchor result's value for proposal state.
+Failures carry `{ code, message }`: `unknown-proposal` for an unregistered id,
+`missing-target` for no visible cells, `pending` while proposals refresh,
+`read-failed` when they cannot be read, and `layout-unavailable` for a superseded
+context or unpainted layout. The result type also allows `stale-version`,
+`ambiguous-target` and `unsupported`.
+
+`selection-settle` reports the current selection after a minimum quiet window of
+350 ms; engines may wait up to 1.5 seconds longer for paint. Sources are `pointer`,
+`touch` and `keyboard`; programmatic changes use `keyboard`. `snapshot.selectionSettled`
+is false while the selection changes. These experimental signals are on for installed
+plugins. `geometry.getAnchorGeometry({ kind: "selection" })` anchors to the live
+selection. Superseded retained contexts or unpainted layouts return `layout-unavailable`
+before the missing-selection check. Charts and absent selections return `missing-target`;
+cells on another sheet or offscreen return `layout-unavailable`. `readAnchorGeometries`
+returns the same answers in a promise. In-cell editing anchors to the cell.
+
+Granted mutating built-in commands require `document: "write"`. A trusted `click`, `keydown`,
+or `pointerup` in the plugin's own UI, including its contributed toolbar buttons, admits
+that plugin's mutating calls until the event finishes dispatching, including the handler
+and microtasks queued before it settles, whichever of the plugin's code paths makes them.
+Another plugin's calls and calls after the window closes refuse with `unsupported-policy`.
 
 ## Structured export
 

@@ -1,8 +1,8 @@
-import { defineConfig } from 'tsup';
+import { defineConfig, type Options } from 'tsup';
 import { fileURLToPath } from 'node:url';
 import { packageBoundary } from '../../scripts/package-boundary';
 
-export default defineConfig({
+export const library: Options = {
   entry: {
     index: 'src/index.ts',
     'peerless-harness': 'src/components/DocxEditor/peerless/browserHarness.ts',
@@ -23,4 +23,6 @@ export default defineConfig({
   esbuildOptions(options) {
     options.chunkNames = 'chunk-[hash]';
   },
-});
+};
+
+export default defineConfig(library);

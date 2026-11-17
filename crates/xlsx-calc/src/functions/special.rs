@@ -181,10 +181,42 @@ fn lngamma_shift(z: f64, d: f64) -> f64 {
     }
 }
 
+/// the largest n whose factorial a double holds.
+pub(crate) const MAX_FACTORIAL: u32 = 170;
+
+/// n!, rounded once: a plain product of doubles drifts up to six units in the
+/// last place past 27!, so what each step rounds off rides along in a second
+/// double.
+pub(crate) fn factorial(n: u32) -> f64 {
+    let (mut high, mut low) = (1.0_f64, 0.0_f64);
+    for factor in 2..=n {
+        let factor = f64::from(factor);
+        let product = high * factor;
+        low = low * factor + high.mul_add(factor, -product);
+        high = product + low;
+        low -= high - product;
+    }
+    high
+}
+
+/// `z - 1` when Gamma(z) is a factorial a double holds.
+fn factorial_of_gamma(z: f64) -> Option<u32> {
+    (z >= 1.0 && z == z.trunc() && z <= f64::from(MAX_FACTORIAL + 1)).then(|| z as u32 - 1)
+}
+
+/// ln Gamma(z) as the worksheet function shows it: exact where Gamma(z) is a
+/// factorial, so GAMMALN(3) is ln 2.
+pub(crate) fn lngamma_shown(z: f64) -> f64 {
+    factorial_of_gamma(z).map_or_else(|| lngamma(z), |n| factorial(n).ln())
+}
+
 /// Gamma(z) for any z that is not a non-positive integer (the caller checks
-/// the poles). negative arguments go through the reflection formula.
+/// the poles), exact at the positive integers. negative arguments go through
+/// the reflection formula.
 pub(crate) fn gamma_fn(z: f64) -> f64 {
-    if z < 0.5 && z != z.trunc() {
+    if let Some(n) = factorial_of_gamma(z) {
+        factorial(n)
+    } else if z < 0.5 && z != z.trunc() {
         PI / ((PI * z).sin() * gamma_fn(1.0 - z))
     } else if z < 0.5 {
         f64::NAN
@@ -835,4 +867,23 @@ pub(crate) fn chisq_tail(x: f64, df: f64) -> f64 {
 /// the chi-square density.
 pub(crate) fn chisq_pdf(x: f64, df: f64) -> f64 {
     gamma_pdf(x, 0.5 * df, 2.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gamma_fn, lngamma, lngamma_shown};
+
+    /// only the factorials take the exact path: every other argument computes
+    /// as it did, to the bit.
+    #[test]
+    fn exact_gamma_leaves_every_other_argument_alone() {
+        for z in [
+            0.5, 1.5, 2.5, 4.999_999, 5.000_001, 12.5, 170.5, 171.5, 172.0,
+        ] {
+            assert_eq!(gamma_fn(z).to_bits(), lngamma(z).exp().to_bits(), "{z}");
+            assert_eq!(lngamma_shown(z).to_bits(), lngamma(z).to_bits(), "{z}");
+        }
+        assert!(gamma_fn(-2.5) < 0.0);
+        assert_eq!(lngamma_shown(1000.0).to_bits(), lngamma(1000.0).to_bits());
+    }
 }

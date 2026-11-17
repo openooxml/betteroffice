@@ -259,7 +259,7 @@ fn parse_doc_defaults(element: Option<&XmlElement>, theme: Option<&Theme>) -> Op
             theme,
         ),
     };
-    (value != DocDefaults::default()).then_some(value)
+    Some(value)
 }
 
 fn resolve_style_inheritance(
@@ -406,6 +406,17 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_doc_defaults_element_is_present_but_a_missing_one_is_not() {
+        let empty = parse(
+            r#"<w:styles><w:docDefaults><w:rPrDefault/><w:pPrDefault/></w:docDefaults></w:styles>"#,
+        );
+        assert_eq!(empty.doc_defaults, Some(DocDefaults::default()));
+        let missing =
+            parse(r#"<w:styles><w:style w:type="paragraph" w:styleId="Title"/></w:styles>"#);
+        assert_eq!(missing.doc_defaults, None);
+    }
+
+    #[test]
     fn parses_on_default_style() {
         let definitions = parse(
             r#"<w:styles><w:style w:type="paragraph" w:styleId="Normal" w:default="on"/></w:styles>"#,
@@ -478,6 +489,44 @@ mod tests {
                 .rgb
                 .as_deref(),
             Some("FF0000")
+        );
+    }
+
+    #[test]
+    fn typography_inherits_through_character_and_paragraph_styles() {
+        let definitions = parse(
+            r#"<w:styles><w:docDefaults><w:rPrDefault><w:rPr><w14:ligatures w14:val="standard"/><w14:cntxtAlts/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w14:ligatures w14:val="contextual"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Normal"/></w:style><w:style w:type="character" w:styleId="Base"><w:rPr><w14:ligatures w14:val="all"/><w14:cntxtAlts w14:val="off"/></w:rPr></w:style><w:style w:type="character" w:styleId="Emphasis"><w:basedOn w:val="Base"/><w:rPr><w14:ligatures w14:val="invalid"/></w:rPr></w:style></w:styles>"#,
+        );
+        let defaults = definitions
+            .doc_defaults
+            .as_ref()
+            .unwrap()
+            .r_pr
+            .as_ref()
+            .unwrap();
+        assert_eq!(defaults.ligatures.as_deref(), Some("standard"));
+        assert_eq!(defaults.contextual_alternates, Some(true));
+        let child = definitions
+            .styles
+            .iter()
+            .find(|style| style.style_id == "Child")
+            .unwrap();
+        assert_eq!(
+            child.r_pr.as_ref().unwrap().ligatures.as_deref(),
+            Some("contextual")
+        );
+        let character = definitions
+            .styles
+            .iter()
+            .find(|style| style.style_id == "Emphasis")
+            .unwrap();
+        assert_eq!(
+            character.r_pr.as_ref().unwrap().ligatures.as_deref(),
+            Some("all")
+        );
+        assert_eq!(
+            character.r_pr.as_ref().unwrap().contextual_alternates,
+            Some(false)
         );
     }
 

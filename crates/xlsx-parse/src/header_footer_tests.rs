@@ -108,3 +108,14 @@ fn header_footer_element_all_empty_is_absent() {
         assert_eq!(parse_header_footer(xml.as_bytes()), None);
     }
 }
+
+#[test]
+fn header_footer_element_reads_literal_line_ends_as_line_feeds() {
+    let actual = parse_header_footer(
+        b"<headerFooter><oddHeader>&amp;CA\r\nB\rC&#13;D_x000D_E</oddHeader></headerFooter>",
+    )
+    .unwrap();
+    let header = actual.odd.header.unwrap();
+    assert_eq!(header.raw, "&CA\nB\nC\rD\rE");
+    assert_eq!(header.center, "A\nB\nC\nD\nE");
+}

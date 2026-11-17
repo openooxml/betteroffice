@@ -5,8 +5,9 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createPlan } from './plan.mjs';
+import { PRIVATE_BUCKET } from './private-corpus.mjs';
 import { privateLogDirectory, privateMode } from './private-step.mjs';
 
 const script = (name: string) => fileURLToPath(new URL(`./${name}`, import.meta.url));
@@ -28,9 +29,16 @@ async function withTemp(task: (root: string) => Promise<void>) {
   }
 }
 
+const ENDPOINT = `https://${'d'.repeat(32)}.r2.cloudflarestorage.com`;
+const BUCKET = `${ENDPOINT}/${PRIVATE_BUCKET}`;
+const signed: { url: string; authorization: string }[] = [];
+
 async function withOrigin(routes: Record<string, (response: any) => void>, task: (origin: string) => Promise<void>) {
   const server = createServer((request, response) => {
-    const route = routes[request.url ?? ''];
+    const path = request.url ?? '';
+    const inBucket = path.startsWith(`/${PRIVATE_BUCKET}/`);
+    if (inBucket) signed.push({ url: path, authorization: String(request.headers.authorization ?? '') });
+    const route = routes[inBucket ? path.slice(PRIVATE_BUCKET.length + 1) : path];
     if (route) route(response);
     else response.writeHead(404).end();
   });
@@ -48,6 +56,31 @@ async function privateLogs(directory: string) {
 }
 
 const leaks = (output: string, secrets: string[]) => secrets.filter((secret) => output.includes(secret));
+
+async function privateBucket(root: string, origin: string) {
+  const preload = join(root, 'route-r2.mjs');
+  await writeFile(preload, `const real = globalThis.fetch;
+globalThis.fetch = (input, init) => {
+  const url = String(input);
+  return real(url.startsWith(${JSON.stringify(ENDPOINT)}) ? ${JSON.stringify(origin)} + url.slice(${ENDPOINT.length}) : input, init);
+};
+`);
+  signed.length = 0;
+  return {
+    QUALITY_PRIVATE: 'true',
+    QUALITY_PRIVATE_LOGS: join(root, 'logs'),
+    PRIVATE_R2_ENDPOINT: ENDPOINT,
+    PRIVATE_R2_READ_KEY_ID: 'leakprobe-read-id',
+    PRIVATE_R2_READ_SECRET: 'leakprobe-read-secret',
+    NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+  };
+}
+
+function expectSignedReads() {
+  expect(signed.length).toBeGreaterThan(0);
+  for (const { authorization } of signed)
+    expect(authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=leakprobe-read-id\/\d{8}\/auto\/s3\/aws4_request, /);
+}
 
 test('private mode is explicit and needs a log directory', () => {
   expect(privateMode({})).toBe(false);
@@ -94,17 +127,18 @@ test('a planning failure on a fixture corpus names its samples publicly but not 
     [`/${ids[1]}/metadata.json`]: (response) => response.writeHead(503, { 'Retry-After': '0' }).end(),
   }, async (origin) => {
     await withTemp(async (root) => {
-      const secrets = [...ids, 'leakprobe-collection', origin.replace('http://', ''), 'metadata.json'];
-      const env = { QUALITY_COLLECTION: 'leakprobe-collection', QUALITY_CORPUS_ORIGIN: origin, QUALITY_OUTPUT: join(root, 'plan') };
+      const secrets = [...ids, 'leakprobe-collection', origin.replace('http://', ''), 'metadata.json', 'd'.repeat(32), 'leakprobe-read'];
+      const env = { QUALITY_COLLECTION: 'leakprobe-collection', QUALITY_OUTPUT: join(root, 'plan') };
       const plan = ['plan', '--', 'node', script('plan.mjs')];
-      const shown = await run(plan, { ...env, QUALITY_PRIVATE: 'false' });
+      const shown = await run(plan, { ...env, QUALITY_CORPUS_ORIGIN: origin, QUALITY_PRIVATE: 'false' });
       expect(shown.code).not.toBe(0);
       expect(leaks(shown.output, secrets).length).toBeGreaterThan(0);
-      const logs = join(root, 'logs');
-      const hidden = await run(plan, { ...env, QUALITY_PRIVATE: 'true', QUALITY_PRIVATE_LOGS: logs });
+      const bucket = await privateBucket(root, origin);
+      const hidden = await run(plan, { ...env, ...bucket });
       expect(hidden.code).not.toBe(0);
       expect(leaks(hidden.output, secrets)).toEqual([]);
-      expect(leaks(await privateLogs(logs), ids).length).toBeGreaterThan(0);
+      expect(leaks(await privateLogs(bucket.QUALITY_PRIVATE_LOGS), ids).length).toBeGreaterThan(0);
+      expectSignedReads();
     });
   });
 }, 30_000);
@@ -115,26 +149,31 @@ test('a staging failure on a fixture corpus names its sample and URL publicly bu
   await withOrigin({ [`/${id}/source.docx`]: (response) => response.writeHead(200).end(Buffer.from('tampered private-mode fixture!')) }, async (origin) => {
     await withTemp(async (root) => {
       const sha256 = createHash('sha256').update(bytes).digest('hex');
-      const source = { url: `${origin}/${id}/source.docx`, bytes: bytes.length, sha256 };
-      const formats = ['docx'];
-      const fixture = createPlan({ samples: [{ id, format: 'docx', metadata: { format: 'docx', source,
-        reference: { status: 'ok', dpi: 150, sha256, pages: 1 },
-        reference_pages: [{ url: `${origin}/${id}/reference/page_0001.png`, bytes: 1, sha256 }] } }],
-        source_sha: 'b'.repeat(40), commit: 'b'.repeat(40), react_version: '1.0.0', versions: { docx: '1.0.0', pptx: '1.0.0', xlsx: '1.0.0' },
-        docx_published_source_sha: 'c'.repeat(40), formats });
-      const planPath = join(root, 'plan.json');
-      await writeFile(planPath, JSON.stringify(fixture));
-      const secrets = [id, origin.replace('http://', ''), 'source.docx'];
-      const env = { QUALITY_CORPUS_ORIGIN: origin, QUALITY_PLAN: planPath, QUALITY_FORMAT: 'docx', QUALITY_SHARD: '0', QUALITY_OUTPUT: join(root, 'output') };
+      const planAt = async (base: string) => {
+        const fixture = createPlan({ samples: [{ id, format: 'docx', metadata: { format: 'docx',
+          source: { url: `${base}/${id}/source.docx`, bytes: bytes.length, sha256 },
+          reference: { status: 'ok', dpi: 150, sha256, pages: 1 },
+          reference_pages: [{ url: `${base}/${id}/reference/page_0001.png`, bytes: 1, sha256 }] } }],
+          source_sha: 'b'.repeat(40), commit: 'b'.repeat(40), react_version: '1.0.0', versions: { docx: '1.0.0', pptx: '1.0.0', xlsx: '1.0.0' },
+          docx_published_source_sha: 'c'.repeat(40), formats: ['docx'] });
+        const path = join(root, `plan-${base === origin ? 'public' : 'private'}.json`);
+        await writeFile(path, JSON.stringify(fixture));
+        return path;
+      };
+      const secrets = [id, origin.replace('http://', ''), 'source.docx', 'd'.repeat(32), 'leakprobe-read'];
+      const env = { QUALITY_FORMAT: 'docx', QUALITY_SHARD: '0', QUALITY_OUTPUT: join(root, 'output') };
       const stage = ['roundtrip-stage', '--', 'node', script('roundtrip.mjs')];
-      const shown = await run(stage, { ...env, QUALITY_PRIVATE: 'false' });
+      const shown = await run(stage, { ...env, QUALITY_CORPUS_ORIGIN: origin, QUALITY_PLAN: await planAt(origin), QUALITY_PRIVATE: 'false' });
       expect(shown.code).not.toBe(0);
       expect(leaks(shown.output, secrets).length).toBeGreaterThan(0);
-      const logs = join(root, 'logs');
-      const hidden = await run(stage, { ...env, QUALITY_PRIVATE: 'true', QUALITY_PRIVATE_LOGS: logs });
+      const bucket = await privateBucket(root, origin);
+      const hidden = await run(stage, { ...env, ...bucket, QUALITY_PLAN: await planAt(BUCKET) });
       expect(hidden.code).not.toBe(0);
       expect(leaks(hidden.output, secrets)).toEqual([]);
-      expect(leaks(await privateLogs(logs), [id]).length).toBeGreaterThan(0);
+      const logs = await privateLogs(bucket.QUALITY_PRIVATE_LOGS);
+      expect(leaks(logs, [id]).length).toBeGreaterThan(0);
+      expect(logs).toContain('Corpus hash mismatch');
+      expectSignedReads();
     });
   });
 }, 30_000);

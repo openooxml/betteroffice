@@ -1,12 +1,15 @@
 //! PyO3 bindings over the `betteroffice-docx` facade.
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyInt};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyString};
 use python_common::map_io_error;
 
 use betteroffice_docx::{
@@ -63,6 +66,20 @@ create_exception!(
     DocxError,
     "The engine refused a structured export's or a content-control listing's options."
 );
+
+fn png_target_index(target: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let invalid =
+        || PyValueError::new_err("target must be a dict containing only a nonnegative page index");
+    let target = target.cast::<PyDict>().map_err(|_| invalid())?;
+    if target.len() != 1 {
+        return Err(invalid());
+    }
+    let index = target.get_item("page")?.ok_or_else(invalid)?;
+    if index.is_instance_of::<PyBool>() {
+        return Err(invalid());
+    }
+    index.extract::<usize>().map_err(|_| invalid())
+}
 
 fn map_error(error: CoreError) -> PyErr {
     let message = error.to_string();
@@ -763,23 +780,35 @@ fn offset_repr(offset: Option<u32>) -> String {
     frozen,
     from_py_object
 )]
-#[derive(Clone)]
 pub struct PyDisplayList {
     inner: DisplayList,
-    payload: String,
+    payload: OnceLock<Py<PyString>>,
     #[pyo3(get)]
     contract_version: Option<u32>,
 }
 
+impl Clone for PyDisplayList {
+    fn clone(&self) -> Self {
+        Self::new(self.inner.clone())
+    }
+}
+
 impl PyDisplayList {
-    fn new(inner: DisplayList) -> PyResult<Self> {
-        let payload = serde_json::to_string(&inner)
-            .map_err(|error| LayoutError::new_err(error.to_string()))?;
-        Ok(Self {
+    fn new(inner: DisplayList) -> Self {
+        Self {
             contract_version: inner.contract_version,
             inner,
-            payload,
-        })
+            payload: OnceLock::new(),
+        }
+    }
+
+    fn payload<'py>(&self, py: Python<'py>) -> Result<Bound<'py, PyString>, serde_json::Error> {
+        if let Some(text) = self.payload.get() {
+            return Ok(text.bind(py).clone());
+        }
+        let text = py.detach(|| serde_json::to_string(&self.inner))?;
+        let text = PyString::new(py, &text).unbind();
+        Ok(self.payload.get_or_init(|| text).bind(py).clone())
     }
 }
 
@@ -790,12 +819,13 @@ impl PyDisplayList {
     fn from_json(text: &str) -> PyResult<Self> {
         let inner: DisplayList = serde_json::from_str(text)
             .map_err(|error| PyValueError::new_err(format!("invalid display list: {error}")))?;
-        Self::new(inner)
+        Ok(Self::new(inner))
     }
 
     #[getter]
-    fn json(&self) -> &str {
-        &self.payload
+    fn json<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyString>> {
+        self.payload(py)
+            .map_err(|error| LayoutError::new_err(error.to_string()))
     }
 
     #[getter]
@@ -808,12 +838,17 @@ impl PyDisplayList {
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        py.import("json")?
-            .call_method1("loads", (self.payload.as_str(),))
+        let payload = self.json(py)?;
+        py.import("json")?.call_method1("loads", (payload,))
     }
 
     fn write(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
-        py.detach(|| fs::write(&path, self.payload.as_bytes()))
+        let payload = self
+            .payload(py)
+            .map_err(|error| map_io_error(&io::Error::from(error), &path))?;
+        let bytes = payload.encode_utf8()?;
+        let bytes = bytes.as_bytes();
+        py.detach(|| fs::write(&path, bytes))
             .map_err(|error| map_io_error(&error, &path))
     }
 
@@ -836,12 +871,16 @@ pub struct PyLayout {
     payload: String,
     #[pyo3(get)]
     pages: usize,
-    #[pyo3(get)]
-    display_list: PyDisplayList,
+    display_list: Py<PyDisplayList>,
 }
 
 #[pymethods]
 impl PyLayout {
+    #[getter]
+    fn display_list(&self, py: Python<'_>) -> Py<PyDisplayList> {
+        self.display_list.clone_ref(py)
+    }
+
     #[getter]
     fn json(&self) -> &str {
         &self.payload
@@ -867,12 +906,15 @@ impl PyLayout {
 }
 
 /// One rasterized page. `skipped_images` counts the image references the
-/// backend could not resolve and left undrawn.
+/// backend could not resolve and left undrawn; `skipped_effects` counts, by
+/// kind, the effects it left out of primitives it otherwise drew.
 #[pyclass(module = "betteroffice_docx", name = "Png", frozen)]
 pub struct PyPng {
     data: Vec<u8>,
     #[pyo3(get)]
     skipped_images: usize,
+    #[pyo3(get)]
+    skipped_effects: BTreeMap<String, usize>,
 }
 
 #[pymethods]
@@ -1306,7 +1348,7 @@ impl PyDocument {
         Ok(PyLayout {
             payload,
             pages: result.layout.pages.len(),
-            display_list: PyDisplayList::new(result.display_list)?,
+            display_list: Py::new(py, PyDisplayList::new(result.display_list))?,
         })
     }
 
@@ -1341,9 +1383,24 @@ impl PyDocument {
             .map_err(map_error)
     }
 
-    /// Rasterize one display-list page to deterministic PNG bytes.
+    #[pyo3(signature = (target, *, scale = 1.0))]
+    fn render_png(&self, py: Python<'_>, target: &Bound<'_, PyAny>, scale: f32) -> PyResult<PyPng> {
+        let target = betteroffice_docx::PngTarget {
+            page: png_target_index(target)?,
+        };
+        let options = betteroffice_docx::RenderOptions { scale };
+        let rendered = py
+            .detach(|| self.inner.render_png(target, &options))
+            .map_err(map_error)?;
+        Ok(PyPng {
+            data: rendered.bytes,
+            skipped_images: rendered.skipped_images,
+            skipped_effects: rendered.skipped_effects,
+        })
+    }
+
     #[pyo3(signature = (display_list, page = 0))]
-    fn render_png(
+    fn render_display_list_png(
         &self,
         py: Python<'_>,
         display_list: &PyDisplayList,
@@ -1351,11 +1408,12 @@ impl PyDocument {
     ) -> PyResult<PyPng> {
         let list = &display_list.inner;
         let rendered = py
-            .detach(|| self.inner.render_png(list, page))
+            .detach(|| self.inner.render_display_list_png(list, page))
             .map_err(map_error)?;
         Ok(PyPng {
             data: rendered.bytes,
             skipped_images: rendered.skipped_images,
+            skipped_effects: rendered.skipped_effects,
         })
     }
 

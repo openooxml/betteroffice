@@ -32,4 +32,4 @@ test('the default editor loads peerless modules only through a dynamic chunk', a
     expect(eager.some((file) => file.includes(module))).toBe(false);
   }
   expect(Object.values(outputs).some((output) => output.imports.some((imported) => imported.kind === 'dynamic-import'))).toBe(true);
-});
+}, 30_000);

@@ -70,18 +70,24 @@ Upgrading from 0.4? See [Migrating to 0.5](https://docs.betteroffice.dev/docs/mi
 
 ## Fonts
 
-BetterOffice bundles metric-compatible replacements for Microsoft's core fonts (Carlito for Calibri, Caladea for Cambria, Liberation for Arial, Times New Roman and Courier New), so line breaks and pagination match Office without the originals. Faces ship compressed: zstd, plus the WOFF2 glyf/loca transform for TrueType faces.
+BetterOffice ships open fonts with the same advance widths as the Microsoft core fonts, so
+pagination and line breaks match Office. Packs are compressed with zstd, each bold or italic against
+its family's Regular; Latin faces also use a WOFF2-style glyph transform.
 
-- **Web:** a face loads on demand, only when a document uses it. Fonts we don't bundle are fetched on demand from Bunny Fonts by default (no logging, EU-based); switch to Google, your own URL, or turn remote fonts off. The spreadsheet editor does this today; the document and presentation editors use a generic fallback for those fonts until they measure with the fetched faces.
-- **Native, Rust and Python:** fonts are bundled and read locally; nothing is fetched.
+**Browser editors.** While the main engine initializes, a small preflight WebAssembly module scans
+the document in parallel and starts loading only the fonts it needs from jsDelivr, with CJK fonts
+arriving in slices. Open fonts that aren't in BetterOffice's packs come from Bunny Fonts, a
+GDPR-compliant Google Fonts alternative; switch to Google Fonts or your own URL, or turn remote
+fonts off. The spreadsheet editor paints with those fetched faces today; the document and
+presentation editors use a generic fallback for them until they measure with the fetched faces.
+You can also bundle the font packs yourself.
 
-| Pack | Covers | Size |
-|---|---|---:|
-| `@betteroffice/fonts-latin` | Office core families, Hebrew, Arabic | 4.6 MB |
-| `@betteroffice/fonts-intl` | 23 more scripts, incl. Thai, Indic, Armenian, Georgian, Ethiopic | 2.2 MB |
-| `@betteroffice/fonts-cjk` | Chinese (Simplified and Traditional), Japanese, Korean | 26.7 MB |
+**Headless engines (`-native`, Python, Rust).** All fonts are included by default, so nothing is
+fetched.
 
-See [Fonts](https://docs.betteroffice.dev/docs/fonts) for resolution order, runtimes and remote font settings.
+**Resolution order.** Fonts embedded in the document, fonts supplied by your app, BetterOffice's
+font packs, then a last-resort fallback face. See [Fonts](https://docs.betteroffice.dev/docs/fonts)
+for runtimes and remote font settings.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks

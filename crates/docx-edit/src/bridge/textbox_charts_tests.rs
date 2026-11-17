@@ -133,7 +133,7 @@ fn hidden_text_box_chart_obeys_show_hidden_text() {
 
 #[test]
 fn text_box_chart_carrier_uses_constrained_chart_dimensions() {
-    use docx_layout::types::Run;
+    use docx_layout::types::{Run, RunFormatting};
 
     use crate::bridge::RenderEnv;
 
@@ -148,11 +148,16 @@ fn text_box_chart_carrier_uses_constrained_chart_dimensions() {
                 "chartType": "column", "size": {"width": width, "height": height},
                 "series": [{"name": "Sales", "categories": ["Q1"], "values": [2.0]}]
             }}]});
+            let env = RenderEnv {
+                page_content_height: page_height,
+                ..RenderEnv::default()
+            };
             let runs = super::shape_document_runs(
                 &run,
-                &RenderEnv {
-                    page_content_height: page_height,
-                    ..RenderEnv::default()
+                &super::ShapeRunStyles {
+                    env: &env,
+                    paragraph: None,
+                    defaults: RunFormatting::default(),
                 },
             );
             let Run::Image(image) = &runs[0] else {

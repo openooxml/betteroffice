@@ -16,6 +16,8 @@ export type {
   PathStroke,
   PathCmd,
   TextCmd,
+  ImageCmd,
+  ImageCrop,
   DrawCmd,
   DisplayList,
   GridMeta,

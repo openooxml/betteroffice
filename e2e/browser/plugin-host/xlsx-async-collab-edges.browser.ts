@@ -82,6 +82,46 @@ async function history(page: Page, index: number, direction: 'undo' | 'redo') {
   await button.click();
 }
 
+async function merge(page: Page, index: number, row: number, col: number) {
+  await select(page, index, row, col);
+  const scroll = peer(page, index).getByTestId('xlsx-scroll');
+  await scroll.press('Shift+ArrowRight');
+  await scroll.press('Shift+ArrowDown');
+  await expect.poll(() => pinnedEvaluate(page, (index) => window.__xlsxWorkerEditor.peerless!.selection(index), index))
+    .toMatchObject({ cells: { anchor: { row, col }, focus: { row: row + 1, col: col + 1 } } });
+  await expect.poll(() => page.evaluate((index) =>
+    window.__xlsxWorkerEditor.peerless!.editorAt(index).commands.getState('merge', { value: 'all' }).enabled, index)).toBe(true);
+  expect(await pinnedEvaluate(page, (index) =>
+    window.__xlsxWorkerEditor.peerless!.editorAt(index).commands.execute('merge', { value: 'all' }), index)).toMatchObject({ ok: true });
+}
+
+async function merged(page: Page, index: number, row: number, col: number, expected: boolean) {
+  await select(page, index, row, col);
+  await expect.poll(() => page.evaluate((index) =>
+    window.__xlsxWorkerEditor.peerless!.editorAt(index).commands.getState('merge', { value: 'unmerge' }).enabled, index)).toBe(expected);
+}
+
+test('concurrent merges from both peers converge, undo and redo, and save the same merges', async ({ page }) => {
+  await page.evaluate(() => window.__xlsxWorkerEditor.pauseDelivery());
+  await merge(page, 0, 2, 2);
+  await merge(page, 1, 5, 5);
+  await queued(page, 0);
+  await queued(page, 1);
+  await resume(page);
+  for (const index of [0, 1]) {
+    await merged(page, index, 2, 2, true);
+    await merged(page, index, 5, 5, true);
+  }
+  await history(page, 0, 'undo');
+  for (const index of [0, 1]) {
+    await merged(page, index, 2, 2, false);
+    await merged(page, index, 5, 5, true);
+  }
+  await history(page, 0, 'redo');
+  for (const index of [0, 1]) await merged(page, index, 2, 2, true);
+  for (const saved of await savedPeers(page)) expect([...saved[sheet].merges].sort()).toEqual(['C3:D4', 'F6:G7']);
+});
+
 test('concurrent formatting and a value edit in the same cell preserve both changes', async ({ page }) => {
   await page.evaluate(() => window.__xlsxWorkerEditor.pauseDelivery());
   await peer(page, 0).getByRole('button', { name: 'Bold', exact: true }).click();

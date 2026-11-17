@@ -1,19 +1,22 @@
-import { expect, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import JSZip from 'jszip';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { openPresentation } from '@betteroffice/pptx';
+import { initWasm, openPresentation } from '@betteroffice/pptx';
 import { createOfficeMcpServer } from '../src/mcp';
 import { attachPptx, openPptx } from '../src/pptx';
 import { pptxEditSchema } from '../src/pptx-schema';
 import { tableFixture } from './pptx-fixture';
+import { initialize } from '../src/prototype';
 
-async function connect(merged = false) {
+beforeAll(() => initialize('pptx', initWasm));
+
+async function connect(merged = false, fixture?: Uint8Array) {
   const root = await mkdtemp(join(tmpdir(), 'pptx-table-'));
-  const source = await tableFixture(merged);
+  const source = fixture ?? await tableFixture(merged);
   await writeFile(join(root, 'deck.pptx'), source);
   const server = await createOfficeMcpServer({ root });
   const client = new Client({ name: 'table-test', version: '1' });
@@ -29,7 +32,7 @@ async function connect(merged = false) {
   const { document } = await call('office_open', { path: 'deck.pptx' });
   const outline = await call('pptx_outline', { document });
   const slide = outline.slides[0].id;
-  const shape = outline.slides[0].shapes.find((s: any) => s.name === 'Table 8').id;
+  const shape = (outline.slides[0].shapes.find((s: any) => s.name === 'Table 8') ?? outline.slides[0].shapes[0]).id;
   return { root, source, document, slide, shape, call, raw, version: outline.version,
     close: async () => { await client.close(); await server.close(); await rm(root, { recursive: true, force: true }); } };
 }
@@ -151,5 +154,74 @@ test('insert_table_column schema names invalid width values', () => {
   if (!result.success) {
     expect(result.error.issues.some(issue => issue.path.includes('width'))).toBe(true);
     expect(result.error.message).toContain('width');
+  }
+});
+
+test.each(['insertTableRow', 'deleteTableRow', 'insertTableColumn', 'deleteTableColumn'] as const)('office_propose exposes %s and accepts table edits atomically', async type => {
+  const c = await connect();
+  try {
+    const { document, slide, shape } = c;
+    const before = await c.call('pptx_read_slide', { document, slide });
+    const edit = type === 'insertTableRow' || type === 'insertTableColumn'
+      ? { type, slideId: slide, shapeId: shape, index: 0, position: 'after', cells: ['Agent cell'] }
+      : { type, slideId: slide, shapeId: shape, index: 0 };
+    const pending = await c.call('office_propose', { document, author: 'agent', edits: [edit] });
+    expect(await c.call('pptx_read_slide', { document, slide })).toEqual(before);
+    await c.call('office_reject', { document, proposal: pending.id });
+    expect(await c.call('pptx_read_slide', { document, slide })).toEqual(before);
+    const accepted = await c.call('office_propose', { document, author: 'agent', edits: [edit] });
+    await c.call('office_accept', { document, proposal: accepted.id });
+    const after = await c.call('pptx_read_slide', { document, slide });
+    const table = after.shapes.find((entry: any) => entry.id === shape).table;
+    expect(table.rows).toBe(type === 'insertTableRow' ? 4 : type === 'deleteTableRow' ? 2 : 3);
+    expect(table.columns).toBe(type === 'insertTableColumn' ? 4 : type === 'deleteTableColumn' ? 2 : 3);
+    const invalid = await c.raw('office_propose', { document, author: 'agent', edits: [{ ...edit, index: 99 }] });
+    expect(invalid.isError).toBe(true);
+    expect(await c.call('pptx_read_slide', { document, slide })).toEqual(after);
+  } finally { await c.close(); }
+});
+
+test('table proposal schema rejects invalid positions, widths, indices and extra keys', async () => {
+  const { pptxProposalEditSchema } = await import('../src/pptx-schema');
+  const edit = { type: 'insertTableColumn', slideId: '@slide', shapeId: '@shape', index: 0, position: 'before' };
+  expect(pptxProposalEditSchema.safeParse(edit).success).toBe(true);
+  expect(pptxProposalEditSchema.safeParse({ ...edit, width: 'copy', cells: ['A'] }).success).toBe(true);
+  for (const extra of [{ index: -1 }, { index: 0.5 }, { index: 4294967296 }, { position: 'middle' }, { width: 'stretch' }, { cells: [1] }, { extra: true }]) {
+    expect(pptxProposalEditSchema.safeParse({ ...edit, ...extra }).success).toBe(false);
+  }
+});
+
+test.each(['front', 'back', 'forward', 'backward'] as const)('office_propose exposes reorderShape %s without changing the live order before acceptance', async to => {
+  const fixture = await readFile(new URL('../../../crates/pptx-edit/tests/fixtures/proposal-shapes.pptx', import.meta.url));
+  const c = await connect(false, fixture);
+  try {
+    const { document, slide } = c;
+    const before = await c.call('pptx_read_slide', { document, slide });
+    const shape = before.shapes[to === 'back' || to === 'backward' ? 1 : 0].id;
+    const edit = { type: 'reorderShape', slideId: slide, shapeId: shape, to };
+    const pending = await c.call('office_propose', { document, author: 'agent', edits: [edit] });
+    expect(pending.changes[0]).toMatchObject({ ref: shape, slide: 1, kind: 'content' });
+    expect(await c.call('pptx_read_slide', { document, slide })).toEqual(before);
+    await c.call('office_reject', { document, proposal: pending.id });
+    expect(await c.call('pptx_read_slide', { document, slide })).toEqual(before);
+    const accepted = await c.call('office_propose', { document, author: 'agent', edits: [edit] });
+    await c.call('office_accept', { document, proposal: accepted.id });
+    const after = await c.call('pptx_read_slide', { document, slide });
+    expect(after.shapes.map((entry: any) => entry.id)).toEqual(before.shapes.map((entry: any) => entry.id).reverse());
+    for (const invalid of [{ ...edit, to: 'up' }, { ...edit, extra: true }, { ...edit, shapeId: 'missing' }]) {
+      expect((await c.raw('office_propose', { document, author: 'agent', edits: [invalid] })).isError).toBe(true);
+      expect(await c.call('pptx_read_slide', { document, slide })).toEqual(after);
+    }
+  } finally { await c.close(); }
+});
+
+test('reorder proposal schema accepts both refs and strictly validates direction and keys', async () => {
+  const { pptxProposalEditSchema } = await import('../src/pptx-schema');
+  const edit = { type: 'reorderShape', slideId: '@slide', shapeId: '@shape', to: 'front' };
+  for (const to of ['front', 'back', 'forward', 'backward']) {
+    expect(pptxProposalEditSchema.safeParse({ ...edit, to }).success).toBe(true);
+  }
+  for (const invalid of [{ ...edit, to: 'up' }, { ...edit, to: null }, { ...edit, to: undefined }, { ...edit, extra: true }]) {
+    expect(pptxProposalEditSchema.safeParse(invalid).success).toBe(false);
   }
 });

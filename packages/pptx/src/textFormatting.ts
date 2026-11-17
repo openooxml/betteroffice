@@ -4,6 +4,7 @@ export interface EffectiveTextStyle {
   bold: boolean;
   italic: boolean;
   underline: string;
+  strike?: string;
   fontSizePt: number;
   color: string;
   fontFamily: string;
@@ -22,6 +23,7 @@ export interface SelectionTextFormatting {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  strikethrough?: boolean;
   fontSize?: number;
   textColor?: string;
   fontFamily?: string;
@@ -41,10 +43,13 @@ export function selectionFormattingFromStory(
 ): SelectionTextFormatting {
   const styles = selectedStyles(story, anchor, focus, fallback);
   const underline = commonValue(styles, 'underline');
+  const strikes = styles.map((style) => style.strike === 'sngStrike' || style.strike === 'dblStrike');
+  const strikethrough = strikes.every((strike) => strike === strikes[0]) ? strikes[0] : undefined;
   return {
     bold: commonValue(styles, 'bold'),
     italic: commonValue(styles, 'italic'),
     underline: underline === undefined ? undefined : underline !== 'none',
+    strikethrough,
     fontSize: commonValue(styles, 'fontSizePt'),
     textColor: commonValue(styles, 'color'),
     fontFamily: commonValue(styles, 'fontFamily'),
@@ -65,6 +70,9 @@ export function effectiveStyleFromSelection(
   fallback: EffectiveTextStyle
 ): EffectiveTextStyle {
   const formatting = selectionFormattingFromStory(story, anchor, focus, fallback);
+  const strike = commonValue(selectedStyles(story, anchor, focus, fallback), 'strike');
+  const selectedStrike = strike ?? (formatting.strikethrough === undefined ? fallback.strike
+    : formatting.strikethrough ? 'sngStrike' : undefined);
   return {
     bold: formatting.bold ?? fallback.bold,
     italic: formatting.italic ?? fallback.italic,
@@ -74,16 +82,26 @@ export function effectiveStyleFromSelection(
         : formatting.underline
           ? 'sng'
           : 'none',
+    ...(selectedStrike === undefined ? {} : { strike: selectedStrike }),
     fontSizePt: formatting.fontSize ?? fallback.fontSizePt,
     color: formatting.textColor ?? fallback.color,
     fontFamily: formatting.fontFamily ?? fallback.fontFamily,
   };
 }
 
+export function typingStyle<T extends { strike?: string | null }>(style: T): T {
+  return style.strike === 'noStrike' ? { ...style, strike: undefined } : style;
+}
+
+export function insertionStyle<T extends { strike?: string | null }>(style: T): T {
+  return Object.prototype.hasOwnProperty.call(style, 'strike') && style.strike === undefined
+    ? { ...style, strike: 'noStrike' } : style;
+}
+
 export function insertionStyleFromSelection(
   story: StorySnapshot, anchor: number, focus: number, storedMarks: TextStyle,
 ): TextStyle {
-  return { ...effectiveStyleFromSelection(story, anchor, focus, DEFAULT_EDITOR_TEXT_STYLE), ...storedMarks };
+  return insertionStyle({ ...effectiveStyleFromSelection(story, anchor, focus, DEFAULT_EDITOR_TEXT_STYLE), ...storedMarks });
 }
 
 export function insertionEchoRun(
@@ -93,8 +111,9 @@ export function insertionEchoRun(
   const inserted = { ...insertionStyleFromSelection(story, anchor, focus, storedMarks), caps: null };
   const identical = (style: TextStyleSnapshot) => {
     const properties = new Set([...Object.keys(style), ...Object.keys(inserted)]);
-    return [...properties].every((key) =>
-      (style[key as keyof TextStyleSnapshot] ?? null) === (inserted[key as keyof typeof inserted] ?? null));
+    return [...properties].every((key) => key === 'strike'
+      ? (style.strike ?? 'noStrike') === (inserted.strike ?? 'noStrike')
+      : (style[key as keyof TextStyleSnapshot] ?? null) === (inserted[key as keyof typeof inserted] ?? null));
   };
   let position = 0;
   for (const paragraph of story.paragraphs) {
@@ -165,10 +184,12 @@ function resolveTextStyle(
   style: TextStyleSnapshot,
   fallback: EffectiveTextStyle
 ): EffectiveTextStyle {
+  const strike = style.strike ?? fallback.strike;
   return {
     bold: style.bold ?? fallback.bold,
     italic: style.italic ?? fallback.italic,
     underline: style.underline ?? fallback.underline,
+    ...(strike === undefined ? {} : { strike }),
     fontSizePt: style.fontSizePt ?? fallback.fontSizePt,
     color: style.color ?? fallback.color,
     fontFamily: style.fontFamily ?? fallback.fontFamily,

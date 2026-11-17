@@ -129,6 +129,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
   const dependencies = { engine, fonts: new ResidentSessionFonts(engine), init, revision: 0,
     relayout() { state.layoutDirty = true; relaidBuild = true; },
     preparedFonts: new WeakMap(), registerCommandFonts, GlyphCache,
+    commandFontSlots: null, openProgressiveFonts: () => null, setProgressiveFonts() {},
     reply() {}, intactBackBuffers: new Map(), forgetRequirementsCache() {},
     retainedLayoutVersion: null, fontRequirements: null,
     loadRustDisplayListQueryEngine: async () => null, loadedRustDisplayListQueryEngine: () => null,

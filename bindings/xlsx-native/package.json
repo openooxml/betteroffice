@@ -9,11 +9,7 @@
   "imports": {
     "#session-worker": {
       "node": "./dist/sessionWorker.node.js",
-      "default": "./dist/sessionWorker.browser.js"
-    },
-    "#session-scope": {
-      "node": "./dist/sessionScope.node.js",
-      "default": "./dist/sessionScope.browser.js"
+      "default": "./dist/sessionWorker.missing.js"
     }
   },
   "exports": {
@@ -53,7 +49,10 @@
       "x86_64-apple-darwin",
       "aarch64-unknown-linux-gnu",
       "x86_64-unknown-linux-gnu",
-      "x86_64-pc-windows-msvc"
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "aarch64-pc-windows-msvc"
     ]
   },
   "engines": {
@@ -96,6 +95,12 @@
     "**/xlsxSessionWorker.*",
     "**/session/worker.*"
   ],
+  "dependencies": {
+    "@betteroffice/fonts": "workspace:^",
+    "@betteroffice/fonts-cjk": "workspace:^",
+    "@betteroffice/fonts-intl": "workspace:^",
+    "@betteroffice/fonts-latin": "workspace:^"
+  },
   "devDependencies": {
     "@types/node": "^26.0.0",
     "tsup": "^8.5.1",

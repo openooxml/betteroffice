@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mergeFromPaths, mergeReports } from './merge.mjs';
+import { measureShards } from './measure-shards.mjs';
 
 const commit = 'c'.repeat(40);
 const sourceSha = 'd'.repeat(40);
@@ -131,9 +132,9 @@ async function writeFixture(root: string, requireRenders = false) {
   const paths = fixture(root);
   await writeFile(paths.plan, JSON.stringify(plan()));
   for (const report of reports()) {
-    const directory = join(paths.parts, `visual-fidelity-report-${report.format}`);
+    const directory = join(paths.parts, `visual-fidelity-report-${report.format}-0`);
     await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, 'report.json'), JSON.stringify(report));
+    await writeFile(join(directory, 'report.json'), JSON.stringify({ ...report, shard: 0 }));
   }
   if (requireRenders) {
     for (const [id, pages] of [
@@ -144,7 +145,7 @@ async function writeFixture(root: string, requireRenders = false) {
       const format = id.startsWith('docx') ? 'docx' : 'pptx';
       const directory = join(
         paths.parts,
-        `visual-fidelity-renders-${format}`,
+        `visual-fidelity-renders-${format}-0`,
         id,
         'commit'
       );
@@ -155,7 +156,7 @@ async function writeFixture(root: string, requireRenders = false) {
           `render ${id} ${page}`
         );
       await writeFile(
-        join(paths.parts, `visual-fidelity-renders-${format}`, 'report.json'),
+        join(paths.parts, `visual-fidelity-renders-${format}-0`, 'report.json'),
         '{}'
       );
     }
@@ -268,10 +269,10 @@ test('skips a successful zero-page commit render', async () => {
     pptx.samples[0].comparisons[1].actual_pages = 0;
     pptx.samples[0].comparisons[1].penalized_ssim = 0;
     await writeFile(
-      join(paths.parts, 'visual-fidelity-report-pptx', 'report.json'),
-      JSON.stringify(pptx)
+      join(paths.parts, 'visual-fidelity-report-pptx-0', 'report.json'),
+      JSON.stringify({ ...pptx, shard: 0 })
     );
-    await rm(join(paths.parts, 'visual-fidelity-renders-pptx'), { recursive: true });
+    await rm(join(paths.parts, 'visual-fidelity-renders-pptx-0'), { recursive: true });
     await mergeFromPaths({
       planPath: paths.plan,
       parts: paths.parts,
@@ -294,7 +295,7 @@ test('rejects missing and symlinked render pages without publishing a partial re
     await Bun.write(
       join(
         paths.parts,
-        'visual-fidelity-renders-docx',
+        'visual-fidelity-renders-docx-0',
         'docx-a',
         'commit',
         'page_0002.png'
@@ -314,7 +315,7 @@ test('rejects missing and symlinked render pages without publishing a partial re
     const unsafePaths = await writeFixture(unsafe, true);
     const render = join(
       unsafePaths.parts,
-      'visual-fidelity-renders-docx',
+      'visual-fidelity-renders-docx-0',
       'docx-a',
       'commit',
       'page_0002.png'
@@ -322,7 +323,7 @@ test('rejects missing and symlinked render pages without publishing a partial re
     await Bun.write(render, 'target');
     const link = join(
       unsafePaths.parts,
-      'visual-fidelity-renders-docx',
+      'visual-fidelity-renders-docx-0',
       'docx-a',
       'commit',
       'page_0001.png'
@@ -342,5 +343,118 @@ test('rejects missing and symlinked render pages without publishing a partial re
       rm(root, { recursive: true, force: true }),
       rm(unsafe, { recursive: true, force: true }),
     ]);
+  }
+});
+
+test('writes a public aggregate beside the section that names no sample', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fidelity-merge-'));
+  try {
+    const paths = await writeFixture(root);
+    await mergeFromPaths({ planPath: paths.plan, parts: paths.parts, output: paths.output });
+    const text = await readFile(join(paths.output, 'aggregate.json'), 'utf8');
+    const aggregate = JSON.parse(text);
+    expect(aggregate.commit).toBe(commit);
+    expect(aggregate.source_sha).toBe(sourceSha);
+    expect(Object.keys(aggregate.formats)).toEqual(['docx', 'pptx', 'xlsx']);
+    expect([aggregate.formats.docx.samples, aggregate.formats.pptx.samples, aggregate.formats.xlsx.samples]).toEqual([2, 1, 0]);
+    for (const leak of ['docx-a', 'docx-b', 'pptx-c', 'a'.repeat(64), 'corpus.example'])
+      expect(text.includes(leak) && leak).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('reports from several measure shards of one format merge into one, and a missing shard blocks the merge', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fidelity-merge-'));
+  try {
+    const paths = fixture(root);
+    const hashes = Array.from({ length: 6 }, (_, index) => String(index).repeat(64));
+    const sharded = {
+      ...plan(),
+      formats: ['docx'],
+      samples: hashes.map((hash, index) => {
+        const entry = metadata('docx', hash);
+        entry.reference.pages = 250;
+        entry.reference_pages = Array.from({ length: 250 }, () => entry.reference_pages[0]);
+        return { id: `docx-${index}`, format: 'docx', metadata: entry };
+      }),
+    };
+    const shards = measureShards(sharded);
+    expect(shards.length).toBe(2);
+    await writeFile(paths.plan, JSON.stringify(sharded));
+    for (const { shard, samples } of shards) {
+      const directory = join(paths.parts, `visual-fidelity-report-docx-${shard}`);
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, 'report.json'), JSON.stringify({
+        source_sha: sourceSha, commit, versions, react_version: '4.5.6', format: 'docx', shard,
+        samples: samples.map((id) => {
+          const hash = hashes[Number(id.slice(5))];
+          return sample(id, 'docx', hash, successful('published', hash, 0.8, 250), successful('commit', hash, 0.7, 250));
+        }),
+      }));
+    }
+    const merged = await mergeFromPaths({ planPath: paths.plan, parts: paths.parts, output: paths.output });
+    expect(merged.samples.map((entry: any) => entry.id)).toEqual(sharded.samples.map((entry) => entry.id));
+    await rm(paths.output, { recursive: true });
+    await rm(join(paths.parts, 'visual-fidelity-report-docx-1'), { recursive: true });
+    await expect(mergeFromPaths({ planPath: paths.plan, parts: paths.parts, output: paths.output }))
+      .rejects.toThrow('missing or invalid docx report for shard 1');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('writes failure clusters with their documents beside the report', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fidelity-merge-'));
+  try {
+    const paths = await writeFixture(root);
+    await mergeFromPaths({ planPath: paths.plan, parts: paths.parts, output: paths.output });
+    const failures = JSON.parse(await readFile(join(paths.output, 'failures.json'), 'utf8'));
+    expect(failures.schema_version).toBe(1);
+    expect(failures.commit).toBe(commit);
+    expect(failures.clusters).toContainEqual({
+      format: 'pptx', area: 'render', channel: 'published', stage: 'capture', reason: 'capture stopped', count: 1, samples: ['pptx-c'],
+    });
+    const aggregate = JSON.parse(await readFile(join(paths.output, 'aggregate.json'), 'utf8'));
+    expect(aggregate.formats.pptx.failures).toContainEqual({ area: 'render', channel: 'published', stage: 'capture', count: 1 });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a channel that scored no document of a format fails the merge, naming the format, channel and failed stages', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fidelity-merge-'));
+  try {
+    const paths = await writeFixture(root);
+    const coveragePath = join(root, 'coverage.md');
+    await expect(mergeFromPaths({ planPath: paths.plan, parts: paths.parts, output: paths.output, coveragePath, requireCoverage: true } as any))
+      .rejects.toThrow('PPTX published: 0 of 1 scored (failed: capture 1)');
+    expect(await Bun.file(join(paths.output, 'section.md')).exists()).toBe(false);
+    const coverage = await readFile(coveragePath, 'utf8');
+    expect(coverage).toContain('- DOCX published: 2 of 2 scored');
+    expect(coverage).toContain('- DOCX commit: 2 of 2 scored');
+    expect(coverage).toContain('- PPTX commit: 1 of 1 scored');
+    expect(coverage).toContain('- PPTX published: 0 of 1 scored (failed: capture 1)');
+    for (const leak of ['docx-a', 'docx-b', 'pptx-c', 'capture stopped']) expect(coverage.includes(leak) && leak).toBe(false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a partial loss is reported in the coverage lines and does not fail the merge', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fidelity-merge-'));
+  try {
+    const paths = await writeFixture(root);
+    const report = JSON.parse(await readFile(join(paths.parts, 'visual-fidelity-report-docx-0', 'report.json'), 'utf8'));
+    report.samples[0].comparisons[1] = { channel: 'commit', renderer_source_commit: commit, status: 'failed', stage: 'compare', error: 'compare stopped' };
+    await writeFile(join(paths.parts, 'visual-fidelity-report-docx-0', 'report.json'), JSON.stringify(report));
+    const coveragePath = join(root, 'coverage.md');
+    const { coverage } = await import('./merge.mjs');
+    const merged = await mergeFromPaths({ planPath: paths.plan, parts: paths.parts, output: paths.output, coveragePath } as any);
+    expect((coverage as any)(merged).find((row: any) => row.format === 'docx' && row.channel === 'commit'))
+      .toEqual({ format: 'docx', channel: 'commit', scored: 1, total: 2, stages: { compare: 1 } });
+    expect(await readFile(coveragePath, 'utf8')).toContain('- DOCX commit: 1 of 2 scored (failed: compare 1)');
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

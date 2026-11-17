@@ -9,13 +9,13 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import fitz
 import numpy
 import PIL
 import skimage
 from PIL import Image, ImageStat
 
 from compare import Pages, compare
+from raster import RASTERIZER, open_pdf, render_page
 
 CHANNELS = ['published', 'commit', 'libreoffice']
 
@@ -101,12 +101,11 @@ def libreoffice_fidelity(sample, root, soffice, version):
         execute(lo_command(soffice, root / 'profile-fidelity', actual, root / f'source.{format}',
                            'pdf:impress_pdf_Export' if format == 'pptx' else 'pdf:writer_pdf_Export'), timeout=600, log=actual / 'convert.log')
         adjustments = []
-        with fitz.open(actual / 'source.pdf') as pdf:
+        with open_pdf(actual / 'source.pdf') as pdf:
             if not len(pdf):
                 raise ValueError('LibreOffice produced no pages')
-            for index, page in enumerate(pdf):
-                pixmap = page.get_pixmap(dpi=150, alpha=False)
-                image = Image.frombytes('RGB', (pixmap.width, pixmap.height), pixmap.samples)
+            for index in range(len(pdf)):
+                image = render_page(pdf, index, 150)
                 reference = root / 'reference' / f'page_{index + 1:04d}.png'
                 if reference.exists():
                     with Image.open(reference) as expected:
@@ -116,7 +115,7 @@ def libreoffice_fidelity(sample, root, soffice, version):
                 image.save(actual / f'page_{index + 1:04d}.png')
             write_json(actual / 'result.json', dict(status='ok', sha256=sample['metadata']['source']['sha256'],
                        dpi=150, pages=len(pdf), engine='LibreOffice ' + version,
-                       rasterizer='PyMuPDF ' + fitz.VersionBind, edge_adjustments=adjustments))
+                       rasterizer=RASTERIZER, edge_adjustments=adjustments))
         stage = 'compare'
         def progress(page, total):
             if page % 10 == 0 or page == total:
@@ -141,9 +140,9 @@ def validate_png(path, size, require_ink):
                     grayscale_variance=variance)
 
 
-def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0):
+def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0, directory='timing', chains=None):
     format = sample.get('format', 'docx')
-    output = root / 'timing'
+    output = root / directory
     output.mkdir()
     with Image.open(root / 'reference/page_0001.png') as reference:
         size = tuple(round(value * 96 / 150) for value in reference.size)
@@ -152,7 +151,9 @@ def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0):
                [('PixelWidth', size[0]), ('PixelHeight', size[1]), ('PageNumber', 1)]}
     options['Translucent'] = dict(type='boolean', value=False)
     commands = {channel: [str(binary), str(root / f'source.{format}'), str(output / f'{channel}.png'), str(manifest)]
+                + ([str(chains[channel])] if chains and channel in chains else [])
                 for channel, binary in binaries.items()}
+    font_paths = {channel: 'product-registry' if chains and channel in chains else 'bench-manifest' for channel in binaries}
     commands['libreoffice'] = lo_command(soffice, root / 'profile-timing', output, root / f'source.{format}',
                                        f'png:{"impress" if format == "pptx" else "writer"}_png_Export:' + json.dumps(options, separators=(',', ':')))
     paths = {channel: output / (f'{channel}.png' if channel != 'libreoffice' else 'source.png') for channel in CHANNELS}
@@ -175,6 +176,15 @@ def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0):
                             or metadata.get('png_sha256') != png['sha256'] or metadata.get('page') != 1
                             or metadata.get('dpi') != 96 or metadata.get('pages', 0) < 1):
                         raise ValueError('Native CLI returned invalid render metadata')
+                    if chains is not None and metadata.get('font_path') != font_paths[channel]:
+                        raise ValueError(f"Native CLI took the {metadata.get('font_path')} font path, expected {font_paths[channel]}")
+                    if format == 'docx':
+                        faces = metadata.get('faces')
+                        if not isinstance(faces, list) or not all(isinstance(face, str) and face for face in faces):
+                            raise ValueError('Native CLI reported no list of replayed font faces')
+                        replayed = hashlib.sha256('\n'.join(faces).encode()).hexdigest()
+                        if results[channel].setdefault('fonts_sha256', replayed) != replayed:
+                            raise ValueError('Native CLI replayed different font faces across trials')
                     results[channel]['native'] = metadata
                 results[channel]['png'] = png
                 if repeat:
@@ -183,7 +193,80 @@ def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0):
             except Exception as error:
                 results[channel] = dict(status='failed', error=str(error), command=commands[channel])
                 print(f"{sample['id']}: {channel} FAILED: {error}", flush=True)
+    if chains is not None:
+        for channel in binaries:
+            results[channel]['font_path'] = font_paths[channel]
     return results
+
+
+LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS = '0.5.1'
+
+
+def semver_key(version):
+    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?', version if isinstance(version, str) else '')
+    if not match:
+        raise ValueError(f'Not a semver version: {version!r}')
+    prerelease = tuple((0, int(part), '') if part.isdigit() else (1, 0, part) for part in match[4].split('.')) if match[4] else ()
+    return int(match[1]), int(match[2]), int(match[3]), not match[4], prerelease
+
+
+def validate_font_paths(paths, published_version):
+    if not isinstance(paths, dict) or set(paths) != {'published', 'commit'} or paths['commit'].get('path') != 'product-registry':
+        raise ValueError(f'Invalid product font chain paths: {paths}')
+    if paths['published'].get('version') != published_version:
+        raise ValueError(f"Font chains were recorded for published {paths['published'].get('version')}, the plan measures {published_version}")
+    entry = paths['published']
+    if entry.get('path') == 'bench-manifest':
+        last = LAST_RELEASE_WITHOUT_REGISTRY_EXPORTS
+        if entry.get('last_release_without_registry_exports') != last:
+            raise ValueError(f"Font chains name {entry.get('last_release_without_registry_exports')} as the last release without the registry exports, expected {last}")
+        if semver_key(entry['version']) > semver_key(last):
+            raise ValueError(f"Published {entry['version']} is newer than {last}, the last release without the registry exports, so it must replay the product registry, not the bench manifest")
+    elif entry.get('path') != 'product-registry':
+        raise ValueError(f"Unknown font path for the published channel: {entry.get('path')}")
+    return paths
+
+
+def product_chains(chains_root, paths, sample):
+    chains = {}
+    for channel, entry in paths.items():
+        if entry['path'] == 'product-registry':
+            path = chains_root / channel / f"{sample['id']}.chains.json"
+            if not path.is_file():
+                raise ValueError(f'Missing product font chains for the {channel} channel: {path.name}')
+            chains[channel] = path
+    return chains
+
+
+def font_path_notes(paths, method):
+    notes = {}
+    for channel in CHANNELS[:2]:
+        entry = (paths or {}).get(channel, dict(path='bench-manifest'))
+        note = f'native column not comparable with runs before {method}'
+        if entry['path'] == 'bench-manifest' and entry.get('last_release_without_registry_exports'):
+            note += (f"; {channel} {entry['version']} <= {entry['last_release_without_registry_exports']}, the last release without the registry exports,"
+                     ' so its native column is still on the old font map'
+                     ' and published against commit on the native column is not like for like until the next release')
+        notes[channel] = note
+    return notes
+
+
+def summarize_font_paths(samples, method, paths=None):
+    notes = font_path_notes(paths, method)
+    lines = [f"- {channel}: {', '.join(sorted({row['timings'][channel].get('font_path', 'bench-manifest') for row in samples})) or 'no documents'}; {notes[channel]}"
+             for channel in CHANNELS[:2]]
+    for channel in CHANNELS[:2]:
+        rejected = [row['timings'][channel].get('rejected_embedded', []) for row in samples]
+        lines.append(f'- {channel}: {sum(map(len, rejected))} rejected embedded font faces in {sum(map(bool, rejected))} documents')
+        absent = [row['timings'][channel].get('absent_addons', []) for row in samples]
+        addons = sorted({use['addon'] for uses in absent for use in uses})
+        by_addon = ', '.join(f"{addon} {sum(any(use['addon'] == addon for use in uses) for uses in absent)}" for addon in addons)
+        lines.append(f"- {channel}: {sum(map(bool, absent))} documents fell back for an absent font add-on{f' ({by_addon})' if by_addon else ''}")
+    text = '### DOCX native font path\n\n' + '\n'.join(lines) + '\n'
+    print(text, flush=True)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+            summary.write(text)
 
 
 def main():
@@ -191,9 +274,19 @@ def main():
     job = json.loads((root / 'job.json').read_text())
     native = Path(os.environ['QUALITY_NATIVE']).resolve()
     manifest = Path(os.environ['QUALITY_FONTS']).resolve()
+    chains_root = Path(os.environ['QUALITY_CHAINS']).resolve() if os.environ.get('QUALITY_CHAINS') else None
+    if chains_root is None:
+        if os.environ.get('QUALITY_NATIVE_FONT_MAP') != 'bench-manifest':
+            raise ValueError('QUALITY_CHAINS is unset; set QUALITY_NATIVE_FONT_MAP=bench-manifest to measure with the bench font manifest')
+        print('DOCX native font path: bench-manifest (QUALITY_CHAINS unset, QUALITY_NATIVE_FONT_MAP=bench-manifest)', flush=True)
+    else:
+        print(f'DOCX native font path: product registry chains from {chains_root}', flush=True)
+    font_paths = validate_font_paths(json.loads((chains_root / 'paths.json').read_text()), job['published_version']) if chains_root else None
+    for channel, note in font_path_notes(font_paths, job['method']).items():
+        print(f'DOCX native font path, {channel}: {note}', flush=True)
     soffice = os.environ.get('SOFFICE', 'libreoffice')
     os.environ['SAL_USE_VCLPLUGIN'] = 'svp'
-    fonts_hash = font_environment(manifest, root)
+    libreoffice_fonts_hash = font_environment(manifest, root)
     _, version_text = execute([soffice, '--version'])
     version = re.search(r'LibreOffice (\d+(?:\.\d+){2,3})\b', version_text)[1]
     builds, binaries = {}, {}
@@ -207,11 +300,11 @@ def main():
                   benchmark=dict(method=job['method'], trials=job['trials'], dpi=96,
                                  published_version=job['published_version'],
                                  libreoffice_version=version, libreoffice_build=version_text.strip(),
-                                 fonts_sha256=fonts_hash, builds=builds, environment=dict(
+                                 libreoffice_fonts_sha256=libreoffice_fonts_hash, font_paths=font_paths, builds=builds, environment=dict(
                                      os=platform.system(), architecture=platform.machine(),
                                      image_os=os.environ.get('ImageOS', 'local'),
                                      image_version=os.environ.get('ImageVersion', 'local'),
-                                     python=platform.python_version(), pymupdf=fitz.VersionBind,
+                                     python=platform.python_version(), rasterizer=RASTERIZER,
                                      numpy=numpy.__version__, pillow=PIL.__version__, skimage=skimage.__version__,
                                      font_policy='bundled-fontconfig' if platform.system() == 'Linux' else 'system-fonts')),
                   runner=dict(name=os.environ.get('RUNNER_NAME', platform.node()),
@@ -224,13 +317,19 @@ def main():
             if sha256(directory / 'reference' / f'page_{page:04d}.png') != asset['sha256']:
                 raise ValueError('Reference hash mismatch')
         print(f"DOCX shard {job['shard']}: {index + 1}/{len(job['samples'])} {sample['id']}", flush=True)
-        timings = measure_sample(sample, directory, binaries, manifest, soffice, job['trials'], index)
+        chains = product_chains(chains_root, font_paths, sample) if chains_root else {}
+        timings = measure_sample(sample, directory, binaries, manifest, soffice, job['trials'], index, chains=chains)
+        for channel, path in chains.items():
+            recorded = json.loads(path.read_text())
+            timings[channel]['rejected_embedded'] = recorded['rejectedEmbedded']
+            timings[channel]['absent_addons'] = recorded['absentAddons']
         print(f"{sample['id']}: LibreOffice fidelity", flush=True)
         fidelity = libreoffice_fidelity(sample, directory, soffice, version)
         report['samples'].append(dict(id=sample['id'], source_sha256=sample['metadata']['source']['sha256'],
                                       libreoffice=fidelity, timings=timings))
         write_json(root / 'report.json', report)
         print(f"{sample['id']}: fidelity {fidelity['status']}, SSIM {fidelity.get('penalized_ssim', '—')}", flush=True)
+    summarize_font_paths(report['samples'], job['method'], font_paths)
 
 
 if __name__ == '__main__':

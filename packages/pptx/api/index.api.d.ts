@@ -471,15 +471,22 @@ export type PptxFindResult = {
     truncated: boolean;
 } | PptxEditRefusal;
 
+// ---- fontPackDiagnostics.d.ts ----
+import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+export type { FontPackDiagnostic };
+/** The installed font add-on packages that cannot be used, and why; their faces are substituted. */
+export declare function fontPackDiagnostics(): Promise<FontPackDiagnostic[]>;
+
 // ---- index.d.ts ----
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
 export type { PresentationImageDecodeOptions } from './render/image';
-export { StaleProposalError } from './proposals';
-export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
-export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
-export { slideToPng } from './render/png';
-export type { SlideToPngOptions } from './render/png';
+export { ProposalPictureMediaTooLargeError, StaleProposalError } from './proposals';
+export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry, ProposalShapeChange, ProposalTextChange } from './proposals';
+export type { CanvasImageResolver, PaintFontCoverage, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
+export { PngExportError } from '../../../shared/office-session/pngExportError';
+export type { PngExportCode } from '../../../shared/office-session/pngExportError';
+export type { PptxPngOptions, PptxPngTarget } from './wasm/pngOptions';
 export { CollaborationError, CollaborationProvider } from './collaboration';
 export type { CollaborationUser, CollaborationErrorCode, CollaborationErrorListener, CollaborationProviderOptions, AsyncCollaborationReplica, CollaborationReplica, CollaborationStatus, CollaborationStatusChange, CollaborationStatusListener, CollaborationTransport, CollaborationTransportEvent, CollaborationUpdateOrigin, PptxPresence, PptxPresenceCursor, PptxPresenceListener, PptxPresencePeer, PptxPresenceState, PptxPresenceUser, } from './collaboration';
 export { PRESENCE_LABEL_DURATION_MS, presenceColorForClientId } from './collaboration';
@@ -488,7 +495,7 @@ export { PptxExportError } from './structuredExport';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, PptxAnchor, PptxAnchorScope, PptxExportComment, PptxExportDiagnostic, PptxExportDiagnosticCode, PptxExportFailure, PptxExportFailureCode, PptxExportList, PptxExportMark, PptxExportNotes, PptxExportObject, PptxExportObjectKind, PptxExportOptions, PptxExportParagraph, PptxExportRefusal, PptxExportResult, PptxExportRun, PptxExportShape, PptxExportShapeKind, PptxExportSlide, PptxExportStory, PptxExportTable, PptxExportTableCell, PptxMarkdownContent, PptxMarkdownOptions, PptxSourceProvenance, PptxStructuredContent, PptxTextSpan, } from './structuredExport';
 export type { InspectPresentationOptions, OpenPresentationOptions, SavePresentationOptions, PresentationHandle, UndoCaptureMode, WasmInitInput, } from './wasm/loader';
 export type { EditSuccess, OperationFailure, OperationRefusal, PptxEditFailure, PptxEditFailureCode, PptxEditHistory, PptxEditPreview, PptxEditReceipt, PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxEditSource, PptxEditStep, PptxEditTarget, PptxFindMatch, PptxFindRequest, PptxFindResult, PptxFindScope, PptxParagraphText, PptxReadRequest, PptxReadResult, PptxShapeTarget, PptxSlideTarget, PptxStoryTarget, PptxStoryText, PptxTextField, PptxTextGuard, PptxTextRange, PptxTextTarget, PptxValidationResult, ValidationSuccess, } from './edits';
-export type { BlipEffect, CaretStop, ColorTransform, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditProfile, GeometryPathCommand, HistoryProfile, HistoryResult, HitTestResult, ImageEffect, ImageCrop, ImagePrimitive, InheritedGeometry, LayoutProfile, Paint, ParagraphAlignment, ParagraphSnapshot, PictureDraft, PlaceholderPrimitive, PositionedGlyph, PositionedTextLine, PositionedTextRun, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, PrimitiveTransform, ShapeAdjustReceipt, ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeGradient, ShapeKind, ShapeLineEnd, ShapeOutline, ShapePrimitive, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, SlideDisplayList, SlidePrimitive, SlideReceipt, SlideSnapshot, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter, StorySnapshot, Stroke, StrokeEnd, TextBoxPrimitive, TextReceipt, TextParagraphDraft, TextRunSnapshot, TextStyle, TextStylePatch, TextStyleSnapshot, TransformReceipt, TableReceipt, UpdateEvent, } from './types';
+export type { BlipEffect, CaretStop, ColorTransform, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditProfile, GeometryPathCommand, HistoryProfile, HistoryResult, HitTestResult, ImageEffect, ImageCrop, ImagePrimitive, InheritedGeometry, LayoutProfile, Paint, ParagraphAlignment, ParagraphSnapshot, PictureDraft, PlaceholderPrimitive, PositionedGlyph, PositionedTextLine, PositionedTextRun, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, PrimitiveTransform, ShapeAdjustReceipt, ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeGradient, ShapeKind, ShapeLineEnd, ShapeOutline, ShapePrimitive, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, ShapeAltText, TextLanguage, TextLink, TextLinkTarget, TableGrid, TableGridCell, ChartData, ChartDataSeries, SlideDisplayList, SlidePrimitive, SlideReceipt, SlideSnapshot, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter, StorySnapshot, Stroke, StrokeEnd, TextBoxPrimitive, TextReceipt, TextParagraphDraft, TextRunSnapshot, TextStyle, TextStylePatch, TextStyleSnapshot, TransformReceipt, TableReceipt, UpdateEvent, } from './types';
 /** @internal */
 export { metafileImageBytes } from './render/image';
 /** @internal */
@@ -497,10 +504,80 @@ export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/
 export { openPresentationSession } from './session/client';
 /** @internal */
 export { createPptxWorkerEditorSession } from './session/editorSession';
+export { fontPackDiagnostics } from './fontPackDiagnostics';
+export type { FontPackDiagnostic } from './fontPackDiagnostics';
+export { fontPreflight, preloadPreflightWasm } from './wasm/preflight';
+export type { FontPreflight, FontPreflightFace } from './wasm/preflight';
 
 // ---- proposals.d.ts ----
-import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextStyleSnapshot } from './types';
+import type { DeckSnapshot, ParagraphAlignment, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeFill, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextParagraphDraft, TextStyleSnapshot } from './types';
 export type ProposalEdit = {
+    type: 'addTextBox';
+    ref?: string;
+    slideId: string;
+    draft: ShapeDraft;
+} | {
+    type: 'addShape';
+    ref?: string;
+    slideId: string;
+    draft: PresetShapeDraft;
+} | {
+    type: 'addPicture';
+    ref?: string;
+    slideId: string;
+    draft: PictureDraft;
+} | {
+    type: 'removeShape';
+    slideId: string;
+    shapeId: string;
+} | {
+    type: 'reorderShape';
+    slideId: string;
+    shapeId: string;
+    to: 'front' | 'back' | 'forward' | 'backward';
+} | {
+    type: 'insertTableRow';
+    slideId: string;
+    shapeId: string;
+    index: number;
+    position: 'before' | 'after';
+    cells?: string[];
+} | {
+    type: 'deleteTableRow';
+    slideId: string;
+    shapeId: string;
+    index: number;
+} | {
+    type: 'insertTableColumn';
+    slideId: string;
+    shapeId: string;
+    index: number;
+    position: 'before' | 'after';
+    cells?: string[];
+    width?: 'split' | 'copy';
+} | {
+    type: 'deleteTableColumn';
+    slideId: string;
+    shapeId: string;
+    index: number;
+} | {
+    type: 'insertSlide';
+    ref?: string;
+    afterSlideId: string | null;
+    layoutPartPath?: string;
+} | {
+    type: 'duplicateSlide';
+    ref?: string;
+    slideId: string;
+    afterSlideId?: string | null;
+} | {
+    type: 'deleteSlide';
+    slideId: string;
+} | {
+    type: 'moveSlide';
+    slideId: string;
+    afterSlideId: string | null;
+} | {
     type: 'replaceText';
     storyId: string;
     start: number;
@@ -519,6 +596,10 @@ export type ProposalEdit = {
     start: number;
     end: number;
     alignment: ParagraphAlignment | 'justLow' | 'dist' | 'thaiDist' | null;
+} | {
+    type: 'setStoryParagraphs';
+    storyId: string;
+    paragraphs: TextParagraphDraft[];
 } | {
     type: 'setShapeRect';
     slideId: string;
@@ -542,11 +623,29 @@ export type ProposalEdit = {
     shapeId: string;
     adjustments: Record<string, number>;
 } | {
+    type: 'setSlideLayout';
+    slideId: string;
+    layoutPartPath: string;
+    mapping?: [string, number][];
+} | {
+    type: 'setSlideBackground';
+    slideId: string;
+    background: ShapeFill | null;
+} | {
     type: 'setSlideNotes';
     slideId: string;
     text: string;
 };
+export interface ProposalStripEntry {
+    slideId: string;
+    status: 'unchanged' | 'changed' | 'inserted' | 'deleted' | 'moved';
+    liveIndex: number | null;
+    previewIndex: number | null;
+}
 export interface ProposalChange {
+    kind?: 'content' | 'inserted' | 'deleted' | 'moved';
+    beforeIndex?: number | null;
+    afterIndex?: number | null;
     slideId: string;
     shapeId: string | null;
     before: ShapeSnapshot | null;
@@ -561,6 +660,7 @@ export interface Proposal {
     edits: ProposalEdit[];
     changes: ProposalChange[];
     staleTargets: string[];
+    refs?: Record<string, string>;
 }
 export interface ProposalPreview {
     proposal: Proposal;
@@ -572,9 +672,18 @@ export interface ProposalTextChange {
     end: number;
     kind: 'insertion' | 'deletion';
 }
+export interface ProposalShapeChange {
+    shapeId: string;
+    kind: 'inserted' | 'deleted' | 'moved' | 'resized' | 'changed' | 'reordered';
+}
 export interface ProposalDiffSlide extends ProposalPreview {
+    shapeChanges?: ProposalShapeChange[];
     frame: SlideDisplayList;
     textChanges: ProposalTextChange[];
+    media?: {
+        assetId: string;
+        bytes: ArrayBuffer;
+    }[];
 }
 export interface ProposalAcceptance {
     proposalId: string;
@@ -584,6 +693,12 @@ export interface ProposalAcceptance {
 export declare class StaleProposalError extends Error {
     readonly targets: string[];
     constructor(targets: string[]);
+}
+export declare class ProposalPictureMediaTooLargeError extends Error {
+    readonly totalBytes: number;
+    readonly limitBytes: number;
+    readonly code = "proposalPictureMediaTooLarge";
+    constructor(totalBytes: number, limitBytes?: number);
 }
 
 // ---- render/browserImage.d.ts ----
@@ -611,7 +726,7 @@ export declare function metafileImageBytes(bytes: Uint8Array, resolve?: () => Ui
 
 // ---- render/canvas.d.ts ----
 import type { ImageEffect, SlideDisplayList } from '../types';
-import type { ProposalTextChange } from '../proposals';
+import type { ProposalShapeChange, ProposalTextChange } from '../proposals';
 export type CanvasImageResolver = ((assetId: string) => CanvasImageSource | Promise<CanvasImageSource | null> | null) & {
     acquire?(): CanvasImageResolver;
     release?(): void;
@@ -620,7 +735,33 @@ export interface PaintSlideOptions {
     resolveImage?: CanvasImageResolver;
     maxShadowPixels?: number;
     textChanges?: readonly ProposalTextChange[];
+    shapeChanges?: readonly ProposalShapeChange[];
+    /** The family a run paints with in place of its own, e.g. an export's private face. */
+    fontFamily?: (font: {
+        family: string;
+        bold: boolean;
+        italic: boolean;
+        id: number;
+    }) => string | undefined;
+    /**
+     * Makes the faces a slide draws with ready before any text is painted. Without it, text draws with each run's own
+     * family, as the host installed it.
+     */
+    fontCoverage?: PaintFontCoverage;
 }
+/** Prepares the fonts a paint draws text with. */
+export interface PaintFontCoverage {
+    /**
+     * Resolves once every character of `text` can be drawn in `family`, with the family name to draw it with (for
+     * example a newer installed revision of the same face).
+     */
+    prepare(family: string, text: string): Promise<string>;
+    /** The newest family to draw prepared text with now; a newer revision holds everything an older one did. */
+    latest?(family: string): string | undefined;
+    /** False for a style that draws under its own name, whatever the family's other styles do. Defaults to true. */
+    covers?(family: string, bold: boolean, italic: boolean): boolean;
+}
+export type TextFamilies = (family: string, bold?: boolean, italic?: boolean) => string;
 export interface SlideCanvasLike {
     width: number;
     height: number;
@@ -648,22 +789,8 @@ export type { PresentationImageDecodeOptions } from './browserImage';
 export declare function presentationImageBlob(bytes: Uint8Array): Blob;
 export declare function decodePresentationImage(bytes: Uint8Array, errorMessage: string, options?: PresentationImageDecodeOptions): Promise<CanvasImageSource>;
 
-// ---- render/png.d.ts ----
-import type { SlideDisplayList } from '../types';
-import { type CanvasImageResolver } from './canvas';
-export interface SlideToPngOptions {
-    /** Output scale, e.g. 2 for hidpi. */
-    scale?: number;
-    resolveImage?: CanvasImageResolver;
-}
-/**
- * Rasterize one slide to a PNG blob through the same canvas painter the editor
- * draws with, so an export matches what is on screen. The server-side twin is
- * the `betteroffice-pptx-raster` crate.
- */
-export declare function slideToPng(list: SlideDisplayList, options?: SlideToPngOptions): Promise<Blob>;
-
 // ---- session/client.d.ts ----
+import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import { type SessionTransport } from '../../../../shared/office-session/transport';
 import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
 import type { OpenPresentationOptions } from '../wasm/loader';
@@ -683,12 +810,14 @@ export interface OpenPresentationSessionOptions extends OpenPresentationOptions 
  */
 export interface PresentationSession {
     readonly state: PresentationSessionState;
-    readonly call: Promisified<Omit<PresentationSessionMethods, 'open' | 'dispose' | 'frame'>> & {
+    readonly call: Promisified<Omit<PresentationSessionMethods, 'open' | 'dispose' | 'frame' | 'renderPng'>> & {
         /**
          * @experimental A newer frame call replaces a queued one, which rejects with an error
          * named SessionSuperseded.
          */
         frame(slideIndex: number): Promise<PresentationFrame>;
+        /** Draws a slide as PNG bytes in the session's engine. */
+        renderPng(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
     };
     save(): Promise<Uint8Array>;
     on<K extends keyof PresentationSessionEvents>(name: K, listener: (payload: PresentationSessionEvents[K]) => void): () => void;
@@ -719,7 +848,7 @@ import { type PresentationHandle, type PresentationPeerHandle } from '../wasm/lo
 import { PptxWorkerEditorFailedError } from './peerHydrationError';
 import { type PptxWorkerEditorOperation, type PptxWorkerEditorReply } from './replay';
 import type { PresentationSessionState } from './methods';
-declare const readMethods: readonly ["snapshot", "story", "anchorCaret", "resolveCaretAnchor", "version", "readContent", "findText", "validateEdits", "searchText", "isProposalsAvailable", "listProposals", "layoutSlide", "hitTest", "mediaBytes", "metafileSvg", "comments", "canUndo", "canRedo", "undoCaptureMode", "onUpdate"];
+declare const readMethods: readonly ["snapshot", "story", "anchorCaret", "resolveCaretAnchor", "version", "readContent", "findText", "validateEdits", "searchText", "proposalSlideStrip", "layoutProposalDiffSlideById", "isProposalsAvailable", "listProposals", "layoutSlide", "hitTest", "mediaBytes", "metafileSvg", "comments", "canUndo", "canRedo", "undoCaptureMode", "onUpdate"];
 export interface PptxWorkerEditorInteractionAccess {
     snapshot(): {
         snapshot: DeckSnapshot;
@@ -796,9 +925,13 @@ export declare function createPresentationEditorSession(bytes: Uint8Array | Arra
 
 // ---- session/methods.d.ts ----
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type { PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxReadRequest, PptxReadResult, PptxValidationResult } from '../edits';
 import type { SlideDisplayList } from '../types';
 import type { OpenPresentationOptions } from '../wasm/loader';
+import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
+/** PNG options a session call carries; an abort signal stays on the caller's side. */
+export type PresentationPngOptions = Omit<PptxPngOptions, 'signal'>;
 /** @experimental */
 export interface PresentationFrame {
     displayList: SlideDisplayList;
@@ -833,6 +966,8 @@ export interface PresentationSessionOpenOptions extends Omit<OpenPresentationOpt
     fonts?: readonly PresentationSessionFont[];
     fallbackFonts?: readonly PresentationSessionFont[];
     wasm?: ArrayBuffer | WebAssembly.Module;
+    /** @internal */
+    fontCdn?: FontCdnConfiguration;
 }
 /**
  * Slide metadata without layout; indices are zero-based.
@@ -885,6 +1020,8 @@ export type PresentationSessionMethods = {
         height: number;
     };
     save(): ArrayBuffer;
+    /** Draws a slide as PNG bytes in the session's engine, with the faces it measured with. */
+    renderPng(target: PptxPngTarget, options?: PresentationPngOptions): ArrayBuffer;
     dispose(): void;
 };
 /** Exhaustive RPC names used by the session client. */
@@ -899,6 +1036,7 @@ export declare const PRESENTATION_SESSION_METHODS: {
     slides: true;
     slideSize: true;
     save: true;
+    renderPng: true;
     dispose: true;
 };
 /** Non-reorderable policies preserve call order across all lanes. */
@@ -1394,6 +1532,22 @@ export interface CollaborationPipeHost<C = PipeCursor, P = PipePeer> {
 export declare function createCollaborationPipeHost<Prov extends PipeProvider<C, P>, C = PipeCursor, P = PipePeer>(options: CollaborationPipeHostOptions<Prov, C, P>): CollaborationPipeHost<C, P>;
 export {};
 
+// ---- shared/fontPackDiagnostics.d.ts ----
+/** An installed font pack that cannot be used, so its faces are substituted. */
+export interface FontPackDiagnostic {
+    /** The add-on package: `@betteroffice/fonts-latin`, `-intl` or `-cjk`. */
+    pack: 'latin' | 'intl' | 'cjk';
+    /** `version-mismatch`: another release is installed; `missing-file`: files are absent; `invalid-manifest`: its manifest cannot be read. */
+    reason: 'version-mismatch' | 'missing-file' | 'invalid-manifest';
+    /** A sentence naming the package and what is wrong. */
+    detail: string;
+}
+/**
+ * Emits each diagnostic once per pack and process as a Node process warning with code `BETTEROFFICE_FONT_PACK`,
+ * so server hosts can filter it. Does nothing outside Node.
+ */
+export declare function warnFontPackDiagnostics(diagnostics: readonly FontPackDiagnostic[]): void;
+
 // ---- shared/host-contracts/edits.d.ts ----
 /**
  * Result envelopes shared by the formats' host edit APIs. Targets, steps, receipts and failure
@@ -1465,6 +1619,16 @@ import { type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
 import { SessionFailure, type Promisified, type SessionEvents, type SessionMethods } from './types';
 export declare const OFFICE_SESSION_SILENCE_MS = 60000;
+/**
+ * Starts fetching the worker's engine on this side while the worker boots, so the download overlaps the worker's own
+ * startup, and hands the response body over once the worker accepts it (no wasm on this thread). The body goes as a
+ * transferred stream, or as bytes where streams cannot be transferred. A worker from before this handoff never
+ * accepts: it compiles on its own and the body is cancelled when it advertises its module. The worker keeps its own
+ * path off http(s) and without fetch, and after a failed fetch, so it reports the same errors as before. Returns an
+ * abort for a session disposed mid-download.
+ * @internal
+ */
+export declare function supplyWasmFetch(transport: SessionTransport, url: URL): () => void;
 export declare function requestWasmCompile(transport: SessionTransport): void;
 export interface SessionClientOptions<M extends SessionMethods> {
     methods: {
@@ -1489,6 +1653,17 @@ export interface SessionClient<M extends SessionMethods, E extends SessionEvents
 /** Creates a typed client over an existing transport. */
 export declare function createSessionClient<M extends SessionMethods, E extends SessionEvents>(transport: SessionTransport, options: SessionClientOptions<M>): SessionClient<M, E>;
 
+// ---- shared/office-session/fontCdn.d.ts ----
+/** @internal */
+export interface FontCdnConfiguration {
+    baseUrl: string | false;
+    timeoutMs: number;
+}
+/** @internal */
+export declare function getFontCdnConfiguration(): FontCdnConfiguration | undefined;
+/** @internal */
+export declare function setFontCdnConfiguration(configuration: FontCdnConfiguration | undefined): void;
+
 // ---- shared/office-session/fontDecoder.d.ts ----
 export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {
     codec: string;
@@ -1508,6 +1683,34 @@ export declare function copyDecodedFace(face: {
     font: Uint8Array;
     payload?: Uint8Array;
 }): FontDecodeResult;
+
+// ---- shared/office-session/fontPreflight.d.ts ----
+export type PreflightWasmInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+/** @experimental */
+export interface FontPreflightFace {
+    family: string;
+    bold: boolean;
+    italic: boolean;
+    scripts: string[];
+}
+/** @experimental */
+export interface FontPreflight {
+    faces: FontPreflightFace[];
+    /** False when some font rules could not be resolved. */
+    complete: boolean;
+}
+/** @internal */
+export declare function createPreflightState(options: {
+    assetUrl: () => URL;
+    engineKind: 'wasm' | 'native';
+    initAsync: (input: {
+        module_or_path: PreflightWasmInput;
+    }) => Promise<unknown>;
+}): {
+    status(): "idle" | "loading" | "ready";
+    memory(): WebAssembly.Memory | undefined;
+    preload(input?: PreflightWasmInput): Promise<void>;
+};
 
 // ---- shared/office-session/host.d.ts ----
 import { type TaskExecutor } from './scheduler';
@@ -1539,11 +1742,75 @@ export * from './client';
 export * from './host';
 export * from './scheduler';
 
+// ---- shared/office-session/pngExportError.d.ts ----
+export type PngExportCode = 'canvas-unavailable' | 'canvas-too-large' | 'font-unavailable' | 'picture-unavailable';
+export declare class PngExportError extends Error {
+    readonly code: PngExportCode;
+    constructor(code: PngExportCode, message: string);
+}
+/** Why a picture was left as a placeholder. */
+export type PngPictureUnavailableReason = 'missing' | 'unsupported' | 'decode-failed' | 'metafile' | 'too-large' | 'budget';
+/** A picture a PNG export drew as a placeholder. `limit` and `actual` say by how much a size or budget limit was passed. */
+export interface PngUnavailablePicture {
+    /** The engine's reference for the picture; empty for one whose relationship has no part, which has nothing to name it by. */
+    id: string;
+    reason: PngPictureUnavailableReason;
+    limit?: number;
+    actual?: number;
+    unit?: 'pixels' | 'bytes' | 'work';
+}
+/**
+ * The kinds of effect a PNG export can leave off a page:
+ * - `text.outline`: a run's classic hollow outline.
+ * - `text.emphasisMark`: the dots, commas or circles marking emphasised characters.
+ * - `text.effect`: a legacy animated text effect such as a blinking background.
+ * - `text.modernEffects`: a run's glow, shadow, reflection, fill or outline text effects.
+ * - `text.shadow`: a run's classic shadow, emboss or engrave.
+ * - `text.leaderGlyphs`: the dots or dashes a tab leader repeats.
+ * - `shape.effects`: a shape's effects, such as a soft edge or a second shadow.
+ * - `image.filter`: a picture's colour filter, such as a watermark washout.
+ * - `image.effects`: a picture's colour or blur effects.
+ *
+ * A page reports a kind when it carries at least one drawing primitive with an
+ * effect of that kind that the engine does not draw on its normal path. A
+ * picture whose bytes cannot be loaded or decoded reports `picture-unavailable`
+ * and nothing else. Kinds come in the order listed here.
+ *
+ * The report describes each engine's normal path, not the pixels of one page.
+ * A degenerate primitive that carries an effect, such as an empty crop, a run
+ * of spaces or a leader with no advance, still reports it.
+ */
+export declare const PNG_SKIPPED_EFFECT_KINDS: readonly ["text.outline", "text.emphasisMark", "text.effect", "text.modernEffects", "text.shadow", "text.leaderGlyphs", "shape.effects", "image.filter", "image.effects"];
+export type PngSkippedEffectKind = (typeof PNG_SKIPPED_EFFECT_KINDS)[number];
+/** Pictures a PNG export drew as a placeholder. */
+export interface PngPictureUnavailableDiagnostic {
+    code: 'picture-unavailable';
+    pictures: PngUnavailablePicture[];
+}
+/**
+ * Effects a PNG export left off a page, sent at most once per page and only
+ * when `effects` is not empty. `page` is zero-based, as the export target is.
+ * `effects` names each kind once, in {@link PNG_SKIPPED_EFFECT_KINDS} order.
+ */
+export interface PngEffectsSkippedDiagnostic {
+    code: 'effects-skipped';
+    page: number;
+    effects: PngSkippedEffectKind[];
+}
+/** A problem a PNG export worked around: the page still exports. */
+export type PngDiagnostic = PngPictureUnavailableDiagnostic | PngEffectsSkippedDiagnostic;
+
 // ---- shared/office-session/protocol.d.ts ----
 import type { SessionFailureCode } from './types';
 export type ClientMessage = {
     protocol: 1;
     kind: 'wasm-compile';
+    /** The client is fetching the engine and will send it: wait for it instead of fetching. */
+    pending?: true;
+    /** The engine's response body, fetched by the client; the worker compiles it as it streams. */
+    stream?: ReadableStream<Uint8Array>;
+    /** The engine's bytes, where the stream could not be transferred; the worker compiles them. */
+    bytes?: ArrayBuffer;
 } | {
     protocol: 1;
     kind: 'call';
@@ -1560,7 +1827,12 @@ export interface ReplyError {
     code?: string;
     refusal?: unknown;
 }
-export type HostMessage = {
+export type HostMessage = 
+/** The worker waits for the engine body the client announced as pending; old workers never send it. */
+{
+    protocol: 1;
+    kind: 'wasm-accept';
+} | {
     protocol: 1;
     kind: 'wasm-module';
     url: string;
@@ -2051,6 +2323,7 @@ export interface TextStyle {
     color?: string;
     fontFamily?: string;
     underline?: string;
+    strike?: string;
     spacingPt?: number;
     baselinePct?: number;
 }
@@ -2062,6 +2335,7 @@ export interface TextStyleSnapshot {
     color: string | null;
     fontFamily: string | null;
     underline: string | null;
+    strike?: string | null;
     spacingPt?: number | null;
     baselinePct?: number | null;
     /** `a:rPr@kern`: the smallest size, in points, the run is kerned at. */
@@ -2592,9 +2866,12 @@ export interface PositionedTextRun {
     bold: boolean;
     italic: boolean;
     underline: boolean;
+    strike?: string;
     color: string;
     letterSpacingPx?: number;
     baselineOffsetPx?: number;
+    /** `false` when layout shaped the run without kerning, below its `kern` threshold; absent when kerned. */
+    kerning?: false;
     glyphs: PositionedGlyph[];
 }
 export interface PositionedTextLine {
@@ -2616,6 +2893,8 @@ export interface TextBoxPrimitive extends PrimitiveBase {
     paragraphs: Array<{
         align?: 'left' | 'center' | 'right' | 'justify';
         level: number;
+        languages?: TextLanguage[];
+        links?: TextLink[];
         runs: Array<{
             text: string;
             fontFamily: string;
@@ -2631,6 +2910,28 @@ export interface TextBoxPrimitive extends PrimitiveBase {
     /** `a:rPr/a:effectLst`: the shadow the box's glyphs are drawn with. */
     textShadow?: Shadow;
 }
+/** UTF-16 offsets into the paragraph's concatenated run text. */
+export interface TextLanguage {
+    start: number;
+    end: number;
+    lang: string;
+}
+/** UTF-16 offsets into the paragraph's concatenated run text. */
+export interface TextLink {
+    start: number;
+    end: number;
+    target: TextLinkTarget;
+}
+export type TextLinkTarget = {
+    kind: 'url';
+    href: string;
+} | {
+    kind: 'slide';
+    index: number;
+} | {
+    kind: 'jump';
+    jump: 'next' | 'previous' | 'first' | 'last';
+};
 export interface PlaceholderPrimitive extends PrimitiveBase {
     kind: 'placeholder';
     name: string;
@@ -2643,6 +2944,21 @@ export interface ChartPrimitive extends PrimitiveBase {
     name: string;
     label: string;
     primitives: SlidePrimitive[];
+    /** The plotted values as text, for assistive technology, with no categories
+     *  or series when the chart caches no points. Older engines and charts over
+     *  the size cap leave it out. */
+    data?: ChartData;
+}
+/** What a chart plots: one row per category and one column per series. */
+export interface ChartData {
+    categories: string[];
+    series: ChartDataSeries[];
+}
+export interface ChartDataSeries {
+    name?: string;
+    /** Each category's value as the chart's data labels would show it; `null`
+     *  where the chart has no number. */
+    values: (string | null)[];
 }
 /** A laid-out table. Its cells paint clipped to the table rectangle, and
  *  `label` is the screen-reader summary of the whole table. */
@@ -2651,14 +2967,51 @@ export interface TablePrimitive extends PrimitiveBase {
     name: string;
     label: string;
     primitives: SlidePrimitive[];
+    /** The row and column structure, for assistive technology. Older engines
+     *  leave it out. */
+    grid?: TableGrid;
+}
+export interface TableGrid {
+    rows: number;
+    columns: number;
+    /** Cells that start a span, in row then column order; cells merged into
+     *  another one are left out. */
+    cells: TableGridCell[];
+}
+export interface TableGridCell {
+    row: number;
+    column: number;
+    rowSpan: number;
+    columnSpan: number;
+    /** `column` heads its column (the header row), `row` heads its row (the
+     *  first column). */
+    header?: 'column' | 'row';
+    /** The `[start, end)` range of the table's `primitives` that hold the
+     *  cell's text. */
+    primitives: [number, number];
 }
 export type SlidePrimitive = ShapePrimitive | ImagePrimitive | TextBoxPrimitive | PlaceholderPrimitive | ChartPrimitive | TablePrimitive;
+/** What `p:cNvPr` says about a shape for assistive technology. */
+export interface ShapeAltText {
+    title?: string;
+    description?: string;
+    /** The shape, or a group around it, is marked decorative. */
+    decorative?: boolean;
+    /** The nearest enclosing group with alternative text, by its key in `altText`. */
+    group?: string;
+    /** Where the shape starts in `primitives` when what paints it carries no shape id. */
+    primitive?: number;
+}
 export interface SlideDisplayList {
     contractVersion: number;
     width: number;
     height: number;
     background?: Paint;
     primitives: SlidePrimitive[];
+    /** Alternative text by shape id, for the shapes that have some. */
+    altText?: Record<string, ShapeAltText>;
+    /** The shape holding the slide's title placeholder. */
+    titleShape?: string;
 }
 export type HitTestResult = {
     kind: 'shape';
@@ -2675,7 +3028,7 @@ export interface UpdateEvent {
 }
 export interface TextParagraphDraft {
     bullet?: boolean;
-    alignment?: ParagraphAlignment | null;
+    alignment?: ParagraphAlignment | 'justLow' | 'dist' | 'thaiDist' | null;
     runs: Array<{
         text: string;
         style?: TextStyle;
@@ -2785,6 +3138,7 @@ export class PptxDocument {
     static openReplayBaseline(source: Uint8Array, client_id?: number | null, initial_update?: Uint8Array | null): PptxDocument;
     peerHydrationJson(fonts_json: string): string;
     previewProposalJson(args: string): string;
+    proposalSlideStripJson(id: string): string;
     proposeJson(args: string): string;
     readCommandContentJson(request: string): string;
     /**
@@ -2842,6 +3196,7 @@ export class PptxDocument {
      * `{"ok":true,"baseVersion","wouldApply","previews"}`.
      */
     validateEditsJson(request: string): string;
+    validateProposalJson(args: string): string;
     static version(): string;
     readonly clientId: number;
 }
@@ -2849,8 +3204,13 @@ export class PptxDocument {
 export class PptxRenderer {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * `layoutSlideJson` for an export: hit testing keeps the slide it had.
+     */
+    exportSlideJson(document: PptxDocument, slide_index: number): string;
     hitTestJson(x: number, y: number): string;
     hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string;
+    layoutProposalDiffSlideByIdJson(document: PptxDocument, id: string, slide_id: string): string;
     layoutProposalDiffSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutProposalSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutSlideJson(document: PptxDocument, slide_index: number): string;
@@ -2984,6 +3344,7 @@ export interface InitOutput {
     readonly pptxdocument_openReplayBaseline: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly pptxdocument_peerHydrationJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_previewProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_proposalSlideStripJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_readCommandContentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_readContentJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3024,9 +3385,12 @@ export interface InitOutput {
     readonly pptxdocument_undoProfiledJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_undoReceiptJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_validateProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_version: () => [number, number];
+    readonly pptxrenderer_exportSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestSlideJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly pptxrenderer_layoutProposalDiffSlideByIdJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3069,9 +3433,11 @@ export default function __wbg_init (module_or_path?: { module_or_path: InitInput
 // ---- wasm/loader.d.ts ----
 import type { InitInput } from './generated/pptx_wasm.js';
 import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import type { PptxPngOptions, PptxPngTarget } from './pngOptions';
+export type { PptxPngOptions, PptxPngTarget } from './pngOptions';
 export declare const decodeFontFace: FontDecoder;
 import type { PptxExportOptions, PptxExportResult, PptxMarkdownContent, PptxMarkdownOptions, PptxStructuredContent } from '../structuredExport';
-import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
+import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalStripEntry } from '../proposals';
 import type { PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxReadRequest, PptxReadResult, PptxTextField, PptxValidationResult } from '../edits';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, HistoryProfile, HistoryResult, HitTestResult, ParagraphAlignment, PictureDraft, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, SlideDisplayList, SlideReceipt, StorySnapshot, TextReceipt, TextParagraphDraft, TextStyle, TextStylePatch, TransformReceipt, TableReceipt } from '../types';
@@ -3126,12 +3492,21 @@ export type PresentationCommandReadResult = Extract<PptxReadResult, {
     }[];
 });
 export interface PresentationHandle extends CollaborationReplica {
+    /**
+     * Draws a slide as PNG bytes with the editor's painter on a canvas, with the
+     * faces layout measured with. Rejects with `PngExportError` rather than
+     * paint a substitute font, and where no canvas exists names
+     * `@betteroffice/pptx-native`.
+     */
+    renderPng(target: PptxPngTarget, options?: PptxPngOptions): Promise<Uint8Array>;
     isProposalsAvailable(): boolean;
     propose(agentId: string, note: string | null, edits: readonly ProposalEdit[]): Proposal;
     listProposals(): Proposal[];
     previewProposal(id: string): ProposalPreview;
     layoutProposalSlide(id: string, slideIndex: number): SlideDisplayList;
     layoutProposalDiffSlide(id: string, slideIndex: number): ProposalDiffSlide;
+    layoutProposalDiffSlideById(id: string, slideId: string): ProposalDiffSlide;
+    proposalSlideStrip(id: string): ProposalStripEntry[];
     acceptProposal(id: string, options?: {
         force?: boolean;
     }): ProposalAcceptance;
@@ -3190,6 +3565,12 @@ export interface PresentationHandle extends CollaborationReplica {
     registerFont(face: PptxFontFace): number;
     /** Registers a face drawn only where a run's own face has no glyph. */
     registerFallbackFont(face: PptxFontFace): number;
+    /** Gives PNG export the complete bytes of a family layout measured with only part of. */
+    replaceExportFace(family: string, bytes: Uint8Array, keep?: (face: {
+        id: number;
+        bold?: boolean;
+        italic?: boolean;
+    }) => boolean): void;
     layoutSlide(slideIndex: number): SlideDisplayList;
     /** `layoutSlide` with scope, layout and serialize time measured inside the renderer. */
     layoutSlideProfiled(slideIndex: number): ProfiledLayout;
@@ -3328,7 +3709,7 @@ export interface PresentationReplayReply {
     outcome: PresentationReplayOutcome;
 }
 /** @internal */
-export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' | 'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
+export type PresentationPeerHandle = Pick<PresentationHandle, 'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' | 'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' | 'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'renderPng' | 'hitTest' | 'mediaBytes' | 'metafileSvg' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'>;
 /** @internal */
 export declare function openPresentationReplayBaseline(bytes: Uint8Array, options?: OpenPresentationOptions): PresentationPeerHandle;
 /** @internal */
@@ -3387,4 +3768,38 @@ export declare function exportPptxMarkdown(bytes: Uint8Array, options?: PptxExpo
 export declare function renderPptxMarkdown(content: PptxStructuredContent, options?: PptxMarkdownOptions): Promise<PptxMarkdownContent>;
 export declare function decodeTiffImage(bytes: Uint8Array): Uint8Array;
 export declare function openPresentation(bytes: Uint8Array, options?: OpenPresentationOptions): PresentationHandle;
-export {};
+
+// ---- wasm/pngOptions.d.ts ----
+import type { PptxFontFace } from '../types';
+/** What `renderPng` draws: a slide by zero-based index or by its ID. */
+export type PptxPngTarget = {
+    slide: number | string;
+};
+export interface PptxPngOptions {
+    /** Device pixels per slide pixel. Defaults to 1. */
+    scale?: number;
+    /** `'slide'` (default) paints white under the slide, as the editor shows it; `'transparent'` nothing; or a `#rrggbb` color. */
+    background?: 'slide' | 'transparent' | `#${string}`;
+    /** Scratch pixels every shadow on the slide may blur between them. */
+    maxShadowPixels?: number;
+    signal?: AbortSignal;
+    /**
+     * Faces to paint with besides those the presentation registered, matched by
+     * family and style. One that fails to load rejects with `PngExportError`
+     * `font-unavailable`.
+     */
+    fonts?: ReadonlyArray<PptxFontFace>;
+}
+
+// ---- wasm/preflight.d.ts ----
+import { type FontPreflight, type PreflightWasmInput } from '../../../../shared/office-session/fontPreflight';
+export type { FontPreflight, FontPreflightFace } from '../../../../shared/office-session/fontPreflight';
+export declare const preflightWasmState: {
+    status(): "idle" | "loading" | "ready";
+    memory(): WebAssembly.Memory | undefined;
+    preload(input?: PreflightWasmInput): Promise<void>;
+};
+/** @experimental Load the font preflight wasm on demand. Idempotent. */
+export declare function preloadPreflightWasm(input?: PreflightWasmInput): Promise<void>;
+/** @experimental Font faces for a zero-based slide index. Defaults to the first slide. */
+export declare function fontPreflight(bytes: Uint8Array, activeSlide?: number): Promise<FontPreflight>;

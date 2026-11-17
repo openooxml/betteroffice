@@ -959,6 +959,7 @@ fn criteria_index_formula_names_tables_and_cross_sheet_dependencies() {
         header_rows: 1,
         totals_rows: 0,
         columns: vec!["Value".into()],
+        style: Vec::new(),
     });
     wb.defined_names.push(xlsx_model::DefinedName {
         name: "InputValue".into(),
@@ -1075,6 +1076,7 @@ fn criteria_index_spill_schedules_guard_before_later_readers() {
             spilled: Vec::new(),
             readers: Readers::new(&graph),
             inherited: HashMap::new(),
+            answered_reads: HashMap::new(),
             replaced: HashMap::new(),
             rerun: Vec::new(),
             early: HashMap::new(),

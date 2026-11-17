@@ -519,13 +519,13 @@ impl<'b> Painter<'_, 'b> {
         let Some(rect) = Rect::from_xywh(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0)) else {
             return;
         };
-        let unit = device_scale(outer).max(1.0);
+        let pixel = device_scale(outer) / vsdx_render::PIXELS_PER_INCH;
         let mut paint = Paint::default();
         paint.set_color(Color::from_rgba8(0x8a, 0x94, 0xa6, 255));
         paint.anti_alias = true;
         let stroke = Stroke {
-            width: unit,
-            dash: StrokeDash::new(vec![5.0 * unit, 4.0 * unit], 0.0),
+            width: pixel.max(1.0),
+            dash: StrokeDash::new(vec![4.0 * pixel, 3.0 * pixel], 0.0),
             ..Stroke::default()
         };
         self.pixmap.stroke_path(
@@ -540,11 +540,13 @@ impl<'b> Painter<'_, 'b> {
     fn decode(&mut self, asset_id: &str) -> Option<(Pixmap, (f32, f32))> {
         use image::ImageDecoder as _;
         let bytes = self.images.get(asset_id)?;
-        let decoder = image::ImageReader::new(Cursor::new(bytes))
+        let reader = image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
-            .ok()?
-            .into_decoder()
             .ok()?;
+        if reader.format() == Some(image::ImageFormat::Tiff) {
+            return None;
+        }
+        let decoder = reader.into_decoder().ok()?;
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
         if declared == 0 || declared > MAX_IMAGE_PIXELS {
@@ -695,6 +697,47 @@ mod tests {
         )
     }
 
+    fn pixels(bytes: &[u8]) -> (u32, Vec<u8>) {
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buffer = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buffer).unwrap();
+        let channels = info.line_size / info.width as usize;
+        let gray = buffer[..info.buffer_size()]
+            .chunks(channels)
+            .map(|pixel| pixel[0].min(pixel[1]).min(pixel[2]))
+            .collect();
+        (info.width, gray)
+    }
+
+    #[test]
+    fn placeholders_are_a_thin_dashed_outline() {
+        let mut list = empty_list(4.0, 3.0);
+        list.primitives.push(Primitive::Placeholder {
+            id: "p".into(),
+            z_order: 0,
+            x: 1.0,
+            y: 1.0,
+            width: 2.0,
+            height: 1.0,
+            reason: String::new(),
+        });
+        let rendered = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
+        let (width, gray) = pixels(&rendered.bytes);
+        let at = |x: u32, y: u32| gray[(y * width + x) as usize];
+        let (left, right, top, bottom) = (96, 288, 96, 192);
+        assert_eq!(at((left + right) / 2, (top + bottom) / 2), 255);
+        let inked: Vec<u32> = (top - 4..top + 5)
+            .filter(|&y| at(150, y) < 200 || at(153, y) < 200 || at(156, y) < 200)
+            .collect();
+        assert!(!inked.is_empty() && inked.len() <= 2, "edge rows {inked:?}");
+        let row = inked[0];
+        let marks: Vec<bool> = (left + 2..right - 2).map(|x| at(x, row) < 200).collect();
+        let runs = marks.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        assert!(runs >= 40, "only {runs} dash edges along the top");
+        assert!(marks.iter().filter(|&&mark| mark).count() > marks.len() / 3);
+    }
+
     #[test]
     fn renders_white_pages_at_display_list_size_times_scale() {
         let images = HashMap::new();
@@ -826,6 +869,36 @@ mod tests {
             transform: Affine::identity(),
         });
         let page = render_list(None, &list, &HashMap::new(), 1.0).unwrap();
+        assert_eq!(page.skipped_images, 1);
+    }
+
+    #[test]
+    fn a_tiff_is_skipped_even_when_the_image_crate_can_open_it() {
+        use image::ImageEncoder as _;
+        let mut data = Vec::new();
+        image::codecs::tiff::TiffEncoder::new(Cursor::new(&mut data))
+            .write_image(
+                &[255, 0, 0, 0, 255, 0],
+                2,
+                1,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        assert!(image::load_from_memory(&data).is_ok());
+        let mut list = empty_list(4.0, 4.0);
+        list.primitives.push(Primitive::Image {
+            id: "tiff".into(),
+            z_order: 0,
+            asset_id: "a".into(),
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+            transform: Affine::identity(),
+        });
+        let mut images: HashMap<&str, &[u8]> = HashMap::new();
+        images.insert("a", &data);
+        let page = render_list(None, &list, &images, 1.0).unwrap();
         assert_eq!(page.skipped_images, 1);
     }
 

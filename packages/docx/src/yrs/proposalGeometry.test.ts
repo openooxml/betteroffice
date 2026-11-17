@@ -501,7 +501,7 @@ describe('proposal geometry readers', () => {
         main.withdrawProposals({ expectVersion: main.version(), ids: ['same'] })
       );
       expect(withdrawn.version).toBe(first.version);
-      expect(withdrawn.previewVersion).toBe(first.previewVersion);
+      expect(withdrawn.previewVersion).toBe(first.previewVersion + 1);
       expect(withdrawn.proposals.some(({ id }) => id === 'same')).toBe(false);
       expect(proposalSetIdentity(withdrawn)).not.toBe(first.proposals);
 
@@ -513,7 +513,7 @@ describe('proposal geometry readers', () => {
       );
       const next = computeProposalGeometryMirror(main, proposed);
       expect(next.version).toBe(first.version);
-      expect(next.previewVersion).toBe(first.previewVersion);
+      expect(next.previewVersion).toBe(withdrawn.previewVersion);
       expect(next.proposals).toBe(proposalSetIdentity(proposed));
       expect(next.proposals).not.toBe(first.proposals);
       expect(next.proposals).not.toBe(proposalSetIdentity(withdrawn));

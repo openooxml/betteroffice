@@ -45,6 +45,7 @@ import type {
   DocxPluginLayout,
   DocxPluginPageRect,
   DocxPluginRect,
+  DocxPluginSelection,
 } from './types';
 
 import { flushEditorInput } from '../components/DocxEditor/editorBatches';
@@ -66,6 +67,7 @@ export async function readPluginPositionAtPoint(
 
 const layoutIds = new WeakMap<DisplayListQueries, string>();
 let nextLayoutId = 0;
+export const SELECTION_ANCHOR_WAIT_MS = 2000;
 
 export function layoutIdOf(queries: DisplayListQueries): string {
   let id = layoutIds.get(queries);
@@ -114,48 +116,84 @@ const reservationReaders = new WeakMap<DocxPluginGeometry, ReservationReader>();
 export function registerReservationReader(geometry: DocxPluginGeometry, reader: ReservationReader): void {
   reservationReaders.set(geometry, reader);
 }
-const scopedGeometries = new WeakMap<DocxPluginGeometry, Map<string, DocxPluginGeometry>>();
+type ScopedGeometry = {
+  geometry: DocxPluginGeometry;
+  checks: { selectionCurrent?: () => boolean; beforeRead?: () => void };
+};
+const scopedGeometries = new WeakMap<DocxPluginGeometry, Map<string, {
+  shared?: ScopedGeometry;
+  contexts: WeakMap<object, ScopedGeometry>;
+}>>();
 
 /** `geometry` as plugin `pluginId` reads it: its `reservation` targets name its own reservations. */
 export function scopePluginGeometry(
   geometry: DocxPluginGeometry,
-  pluginId: string
+  pluginId: string,
+  selectionCurrent?: () => boolean,
+  beforeRead?: () => void,
+  context?: object
 ): DocxPluginGeometry {
   let byPlugin = scopedGeometries.get(geometry);
   if (!byPlugin) {
     byPlugin = new Map();
     scopedGeometries.set(geometry, byPlugin);
   }
-  let scoped = byPlugin.get(pluginId);
-  if (!scoped) {
-    const reservation = (target: DocxGeometryTarget) => {
-      if (target.kind !== 'reservation') return geometry.getAnchorGeometry(target);
-      const reader = reservationReaders.get(geometry);
-      return reader
-        ? reader.get(pluginId, target.id)
-        : anchorFailure('unsupported', 'This layout reports no reservations');
-    };
-    scoped = {
-      get layout() {
-        return geometry.layout;
-      },
-      get dom() {
-        return geometry.dom;
-      },
-      toOverlayRect: (rect) => geometry.toOverlayRect(rect),
-      getPositionAtPoint: (clientX, clientY) => geometry.getPositionAtPoint(clientX, clientY),
-      readPositionAtPoint: (clientX, clientY) => geometry.readPositionAtPoint(clientX, clientY),
-      readAnchorGeometries: async (targets) => {
-        if (!targets.some((target) => target.kind === 'reservation')) return geometry.readAnchorGeometries(targets);
-        const reader = reservationReaders.get(geometry);
-        return reader?.read ? reader.read(pluginId, targets) : targets.map(reservation);
-      },
-      getPageRect: (pageIndex) => geometry.getPageRect(pageIndex),
-      isPageBuilt: (pageIndex) => geometry.isPageBuilt(pageIndex),
-      getAnchorGeometry: reservation,
-    };
-    byPlugin.set(pluginId, scoped);
+  let cache = byPlugin.get(pluginId);
+  if (!cache) {
+    cache = { contexts: new WeakMap() };
+    byPlugin.set(pluginId, cache);
   }
+  const key = context ?? selectionCurrent;
+  const cached = key ? cache.contexts.get(key) : cache.shared;
+  if (cached) {
+    cached.checks.selectionCurrent = selectionCurrent;
+    cached.checks.beforeRead = beforeRead;
+    return cached.geometry;
+  }
+  const checks = { selectionCurrent, beforeRead };
+  const superseded = () => anchorFailure('layout-unavailable', 'The plugin selection is no longer current');
+  const reservation = (target: DocxGeometryTarget) => {
+    checks.beforeRead?.();
+    if (target.kind === 'selection' && checks.selectionCurrent && !checks.selectionCurrent()) return superseded();
+    if (target.kind !== 'reservation') return geometry.getAnchorGeometry(target);
+    const reader = reservationReaders.get(geometry);
+    return reader
+      ? reader.get(pluginId, target.id)
+      : anchorFailure('unsupported', 'This layout reports no reservations');
+  };
+  const scoped: DocxPluginGeometry = {
+    get layout() {
+      return geometry.layout;
+    },
+    get viewport() {
+      return geometry.viewport;
+    },
+    get dom() {
+      return geometry.dom;
+    },
+    toOverlayRect: (rect) => geometry.toOverlayRect(rect),
+    getPositionAtPoint: (clientX, clientY) => geometry.getPositionAtPoint(clientX, clientY),
+    readPositionAtPoint: (clientX, clientY) => geometry.readPositionAtPoint(clientX, clientY),
+    readAnchorGeometries: async (targets) => {
+      checks.beforeRead?.();
+      if (checks.selectionCurrent && !checks.selectionCurrent() && targets.every((target) => target.kind === 'selection')) {
+        return targets.map(superseded);
+      }
+      const reader = reservationReaders.get(geometry);
+      const answers = await (!targets.some((target) => target.kind === 'reservation')
+        ? geometry.readAnchorGeometries(targets)
+        : reader?.read ? reader.read(pluginId, targets) : targets.map(reservation));
+      checks.beforeRead?.();
+      return answers.map((answer, index) => targets[index]!.kind === 'selection' &&
+        checks.selectionCurrent && !checks.selectionCurrent() ? superseded() : answer);
+    },
+    getPageRect: (pageIndex) => geometry.getPageRect(pageIndex),
+    isPageBuilt: (pageIndex) => geometry.isPageBuilt(pageIndex),
+    getAnchorGeometry: reservation,
+  };
+  const entry = { geometry: scoped, checks };
+  if (key) cache.contexts.set(key, entry);
+  else cache.shared = entry;
   return scoped;
 }
 
@@ -192,6 +230,24 @@ export function overlayProjector(
     width: rect.width * scale,
     height: rect.height * scale,
   });
+}
+
+export function visibleViewport(scroller: HTMLElement, root: Element, layer: HTMLElement): DocxPluginRect {
+  const box = scroller.getBoundingClientRect();
+  const bounds = root.getBoundingClientRect();
+  const overlay = layer.getBoundingClientRect();
+  const zoom = effectiveZoom(scroller);
+  const scale = effectiveZoom(layer);
+  const left = Math.max(box.left + scroller.clientLeft * zoom, bounds.left);
+  const top = Math.max(box.top + scroller.clientTop * zoom, bounds.top);
+  const right = Math.min(box.left + (scroller.clientLeft + scroller.clientWidth) * zoom, bounds.right);
+  const bottom = Math.min(box.top + (scroller.clientTop + scroller.clientHeight) * zoom, bounds.bottom);
+  return {
+    x: (left - overlay.left) / scale - layer.clientLeft + layer.scrollLeft,
+    y: (top - overlay.top) / scale - layer.clientTop + layer.scrollTop,
+    width: Math.max(0, right - left) / scale,
+    height: Math.max(0, bottom - top) / scale,
+  };
 }
 
 export interface AnchorGeometryAccess {
@@ -481,7 +537,8 @@ export function placeRepeated(
   routed: readonly string[],
   ranges: Interval[],
   hidden: readonly Interval[],
-  paragraph: number | null
+  paragraph: number | null,
+  focus?: number
 ): DocxAnchorGeometryResult {
   const rIds = new Set(routed);
   const pages = queries.displayList?.pages ?? [];
@@ -520,15 +577,17 @@ export function placeRepeated(
   const first = firstOf(drawn);
   const last = ranges.at(-1);
   const gap = last && widen(last, hidden);
-  const end = first
-    ? lastInReadingOrder(drawn.filter(({ pageIndex }) => pageIndex === first.pageIndex))
-    : firstOf(
-        [...built.values()].flatMap(({ region, rId }) => [
-          ...(gap ? queries.hfCaretRects(region, rId, gap.from) : []),
-          ...(gap ? queries.hfCaretRects(region, rId, gap.to) : []),
-          ...(paragraph === null ? [] : queries.hfAnchorRects(region, rId, paragraph)),
-        ])
-      );
+  const end = focus !== undefined
+    ? firstOf([...built.values()].flatMap(({ region, rId }) => queries.hfCaretRects(region, rId, focus)))
+    : first
+      ? lastInReadingOrder(drawn.filter(({ pageIndex }) => pageIndex === first.pageIndex))
+      : firstOf(
+          [...built.values()].flatMap(({ region, rId }) => [
+            ...(gap ? queries.hfCaretRects(region, rId, gap.from) : []),
+            ...(gap ? queries.hfCaretRects(region, rId, gap.to) : []),
+            ...(paragraph === null ? [] : queries.hfAnchorRects(region, rId, paragraph)),
+          ])
+        );
   const unbuiltPages = [...new Set(bands.filter((band) => band.unbuilt).map((band) => band.pageIndex))];
   if (end) return respond(drawn, { ...end, width: 0 }, unbuiltPages);
   const unbuilt = bands.find((band) => band.unbuilt);
@@ -617,7 +676,11 @@ export function createPluginGeometry(
   access: (reservation?: boolean) => AnchorGeometryAccess | null,
   held: () => boolean = () => false,
   readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
-  complete: () => boolean = () => false
+  complete: () => boolean = () => false,
+  viewport: () => DocxPluginRect = () => visibleViewport(layer, layer, layer),
+  selection: () => (NonNullable<DocxPluginSelection['displayRange']> & { focus?: number; viewer?: boolean }) | null = () => null,
+  subscribeSelection?: (listener: () => void) => () => void,
+  selectionStory: () => string | null = () => access()?.session.selection()?.head.story ?? null
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -672,7 +735,8 @@ export function createPluginGeometry(
     target: AnchorGeometryTarget | null,
     raw?: { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc; drawing?: boolean; drawingOffset?: number },
     reservationTarget = false,
-    hiddenTarget = false
+    hiddenTarget = false,
+    focus?: number
   ): DocxAnchorGeometryResult => {
     if (!shown()) return unavailable();
     const live = access(reservationTarget);
@@ -732,7 +796,8 @@ export function createPluginGeometry(
         routed,
         [...ranges],
         hidden,
-        paragraph
+        paragraph,
+        focus
       );
     }
     const window = displayWindowOf(queries)?.read();
@@ -838,6 +903,7 @@ export function createPluginGeometry(
   const drawable = () => shown() || (dom.zoom === layout.zoom && held());
   const created: DocxPluginGeometry = {
     layout,
+    get viewport() { return viewport(); },
     dom,
     toOverlayRect: (rect) =>
       drawable() ? toOverlayRect(dom.pagesContainer, layer, dom.zoom, rect) : null,
@@ -848,7 +914,32 @@ export function createPluginGeometry(
           )
         : null,
     isPageBuilt: (pageIndex) => drawable() && pageBuilt(queries, pageIndex),
-    readAnchorGeometries: async (targets) => targets.map((target) => created.getAnchorGeometry(target)),
+    readAnchorGeometries: async (targets) => {
+      const read = () => targets.map((target) => created.getAnchorGeometry(target));
+      const pending = (answer: DocxAnchorGeometryResult, index: number) => targets[index]!.kind === 'selection' &&
+        !answer.ok && answer.failure.code === 'pending';
+      const answers = read();
+      if (!answers.some(pending)) return answers;
+      return new Promise<DocxAnchorGeometryResult[]>((resolve) => {
+        let detach = () => {};
+        let poll: ReturnType<typeof setTimeout> | undefined;
+        const finish = (results: DocxAnchorGeometryResult[]) => {
+          clearTimeout(timer);
+          clearTimeout(poll);
+          detach();
+          resolve(results);
+        };
+        const check = () => {
+          const results = read();
+          if (!results.some(pending)) finish(results);
+          else if (!subscribeSelection) poll = setTimeout(check, 50);
+        };
+        const timer = setTimeout(() => finish(read().map((answer, index) =>
+          pending(answer, index) ? unavailable() : answer)), SELECTION_ANCHOR_WAIT_MS);
+        detach = subscribeSelection?.(check) ?? detach;
+        check();
+      });
+    },
     getPositionAtPoint(clientX, clientY) {
       if (!shown()) return null;
       const position = resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
@@ -862,10 +953,52 @@ export function createPluginGeometry(
       return shown() && position && position.version === layout.version
         ? { ...position, layoutId: layout.id } : null;
     },
-    getAnchorGeometry: (target) =>
-      target.kind === 'reservation'
+    getAnchorGeometry(target) {
+      if (target.kind === 'selection') {
+        if (!shown()) return unavailable();
+        const range = selection();
+        if (!range) {
+          const story = selectionStory();
+          if (story === null) return anchorFailure('missing-target', 'No selection is available');
+          if (anchorDisplayRoot(story) === null) return anchorFailure('unsupported', 'The range has no display position');
+          return { ok: false as const, failure: { code: 'pending' as const,
+            message: 'The selection display range is being read' } };
+        }
+        if (range.layoutId !== layout.id) return unavailable();
+        const from = Math.min(range.from, range.to);
+        const to = Math.max(range.from, range.to);
+        const focus = range.focus ?? range.to;
+        const root = anchorDisplayRoot(range.story);
+        if (root === null) return anchorFailure('unsupported', 'The range has no display position');
+        if (root !== 'body') {
+          if (range.viewer) return anchorFailure('unsupported', 'The range has no display position');
+          const live = access();
+          const sticky = live?.session.selection();
+          if (!live || !sticky || anchorDisplayRoot(sticky.anchor.story) !== root ||
+            anchorDisplayRoot(sticky.head.story) !== root) return unavailable();
+          const anchor = live.editor.yrsLocToDisplayPosition(sticky.anchor);
+          const head = live.editor.yrsLocToDisplayPosition(sticky.head);
+          if (anchor === null || head === null || Math.min(anchor, head) !== from || Math.max(anchor, head) !== to) return unavailable();
+          const [start, end] = anchor <= head ? [sticky.anchor, sticky.head] : [sticky.head, sticky.anchor];
+          return anchorGeometry(null, { ok: true, ranges: [{ start, end }], paragraph: { ...start, offset: 0 } }, false, false, head);
+        }
+        const rects = from === to ? [] : queries.rangeRects(from, to).filter((rect) => rect.width > 0);
+        const caret = from === to || focus === from
+          ? caretAt(queries, focus) ?? queries.caretRect(focus) ?? queries.anchorRect(focus)
+          : endOf({ from, to });
+        const anchor = caret ? { ...caret, width: 0 } : null;
+        if (rects.some((rect) => pendingPage(rect.pageIndex)) || (anchor && pendingPage(anchor.pageIndex))) return unavailable();
+        const unbuiltPages = unbuiltPagesOf(queries, [{ from, to }]);
+        if (from !== to && rects.length === 0 && !anchor && selectionStory() !== null && complete() && unbuiltPages.length === 0 &&
+          !queries.displayList?.pages.some(({ unbuilt, positionSpan }) => unbuilt && !positionSpan)) {
+          return anchorFailure('missing-target', 'The selection has no rendered text range');
+        }
+        return respond(rects, anchor, unbuiltPages);
+      }
+      return target.kind === 'reservation'
         ? anchorFailure('unsupported', 'Reservations are read through a plugin context')
-        : anchorGeometry(target),
+        : anchorGeometry(target);
+    },
   };
   registerReservationReader(created, { get: reservation });
   return created;

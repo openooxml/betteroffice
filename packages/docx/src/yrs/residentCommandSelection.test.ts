@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolveReservations, validReservationsPayload } from './reservations';
+import { canvasPageStack } from '../layout/render/canvasPageMetrics';
 import * as queryModule from '../layout/render/displayListQueries';
 import * as rustQueries from '../layout/render/rustDisplayList';
 import type { DisplayPage, TextRunPrimitive } from '../layout/render/displayList';
@@ -310,7 +311,7 @@ test('page_navigation_moves_by_viewport_height_and_preserves_the_selection_ancho
 test('shift_page_navigation_extends_to_the_landing_cell_from_above_and_within_a_table', () => {
   const stories = ['body:t0:r0c0', 'body:t0:r1c0', 'body:t0:r2c0'];
   const arm = fakeArm({ body: ['Before', 'After'], ...Object.fromEntries(stories.map(story => [story, ['Cell']])) });
-  const payload = { rows: stories.map(story => ({ cells: [{ story }] })) };
+  const payload = { tblPr: {}, grid: [], rows: stories.map(story => ({ cells: [{ story }] })) };
   const segments = arm.engine.geometryReader.storySegments;
   arm.engine.geometryReader.storySegments = story => story === 'body' ? [
     ...segments(story).slice(0, 2),
@@ -355,7 +356,7 @@ test('shift_page_navigation_extends_to_the_landing_cell_from_above_and_within_a_
 test('repeated_shift_page_down_grows_the_cell_selection_and_shift_page_up_shrinks_it', () => {
   const stories = Array.from({ length: 7 }, (_, row) => `body:t0:r${row}c0`);
   const arm = fakeArm({ body: ['Before', 'After'], ...Object.fromEntries(stories.map(story => [story, ['Cell']])) });
-  const payload = { rows: stories.map(story => ({ cells: [{ story }] })) };
+  const payload = { tblPr: {}, grid: [], rows: stories.map(story => ({ cells: [{ story }] })) };
   const segments = arm.engine.geometryReader.storySegments;
   arm.engine.geometryReader.storySegments = story => story === 'body' ? [
     ...segments(story).slice(0, 2),
@@ -535,7 +536,7 @@ function workerSelectionHooks(arm: CommandArm, frame: RetainedFrame, buildPages?
   const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
   const binding = source.slice(source.indexOf('function bindResidentCommands('), source.indexOf('function replacementCommandInit('));
   const dependencies = {
-    resolveReservations, validReservationsPayload, cellSelectionHeadPosition,
+    resolveReservations, validReservationsPayload, cellSelectionHeadPosition, canvasPageStack, offscreenDpr: 1, offscreenZoom: 1,
     session: {
       ...arm.engine, proposalEngine: { version: () => arm.engine.geometryReader.version() },
       selection: () => ({ anchor: arm.state.selection!.anchor, head: arm.state.selection!.focus }),
@@ -615,7 +616,7 @@ test('d2a_vertical_extension_clamps_at_body_cell_story_boundary', () => {
   const segments = arm.engine.geometryReader.storySegments;
   arm.engine.geometryReader.storySegments = (story) => story === 'body' ? [
     ...segments(story),
-    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { rows: [{ cells: [{ story: cell }] }] } },
+    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { tblPr: {}, grid: [], rows: [{ cells: [{ story: cell }] }] } },
   ] : segments(story);
   const index = new DisplayPositionIndex({
     ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment,
@@ -917,7 +918,7 @@ test('d2a_worker_vertical_navigation_builds_unbuilt_neighbours_before_chained_ty
   const reservations = source.slice(reservationStart, source.indexOf('\n/**', reservationStart));
   const binding = source.slice(source.indexOf('function bindResidentCommands('), source.indexOf('function replacementCommandInit('));
   const dependencies = {
-    resolveReservations, validReservationsPayload, cellSelectionHeadPosition,
+    resolveReservations, validReservationsPayload, cellSelectionHeadPosition, canvasPageStack, offscreenDpr: 1, offscreenZoom: 1,
     session: arm.engine, commandHooksFactory: factory, collaboration: null,
     init: { layoutWithRegions: true, layoutInput: '{}', extras: '{}' } as DocxCommandInitRequest,
     retainedFrame: windowed, retainedLayoutVersion: null, layoutRevision: 0, commandFrameChanges: null,
@@ -982,7 +983,7 @@ test('d2a_worker_arrow_down_builds_the_actual_split_row_caret_page_and_neighbour
   const segments = arm.engine.geometryReader.storySegments;
   arm.engine.geometryReader.storySegments = (story) => story === 'body' ? [
     ...segments(story),
-    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { rows: [{ cells: [{ story: cell }] }] } },
+    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { tblPr: {}, grid: [], rows: [{ cells: [{ story: cell }] }] } },
   ] : segments(story);
   arm.state.selection = selection(`${cell}-0`, 10, 10, cell);
   const index = new DisplayPositionIndex({ ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment });
@@ -1128,7 +1129,7 @@ test('d2a_repeated_end_of_document_drag_and_line_results_use_indexed_positions',
   const segments = arm.engine.geometryReader.storySegments;
   arm.engine.geometryReader.storySegments = (story) => story === 'body' ? [
     ...segments(story),
-    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { rows: [{ cells: Object.keys(cells).map((story) => ({ story })) }] } },
+    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { tblPr: {}, grid: [], rows: [{ cells: Object.keys(cells).map((story) => ({ story })) }] } },
   ] : segments(story);
   const cell = 'body:t0:r0c99';
   const index = new DisplayPositionIndex({ ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment });

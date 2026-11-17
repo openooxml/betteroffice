@@ -49,6 +49,7 @@ export interface XlsxEditorBridge {
   handle(): WorkbookHandle | null;
   status(): XlsxCommandEnvironment['status'];
   readOnly(): boolean;
+  allowHostProposals?(): boolean;
   collaborative(): boolean;
   /** Bumped by every committed change, so cached engine reads stay current. */
   mutation(): number;
@@ -61,13 +62,14 @@ export interface XlsxEditorBridge {
   fail(error: unknown): void;
   setZoom(scale: number): void;
   setProposalsPanelOpen(open: boolean): void;
+  setReplaceOpen?(open: boolean): void;
   setCapturedFormat(format: CapturedFormat | null, source: string | null): void;
   setBorderStyle(style: BorderStyle): void;
   setBorderColor(color: string): void;
   markStale(proposalId: string, cells: string[] | null): void;
   refreshProposals(): void;
   deliver(bytes: Uint8Array): void;
-  exportPng(): void;
+  exportPng(): Promise<void>;
   /** True once the canvas paints every committed change; false if it does not in time. */
   afterPaint(): Promise<boolean>;
   focusGrid(): void;
@@ -202,6 +204,7 @@ export function useXlsxCommandBinding(
       return {
         status: current.status(),
         readOnly: current.readOnly(),
+        allowHostProposals: current.allowHostProposals?.(),
         collaborative: current.collaborative(),
         selection,
         canUndo: read?.canUndo ?? false,
@@ -354,11 +357,16 @@ export function useXlsxCommandBinding(
             current.deliver(handle.save());
             return done();
           });
-        case 'exportPng':
-          return attempt(() => {
-            current.exportPng();
-            return done();
+        case 'exportPng': {
+          const generation = current.generation();
+          let exported: Promise<void>;
+          try { exported = current.exportPng(); } catch (error) { current.fail(error); return fail('command-failed'); }
+          return exported.then(() => bridgeRef.current.generation() !== generation ? fail('document-replaced') : done(), (error: unknown) => {
+            if (bridgeRef.current.generation() !== generation) return fail('document-replaced');
+            current.fail(error);
+            return fail('command-failed');
           });
+        }
         case 'print': {
           const generation = current.generation();
           return current.afterPaint().then((painted) => {
@@ -368,6 +376,9 @@ export function useXlsxCommandBinding(
             return done();
           });
         }
+        case 'findReplace':
+          current.setReplaceOpen?.(true);
+          return done(false);
         case 'zoom':
           if (env.zoom === bound.scale) return done(false);
           current.setZoom(bound.scale);

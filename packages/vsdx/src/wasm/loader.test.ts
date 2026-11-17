@@ -144,18 +144,22 @@ describe('VSDX wasm boundary', () => {
     }
   });
 
-  test('exports a scaled PNG per diagram page', () => {
+  test('renders a page through the canvas backend without moving the hit-test page', async () => {
+    const restore = stubOffscreenCanvas();
     const diagram = openDiagram(textAccounting, { clientId: 9015 });
     try {
-      const first = diagram.exportPng(0, 1);
-      expect([first[0], first[1], first[2], first[3]]).toEqual([0x89, 0x50, 0x4e, 0x47]);
-      const second = diagram.exportPng(0, 2);
-      expect(second.byteLength).toBeGreaterThan(first.byteLength);
-      expect(() => diagram.exportPng(-1, 1)).toThrow('non-negative integer');
-      expect(() => diagram.exportPng(0, 0)).toThrow('positive number');
-      expect(() => diagram.exportPng(99, 1)).toThrow();
+      const list = diagram.layoutPage(0);
+      const before = diagram.hitTest(list.width / 2, list.height / 2);
+      const png = await diagram.renderPng({ page: 0 }, { scale: 2 });
+      expect([...png]).toEqual([...new TextEncoder().encode('png')]);
+      expect(restore.sizes).toEqual([[Math.ceil(list.width * 2), Math.ceil(list.height * 2)]]);
+      expect(diagram.hitTest(list.width / 2, list.height / 2)).toEqual(before);
+      await expect(diagram.renderPng({ page: -1 })).rejects.toThrow('non-negative integer');
+      await expect(diagram.renderPng({ page: 0 }, { scale: 0 })).rejects.toThrow('positive number');
+      await expect(diagram.renderPng({ page: 99 })).rejects.toThrow('page index 99 is out of range');
     } finally {
       diagram.dispose();
+      restore.restore();
     }
   });
 
@@ -972,3 +976,51 @@ test('hit testing returns a shape ID accepted by editing commands', () => {
     expect(flattenShapes(diagram.snapshot().pages[0].shapes).find(shape => shape.id === hit!.shapeId)?.cells.find(cell => cell.name === 'PinX')?.formula).toBe('0.25');
   } finally { diagram.dispose(); }
 });
+
+test('an export paints with the faces as registered, not as the caller changed them afterwards', async () => {
+  const font = new Uint8Array(await readFile(resolve(root, 'packages/fonts/assets/LiberationSans-Regular.ttf')));
+  const restore = stubOffscreenCanvas();
+  const sources: Uint8Array[] = [];
+  const scope = globalThis as Record<string, unknown>;
+  const saved = { FontFace: scope.FontFace, fonts: scope.fonts };
+  scope.FontFace = class {
+    constructor(_family: string, source: ArrayBuffer) { sources.push(new Uint8Array(source)); }
+    load() { return Promise.resolve(this); }
+  };
+  scope.fonts = { add() {}, delete() { return true; }, load: () => Promise.resolve([{}]) };
+  const opened = { family: 'Arial', bytes: font.slice() };
+  const diagram = openDiagram(textAccounting, { clientId: 9016, fonts: [opened] });
+  try {
+    const later = { family: 'Arial', bold: true, bytes: font.slice() };
+    diagram.registerFont(later);
+    for (const face of [opened, later]) { face.bytes.fill(0); face.family = 'Changed'; }
+    await diagram.renderPng({ page: 0 });
+    expect(sources.length).toBeGreaterThan(0);
+    for (const source of sources) expect(source).toEqual(font);
+  } finally {
+    diagram.dispose();
+    restore.restore();
+    Object.assign(scope, saved);
+  }
+});
+
+function stubOffscreenCanvas() {
+  const sizes: [number, number][] = [];
+  const original = globalThis.OffscreenCanvas;
+  class Stub {
+    constructor(width: number, height: number) { sizes.push([width, height]); }
+    getContext() {
+      return new Proxy({} as Record<string, unknown>, {
+        get(target, property) {
+          if (property === 'measureText') return () => ({ width: 1 });
+          if (property === 'createLinearGradient' || property === 'createRadialGradient') return () => ({ addColorStop: () => undefined });
+          return property in target ? target[property as string] : () => undefined;
+        },
+        set(target, property, value) { target[property as string] = value; return true; },
+      });
+    }
+    convertToBlob(options: { type: string }) { return Promise.resolve(new Blob(['png'], { type: options.type })); }
+  }
+  (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas = Stub;
+  return { sizes, restore() { (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas = original; } };
+}

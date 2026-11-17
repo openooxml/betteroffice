@@ -1,7 +1,7 @@
 # @betteroffice/docx-native
 
 The `@betteroffice/docx` API backed by native Rust in Node.js, Bun and Deno.
-Prebuilt binaries cover macOS arm64/x64, GNU Linux arm64/x64, and Windows x64.
+Prebuilt binaries cover macOS arm64/x64, GNU and musl Linux arm64/x64, and Windows arm64/x64.
 
 Worker sessions on Node.js >= 20.16 / 22.3 run on `worker_threads`, keeping the process alive until the session is disposed. Outside browsers the DOCX worker opens, reads and saves documents; for headless editing use the in-thread edit session (`openDocx` / `EditSession`), which is fully supported, because the worker editor session paints frames and needs `OffscreenCanvas`.
 
@@ -29,6 +29,10 @@ Select the engine by importing `@betteroffice/docx-native` or `@betteroffice/doc
 there is no runtime engine switch. Native initialization needs no WebAssembly assets.
 Default fonts need no setup: the Latin, international and CJK font packs install with this
 package and each face is read from disk the first time a document needs it; nothing is fetched.
+
+An installed font pack that cannot be used (another release, missing files, an unreadable manifest) is skipped and its
+faces substituted; the process warns once per pack with code `BETTEROFFICE_FONT_PACK`, and `fontPackDiagnostics()`
+lists each one with the pack and the reason.
 
 The previous `Document` and `openDocument` facade has been removed. Use the
 [DOCX API](https://docs.betteroffice.dev/docs/javascript) with the native package name.

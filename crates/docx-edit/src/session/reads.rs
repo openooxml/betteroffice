@@ -125,8 +125,12 @@ impl EditSessionCore {
         let outcome = doc
             .format_text_target(&target, &delta)
             .map_err(EngineError::message)?;
-        outcome_json(&outcome.map(|()| json!({ "version": doc.version() })))
-            .map_err(EngineError::message)
+        outcome_json(
+            &outcome.map(|kept| {
+                json!({ "version": doc.version(), "keptUnchanged": super::text::kept_counts(&kept) })
+            }),
+        )
+        .map_err(EngineError::message)
     }
 
     /// Resolves a text target and anchors a side-map comment over it in one
@@ -198,10 +202,14 @@ impl EditSessionCore {
         serde_json::to_string(&matches).map_err(EngineError::message)
     }
 
-    /// Whether the document has a story with this id.
+    /// Whether the document has a story with this id, or a table of a live story names it as a
+    /// cell (a cell whose story is missing reads as one empty paragraph).
     pub fn has_story(&self, story: &str) -> bool {
         let txn = self.engine.doc().yrs_doc().transact();
-        crate::story_ref(&txn, story).is_ok()
+        matches!(
+            crate::story_ref(&txn, story),
+            Ok(_) | Err(crate::EditError::CellHasNoStory(_))
+        )
     }
 
     /// `{"revision","stories":[…]}`: the current story revision and the sorted
@@ -209,6 +217,14 @@ impl EditSessionCore {
     pub fn stories_changed_since(&self, since: f64) -> String {
         let (revision, stories) = self.engine.doc().stories_changed_since(since as u64);
         json!({ "revision": revision, "stories": stories }).to_string()
+    }
+
+    /// `[{"story","tableIndex"}]` from a full walk of `roots_json` (a JSON array of root story
+    /// ids), or `null` when a walk cannot finish. Internal: the save gate's scan.
+    pub fn unavailable_tables_from(&self, roots_json: &str) -> EngineResult<String> {
+        let roots: Vec<String> = serde_json::from_str(roots_json).map_err(EngineError::message)?;
+        serde_json::to_string(&self.engine.doc().unavailable_tables_from(&roots))
+            .map_err(EngineError::message)
     }
 
     /// Every story id in the document, sorted so the order is stable across
@@ -270,9 +286,13 @@ impl EditSessionCore {
 
     /// Compact paragraph-position projection built in one story traversal:
     /// `[{"paraId","length"}, …]` in document order, where `length` counts the
-    /// UTF-16 text and inline embed units before that paragraph's pilcrow :
-    /// exactly the `offset` domain of a Loc in it. One call replaces crossing
-    /// the boundary once per paragraph. Errors on an unknown story.
+    /// UTF-16 text, inline embed units and one unit per block embed (table,
+    /// block content control) that leads the paragraph, before its pilcrow :
+    /// exactly the `offset` domain of a Loc in it. In a paragraph that follows
+    /// one table, offset 0 is before the table and the text starts at offset 1;
+    /// each further leading table or block content control adds one.
+    /// One call replaces crossing the boundary once per paragraph. Errors on an
+    /// unknown story.
     pub fn paragraph_spans(&self, story: &str) -> EngineResult<String> {
         let mut items = Vec::new();
         let mut cursor = 0_u32;

@@ -35,9 +35,9 @@ use crate::{
     SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 2.3;
+const SCHEMA_VERSION: f64 = 2.4;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 5] = [1.0, 2.0, 2.1, 2.2, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 6] = [1.0, 2.0, 2.1, 2.2, 2.3, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -695,6 +695,7 @@ impl DeckSession {
         crate::story::validate_style_values(
             draft.style.font_family.as_deref(),
             draft.style.underline.as_deref(),
+            draft.style.strike.as_deref(),
             draft.style.color.as_deref(),
             draft.style.font_size_pt,
             draft.style.spacing_pt,
@@ -1831,8 +1832,14 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
         migrate_doc_to_v2_1(doc)?
     } else if version < 2.2 {
         migrate_doc_to_v2_2(doc)?
-    } else if version < SCHEMA_VERSION {
+    } else if version < 2.3 {
         return migrate_doc_to_v2_3(doc);
+    } else if version < SCHEMA_VERSION {
+        let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+        let meta = required_map(&txn, META)?;
+        meta.insert(&mut txn, "strikePendingSource", true);
+        meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+        return Ok(());
     } else {
         return Ok(());
     };
@@ -1844,6 +1851,7 @@ fn migrate_doc_to_v2_3(doc: &Doc) -> EditResult<()> {
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
     meta.insert(&mut txn, "kernPendingSource", true);
+    meta.insert(&mut txn, "strikePendingSource", true);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(())
 }
@@ -1862,6 +1870,7 @@ fn migrate_doc_to_v2_2(doc: &Doc) -> EditResult<PptxPackage> {
         Any::Buffer(Arc::from(package_json)),
     );
     meta.insert(&mut txn, "kernPendingSource", true);
+    meta.insert(&mut txn, "strikePendingSource", true);
     defer_legacy_runs(&mut txn, &meta);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(package)
@@ -2046,6 +2055,7 @@ fn migrate_doc_to_v2_1(doc: &Doc) -> EditResult<PptxPackage> {
     backfill_tables(&mut txn, &package)?;
     meta.insert(&mut txn, "spacingPendingSource", true);
     meta.insert(&mut txn, "kernPendingSource", true);
+    meta.insert(&mut txn, "strikePendingSource", true);
     if package_needs_ole_source(&package) {
         meta.insert(&mut txn, "olePicturesPendingSource", true);
     }
@@ -2373,23 +2383,37 @@ pub(crate) fn slide_scope(
     let slides = required_map(&txn, SLIDES)?;
     let shapes = required_map(&txn, SHAPES)?;
     let stories = required_map(&txn, STORIES)?;
-    let mut ids = live_slide_ids(&txn)?;
+    let ids = live_slide_ids(&txn)?;
     if slide_index >= ids.len() {
         return Err(EditError::OutOfBounds {
             index: slide_index.min(u32::MAX as usize) as u32,
             length: ids.len() as u32,
         });
     }
-    let slide_id = ids.swap_remove(slide_index);
+    let slide = snapshot_slide(&slides, &shapes, &stories, package, &txn, &ids[slide_index])?;
+    let slide_part_paths = if crate::paragraph::has_internal_slide_links(package, &slide) {
+        ids.iter()
+            .map(|id| {
+                let slide = live_entry(&slides, &txn, id)
+                    .ok_or_else(|| EditError::SlideNotFound(id.clone()))?;
+                Ok(map_string(&slide, &txn, "sourcePartPath"))
+            })
+            .collect::<EditResult<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
     Ok(SlideScope {
         index: slide_index,
-        slide: snapshot_slide(&slides, &shapes, &stories, package, &txn, &slide_id)?,
+        slide_part_paths,
+        slide,
         width_emu: required_i64(&meta, &txn, "widthEmu")?,
         height_emu: required_i64(&meta, &txn, "heightEmu")?,
     })
 }
 
 pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
+    #[cfg(feature = "test-counters")]
+    crate::test_counters::bump(|work| work.live_snapshots += 1);
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
     let slides = required_map(&txn, SLIDES)?;
@@ -2574,15 +2598,15 @@ fn validate_background_color(color: &ColorValue) -> EditResult<()> {
             "the background colour needs an RGB or theme value".to_owned(),
         ));
     }
-    for (name, value) in [
-        ("alpha", color.alpha),
-        ("luminance modulation", color.luminance_modulation),
-        ("luminance offset", color.luminance_offset),
-        ("saturation modulation", color.saturation_modulation),
+    for (name, value, minimum) in [
+        ("alpha", color.alpha, 0.0),
+        ("luminance modulation", color.luminance_modulation, 0.0),
+        ("luminance offset", color.luminance_offset, -1.0),
+        ("saturation modulation", color.saturation_modulation, 0.0),
     ] {
-        if value.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
+        if value.is_some_and(|value| !value.is_finite() || !(minimum..=1.0).contains(&value)) {
             return Err(EditError::InvalidFill(format!(
-                "background colour {name} is outside 0..=1"
+                "background colour {name} is outside {minimum}..=1"
             )));
         }
     }
@@ -2599,8 +2623,10 @@ fn validate_background_color(color: &ColorValue) -> EditResult<()> {
         use ooxml_drawingml::ColorTransform::*;
 
         let valid = match *transform {
-            Tint(value) | Shade(value) | LumMod(value) | LumOff(value) | SatMod(value)
-            | Alpha(value) => value.is_finite() && (0.0..=1.0).contains(&value),
+            Tint(value) | Shade(value) | LumMod(value) | SatMod(value) | Alpha(value) => {
+                value.is_finite() && (0.0..=1.0).contains(&value)
+            }
+            LumOff(value) => value.is_finite() && (-1.0..=1.0).contains(&value),
             Hue(value) | HueMod(value) | HueOff(value) | Sat(value) | SatOff(value)
             | Lum(value) | Red(value) | RedMod(value) | RedOff(value) | Green(value)
             | GreenMod(value) | GreenOff(value) | Blue(value) | BlueMod(value) | BlueOff(value)
@@ -2778,6 +2804,8 @@ pub(crate) fn legacy_baseline_snapshot(package: &PptxPackage) -> EditResult<Deck
 }
 
 fn seeded_snapshot(package: &PptxPackage, color_map: bool) -> EditResult<DeckSnapshot> {
+    #[cfg(feature = "test-counters")]
+    crate::test_counters::bump(|work| work.seeded_snapshots += 1);
     let mut slide_id_by_part = HashMap::new();
     let mut slides = Vec::with_capacity(package.slides.len());
     for (slide_index, slide) in package.slides.iter().enumerate() {
@@ -3944,6 +3972,7 @@ mod tests {
             color: Some("123ABC".into()),
             font_family: Some("Arial".into()),
             underline: Some("dbl".into()),
+            strike: Some("sngStrike".into()),
             spacing_pt: Some(1.5),
             baseline_pct: Some(12.0),
         };
@@ -3963,6 +3992,7 @@ mod tests {
             assert_eq!(style.color, patch.color);
             assert_eq!(style.font_family, patch.font_family);
             assert_eq!(style.underline, patch.underline);
+            assert_eq!(style.strike, patch.strike);
             assert_eq!(style.spacing_pt, patch.spacing_pt);
             assert_eq!(style.baseline_pct, patch.baseline_pct);
             assert_eq!(formatted.paragraphs[0].runs[0].text, "A");

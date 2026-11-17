@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use docx_layout::types::{
     AxisPosition, BlockId, BoxEdges, FieldRun, ImageRunPosition, LineBreakRun, ParagraphAttrs,
     ParagraphBlock, Run, RunFormatting, ShapeBlock, TabRun, TextRun,
 };
 use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
+use ooxml_drawingml::ColorTransform;
 use serde_json::{Map, Value, json};
 
 use super::RenderEnv;
@@ -14,6 +16,78 @@ use crate::fmath;
 const EMU_PER_INCH: f64 = 914_400.0;
 const PIXELS_PER_INCH: f64 = 96.0;
 const MAX_SHAPE_BODY_DEPTH: usize = 8;
+
+/// Shared styles for shape text lowering.
+#[derive(Clone, Default)]
+pub struct ShapeStyles(Option<Arc<crate::seed::StyleResolver>>);
+
+impl ShapeStyles {
+    pub(super) fn new(doc: &crate::EditingDoc) -> Self {
+        Self(doc.shape_style_resolver())
+    }
+}
+
+impl std::fmt::Debug for ShapeStyles {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("ShapeStyles")
+            .field(&self.0.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for ShapeStyles {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+struct ShapeRunStyles<'a> {
+    env: &'a RenderEnv,
+    paragraph: Option<Arc<Value>>,
+    defaults: RunFormatting,
+}
+
+impl ShapeRunStyles<'_> {
+    fn formatting(&self, run: &Value) -> RunFormatting {
+        let mut formatting = if let Some(source) = &self.env.shape_styles.0 {
+            let attributes =
+                crate::seed::payload(source.render_shape_run_attrs(run, self.paragraph.as_deref()))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(key, value)| (key.into(), value))
+                    .collect();
+            let mut formatting = super::lower_run_formatting(Some(&attributes), self.env);
+            if let Some(color) = resolve_shape_color(
+                field(run, "formatting").and_then(|value| value.get("color")),
+                self.env,
+            ) {
+                formatting.color = Some(color);
+            }
+            let direct = field(run, "formatting");
+            let highlighted = direct
+                .and_then(|value| value.get("highlight"))
+                .and_then(Value::as_str)
+                .is_some_and(|value| value != "none");
+            if !highlighted && direct.and_then(|value| value.get("shading")).is_some() {
+                formatting.highlight = shape_shading(direct, self.env);
+            }
+            formatting
+        } else {
+            shape_run_formatting_with_shading(field(run, "formatting"), self.env)
+        };
+        super::apply_run_defaults(&mut formatting, &self.defaults);
+        formatting
+    }
+
+    fn field_formatting(&self, formatting: Option<&Value>) -> RunFormatting {
+        self.formatting(&json!({"formatting": formatting}))
+    }
+}
 
 pub(super) fn lower_shape_json(
     shape: &Value,
@@ -112,8 +186,8 @@ fn lower_shape(
     let geometry_path = array(shape, "geometryPath")
         .filter(|path| !path.is_empty())
         .cloned()
+        .or_else(|| shared_preset_geometry(&shape_type, shape))
         .or_else(|| preset_geometry(&shape_type))
-        .or_else(|| shared_plus_geometry(&shape_type, shape))
         .or_else(|| {
             object(shape, "position")
                 .is_some()
@@ -161,7 +235,7 @@ fn lower_shape(
         shape_type,
         geometry_path,
         fill,
-        stroke: shape_stroke(shape),
+        stroke: shape_stroke(shape, env),
         transform: shape_transform(shape),
         width,
         height,
@@ -176,7 +250,7 @@ fn lower_shape(
         inner_measures: None,
         children,
         scene: field(shape, "scene").cloned(),
-        effects: array(shape, "effects").cloned(),
+        effects: shape_effects(shape, env),
         text_body_properties: field(shape, "textBodyProperties")
             .or_else(|| field(shape, "textBody"))
             .map(text_body_in_pixels),
@@ -275,16 +349,27 @@ fn shape_fill(shape: &Value, env: &RenderEnv) -> Option<Value> {
                         .get("foregroundColor")
                         .filter(|value| !value.is_null())
                         .or_else(|| paint.get("color")),
+                    env,
                 );
                 insert_clone(&mut fill, "patternPreset", paint.get("patternPreset"));
-                insert_color(&mut fill, "foregroundColor", paint.get("foregroundColor"));
-                insert_color(&mut fill, "backgroundColor", paint.get("backgroundColor"));
+                insert_color(
+                    &mut fill,
+                    "foregroundColor",
+                    paint.get("foregroundColor"),
+                    env,
+                );
+                insert_color(
+                    &mut fill,
+                    "backgroundColor",
+                    paint.get("backgroundColor"),
+                    env,
+                );
                 return Some(Value::Object(fill));
             }
             "picture" => {
                 let mut fill = Map::new();
                 fill.insert("type".to_owned(), Value::String("picture".to_owned()));
-                insert_color(&mut fill, "color", paint.get("color"));
+                insert_color(&mut fill, "color", paint.get("color"), env);
                 if let Some(picture) = paint.get("picture") {
                     insert_clone(
                         &mut fill,
@@ -322,7 +407,7 @@ fn shape_fill(shape: &Value, env: &RenderEnv) -> Option<Value> {
             "theme" => {
                 let mut fill = Map::new();
                 fill.insert("type".to_owned(), Value::String("solid".to_owned()));
-                insert_color(&mut fill, "color", paint.get("color"));
+                insert_color(&mut fill, "color", paint.get("color"), env);
                 insert_clone(&mut fill, "themeRefIndex", paint.get("themeRefIndex"));
                 return Some(Value::Object(fill));
             }
@@ -337,7 +422,7 @@ fn shape_fill(shape: &Value, env: &RenderEnv) -> Option<Value> {
     if fill_type == "none" {
         return Some(Value::Object(output));
     }
-    insert_color(&mut output, "color", fill.get("color"));
+    insert_color(&mut output, "color", fill.get("color"), env);
     if fill_type == "gradient"
         && let Some(gradient) = fill.get("gradient").and_then(object_value)
     {
@@ -355,7 +440,7 @@ fn shape_fill(shape: &Value, env: &RenderEnv) -> Option<Value> {
                                 insert_clone(&mut output, "position", stop.get("position"));
                                 output.insert(
                                     "color".to_owned(),
-                                    resolve_shape_color(stop.get("color"))
+                                    resolve_shape_paint(stop.get("color"), env)
                                         .map(Value::String)
                                         .unwrap_or_else(|| Value::String("#000000".to_owned())),
                                 );
@@ -370,15 +455,65 @@ fn shape_fill(shape: &Value, env: &RenderEnv) -> Option<Value> {
     Some(Value::Object(output))
 }
 
-fn shape_stroke(shape: &Value) -> Option<Value> {
+fn shape_stroke(shape: &Value, env: &RenderEnv) -> Option<Value> {
     let outline = object(shape, "outline")?;
     let mut stroke = Map::new();
-    insert_color(&mut stroke, "color", outline.get("color"));
+    let style_color = || {
+        let paint = object(shape, "strokePaint")?;
+        let fill = paint.get("fill")?;
+        (string(fill, "kind").as_deref() == Some("theme")
+            && number_in(paint, "themeRefIndex") != Some(0.0))
+        .then(|| fill.get("color"))?
+    };
+    insert_color(
+        &mut stroke,
+        "color",
+        outline
+            .get("color")
+            .filter(|value| !value.is_null())
+            .or_else(style_color),
+        env,
+    );
     if let Some(width) = number_in(outline, "width") {
         stroke.insert("width".to_owned(), Value::from(emu_to_pixels(width)));
     }
     insert_clone(&mut stroke, "dash", outline.get("style"));
+    for key in ["headEnd", "tailEnd"] {
+        if let Some(end) = outline
+            .get(key)
+            .filter(|end| string(end, "type").is_some_and(|kind| kind != "none"))
+        {
+            stroke.insert(key.to_owned(), end.clone());
+        }
+    }
     Some(Value::Object(stroke))
+}
+
+/// Effects with their lengths in page pixels and their colour resolved, as the painters read them.
+fn shape_effects(shape: &Value, env: &RenderEnv) -> Option<Vec<Value>> {
+    let effects = array(shape, "effects")?;
+    Some(
+        effects
+            .iter()
+            .map(|effect| {
+                let mut effect = effect.clone();
+                if let Some(map) = effect.as_object_mut() {
+                    for key in ["blurRadius", "distance", "size"] {
+                        if let Some(emu) = map.get(key).and_then(Value::as_f64) {
+                            map.insert(key.to_owned(), Value::from(emu_to_pixels(emu)));
+                        }
+                    }
+                    if map.get("color").is_some_and(Value::is_object) {
+                        match resolve_shape_paint(map.get("color"), env) {
+                            Some(color) => map.insert("color".to_owned(), Value::String(color)),
+                            None => map.remove("color"),
+                        };
+                    }
+                }
+                effect
+            })
+            .collect(),
+    )
 }
 
 fn shape_transform(shape: &Value) -> Option<Value> {
@@ -486,35 +621,76 @@ fn shape_paragraph(
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
 ) -> ParagraphBlock {
-    let formatting = object(paragraph, "formatting");
-    let alignment = formatting
-        .and_then(|value| string_in(value, "alignment"))
-        .and_then(|value| match value.as_str() {
+    let (mut values, paragraph_formatting) = if let Some(source) = &env.shape_styles.0 {
+        let (properties, formatting) = source.render_paragraph(paragraph);
+        let values: std::collections::BTreeMap<String, yrs::Any> = crate::seed::payload(properties)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        (values, formatting)
+    } else {
+        let values = object(paragraph, "formatting")
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.clone(),
+                    crate::seed::any_from_value(value.clone()).ok()?,
+                ))
+            })
+            .collect();
+        (values, None)
+    };
+    values.remove("numPr");
+    let alignment =
+        super::value_string(values.get("alignment")).and_then(|value| match value.as_str() {
             "both" => Some("justify".to_owned()),
             "left" | "center" | "right" => Some(value),
             _ => None,
         });
-    let values: std::collections::BTreeMap<String, yrs::Any> = formatting
-        .into_iter()
-        .flatten()
-        .filter_map(|(key, value)| {
-            Some((
-                key.clone(),
-                crate::seed::any_from_value(value.clone()).ok()?,
-            ))
-        })
-        .collect();
     let mut attrs = ParagraphAttrs {
         alignment,
         ..ParagraphAttrs::default()
     };
     super::lower_paragraph_spacing(&values, &mut attrs, env, false);
     super::lower_paragraph_indent(&values, &mut attrs);
-    attrs.shading = shape_shading(field(paragraph, "formatting"), env);
+    super::lower_paragraph_tabs(&values, &mut attrs);
+    if let Some(bullet) = object(paragraph, "bullet") {
+        attrs.list_marker = string_in(bullet, "text");
+        attrs.list_is_bullet = Some(true);
+        attrs.list_marker_suffix = Some("tab".to_owned());
+        attrs.list_marker_font_family = string_in(bullet, "fontFamily");
+        attrs.list_marker_font_size = number_in(bullet, "size");
+        attrs.list_marker_color = resolve_shape_color(bullet.get("color"), env);
+    }
+    if env.shape_styles.0.is_some() {
+        let styled = super::lower_paragraph_attrs(
+            &values,
+            None,
+            env,
+            &mut crate::list_marker::ListState::default(),
+            false,
+        );
+        attrs.shading = styled.shading;
+        attrs.default_font_size = styled.default_font_size;
+        attrs.default_font_family = styled.default_font_family;
+    } else {
+        attrs.shading = shape_shading(field(paragraph, "formatting"), env);
+    }
+    let defaults = if env.shape_styles.0.is_some() {
+        super::paragraph_run_defaults(&values, super::paragraph_chain_size(env, &values), env)
+    } else {
+        RunFormatting::default()
+    };
+    let styles = ShapeRunStyles {
+        env,
+        paragraph: paragraph_formatting,
+        defaults,
+    };
     let mut runs: Vec<Run> = array(paragraph, "content")
         .into_iter()
         .flatten()
-        .flat_map(|content| shape_content_runs(content, 0, nested_sequences, env))
+        .flat_map(|content| shape_content_runs(content, 0, nested_sequences, &styles))
         .collect();
     for (index, run) in runs.iter_mut().enumerate() {
         if let Run::Image(image) = run
@@ -563,35 +739,27 @@ fn shape_content_runs(
     content: &Value,
     depth: usize,
     nested_sequences: &mut Vec<String>,
-    env: &RenderEnv,
+    styles: &ShapeRunStyles<'_>,
 ) -> Vec<Run> {
     if depth >= MAX_SHAPE_BODY_DEPTH {
         skip_deep_content(content, nested_sequences);
         return Vec::new();
     }
     match string(content, "type").as_deref() {
-        Some("run") => {
-            if !env.show_hidden_text
-                && shape_run_formatting(field(content, "formatting")).hidden == Some(true)
-            {
-                Vec::new()
-            } else {
-                shape_document_runs(content, env)
-            }
-        }
+        Some("run") => shape_document_runs(content, styles),
         Some("hyperlink") => {
             nested_sequences.extend(crate::seed::hyperlink_sequence_names(content));
             array(content, "structuredChildren")
                 .or_else(|| array(content, "children"))
                 .into_iter()
                 .flatten()
-                .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences, env))
+                .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences, styles))
                 .collect()
         }
         Some("inlineSdt") => array(content, "content")
             .into_iter()
             .flatten()
-            .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences, env))
+            .flat_map(|child| shape_content_runs(child, depth + 1, nested_sequences, styles))
             .collect(),
         Some("complexField") => match projected_result(content, depth) {
             Some(result) => {
@@ -612,15 +780,15 @@ fn shape_content_runs(
                         {
                             let mut child = child.clone();
                             child["formatting"] = formatting.clone();
-                            shape_content_runs(&child, depth + 1, nested_sequences, env)
+                            shape_content_runs(&child, depth + 1, nested_sequences, styles)
                         }
-                        _ => shape_content_runs(child, depth + 1, nested_sequences, env),
+                        _ => shape_content_runs(child, depth + 1, nested_sequences, styles),
                     })
                     .collect()
             }
-            None => vec![shape_field_run(content, env)],
+            None => vec![shape_field_run(content, styles)],
         },
-        Some("simpleField") => vec![shape_field_run(content, env)],
+        Some("simpleField") => vec![shape_field_run(content, styles)],
         _ => Vec::new(),
     }
 }
@@ -671,7 +839,7 @@ fn projected_result(field_value: &Value, depth: usize) -> Option<&Vec<Value>> {
 
 /// A field in shape text, lowered like one in body text: PAGE and NUMPAGES
 /// resolve per page, and any other field shows its cached result.
-fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
+fn shape_field_run(field_value: &Value, styles: &ShapeRunStyles<'_>) -> Run {
     let results = if string(field_value, "type").as_deref() == Some("simpleField") {
         array(field_value, "content")
     } else {
@@ -696,8 +864,8 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
                 if text.is_empty() {
                     continue;
                 }
-                if !env.show_hidden_text
-                    && shape_run_formatting(run_formatting).hidden == Some(true)
+                if !styles.env.show_hidden_text
+                    && styles.field_formatting(run_formatting).hidden == Some(true)
                 {
                     hidden_result = true;
                     continue;
@@ -723,10 +891,7 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
         "PAGE" | "NUMPAGES" | "DATE" | "TIME" => raw_type.clone(),
         _ => "OTHER".to_owned(),
     };
-    let mut fmt = shape_run_formatting_with_shading(
-        formatting.or_else(|| field(field_value, "formatting")),
-        env,
-    );
+    let mut fmt = styles.field_formatting(formatting.or_else(|| field(field_value, "formatting")));
     let mut nested_sequences = crate::seed::nested_sequence_names(field_value);
     if hidden_result {
         nested_sequences.extend(
@@ -751,8 +916,12 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
     })
 }
 
-fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
-    let formatting = shape_run_formatting_with_shading(field(run, "formatting"), env);
+fn shape_document_runs(run: &Value, styles: &ShapeRunStyles<'_>) -> Vec<Run> {
+    let env = styles.env;
+    let formatting = styles.formatting(run);
+    if !env.show_hidden_text && formatting.hidden == Some(true) {
+        return Vec::new();
+    }
     array(run, "content")
         .into_iter()
         .flatten()
@@ -760,9 +929,11 @@ fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
             Some("text") => string(content, "text")
                 .filter(|text| !text.is_empty())
                 .map(|text| {
+                    let mut fmt = formatting.clone();
+                    let text = super::symbol_display_run(&mut fmt, text);
                     Run::Text(TextRun {
-                        fmt: formatting.clone(),
                         text,
+                        fmt,
                         pm_start: None,
                         pm_end: None,
                         inline_sdt_widget: None,
@@ -817,7 +988,14 @@ fn shape_shading(formatting: Option<&Value>, env: &RenderEnv) -> Option<String> 
 }
 
 fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) -> RunFormatting {
-    let mut formatting = shape_run_formatting(source);
+    let mut formatting = shape_run_formatting(source, env);
+    super::apply_run_defaults(
+        &mut formatting,
+        &RunFormatting {
+            language: env.doc_default_language.clone(),
+            ..RunFormatting::default()
+        },
+    );
     if let Some(slots) = formatting.font_slots.as_mut() {
         super::resolve_font_slots(slots, env);
         formatting.font_family = slots
@@ -832,7 +1010,7 @@ fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) ->
     formatting
 }
 
-fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
+fn shape_run_formatting(source: Option<&Value>, env: &RenderEnv) -> RunFormatting {
     let Some(source) = source.and_then(object_value) else {
         return RunFormatting::default();
     };
@@ -852,7 +1030,7 @@ fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
     if source.get("underline").is_some_and(js_truthy) {
         output.insert("underline".to_owned(), Value::Bool(true));
     }
-    if let Some(color) = resolve_shape_color(source.get("color")) {
+    if let Some(color) = resolve_shape_color(source.get("color"), env) {
         output.insert("color".to_owned(), Value::String(color));
     }
     if let Some(size) = number_in(source, "fontSize") {
@@ -884,9 +1062,9 @@ fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
         .unwrap_or_default()
 }
 
-fn resolve_shape_color(value: Option<&Value>) -> Option<String> {
+fn resolve_shape_color(value: Option<&Value>, env: &RenderEnv) -> Option<String> {
     let value = value?.as_object()?;
-    let base = shape_base_color(value)?;
+    let base = shape_base_color(value, env)?;
     let mut color = ColorValue {
         transforms: value
             .get("transforms")
@@ -915,7 +1093,7 @@ fn resolve_shape_color(value: Option<&Value>) -> Option<String> {
     resolve_color_value_to_hex(Some(&color)).or(Some(base))
 }
 
-fn shape_base_color(value: &Map<String, Value>) -> Option<String> {
+fn shape_base_color(value: &Map<String, Value>, env: &RenderEnv) -> Option<String> {
     if let Some(rgb) = value
         .get("rgb")
         .and_then(Value::as_str)
@@ -927,26 +1105,39 @@ fn shape_base_color(value: &Map<String, Value>) -> Option<String> {
         .get("themeColor")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())?;
-    let color = match slot.to_ascii_lowercase().as_str() {
-        "dk1" | "dark1" | "text1" | "tx1" => "000000",
-        "lt1" | "light1" | "background1" | "bg1" => "FFFFFF",
-        "dk2" | "dark2" | "text2" | "tx2" => "44546A",
-        "lt2" | "light2" | "background2" | "bg2" => "E7E6E6",
-        "accent1" => "4472C4",
-        "accent2" => "ED7D31",
-        "accent3" => "A5A5A5",
-        "accent4" => "FFC000",
-        "accent5" => "5B9BD5",
-        "accent6" => "70AD47",
-        "hlink" | "hyperlink" => "0563C1",
-        "folhlink" | "followedhyperlink" => "954F72",
-        _ => return None,
-    };
-    Some(format!("#{color}"))
+    let color = super::theme_color(slot, env)?;
+    Some(format!("#{}", color.trim_start_matches('#')))
 }
 
-fn insert_color(output: &mut Map<String, Value>, key: &str, value: Option<&Value>) {
-    if let Some(color) = resolve_shape_color(value) {
+/// A fill or line colour, with an `#RRGGBBAA` alpha byte when its transforms make it translucent.
+fn resolve_shape_paint(value: Option<&Value>, env: &RenderEnv) -> Option<String> {
+    let color = resolve_shape_color(value, env)?;
+    let transforms: Vec<ColorTransform> = value
+        .and_then(|value| value.get("transforms"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    let alpha = transforms
+        .iter()
+        .fold(1.0_f64, |alpha, transform| match transform {
+            ColorTransform::Alpha(value) => *value,
+            ColorTransform::AlphaMod(value) => alpha * value,
+            ColorTransform::AlphaOff(value) => alpha + value,
+            _ => alpha,
+        })
+        .clamp(0.0, 1.0);
+    if color.len() != 7 || alpha >= 1.0 {
+        return Some(color);
+    }
+    Some(format!("{color}{:02X}", (alpha * 255.0).round() as u8))
+}
+
+fn insert_color(
+    output: &mut Map<String, Value>,
+    key: &str,
+    value: Option<&Value>,
+    env: &RenderEnv,
+) {
+    if let Some(color) = resolve_shape_paint(value, env) {
         output.insert(key.to_owned(), Value::String(color));
     }
 }
@@ -1170,7 +1361,6 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
         | "flowChartPredefinedProcess"
         | "flowChartInternalStorage"
         | "flowChartPreparation"
-        | "flowChartManualOperation"
         | "flowChartMagneticTape"
         | "flowChartMagneticDisk"
         | "flowChartMagneticDrum"
@@ -1332,10 +1522,7 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
     })
 }
 
-fn shared_plus_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
-    if shape_type != "plus" {
-        return None;
-    }
+fn shared_preset_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
     let size = object(shape, "size");
     let width = size
         .and_then(|value| number_in(value, "width"))
@@ -1348,7 +1535,7 @@ fn shared_plus_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
     } else {
         1.0
     };
-    let path = docx_parse::drawingml::preset_geometry_to_path("plus", &HashMap::new(), aspect)?;
+    let path = docx_parse::drawingml::preset_outline(shape_type, &HashMap::new(), aspect)?;
     path.into_iter()
         .map(|p| {
             serde_json::to_string(&p)
@@ -1370,8 +1557,43 @@ mod textbox_pictures_tests;
 mod textbox_charts_tests;
 
 #[cfg(test)]
+#[path = "textbox_language_tests.rs"]
+mod textbox_language_tests;
+
+#[cfg(test)]
+#[path = "textbox_style_tests.rs"]
+mod textbox_style_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shape_run_keeps_its_own_language_and_fills_the_slots_it_leaves_unset() {
+        let env = RenderEnv {
+            doc_default_language: Some(docx_layout::types::RunLanguageSlots {
+                latin: Some("en-US".to_owned()),
+                east_asia: Some("ja-JP".to_owned()),
+                bidi: None,
+            }),
+            ..RenderEnv::default()
+        };
+        let language = |source: Value| {
+            let formatting = shape_run_formatting_with_shading(Some(&source), &env);
+            let language = formatting.language.unwrap();
+            (language.latin, language.east_asia)
+        };
+        let owned = |tag: &str| Some(tag.to_owned());
+        assert_eq!(
+            language(json!({"language": {"latin": "fr-FR", "eastAsia": "zh-TW"}})),
+            (owned("fr-FR"), owned("zh-TW"))
+        );
+        assert_eq!(
+            language(json!({"language": {"latin": "fr-FR"}})),
+            (owned("fr-FR"), owned("ja-JP"))
+        );
+        assert_eq!(language(json!({})), (owned("en-US"), owned("ja-JP")));
+    }
 
     #[test]
     fn shape_colors_resolve_ordered_drawingml_transforms() {
@@ -1393,7 +1615,10 @@ mod tests {
                 "#BDBFC6",
             ),
         ] {
-            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+            assert_eq!(
+                resolve_shape_color(Some(&color), &RenderEnv::default()).as_deref(),
+                Some(expected)
+            );
         }
     }
 
@@ -1431,7 +1656,10 @@ mod tests {
                 "#FFC000",
             ),
         ] {
-            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+            assert_eq!(
+                resolve_shape_color(Some(&color), &RenderEnv::default()).as_deref(),
+                Some(expected)
+            );
         }
     }
 
@@ -1449,7 +1677,10 @@ mod tests {
             ("AcCeNt4", "#FFC000"),
         ] {
             let color = json!({"themeColor":slot,"luminanceModulation":1.0});
-            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+            assert_eq!(
+                resolve_shape_color(Some(&color), &RenderEnv::default()).as_deref(),
+                Some(expected)
+            );
         }
         for (color, expected) in [
             (json!({"themeColor":"unknown","luminanceOffset":0.6}), None),
@@ -1467,8 +1698,71 @@ mod tests {
             ),
             (json!({"rgb":"aabbcc","alpha":0.5}), Some("#aabbcc")),
         ] {
-            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), expected);
+            assert_eq!(
+                resolve_shape_color(Some(&color), &RenderEnv::default()).as_deref(),
+                expected
+            );
         }
+    }
+
+    #[test]
+    fn shape_theme_colors_follow_the_document_theme_and_fall_back_to_office() {
+        let shape = |properties: &str, style: &str| {
+            format!(
+                r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>{properties}</wps:spPr><wps:style>{style}</wps:style><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+            )
+        };
+        let body = [
+            shape(
+                r#"<a:ln><a:round/></a:ln>"#,
+                r#"<a:lnRef idx="2"><a:schemeClr val="accent2"><a:shade val="50000"/></a:schemeClr></a:lnRef><a:fillRef idx="1"><a:schemeClr val="accent2"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent2"/></a:effectRef><a:fontRef idx="minor"/>"#,
+            ),
+            shape(
+                r#"<a:solidFill><a:schemeClr val="accent1"><a:lumMod val="75000"/></a:schemeClr></a:solidFill><a:ln w="12700"><a:solidFill><a:schemeClr val="bg2"/></a:solidFill></a:ln>"#,
+                r#"<a:lnRef idx="0"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="0"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"/>"#,
+            ),
+        ]
+        .concat();
+        let doc = crate::EditingDoc::new(4401);
+        crate::seed_from_docx(&doc, &crate::seed::fixture::Package::new(&body).bytes()).unwrap();
+        let colors = |env: &RenderEnv| {
+            super::super::yrs_doc_to_layout_blocks(&doc, "body", env)
+                .unwrap()
+                .into_iter()
+                .flat_map(|block| match block {
+                    docx_layout::types::LayoutBlock::Paragraph(paragraph) => paragraph.runs,
+                    _ => Vec::new(),
+                })
+                .filter_map(|run| match run {
+                    Run::Image(image) => image.inline_shape.map(|shape| *shape),
+                    _ => None,
+                })
+                .map(|shape| {
+                    let fill = shape.fill.unwrap()["color"].as_str().unwrap().to_owned();
+                    let stroke = shape.stroke.unwrap()["color"].as_str().unwrap().to_owned();
+                    (fill, stroke)
+                })
+                .collect::<Vec<_>>()
+        };
+        let owned = |fill: &str, stroke: &str| (fill.to_owned(), stroke.to_owned());
+        let office_2007 = RenderEnv {
+            theme_colors: [
+                ("accent1", "4F81BD"),
+                ("accent2", "C0504D"),
+                ("lt2", "EEECE1"),
+            ]
+            .map(|(slot, hex)| (slot.to_owned(), hex.to_owned()))
+            .into(),
+            ..RenderEnv::default()
+        };
+        assert_eq!(
+            colors(&office_2007),
+            [owned("#C0504D", "#8C3836"), owned("#376092", "#EEECE1")]
+        );
+        assert_eq!(
+            colors(&RenderEnv::default()),
+            [owned("#ED7D31", "#AE5A21"), owned("#2F5597", "#E7E6E6")]
+        );
     }
 
     #[test]
@@ -1489,7 +1783,10 @@ mod tests {
                 "#FFFFFF",
             ),
         ] {
-            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+            assert_eq!(
+                resolve_shape_color(Some(&color), &RenderEnv::default()).as_deref(),
+                Some(expected)
+            );
         }
     }
 
@@ -1543,9 +1840,15 @@ mod tests {
         let link = json!({"type": "hyperlink", "anchor": "top", "children": [text]});
         let page = json!({"type": "simpleField", "fieldType": "PAGE",
             "instruction": "PAGE", "content": [text]});
-        let text_runs = shape_document_runs(&text, &RenderEnv::default());
+        let env = RenderEnv::default();
+        let styles = ShapeRunStyles {
+            env: &env,
+            paragraph: None,
+            defaults: RunFormatting::default(),
+        };
+        let text_runs = shape_document_runs(&text, &styles);
         let mut text_and_page = text_runs.clone();
-        text_and_page.push(shape_field_run(&page, &RenderEnv::default()));
+        text_and_page.push(shape_field_run(&page, &styles));
         for (result, expected) in [
             (json!([link]), text_runs),
             (json!([link, page]), text_and_page),
@@ -1607,6 +1910,60 @@ mod tests {
         let paragraphs = shape.inner_text.unwrap();
         assert_eq!(paragraphs.len(), 3);
         assert!(paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()));
+    }
+
+    #[test]
+    fn translucent_paint_effects_and_shared_presets_lower_for_the_painters() {
+        let translucent = |rgb: &str, alpha: f64| json!({"rgb": rgb, "transforms": [{"kind": "alpha", "value": alpha}]});
+        let shape = json!({
+            "shapeType": "round1Rect",
+            "size": {"width": 1905000, "height": 952500},
+            "fill": {"type": "solid", "color": translucent("44546A", 0.5)},
+            "outline": {"color": translucent("FFFFFF", 1.0), "width": 12700,
+                "headEnd": {"type": "none"}, "tailEnd": {"type": "triangle", "width": "sm"}},
+            "effects": [{"kind": "outerShadow", "blurRadius": 38100, "distance": 19050,
+                "direction": 90.0, "color": translucent("000000", 0.35)}]
+        });
+        let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+        assert_eq!(block.fill.unwrap()["color"], "#44546A80");
+        let stroke = block.stroke.unwrap();
+        assert_eq!(stroke["color"], "#FFFFFF");
+        assert_eq!(stroke.get("headEnd"), None);
+        assert_eq!(
+            stroke["tailEnd"],
+            json!({"type": "triangle", "width": "sm"})
+        );
+        assert_eq!(
+            block.effects.unwrap()[0],
+            json!({"kind": "outerShadow", "blurRadius": 4.0, "distance": 2.0,
+                "direction": 90.0, "color": "#00000059"})
+        );
+        assert!(block.geometry_path.len() > 5);
+        let manual = json!({"shapeType": "flowChartManualOperation"});
+        let block = lower_shape_json(&manual, 1, &RenderEnv::default()).unwrap();
+        assert_eq!(
+            block.geometry_path[2],
+            json!({"type": "line", "x": 0.8, "y": 1.0})
+        );
+    }
+
+    #[test]
+    fn drawing_bullets_lower_to_list_markers() {
+        let shape = json!({"shapeType": "rect", "textBody": {"content": [{
+            "type": "paragraph",
+            "formatting": {"indentLeft": 360, "indentFirstLine": 360, "hangingIndent": true},
+            "bullet": {"text": "•", "size": 22.0, "fontFamily": "Arial", "color": {"rgb": "FF0000"}},
+            "content": [{"type": "run", "content": [{"type": "text", "text": "one"}]}]
+        }]}});
+        let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+        let paragraph = &block.inner_text.unwrap()[0];
+        let attrs = paragraph.attrs.as_ref().unwrap();
+        assert_eq!(attrs.list_marker.as_deref(), Some("•"));
+        assert_eq!(attrs.list_marker_suffix.as_deref(), Some("tab"));
+        assert_eq!(attrs.list_marker_font_family.as_deref(), Some("Arial"));
+        assert_eq!(attrs.list_marker_font_size, Some(22.0));
+        assert_eq!(attrs.list_marker_color.as_deref(), Some("#FF0000"));
+        assert_eq!(paragraph.runs.len(), 1);
     }
 
     #[test]

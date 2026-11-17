@@ -109,6 +109,8 @@ fn slide(primitives: Vec<Primitive>) -> SurfaceDisplayList {
             color: "#fdfdfd".into(),
         }),
         primitives,
+        alt_text: Default::default(),
+        title_shape: None,
     }
 }
 
@@ -176,6 +178,8 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
         h: size_px * 2.0,
         anchor: TextAnchor::Top,
         paragraphs: vec![TextParagraph {
+            languages: Vec::new(),
+            links: Vec::new(),
             align: None,
             level: 0,
             runs: Vec::new(),
@@ -201,9 +205,11 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
                 bold: false,
                 italic: false,
                 underline,
+                strike: None,
                 color: "#1b2733".into(),
                 baseline_offset_px: 0.0,
                 letter_spacing_px: 0.0,
+                kerning: true,
                 glyphs,
             }],
             caret_stops: vec![CaretStop { position: 0, x }],
@@ -516,6 +522,7 @@ fn golden_chart() {
                 ),
             ],
             transform: Transform::default(),
+            data: None,
         }]),
     );
 }
@@ -589,6 +596,7 @@ fn table(primitives: Vec<Primitive>) -> Primitive {
         label: "Table, 2 rows, 2 columns".into(),
         primitives,
         transform: Transform::default(),
+        grid: None,
     }
 }
 
@@ -619,6 +627,7 @@ fn a_table_paints_exactly_as_the_chart_container_does() {
         label,
         primitives,
         transform,
+        ..
     } = table(table_children())
     else {
         unreachable!()
@@ -634,6 +643,7 @@ fn a_table_paints_exactly_as_the_chart_container_does() {
         label,
         primitives: primitives.clone(),
         transform,
+        data: None,
     };
     assert_eq!(
         render(&slide(vec![table(primitives)])),
@@ -697,6 +707,7 @@ fn rotated(primitive: Primitive, rotation_deg: f32) -> Primitive {
             rotation_deg,
             ..Transform::default()
         },
+        grid: None,
     }
 }
 
@@ -715,6 +726,7 @@ fn a_table_turns_its_cells_and_its_clip_under_its_own_transform() {
         label,
         primitives,
         transform,
+        ..
     } = rotated(table(table_children()), 30.0)
     else {
         unreachable!()
@@ -732,6 +744,7 @@ fn a_table_turns_its_cells_and_its_clip_under_its_own_transform() {
             label,
             primitives,
             transform,
+            data: None,
         }]))
     );
 }
@@ -806,6 +819,7 @@ fn overflowing_text_escapes_its_box_but_respects_the_parent_clip() {
                     label: "".into(),
                     primitives: vec![text],
                     transform: Transform::default(),
+                    data: None,
                 }
             } else {
                 text

@@ -166,7 +166,7 @@ fn source_content_after_a_break_only_paragraph_keeps_the_break() {
     assert_eq!(page_texts(&body), ["A", ""]);
 }
 
-fn assert_endnotes_keep_terminal_break(position: &str) {
+fn assert_endnotes_follow_the_text_before_a_terminal_break(position: &str) {
     let body = format!(
         r#"{}{}<w:sectPr><w:endnotePr><w:pos w:val="{position}"/></w:endnotePr></w:sectPr>"#,
         fixture::p(
@@ -180,27 +180,34 @@ fn assert_endnotes_keep_terminal_break(position: &str) {
     );
     let (engine, _) = fixture::laid_out(&fixture::with_body(&body), 9404);
     let layout: Value = serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap();
-    assert_eq!(layout_page_texts(&layout).len(), 2);
+    assert_eq!(layout_page_texts(&layout), ["A1"], "{position}");
+    let pages = layout["layout"]["pages"].as_array().unwrap();
+    assert!(
+        pages[0]["noteAreas"]
+            .as_array()
+            .is_some_and(|areas| areas.iter().any(|area| area["kind"] == "endnote")),
+        "{position}: the endnote follows the text on its page"
+    );
     let blocks: Value = serde_json::from_str(
         &engine
             .lower_story_json("body", &RenderEnv::default())
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(
+    assert_ne!(
         blocks.as_array().unwrap().last().unwrap()["kind"],
         "pageBreak"
     );
 }
 
 #[test]
-fn document_end_endnotes_keep_a_terminal_break_only_paragraphs_break() {
-    assert_endnotes_keep_terminal_break("docEnd");
+fn document_end_endnotes_follow_the_text_before_a_terminal_break_only_paragraph() {
+    assert_endnotes_follow_the_text_before_a_terminal_break("docEnd");
 }
 
 #[test]
-fn final_section_endnotes_keep_a_terminal_break_only_paragraphs_break() {
-    assert_endnotes_keep_terminal_break("sectEnd");
+fn final_section_endnotes_follow_the_text_before_a_terminal_break_only_paragraph() {
+    assert_endnotes_follow_the_text_before_a_terminal_break("sectEnd");
 }
 
 #[test]
@@ -1281,7 +1288,7 @@ fn keep_lines_column_width_oscillation_uses_one_stable_measure() {
     assert!(wide_height < remainder && remainder < narrow_height);
     let filler_height = narrow_height + 32.0;
     let body = format!(
-        "{}{}{}",
+        "{}{}{}{}",
         fixture::p(
             "7100000B",
             &format!(
@@ -1292,6 +1299,7 @@ fn keep_lines_column_width_oscillation_uses_one_stable_measure() {
         ),
         title,
         fixture::p("7100000C", r#"<w:r><w:br w:type="page"/></w:r>"#),
+        fixture::p("7100000D", &fixture::r("After the break")),
     );
     let columns = r#"<w:cols w:num="2" w:space="360" w:equalWidth="0"><w:col w:w="1800" w:space="360"/><w:col w:w="7920"/></w:cols>"#;
     let height = 2160 + ((filler_height + remainder) * 15.0).round() as u32;
@@ -1740,7 +1748,8 @@ fn an_edit_before_page_breaks_repaginates_only_its_own_page() {
             )
         })
         .collect();
-    let (engine, request) = fixture::laid_out(&fixture::with_body(&body), 9401);
+    let bytes = fixture::with_body(&body);
+    let (engine, request) = fixture::laid_out(&bytes, 9401);
     let before = engine.stats();
     assert!(before.retained_pages >= 6);
 
@@ -1762,10 +1771,65 @@ fn an_edit_before_page_breaks_repaginates_only_its_own_page() {
     assert_eq!(after.rebuilt_pages, 1, "later pages converge");
 
     let fresh = EngineSession::new(9402);
-    fresh
+    let state = engine.doc().encode_state_as_update_v1();
+    let metadata = engine.doc().encode_peer_metadata().unwrap();
+    let prepared = fresh
         .doc()
-        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .prepare_peer_bootstrap(&state, &metadata, Some(bytes.into()))
         .unwrap();
+    fresh.doc().install_peer_bootstrap(prepared, 17).unwrap();
+    fresh.doc().apply_update_v1(&state).unwrap();
+    assert_eq!(
+        fresh.layout_document_with_regions_json(&request).unwrap(),
+        layout
+    );
+}
+
+#[test]
+fn an_edit_before_a_terminal_break_only_paragraph_repaginates_only_its_own_page() {
+    let paragraph = |id: u32| fixture::p(&format!("{id:08X}"), &fixture::r("text on its own page"));
+    let page_break = |id: u32| fixture::p(&format!("{id:08X}"), PAGE_BREAK);
+    let body: String = (0..6_u32)
+        .map(|index| {
+            format!(
+                "{}{}",
+                paragraph(0x7000_0000 + index * 2),
+                page_break(0x7000_0001 + index * 2)
+            )
+        })
+        .collect();
+    let bytes = body_document(&body);
+    let (engine, request) = fixture::laid_out(&bytes, 9401);
+    let before = engine.stats();
+    assert_eq!(before.retained_pages, 6);
+
+    engine
+        .doc()
+        .insert_text(
+            &EditCtx::local("", ""),
+            Position::new("body", 0),
+            "x",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    let after = engine.stats();
+    assert_eq!(
+        after.incremental_pagination_calls - before.incremental_pagination_calls,
+        1
+    );
+    assert_eq!(after.rebuilt_pages, 1, "later pages converge");
+    assert_eq!(after.retained_pages, 6);
+
+    let fresh = EngineSession::new(9402);
+    let state = engine.doc().encode_state_as_update_v1();
+    let metadata = engine.doc().encode_peer_metadata().unwrap();
+    let prepared = fresh
+        .doc()
+        .prepare_peer_bootstrap(&state, &metadata, Some(bytes.into()))
+        .unwrap();
+    fresh.doc().install_peer_bootstrap(prepared, 17).unwrap();
+    fresh.doc().apply_update_v1(&state).unwrap();
     assert_eq!(
         fresh.layout_document_with_regions_json(&request).unwrap(),
         layout

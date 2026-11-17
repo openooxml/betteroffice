@@ -30,3 +30,14 @@ inherited master text.
 | `Shape.children` / `cells` | Group descendants and ShapeSheet cells |
 
 Errors raise `VsdxError`, or `ParseError` for invalid packages and XML.
+
+Render a zero-based page with a `PngTarget` dictionary. Scale defaults to 1.0.
+
+```python
+png = diagram.render_png({"page": 0}, scale=2.0)
+png.write("page.png")
+print(png.width, png.height, png.skipped_images)
+```
+
+`Png.bytes` contains the PNG data. Invalid target dictionaries raise `RangeError`;
+invalid pages or scales raise `RenderError`.

@@ -34,6 +34,7 @@ mod tests {
             rect,
             clip,
             movable: true,
+            resizable: true,
         }
     }
 

@@ -1,64 +1,6 @@
 use super::*;
 
-fn zip(parts: &[(&str, &[u8])], deflate: bool) -> Vec<u8> {
-    let mut output = Vec::new();
-    let mut central = Vec::new();
-    let method = u16::from(deflate) * 8;
-    for (name, data) in parts {
-        let offset = output.len() as u32;
-        let crc = zip::crc32(data);
-        let compressed = if deflate {
-            let mut compressed = Vec::new();
-            let count = data.len().max(1).div_ceil(65535);
-            for index in 0..count {
-                let start = index * 65535;
-                let end = (start + 65535).min(data.len());
-                let len = (end - start) as u16;
-                compressed.push(u8::from(index + 1 == count));
-                compressed.extend_from_slice(&len.to_le_bytes());
-                compressed.extend_from_slice(&(!len).to_le_bytes());
-                compressed.extend_from_slice(&data[start..end]);
-            }
-            compressed
-        } else {
-            data.to_vec()
-        };
-        output.extend_from_slice(b"PK\x03\x04");
-        for value in [20u16, 0, method, 0, 0] {
-            output.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in [crc, compressed.len() as u32, data.len() as u32] {
-            output.extend_from_slice(&value.to_le_bytes());
-        }
-        output.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        output.extend_from_slice(&0u16.to_le_bytes());
-        output.extend_from_slice(name.as_bytes());
-        output.extend_from_slice(&compressed);
-        central.extend_from_slice(b"PK\x01\x02");
-        for value in [20u16, 20, 0, method, 0, 0] {
-            central.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in [crc, compressed.len() as u32, data.len() as u32] {
-            central.extend_from_slice(&value.to_le_bytes());
-        }
-        for value in [name.len() as u16, 0, 0, 0, 0] {
-            central.extend_from_slice(&value.to_le_bytes());
-        }
-        central.extend_from_slice(&0u32.to_le_bytes());
-        central.extend_from_slice(&offset.to_le_bytes());
-        central.extend_from_slice(name.as_bytes());
-    }
-    let offset = output.len() as u32;
-    output.extend_from_slice(&central);
-    output.extend_from_slice(b"PK\x05\x06");
-    for value in [0u16, 0, parts.len() as u16, parts.len() as u16] {
-        output.extend_from_slice(&value.to_le_bytes());
-    }
-    output.extend_from_slice(&(central.len() as u32).to_le_bytes());
-    output.extend_from_slice(&offset.to_le_bytes());
-    output.extend_from_slice(&0u16.to_le_bytes());
-    output
-}
+use crate::test_support::zip;
 
 fn document(body: &str) -> String {
     format!(
@@ -180,7 +122,6 @@ fn theme_references_and_explicit_overrides() {
         keys(&result),
         [
             ("Body", false, false),
-            ("Explicit", false, false),
             ("Heading", false, false),
             ("Major CJK", false, false),
             ("Major CS", false, false)
@@ -189,12 +130,76 @@ fn theme_references_and_explicit_overrides() {
 }
 
 #[test]
+fn theme_style_slots_override_cached_faces_in_body_and_text_boxes() {
+    let style = r#"<w:style w:type="paragraph" w:styleId="Box"><w:rPr><w:rFonts w:ascii="Cached ASCII" w:asciiTheme="majorAscii" w:hAnsi="Cached HAnsi" w:hAnsiTheme="minorHAnsi" w:eastAsia="Cached CJK" w:eastAsiaTheme="majorEastAsia" w:cs="Cached CS" w:cstheme="majorBidi"/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:style>"#;
+    let paragraph =
+        r#"<w:p><w:pPr><w:pStyle w:val="Box"/></w:pPr><w:r><w:t>漢字 العربية</w:t></w:r></w:p>"#;
+    let rels = THEME_RELS.replace("./theme/custom.xml", "theme/theme1.xml");
+    for shape in [false, true] {
+        let body = if shape {
+            format!("<w:p><w:r><w:txbxContent>{paragraph}</w:txbxContent></w:r></w:p>")
+        } else {
+            paragraph.to_owned()
+        };
+        let result = docx_font_preflight(&fixture(
+            style,
+            &body,
+            &[
+                ("word/_rels/document.xml.rels", &rels),
+                ("word/theme/theme1.xml", THEME),
+            ],
+            false,
+        ))
+        .unwrap();
+        assert!(result.complete);
+        for family in ["Heading", "Body", "Major CJK", "Major CS"] {
+            assert!(
+                result.faces.iter().any(|face| face.family == family),
+                "{family}, shape={shape}: {:?}",
+                result.faces
+            );
+        }
+        assert!(
+            !result
+                .faces
+                .iter()
+                .any(|face| face.family.starts_with("Cached"))
+        );
+    }
+}
+
+#[test]
+fn empty_theme_slots_keep_cached_faces() {
+    let rels = THEME_RELS.replace("./theme/custom.xml", "theme/theme1.xml");
+    let result = docx_font_preflight(&fixture(
+        "",
+        r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsia="Cached CJK" w:eastAsiaTheme="minorEastAsia" w:cs="Cached CS" w:cstheme="minorBidi"/></w:rPr><w:t>漢字 العربية</w:t></w:r></w:p>"#,
+        &[
+            ("word/_rels/document.xml.rels", &rels),
+            ("word/theme/theme1.xml", THEME),
+        ],
+        false,
+    ))
+    .unwrap();
+    assert_eq!(
+        keys(&result),
+        [
+            ("Base", false, false),
+            ("Cached CJK", false, false),
+            ("Cached CS", false, false)
+        ]
+    );
+}
+
+#[test]
 fn theme_language_fills_empty_slots() {
+    let rels = THEME_RELS.replace("./theme/custom.xml", "theme/theme1.xml");
     let result = docx_font_preflight(&fixture("",
         r#"<w:p><w:r><w:rPr><w:rFonts w:eastAsiaTheme="minorEastAsia" w:cstheme="minorBidi"/></w:rPr><w:t>かな العربية</w:t></w:r></w:p>"#,
-        &[("word/_rels/document.xml.rels", THEME_RELS), ("word/theme/custom.xml", THEME),
+        &[("word/_rels/document.xml.rels", &rels), ("word/theme/theme1.xml", THEME),
             ("word/settings.xml", r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:themeFontLang w:eastAsia="ja-JP" w:bidi="ar-SA"/></w:settings>"#)], false,
     )).unwrap();
+    assert!(result.complete);
     assert_eq!(
         keys(&result),
         [
@@ -288,6 +293,43 @@ fn normal_without_default_and_paragraph_mark_fonts() {
 }
 
 #[test]
+fn duplicate_default_character_styles_select_the_lowest_style_id() {
+    let defaults = styles("").replace(
+        r#"w:ascii="Base" w:hAnsi="Base""#,
+        r#"w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi""#,
+    );
+    let theme = THEME.replace(r#"typeface="Body""#, r#"typeface="Calibri""#);
+    let body = document(
+        r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/></w:rPr><w:t>Text</w:t></w:r></w:p><w:p/>"#,
+    );
+    let ordinary =
+        r#"<w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont"/>"#;
+    for id in ["ZCustom", "ACustom"] {
+        let custom = format!(
+            r#"<w:style w:type="character" w:default="1" w:styleId="{id}"><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:style>"#
+        );
+        for definitions in [format!("{custom}{ordinary}"), format!("{ordinary}{custom}")] {
+            let styles = defaults.replace("</w:styles>", &format!("{definitions}</w:styles>"));
+            let result = docx_font_preflight(&zip(
+                &[
+                    ("word/document.xml", body.as_bytes()),
+                    ("word/styles.xml", styles.as_bytes()),
+                    ("word/theme/theme1.xml", theme.as_bytes()),
+                ],
+                false,
+            ))
+            .unwrap();
+            assert!(result.complete);
+            let mut expected = vec![("Arial", false, false), ("Arial", true, false)];
+            if id == "ZCustom" {
+                expected.push(("Calibri", false, false));
+            }
+            assert_eq!(keys(&result), expected, "{id}: {definitions}");
+        }
+    }
+}
+
+#[test]
 fn math_names_the_engine_fallback_and_inherited_slots() {
     let result = scan(
         "",
@@ -335,6 +377,96 @@ fn header_relationship_and_unused_header() {
         keys(&result),
         [("Base", false, false), ("Header", false, false)]
     );
+}
+
+#[test]
+fn footer_relationship_names_a_face() {
+    let rels = r#"<Relationships><Relationship Id="footer" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer.xml"/></Relationships>"#;
+    let footer = r#"<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:rPr><w:rFonts w:ascii="Footer" w:hAnsi="Footer"/></w:rPr><w:t>Footer</w:t></w:r></w:p></w:ftr>"#;
+    let bytes = fixture(
+        "",
+        r#"<w:p/><w:sectPr><w:footerReference w:type="default" r:id="footer"/></w:sectPr>"#,
+        &[
+            ("word/_rels/document.xml.rels", rels),
+            ("word/footer.xml", footer),
+        ],
+        false,
+    );
+    let result = docx_font_preflight(&bytes).unwrap();
+    assert!(result.complete);
+    assert!(keys(&result).contains(&("Footer", false, false)));
+}
+
+#[test]
+fn endnotes_relationship_names_a_face() {
+    let rels = r#"<Relationships><Relationship Id="notes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/></Relationships>"#;
+    let notes = r#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="1"><w:p><w:r><w:rPr><w:rFonts w:ascii="Endnote" w:hAnsi="Endnote"/></w:rPr><w:t>Note</w:t></w:r></w:p></w:endnote></w:endnotes>"#;
+    let bytes = fixture(
+        "",
+        r#"<w:p><w:r><w:endnoteReference w:id="1"/></w:r></w:p>"#,
+        &[
+            ("word/_rels/document.xml.rels", rels),
+            ("word/endnotes.xml", notes),
+        ],
+        false,
+    );
+    let result = docx_font_preflight(&bytes).unwrap();
+    assert!(result.complete);
+    assert!(keys(&result).contains(&("Endnote", false, false)));
+}
+
+#[test]
+fn unsupported_drawing_relationships_are_incomplete() {
+    for (input, content) in [
+        (
+            "chart",
+            r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="unsupported"/>"#,
+        ),
+        (
+            "diagramData",
+            r#"<d:relIds xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="unsupported"/>"#,
+        ),
+        (
+            "diagramLayout",
+            r#"<d:relIds xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:lo="unsupported"/>"#,
+        ),
+        (
+            "diagramDrawing",
+            r#"<d:relIds xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="unsupported"/>"#,
+        ),
+        (
+            "oleObject",
+            r#"<o:OLEObject xmlns:o="urn:schemas-microsoft-com:office:office" r:id="unsupported"/>"#,
+        ),
+    ] {
+        let rels = format!(
+            r#"<Relationships><Relationship Id="unsupported" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{input}" Target="unsupported.xml"/></Relationships>"#
+        );
+        let body = format!("<w:p><w:r><w:drawing>{content}</w:drawing></w:r></w:p>");
+        let bytes = fixture(
+            "",
+            &body,
+            &[
+                ("word/_rels/document.xml.rels", &rels),
+                ("word/unsupported.xml", "<unsupported/>"),
+            ],
+            false,
+        );
+        assert!(!docx_font_preflight(&bytes).unwrap().complete, "{input}");
+    }
+}
+
+#[test]
+fn unsupported_drawing_namespaces_are_incomplete() {
+    for (namespace, local) in [
+        ("wordprocessingCanvas", "wpc"),
+        ("wordprocessingGroup", "wgp"),
+    ] {
+        let body = format!(
+            r#"<w:p><w:r><w:drawing><s:{local} xmlns:s="http://schemas.microsoft.com/office/word/2010/{namespace}"/></w:drawing></w:r></w:p>"#
+        );
+        assert!(!scan("", &body).complete, "{namespace}");
+    }
 }
 
 #[test]
@@ -461,19 +593,152 @@ fn marker_faces_inherit_paragraph_bold_and_italic() {
 }
 
 #[test]
-fn text_boxes_use_direct_fonts_and_the_shape_default() {
+fn text_boxes_use_paragraph_styles_and_direct_fonts() {
     let result = scan(
-        r#"<w:style w:type="paragraph" w:styleId="BoxStyle"><w:rPr><w:rFonts w:ascii="Unused" w:hAnsi="Unused"/><w:b/></w:rPr></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="BoxStyle"><w:rPr><w:rFonts w:ascii="Box" w:hAnsi="Box"/><w:b/></w:rPr></w:style>"#,
         r#"<w:p><w:r><w:pict><v:shape xmlns:v="urn:synthetic"><v:textbox><w:txbxContent><w:p><w:pPr><w:pStyle w:val="BoxStyle"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
     );
     assert_eq!(
         keys(&result),
         [
             ("Base", false, false),
-            ("Calibri", false, false),
-            ("Calibri", true, false)
+            ("Box", false, false),
+            ("Box", true, false)
         ]
     );
+}
+
+#[test]
+fn text_box_style_cascade_matches_body_except_own_languages_including_headers() {
+    let styles = styles(
+        r#"<w:style w:type="paragraph" w:styleId="Parent"><w:rPr><w:rFonts w:ascii="Paragraph" w:hAnsi="Paragraph" w:eastAsia="Paragraph CJK"/><w:b/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Parent"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="character" w:styleId="AccentBase"><w:rPr><w:rFonts w:ascii="Character" w:hAnsi="Character" w:eastAsia="Character CJK"/><w:lang w:eastAsia="zh-TW"/></w:rPr></w:style><w:style w:type="character" w:styleId="Accent"><w:basedOn w:val="AccentBase"/><w:rPr><w:b/></w:rPr></w:style>"#,
+    )
+    .replacen(
+        "</w:rPr>",
+        r#"<w:lang w:eastAsia="ko-KR"/></w:rPr>"#,
+        1,
+    );
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#;
+    for (paragraph_properties, run_properties, family, bold, italic, body_script, box_script) in [
+        (
+            r#"<w:pStyle w:val="Child"/>"#,
+            "",
+            "Paragraph CJK",
+            true,
+            true,
+            "cjk-jp",
+            "cjk-jp",
+        ),
+        (
+            r#"<w:pStyle w:val="Child"/>"#,
+            r#"<w:rStyle w:val="Accent"/>"#,
+            "Character CJK",
+            false,
+            true,
+            "cjk-jp",
+            "cjk-tc",
+        ),
+        (
+            r#"<w:pStyle w:val="Child"/>"#,
+            r#"<w:rStyle w:val="Accent"/><w:rFonts w:ascii="Direct" w:hAnsi="Direct" w:eastAsia="Direct CJK"/><w:b/><w:i w:val="0"/><w:lang w:eastAsia="zh-CN"/>"#,
+            "Direct CJK",
+            true,
+            false,
+            "cjk-jp",
+            "cjk-sc",
+        ),
+        ("", "", "Base", false, false, "cjk-kr", "cjk-kr"),
+        (
+            r#"<w:pStyle w:val="Child"/><w:rPr><w:lang w:eastAsia="zh-TW"/></w:rPr>"#,
+            r#"<w:lang w:eastAsia="ko-KR"/>"#,
+            "Paragraph CJK",
+            true,
+            true,
+            "cjk-tc",
+            "cjk-kr",
+        ),
+        (
+            r#"<w:pStyle w:val="Child"/><w:rPr><w:lang w:eastAsia="zh-TW"/></w:rPr>"#,
+            "",
+            "Paragraph CJK",
+            true,
+            true,
+            "cjk-tc",
+            "cjk-tc",
+        ),
+        (
+            r#"<w:pStyle w:val="Missing"/>"#,
+            r#"<w:rStyle w:val="MissingRun"/>"#,
+            "Base",
+            false,
+            false,
+            "cjk-kr",
+            "cjk-kr",
+        ),
+    ] {
+        let paragraph = format!(
+            r#"<w:p><w:pPr>{paragraph_properties}</w:pPr><w:r><w:rPr>{run_properties}</w:rPr><w:t>漢字</w:t></w:r></w:p>"#
+        );
+        let body = document(&format!("<w:p/>{paragraph}"));
+        let expected = docx_font_preflight(&zip(
+            &[
+                ("word/document.xml", body.as_bytes()),
+                ("word/styles.xml", styles.as_bytes()),
+            ],
+            false,
+        ))
+        .unwrap();
+        assert!(expected.faces.iter().any(|face| {
+            face.family == family
+                && face.bold == bold
+                && face.italic == italic
+                && face.scripts == [body_script]
+        }));
+        let mut expected_box_faces = expected.faces.clone();
+        for face in &mut expected_box_faces {
+            for script in &mut face.scripts {
+                if script.as_str() == body_script {
+                    *script = box_script.to_owned();
+                }
+            }
+        }
+        for vml in [false, true] {
+            let boxed = if vml {
+                format!(
+                    r#"<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent>{paragraph}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#
+                )
+            } else {
+                format!(
+                    r#"<w:p><w:r><w:drawing><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:txbx><w:txbxContent>{paragraph}</w:txbxContent></wps:txbx></wps:wsp></w:drawing></w:r></w:p>"#
+                )
+            };
+            for in_header in [false, true] {
+                let body = document(if in_header {
+                    r#"<w:p/><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>"#
+                } else {
+                    &boxed
+                });
+                let header = format!(
+                    r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{boxed}</w:hdr>"#
+                );
+                let mut parts = vec![
+                    ("word/document.xml", body.as_bytes()),
+                    ("word/styles.xml", styles.as_bytes()),
+                ];
+                if in_header {
+                    parts.extend([
+                        ("word/_rels/document.xml.rels", rels.as_bytes()),
+                        ("word/header1.xml", header.as_bytes()),
+                    ]);
+                }
+                let result = docx_font_preflight(&zip(&parts, false)).unwrap();
+                assert_eq!(
+                    result.faces, expected_box_faces,
+                    "{paragraph}, vml={vml}, header={in_header}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

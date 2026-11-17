@@ -10,6 +10,8 @@ pub struct ProposalDiffSlide {
     pub proposal: pptx_edit::Proposal,
     pub snapshot: pptx_edit::DeckSnapshot,
     pub text_changes: Vec<pptx_edit::ProposalTextChange>,
+    #[serde(default)]
+    pub shape_changes: Vec<pptx_edit::ProposalShapeChange>,
     pub frame: SurfaceDisplayList,
 }
 
@@ -18,13 +20,17 @@ impl Serialize for ProposalDiffSlide {
     where
         S: serde::Serializer,
     {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "proposal": self.proposal,
             "snapshot": self.snapshot,
             "textChanges": self.text_changes,
             "frame": self.frame,
-        })
-        .serialize(serializer)
+        });
+        if !self.shape_changes.is_empty() {
+            value["shapeChanges"] =
+                serde_json::to_value(&self.shape_changes).map_err(serde::ser::Error::custom)?;
+        }
+        value.serialize(serializer)
     }
 }
 
@@ -37,6 +43,33 @@ pub struct SurfaceDisplayList {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<Paint>,
     pub primitives: Vec<Primitive>,
+    /// Alternative text by shape id. Holds only shapes that have some, and
+    /// nothing painted reads it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub alt_text: BTreeMap<String, ShapeAltText>,
+    /// The shape holding the slide's title placeholder, for assistive technology.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_shape: Option<String>,
+}
+
+/// What `p:cNvPr` says about a shape for assistive technology.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeAltText {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The shape, or a group around it, is marked decorative.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub decorative: bool,
+    /// The nearest enclosing group with alternative text, by its key in the same map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Where the shape starts in `primitives` when what paints it carries no
+    /// shape id, as a picture drawn from a metafile's operations does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primitive: Option<u32>,
 }
 
 impl SurfaceDisplayList {
@@ -400,6 +433,9 @@ pub enum Primitive {
         primitives: Vec<Primitive>,
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
         transform: Transform,
+        /// The plotted values as text, for assistive technology.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<ooxml_drawingml::chart::ChartData>,
     },
     /// A laid-out table: one addressable object whose cells paint clipped to
     /// its rectangle, and whose `label` is the screen-reader summary.
@@ -416,7 +452,43 @@ pub enum Primitive {
         primitives: Vec<Primitive>,
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
         transform: Transform,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grid: Option<TableGrid>,
     },
+}
+
+/// The row and column structure of a table, for assistive technology.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableGrid {
+    pub rows: u32,
+    pub columns: u32,
+    /// Cells that start a span, in row then column order; cells merged into
+    /// another one are left out.
+    pub cells: Vec<TableGridCell>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableGridCell {
+    pub row: u32,
+    pub column: u32,
+    pub row_span: u32,
+    pub column_span: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<TableHeader>,
+    /// The `[start, end)` range of the table's primitives that hold the
+    /// cell's text.
+    pub primitives: [u32; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableHeader {
+    /// The cell heads its column, from the table's header row.
+    Column,
+    /// The cell heads its row, from the table's first column.
+    Row,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,6 +506,36 @@ pub struct TextParagraph {
     pub align: Option<TextAlign>,
     pub level: u32,
     pub runs: Vec<TextRun>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub languages: Vec<TextLanguage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<TextLink>,
+}
+
+/// UTF-16 offsets into the paragraph's concatenated run text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextLanguage {
+    pub start: u32,
+    pub end: u32,
+    pub lang: String,
+}
+
+/// UTF-16 offsets into the paragraph's concatenated run text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextLink {
+    pub start: u32,
+    pub end: u32,
+    pub target: TextLinkTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TextLinkTarget {
+    Url { href: String },
+    Slide { index: u32 },
+    Jump { jump: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,6 +599,8 @@ pub struct PositionedTextRun {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    #[serde(default, skip_serializing_if = "is_unstruck")]
+    pub strike: Option<String>,
     pub color: String,
     /// Tracking between clusters in pixels.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -504,6 +608,9 @@ pub struct PositionedTextRun {
     /// Pixels this run's baseline sits above the line's; negative is subscript.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub baseline_offset_px: f32,
+    /// Whether layout shaped the run with kerning; `false` below the run's `kern` threshold.
+    #[serde(default = "kerned_by_default", skip_serializing_if = "is_kerned")]
+    pub kerning: bool,
     pub glyphs: Vec<PositionedGlyph>,
 }
 
@@ -528,8 +635,20 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn kerned_by_default() -> bool {
+    true
+}
+
+fn is_kerned(value: &bool) -> bool {
+    *value
+}
+
 fn is_zero(value: &f32) -> bool {
     *value == 0.0
+}
+
+fn is_unstruck(value: &Option<String>) -> bool {
+    !matches!(value.as_deref(), Some("sngStrike" | "dblStrike"))
 }
 
 #[cfg(test)]
@@ -560,6 +679,8 @@ mod tests {
             height: 10.0,
             background: None,
             primitives: Vec::new(),
+            alt_text: BTreeMap::new(),
+            title_shape: None,
         };
         assert!(!list.has_glyphs());
         for primitive in [
@@ -605,6 +726,8 @@ mod tests {
                 label: Some("Chart".into()),
                 transform: Transform::default(),
             }],
+            alt_text: BTreeMap::new(),
+            title_shape: None,
         };
 
         let json = serde_json::to_string(&list).expect("serialize display list");

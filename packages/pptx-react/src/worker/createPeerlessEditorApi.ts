@@ -33,7 +33,9 @@ export type PptxAsyncEditorApi = Omit<PptxWorkerEditorApi,
   save(): Promise<Uint8Array>;
   /** @deprecated Use {@link save}, which is async on the default editor. */
   saveAsync(): Promise<Uint8Array>;
-  recoverySave(): Promise<{ bytes: Uint8Array; recovery: true; throughSeq: number; version: string }>;
+  /** `unrecoveredIntents` lists edits made just before the failure that recovery left out because their outcome is unknown. */
+  recoverySave(): Promise<{ bytes: Uint8Array; recovery: true; throughSeq: number; version: string;
+    unrecoveredIntents?: { seq: number; kind: string; reason: 'unknown-outcome' }[] }>;
 };
 
 const caller = { reportRefusal: false } as const;
@@ -164,6 +166,8 @@ export function createPeerlessEditorApi(run: PeerlessPresentation, canvas: HTMLC
     ...mutations,
     encodeStateVector: () => read('encodeStateVector'),
     encodeStateAsUpdate: (vector) => read('encodeStateAsUpdate', vector),
+    proposalSlideStrip: (id) => read('proposalSlideStrip', id),
+    layoutProposalDiffSlideById: (id, slideId) => read('layoutProposalDiffSlideById', id, slideId),
     previewProposal: (id) => read('previewProposal', id), layoutSlide: (index) => read('layoutSlide', index),
     layoutProposalSlide: (id, index) => read('layoutProposalSlide', id, index), layoutProposalDiffSlide: (id, index) => read('layoutProposalDiffSlide', id, index),
     comments: () => read('comments'), snapshot: () => read('snapshot'), story: (id) => read('story', id), findText: api.findText,

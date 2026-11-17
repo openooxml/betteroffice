@@ -12,6 +12,8 @@
 //!   preferred cell widths before fitting any explicit table width.
 //! - **autofit** — accumulate per-column minimum and maximum content widths
 //!   from every cell, bounded by preferred cell widths and the content budget.
+//!   In a table that states no width, cell widths and a grid that both exceed
+//!   the budget widen it, as in Word.
 //!   Distribute room above minimums in proportion to column flex (`max - min`),
 //!   or shrink minimums proportionally when they exceed the budget.
 //! - otherwise — normalize the declared grid and uniformly scale it to an
@@ -32,7 +34,7 @@ pub use ooxml_drawingml::normalize_table_column_widths;
 use serde::Serialize;
 
 use crate::cell_layout::table_compat_leading_shift;
-use crate::types::TableBlock;
+use crate::types::{LayoutBlock, Run, TableBlock, TableCell, TableRow};
 
 /// Twips per inch.
 const TWIPS_PER_INCH: f64 = 1440.0;
@@ -129,6 +131,116 @@ pub fn resolve_cell_grid(table_block: &TableBlock) -> Vec<ResolvedGridCell> {
         }
     }
     out
+}
+
+/// Removes rows marked `w:hidden` (§17.4.20) that held only vanished runs when
+/// read and still show nothing, as Word does when hidden text is not shown:
+/// they take no height, paint nothing and leave the borders of the rows around
+/// them as if they were never there. The mark only hides the end-of-row mark,
+/// so a marked row with visible content stays, as does one that starts a
+/// vertical merge continuing into a row that stays. A merge through a removed
+/// row shrinks by it. A table left with no rows takes no space.
+pub fn drop_hidden_rows(table: &mut TableBlock) {
+    let mut dropped: Vec<bool> = table
+        .rows
+        .iter()
+        .map(|row| {
+            row.hidden == Some(true)
+                && row.hidden_content_only == Some(true)
+                && !row_shows_content(row)
+        })
+        .collect();
+    if !dropped.contains(&true) {
+        return;
+    }
+    let grid = resolve_cell_grid(table);
+    // spans only reach down, so walking up settles each row once
+    for cell in grid.iter().rev().filter(|cell| cell.row_span > 1) {
+        let end = (cell.row_index + cell.row_span).min(dropped.len());
+        if (cell.row_index + 1..end).any(|row| !dropped[row]) {
+            dropped[cell.row_index] = false;
+        }
+    }
+    if !dropped.contains(&true) {
+        return;
+    }
+    for cell in grid
+        .iter()
+        .filter(|cell| cell.row_span > 1 && !dropped[cell.row_index])
+    {
+        let end = (cell.row_index + cell.row_span).min(dropped.len());
+        let kept = (cell.row_index..end).filter(|row| !dropped[*row]).count();
+        table.rows[cell.row_index].cells[cell.cell_index].row_span = Some(kept as f64);
+    }
+    let mut index = 0;
+    table.rows.retain_mut(|row| {
+        index += 1;
+        row.source_row.get_or_insert(index as u64 - 1);
+        !dropped[index - 1]
+    });
+}
+
+fn row_shows_content(row: &TableRow) -> bool {
+    row.cells
+        .iter()
+        .any(|cell| cell.blocks.iter().any(block_shows_content))
+}
+
+fn block_shows_content(block: &LayoutBlock) -> bool {
+    match block {
+        LayoutBlock::Paragraph(paragraph) => {
+            paragraph.runs.iter().any(|run| match run {
+                Run::Text(run) => !run.text.is_empty(),
+                // a field with an empty result paints nothing unless layout computes it
+                Run::Field(field) => {
+                    matches!(field.field_type.as_str(), "PAGE" | "NUMPAGES")
+                        || field
+                            .raw_type
+                            .as_deref()
+                            .is_some_and(|kind| kind.eq_ignore_ascii_case("SEQ"))
+                        || field
+                            .fallback
+                            .as_deref()
+                            .is_some_and(|text| !text.is_empty())
+                }
+                _ => true,
+            }) || paragraph.attrs.as_ref().is_some_and(|attrs| {
+                attrs.shading.is_some()
+                    || attrs.borders.is_some()
+                    || (attrs.list_marker_hidden != Some(true)
+                        && attrs
+                            .list_marker
+                            .as_deref()
+                            .is_some_and(|marker| !marker.is_empty()))
+            })
+        }
+        LayoutBlock::Table(table) => table
+            .rows
+            .iter()
+            .any(|row| row_shows_content(row) || row.cells.iter().any(cell_paints)),
+        LayoutBlock::SectionBreak(_) | LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) => {
+            false
+        }
+        _ => true,
+    }
+}
+
+/// A nested cell paints shading or a border line even with no content, by the
+/// same tests the display list applies.
+fn cell_paints(cell: &TableCell) -> bool {
+    cell.background.is_some()
+        || cell.borders.as_ref().is_some_and(|borders| {
+            [&borders.top, &borders.right, &borders.bottom, &borders.left]
+                .into_iter()
+                .flatten()
+                .any(|border| {
+                    crate::display_list::border_paints(
+                        border.style.as_deref(),
+                        border.ooxml_style.as_deref(),
+                        border.width,
+                    )
+                })
+        })
 }
 
 /// Total grid columns: the furthest column any cell reaches, and every row's
@@ -340,6 +452,8 @@ fn resolve_fixed_column_widths(
     widths
 }
 
+/// Per-column minimum and maximum widths, and the total of the columns a
+/// cell's stated width prices.
 fn autofit_content_widths(
     table_block: &TableBlock,
     content_width: f64,
@@ -347,7 +461,7 @@ fn autofit_content_widths(
     explicit_width_px: Option<f64>,
     content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
     nowrap_base_minimums: bool,
-) -> (Vec<f64>, Vec<f64>) {
+) -> (Vec<f64>, Vec<f64>, f64) {
     let source = table_block
         .grid_widths
         .as_deref()
@@ -432,6 +546,7 @@ fn autofit_content_widths(
     }
     let mut maximums = minimums.clone();
     let mut preferences = minimums.clone();
+    let mut stated_widths = vec![0.0; col_count];
     let mut priced = vec![false; col_count];
     for (grid_cell, _, maximum, preferred, _) in &constraints {
         add_span_constraint(
@@ -443,6 +558,12 @@ fn autofit_content_widths(
         if let Some(preferred) = preferred {
             add_span_constraint(
                 &mut preferences,
+                grid_cell.column_index,
+                grid_cell.col_span,
+                *preferred,
+            );
+            add_span_constraint(
+                &mut stated_widths,
                 grid_cell.column_index,
                 grid_cell.col_span,
                 *preferred,
@@ -497,7 +618,7 @@ fn autofit_content_widths(
             table_width = table_width.max(natural / (1.0 - percentage_total));
         }
         table_width = table_width.min(content_width);
-        let (_, resolved) = autofit_content_widths(
+        let (_, resolved, _) = autofit_content_widths(
             table_block,
             content_width,
             col_count,
@@ -525,7 +646,11 @@ fn autofit_content_widths(
             }
         }
     }
-    (minimums, maximums)
+    let stated = (0..col_count)
+        .filter(|column| priced[*column])
+        .map(|column| stated_widths[column])
+        .sum();
+    (minimums, maximums, stated)
 }
 
 fn legacy_fixed_column_widths(
@@ -685,7 +810,7 @@ fn autofit_column_widths(
     nowrap_base_minimums: bool,
 ) -> Option<Vec<f64>> {
     let budget = table_width_budget(table_block, content_width);
-    let (minimums, maximums) = autofit_content_widths(
+    let (minimums, maximums, stated) = autofit_content_widths(
         table_block,
         budget,
         col_count,
@@ -695,7 +820,17 @@ fn autofit_column_widths(
     );
     let min_total: f64 = minimums.iter().sum();
     let max_total: f64 = maximums.iter().sum();
-    let target = budget.min(
+    let grid_total: f64 = table_block
+        .grid_widths
+        .as_deref()
+        .or(table_block.column_widths.as_deref())
+        .map_or(0.0, |grid| grid.iter().sum());
+    let limit = if explicit_width_px.is_some() {
+        budget
+    } else {
+        budget.max(stated.min(grid_total))
+    };
+    let target = limit.min(
         min_total.max(explicit_width_px.unwrap_or(if max_total > 0.0 {
             max_total
         } else {

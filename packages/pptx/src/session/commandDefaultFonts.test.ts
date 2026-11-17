@@ -1,9 +1,12 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import * as fonts from '@betteroffice/fonts';
+import * as progressive from '@betteroffice/fonts/progressive';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
+import { createSlicedFontFaces } from './commandSlicedFonts';
 import { decodeFontFace } from '../wasm/loader';
+import { engineKind } from '../wasm/engine';
 
 const restorers: (() => void)[] = [];
 
@@ -21,11 +24,26 @@ function provider(
   const resolve = mock(load);
   const resolveFamily = mock(() => undefined);
   const resolveScriptFallback = mock(script);
-  const source = { resolve, resolveFamily, resolveScriptFallback,
-    resolveLastResort: () => { throw new Error('Unrelated substitution'); } };
+  const resolveLastResort = mock((_family: string, _bold: boolean, _italic: boolean, _office?: string) =>
+    async (): Promise<ArrayBuffer> => { throw new Error('No substitute'); });
+  const source = { resolve, resolveFamily, resolveScriptFallback, resolveLastResort };
   const imported = spyOn(commandFontProvider, 'load').mockResolvedValue(source);
   restorers.push(() => imported.mockRestore());
-  return { imported, resolve, resolveFamily, resolveScriptFallback };
+  return { imported, resolve, resolveFamily, resolveScriptFallback, resolveLastResort };
+}
+
+function deadline() {
+  const timeout = globalThis.setTimeout;
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) =>
+    timeout(callback, delay === 5000 ? 10 : delay, ...args)) as typeof setTimeout);
+  restorers.push(() => timer.mockRestore());
+}
+
+function retryClock() {
+  let now = Date.now();
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  restorers.push(() => clock.mockRestore());
+  return (elapsed: number) => { now += elapsed; };
 }
 
 afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
@@ -39,7 +57,7 @@ test('the manager decodes packed faces with the worker engine', async () => {
   expect((await decoder(packed, { codec: 'zstd' })).font.byteLength).toBe((await notoSansJP()).byteLength);
 });
 
-test('coverage prefetch loads each face once and decodes only after the session wasm is ready', async () => {
+test('coverage prefetch loads each face once; faces decode only after the session engine is ready, except large faces on wasm', async () => {
   let release!: () => void;
   const ready = new Promise<void>((resolve) => { release = resolve; });
   const load = mock(async () => bytes);
@@ -53,13 +71,19 @@ test('coverage prefetch loads each face once and decodes only after the session 
   restorers.push(() => create.mockRestore());
   await commandFontProvider.load();
   const decoder = (create.mock.calls[0]![1] as { decoder: typeof decodeFontFace }).decoder;
-  const packed = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  const large = await readFile(new URL('../../../fonts-cjk/assets/NotoSansJP-Regular.otf.zst', import.meta.url));
+  let largeDecoded = false;
+  const largeDecoding = decoder(large, { codec: 'zstd' }).then((face) => { largeDecoded = true; return face; });
+  if (engineKind === 'wasm') await largeDecoding;
+  const small = await readFile(new URL('../../../fonts-latin/assets/LiberationSans-Regular.ttf.zst', import.meta.url));
   let decoded = false;
-  const decoding = decoder(packed, { codec: 'zstd' }).then((face) => { decoded = true; return face; });
+  const decoding = decoder(small, { codec: 'woff2t+zstd' }).then((face) => { decoded = true; return face; });
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(decoded).toBe(false);
+  expect(largeDecoded).toBe(engineKind === 'wasm');
   release();
   expect((await decoding).font.byteLength).toBeGreaterThan(0);
+  expect((await largeDecoding).font.byteLength).toBeGreaterThan(0);
 });
 
 test('a prefetched coverage face and the later request share one decode', async () => {
@@ -125,8 +149,9 @@ test('unavailable and rejected defaults never prepare registration', async () =>
   } finally { fonts.dispose(); }
 });
 
-test('resolves requested traits through manager mappings and skips unknown families', async () => {
+test('resolves requested traits through manager mappings and gives unknown families the PowerPoint last resort', async () => {
   const source = provider((family) => family === 'Calibri' ? async () => bytes : undefined);
+  source.resolveLastResort.mockImplementation(() => async () => bytes);
   const register = mock(() => {});
   const fonts = createCommandDefaultFonts([], () => [{ ...regular, bold: true, italic: true },
     { ...regular, family: 'Unknown Family' }], register, () => {});
@@ -134,19 +159,21 @@ test('resolves requested traits through manager mappings and skips unknown famil
     const faces = await fonts.load();
     expect(source.resolve.mock.calls).toEqual([['Calibri', true, true], ['Unknown Family', false, false]]);
     expect(source.resolveFamily).toHaveBeenCalledWith('Unknown Family', false, false);
-    expect(faces).toHaveLength(1);
+    expect(source.resolveLastResort.mock.calls).toEqual([['Unknown Family', false, false, 'powerpoint']]);
+    expect(faces).toHaveLength(2);
     expect(faces[0]).toMatchObject({ family: 'Calibri', bold: true, italic: true });
+    expect(faces[1]).toMatchObject({ family: 'Unknown Family', bold: false, italic: false });
     expect(faces[0].ownWeight).toBeUndefined();
     expect(faces.every((face) => !('bytes' in face))).toBe(true);
     expect(bytes.byteLength).toBe(3);
   } finally { fonts.dispose(); }
 });
 
-test('lighter members of bundled families load their regular face at their own weight; other unknown names stay unregistered', async () => {
+test('lighter members of bundled families load their regular face at their own weight; other unknown names take the last resort', async () => {
   const resolve = mock(() => undefined);
   const resolveLightVariant = mock((family: string, _bold: boolean, _italic: boolean) =>
     family === 'Calibri Light' ? async () => bytes : undefined);
-  const resolveLastResort = mock(() => { throw new Error('Unrelated substitution'); });
+  const resolveLastResort = mock((_family: string, _bold: boolean, _italic: boolean, _office?: string) => async () => bytes);
   const imported = spyOn(commandFontProvider, 'load').mockResolvedValue({ resolve, resolveFamily: () => undefined,
     resolveScriptFallback: () => undefined, resolveLastResort, resolveLightVariant });
   restorers.push(() => imported.mockRestore());
@@ -156,32 +183,167 @@ test('lighter members of bundled families load their regular face at their own w
   try {
     const faces = await fonts.load();
     expect(resolveLightVariant.mock.calls).toEqual([['Calibri Light', true, false], ['BIZ UD明朝 Medium', false, false]]);
-    expect(resolveLastResort).not.toHaveBeenCalled();
-    expect(faces.map((face) => [face.family, face.bold, face.ownWeight])).toEqual([['Calibri Light', true, true]]);
-    expect(register).toHaveBeenCalledTimes(1);
+    expect(resolveLastResort.mock.calls).toEqual([['BIZ UD明朝 Medium', false, false, 'powerpoint']]);
+    expect(faces.map((face) => [face.family, face.bold, face.ownWeight])).toEqual([['Calibri Light', true, true], ['BIZ UD明朝 Medium', false, undefined]]);
+    expect(register).toHaveBeenCalledTimes(2);
   } finally { fonts.dispose(); }
 });
 
-test('failed, invalid and timed out faces settle once without late registration', async () => {
+test('failed and invalid faces stay unregistered while timed out faces register late', async () => {
   let finish!: (value: ArrayBuffer) => void;
   const slow = new Promise<ArrayBuffer>((resolve) => { finish = resolve; });
-  provider((family) => family === 'Slow' ? () => slow : family === 'Failure'
+  const slowLoad = mock(() => slow);
+  provider((family) => family === 'Slow' ? slowLoad : family === 'Failure'
     ? async () => { throw new Error('Unavailable'); } : async () => bytes);
-  const timeout = globalThis.setTimeout;
-  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) =>
-    timeout(callback, delay === 5000 ? 10 : delay, ...args)) as typeof setTimeout);
-  restorers.push(() => timer.mockRestore());
+  deadline();
   const register = mock((face: { family: string }) => { if (face.family === 'Invalid') throw new Error('Invalid font'); });
   const settled = mock(() => {});
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
   const fonts = createCommandDefaultFonts([], () => ['Slow', 'Failure', 'Invalid', 'Calibri']
-    .map((family) => ({ ...regular, family })), register, settled);
+    .map((family) => ({ ...regular, family })), register, settled, install);
   try {
     expect(await fonts.load()).toMatchObject([{ family: 'Calibri' }]);
     expect(settled).toHaveBeenCalledTimes(1);
-    finish(bytes);
-    await Promise.resolve();
-    expect(await fonts.load()).toEqual([]);
     expect(register.mock.calls.map(([face]) => face.family)).toEqual(['Invalid', 'Calibri']);
+    expect(await fonts.load()).toEqual([]);
+    finish(bytes);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(register.mock.calls.map(([face]) => face.family)).toEqual(['Invalid', 'Calibri', 'Slow']);
+    expect(settled).toHaveBeenCalledTimes(2);
+    expect(settled).toHaveBeenLastCalledWith([{ ...regular, family: 'Slow' }]);
+    expect(install).toHaveBeenLastCalledWith([{ ...regular, family: 'Slow', bytes }]);
+    expect(slowLoad).toHaveBeenCalledTimes(1);
+    expect(await fonts.load()).toEqual([]);
+    expect(settled).toHaveBeenCalledTimes(2);
+  } finally { fonts.dispose(); }
+});
+
+test('a transient failure retries after backoff and registers the second load', async () => {
+  const advance = retryClock();
+  const load = mock(async () => bytes).mockRejectedValueOnce(new Error('Unavailable'));
+  provider(() => load);
+  const register = mock(() => {});
+  const settled = mock(() => {});
+  const fonts = createCommandDefaultFonts([], () => [regular], register, settled);
+  try {
+    expect(await fonts.load()).toEqual([]);
+    expect(fonts.hasPending()).toBe(false);
+    expect(await fonts.load()).toEqual([]);
+    expect(load).toHaveBeenCalledTimes(1);
+    advance(1999);
+    expect(fonts.hasPending()).toBe(false);
+    expect(await fonts.load()).toEqual([]);
+    expect(load).toHaveBeenCalledTimes(1);
+    advance(1);
+    expect(fonts.hasPending()).toBe(true);
+    expect(await fonts.load()).toEqual([regular]);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledWith([regular]);
+  } finally { fonts.dispose(); }
+});
+
+test('rejected faces back off for two and eight seconds and stop after three attempts', async () => {
+  const advance = retryClock();
+  const load = mock(async (): Promise<ArrayBuffer> => { throw new Error('Unavailable'); });
+  provider(() => load);
+  const register = mock(() => {});
+  const settled = mock(() => {});
+  const fonts = createCommandDefaultFonts([], () => [regular], register, settled);
+  try {
+    expect(await fonts.load()).toEqual([]);
+    for (const [delay, attempts] of [[2000, 1], [8000, 2]]) {
+      advance(delay - 1);
+      expect(fonts.hasPending()).toBe(false);
+      for (let call = 0; call < 20; call++) expect(await fonts.load()).toEqual([]);
+      expect(load).toHaveBeenCalledTimes(attempts);
+      advance(1);
+      expect(fonts.hasPending()).toBe(true);
+      expect(await fonts.load()).toEqual([]);
+      expect(load).toHaveBeenCalledTimes(attempts + 1);
+    }
+    for (let call = 0; call < 20; call++) {
+      advance(60_000);
+      expect(fonts.hasPending()).toBe(false);
+      expect(await fonts.load()).toEqual([]);
+    }
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(register).not.toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
+  } finally { fonts.dispose(); }
+});
+
+test('a face with no loader stays attempted without retries', async () => {
+  const advance = retryClock();
+  const source = provider(() => undefined);
+  source.resolveLastResort.mockReturnValue(undefined as never);
+  const register = mock(() => {});
+  const settled = mock(() => {});
+  const fonts = createCommandDefaultFonts([], () => [regular], register, settled);
+  try {
+    expect(await fonts.load()).toEqual([]);
+    advance(60_000);
+    expect(fonts.hasPending()).toBe(false);
+    expect(await fonts.load()).toEqual([]);
+    expect(source.resolve).toHaveBeenCalledTimes(1);
+    expect(register).not.toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
+  } finally { fonts.dispose(); }
+});
+
+test('a refused installation is retried after backoff', async () => {
+  const advance = retryClock();
+  const load = mock(async () => bytes);
+  provider(() => load);
+  const register = mock(() => {});
+  const settled = mock(() => {});
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces).mockResolvedValueOnce([]);
+  const fonts = createCommandDefaultFonts([], () => [regular], register, settled, install);
+  try {
+    expect(await fonts.load()).toEqual([]);
+    expect(register).not.toHaveBeenCalled();
+    advance(2000);
+    expect(await fonts.load()).toEqual([regular]);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(install).toHaveBeenCalledTimes(2);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(settled).toHaveBeenCalledWith([regular]);
+  } finally { fonts.dispose(); }
+});
+
+test('a face that never resolves releases first paint at the deadline without refetching', async () => {
+  deadline();
+  const load = mock(() => new Promise<ArrayBuffer>(() => {}));
+  provider(() => load);
+  const register = mock(() => {});
+  const settled = mock(() => {});
+  const fonts = createCommandDefaultFonts([], () => [regular], register, settled);
+  try {
+    expect(await fonts.load()).toEqual([]);
+    expect(await fonts.load()).toEqual([]);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(register).not.toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
+  } finally { fonts.dispose(); }
+});
+
+for (const action of ['supply', 'dispose'] as const) test(`${action} prevents registration after the deadline`, async () => {
+  deadline();
+  let finish!: (value: ArrayBuffer) => void;
+  provider(() => () => new Promise<ArrayBuffer>((resolve) => { finish = resolve; }));
+  const register = mock(() => {});
+  const settled = mock(() => {});
+  const fonts = createCommandDefaultFonts([], () => [regular], register, settled);
+  try {
+    expect(await fonts.load()).toEqual([]);
+    if (action === 'supply') fonts.supply(' CALIBRI ');
+    else fonts.dispose();
+    finish(bytes);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(register).not.toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
   } finally { fonts.dispose(); }
 });
 
@@ -326,4 +488,92 @@ test('browser refusal prevents coverage registration and settlement', async () =
     expect(settled).not.toHaveBeenCalled();
     expect(beforeRegister).not.toHaveBeenCalled();
   } finally { fonts.dispose(); }
+});
+
+test('with sliced faces off, a sliced loader registers the whole face and its exact bytes', async () => {
+  const whole = new Uint8Array([9, 8, 7]).buffer;
+  const open = spyOn(progressive, 'openSlicedFace');
+  restorers.push(() => open.mockRestore());
+  const load = Object.assign(mock(async () => whole), { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
+  provider(() => load as never);
+  const registered: DefaultFontFace[] = [];
+  const fonts = createCommandDefaultFonts([], () => [regular], (face) => { registered.push(face); }, () => {});
+  try {
+    await fonts.load();
+    expect(open).not.toHaveBeenCalled();
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(registered.map((face) => [...new Uint8Array(face.bytes as ArrayBuffer)])).toEqual([[9, 8, 7]]);
+  } finally { fonts.dispose(); }
+});
+
+test('with sliced faces off, coverage prefetch fetches whole faces', async () => {
+  const open = spyOn(progressive, 'openSlicedFace');
+  restorers.push(() => open.mockRestore());
+  const load = Object.assign(mock(async () => bytes), { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
+  provider(() => undefined, () => load as never);
+  prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), () => commandFontProvider.load());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(open).not.toHaveBeenCalled();
+});
+
+test('a host-supplied face under a coverage family is never sliced over', async () => {
+  const skeleton = await notoSansJP();
+  const load = Object.assign(mock(async () => skeleton), { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
+  provider(() => undefined, (script) => script === 'cjk-jp' ? load as never : undefined);
+  const open = spyOn(progressive, 'openSlicedFace').mockResolvedValue({ revision: 1, bytes: () => skeleton,
+    ensureText: async () => 1, prefetch() {} } as never);
+  restorers.push(() => open.mockRestore());
+  const browser = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/149.0' } });
+  restorers.push(() => {
+    if (browser) Object.defineProperty(globalThis, 'navigator', browser);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  const sliced = createSlicedFontFaces();
+  const fonts = createCommandDefaultFonts([{ family: 'Noto Sans JP' }], () => [{ ...regular, family: 'BIZ UD明朝', scripts: ['cjk-jp'] }],
+    () => {}, () => {}, undefined, undefined, undefined, sliced);
+  try {
+    await fonts.load();
+    expect(open).toHaveBeenCalled();
+    expect(sliced.families()).toEqual([]);
+  } finally { fonts.dispose(); sliced.dispose(); }
+});
+
+test('regular sliced with a whole substitute for bold: the family is sliced, and bold stays out of it', async () => {
+  const skeleton = await notoSansJP();
+  const sliceable = Object.assign(mock(async () => skeleton), { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
+  provider((_family, bold) => (bold ? async () => bytes : sliceable) as never);
+  const open = spyOn(progressive, 'openSlicedFace').mockResolvedValue({ revision: 1, bytes: () => skeleton,
+    ensureText: async () => 1, prefetch() {} } as never);
+  restorers.push(() => open.mockRestore());
+  const browser = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/149.0' } });
+  restorers.push(() => {
+    if (browser) Object.defineProperty(globalThis, 'navigator', browser);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  const sliced = createSlicedFontFaces();
+  const fonts = createCommandDefaultFonts([], () => [regular, { ...regular, bold: true }], () => {}, () => {},
+    undefined, undefined, undefined, sliced);
+  try {
+    await fonts.load();
+    expect(sliced.families()).toEqual(['Calibri']);
+    expect(sliced.plainStyles()).toEqual(['calibri|1|0']);
+    expect(sliced.coverage.covers!('Calibri', true, false)).toBe(false);
+    expect(sliced.coverage.covers!('Calibri', false, false)).toBe(true);
+  } finally { fonts.dispose(); sliced.dispose(); }
+});
+
+test('a worker provider applies its session CDN snapshot before creating loaders', async () => {
+  const create = spyOn(fonts, 'createFontProvider');
+  restorers.push(() => create.mockRestore());
+  const configured = { baseUrl: 'https://worker-provider.example/', timeoutMs: 4321 };
+  try {
+    await commandFontProvider.load(configured);
+    expect(fonts.fontCdnConfiguration()).toEqual(configured);
+    await commandFontProvider.load({ baseUrl: false, timeoutMs: 30_000 });
+    expect(fonts.fontCdnConfiguration().baseUrl).toBe(false);
+    expect(create).toHaveBeenCalledTimes(2);
+  } finally { fonts.configureFontCdn({ baseUrl: false }); }
 });

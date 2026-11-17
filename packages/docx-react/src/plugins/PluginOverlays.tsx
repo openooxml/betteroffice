@@ -27,6 +27,7 @@ export function PluginOverlays({
     <div
       ref={layerRef}
       className="docx-plugin-overlays"
+      data-plugin-overlays=""
       data-testid="plugin-overlays"
       style={{
         position: 'absolute',
@@ -42,7 +43,7 @@ export function PluginOverlays({
       {activations.map((activation) => {
         const Overlay = activation.plugin.overlay;
         const geometry = heldGeometry
-          ? scopePluginGeometry(heldGeometry, activation.pluginId)
+          ? scopePluginGeometry(heldGeometry, activation.pluginId, undefined, host.flushSelection)
           : activation.context.geometry;
         return Overlay && geometry ? (
           <PluginRenderScope key={activation.key} host={host} activation={activation}>

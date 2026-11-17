@@ -1,5 +1,11 @@
+import { trackPluginGestures } from '../../../../shared/plugin-host/gesture';
 import type { Translations } from '@betteroffice/pptx-i18n';
-import { isPluginCommandId, isPptxCommandId, PPTX_COMMAND_DESCRIPTORS } from './descriptors';
+import {
+  isPluginCommandId,
+  isPptxCommandId,
+  PPTX_COMMAND_DESCRIPTORS,
+} from './descriptors';
+import type { ResolvedShortcuts } from '../../../../shared/keyboard/resolve';
 import {
   commandReason,
   contributedCommandGate,
@@ -8,6 +14,7 @@ import {
 } from './evaluate';
 import type {
   PptxCommandArgs,
+  PptxCommandDescriptor,
   PptxCommandDisabledCode,
   PptxCommandFailureCode,
   PptxCommandId,
@@ -94,6 +101,7 @@ export interface PptxPendingCommand<K extends PptxCommandId> {
 
 /** A contributed command as the store runs it. */
 export interface PptxPluginCommandBinding {
+  readonly activationId?: string;
   readonly descriptor: PptxPluginCommandDescriptor;
   /** The plugin's own state; the editor's gate applies on top. */
   state(): PptxPluginCommandState;
@@ -103,6 +111,7 @@ export interface PptxPluginCommandBinding {
 
 /** Who a scoped store acts for; asked again inside every operation boundary. */
 export interface PptxCommandScope {
+  gesture(): boolean;
   /** Why the caller may not run `id` now, or null. */
   deny(id: PptxCommandId | PptxPluginCommandId): PptxCommandFailureCode | null;
   /** Notified whenever `deny` may answer differently. */
@@ -137,12 +146,16 @@ export interface PptxCommandController {
   ): void;
   /** Contributed toolbar commands, in display order. */
   pluginToolbar(): readonly PptxPluginCommandId[];
+  pluginActivation(id: PptxPluginCommandId): string | undefined;
   /** Keyboard bindings of the contributed commands. */
   pluginShortcuts(): readonly { id: PptxPluginCommandId; chord: string }[];
-  /**
-   * A store acting for `scope`: its answer is checked inside each operation, and mutating
-   * built-in commands refuse with `unsupported-policy`.
-   */
+  /** Replaces the host's resolved shortcuts; undefined restores the defaults. */
+  setShortcuts(table: ResolvedShortcuts | undefined): void;
+  /** The host's resolved shortcuts, or undefined while the defaults apply. */
+  hostShortcuts(): ResolvedShortcuts | undefined;
+  /** Changes whenever the shortcut map does; the store notifies its subscribers too. */
+  shortcutRevision(): number;
+  /** A store acting for `scope`; mutating built-ins need a gesture in the plugin's UI. */
   scoped(scope: PptxCommandScope): PptxCommandStore;
   guarded(guard: () => void): PptxCommandStore;
   /** Whether `store` is this editor's store or one scoped from it. */
@@ -213,6 +226,22 @@ export function createPptxCommandController(): PptxCommandController {
   const chromeListeners = new Set<() => void>();
   let chromeSnapshot: PptxChromeContext | null = null;
   let round = 0;
+  let hostTable: ResolvedShortcuts | undefined;
+  let revision = 0;
+  const effectiveDescriptors = new Map<PptxCommandId, PptxCommandDescriptor>();
+  const effectiveDescriptor = (id: PptxCommandId): PptxCommandDescriptor => {
+    if (!hostTable) return PPTX_COMMAND_DESCRIPTORS[id];
+    const table = hostTable;
+    let descriptor = effectiveDescriptors.get(id);
+    if (!descriptor) {
+      descriptor = Object.freeze({
+        ...PPTX_COMMAND_DESCRIPTORS[id],
+        shortcuts: Object.freeze((table.chords.get(id) ?? []).map((chord) => ({ chord, args: null }))),
+      }) as PptxCommandDescriptor;
+      effectiveDescriptors.set(id, descriptor);
+    }
+    return descriptor;
+  };
 
   const environment = (executing: boolean): PptxCommandEnvironment | null => {
     if (!binding) return null;
@@ -339,6 +368,7 @@ export function createPptxCommandController(): PptxCommandController {
   ): Promise<PptxPluginCommandResult> {
     const current = binding;
     if (!current) return failure('editor-unavailable', null);
+    const gesture = scope?.gesture() ?? false;
     const builtIn = isPluginCommandId(id) ? null : id;
     const ordered =
       deferred !== undefined || (builtIn !== null && current.ordered(builtIn, args as never));
@@ -353,7 +383,7 @@ export function createPptxCommandController(): PptxCommandController {
       const env = environment(true);
       const state = compute(id, args, env);
       if (!state.enabled) return { ok: false, failure: state.disabledReason };
-      if (scope && mutatingBuiltIn(id)) return failure('unsupported-policy', env);
+      if (scope && mutatingBuiltIn(id) && !gesture) return failure('unsupported-policy', env);
       return perform(env!);
     };
     try {
@@ -387,7 +417,7 @@ export function createPptxCommandController(): PptxCommandController {
   const getDescriptor = (id: AnyCommandId) =>
     isPluginCommandId(id)
       ? pluginCommands.get(id)?.descriptor ?? null
-      : PPTX_COMMAND_DESCRIPTORS[id];
+      : effectiveDescriptor(id);
 
   const store = Object.freeze({
     getDescriptor,
@@ -404,18 +434,17 @@ export function createPptxCommandController(): PptxCommandController {
   const createScoped = (scope: PptxCommandScope): PptxCommandStore => {
     const cache = new Map<
       string,
-      { base: unknown; denial: PptxCommandFailureCode | null; policy: boolean; state: unknown }
+      { base: unknown; denial: PptxCommandFailureCode | null; state: unknown }
     >();
     const getState = (id: AnyCommandId, args?: unknown) => {
       const base = snapshot(id, args).state;
       const denial = scope.deny(id);
-      const policy = !denial && base.enabled && mutatingBuiltIn(id);
       const key = snapshotKey(id, args);
       const cached = cache.get(key);
-      if (cached && cached.base === base && cached.denial === denial && cached.policy === policy) {
+      if (cached && cached.base === base && cached.denial === denial) {
         return cached.state;
       }
-      const code = denial ? disabledCode(denial) : policy ? 'unsupported-policy' : null;
+      const code = denial ? disabledCode(denial) : null;
       const { enabled: _enabled, disabledReason: _reason, ...presentation } = base;
       const state = code
         ? {
@@ -425,7 +454,7 @@ export function createPptxCommandController(): PptxCommandController {
           }
         : base;
       if (cache.size >= MAX_CACHED_SNAPSHOTS) cache.delete(cache.keys().next().value!);
-      cache.set(key, { base, denial, policy, state });
+      cache.set(key, { base, denial, state });
       return state;
     };
     const scopedStore = Object.freeze({
@@ -507,7 +536,9 @@ export function createPptxCommandController(): PptxCommandController {
     },
     registerChrome(element) {
       chromeRoots.add(element);
+      const releaseGesture = trackPluginGestures(element);
       return () => {
+        releaseGesture();
         chromeRoots.delete(element);
       };
     },
@@ -538,7 +569,16 @@ export function createPptxCommandController(): PptxCommandController {
       notify();
     },
     pluginToolbar: () => pluginToolbarIds,
+    pluginActivation: (id) => pluginCommands.get(id)?.activationId,
     pluginShortcuts: () => pluginShortcutList,
+    setShortcuts(table) {
+      hostTable = table;
+      revision += 1;
+      effectiveDescriptors.clear();
+      notify();
+    },
+    hostShortcuts: () => hostTable,
+    shortcutRevision: () => revision,
     scoped(scope) {
       let scoped = scopedStores.get(scope);
       if (!scoped) {

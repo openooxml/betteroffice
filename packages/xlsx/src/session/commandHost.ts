@@ -15,6 +15,7 @@ import {
   type WorkbookSharedCommand, type WorkbookSharedWireAck, type WorkbookWireAck,
   type CommandStatus, type WorkbookSharedOutcome,
 } from './commandProtocol';
+import { isEngineTrap } from '../../../../shared/office-session/trap';
 
 function projectionEquals(
   previous: WorkbookCommandSelection | Partial<WorkbookEditState> | undefined,
@@ -111,15 +112,17 @@ export function createWorkbookCommandHost(options: {
         if (intent.kind !== 'applyUpdate' && intent.kind !== 'collabPipe' &&
           intent.afterSeq !== undefined && !state.statuses.has(intent.afterSeq)) refusal = 'dependency-expired';
       }
-      const before = handle.version();
-      let reply: WorkbookWireAck;
-      try { reply = applyWorkbookCommandIntent(handle, state, intent, refusal, false, options.applyPipe); }
-      catch (error) {
-        failure = error instanceof SessionFailure ? error : new SessionFailure(
-          error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash', 'Workbook command failed',
-          error instanceof Error ? error.message : String(error));
-        throw failure;
-      }
+      const engine = <T>(run: () => T): T => {
+        try { return run(); }
+        catch (error) {
+          failure = error instanceof SessionFailure ? error : new SessionFailure(
+            isEngineTrap(error) ? 'trap' : 'crash', 'Workbook command failed',
+            error instanceof Error ? error.message : String(error));
+          throw failure;
+        }
+      };
+      const before = engine(() => handle.version());
+      const reply = engine(() => applyWorkbookCommandIntent(handle, state, intent, refusal, false, options.applyPipe));
       const status = reply.statuses[0];
       if (input.kind !== 'collabPipe' && isWorkbookCommandFrameRequest(requested.get(input.seq)?.frame)) pendingVisual = true;
       if (publishRecovery) {
@@ -127,9 +130,10 @@ export function createWorkbookCommandHost(options: {
         reply.editState = state.editState;
         publishRecovery = false;
       }
-      if (handle.version() !== before) {
+      const after = engine(() => handle.version());
+      if (after !== before) {
         revision += 1;
-        versions.set(revision, handle.version());
+        versions.set(revision, after);
         if (versions.size > 256) versions.delete(versions.keys().next().value!);
         options.onCommit?.();
       }

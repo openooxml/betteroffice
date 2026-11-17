@@ -181,6 +181,62 @@ fn proposal_diff_boundary_preserves_the_original_json_contract() {
 }
 
 #[test]
+fn shape_diff_boundary_adds_metadata_without_changing_original_fields() {
+    let session = DeckSession::open(DECK, 1).unwrap();
+    let scope = session.slide_scope(0).unwrap();
+    let proposal = session
+        .propose(ProposalRequest {
+            agent_id: "shape-render-parity".to_owned(),
+            note: None,
+            edits: vec![ProposalEdit::SetShapeFill {
+                slide_id: scope.slide.id.clone(),
+                shape_id: scope.slide.shapes[0].id.clone(),
+                color: Some("#123456".to_owned()),
+            }],
+        })
+        .unwrap();
+    for fonts in [false, true] {
+        let (engine, renderer) = renderers(fonts);
+        for index in 0..session.slide_ids().unwrap().len() {
+            let preview = session
+                .preview_proposal_diff_slide(&proposal.id, index)
+                .unwrap();
+            let rendered = renderer
+                .layout_scoped_slide(session.package(), &preview.scope)
+                .unwrap();
+            let expected = serde_json::json!({
+                "proposal": preview.proposal,
+                "snapshot": preview.snapshot,
+                "textChanges": preview.text_changes,
+                "frame": rendered.display_list,
+            });
+            let mut actual: Value = serde_json::from_str(
+                &engine
+                    .layout_proposal_diff_slide_json(&session, &proposal.id, index as u32)
+                    .unwrap(),
+            )
+            .unwrap();
+            let metadata = actual.as_object_mut().unwrap().remove("shapeChanges");
+            if index == 0 {
+                assert_eq!(
+                    metadata,
+                    Some(serde_json::json!([{
+                        "shapeId": scope.slide.shapes[0].id,
+                        "kind": "changed",
+                    }]))
+                );
+            } else {
+                assert_eq!(metadata, None);
+            }
+            assert_eq!(
+                serde_json::to_string(&actual).unwrap(),
+                serde_json::to_string(&expected).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn inspection_boundary_matches_parse_json_with_and_without_media() {
     let package = pptx_parse::parse_pptx(DECK).unwrap();
     let full: Value = serde_json::from_str(&parse_pptx_json(DECK).unwrap()).unwrap();

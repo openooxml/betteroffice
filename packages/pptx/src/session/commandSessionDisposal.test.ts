@@ -1,4 +1,6 @@
+import { configureFontCdn } from '@betteroffice/fonts';
 import { expect, mock, test } from 'bun:test';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { isClientMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
 import { createPptxWorkerSession } from './commandSession';
 import type { PresentationCommandOpenOptions, PresentationCommandOpenResult } from './commandProtocol';
@@ -43,7 +45,7 @@ function heldWorker() {
     },
     terminate,
   } as unknown as Worker;
-  return { worker, terminate,
+  return { worker, terminate, calls,
     listenerCount: () => [...listeners.values()].reduce((count, active) => count + active.size, 0),
     waitFor(method: string) {
       if (calls.some((call) => call.method === method)) return Promise.resolve();
@@ -103,5 +105,36 @@ test('disposing before open settles ready and removes connection listeners', asy
   } finally {
     await session.dispose();
     process.off('unhandledRejection', unhandled);
+  }
+});
+
+test('worker open forwards the configured CDN and explicit disable state', async () => {
+  const previous = getFontCdnConfiguration();
+  try {
+    for (const baseUrl of ['https://worker-fonts.example/root/', false] as const) {
+      configureFontCdn({ baseUrl, timeoutMs: 5678 });
+      const endpoint = heldWorker();
+      const session = createPptxWorkerSession(new Uint8Array(), { worker: () => endpoint.worker });
+      try {
+        await session.ready;
+        const open = endpoint.calls.find((call) => call.method === 'openCommandEditor')!;
+        expect((open.args[1] as PresentationCommandOpenOptions).fontCdn).toEqual({ baseUrl, timeoutMs: 5678 });
+      } finally { await session.dispose(); }
+    }
+  } finally { setFontCdnConfiguration(previous); }
+});
+
+test('worker open omits font CDN configuration when none was configured', async () => {
+  const previous = getFontCdnConfiguration();
+  setFontCdnConfiguration(undefined);
+  const endpoint = heldWorker();
+  const session = createPptxWorkerSession(new Uint8Array(), { worker: () => endpoint.worker });
+  try {
+    await session.ready;
+    const open = endpoint.calls.find((call) => call.method === 'openCommandEditor')!;
+    expect(open.args[1]).not.toHaveProperty('fontCdn');
+  } finally {
+    await session.dispose();
+    setFontCdnConfiguration(previous);
   }
 });

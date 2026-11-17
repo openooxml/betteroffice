@@ -83,7 +83,7 @@ class Canvas {
  */
 export async function residentWorkerFactory(options: { transferBuffers?: boolean; offscreenCanvas?: unknown } = {}): Promise<(clientId?: number) => InProcessResidentWorker> {
   const result = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, '../residentEngineWorker.ts')],
+    entrypoints: [resolve(import.meta.dir, '../docxWorker.browser.ts')],
     target: 'bun',
     format: 'iife',
     plugins: [
@@ -135,6 +135,7 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
   return (clientId) => {
     let held: DocxEngineWorkerResponse[] | null = null;
     let terminated = false;
+    let trapped = false;
     const channels: TurnChannel[] = [];
     let turnPosts = 0;
     class TurnChannel {
@@ -177,6 +178,7 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
       }) => void) | null,
       postMessage(reply: DocxEngineWorkerResponse) {
         if (terminated) return;
+        if (!reply.ok && reply.terminal) trapped = true;
         if (held) held.push(reply);
         else deliver(reply);
       },
@@ -230,7 +232,15 @@ export async function residentWorkerFactory(options: { transferBuffers?: boolean
           channel.port1.close();
           channel.port2.close();
         }
-        for (const session of worker.sessions) session.destroy();
+        // A real worker is stopped without freeing anything; an engine that trapped mid-call can
+        // refuse the free this in-process teardown makes.
+        for (const session of worker.sessions) {
+          try {
+            session.destroy();
+          } catch (error) {
+            if (!trapped) throw error;
+          }
+        }
       },
       hold() {
         held ??= [];

@@ -21,7 +21,7 @@ const decode = mock(async (
   };
 });
 mock.module('./decode', () => ({ decodeFontFace: decode }));
-const { loadPackedFontBytes, readPackManifest } = await import('./packed');
+const { loadPackedFontBytes, readPackedFontBytes, readPackManifest } = await import('./packed');
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -76,6 +76,28 @@ for (const codec of ['zstd', 'woff2t+zstd'] as const) {
   });
 }
 
+test('the shared read returns the one decoded buffer, which owned copies leave intact', async () => {
+  const { face, manifest, resolveUrl } = fixture();
+  const first = await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  expect(new Uint8Array(first)).toEqual(bold);
+  expect(await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest)).toBe(first);
+  const owned = await loadPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  expect(owned).not.toBe(first);
+  structuredClone(owned, { transfer: [owned] });
+  expect(first.byteLength).toBe(bold.byteLength);
+  expect(decode).toHaveBeenCalledTimes(2);
+});
+
+test('a shared decoded face that something transferred is decoded again', async () => {
+  const { face, manifest, resolveUrl } = fixture();
+  const shared = await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  structuredClone(shared, { transfer: [shared] });
+  expect(shared.byteLength).toBe(0);
+  const again = await readPackedFontBytes(face, resolveUrl, undefined, undefined, manifest);
+  expect(new Uint8Array(again)).toEqual(bold);
+  expect(new Uint8Array(await loadPackedFontBytes(face, resolveUrl, undefined, undefined, manifest))).toEqual(bold);
+});
+
 test('ignores unknown manifest and face fields, including slices, while loading unchanged', async () => {
   const { manifest, face, resolveUrl } = fixture();
   const extended = {
@@ -86,7 +108,7 @@ test('ignores unknown manifest and face fields, including slices, while loading 
     })),
   };
   const parsed = readPackManifest(extended);
-  expect(parsed).toBe(extended);
+  expect(parsed as unknown).toBe(extended);
   expect(new Uint8Array(await loadPackedFontBytes(face, resolveUrl, undefined, undefined, parsed)))
     .toEqual(bold);
   expect(extended.faces[0].slices.skeleton.file).toBe('unused.zst');

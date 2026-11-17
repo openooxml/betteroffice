@@ -74,6 +74,8 @@ export interface PluginRuntimeOptions<
   currentVersion(): string | null;
   loadEvent(snapshot: Snapshot, reason: PluginLoadReason): Event;
   grantsEvent(snapshot: Snapshot, grant: PluginGrant<string>): Event;
+  /** Whether a queued event still describes the snapshot at dispatch. */
+  eventCurrent?(event: Event, snapshot: Snapshot): boolean;
   /** A problem that disables the plugin, or null. */
   validate?(plugin: Plugin): unknown;
   report(error: PluginError<Phase | RuntimePhase>): void;
@@ -98,6 +100,8 @@ export type InvokeOutcome<T> =
 export interface PluginRuntime<Plugin, Context, Event, Phase extends string> {
   /** Reconciles registrations by id and revision; call after the host commits. */
   setPlugins(plugins: readonly Plugin[]): void;
+  /** @internal The definitions the last setPlugins accepted, by id in registration order. */
+  registered(): ReadonlyMap<string, Plugin>;
   /** Rereads every grant, including one changed in place, and notifies the plugins it changed. */
   setGrants(grants: Readonly<Record<string, PluginGrant<string>>> | null | undefined): void;
   grant(pluginId: string): PluginGrant<string>;
@@ -113,6 +117,12 @@ export interface PluginRuntime<Plugin, Context, Event, Phase extends string> {
   touch(): void;
   /** Ready activations in registration order; stable until listeners are notified. */
   activations(): readonly RuntimeActivation<Plugin, Context>[];
+  /**
+   * @internal Where the current registration of `pluginId` stands for the open document:
+   * `loading` until its activation is ready, `ready` after, `none` with no running activation
+   * (rejected, removed, quarantined, ended or no document open).
+   */
+  activationState(pluginId: string): 'none' | 'loading' | 'ready';
   subscribe(listener: () => void): () => void;
   /**
    * Runs a pure plugin function, as during a host render. A throw returns `fallback` and
@@ -435,9 +445,11 @@ export function createPluginRuntime<
         const event = activation.pending.shift();
         if (!event) break;
         if (!activation.registration.plugin.onEvent) continue;
-        const outcome = await hook(activation, 'event', channelOf(event), (context) =>
-          activation.registration.plugin.onEvent?.(context, event as Event)
-        );
+        const outcome = await hook(activation, 'event', channelOf(event), (context, invocation) => {
+          const current = !options.eventCurrent || options.eventCurrent(event as Event, invocation.snapshot);
+          if (!current) return;
+          return activation.registration.plugin.onEvent?.(context, event as Event);
+        });
         if (outcome === 'ended') break;
       }
     } finally {
@@ -591,6 +603,8 @@ export function createPluginRuntime<
       changed();
     },
 
+    registered: () => new Map([...registrations].map(([id, registration]) => [id, registration.plugin])),
+
     setGrants(next) {
       const before = new Map(
         [...registrations.keys()].map((pluginId) => [pluginId, grantOf(pluginId)] as const)
@@ -650,6 +664,14 @@ export function createPluginRuntime<
     touch: changed,
 
     activations: () => published,
+
+    activationState(pluginId) {
+      const registration = registrations.get(pluginId);
+      const activation = registration?.activation;
+      if (!activation || registration.quarantined || current === null || activation.generation !== current ||
+          activation.status === 'disposed') return 'none';
+      return activation.status === 'ready' ? 'ready' : 'loading';
+    },
 
     subscribe(listener) {
       listeners.add(listener);

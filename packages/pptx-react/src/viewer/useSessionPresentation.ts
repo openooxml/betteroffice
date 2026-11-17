@@ -1,3 +1,4 @@
+import type { ResolvedFontProps } from '../bundledFonts';
 import { openPresentationSession } from '@betteroffice/pptx';
 import type { PresentationFrame, PresentationSession } from '@betteroffice/pptx/worker';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -180,7 +181,7 @@ export class ViewerSession {
 }
 
 export function useSessionPresentation(
-  props: PptxWorkerViewerProps, commands: PptxCommandStore, focus: () => void
+  props: ResolvedFontProps<PptxWorkerViewerProps>, commands: PptxCommandStore, focus: () => void
 ) {
   const fonts = useStableFonts(props.fonts);
   const fontSession = useMemo(() => ({}), [props.file, props.clientId, fonts]);

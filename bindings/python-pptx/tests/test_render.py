@@ -25,7 +25,7 @@ def deck(sample_bytes, font_bytes):
 
 
 def test_render_png_uses_the_bundled_fonts_without_registration(sample_bytes):
-    png = bo.Presentation.open(sample_bytes).render_png(0)
+    png = bo.Presentation.open(sample_bytes).render_png({"slide": 0})
     assert png.bytes[:8] == PNG_MAGIC
     assert (png.width, png.height) == (1280, 720)
 
@@ -34,11 +34,11 @@ def test_render_png_uses_the_bundled_fonts_without_registration(sample_bytes):
 def test_render_png_needs_a_registered_font(sample_bytes):
     presentation = bo.Presentation.open(sample_bytes)
     with pytest.raises(bo.RenderError, match="font"):
-        presentation.render_png(0)
+        presentation.render_png({"slide": 0})
 
 
 def test_render_png_produces_a_slide_sized_png(deck, tmp_path):
-    png = deck.render_png(0)
+    png = deck.render_png({"slide": 0})
     assert png.bytes[:8] == PNG_MAGIC
     assert (png.width, png.height) == (1280, 720)
     assert png_dimensions(png.bytes) == (1280, 720)
@@ -52,18 +52,18 @@ def test_render_png_produces_a_slide_sized_png(deck, tmp_path):
 
 
 def test_render_png_scales(deck):
-    assert png_dimensions(deck.render_png(0, scale=2.0).bytes) == (2560, 1440)
+    assert png_dimensions(deck.render_png({"slide": 0}, scale=2.0).bytes) == (2560, 1440)
 
 
-def test_render_png_accepts_a_slide_id(deck):
-    by_id = deck.render_png(deck.slide_ids[1])
-    by_index = deck.render_png(1)
+def test_render_png_uses_a_zero_based_slide_target(deck):
+    by_id = deck.render_png({"slide": deck.slide_ids.index(deck.slide_ids[1])})
+    by_index = deck.render_png({"slide": 1})
     assert by_id.bytes == by_index.bytes
 
 
 def test_render_png_renders_every_slide(deck):
     for index in range(len(deck)):
-        assert deck.render_png(index).bytes[:8] == PNG_MAGIC
+        assert deck.render_png({"slide": index}).bytes[:8] == PNG_MAGIC
 
 
 def test_render_png_counts_a_picture_without_a_media_reference(sample_bytes, font_bytes):
@@ -85,33 +85,53 @@ def test_render_png_counts_a_picture_without_a_media_reference(sample_bytes, fon
     ]
     assert len(pictures) == 1
     assert pictures[0].get("assetId") is None
-    assert presentation.render_png(0).skipped_images == 1
+    assert presentation.render_png({"slide": 0}).skipped_images == 1
 
 
 def test_render_png_is_deterministic(deck):
-    assert deck.render_png(2).bytes == deck.render_png(2).bytes
+    assert deck.render_png({"slide": 2}).bytes == deck.render_png({"slide": 2}).bytes
 
 
 def test_render_png_rejects_a_slide_past_the_deck(deck):
     with pytest.raises(IndexError):
-        deck.render_png(99)
+        deck.render_png({"slide": 99})
 
 
 def test_render_png_rejects_a_scale_that_is_not_positive(deck):
     with pytest.raises(bo.PptxError, match="finite and positive"):
-        deck.render_png(0, scale=0.0)
+        deck.render_png({"slide": 0}, scale=0.0)
 
 
 @pytest.mark.parametrize("background", ["slide", "transparent", "#102030"])
 def test_render_png_accepts_every_background(deck, background):
-    assert deck.render_png(0, background=background).bytes[:8] == PNG_MAGIC
+    assert deck.render_png({"slide": 0}, background=background).bytes[:8] == PNG_MAGIC
 
 
 def test_render_png_rejects_an_unknown_background(deck):
     with pytest.raises(ValueError, match="background must be"):
-        deck.render_png(0, background="chartreuse")
+        deck.render_png({"slide": 0}, background="chartreuse")
 
 
 def test_png_is_exported(deck):
-    assert isinstance(deck.render_png(0), bo.Png)
+    assert isinstance(deck.render_png({"slide": 0}), bo.Png)
     assert "Png" in bo.__all__
+
+
+@pytest.mark.parametrize("target", [None, 0, {}, {"page": 0}, {"slide": 0, "extra": 1}])
+def test_rejects_invalid_slide_targets(deck, target):
+    with pytest.raises(bo.RangeError):
+        deck.render_png(target)
+
+
+def test_slide_target_keeps_the_slide_key_errors(deck):
+    with pytest.raises(IndexError):
+        deck.render_png({"slide": -1})
+    with pytest.raises(TypeError):
+        deck.render_png({"slide": True})
+    with pytest.raises(KeyError):
+        deck.render_png({"slide": "no-such-slide"})
+
+
+def test_slide_target_takes_an_index_or_an_id(deck):
+    slide_id = deck.slide_ids[0]
+    assert deck.render_png({"slide": slide_id}).bytes == deck.render_png({"slide": 0}).bytes

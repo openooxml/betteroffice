@@ -295,3 +295,21 @@ fn an_evicted_glyph_outline_is_extracted_again_on_demand() {
     assert_eq!(refilled.upem, f32::from(upem));
     assert!(cache.entries.contains_key(&(ids[0].to_u32(), 0)));
 }
+
+/// A new outline revision of the bound store drops every cached path, so a
+/// glyph cached blank before its outline arrived is extracted again; a
+/// different store is still refused.
+#[test]
+fn a_new_outline_revision_drops_cached_paths() {
+    let (fonts, font) = store();
+    let mut cache = GlyphCache::default();
+    for gid in [36, 37] {
+        cached_glyph(&mut cache, &fonts, font, gid).unwrap();
+    }
+    assert_eq!(cache.entries.len(), 2);
+    cache.bind(fonts.id(), 0).unwrap();
+    assert_eq!(cache.entries.len(), 2);
+    cache.bind(fonts.id(), 1).unwrap();
+    assert!(cache.entries.is_empty() && cache.order.is_empty());
+    assert!(cache.bind(fonts.id() + 1, 1).is_err());
+}

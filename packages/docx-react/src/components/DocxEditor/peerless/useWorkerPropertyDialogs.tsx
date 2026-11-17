@@ -48,7 +48,7 @@ export function buildImageTransformPatch(currentAttrs: Readonly<Record<string, u
 type WorkerLink = { query: WorkerPropertyQuery; initialData: HyperlinkData; targetSelection: DocxCommandSelection; replaceText: boolean };
 
 export function useWorkerPropertyDialogs(controller: WorkerShellController, props: Pick<DocxEditorProps, 'onError' | 'watermarkPresets' | 'rulerUnit'>) {
-  const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot, controller.getSnapshot);
+  const state = useSyncExternalStore(controller.subscribeShell, controller.getShellSnapshot, controller.getShellSnapshot);
   const page = useWorkerPageSetupControls(controller, props.onError);
   const watermark = useWorkerWatermarkControls(controller, props.onError);
   const selection = state.view?.workerSelection;

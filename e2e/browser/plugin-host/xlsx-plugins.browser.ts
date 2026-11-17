@@ -1,8 +1,19 @@
 import { test, expect, type Page } from 'playwright/test';
 import { pinnedEvaluate } from '../pinned-evaluate';
 import { renderedBox } from '../rendered-box';
+import { selectionClock } from './selection-clock';
+
+type ProbeRect = { x: number; y: number; width: number; height: number };
+
+interface ProbeGeometry {
+  getCellRect(target: unknown): ProbeRect | null;
+  getRangeRect(target: unknown): ProbeRect | null;
+  getAnchorGeometry(target: unknown): unknown;
+  readAnchorGeometries(targets: unknown[]): Promise<unknown[]>;
+}
 
 interface ProbeContext {
+  geometry: ProbeGeometry | null;
   snapshot: { version: string };
   read: {
     version(): Promise<{ ok: boolean; version: string }>;
@@ -16,7 +27,12 @@ interface ProbeContext {
 }
 
 interface Probe {
-  editor: { commands: { execute(id: string, args: unknown): Promise<unknown> } } | null;
+  editor: { commands: {
+    execute(id: string, args: unknown): Promise<unknown>;
+    getState(id: string): { active?: boolean | 'mixed' };
+  } } | null;
+  mutation: unknown;
+  runMutation(): Promise<unknown>;
   act<T>(action: (context: ProbeContext) => Promise<T>): Promise<T>;
   navigation: unknown;
   selection: { sheetId: string; cells: { focus: { row: number; col: number } } | null } | null;
@@ -84,6 +100,8 @@ async function misalignment(page: Page): Promise<number> {
   });
 }
 
+type ProbeEvent = { type: string; focused?: boolean; source?: string };
+
 for (const engine of ['legacy', 'worker'] as const) {
   test.describe(`xlsx plugins (${engine})`, () => {
     test.afterEach(async ({ page }) => {
@@ -93,6 +111,115 @@ for (const engine of ['legacy', 'worker'] as const) {
       if (engine === 'worker') expect(count).toBe(0);
       else expect(count).toBeGreaterThan(0);
     });
+test('dragging A1:C3 settles once and anchors to getRangeRect', async ({ page }) => {
+  await open(page, engine);
+  const points = await pinnedEvaluate(page, () => (window as unknown as { __probe: Probe }).__probe.act(async (context) => {
+    const geometry = context.geometry!;
+    const start = geometry.getCellRect({ sheetId: 'sheet:0', row: 0, col: 0 })!;
+    const end = geometry.getCellRect({ sheetId: 'sheet:0', row: 2, col: 2 })!;
+    const layer = document.querySelector('[data-testid="plugin-overlays"]')!.getBoundingClientRect();
+    return { start: { x: layer.left + start.x + 1, y: layer.top + start.y + start.height / 2 },
+      end: { x: layer.left + end.x + end.width / 2, y: layer.top + end.y + end.height / 2 } };
+  }));
+  await page.waitForTimeout(400);
+  await page.evaluate(() => { (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = []; });
+  await page.mouse.move(points.start.x, points.start.y);
+  await page.mouse.down();
+  await page.mouse.move(points.end.x, points.end.y, { steps: 8 });
+  expect(await page.evaluate(() => (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+    .filter((event) => event.type === 'selection-settle'))).toHaveLength(0);
+  await page.mouse.up();
+  const events = () => page.evaluate(() => (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+    .filter((event) => event.type === 'selection-settle'));
+  await expect.poll(async () => (await events()).length).toBe(1);
+  await page.waitForTimeout(400);
+  expect(await events()).toHaveLength(1);
+  expect(await events()).toMatchObject([{ source: 'pointer', selection: { cells: {
+    anchor: { row: 0, col: 0 }, focus: { row: 2, col: 2 },
+  } } }]);
+  const geometry = await pinnedEvaluate(page, () => (window as unknown as { __probe: Probe }).__probe.act(async (context) => ({
+    selected: context.geometry!.getAnchorGeometry({ kind: 'selection' }),
+    range: context.geometry!.getRangeRect({ sheetId: 'sheet:0', range: { top: 0, left: 0, bottom: 2, right: 2 } }),
+    read: await context.geometry!.readAnchorGeometries([{ kind: 'selection' }]),
+  })));
+  expect(geometry.range).not.toBeNull();
+  expect(geometry.selected).toMatchObject({ ok: true, rects: [geometry.range], anchor: geometry.range });
+  expect(geometry.read).toEqual([geometry.selected]);
+});
+
+test('T22: shift-arrow settles once with the painted range anchor', async ({ page }) => {
+  await page.addInitScript({ content: `window.__selectionClock = (${selectionClock.toString()})();` });
+  await open(page, engine);
+  const tick = (ms: number) => page.evaluate(async value => {
+    await (window as unknown as { __selectionClock: { tick(ms: number): Promise<void> } }).__selectionClock.tick(value);
+  }, ms);
+  await tick(350);
+  await page.evaluate(() => { (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = []; });
+  await page.getByTestId('xlsx-scroll').focus();
+  await page.keyboard.press('Shift+ArrowDown');
+  await expect.poll(async () => (await probe(page)).selection?.cells?.focus).toEqual({ row: 1, col: 0 });
+  await expect(page.getByTestId('xlsx-selection')).toBeVisible();
+  const events = () => page.evaluate(() => (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events.filter(event => event.type === 'selection-settle'));
+  await tick(349);
+  expect(await events()).toHaveLength(0);
+  await tick(1);
+  await expect.poll(async () => (await events()).length).toBe(1);
+  expect(await events()).toMatchObject([{ source: 'keyboard', selection: { cells: { focus: { row: 1, col: 0 } } } }]);
+  const anchor = await pinnedEvaluate(page, () => (window as unknown as { __probe: Probe }).__probe.act(async context => ({
+    selection: await context.geometry!.readAnchorGeometries([{ kind: 'selection' }]),
+    range: context.geometry!.getRangeRect({ sheetId: 'sheet:0', range: { top: 0, left: 0, bottom: 1, right: 0 } }),
+  })));
+  expect(anchor.range).not.toBeNull();
+  expect(anchor.selection).toMatchObject([{ ok: true, rects: [anchor.range], anchor: anchor.range }]);
+  await tick(700);
+  expect(await events()).toHaveLength(1);
+});
+
+test('xlsx: a plugin panel gesture admits a granted built-in mutation', async ({ page }) => {
+  await open(page, engine);
+  await select(page, 2, 1);
+  const state = () => pinnedEvaluate(page, async () => {
+    const probe = (window as unknown as { __probe: Probe }).__probe;
+    const version = await probe.act((context) => context.read.version());
+    return { version: version.version, bold: probe.editor!.commands.getState('bold').active };
+  });
+  const before = await state();
+  await expect(page.getByTestId('probe-mutation')).toHaveAttribute('data-version', before.version);
+  await page.getByTestId('probe-mutation').click();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __probe: Probe }).__probe.mutation)).toMatchObject({ ok: true, status: 'executed' });
+  await expect.poll(async () => (await state()).bold).toBe(before.bold !== true);
+  expect((await state()).version).not.toBe(before.version);
+  const after = await state();
+  expect(await pinnedEvaluate(page, () =>
+    (window as unknown as { __probe: Probe }).__probe.runMutation())).toMatchObject({
+    ok: false, failure: { code: 'unsupported-policy' },
+  });
+  expect(await state()).toEqual(after);
+  await page.getByTestId('probe-timer-mutation').click();
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __probe: Probe }).__probe.mutation)).toMatchObject({
+    ok: false, failure: { code: 'unsupported-policy' },
+  });
+  expect(await state()).toEqual(after);
+});
+
+test('document focus excludes the plugin panel', async ({ page }) => {
+  await open(page, engine);
+  const events = () => page.evaluate(() =>
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events
+      .filter((event) => event.type === 'focus-change'));
+  await page.getByTestId('probe-input').click();
+  await page.evaluate(() => {
+    (window as unknown as { __probe: { events: ProbeEvent[] } }).__probe.events = [];
+  });
+  await page.getByTestId('xlsx-scroll').locator('canvas').first().click({ position: { x: 100, y: 100 } });
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(true);
+  await page.getByTestId('probe-input').click();
+  await expect.poll(async () => (await events()).at(-1)?.focused).toBe(false);
+  expect((await events()).map((event) => event.focused)).toEqual([true, false]);
+});
+
 test('xlsx: overlays land on the painted cells at every zoom, scrolled and in frozen panes', async ({
   page,
 }) => {

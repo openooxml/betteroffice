@@ -2023,6 +2023,12 @@
       }
     }
   },
+  "emulatedSymbolFamilies": [
+    "wingdings",
+    "wingdings 2",
+    "wingdings 3",
+    "webdings"
+  ],
   "scriptFallbackOrder": {
     "hebrew": [
       "NotoSansHebrew-Regular.ttf.zst",
@@ -2137,6 +2143,14 @@
     "cjk-kr": [
       "NotoSansKR-Regular.otf.zst"
     ]
+  },
+  "requestedFamilyScriptFallback": {
+    "simplified arabic": {
+      "arabic": "NotoNaskhArabic-Regular.ttf.zst"
+    },
+    "traditional arabic": {
+      "arabic": "NotoNaskhArabic-Regular.ttf.zst"
+    }
   },
   "lastResortFamilies": {
     "powerpoint": {

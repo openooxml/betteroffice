@@ -52,13 +52,18 @@ async function savedTables(page: Page, info: TestInfo, name: string): Promise<st
 async function expectCopiedTable(page: Page) {
   // A read overlapping the copy's clipboard write can return its text/plain without its text/html.
   await expect.poll(() => pinnedEvaluate(page, async () => {
-    const items = await navigator.clipboard.read();
-    const types = items.flatMap(item => [...item.types]);
-    const read = async (type: string) => {
-      const item = items.find(entry => entry.types.includes(type));
-      return item ? (await item.getType(type)).text() : '';
-    };
-    return { types, html: await read('text/html'), text: await read('text/plain') };
+    try {
+      const items = await navigator.clipboard.read();
+      const types = items.flatMap(item => [...item.types]);
+      const read = async (type: string) => {
+        const item = items.find(entry => entry.types.includes(type));
+        return item ? (await item.getType(type)).text() : '';
+      };
+      return { types, html: await read('text/html'), text: await read('text/plain') };
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'InvalidStateError') return { types: [] as string[], html: '', text: '' };
+      throw error;
+    }
   })).toMatchObject({
     types: expect.arrayContaining(['text/html']),
     html: expect.stringContaining('<table'),

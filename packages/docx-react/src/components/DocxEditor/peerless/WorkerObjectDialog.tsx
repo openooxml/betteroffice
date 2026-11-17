@@ -1,6 +1,13 @@
 import { useState } from 'react';
+import type { CSSProperties } from 'react';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { useTranslation } from '../../../i18n';
+
+const fieldStyle: CSSProperties = { display: 'grid', gap: 4, fontSize: 13, color: 'var(--doc-text-muted)' };
+const inputStyle: CSSProperties = { padding: '6px 8px', border: '1px solid var(--doc-border)', borderRadius: 4, fontSize: 13 };
+const footerStyle: CSSProperties = { display: 'flex', justifyContent: 'flex-end', gap: 8 };
+const buttonStyle: CSSProperties = { padding: '6px 16px', fontSize: 13, border: '1px solid var(--doc-border)', borderRadius: 4, cursor: 'pointer' };
+const primaryStyle: CSSProperties = { ...buttonStyle, backgroundColor: 'var(--doc-primary)', color: 'var(--doc-on-primary)', borderColor: 'var(--doc-primary)' };
 
 export function WorkerObjectDialog({ action, target, apply, close }: {
   action: 'resizeImage' | 'moveImage' | 'resizeColumn';
@@ -27,13 +34,16 @@ export function WorkerObjectDialog({ action, target, apply, close }: {
   return <div data-docx-escape-layer="true" style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'grid', placeItems: 'center', background: '#0004' }}>
     <form role="dialog" aria-modal="true" aria-label={label} onSubmit={event => { event.preventDefault(); void submit(); }}
       onKeyDown={event => { if (event.key === 'Escape' && !busy) { event.stopPropagation(); close(); } }}
-      style={{ display: 'grid', gap: 12, padding: 24, borderRadius: 8, background: 'var(--doc-bg)', color: 'var(--doc-text)' }}>
+      style={{ display: 'grid', gap: 12, padding: 24, minWidth: 240, borderRadius: 8, background: 'var(--doc-surface)', color: 'var(--doc-text)', boxShadow: '0 4px 20px var(--doc-shadow)' }}>
       <strong>{label}</strong>
-      <label>{t(moving ? 'dialogs.objectGeometry.left' : 'dialogs.objectGeometry.width')}<input type="number" autoFocus required value={width} disabled={busy}
+      <label style={fieldStyle}>{t(moving ? 'dialogs.objectGeometry.left' : 'dialogs.objectGeometry.width')}<input type="number" autoFocus required value={width} disabled={busy} style={inputStyle}
         onChange={event => setWidth(event.target.valueAsNumber)} /></label>
-      {action !== 'resizeColumn' && <label>{t(moving ? 'dialogs.objectGeometry.top' : 'dialogs.objectGeometry.height')}<input type="number" required value={height} disabled={busy}
+      {action !== 'resizeColumn' && <label style={fieldStyle}>{t(moving ? 'dialogs.objectGeometry.top' : 'dialogs.objectGeometry.height')}<input type="number" required value={height} disabled={busy} style={inputStyle}
         onChange={event => setHeight(event.target.valueAsNumber)} /></label>}
-      <div><button type="button" disabled={busy} onClick={close}>{t('common.cancel')}</button><button type="submit" disabled={!valid || busy}>{t('common.apply')}</button></div>
+      <div style={footerStyle}>
+        <button type="button" disabled={busy} onClick={close} style={buttonStyle}>{t('common.cancel')}</button>
+        <button type="submit" disabled={!valid || busy} style={{ ...primaryStyle, ...(!valid || busy ? { opacity: 0.6, cursor: 'not-allowed' } : {}) }}>{t('common.apply')}</button>
+      </div>
     </form>
   </div>;
 }

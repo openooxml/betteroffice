@@ -1,0 +1,7 @@
+[
+  { "family": "Simplified Arabic", "bold": false, "arabic": "NotoNaskhArabic-Regular.ttf.zst" },
+  { "family": "Simplified Arabic", "bold": true, "arabic": "NotoNaskhArabic-Regular.ttf.zst" },
+  { "family": "Traditional Arabic", "bold": false, "arabic": "NotoNaskhArabic-Regular.ttf.zst" },
+  { "family": "Arial", "bold": false, "arabic": "NotoSansArabic-Regular.ttf.zst" },
+  { "family": "Arial", "bold": true, "arabic": "NotoSansArabic-Bold.ttf.zst" }
+]
