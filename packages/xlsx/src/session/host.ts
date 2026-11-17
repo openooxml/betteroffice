@@ -442,6 +442,7 @@ export function createWorkbookSessionHost(
         collaborative: input.collaborative,
         clientId: input.clientId,
         calculation,
+        recalculate: input.recalculate,
       });
       collaborative = input.collaborative === true;
       try {
