@@ -1169,7 +1169,7 @@ test('d2a_repeated_end_of_document_drag_and_line_results_use_indexed_positions',
   }
 });
 
-type ControlPart = string | { control: string };
+type ControlPart = string | { control: string } | { embed: YrsStorySegment };
 
 const CHECKBOX = { control: '☐' };
 
@@ -1177,6 +1177,7 @@ function controlSegments(story: string, index: number, parts: readonly ControlPa
   return [
     ...parts.map<YrsStorySegment>((part) => typeof part === 'string'
       ? { kind: 'text', text: part, attributes: {} }
+      : 'embed' in part ? part.embed
       : { kind: 'embed', embedKind: 'sdt', attributes: {}, payload: { content: [{ kind: 'text', text: part.control }] } }),
     { kind: 'pilcrow', paraId: `${story}-${index}`, properties: {}, attributes: {} },
   ];
@@ -1194,11 +1195,14 @@ function controlArm(stories: Record<string, ControlPart[][]>): CommandArm {
   return arm;
 }
 
-function pointer(arm: CommandArm, lines: queryModule.DisplayListVisualLine[] = []) {
+function pointer(
+  arm: CommandArm, lines: queryModule.DisplayListVisualLine[] = [],
+  region: Omit<queryModule.DisplayListRegionHit, 'pos'> = { region: 'body', target: 'text' },
+) {
   const frame = fakeFrame([{ pageIndex: 0, width: 600, height: 800, primitives: [] }]);
   let hit: number | null = null;
   const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
-    hitTestRegions: () => hit === null ? null : { region: 'body', pos: hit, target: 'text' },
+    hitTestRegions: () => hit === null ? null : { ...region, pos: hit },
     visualLinesOnPage: () => lines,
   }));
   releasesAfterTest.push(() => queries.mockRestore());
@@ -1239,6 +1243,67 @@ test('click_between_and_after_two_controls_in_one_paragraph_lands_at_the_clicked
   for (const [content, offset] of [[0, 0], [1, 1], [4, 2], [5, 3], [14, 4], [15, 5]] as const) {
     arm.state.selection = selection('body-0', 2);
     expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_left_and_right_of_a_trailing_checkbox_control_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['ab', CHECKBOX]] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [2, 2], [3, 2], [4, 3], [5, 3]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_before_between_and_after_two_adjacent_checkbox_controls_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['a', CHECKBOX, CHECKBOX, 'b']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [1, 1], [2, 1], [3, 2], [4, 2], [5, 2], [6, 3], [7, 3], [8, 4]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_before_and_after_a_control_nesting_another_control_lands_at_the_clicked_story_offset', () => {
+  const nested = { embed: { kind: 'embed', embedKind: 'sdt', attributes: {}, payload: { content: [
+    { kind: 'sdt', payload: { content: [{ kind: 'text', text: '☐' }] } },
+  ] } } satisfies YrsStorySegment };
+  const arm = controlArm({ body: [['Intro'], ['ab', nested, 'cd']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [2, 2], [3, 2], [4, 2], [5, 3], [6, 3], [7, 3], [9, 5]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_before_and_after_the_only_control_of_a_paragraph_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], [CHECKBOX]] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [1, 0], [2, 1], [3, 1]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_around_a_control_in_a_paragraph_led_by_a_table_lands_past_the_leading_block', () => {
+  const cell = 'body:t0:r0c0';
+  const table = { embed: { kind: 'embed', embedKind: 'table', attributes: {},
+    payload: { tblPr: {}, grid: [], rows: [{ cells: [{ story: cell }] }] } } satisfies YrsStorySegment };
+  const arm = controlArm({ body: [['Before'], [table, 'ab', CHECKBOX, 'cd']], [cell]: [['Cell']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 1], [2, 3], [5, 4], [7, 6]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(21 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_before_and_after_a_checkbox_control_in_a_header_lands_at_the_clicked_story_offset', () => {
+  const header = 'hf:rId1';
+  const arm = controlArm({ body: [['Intro']], [header]: [['ab', CHECKBOX, 'cd']] });
+  const click = pointer(arm, [], { region: 'header', rId: 'rId1', target: 'text' });
+  for (const [content, offset] of [[0, 0], [2, 2], [5, 3], [7, 5]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(1 + content).selection, `content unit ${content}`).toEqual(selection(`${header}-0`, offset, offset, header));
   }
 });
 
