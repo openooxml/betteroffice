@@ -9693,7 +9693,10 @@ mod tests {
         assert_eq!(cells[0][2]["borders"]["right"]["size"], json!(8));
         assert!(cells[0][1]["borders"]["left"]["size"].is_null());
         assert_eq!(unbanded[0][1]["borders"]["left"]["size"], json!(8));
-        assert_ne!(cells[0][1]["borders"]["left"], unbanded[0][1]["borders"]["left"]);
+        assert_ne!(
+            cells[0][1]["borders"]["left"],
+            unbanded[0][1]["borders"]["left"]
+        );
     }
 
     fn both_bands_look() -> Value {
@@ -9743,7 +9746,11 @@ mod tests {
                 ],
             );
             let cells = seeded_cells(&definitions, &offset_band_table());
-            assert_eq!(cells[1][0]["borders"]["left"]["size"], json!(4), "{cleared}");
+            assert_eq!(
+                cells[1][0]["borders"]["left"]["size"],
+                json!(4),
+                "{cleared}"
+            );
         }
     }
 
@@ -9839,7 +9846,12 @@ mod tests {
             (
                 ruled,
                 ruled_table,
-                vec![(0, 1, "top"), (0, 2, "top"), (2, 1, "bottom"), (2, 2, "bottom")],
+                vec![
+                    (0, 1, "top"),
+                    (0, 2, "top"),
+                    (2, 1, "bottom"),
+                    (2, 2, "bottom"),
+                ],
             ),
             (
                 band_style(
@@ -9876,8 +9888,7 @@ mod tests {
             let unbanded = seeded_cells(&definitions, &without_bands(&table));
             for (row, column, side) in edges {
                 assert_eq!(
-                    banded[row][column]["borders"][side],
-                    unbanded[row][column]["borders"][side],
+                    banded[row][column]["borders"][side], unbanded[row][column]["borders"][side],
                     "{row} {column} {side}"
                 );
             }
