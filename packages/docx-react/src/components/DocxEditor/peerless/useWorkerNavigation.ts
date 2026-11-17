@@ -127,13 +127,18 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
       const seq = outcome.seq ?? result.ticket.seq ?? throughSeq;
       const view = current.viewStore.getSnapshot();
       return presented === 'presented' && (view.throughSeq <= seq ||
-        view.versionSinceSeq !== undefined && view.versionSinceSeq <= seq && samePosition(view.workerSelection, value));
+        view.versionSinceSeq !== undefined && view.versionSinceSeq <= seq && samePosition(view.workerSelection, value) &&
+        view.editState?.tableContext?.hasMultiCellSelection !== true);
     };
     if (!await select({ anchor: selection.anchor, focus: selection.anchor })) return false;
-    const shown = current.viewStore.getSnapshot().geometry?.caret;
-    if (!shown || !scroller.current || !host.current) return !requireGeometry;
+    const first = current.viewStore.getSnapshot().geometry;
+    let shown = first?.caret;
+    if (!first || !shown || !scroller.current || !host.current) return !requireGeometry;
     if (selection.anchor.story !== selection.focus.story || selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset) {
       if (!await select({ anchor: selection.focus, focus: selection.anchor })) return false;
+      const final = current.viewStore.getSnapshot().geometry;
+      shown = final?.caret ?? final?.selectionFocus ?? (final?.layoutRevision === first.layoutRevision ? shown : null);
+      if (!shown) return !requireGeometry;
     }
     if (!scroller.current || !host.current) return false;
     check();
