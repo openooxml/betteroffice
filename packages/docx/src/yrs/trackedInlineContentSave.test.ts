@@ -225,24 +225,31 @@ describe('a line break and a comment reference inside a tracked change', () => {
     expectCommentResolves(second);
   });
 
-  for (const change of [MOVE_FROM, MOVE_TO]) {
-    it(`a comment reference inside a tracked ${change.tag} stays inside it after typing elsewhere in the paragraph`, async () => {
+  for (const [change, tag, side] of [[MOVE_FROM, 'del', 'deletion'], [MOVE_TO, 'ins', 'insertion']] as const) {
+    it(`a comment reference inside a tracked ${change.tag} is saved inside the same ${side} as its text`, async () => {
       const text = textFor(change);
       const source = paragraph(`${COMMENTED}${tracked(change, `${text('left')}${COMMENT_REFERENCE}${text('right')}`)}`);
       const saved = await typedAndSaved(docx(source), 'X');
       const xml = part(saved, 'word/document.xml');
-      const wrapper = trackedContent(xml, change);
-      expect(wrapper.wrappers).toBeGreaterThan(0);
-      expect(wrapper.content).toBe('left[ref 5]right');
-      expect(count(wrapper.raw, /<w:commentReference\b/g)).toBe(1);
+      const wrappers = [...xml.matchAll(new RegExp(`<w:${tag}\\b([^>]*[^/])>([\\s\\S]*?)</w:${tag}>`, 'g'))]
+        .map(([, attributes, inner]) => ({
+          revision: ['id', 'author', 'date'].map(name => attributes!.match(new RegExp(`w:${name}="([^"]*)"`))?.[1]),
+          inner: inner!,
+        }));
+      expect(wrappers.length).toBeGreaterThan(0);
+      expect(wrappers[0]!.revision.every(value => value !== undefined)).toBe(true);
+      for (const { revision } of wrappers) expect(revision).toEqual(wrappers[0]!.revision);
+      const inner = wrappers.map(wrapper => wrapper.inner).join('');
+      expect(render(inner)).toBe('left[ref 5]right');
+      expect(count(inner, /<w:commentReference\b/g)).toBe(1);
       expect(count(xml, /<w:commentReference\b/g)).toBe(1);
-      expect(count(xml, /<w:(ins|del)\b/g)).toBe(0);
+      expect(count(xml, /<w:(moveFrom|moveTo)\b/g)).toBe(0);
       expect(render(body(xml))).toBe(`X${render(source)}`);
       expectCommentResolves(saved);
     });
   }
 
-  it('both seeders give a comment reference the insertion, deletion or move it sits in', async () => {
+  it('both seeders give a comment reference inside a tracked change the same marks as the text around it', async () => {
     for (const change of [INS, DEL, MOVE_FROM, MOVE_TO]) {
       const text = textFor(change);
       const bytes = docx(paragraph(`${COMMENTED}${tracked(change, `${text('left')}${COMMENT_REFERENCE}${text('right')}`)}`));
@@ -251,20 +258,24 @@ describe('a line break and a comment reference inside a tracked change', () => {
       sessions.push(engine, projected);
       engine.seedFromDocx(bytes);
       documentToYrs(projected, await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false }));
+      const key = change.kind === 'insertion' ? 'ins' : 'del';
       const reference = (session: YrsSession) => {
-        const found = session.storySegments('body').filter(segment =>
+        const segments = session.storySegments('body');
+        const found = segments.filter(segment =>
           segment.kind === 'embed' && segment.payload.modelKind === 'commentReference');
         expect(found).toHaveLength(1);
+        const around = segments.filter(segment => segment.kind === 'text' && ['left', 'right'].includes(segment.text));
+        expect(around).toHaveLength(2);
+        for (const segment of around) expect(segment.attributes[key]).toEqual(found[0]!.attributes[key]);
         return found[0]!.attributes;
       };
-      const key = change.kind === 'insertion' ? 'ins' : 'del';
       const attributes = reference(projected);
       expect(Object.keys(attributes)).toEqual([key]);
       const revision = attributes[key] as Record<string, unknown>;
       expect(String(revision.id)).toBe(change.id);
       expect(revision.author).toBe(change.author);
       expect(revision.date).toBe(change.date);
-      expect(revision.isMovePair === true).toBe(change === MOVE_FROM || change === MOVE_TO);
+      expect('isMovePair' in revision).toBe(false);
       expect(reference(engine)).toEqual(attributes);
     }
   });
