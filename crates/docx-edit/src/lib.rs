@@ -184,6 +184,9 @@ pub use seed::{
     OPAQUE_SEED_BUDGET_BYTES, StyleResolver, is_opaque_seed_budget_error,
     opaque_seed_budget_exceeded, seed_docx_preview, seed_from_docx, seed_from_docx_with_generation,
 };
+// Used by betteroffice-docx; not part of the stable API.
+#[doc(hidden)]
+pub use seed::seed_from_parsed_docx;
 use segments::{ParagraphIndex, SegmentIndex, build_indexes};
 pub use stories::{
     AllStories, ListStoriesResponse, ListStoryUse, StoryInfo, StoryInfoKind, StorySelection,

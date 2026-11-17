@@ -33,7 +33,7 @@ pub mod namespaces {
 }
 
 /// Conservative defaults for the XML/relationship foundation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseLimits {
     pub max_xml_bytes: usize,
     pub max_xml_events: usize,
