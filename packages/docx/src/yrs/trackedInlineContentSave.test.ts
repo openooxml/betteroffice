@@ -271,6 +271,35 @@ describe('a line break and a comment reference inside a tracked change', () => {
     });
   }
 
+  const halfOfMove = (paraId: string, change: Change, kind: string, id: string, text: string) =>
+    `<w:p w14:paraId="${paraId}" w14:textId="${paraId}">${t('Head ')}<w:${kind}RangeStart w:id="${id}" w:name="move1" w:author="${change.author}" w:date="${change.date}"/>${tracked(change, t(text))}<w:${kind}RangeEnd w:id="${id}"/>${t(' tail')}</w:p>`;
+
+  for (const [half, index] of [['move source', 0], ['move destination', 1]] as const) {
+    it(`a move across two paragraphs keeps its named range markers after typing elsewhere in the ${half} paragraph`, async () => {
+      const source = [
+        halfOfMove('1A2B3C02', MOVE_FROM, 'moveFrom', '50', 'moved'),
+        halfOfMove('1A2B3C03', MOVE_TO, 'moveTo', '51', 'moved'),
+      ].join('');
+      const session = await opened(docx(source));
+      const { paraId } = session.paragraphs('body')[index]!;
+      session.insertText({ story: 'body', paraId, offset: 0 }, 'X');
+      const xml = part(await save(session), 'word/document.xml');
+      for (const kind of ['moveFrom', 'moveTo']) {
+        const starts = [...xml.matchAll(new RegExp(`<w:${kind}RangeStart\\b[^>]*/>`, 'g'))].map(([tag]) => tag);
+        expect(starts).toHaveLength(1);
+        expect(starts[0]).toContain('w:name="move1"');
+        const startId = starts[0]!.match(/w:id="([^"]*)"/)?.[1];
+        expect(startId).toBeDefined();
+        const ends = [...xml.matchAll(new RegExp(`<w:${kind}RangeEnd\\b[^>]*w:id="([^"]*)"[^>]*/>`, 'g'))].map(([, end]) => end);
+        expect(ends).toEqual([startId]);
+      }
+      expect(trackedContent(xml, MOVE_FROM).content).toBe('moved');
+      expect(trackedContent(xml, MOVE_TO).content).toBe('moved');
+      expect(count(xml, /<w:(ins|del)\b/g)).toBe(0);
+      expect(render(body(xml))).toBe(index === 0 ? 'XHead moved tailHead moved tail' : 'Head moved tailXHead moved tail');
+    });
+  }
+
   it('both seeders give a comment reference inside a tracked change the same marks as the text around it', async () => {
     for (const change of [INS, DEL, MOVE_FROM, MOVE_TO]) {
       const text = textFor(change);
