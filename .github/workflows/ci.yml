@@ -108,6 +108,10 @@ jobs:
       - name: Check changeset length
         run: bun scripts/check-changeset-length.ts
 
+      # Every `bun test` preloads scripts/test-preload.ts, which imports the built fonts package.
+      - name: Build the fonts package
+        run: bun run build:fonts
+
       - name: Check embedded fonts
         run: |
           bun scripts/check-embedded-fonts.mjs
