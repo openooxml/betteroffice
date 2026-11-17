@@ -594,6 +594,15 @@ impl XlsxDocument {
     }
 
     #[napi(catch_unwind)]
+    pub fn media_bytes(&self, env: Env, asset_id: String) -> Result<Uint8Array> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .media_bytes(&asset_id)
+            .map_err(|error| map_error(env, error))
+            .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    #[napi(catch_unwind)]
     pub fn move_chart_json(&mut self, env: Env, args: String) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document_mut(env)?

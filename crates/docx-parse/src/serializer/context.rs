@@ -75,6 +75,7 @@ pub struct SerializerContext {
     pub(crate) deletion: bool,
     pub(crate) in_control: bool,
     pub(crate) in_revision: bool,
+    pub(crate) vmerge_continuation: u32,
     splice: Option<SpliceRecorder>,
     document_root: Option<String>,
 }
@@ -124,6 +125,7 @@ impl SerializerContext {
             deletion: false,
             in_control: false,
             in_revision: false,
+            vmerge_continuation: 0,
             splice: None,
             document_root: None,
         })
@@ -313,6 +315,7 @@ impl SerializerContext {
                 }
                 recorded.written.insert(ordinal, xml.to_owned());
             }
+            Some(_) if self.vmerge_continuation > 0 => return None,
             Some(_) => {
                 recorder.conflict = true;
                 return None;

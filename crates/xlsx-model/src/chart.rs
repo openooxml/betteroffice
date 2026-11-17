@@ -170,6 +170,31 @@ impl SheetChart {
     }
 }
 
+/// `a:srcRect` insets in thousandths of a percent of the image; a negative
+/// inset pads the image instead of cropping it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PictureCrop {
+    pub left: i64,
+    pub top: i64,
+    pub right: i64,
+    pub bottom: i64,
+}
+
+/// a raster picture (`xdr:pic`) a worksheet drawing anchors. Not held by the
+/// sheet: read from the source package when a frame is drawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SheetPicture {
+    /// package path of the image part the blip embeds.
+    pub media: String,
+    /// package path of the `xdr:wsDr` part that anchors it.
+    pub drawing: String,
+    /// position among the drawing's anchors, as [`SheetChart::anchor_index`]
+    /// counts them; the drawing stacks its anchors in this order.
+    pub anchor_index: usize,
+    pub anchor: ChartAnchor,
+    pub crop: PictureCrop,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChartEdit {

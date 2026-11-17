@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -8,6 +8,7 @@ type Fetch = typeof globalThis.fetch;
 
 let createLoader: (fetch: Fetch) => Loader;
 let createNativeLoader: (fetch: Fetch) => Loader;
+const builtin = Object.getOwnPropertyDescriptor(process, 'getBuiltinModule');
 const viewport = { x: 0, y: 0, width: 320, height: 240 };
 const fixture = new Uint8Array(readFileSync(resolve(import.meta.dir, '../../test-fixtures/sample.xlsx')));
 const unchanged = new Uint8Array(readFileSync(resolve(import.meta.dir, '../../test-fixtures/no-edit-save.xlsx')));
@@ -63,6 +64,12 @@ function assetFetch(requests: string[]): Fetch {
 beforeAll(async () => {
   createLoader = await loaderFactory();
   createNativeLoader = await loaderFactory(true);
+  Object.defineProperty(process, 'getBuiltinModule', { value: undefined, configurable: true, writable: true });
+});
+
+afterAll(() => {
+  if (builtin) Object.defineProperty(process, 'getBuiltinModule', builtin);
+  else Reflect.deleteProperty(process, 'getBuiltinModule');
 });
 
 describe('wasm PNG initialization', () => {

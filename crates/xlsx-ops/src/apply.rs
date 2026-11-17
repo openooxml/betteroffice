@@ -6091,6 +6091,7 @@ mod track_move_tests {
             header_rows: 1,
             totals_rows: 0,
             columns: Vec::new(),
+            style: Vec::new(),
         });
         let base = wb.clone();
 

@@ -5,7 +5,7 @@ use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, AutoFilter, Border, BorderEdge,
     BorderStyle, ChartRef, ChartRefKind, ColStyle, Color, ConditionalFormatRule,
     ConditionalFormatting, DefinedName, DifferentialFormat, Fill, Font, HAlign, PatternType,
-    Protection, RunUnderline, Table, VAlign,
+    Protection, RunUnderline, Table, TableStyleElement, TableStyleElementType, VAlign,
 };
 
 use super::*;
@@ -473,14 +473,27 @@ fn defined_name() -> S<DefinedName> {
     })
 }
 
-fn table() -> S<Table> {
+fn table(style: std::ops::Range<usize>) -> S<Table> {
     record!(Table {
         name: text(),
         sheet: sheet(),
         range: range(),
         header_rows: any::<u32>(),
         totals_rows: any::<u32>(),
-        columns: prop::collection::vec(text(), 0..3)
+        columns: prop::collection::vec(text(), 0..3),
+        style: prop::collection::vec(
+            record!(TableStyleElement {
+                kind: select(vec![
+                    TableStyleElementType::WholeTable,
+                    TableStyleElementType::SecondRowStripe,
+                    TableStyleElementType::HeaderRow,
+                    TableStyleElementType::LastTotalCell,
+                ]),
+                size: any::<u32>(),
+                format: differential()
+            }),
+            style
+        )
     })
 }
 
@@ -676,7 +689,7 @@ fn op(tag: u8) -> S<Op> {
             formulas: prop::collection::vec((sheet(), at(), cell()), 0..4)
         }),
         37 => operation!(SetTables {
-            tables: prop::collection::vec(table(), 0..3)
+            tables: prop::collection::vec(table(0..1), 0..3)
         }),
         38 => operation!(MoveCols {
             sheet: sheet(),
@@ -702,6 +715,9 @@ fn op(tag: u8) -> S<Op> {
             count: any::<u32>(),
             hidden: any::<bool>()
         }),
+        44 => operation!(SetTables {
+            tables: prop::collection::vec(table(1..3), 1..3)
+        }),
         _ => unreachable!(),
     }
 }
@@ -718,7 +734,7 @@ fn all_ops() -> S<Vec<Op>> {
 }
 
 fn any_op() -> S<Op> {
-    (0u8..40).prop_flat_map(op).boxed()
+    prop_oneof![40 => (0u8..40).prop_flat_map(op), 1 => op(44)].boxed()
 }
 
 fn history() -> S<Vec<Vec<Op>>> {

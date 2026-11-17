@@ -730,6 +730,7 @@
     "linkRemoved": "Đã xóa liên kết",
     "linkCopied": "Đã sao chép liên kết vào bảng tạm",
     "pasteFailed": "Không thể hoàn tất thao tác dán. Không có gì thay đổi.",
+    "cutRefused": "Vùng chọn chứa đối tượng không thể cắt. Không có gì thay đổi.",
     "failedToSave": "Không thể lưu tài liệu",
     "documentInput": "Đầu vào tài liệu",
     "documentPreview": "Xem trước tài liệu",

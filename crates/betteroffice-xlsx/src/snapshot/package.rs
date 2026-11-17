@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use ooxml_opc::SourceContainer;
+use xlsx_model::SheetPicture;
 use xlsx_parse::{PackageFacts, PackageFactsEncoder, PackageFactsView, PreservedPackage};
 
 use super::{SnapshotError, SnapshotResult};
@@ -111,6 +112,74 @@ impl PackageSlot {
             Err(_) => return true,
         }
         xlsx_parse::sheet_drawings_may_move(&parts, path)
+    }
+
+    /// The pictures source sheet `sheet` draws. A deferred package inflates only the sheet's
+    /// relationship part, its drawings and theirs.
+    pub(crate) fn source_sheet_pictures(&self, sheet: usize) -> Vec<SheetPicture> {
+        let (source, facts) = match self {
+            Self::Present(package) => return package.source_sheet_pictures(sheet),
+            Self::Deferred {
+                source,
+                facts,
+                rebuilt,
+            } => match rebuilt.get() {
+                Some(Ok(package)) => return package.source_sheet_pictures(sheet),
+                _ => (source, facts),
+            },
+        };
+        let Some(path) = PackageFactsView::from_facts(facts).source_sheet_part(sheet) else {
+            return Vec::new();
+        };
+        let inflate = |names: &[String]| {
+            ooxml_opc::unzip_parts_where(source.as_bytes(), u64::MAX, |name| {
+                let name = name.trim_start_matches('/');
+                names
+                    .iter()
+                    .any(|wanted| wanted.trim_start_matches('/') == name)
+            })
+            .unwrap_or_default()
+        };
+        let mut parts = inflate(&[xlsx_parse::relationship_part_of(path)]);
+        let Some(drawings) = parts
+            .first()
+            .and_then(|(_, rels)| xlsx_parse::sheet_drawing_targets(rels, path))
+            .filter(|drawings| !drawings.is_empty())
+        else {
+            return Vec::new();
+        };
+        let drawing_rels = drawings
+            .iter()
+            .map(|drawing| xlsx_parse::relationship_part_of(drawing));
+        parts.extend(inflate(
+            &drawings
+                .iter()
+                .cloned()
+                .chain(drawing_rels)
+                .collect::<Vec<_>>(),
+        ));
+        xlsx_parse::sheet_pictures(&parts, path)
+    }
+
+    /// The bytes of source part `path`.
+    pub(crate) fn part_bytes(&self, path: &str) -> Option<Vec<u8>> {
+        match self {
+            Self::Present(package) => package.part_bytes(path).map(<[u8]>::to_vec),
+            Self::Deferred {
+                source, rebuilt, ..
+            } => match rebuilt.get() {
+                Some(Ok(package)) => package.part_bytes(path).map(<[u8]>::to_vec),
+                _ => {
+                    let path = path.trim_start_matches('/');
+                    ooxml_opc::unzip_parts_where(source.as_bytes(), u64::MAX, |name| {
+                        name.trim_start_matches('/') == path
+                    })
+                    .ok()?
+                    .pop()
+                    .map(|(_, bytes)| bytes)
+                }
+            },
+        }
     }
 
     pub(crate) fn materialize(&self) -> Result<&PreservedPackage> {
@@ -276,6 +345,54 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
                 inputs: vec![vec!["5".to_owned()]],
             })],
         }
+    }
+
+    #[test]
+    fn deferred_slot_draws_pictures_without_parsing() {
+        let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
+        for (path, bytes) in &mut parts {
+            let (from, to) = match path.as_str() {
+                "xl/drawings/drawing1.xml" => (
+                    "</xdr:wsDr>",
+                    r#"<xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="952500" cy="952500"/>
+                    <xdr:pic><xdr:nvPicPr><xdr:cNvPr id="3" name="Picture"/><xdr:cNvPicPr/>
+                    </xdr:nvPicPr><xdr:blipFill><a:blip r:embed="image"/></xdr:blipFill>
+                    <xdr:spPr/></xdr:pic><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>"#,
+                ),
+                "xl/drawings/_rels/drawing1.xml.rels" => (
+                    "</Relationships>",
+                    r#"<Relationship Id="image" Target="../media/image1.png"
+Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"/></Relationships>"#,
+                ),
+                _ => continue,
+            };
+            *bytes = String::from_utf8(std::mem::take(bytes))
+                .unwrap()
+                .replace(from, to)
+                .into_bytes();
+        }
+        parts.push(("xl/media/image1.png".to_owned(), b"image".to_vec()));
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut workbook = Workbook::open(&bytes).unwrap();
+        let present = Workbook::open(&bytes).unwrap();
+        workbook.defer_source_package_for_test().unwrap();
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 400.0,
+        };
+        let deferred = workbook.display_list(&viewport).unwrap();
+        assert!(deferred.commands.iter().any(|command| matches!(
+            command,
+            xlsx_render::DrawCmd::Image { asset_id, .. } if &**asset_id == "xl/media/image1.png"
+        )));
+        assert_eq!(deferred, present.display_list(&viewport).unwrap());
+        assert_eq!(
+            workbook.media_bytes("xl/media/image1.png").unwrap(),
+            b"image"
+        );
+        assert!(workbook.source_package_is_unmaterialized_for_test());
     }
 
     #[test]

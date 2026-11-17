@@ -73,8 +73,10 @@ function rulerDocumentKey(state: ReturnType<WorkerShellController['getSnapshot']
 }
 
 export function useWorkerRulerControls(controller: WorkerShellController, onError?: (error: Error) => void, enabled = true) {
-  const live = useWorkerQuery<'sectionProperties'>(controller, enabled ? { kind: 'sectionProperties' } : null);
   const state = controller.getSnapshot();
+  const focus = state.view?.workerSelection?.focus;
+  const live = useWorkerQuery<'sectionProperties'>(controller, enabled
+    ? { kind: 'sectionProperties', paragraphs: focus ? [{ story: focus.story, paraId: focus.paraId }] : [] } : null);
   const documentKey = enabled ? rulerDocumentKey(state) : null;
   // the markers show the last read while an edit's re-read is in flight; writes always use a fresh one
   const settled = useRef<{ documentKey: string; query: RulerQuery } | null>(null);
