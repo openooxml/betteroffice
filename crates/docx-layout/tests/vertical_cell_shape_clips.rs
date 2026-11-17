@@ -25,9 +25,8 @@ fn clip_of(attrs: &DocAttrs) -> Option<(f64, f64, f64, f64)> {
         .as_ref()
         .and_then(|group| group.clip.as_ref())
         .map(|clip| {
-            let v = |n: &Option<serde_json::Number>| {
-                n.as_ref().and_then(|n| n.as_f64()).unwrap_or(0.0)
-            };
+            let v =
+                |n: &Option<serde_json::Number>| n.as_ref().and_then(|n| n.as_f64()).unwrap_or(0.0);
             (v(&clip.x), v(&clip.y), v(&clip.w), v(&clip.h))
         })
 }
