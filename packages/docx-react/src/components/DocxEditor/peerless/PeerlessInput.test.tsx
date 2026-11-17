@@ -190,7 +190,7 @@ test('autofocus prevents browser scrolling', () => {
   const focus = spyOn(HTMLTextAreaElement.prototype, 'focus');
   const input = mount(false, { autoFocus: true });
   try {
-    expect(document.activeElement).toBe(input.textarea);
+    expect(document.activeElement === input.textarea).toBe(true);
     expect(focus.mock.calls).toEqual([[{ preventScroll: true }]]);
   } finally { input.unmount(); input.admission.dispose(); focus.mockRestore(); }
 });
@@ -204,7 +204,7 @@ test('autofocus applies on mount only, so enabling editing later keeps focus whe
   try {
     other.focus();
     view.rerender(<PeerlessInput admission={input.admission} viewStore={input.viewStore} autoFocus />);
-    expect(document.activeElement).toBe(other);
+    expect(document.activeElement === other).toBe(true);
   } finally { view.unmount(); input.admission.dispose(); other.remove(); }
 });
 
@@ -218,11 +218,11 @@ test('a hidden and revealed editor does not take focus back after mount', () => 
   </Activity>;
   const view = render(tree('visible'));
   try {
-    expect(document.activeElement).toBe(view.container.querySelector('textarea'));
+    expect(document.activeElement === view.container.querySelector('textarea')).toBe(true);
     other.focus();
     view.rerender(tree('hidden'));
     view.rerender(tree('visible'));
-    expect(document.activeElement).toBe(other);
+    expect(document.activeElement === other).toBe(true);
   } finally { view.unmount(); input.admission.dispose(); other.remove(); }
 });
 
@@ -237,7 +237,7 @@ test('input uses its content host before the parent ref attaches', () => {
   </div>);
   try {
     const textarea = view.getByRole('textbox') as HTMLTextAreaElement;
-    expect(textarea.parentElement).toBe(caretHostRef.current);
+    expect(textarea.parentElement === caretHostRef.current).toBe(true);
     expect(textarea.style.position).toBe('absolute');
     expect(textarea.style.left).toBe('20px');
     expect(textarea.style.top).toBe('40px');
@@ -443,7 +443,7 @@ test.each([false, true])('shift_page_down_reveals_the_landing_with_cell_rects=%s
     act(() => { fireEvent.scroll(scroller); });
     expect(scroller.scrollTop).toBe(86);
     expect(Number.parseFloat(input.textarea.style.top)).toBe(650);
-    expect(document.activeElement).toBe(input.textarea);
+    expect(document.activeElement === input.textarea).toBe(true);
   } finally {
     input.unmount();
     input.admission.dispose();
@@ -1516,15 +1516,15 @@ test('a paste recorded from outside the input offers paste options until the nex
     await paste.settle(0, 'applied', { anchor: end, focus: end });
     paste.present(1);
     await paste.idle();
-    expect(paste.control()).toBeNull();
+    expect(paste.control() !== null).toBe(false);
     act(() => paste.record(boldFragment(), 'Bold'));
     await paste.settle(1, 'applied', { anchor: end, focus: end });
     paste.present(2);
-    await waitFor(() => expect(paste.control()).not.toBeNull());
+    await waitFor(() => expect(paste.control() !== null).toBe(true));
     expect(paste.control()!.style.left).toBe('86px');
     expect(paste.control()!.style.top).toBe('316px');
     beforeinput(paste.input.textarea, 'insertText', 'x');
-    expect(paste.control()).toBeNull();
+    expect(paste.control() !== null).toBe(false);
   } finally {
     paste.dispose();
   }
@@ -1544,7 +1544,7 @@ test('a selection change while a paste is pending leaves no Paste Options contro
     await paste.settle(1, 'applied', { anchor: moved, focus: moved });
     paste.present(1);
     await paste.idle();
-    expect(paste.control()).toBeNull();
+    expect(paste.control() !== null).toBe(false);
   } finally {
     paste.dispose();
   }
@@ -1560,7 +1560,7 @@ test('a refused or cancelled paste leaves no Paste Options control', async () =>
       act(() => { paste.input.snapshot.workerSelection = { anchor: end, focus: end }; });
       paste.present(1);
       await paste.idle();
-      expect({ status, control: paste.control() }).toEqual({ status, control: null });
+      expect(`${status}: ${paste.control() !== null}`).toBe(`${status}: false`);
     } finally {
       paste.dispose();
     }
@@ -1580,7 +1580,7 @@ test('a later command presented in the same frame as the paste leaves no Paste O
     });
     paste.present(1);
     await paste.idle();
-    expect(paste.control()).toBeNull();
+    expect(paste.control() !== null).toBe(false);
   } finally {
     paste.dispose();
   }
@@ -1595,17 +1595,17 @@ test('the paste options control follows a window scroll only while it is shown',
     const end = { story: 'body', paraId: 'a', offset: 4 };
     await paste.settle(0, 'applied', { anchor: end, focus: end });
     paste.present(1);
-    await waitFor(() => expect(control()).not.toBeNull());
+    await waitFor(() => expect(control() !== null).toBe(true));
     expect(control()!.style.left).toBe('86px');
     expect(control()!.style.top).toBe('316px');
     act(() => { paste.moveHost(20); fireEvent.scroll(window); });
     expect(control()!.style.top).toBe('236px');
     act(() => { fireEvent.pointerDown(document.body); });
-    expect(control()).toBeNull();
+    expect(control() !== null).toBe(false);
     paste.measured.count = 0;
     act(() => { paste.moveHost(60); fireEvent.scroll(window); });
     expect(paste.measured.count).toBe(0);
-    expect(control()).toBeNull();
+    expect(control() !== null).toBe(false);
   } finally {
     paste.dispose();
   }
