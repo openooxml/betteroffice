@@ -333,3 +333,44 @@ for (const destroyed of [true, false]) {
     } finally { client.destroy(); dispose(); }
   });
 }
+
+const collapsedTargets = { [JSON.stringify({ kind: 'comment', id: 7 })]: { id: 'native',
+  ranges: [{ story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'p', offset: 3 } }] } };
+
+function presentWithForeignCommand(navigation: ReturnType<typeof reviewNavigation>, at: { paraId: string; offset: number }, version = 1) {
+  const { submit, viewStore } = navigation;
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }),
+    presented: Promise.resolve().then(() => {
+      const view = viewStore.getSnapshot();
+      viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version, throughSeq: 2, presentedThroughSeq: 2,
+        selection: { anchor: { story: 'body', ...at }, focus: { story: 'body', ...at } }, editState: view.editState });
+      viewStore.installFrameGeometry({ ...view.geometry!, frameEpoch: view.geometry!.frameEpoch + 1, coversThroughSeq: 2,
+        caret: { x: 10, y: 600, width: 1, height: 12 } });
+      return 'presented';
+    }) } }));
+}
+
+test('review navigation reveals its selection when a command that keeps it is presented in the same frame', async () => {
+  const navigation = reviewNavigation(collapsedTargets);
+  presentWithForeignCommand(navigation, { paraId: 'p', offset: 3 });
+  try {
+    expect(await navigation.controller.ref.scrollToComment(7)).toBe(true);
+    expect(navigation.submit).toHaveBeenCalledTimes(1);
+    expect(navigation.scroller.scrollTop).toBe(600 * 2 - 24);
+  } finally { navigation.dispose(); }
+});
+
+for (const [name, at, version] of [
+  ['another select replaced the selection', { paraId: 'z', offset: 0 }, 1],
+  ['a later command moved the caret', { paraId: 'p', offset: 5 }, 1],
+  ['a later edit changed the paragraph under the same offsets', { paraId: 'p', offset: 3 }, 2],
+] as const) {
+  test(`review navigation resolves false without scrolling when ${name}`, async () => {
+    const navigation = reviewNavigation(collapsedTargets);
+    presentWithForeignCommand(navigation, at, version);
+    try {
+      expect(await navigation.controller.ref.scrollToComment(7)).toBe(false);
+      expect(navigation.scroller.scrollTop).toBe(0);
+    } finally { navigation.dispose(); }
+  });
+}
