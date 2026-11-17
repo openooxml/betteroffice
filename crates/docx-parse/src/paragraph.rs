@@ -3154,6 +3154,169 @@ mod tests {
         assert_eq!(paragraph.content.len(), 4);
     }
 
+    const FIELD_OPEN: &str = concat!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> SUBJECT </w:instrText></w:r>"#,
+        r#"<w:dir w:val="rtl"><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+    );
+
+    const FIELD_CLOSE: &str = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:dir>"#;
+
+    const SDT_OPEN: &str = concat!(
+        r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr>"#,
+        r#"<w:sdtContent><w:dir w:val="rtl">"#,
+    );
+
+    const DIRECTION_SCOPES: [(&str, &str, &str, &str); 10] = [
+        ("paragraph", r#"<w:dir w:val="rtl">"#, "", "</w:dir>"),
+        ("bdo", r#"<w:bdo w:val="rtl">"#, "", "</w:bdo>"),
+        (
+            "hyperlink",
+            r#"<w:hyperlink w:anchor="target"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:hyperlink>",
+        ),
+        (
+            "insertion",
+            r#"<w:ins w:id="1" w:author="Ann"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:ins>",
+        ),
+        (
+            "deletion",
+            r#"<w:del w:id="2" w:author="Ann"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:del>",
+        ),
+        ("content control", SDT_OPEN, "", "</w:dir></w:sdtContent></w:sdt>"),
+        (
+            "simple field",
+            r#"<w:fldSimple w:instr=" SUBJECT "><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:fldSimple>",
+        ),
+        ("nested", r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#, "", "</w:dir></w:bdo>"),
+        ("adjacent", r#"<w:dir w:val="rtl">"#, r#"</w:dir><w:dir w:val="ltr">"#, "</w:dir>"),
+        ("complex field", FIELD_OPEN, "", FIELD_CLOSE),
+    ];
+
+    fn direction_scope_paragraph(name: &str, open: &str, middle: &str, close: &str) -> String {
+        let deleted = name == "deletion";
+        let text = if deleted { "w:delText" } else { "w:t" };
+        format!(
+            r#"<w:p xmlns:w="w"><w:r><w:t xml:space="preserve">Before </w:t></w:r>{open}<w:r><{text}>two</{text}></w:r>{middle}<w:r><{text} xml:space="preserve"> runs</{text}></w:r>{close}<w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>"#
+        )
+    }
+
+    fn push_run_texts(run: &Run, texts: &mut Vec<String>) {
+        for content in &run.content {
+            if let RunContent::Text { text, .. } = content {
+                texts.push(text.clone());
+            }
+        }
+    }
+
+    fn push_node_texts(node: &InlineNode, texts: &mut Vec<String>) {
+        match node {
+            InlineNode::Run(run) => push_run_texts(run, texts),
+            InlineNode::Hyperlink(link) => {
+                for child in &link.children {
+                    push_node_texts(child, texts);
+                }
+            }
+            InlineNode::SimpleField(field) => {
+                for run in &field.content {
+                    push_run_texts(run, texts);
+                }
+            }
+            InlineNode::ComplexField(field) => {
+                for run in &field.field_result {
+                    push_run_texts(run, texts);
+                }
+            }
+            InlineNode::InlineSdt(sdt) => {
+                for child in &sdt.content {
+                    push_node_texts(child, texts);
+                }
+            }
+            InlineNode::Tracked(change) => {
+                for child in &change.content {
+                    push_node_texts(child, texts);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn all_texts(paragraph: &Paragraph) -> Vec<String> {
+        let mut texts = Vec::new();
+        for content in &paragraph.content {
+            match content {
+                ParagraphContent::Inline(node) => push_node_texts(node, &mut texts),
+                ParagraphContent::Tracked(change) => {
+                    for child in &change.content {
+                        push_node_texts(child, &mut texts);
+                    }
+                }
+                _ => {}
+            }
+        }
+        texts
+    }
+
+    #[test]
+    fn direction_scoped_runs_keep_their_text_in_every_container() {
+        for (name, open, middle, close) in DIRECTION_SCOPES {
+            let paragraph = parse(&direction_scope_paragraph(name, open, middle, close));
+            assert_eq!(
+                all_texts(&paragraph),
+                ["Before ", "two", " runs", " after"],
+                "{name}"
+            );
+            let json = serde_json::to_string(&paragraph).unwrap();
+            assert!(json.contains(r#":"rtl""#), "{name}: {json}");
+            if matches!(name, "nested" | "adjacent") {
+                assert!(json.contains(r#":"ltr""#), "{name}: {json}");
+            }
+        }
+    }
+
+    #[test]
+    fn direction_scopes_inside_smart_tags_keep_their_text() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:r><w:t>a</w:t></w:r>
+              <w:smartTag w:element="place">
+                <w:dir w:val="rtl"><w:r><w:t>b</w:t></w:r></w:dir>
+              </w:smartTag>
+              <w:bdo w:val="rtl">
+                <w:smartTag w:element="date"><w:r><w:t>c</w:t></w:r></w:smartTag>
+              </w:bdo>
+              <w:r><w:t>d</w:t></w:r>
+            </w:p>"#,
+        );
+        assert_eq!(all_texts(&paragraph), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn unmodeled_word_inline_elements_are_kept_as_raw_xml() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>a</w:t></w:r><w:zzz><w:r><w:t>x</w:t></w:r></w:zzz><w:r><w:t>b</w:t></w:r></w:p>"#,
+        );
+        let raw: Vec<_> = paragraph
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ParagraphContent::Inline(InlineNode::RawXml(raw)) => Some(raw.xml.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(raw.len(), 1, "{:?}", paragraph.content);
+        assert!(raw[0].starts_with("<w:zzz"), "{}", raw[0]);
+        assert!(raw[0].contains("<w:t>x</w:t>"), "{}", raw[0]);
+        assert_eq!(all_texts(&paragraph), ["a", "b"]);
+    }
+
     #[test]
     fn keeps_comment_range_zero_and_drops_ranges_without_an_id() {
         let paragraph = parse(

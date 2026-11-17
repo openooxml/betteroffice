@@ -1141,4 +1141,22 @@ mod tests {
         );
         assert_eq!(parsed.canonical_sha256.as_deref().unwrap().len(), 64);
     }
+
+    #[test]
+    fn text_bearing_unmodeled_inline_elements_warn_once_per_document() {
+        let parts = vec![(
+            "word/document.xml".to_owned(),
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>a</w:t></w:r><w:zzz><w:r><w:t>x</w:t></w:r></w:zzz></w:p><w:p><w:zzz><w:r><w:t>y</w:t></w:r></w:zzz><w:yyy/></w:p></w:body></w:document>"#.to_vec(),
+        )];
+        let package = ooxml_opc::rezip_parts(&parts).unwrap();
+        let parsed = parse_docx_s9_wire(&package, S9ParseOptions::default()).unwrap();
+        let warnings = parsed.document.warnings.unwrap_or_default();
+        let unmodeled: Vec<_> = warnings
+            .iter()
+            .filter(|warning| warning.contains("DOCX_UNMODELED_INLINE"))
+            .collect();
+        assert_eq!(unmodeled.len(), 1, "{warnings:?}");
+        assert!(unmodeled[0].contains("w:zzz"), "{warnings:?}");
+        assert!(!unmodeled[0].contains("w:yyy"), "{warnings:?}");
+    }
 }

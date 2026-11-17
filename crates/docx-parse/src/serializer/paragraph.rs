@@ -1473,6 +1473,181 @@ mod tests {
         );
     }
 
+    const WORD: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+    const DIR: (&str, &str) = (r#"<w:dir w:val="rtl">"#, "</w:dir>");
+
+    const BDO: (&str, &str) = (r#"<w:bdo w:val="rtl">"#, "</w:bdo>");
+
+    const SCOPE_TAGS: [&str; 4] = [
+        r#"<w:dir w:val="rtl">"#,
+        r#"<w:dir w:val="ltr">"#,
+        r#"<w:bdo w:val="rtl">"#,
+        r#"<w:bdo w:val="ltr">"#,
+    ];
+
+    const FIELD_OPEN: &str = concat!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> SUBJECT </w:instrText></w:r>"#,
+        r#"<w:dir w:val="rtl"><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+    );
+
+    const FIELD_CLOSE: &str = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:dir>"#;
+
+    const SDT_OPEN: &str = concat!(
+        r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr>"#,
+        r#"<w:sdtContent><w:dir w:val="rtl">"#,
+    );
+
+    const DIRECTION_SCOPES: [(&str, &str, &str, &str); 10] = [
+        ("paragraph", r#"<w:dir w:val="rtl">"#, "", "</w:dir>"),
+        ("bdo", r#"<w:bdo w:val="rtl">"#, "", "</w:bdo>"),
+        (
+            "hyperlink",
+            r#"<w:hyperlink w:anchor="target"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:hyperlink>",
+        ),
+        (
+            "insertion",
+            r#"<w:ins w:id="1" w:author="Ann"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:ins>",
+        ),
+        (
+            "deletion",
+            r#"<w:del w:id="2" w:author="Ann"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:del>",
+        ),
+        ("content control", SDT_OPEN, "", "</w:dir></w:sdtContent></w:sdt>"),
+        (
+            "simple field",
+            r#"<w:fldSimple w:instr=" SUBJECT "><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:fldSimple>",
+        ),
+        ("nested", r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#, "", "</w:dir></w:bdo>"),
+        ("adjacent", r#"<w:dir w:val="rtl">"#, r#"</w:dir><w:dir w:val="ltr">"#, "</w:dir>"),
+        ("complex field", FIELD_OPEN, "", FIELD_CLOSE),
+    ];
+
+    fn round_trip(xml: &str) -> String {
+        let limits = crate::xml::ParseLimits::default();
+        let mut budget = crate::xml::ParseBudget::new(&limits);
+        let document =
+            crate::xml::parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
+        let mut ids = crate::paragraph::HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
+        let paragraph = crate::paragraph::parse_paragraph(
+            document.root().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "word/document.xml",
+            &mut budget,
+            &mut ids,
+            None,
+            false,
+            0,
+        )
+        .unwrap();
+        serialize_paragraph(&paragraph, &mut context()).unwrap()
+    }
+
+    fn shown(xml: &str) -> String {
+        let mut text = String::new();
+        let mut rest = xml;
+        while let Some(start) = rest.find('<') {
+            let Some(end) = rest[start..].find('>') else {
+                break;
+            };
+            let tag = &rest[start + 1..start + end];
+            rest = &rest[start + end + 1..];
+            let name = tag.split([' ', '/']).next().unwrap_or_default();
+            if matches!(name, "w:t" | "w:delText") && !tag.ends_with('/') {
+                text.push_str(&rest[..rest.find('<').unwrap_or(rest.len())]);
+            }
+        }
+        text
+    }
+
+    fn region<'a>(xml: &'a str, open: &str, close: &str) -> &'a str {
+        let start = xml.find(open).map_or(xml.len(), |at| at + open.len());
+        let rest = &xml[start..];
+        rest.find(close).map_or("", |end| &rest[..end])
+    }
+
+    fn container(name: &str) -> Option<(&'static str, &'static str)> {
+        match name {
+            "hyperlink" => Some(("<w:hyperlink", "</w:hyperlink>")),
+            "insertion" => Some(("<w:ins ", "</w:ins>")),
+            "deletion" => Some(("<w:del ", "</w:del>")),
+            "content control" => Some(("<w:sdtContent>", "</w:sdtContent>")),
+            "simple field" => Some(("<w:fldSimple", "</w:fldSimple>")),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn direction_scopes_save_back_around_their_text_in_every_container() {
+        for (name, open, middle, close) in DIRECTION_SCOPES {
+            let text = if name == "deletion" { "delText" } else { "t" };
+            let source = format!(
+                r#"<w:p xmlns:w="{WORD}"><w:r><w:t xml:space="preserve">Before </w:t></w:r>{open}<w:r><w:{text}>two</w:{text}></w:r>{middle}<w:r><w:{text} xml:space="preserve"> runs</w:{text}></w:r>{close}<w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>"#
+            );
+            let output = round_trip(&source);
+            assert_eq!(shown(&output), "Before two runs after", "{name}");
+            for tag in SCOPE_TAGS {
+                assert_eq!(
+                    output.matches(tag).count(),
+                    source.matches(tag).count(),
+                    "{name} {tag}: {output}"
+                );
+            }
+            let (inner_open, inner_close) = if name == "bdo" { BDO } else { DIR };
+            let inner = if name == "adjacent" {
+                "two"
+            } else {
+                "two runs"
+            };
+            assert_eq!(
+                shown(region(&output, inner_open, inner_close)),
+                inner,
+                "{name}: {output}"
+            );
+            if name == "adjacent" {
+                let ltr = region(&output, r#"<w:dir w:val="ltr">"#, "</w:dir>");
+                assert_eq!(shown(ltr), " runs", "{output}");
+            }
+            if name == "nested" {
+                let ltr = region(&output, r#"<w:bdo w:val="ltr">"#, "</w:bdo>");
+                assert!(ltr.contains(DIR.0), "{output}");
+                assert_eq!(shown(ltr), "two runs", "{output}");
+            }
+            if let Some((outer_open, outer_close)) = container(name) {
+                assert!(
+                    region(&output, outer_open, outer_close).contains(DIR.0),
+                    "{name}: {output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unmodeled_word_inline_elements_save_back_verbatim() {
+        let output = round_trip(&format!(
+            r#"<w:p xmlns:w="{WORD}"><w:r><w:t>a</w:t></w:r><w:zzz><w:r><w:t>x</w:t></w:r></w:zzz><w:r><w:t>b</w:t></w:r></w:p>"#
+        ));
+        assert!(output.contains("<w:zzz"), "{output}");
+        assert!(
+            output.contains("<w:r><w:t>x</w:t></w:r></w:zzz>"),
+            "{output}"
+        );
+        assert_eq!(shown(&output), "axb", "{output}");
+    }
+
     #[test]
     fn rejects_unvalidated_math_and_sdt_raw_xml() {
         let mut properties = SdtProperties {
