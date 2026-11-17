@@ -293,11 +293,12 @@ pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result
                     let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                         font::measure_text(line, *font_size)
                     });
-                    for (index, line) in lines.iter().enumerate() {
+                    let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
+                    for (index, line) in lines.iter().take(count).enumerate() {
                         font::paint_text(
                             &mut pixmap,
                             &font::TextRun {
-                                y: xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap),
+                                y: xlsx_render::wrap::wrapped_line_y(*y, index, count, wrap),
                                 text: line,
                                 ..run
                             },
@@ -1274,6 +1275,112 @@ mod tests {
             );
             assert!(((left + right) / 2.0 - cell_w / 2.0).abs() < 2.0, "{word}");
         }
+    }
+
+    #[test]
+    fn wrapped_text_paints_at_most_the_lines_its_display_list_keeps() {
+        let cell = DlRect {
+            x: 0.0,
+            y: 0.0,
+            w: 60.0,
+            h: 100.0,
+        };
+        let bands = |max_lines: Option<u32>| {
+            let wrap = serde_json::json!({
+                "width": 30.0,
+                "lineHeight": 20.0,
+                "valign": "center",
+                "maxLines": max_lines,
+            });
+            let mut dl = text_dl("one two six", cell, false, None, false);
+            if let DrawCmd::Text { wrap: slot, .. } = &mut dl.commands[0] {
+                *slot = Some(serde_json::from_value(wrap).unwrap());
+            }
+            ink_row_bands(&dl).len()
+        };
+        let kept = [Some(1), Some(2), Some(u32::MAX), None].map(bands);
+        assert_eq!(kept, [1, 2, 4, 4]);
+    }
+
+    fn wrapped_row(row: u32, row_pt: f64, scroll: f32, zoom: f32) -> DisplayList {
+        let mut workbook = xlsx_model::Workbook::default();
+        workbook.styles.cell_xfs.push(xlsx_model::Xf {
+            alignment: Some(xlsx_model::Alignment {
+                v: Some(xlsx_model::VAlign::Center),
+                wrap_text: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let mut sheet = xlsx_model::Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 6.0);
+        sheet.row_heights.insert(row, row_pt);
+        if row > 0 {
+            let top_left = xlsx_model::CellRef::new(row, 0);
+            sheet.freeze_pane = Some(xlsx_model::FreezePane::new(row, 0, top_left));
+        }
+        sheet.set_cell(
+            xlsx_model::CellRef::new(row, 0),
+            xlsx_model::Cell {
+                value: xlsx_model::CellValue::Text {
+                    value: "xxxxx xxxx xxxx xxxx".into(),
+                },
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        workbook.sheets.push(sheet);
+        let dl = xlsx_render::build_display_list(
+            &workbook,
+            xlsx_model::SheetId(0),
+            &xlsx_render::Viewport {
+                x: 0.0,
+                y: scroll,
+                width: 60.0,
+                height: 100.0,
+            },
+        )
+        .unwrap();
+        xlsx_render::scaled(dl, zoom)
+    }
+
+    #[test]
+    fn a_row_scrolled_partly_under_a_frozen_row_keeps_its_wrapped_lines() {
+        let frozen =
+            xlsx_render::geometry::row_pt_to_px(xlsx_render::geometry::DEFAULT_ROW_HEIGHT_PT);
+        let lines = |scroll: f32| {
+            ink_row_bands(&wrapped_row(1, 40.0, scroll, 1.0))
+                .into_iter()
+                .filter(|&(_, bottom)| bottom as f32 > frozen + 2.0)
+                .count()
+        };
+        assert_eq!([lines(0.0), lines(6.0)], [3, 3]);
+    }
+
+    #[test]
+    fn a_wrapped_row_paints_the_same_lines_at_every_zoom() {
+        for zoom in [1u32, 2, 4] {
+            let widths = ink_band_widths(&wrapped_row(0, 24.5, 0.0, zoom as f32));
+            assert_eq!(widths.len(), 2, "zoom {zoom}: {widths:?}");
+            assert!(
+                widths[0] > widths[1] + 3 * zoom,
+                "zoom {zoom}: the first word should lead: {widths:?}"
+            );
+        }
+    }
+
+    fn ink_band_widths(dl: &DisplayList) -> Vec<u32> {
+        let pixels = Pixmap::decode_png(&render_png(dl).unwrap()).unwrap();
+        let dark = |x: u32, y: u32| pixels.pixel(x, y).unwrap().red() < 128;
+        ink_row_bands(dl)
+            .into_iter()
+            .map(|(top, bottom)| {
+                let ink: Vec<u32> = (0..pixels.width())
+                    .filter(|&x| (top..=bottom).any(|y| dark(x, y)))
+                    .collect();
+                ink.last().unwrap() - ink[0] + 1
+            })
+            .collect()
     }
 
     #[test]

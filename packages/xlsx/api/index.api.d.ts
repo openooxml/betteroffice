@@ -450,12 +450,16 @@ export interface PathCmd {
 /**
  * Wrapped cell text: the painter breaks the run into lines no wider than
  * `width` and steps their baselines by `lineHeight`, the block anchored by
- * `valign` on the single-line baseline `y`.
+ * `valign` on the single-line baseline `y`. `maxLines` is the most lines the
+ * cell keeps, from its whole row or merged area: the painter paints at most
+ * that many and aligns them as a block of their own. A list without it paints
+ * every line.
  */
 export interface TextWrap {
     width: number;
     lineHeight: number;
     valign: 'top' | 'center' | 'bottom';
+    maxLines?: number;
 }
 /**
  * Paint a text run clipped to the cell box: `clip` is the cell rect and

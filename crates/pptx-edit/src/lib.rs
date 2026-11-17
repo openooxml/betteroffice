@@ -22,6 +22,8 @@ mod inherit;
 mod metafile;
 mod model;
 mod outline_gradients;
+#[cfg(test)]
+mod owner_lookup_tests;
 pub mod paragraph;
 mod peer;
 mod proposal_diff;
@@ -33,6 +35,7 @@ mod search;
 mod source_run_properties;
 mod staging;
 mod story;
+mod story_owners;
 pub mod structured;
 mod table;
 mod target;
@@ -124,6 +127,7 @@ pub struct DeckSession {
     state_update: RefCell<Option<(u64, Arc<Vec<u8>>)>>,
     remote_deletions: remote_cleanup::RemoteDeletions,
     metafile_svgs: RefCell<MetafileSvgCache>,
+    story_owners: story_owners::StoryOwners,
 }
 
 fn watch_epoch(doc: &Doc) -> EditResult<(Arc<AtomicU64>, UpdateSubscription)> {
@@ -245,6 +249,7 @@ impl DeckSession {
             state_update: RefCell::new(None),
             remote_deletions: Default::default(),
             metafile_svgs: Default::default(),
+            story_owners: Default::default(),
         })
     }
 
