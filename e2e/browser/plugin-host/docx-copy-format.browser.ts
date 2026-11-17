@@ -236,15 +236,18 @@ for (const mode of ['worker', 'legacy']) {
       expect(lastRun(again, 'AcrossTwo')).not.toContain('<w:i/>');
     });
 
-    test('external html pastes as plain text, as before', async ({ page }) => {
+    test('external html pastes only allow-listed formatting', async ({ page }) => {
       const input = await open(page, mode);
       await page.evaluate(() => navigator.clipboard.write([new ClipboardItem({
         'text/plain': new Blob(['ExternalX'], { type: 'text/plain' }),
-        'text/html': new Blob(['<p><b>ExternalX</b></p>'], { type: 'text/html' }),
+        'text/html': new Blob(['<p><b style="letter-spacing:5pt;vertical-align:super">ExternalX</b></p>'], { type: 'text/html' }),
       })]));
       await pasteAtEnd(input);
       const { body } = await pasted(page, 'ExternalX', 1);
-      expect(lastRun(body, 'ExternalX')).not.toContain('<w:b/>');
+      const external = lastRun(body, 'ExternalX');
+      expect(external).toContain('<w:b/>');
+      expect(external).not.toContain('<w:spacing');
+      expect(external).not.toContain('w:vertAlign');
     });
 
     test('a crafted clipboard payload falls back to its plain text', async ({ page }) => {
