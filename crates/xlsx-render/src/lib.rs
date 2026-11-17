@@ -7,7 +7,9 @@ mod fmath;
 pub mod geometry;
 pub mod hit;
 pub mod number_format;
+mod picture;
 pub mod region;
+mod table_style;
 pub mod wrap;
 
 pub use ooxml_drawingml::GeometryPathCommand;
@@ -26,8 +28,11 @@ use xlsx_model::styles::{BorderEdge, BorderStyle, DifferentialFormat, FormatCode
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{
-    CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId, VAlign, Workbook,
+    CellRange, CellRef, DifferentialFormat, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId,
+    SheetPicture, Table, VAlign, Workbook,
 };
+
+use table_style::SheetTables;
 
 pub use chart::{
     AnchorError, ChartResize, MAX_CHART_OPS_PER_FRAME, MIN_CHART_EXTENT_PX, RenderError,
@@ -35,7 +40,7 @@ pub use chart::{
     resolve_chart_anchor,
 };
 pub use display_list::{
-    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
+    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, ImageCrop,
     PathStroke, Rect, TextValign, TextWrap, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
@@ -107,6 +112,8 @@ struct GhostFont {
 struct AxisTrack {
     index: u32,
     raw_start: f32,
+    /// full track size in sheet px, before the frozen pane or the viewport clips it
+    raw_size: f32,
     start: f32,
     end: f32,
     pinned: bool,
@@ -161,6 +168,7 @@ impl AxisLayout {
                 tracks.push(AxisTrack {
                     index,
                     raw_start: start,
+                    raw_size: edge(index + 1) - start,
                     start,
                     end: edge(index + 1),
                     pinned: true,
@@ -191,6 +199,7 @@ impl AxisLayout {
                 tracks.push(AxisTrack {
                     index,
                     raw_start,
+                    raw_size: raw_end - raw_start,
                     start: if frozen > 0 {
                         raw_start.max(frozen_extent)
                     } else {
@@ -240,6 +249,12 @@ impl AxisLayout {
         std::iter::once(first.start)
             .chain(self.tracks.iter().map(|track| track.end))
             .collect()
+    }
+
+    /// full track sizes, parallel to `offsets`: independent of scroll and of a
+    /// frozen pane clipping the track's leading edge.
+    fn sizes(&self) -> Vec<f32> {
+        self.tracks.iter().map(|track| track.raw_size).collect()
     }
 
     fn contains(&self, index: u32) -> bool {
@@ -640,7 +655,7 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame(wb, sheet, viewport, ghosts, resolver, None)
+    build_frame(wb, sheet, viewport, ghosts, &[], resolver, None)
 }
 
 /// `formats` receives the visible row and column runs and returns the
@@ -654,6 +669,7 @@ pub fn build_display_list_with_geometry<F, R>(
     ghosts: &[GhostEdit],
     geometry: &GridGeometry,
     max_cells: Option<u64>,
+    pictures: &[SheetPicture],
     resolver: F,
     formats: impl FnOnce(&[Range<u32>], &[Range<u32>]) -> CellFormats,
 ) -> Result<DisplayList, RenderError>
@@ -666,6 +682,7 @@ where
         sheet,
         viewport,
         ghosts,
+        pictures,
         resolver,
         None,
         Some(geometry),
@@ -680,6 +697,7 @@ pub fn build_print_display_list_with_charts<F, R>(
     viewport: &Viewport,
     metrics: &PrintMetrics,
     gridlines: bool,
+    pictures: &[SheetPicture],
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
@@ -691,6 +709,7 @@ where
         sheet,
         viewport,
         &[],
+        pictures,
         resolver,
         Some((metrics, gridlines)),
     )
@@ -701,6 +720,7 @@ fn build_frame<F, R>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
     resolver: F,
     print: Option<(&PrintMetrics, bool)>,
 ) -> Result<DisplayList, RenderError>
@@ -719,6 +739,7 @@ where
         sheet,
         viewport,
         ghosts,
+        pictures,
         resolver,
         print,
         geometry.as_ref(),
@@ -733,6 +754,7 @@ fn build_frame_with_geometry<F, R>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
     mut resolver: F,
     print: Option<(&PrintMetrics, bool)>,
     geometry: Option<&GridGeometry>,
@@ -787,7 +809,7 @@ where
             .into()
     });
     let indent_step = geometry::indent_step_px(styles, print.map(|(m, _)| m));
-    let mut fx = FrameStyles::new(styles, sheet_ref);
+    let mut fx = FrameStyles::new(styles, sheet_ref, &wb.tables, sheet);
     let geom = geometry.expect("sheet geometry initialized");
     let (rows, cols, frozen_rows, frozen_cols) =
         viewport_axes(sheet_ref, viewport, geom, print.is_some(), max_cells);
@@ -797,12 +819,18 @@ where
     let grid = GridMeta {
         start_row: rows.start(),
         start_col: cols.start(),
+        frozen_rows: (rows.frozen > 0).then_some(rows.frozen),
+        frozen_cols: (cols.frozen > 0).then_some(cols.frozen),
+        divider_x: cols.divider,
+        divider_y: rows.divider,
         hidden_row_spans: sheet_ref.hidden_row_spans(0..=MAX_ROWS - 1).collect(),
         hidden_col_spans: sheet_ref.hidden_col_spans(0..=MAX_COLS - 1).collect(),
         row_indices: rows.indices(),
         col_indices: cols.indices(),
         row_offsets: rows.offsets(),
         col_offsets: cols.offsets(),
+        row_sizes: rows.sizes(),
+        col_sizes: cols.sizes(),
     };
     let hyperlinks = sheet_ref
         .hyperlinks
@@ -896,8 +924,12 @@ where
         geom,
     );
 
-    for &(at, _) in &anchors {
-        let Some(fill) = &fx.xf_at(at).fill else {
+    let anchor_xfs: Vec<Arc<ResolvedXf>> = anchors
+        .iter()
+        .map(|&(at, _)| fx.xf_at(at).clone())
+        .collect();
+    for (&(at, _), xf) in anchors.iter().zip(&anchor_xfs) {
+        let Some(fill) = &xf.fill else {
             continue;
         };
         let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
@@ -983,8 +1015,7 @@ where
         &merge_index,
         geom,
     );
-    for &(at, _) in &anchors {
-        let xf = fx.xf_at(at).clone();
+    for (&(at, _), xf) in anchors.iter().zip(&anchor_xfs) {
         let Some(border) = &xf.border else {
             continue;
         };
@@ -1000,12 +1031,12 @@ where
         );
     }
 
-    for &(at, cell) in &anchors {
+    for (&(at, cell), xf) in anchors.iter().zip(&anchor_xfs) {
         if changed_ghost_cells.contains(&(at.row, at.col)) {
             continue;
         }
         let hyperlink = link_index.at(at);
-        let xf = &**fx.xf_at(at);
+        let xf = &**xf;
         let conditional = formats.get(&(at.row, at.col));
         let primary = cell_display_text(
             xf,
@@ -1277,6 +1308,8 @@ where
     }
 
     let mut charts = Vec::new();
+    let mut pictures =
+        picture::PictureLayer::new(pictures, geom, &paint_viewport, frozen_rows, frozen_cols);
     chart::render_charts(
         sheet_ref,
         geom,
@@ -1286,7 +1319,9 @@ where
         &mut commands,
         &mut charts,
         &mut resolver,
+        &mut |chart, commands| pictures.paint_below(chart, commands),
     )?;
+    pictures.paint_rest(&mut commands);
 
     if let Some(x) = cols.divider {
         commands.push(DrawCmd::Line {
@@ -1497,7 +1532,11 @@ fn emit_inherited_fills(
     xlsx_model::open_timing! {
         let _timing = xlsx_model::open_timing::span("style_fills");
     }
-    if sheet.col_styles.is_empty() && sheet.row_styles.is_empty() && fx.xf(None).fill.is_none() {
+    if sheet.col_styles.is_empty()
+        && sheet.row_styles.is_empty()
+        && fx.tables.is_empty()
+        && fx.xf(None).fill.is_none()
+    {
         return;
     }
     xlsx_model::open_timing! {
@@ -2027,6 +2066,7 @@ fn cell_box(
 }
 
 /// everything the frame resolves once per xf id instead of once per cell.
+#[derive(Clone)]
 struct ResolvedXf {
     format_code: Arc<str>,
     font: Option<ResolvedFont>,
@@ -2039,6 +2079,33 @@ struct ResolvedXf {
     wrap_or_shrink: bool,
     wrap: bool,
     text_rotation: Option<u16>,
+}
+
+impl ResolvedXf {
+    /// This xf over a table style: each fill and font facet the cell leaves as
+    /// the normal style has takes the table's.
+    fn under_table(&self, table: &DifferentialFormat, normal: &ResolvedFont) -> Self {
+        let mut xf = self.clone();
+        if xf.fill.is_none() {
+            xf.fill = table
+                .fill
+                .as_deref()
+                .map(|color| ResolvedFill::Solid(color.into()));
+        }
+        let font = xf.font.get_or_insert_with(ResolvedFont::default);
+        if (font.color.is_none() || font.color == normal.color)
+            && let Some(color) = &table.font_color
+        {
+            font.color = Some(color.as_str().into());
+        }
+        if font.bold == normal.bold {
+            font.bold = table.bold.unwrap_or(font.bold);
+        }
+        if font.italic == normal.italic {
+            font.italic = table.italic.unwrap_or(font.italic);
+        }
+        xf
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -2101,6 +2168,7 @@ impl ResolvedFill {
     }
 }
 
+#[derive(Clone, Default)]
 struct ResolvedFont {
     size_pt: Option<f64>,
     family: Option<Arc<str>>,
@@ -2112,6 +2180,7 @@ struct ResolvedFont {
     color: Option<Arc<str>>,
 }
 
+#[derive(Clone)]
 struct ResolvedBorder {
     top: Option<ResolvedBorderEdge>,
     left: Option<ResolvedBorderEdge>,
@@ -2119,6 +2188,7 @@ struct ResolvedBorder {
     right: Option<ResolvedBorderEdge>,
 }
 
+#[derive(Clone)]
 struct ResolvedBorderEdge {
     width: f32,
     style: Option<Arc<str>>,
@@ -2131,28 +2201,53 @@ struct FrameStyles<'a> {
     styles: &'a Stylesheet,
     xfs: HashMap<u32, Arc<ResolvedXf>>,
     defaults: ColumnDefaults<'a>,
+    tables: SheetTables<'a>,
+    table_xfs: HashMap<(u32, usize, u16), Arc<ResolvedXf>>,
 }
 
 impl<'a> FrameStyles<'a> {
-    fn new(styles: &'a Stylesheet, sheet: &'a Sheet) -> Self {
+    fn new(styles: &'a Stylesheet, sheet: &'a Sheet, tables: &'a [Table], id: SheetId) -> Self {
         FrameStyles {
             styles,
             xfs: HashMap::new(),
             defaults: ColumnDefaults::new(sheet),
+            tables: SheetTables::new(tables, id),
+            table_xfs: HashMap::new(),
         }
     }
 
-    /// The xf a cell renders with: its own, or its row's or column's default.
+    /// The xf a cell renders with: its own, or its row's or column's default,
+    /// over the style of a table covering it.
     fn xf_at(&mut self, at: CellRef) -> &Arc<ResolvedXf> {
         let style = self.defaults.effective_style(at);
-        self.xf(style)
+        if self.tables.is_empty() {
+            return self.xf(style);
+        }
+        let Some((table, mask)) = self.tables.locate(at) else {
+            return self.xf(style);
+        };
+        let (styles, xfs, tables) = (self.styles, &mut self.xfs, &self.tables);
+        self.table_xfs
+            .entry((style.unwrap_or(0), table, mask))
+            .or_insert_with(|| {
+                let format = tables.format(table, mask);
+                let normal = Self::cached(xfs, styles, Some(0)).font.clone();
+                let xf = Self::cached(xfs, styles, style);
+                Arc::new(xf.under_table(&format, &normal.unwrap_or_default()))
+            })
     }
 
     fn xf(&mut self, style: Option<u32>) -> &Arc<ResolvedXf> {
-        let styles = self.styles;
+        Self::cached(&mut self.xfs, self.styles, style)
+    }
+
+    fn cached<'x>(
+        xfs: &'x mut HashMap<u32, Arc<ResolvedXf>>,
+        styles: &Stylesheet,
+        style: Option<u32>,
+    ) -> &'x Arc<ResolvedXf> {
         let style = style.unwrap_or(0);
-        self.xfs
-            .entry(style)
+        xfs.entry(style)
             .or_insert_with(|| Arc::new(Self::resolve(styles, Some(style))))
     }
 
@@ -3272,6 +3367,18 @@ mod tests {
 
         assert_eq!(dl.grid.start_col, 0);
         assert_eq!(dl.grid.start_row, 0);
+        assert_eq!(dl.grid.frozen_cols, Some(1));
+        assert_eq!(dl.grid.frozen_rows, Some(1));
+        // the divider sits on the trailing edge of the frozen track, in the
+        // same viewport pixels the canvas draws it in.
+        assert_eq!(dl.grid.divider_x, Some(dc));
+        assert_eq!(dl.grid.divider_y, Some(dr));
+        // the wasm boundary serializes these camelCase and only when present.
+        let wire = serde_json::to_value(&dl).unwrap();
+        assert_eq!(wire["grid"]["frozenRows"], serde_json::json!(1));
+        assert_eq!(wire["grid"]["frozenCols"], serde_json::json!(1));
+        assert_eq!(wire["grid"]["dividerX"], serde_json::json!(dc));
+        assert_eq!(wire["grid"]["dividerY"], serde_json::json!(dr));
         assert_eq!(dl.grid.col_indices.as_deref(), Some(&[0, 3, 4, 5][..]));
         assert_eq!(dl.grid.row_indices.as_deref(), Some(&[0, 4, 5, 6][..]));
         assert_eq!(
@@ -3327,6 +3434,76 @@ mod tests {
                 if *y1 == dr && *y2 == dr && *width == PANE_DIVIDER_WIDTH
                     && &**color == PANE_DIVIDER_COLOR
         )));
+    }
+
+    #[test]
+    fn track_sizes_ignore_the_frozen_clip() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.col_widths.insert(0, 30.0);
+        sheet.freeze_pane = Some(FreezePane::new(1, 1, CellRef::new(2, 2)));
+        sheet.set_cell(CellRef::new(1, 1), text_cell("x"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let dr = geometry::row_pt_to_px(geometry::DEFAULT_ROW_HEIGHT_PT);
+        let frozen_w = geometry::col_chars_to_px(30.0);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 20.0,
+                y: 5.0,
+                width: 400.0,
+                height: 300.0,
+            },
+        )
+        .unwrap();
+
+        // the frozen pane clips the body tracks' start in the offset arrays...
+        assert!((dl.grid.col_sizes[0] - frozen_w).abs() < 0.01);
+        assert!((dl.grid.col_sizes[1] - dc).abs() < 0.01);
+        assert!((dl.grid.row_sizes[0] - dr).abs() < 0.01);
+        assert!((dl.grid.row_sizes[1] - dr).abs() < 0.01);
+        assert!(dl.grid.col_offsets[2] - dl.grid.col_offsets[1] < dc - 1.0);
+        assert!(dl.grid.row_offsets[2] - dl.grid.row_offsets[1] < dr - 1.0);
+
+        // ...while the sizes report the full track extent.
+        assert_eq!(dl.grid.col_sizes.len(), dl.grid.col_offsets.len() - 1);
+        assert_eq!(dl.grid.row_sizes.len(), dl.grid.row_offsets.len() - 1);
+
+        // the wire serializes the size arrays camelCase.
+        let wire = serde_json::to_value(&dl).unwrap();
+        assert!(wire["grid"]["colSizes"][1].as_f64().unwrap() > (dc - 1.0) as f64);
+        assert!(wire["grid"]["rowSizes"][1].as_f64().unwrap() > (dr - 1.0) as f64);
+    }
+
+    #[test]
+    fn unfrozen_frames_emit_no_freeze_metadata() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("body"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 200.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(dl.grid.frozen_rows, None);
+        assert_eq!(dl.grid.frozen_cols, None);
+        assert_eq!(dl.grid.divider_x, None);
+        assert_eq!(dl.grid.divider_y, None);
+        let wire = serde_json::to_value(&dl).unwrap();
+        for field in ["frozenRows", "frozenCols", "dividerX", "dividerY"] {
+            assert!(wire["grid"].get(field).is_none(), "{field} must be absent");
+        }
     }
 
     #[test]
@@ -4226,6 +4403,7 @@ mod tests {
             },
             &metrics,
             true,
+            &[],
             |_| {
                 Err::<std::sync::Arc<ooxml_drawingml::chart::ChartSpace>, _>(
                     RenderError::ChartSourceUnavailable {
@@ -4474,6 +4652,7 @@ mod tests {
             SheetId(0),
             &vp,
             &[],
+            &[],
             |chart| {
                 Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
                     part: chart.part.clone(),
@@ -4551,6 +4730,7 @@ mod tests {
             &wb,
             SheetId(0),
             &vp,
+            &[],
             &[],
             |chart| {
                 Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {

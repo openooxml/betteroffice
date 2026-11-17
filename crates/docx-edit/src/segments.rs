@@ -169,6 +169,17 @@ impl ParagraphIndex {
         Some((para.start, para.pilcrow))
     }
 
+    /// Story index of the first content unit of the first paragraph with
+    /// `para_id`, after the block embeds that lead it, where its lowered text
+    /// starts.
+    pub(crate) fn para_content_start(&self, para_id: &str) -> Option<u32> {
+        Some(
+            self.paras
+                .get(*self.by_para.get(para_id)? as usize)?
+                .node_start,
+        )
+    }
+
     /// Index of the first paragraph with `para_id`.
     pub(crate) fn para_slot(&self, para_id: &str) -> Option<u32> {
         self.by_para.get(para_id).copied()

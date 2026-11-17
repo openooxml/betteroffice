@@ -387,6 +387,8 @@ export interface PagedEditorProps {
   onCaretInputDispatched?(): void;
   /** Selection move / blur / IME / mode change: swap to the DOM caret now. */
   onCaretInterrupt?(): void;
+  /** A cut was refused because the clipboard cannot carry part of the selection. */
+  onCutRefused?(error: Error): void;
   /** `.canvas-pages` host element — canvas-path pointer events attach here. */
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   /**
@@ -623,6 +625,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onCaretInput,
       onCaretInputDispatched,
       onCaretInterrupt,
+      onCutRefused,
       canvasHostRef,
       canvasOverlayTarget = null,
       commandBridgeRef,
@@ -2311,6 +2314,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
             onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
             onCaretInterrupt={handleLocalCaretInterrupt}
+            onCutRefused={onCutRefused}
           />
         )}
 

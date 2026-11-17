@@ -271,7 +271,8 @@ fn parse_style_pools(
                     dxf_font_color = parse_color(&e)?;
                 }
                 b"patternFill" if dxf_fill && dxf.is_some() => {
-                    dxf_solid = attr(&e, b"patternType")?.is_none_or(|pattern| pattern == "solid");
+                    dxf_solid =
+                        matches!(attr(&e, b"patternType")?.as_deref(), None | Some("solid"));
                 }
                 b"fgColor" if dxf_fill && dxf.is_some() => {
                     if dxf_solid && dxf_fill_color.is_none() {
@@ -968,5 +969,14 @@ mod tests {
             };
             assert_eq!(xf.protection, protected.then_some(protection));
         }
+    }
+
+    #[test]
+    fn differential_pattern_fill_without_a_pattern_type_is_solid() {
+        let xml = br#"<styleSheet><dxfs count="1"><dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>"#;
+        let (styles, _) = parse_styles(xml, &Theme::default()).unwrap();
+        assert_eq!(styles.dxfs.len(), 1);
+        assert_eq!(styles.dxfs[0].font_color.as_deref(), Some("#9c0006"));
+        assert_eq!(styles.dxfs[0].fill.as_deref(), Some("#ffc7ce"));
     }
 }

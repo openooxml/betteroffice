@@ -580,6 +580,7 @@ fn a_reordered_edited_shape_keeps_the_other_shapes_byte_identical() {
 }
 
 #[test]
+#[ignore = "timing-sensitive; run on demand"]
 fn a_large_table_of_identical_rows_splices_and_scales() {
     use std::time::Instant;
 

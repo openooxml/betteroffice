@@ -1,14 +1,15 @@
 import { expect, mock, test } from 'bun:test';
 import { copyWorkerSelection, createClipboardPrefetch } from './clipboard';
 import type { PeerlessEditSessionBinding } from '../hooks/usePeerlessEditSession';
-import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection } from '@betteroffice/docx/yrs';
+import type { DocxClipboardFragment, DocxClipboardSlice, DocxCommandSelection, YrsTableRange } from '@betteroffice/docx/yrs';
 
 const range: DocxCommandSelection = { anchor: { story: 'body', paraId: 'a', offset: 1 }, focus: { story: 'body', paraId: 'a', offset: 4 } };
 const fragment = { paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'text', text: 'bcd' }, { kind: 'pilcrow' }] }] }] }] }] } as DocxClipboardFragment;
 
-function fixture(slice: DocxClipboardSlice = { text: 'bcd', fragment }) {
+function fixture(slice: DocxClipboardSlice = { text: 'bcd', fragment }, held?: () => boolean) {
   const listeners = new Set<() => void>();
-  let state = { identity: { session: 'clipboard', incarnation: 1, epoch: 1 }, version: 1, workerSelection: null as DocxCommandSelection | null, editState: { readOnly: false } };
+  let state = { identity: { session: 'clipboard', incarnation: 1, epoch: 1 }, version: 1, workerSelection: null as DocxCommandSelection | null, editState: { readOnly: false },
+    geometry: null as { layoutEpoch?: number } | null };
   let tail: unknown;
   const submit = mock((_intent: unknown) => ({ status: 'submitted', ticket: { ack: Promise.resolve({ status: 'applied' }) } }));
   const binding = {
@@ -17,9 +18,9 @@ function fixture(slice: DocxClipboardSlice = { text: 'bcd', fragment }) {
     commands: { submit }, session: { flush: async () => {} },
   } as unknown as PeerlessEditSessionBinding;
   const publish = (next: Partial<typeof state>) => { state = { ...state, ...next }; for (const listener of listeners) listener(); };
-  const readClipboardSlice = mock(async (_selection: DocxCommandSelection) => slice);
+  const readClipboardSlice = mock(async (_selection: DocxCommandSelection, _cells?: YrsTableRange | null) => slice);
   const readSelection = mock(async () => ({ paraId: 'a', selectedText: 'bcd', paragraphText: 'abcdef', before: 'a', after: 'ef' }));
-  const prefetch = createClipboardPrefetch({ binding, isCurrent: () => true, readSelection, readClipboardSlice });
+  const prefetch = createClipboardPrefetch({ binding, isCurrent: () => true, readSelection, readClipboardSlice, held });
   const setPending = (value: unknown) => { tail = value; };
   return { binding, publish, readClipboardSlice, readSelection, prefetch, submit, setPending };
 }
@@ -127,6 +128,45 @@ test('prefetch starts without a quiet timer and coalesces selection changes duri
   f.prefetch.dispose();
 });
 
+test('a pointer drag reads no clipboard slice until pointer-up, then one; keyboard selection stays live', async () => {
+  let dragging = false;
+  const f = fixture(undefined, () => dragging);
+  const extend = async (offset: number) => {
+    f.publish({ workerSelection: { ...range, focus: { ...range.focus, offset } } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+  };
+  dragging = true;
+  for (let offset = 2; offset <= 9; offset++) await extend(offset);
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(0);
+  expect(f.prefetch.take()).toBeNull();
+  dragging = false;
+  f.prefetch.resume();
+  expect((await settled(f.prefetch))?.selection.focus.offset).toBe(9);
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(1);
+  for (let offset = 10; offset <= 12; offset++) {
+    await extend(offset);
+    for (let turn = 0; turn < 100 && f.prefetch.take()?.selection.focus.offset !== offset; turn += 1) await new Promise(resolve => setTimeout(resolve, 5));
+    expect(f.prefetch.take()?.selection.focus.offset).toBe(offset);
+  }
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(4);
+  f.prefetch.dispose();
+});
+
+test('a relayout at one document version reads the slice again; frames that keep the layout do not', async () => {
+  const f = fixture();
+  f.publish({ workerSelection: range, geometry: { layoutEpoch: 1 } });
+  expect(await settled(f.prefetch)).not.toBeNull();
+  f.publish({ geometry: { layoutEpoch: 1 } });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(f.prefetch.take()).not.toBeNull();
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(1);
+  f.publish({ geometry: { layoutEpoch: 2 } });
+  expect(f.prefetch.take()).toBeNull();
+  expect(await settled(f.prefetch)).not.toBeNull();
+  expect(f.readClipboardSlice).toHaveBeenCalledTimes(2);
+  f.prefetch.dispose();
+});
+
 for (const failed of [false, true]) test(`prefetch memoizes ${failed ? 'failed' : 'empty'} reads until the key changes`, async () => {
   const f = fixture({ text: '', fragment: null });
   if (failed) f.readClipboardSlice.mockRejectedValue(new Error('unavailable'));
@@ -218,5 +258,73 @@ test('a pending cut cannot adopt a selection changed while its read is in flight
   await expect(copied).rejects.toThrow('Selection read was superseded');
   expect(writeNative).not.toHaveBeenCalled();
   expect(f.submit).not.toHaveBeenCalled();
+  f.prefetch.dispose();
+});
+
+test('a pending copy completes with the selection it was pressed on after the selection changes', async () => {
+  const f = fixture();
+  let finish!: (slice: DocxClipboardSlice) => void;
+  f.readClipboardSlice.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  f.publish({ workerSelection: range });
+  const writeNative = mock((_capture: NonNullable<ReturnType<typeof f.prefetch.take>>) => true);
+  const copied = copyWorkerSelection({ ...f, isCurrent: () => true,
+    readCapture: () => f.prefetch.read(), writeNative, write: denied, writeSlice: denied });
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  f.publish({ workerSelection: { ...range, focus: { ...range.focus, offset: 5 } } });
+  finish({ text: 'bcd', fragment: null });
+  expect(await copied).toBe(true);
+  expect(writeNative.mock.calls[0]?.[0].selection).toEqual(range);
+  expect(writeNative.mock.calls[0]?.[0].slice.text).toBe('bcd');
+  expect(f.submit).not.toHaveBeenCalled();
+  f.prefetch.dispose();
+});
+
+test('a copy pressed while earlier input is pending reads the selection that input leaves, not later input', async () => {
+  const f = fixture();
+  let selected!: () => void;
+  let clicked!: () => void;
+  f.setPending({ ack: new Promise<void>(resolve => { selected = resolve; }) });
+  const writeNative = mock((_capture: NonNullable<ReturnType<typeof f.prefetch.take>>) => true);
+  const copied = copyWorkerSelection({ ...f, isCurrent: () => true, readCapture: () => f.prefetch.read(),
+    writeNative, write: denied, writeSlice: denied });
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  f.setPending({ ack: new Promise<void>(resolve => { clicked = resolve; }) });
+  f.publish({ workerSelection: range });
+  selected();
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  f.publish({ workerSelection: { anchor: range.focus, focus: range.focus } });
+  f.setPending(undefined);
+  clicked();
+  expect(await copied).toBe(true);
+  expect(writeNative.mock.calls[0]?.[0].selection).toEqual(range);
+  f.prefetch.dispose();
+});
+
+test('a pending copy keeps the cell selection it was pressed with when cells are selected after the key press', async () => {
+  const f = fixture();
+  const inCell: DocxCommandSelection = { anchor: { story: 'body:t0:r0:c0', paraId: 'c', offset: 0 }, focus: { story: 'body:t0:r0:c0', paraId: 'c', offset: 3 } };
+  const cells: YrsTableRange = { anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 }, head: { story: 'body', tableIndex: 0, row: 1, column: 1 } };
+  const liveCells = () => (f.binding.viewStore.getSnapshot() as unknown as { editState: { tableContext?: { cells?: YrsTableRange } } }).editState.tableContext?.cells;
+  f.readClipboardSlice.mockImplementation(async (_selection, pressed) =>
+    (pressed === undefined ? liveCells() : pressed) ? { text: 'a\tb\nc\td', fragment } : { text: 'bcd', fragment: null });
+  let selected!: () => void;
+  let clicked!: () => void;
+  f.setPending({ ack: new Promise<void>(resolve => { selected = resolve; }) });
+  const writeNative = mock((_capture: NonNullable<ReturnType<typeof f.prefetch.take>>) => true);
+  const copied = copyWorkerSelection({ ...f, isCurrent: () => true, readCapture: () => f.prefetch.read(),
+    writeNative, write: denied, writeSlice: denied });
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  f.setPending({ ack: new Promise<void>(resolve => { clicked = resolve; }) });
+  f.publish({ workerSelection: inCell });
+  selected();
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  const editState = { readOnly: false, tableContext: { hasMultiCellSelection: true, cells } };
+  f.publish({ workerSelection: { anchor: inCell.anchor, focus: inCell.anchor }, editState });
+  f.setPending(undefined);
+  clicked();
+  expect(await copied).toBe(true);
+  expect(writeNative.mock.calls[0]?.[0].selection).toEqual(inCell);
+  expect(writeNative.mock.calls[0]?.[0].slice.text).toBe('bcd');
+  expect(f.readClipboardSlice.mock.calls.at(-1)).toEqual([inCell, null]);
   f.prefetch.dispose();
 });

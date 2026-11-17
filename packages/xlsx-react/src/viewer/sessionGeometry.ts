@@ -1,5 +1,6 @@
 import type { CellAddr, CellRange, DisplayList, MergedRange, Rect, SelectionLimits, SheetInfo, Viewport, WorkbookSheetView } from '@betteroffice/xlsx';
 import { cellAtPoint, cellRect, chartRegionAtPoint } from '@betteroffice/xlsx';
+import { XLSX_MAX_COLUMNS, XLSX_MAX_ROWS } from '../sheetLimits';
 import type { XlsxPointPosition } from '../XlsxEditor';
 
 const ROW_H = 24;
@@ -111,8 +112,13 @@ function intersects(left: CellRange, right: CellRange): boolean {
 
 export function expandRangeToMergedCells(
   range: CellRange,
-  mergedRanges: readonly MergedRange[]
+  mergedRanges: readonly MergedRange[],
+  keepWholeTracks = false
 ): CellRange {
+  // with sheet headers shown, a whole column or row is chrome, not a rectangular
+  // cell selection: a merged cell inside it must not widen it past the track.
+  if (keepWholeTracks && range.top === 0 && range.bottom === XLSX_MAX_ROWS - 1) return { ...range };
+  if (keepWholeTracks && range.left === 0 && range.right === XLSX_MAX_COLUMNS - 1) return { ...range };
   const expanded = { ...range };
   let changed = true;
   while (changed) {
