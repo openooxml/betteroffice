@@ -2308,7 +2308,7 @@ async function handle(request: ScheduledRequest): Promise<void> {
           mediaDataUrl: (source: string) => resident.mediaDataUrl(source),
         };
         const { anchor, focus } = request.read.selection;
-        const cells = session.cellSelection();
+        const cells = request.read.cells === undefined ? session.cellSelection() : request.read.cells;
         const multiCell = !!cells && (cells.anchor.story !== cells.head.story ||
           cells.anchor.tableIndex !== cells.head.tableIndex ||
           cells.anchor.row !== cells.head.row || cells.anchor.column !== cells.head.column);

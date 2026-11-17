@@ -23,6 +23,8 @@ mod rich_text_tests;
 #[cfg(any(test, feature = "test-oracle"))]
 mod save_oracle;
 mod styles;
+mod table_style;
+mod table_style_presets;
 mod tree;
 mod write;
 mod xml;

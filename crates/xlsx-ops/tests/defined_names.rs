@@ -60,6 +60,7 @@ fn defined_name_validation_rejects_table_conflicts_duplicates_and_invalid_formul
         header_rows: 1,
         totals_rows: 0,
         columns: vec!["Value".into()],
+        style: Vec::new(),
     });
     for op in [
         set("items", "1", None, None),

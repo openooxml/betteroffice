@@ -5,7 +5,7 @@ use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Border, BorderEdge, BorderStyle,
     Cell, CellRef, ChartAnchor, ChartRef, ChartRefKind, ColStyle, Color, DefinedName, Fill, Font,
     FreezePane, HAlign, Hyperlink, PatternType, Protection, RunUnderline, Sheet, SheetChart,
-    SheetFormat, SheetId, Table, Theme, VAlign, Workbook, Xf,
+    SheetFormat, SheetId, Table, TableStyleElement, Theme, VAlign, Workbook, Xf,
 };
 
 use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, write_ref};
@@ -61,6 +61,18 @@ const CHART_XML: u8 = 34;
 const SIZED_SHEET: u8 = 35;
 /// A sheet record laid out as `SIZED_SHEET` whose sheet hides its gridlines.
 const GRIDLESS_SHEET: u8 = 36;
+/// A table record that also carries the table's style; a table without one
+/// keeps the `TABLE` layout.
+const STYLED_TABLE: u8 = 37;
+
+/// A `STYLED_TABLE` record: the `TABLE` layout, then the style.
+type StyledTableRecord = (
+    (
+        String,
+        (SheetId, (xlsx_model::CellRange, (u32, (u32, usize)))),
+    ),
+    Vec<TableStyleElement>,
+);
 
 const XF_V2: u8 = 21;
 const FILL_V2: u8 = 22;
@@ -71,6 +83,7 @@ fn run_tag(tag: u8) -> u8 {
         CONDITIONAL_HEADER | AUTO_FILTER_HEADER => HEADER,
         STYLED_SHEET | HIDDEN_SHEET | SIZED_SHEET | GRIDLESS_SHEET => SHEET,
         CHART_XML => CHART,
+        STYLED_TABLE => TABLE,
         XF_V2 => XF,
         CONDITIONAL_FORMATS_V2 => CONDITIONAL_FORMATS,
         FILL_V2 => FILL,
@@ -387,6 +400,7 @@ impl MetadataCursor {
             }
             let tag = match self.phase {
                 TABLE if self.child != 0 => TABLE_COLUMN,
+                TABLE if !model.tables[self.index].style.is_empty() => STYLED_TABLE,
                 FILL => FILL_V2,
                 BORDER => BORDER_V2,
                 XF if model.styles.is_released_xf(self.index) => XF,
@@ -416,6 +430,9 @@ impl MetadataCursor {
                     let table = &model.tables[self.index];
                     if self.child == 0 {
                         write_table(w, table);
+                        if tag == STYLED_TABLE {
+                            table.style.write(w);
+                        }
                     } else {
                         w.str(&table.columns[self.child - 1]);
                     }
@@ -786,6 +803,7 @@ impl ModelSnapshotBuilder {
                 String,
                 (SheetId, (xlsx_model::CellRange, (u32, (u32, usize))))
             )),
+            STYLED_TABLE => preflight!(StyledTableRecord),
             CHART => preflight!((String, (String, (usize, (ChartAnchor, usize))))),
             CHART_XML => preflight!((String, (String, (usize, (ChartAnchor, (usize, String)))))),
             _ => Err(SnapshotError::new(
@@ -922,12 +940,18 @@ impl ModelSnapshotBuilder {
                     .push(value);
                 end
             }
-            TABLE => {
-                let ((name, (sheet, (range, (header_rows, (totals_rows, columns))))), end) =
-                    decoded!((
-                        String,
-                        (SheetId, (xlsx_model::CellRange, (u32, (u32, usize))))
-                    ));
+            TABLE | STYLED_TABLE => {
+                let ((name, (sheet, (range, (header_rows, (totals_rows, columns))))), style, end) =
+                    if tag == STYLED_TABLE {
+                        let ((table, style), end) = decoded!(StyledTableRecord);
+                        (table, style, end)
+                    } else {
+                        let (table, end) = decoded!((
+                            String,
+                            (SheetId, (xlsx_model::CellRange, (u32, (u32, usize))))
+                        ));
+                        (table, Vec::new(), end)
+                    };
                 self.model.tables.push(Table {
                     name,
                     sheet,
@@ -935,6 +959,7 @@ impl ModelSnapshotBuilder {
                     header_rows,
                     totals_rows,
                     columns: Vec::new(),
+                    style,
                 });
                 if columns != 0 {
                     self.runs.push_front((TABLE_COLUMN, columns));
@@ -980,7 +1005,7 @@ impl ModelSnapshotBuilder {
                 ));
             }
         };
-        let index = if matches!(tag, TABLE | CHART | CHART_XML) {
+        let index = if matches!(tag, TABLE | STYLED_TABLE | CHART | CHART_XML) {
             usize::from(
                 self.runs
                     .front()
@@ -1247,8 +1272,11 @@ impl ModelSnapshotBuilder {
                 self.theme_index += 1;
             }
             INDEXED => self.model.styles.indexed_colors.push(r.str()?.to_owned()),
-            TABLE => {
-                let (table, columns) = read_table(r)?;
+            TABLE | STYLED_TABLE => {
+                let (mut table, columns) = read_table(r)?;
+                if raw == STYLED_TABLE {
+                    table.style = Codec::read(r)?;
+                }
                 self.model.tables.push(table);
                 if columns != 0 {
                     self.runs.push_front((TABLE_COLUMN, columns));
@@ -1649,6 +1677,7 @@ fn write_table(w: &mut Writer, value: &Table) {
         header_rows,
         totals_rows,
         columns,
+        style: _,
     } = value;
     let SheetId(index) = sheet;
     w.str(name);
@@ -1667,6 +1696,7 @@ fn read_table(r: &mut Reader<'_>) -> SnapshotResult<(Table, usize)> {
         header_rows: r.var_u32()?,
         totals_rows: r.var_u32()?,
         columns: Vec::new(),
+        style: Vec::new(),
     };
     Ok((table, r.var_usize()?))
 }
@@ -2638,7 +2668,7 @@ mod tests {
                 .unwrap();
             let (kind, ordinal, payload) = unframe(chunk).unwrap();
             let mut payload = payload.to_vec();
-            payload[0] = GRIDLESS_SHEET + 1;
+            payload[0] = STYLED_TABLE + 1;
             *chunk = frame(kind, ordinal, &payload);
             let mut builder = ModelSnapshotBuilder::new();
             let refused = unknown
@@ -3460,6 +3490,7 @@ mod tests {
                     header_rows: 0,
                     totals_rows: u32::MAX,
                     columns: vec!["same".into(), String::new(), "same".into()],
+                    style: Vec::new(),
                 },
                 Table {
                     name: "Empty".into(),
@@ -3468,6 +3499,14 @@ mod tests {
                     header_rows: u32::MAX,
                     totals_rows: 0,
                     columns: Vec::new(),
+                    style: vec![xlsx_model::TableStyleElement {
+                        kind: xlsx_model::TableStyleElementType::SecondRowStripe,
+                        size: 2,
+                        format: xlsx_model::DifferentialFormat {
+                            fill: Some("#dde4f0".into()),
+                            ..Default::default()
+                        },
+                    }],
                 },
             ],
         }
