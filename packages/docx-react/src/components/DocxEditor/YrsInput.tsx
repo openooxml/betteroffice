@@ -806,13 +806,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           for (let i = 0; i < pieces.length; i += 1) {
             const piece = pieces[i]!;
             if (piece || (i === 0 && hasSelection)) {
-              const insertedAt = caret;
+              let insertedAt = caret;
               if (i === 0 && hasSelection) {
                 const receipt = session.replaceRange(range, piece, suggestingAuthor());
-                if (receipt.range) caret = { story: receipt.range.story, ...receipt.range.end };
-                else caret = { ...caret, offset: caret.offset + piece.length };
+                if (receipt.range) {
+                  insertedAt = { story: receipt.range.story, ...receipt.range.start };
+                  caret = { story: receipt.range.story, ...receipt.range.end };
+                } else caret = { ...caret, offset: caret.offset + piece.length };
               } else {
                 const landed = session.insertText(caret, piece, suggestingAuthor()).range;
+                if (landed) insertedAt = { story: landed.story, ...landed.start };
                 caret = landed ? { story: landed.story, ...landed.end } : { ...caret, offset: caret.offset + piece.length };
               }
               if (i === 0 && piece && record.stored) {
