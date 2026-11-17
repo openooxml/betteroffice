@@ -1,7 +1,8 @@
+import { join } from 'node:path';
 import { defineConfig } from 'tsup';
 import { buildWorkerStub } from '../../scripts/worker-stub';
 
-export default defineConfig([
+export default defineConfig((options) => [
   {
     entry: {
       core: 'src/core.ts',
@@ -66,8 +67,9 @@ export default defineConfig([
       options.chunkNames = 'chunk-[hash]';
     },
     onSuccess: async () => {
-      await buildWorkerStub({ entry: 'src/yrs/docxWorker.browser.ts', outfile: 'dist/docxWorker.mjs', start: './yrs/residentEngineWorker.mjs' });
-      await buildWorkerStub({ entry: 'src/yrs/docxWorker.browser.ts', outfile: 'dist/yrs/docxWorker.mjs', start: './residentEngineWorker.mjs' });
+      const out = options.outDir ?? 'dist';
+      await buildWorkerStub({ entry: 'src/yrs/docxWorker.browser.ts', outfile: join(out, 'docxWorker.mjs'), start: './yrs/residentEngineWorker.mjs' });
+      await buildWorkerStub({ entry: 'src/yrs/docxWorker.browser.ts', outfile: join(out, 'yrs/docxWorker.mjs'), start: './residentEngineWorker.mjs' });
     },
   },
 ]);

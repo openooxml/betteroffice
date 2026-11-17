@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { build as esbuild } from 'esbuild';
 import { build as vite } from 'vite';
 import { nextWebpack } from './check-webpack-exports.mjs';
+import { validatePublishedWorker } from './worker-entry-check.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const cache = join(root, 'node_modules/.cache');
@@ -18,8 +19,6 @@ const publishedWorkers = [
   ['docx', 'dist/yrs/docxWorker.mjs'],
 ];
 const staticImport = /\b(?:from|import)\s*["'`]([^"'`]+)["'`]/g;
-const dynamicImport = /(?<![\w$.])import\s*\(/g;
-const dynamicTarget = /(?<![\w$.])import\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
 const app = `
 import { openWorkbookSession } from '@betteroffice/xlsx/worker';
 import { openPresentationSession } from '@betteroffice/pptx/worker';
@@ -85,11 +84,9 @@ async function checkPublishedWorkerStubs() {
       failures.push(`${format} ${file} is missing`);
       continue;
     }
-    const imported = [...contents.matchAll(staticImport)].map(([, specifier]) => specifier);
-    if (imported.length > 0) failures.push(`${format} ${file} statically imports ${imported.join(', ')}; it must only import its code dynamically`);
-    const dynamic = contents.match(dynamicImport)?.length ?? 0;
-    if (dynamic !== 1) failures.push(`${format} ${file} has ${dynamic} dynamic imports; it must load its code with exactly one`);
-    for (const [, target] of contents.matchAll(dynamicTarget)) {
+    const { problems, target } = await validatePublishedWorker(contents);
+    failures.push(...problems.map(problem => `${format} ${file} ${problem}`));
+    if (target !== null) {
       const resolved = resolve(dirname(path), target);
       const inside = !relative(dist, resolved).startsWith('..');
       if (!inside || !await access(resolved).then(() => true, () => false)) {
