@@ -178,6 +178,12 @@ fn arraytotext_concise_and_strict() {
             ("ARRAYTOTEXT({1,2;3,4})", text("1, 2, 3, 4")),
             ("ARRAYTOTEXT(_xlfn.SEQUENCE(1,3),1)", text("{1,2,3}")),
             ("ARRAYTOTEXT(5)", text("5")),
+            ("ARRAYTOTEXT(200/3)", text("66.6666666666667")),
+            (
+                "ARRAYTOTEXT(_xlfn.SEQUENCE(1,2)/3,1)",
+                text("{0.333333333333333,0.666666666666667}"),
+            ),
+            ("ARRAYTOTEXT(1/0,1)", error(ErrorValue::Div0)),
             ("ARRAYTOTEXT(A4,1)", text("{\"Hello\"}")),
             ("ARRAYTOTEXT(A2:B4,3)", error(ErrorValue::Value)),
             ("ARRAYTOTEXT()", error(ErrorValue::Value)),
