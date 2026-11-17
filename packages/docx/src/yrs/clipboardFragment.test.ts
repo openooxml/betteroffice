@@ -588,8 +588,22 @@ describe('applyClipboardFragment', () => {
       ] }],
     });
     expect(calls).toEqual([
-      'text:a', 'clear',
+      'text:a', 'clear', 'link:null',
       'text:b', 'clear', 'format:{"other":{"bold":true}}', 'link:{"href":"https://example.test","tooltip":"Tip"}',
+    ]);
+  });
+
+  test('a pasted link does not carry into the next plain run', () => {
+    const calls: string[] = [];
+    applyClipboardFragment(fakeEngine(calls), { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 0 } }, {
+      paragraphs: [{ text: 'ab', runs: [
+        { text: 'a', format: { other: {} }, href: 'https://example.test' },
+        { text: 'b', format: { other: {} } },
+      ] }],
+    });
+    expect(calls).toEqual([
+      'text:a', 'clear', 'link:{"href":"https://example.test"}',
+      'text:b', 'clear', 'link:null',
     ]);
   });
 
