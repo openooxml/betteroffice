@@ -112,6 +112,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   });
   const pasteOptionsRef = useRef(pasteOptions);
   pasteOptionsRef.current = pasteOptions;
+  const positionRef = useRef<(() => void) | null>(null);
   const attach = useCallback((element: HTMLTextAreaElement | null) => {
     textarea.current = element;
     if (typeof textareaRef === 'function') textareaRef(element);
@@ -189,12 +190,21 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const delta = scrollIntoViewDelta(scrollViewport(scroller), top, top + height, 24);
       if (delta) scroller.scrollTop += delta;
     };
-    const follow = () => { if (pasteOptionsRef.current.visible) position(); };
+    positionRef.current = position;
     position();
-    window.addEventListener('scroll', follow, true);
     window.addEventListener('resize', position);
-    return () => { window.removeEventListener('scroll', follow, true); window.removeEventListener('resize', position); };
+    return () => {
+      if (positionRef.current === position) positionRef.current = null;
+      window.removeEventListener('resize', position);
+    };
   }, [snapshot.geometry, snapshot.throughSeq, props.caretHostRef, props.zoom, viewStore]);
+
+  useLayoutEffect(() => {
+    if (!pasteOptions.visible) return;
+    const follow = () => { positionRef.current?.(); };
+    window.addEventListener('scroll', follow, true);
+    return () => window.removeEventListener('scroll', follow, true);
+  }, [pasteOptions.visible]);
 
   useLayoutEffect(() => {
     const record = pasteRecordRef.current;
