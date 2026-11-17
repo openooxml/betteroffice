@@ -605,8 +605,9 @@ for (const selected of [true, false]) {
       if (selected) {
         const struck = texts().filter((segment) => segment.kind === 'text' && segment.attributes.del);
         expect(struck.map((segment) => segment.kind === 'text' ? segment.text : '')).toEqual(['orig']);
-        const length = engine.paragraphs('body').find((paragraph) => paragraph.paraId === paraId)!.text.length;
-        engine.rejectChange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: length } });
+        for (const revisionId of new Set(engine.geometryReader.listRevisions().map((revision) => revision.revisionId))) {
+          engine.rejectChange({ revisionId });
+        }
         expect(engine.paragraphs('body').find((paragraph) => paragraph.paraId === paraId)?.text).toBe('a orig b');
         expect(texts().some((segment) => segment.kind === 'text' && (segment.attributes.bold === true || segment.attributes.italic === true))).toBe(false);
       }
