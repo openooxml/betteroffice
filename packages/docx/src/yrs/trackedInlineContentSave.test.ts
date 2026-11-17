@@ -161,24 +161,25 @@ describe('a line break and a comment reference inside a tracked change', () => {
     }
   }
 
-  it('accepting a tracked deletion that holds a comment reference removes the reference and keeps the comment with its range', async () => {
-    const source = paragraph(`${COMMENTED}${tracked(DEL, `${dt('left')}${COMMENT_REFERENCE}${dt('right')}`)}`);
-    const saved = await resolvedAndSaved(docx(source), DEL, 'accept');
+  const REFERENCE_BESIDE_RANGE = '<w:commentRangeEnd w:id="5"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="5"/></w:r>';
+
+  function expectReferenceBesideRange(saved: Uint8Array): void {
     const xml = part(saved, 'word/document.xml');
-    expect(count(xml, /<w:commentReference\b/g)).toBe(0);
-    expect(count(xml, /<w:del\b/g)).toBe(0);
-    expect(render(body(xml))).toBe('Headnoted tail');
+    expect(count(xml, /<w:commentReference\b/g)).toBe(1);
+    expect(xml.split(REFERENCE_BESIDE_RANGE)).toHaveLength(2);
+    expect(count(xml, /<w:(ins|del)\b/g)).toBe(0);
+    expect(render(body(xml))).toBe('Headnoted[ref 5] tail');
     expectCommentResolves(saved);
+  }
+
+  it('accepting a tracked deletion that holds a comment reference moves the reference beside the comment\'s range and keeps the comment', async () => {
+    const source = paragraph(`${COMMENTED}${tracked(DEL, `${dt('left')}${COMMENT_REFERENCE}${dt('right')}`)}`);
+    expectReferenceBesideRange(await resolvedAndSaved(docx(source), DEL, 'accept'));
   });
 
-  it('rejecting a tracked insertion that holds a comment reference removes the reference and keeps the comment with its range', async () => {
+  it('rejecting a tracked insertion that holds a comment reference moves the reference beside the comment\'s range and keeps the comment', async () => {
     const source = paragraph(`${COMMENTED}${tracked(INS, `${t('left')}${COMMENT_REFERENCE}${t('right')}`)}`);
-    const saved = await resolvedAndSaved(docx(source), INS, 'reject');
-    const xml = part(saved, 'word/document.xml');
-    expect(count(xml, /<w:commentReference\b/g)).toBe(0);
-    expect(count(xml, /<w:ins\b/g)).toBe(0);
-    expect(render(body(xml))).toBe('Headnoted tail');
-    expectCommentResolves(saved);
+    expectReferenceBesideRange(await resolvedAndSaved(docx(source), INS, 'reject'));
   });
 
   it('saving without an edit writes the source document part unchanged', async () => {
