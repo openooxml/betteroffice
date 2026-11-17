@@ -1046,6 +1046,116 @@ fn paragraph_patch_s13_a_part_written_whole_with_all_its_structure_reports_nothi
     );
 }
 
+fn saved_report(source: &str, request: S13SaveRequest) -> S13SaveReport {
+    let parts = ooxml_opc::unzip_parts(&base_package(source)).unwrap();
+    let (_, report) = write_docx_s13_parts_with_report(request.clone(), &parts, None).unwrap();
+    assert_eq!(report.warnings, saved_document(source, request).1);
+    report
+}
+
+fn warning_json(warnings: &[String], prefix: &str) -> Option<Value> {
+    warnings
+        .iter()
+        .find_map(|warning| warning.strip_prefix(prefix))
+        .map(|json| serde_json::from_str(json).unwrap())
+}
+
+fn unless_empty(empty: bool, value: Value) -> Option<Value> {
+    (!empty).then_some(value)
+}
+
+fn assert_report_matches_warnings(report: &S13SaveReport) {
+    let warnings = &report.warnings;
+    assert_eq!(
+        warning_json(warnings, "DOCX_KEPT_UNCHANGED structure "),
+        unless_empty(
+            report.kept_unchanged.is_empty(),
+            json!(report.kept_unchanged)
+        )
+    );
+    assert_eq!(
+        warning_json(warnings, "DOCX_KEPT_PARAGRAPHS "),
+        unless_empty(
+            report.kept_paragraphs.is_empty(),
+            json!(report.kept_paragraphs)
+        )
+    );
+    assert_eq!(
+        warning_json(warnings, "DOCX_STRUCTURE_DROPPED "),
+        unless_empty(
+            report.structure_dropped.is_empty(),
+            json!(report.structure_dropped)
+        )
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_report_types_the_kept_paragraphs_its_warnings_describe() {
+    for (tag, middle) in STRUCTURES {
+        let (source, request) = formatting_alone(middle);
+        let report = saved_report(&source, request);
+        assert_report_matches_warnings(&report);
+        assert_eq!(
+            report.kept_unchanged,
+            BTreeMap::from([("word/document.xml".to_owned(), 1)]),
+            "{tag}"
+        );
+        assert_eq!(report.kept_paragraphs.len(), 1, "{tag}");
+        assert_eq!(report.kept_paragraphs[0].part, "word/document.xml");
+        assert_eq!(report.kept_paragraphs[0].scope, "paragraph");
+        assert!(
+            serde_json::to_string(&report.kept_paragraphs[0].dropped)
+                .unwrap()
+                .contains(tag),
+            "{tag}"
+        );
+        assert!(report.structure_dropped.is_empty(), "{tag}");
+    }
+}
+
+#[test]
+fn paragraph_patch_s13_report_types_a_part_kept_whole() {
+    for (tag, middle) in STRUCTURES {
+        let (source, mut request) = formatting_alone(middle);
+        request.paragraph_ids.as_mut().unwrap().spliced_parts[0]
+            .paragraphs
+            .push(99);
+        let report = saved_report(&source, request);
+        assert_report_matches_warnings(&report);
+        assert_eq!(
+            report.kept_unchanged,
+            BTreeMap::from([("word/document.xml".to_owned(), 3)]),
+            "{tag}"
+        );
+        assert!(
+            report
+                .kept_paragraphs
+                .iter()
+                .any(|paragraph| paragraph.scope == "part"),
+            "{tag}"
+        );
+        assert!(report.structure_dropped.is_empty(), "{tag}");
+    }
+}
+
+#[test]
+fn paragraph_patch_s13_report_types_the_structure_its_warnings_say_dropped() {
+    let (source, mut request) = mixed_request(HYPERLINK);
+    request
+        .paragraph_ids
+        .as_mut()
+        .unwrap()
+        .spliced_parts
+        .clear();
+    let report = saved_report(&source, request);
+    assert_report_matches_warnings(&report);
+    assert!(report.kept_unchanged.is_empty());
+    assert!(report.kept_paragraphs.is_empty());
+    assert_eq!(report.structure_dropped.len(), 1);
+    assert_eq!(report.structure_dropped[0].part, "word/document.xml");
+    assert_eq!(report.structure_dropped[0].dropped, ["w:hyperlink"]);
+}
+
 #[test]
 fn paragraph_patch_s13_admission_rejection_replaces_only_changed_paragraphs() {
     let (source, mut request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");

@@ -1,0 +1,54 @@
+[
+  {
+    "name": "three lines of 9 pt text in a 32 pt row",
+    "height": 43.667, "lineHeight": 16, "fontSize": 9, "maxLines": 3
+  },
+  {
+    "name": "two lines of 10 pt text in a 21 pt row",
+    "height": 29, "lineHeight": 17.333, "fontSize": 10, "maxLines": 2
+  },
+  {
+    "name": "three lines of 10 pt text in a 32 pt merged area",
+    "height": 43.667, "lineHeight": 17.333, "fontSize": 10, "maxLines": 3
+  },
+  {
+    "name": "two lines of 14 pt text in a 29.25 pt row",
+    "height": 40, "lineHeight": 24.667, "fontSize": 14, "maxLines": 2
+  },
+  {
+    "name": "the third line of 12 pt text mostly below a 28 pt row",
+    "height": 38.333, "lineHeight": 20, "fontSize": 12, "maxLines": 2
+  },
+  {
+    "name": "the second line of 11 pt text mostly below a 14 pt row",
+    "height": 19.667, "lineHeight": 18.667, "fontSize": 11, "maxLines": 1
+  },
+  {
+    "name": "the second line of 10 pt text mostly below a 12 pt row",
+    "height": 17, "lineHeight": 17.333, "fontSize": 10, "maxLines": 1
+  },
+  {
+    "name": "the third line of 9 pt text below a 26 px row",
+    "height": 27, "lineHeight": 13.4, "fontSize": 9, "maxLines": 2
+  },
+  {
+    "name": "the fourth line of 9 pt text with its top half exactly inside a 36.75 pt row",
+    "height": 50, "lineHeight": 14.666667, "fontSize": 9, "maxLines": 4
+  },
+  {
+    "name": "the fifth line of 11 pt text with its top half just inside a 60.75 pt row",
+    "height": 81.99813, "lineHeight": 18.666666, "fontSize": 11, "maxLines": 5
+  },
+  {
+    "name": "fifteen lines of 9 pt text in a 150 pt row",
+    "height": 201, "lineHeight": 13.4, "fontSize": 9, "maxLines": 15
+  },
+  {
+    "name": "two lines of 36 pt text",
+    "height": 108.3, "lineHeight": 53.6, "fontSize": 36, "maxLines": 2
+  },
+  {
+    "name": "no line fits and the first still paints",
+    "height": 5, "lineHeight": 13.4, "fontSize": 9, "maxLines": 1
+  }
+]
