@@ -9,10 +9,14 @@ from ._betteroffice_docx import (
     decode_font_face,
     font_substitute,
     DisplayList,
+    DroppedParagraph,
+    DroppedStructure,
     Edit,
     EditError,
     ExportError,
     HeaderFooter,
+    KeptParagraph,
+    KeptUnchanged,
     Layout,
     LayoutError,
     MAX_PIXMAP_DIM,
@@ -21,6 +25,7 @@ from ._betteroffice_docx import (
     ParseError,
     Png,
     RenderError,
+    SaveReport,
     Section,
     Structure,
     Table,
@@ -44,10 +49,14 @@ __all__ = [
     "DisplayList",
     "Document",
     "DocxError",
+    "DroppedParagraph",
+    "DroppedStructure",
     "Edit",
     "EditError",
     "ExportError",
     "HeaderFooter",
+    "KeptParagraph",
+    "KeptUnchanged",
     "Layout",
     "LayoutError",
     "MAX_PIXMAP_DIM",
@@ -57,6 +66,7 @@ __all__ = [
     "ParseError",
     "Png",
     "RenderError",
+    "SaveReport",
     "Section",
     "Structure",
     "TWIPS_PER_INCH",
@@ -339,6 +349,18 @@ class Document:
     ) -> bytes:
         """Serialize back to DOCX bytes, edits included."""
         return self._inner.save(
+            now=now, update_modified_date=update_modified_date, modified_by=modified_by
+        )
+
+    def save_report(
+        self,
+        *,
+        now: "str | None" = None,
+        update_modified_date: bool = False,
+        modified_by: "str | None" = None,
+    ) -> SaveReport:
+        """``save``'s bytes with what the save kept as source bytes or dropped."""
+        return self._inner.save_report(
             now=now, update_modified_date=update_modified_date, modified_by=modified_by
         )
 
