@@ -36,6 +36,7 @@ test('composition_steps_take_the_resident_text_edit_and_keep_the_typed_over_form
   expect(execute(arm, command(arm, 'toggleMark', { mark: { type: 'bold' }, selection: selection(id, 4, 7) })).status).toBe('applied');
   const resident = spyOn(arm.native, 'edit_text_resident');
   const replaced = spyOn(arm.native, 'replace_range');
+  const spans = spyOn(arm.engine.geometryReader, 'paragraphSpans');
   try {
     // Typing over a bold word: the composition keeps the bold although the space before it is not bold.
     expect(execute(arm, command(arm, 'replaceSelection', { text: 'ㄱ', selection: selection(id, 4, 7) })).status).toBe('applied');
@@ -45,6 +46,8 @@ test('composition_steps_take_the_resident_text_edit_and_keep_the_typed_over_form
     expect(arm.engine.selectionContext(storyRange(selection(id, 4, 5))).bold).toBe(true);
     expect(replaced).not.toHaveBeenCalled();
     expect(resident.mock.calls.map(call => [call[2], call[4], call[5]])).toEqual([[4, 7, 'ㄱ'], [4, 5, '가'], [4, 5, '각']]);
+    // A step reads the caret's paragraph alone, not every paragraph of the story.
+    expect(spans).not.toHaveBeenCalled();
     resident.mockClear();
     const removed = step(arm, '', '각');
     expect(removed.status).toBe('applied');
@@ -53,6 +56,7 @@ test('composition_steps_take_the_resident_text_edit_and_keep_the_typed_over_form
     expect(resident.mock.calls.map(call => [call[2], call[4], call[5]])).toEqual([[4, 5, undefined]]);
     expect(replaced).not.toHaveBeenCalled();
   } finally {
+    spans.mockRestore();
     resident.mockRestore();
     replaced.mockRestore();
   }

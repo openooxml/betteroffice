@@ -466,7 +466,8 @@ function collapsed(range: YrsStoryRange): boolean {
 function textRangeBefore(engine: DocxWorkerCommandEngine, range: YrsStoryRange, expected: string): YrsStoryRange | null {
   const end = range.start;
   if (!collapsed(range) || end.offset < expected.length) return null;
-  const index = engine.geometryReader.paragraphSpans(range.story).findIndex(({ paraId }) => paraId === end.paraId);
+  // The caret's paragraph alone: a composition step must not read the whole story.
+  const index = engine.paragraphUnit(range.story, end.paraId);
   if (index < 0) return null;
   let text = '';
   for (const segment of engine.paragraphSegments(range.story, [index])[0] ?? []) {
