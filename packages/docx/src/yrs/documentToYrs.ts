@@ -347,6 +347,8 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
       attrs.rPrChange = mark.attrs.changes;
     } else if (mark.name === 'highlight') {
       attrs.highlight = mark.attrs.color;
+    } else if (mark.name === 'directionScopes') {
+      attrs.directionScopes = mark.attrs.scopes;
     } else if (mark.name === 'insertion' || mark.name === 'deletion') {
       attrs[mark.name === 'insertion' ? 'ins' : 'del'] = dropNulls({
         id: mark.attrs.revisionId,
@@ -360,10 +362,12 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
   return attrs;
 }
 
+const SORTED_KEY_MARKS = new Set(['rPrChange', 'directionScopes']);
+
 function marksKey(marks: readonly MarkDescriptor[]): string {
   return marks
     .filter((mark) => mark.name !== 'hyperlink' && mark.name !== 'comment')
-    .map((mark) => `${mark.name}:${mark.name === 'rPrChange' ? stableStringify(mark.attrs) : JSON.stringify(mark.attrs)}`)
+    .map((mark) => `${mark.name}:${SORTED_KEY_MARKS.has(mark.name) ? stableStringify(mark.attrs) : JSON.stringify(mark.attrs)}`)
     .sort()
     .join('|');
 }
@@ -427,6 +431,9 @@ function runMarks(
       return { ...change, previousAttributes: marksToYrsAttrs(formattingToMarks(previous)) };
     });
     marks.push({ name: 'rPrChange', attrs: { changes } });
+  }
+  if (run.directionScopes?.length) {
+    marks.push({ name: 'directionScopes', attrs: { scopes: run.directionScopes } });
   }
   return marks;
 }

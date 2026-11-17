@@ -233,4 +233,21 @@ export interface Run {
     propertyChanges?: RunPropertyChange[];
     /** Run content (text, tabs, breaks, etc.) */
     content: RunContent[];
+    /** The `w:dir` and `w:bdo` elements around the run, outermost first. */
+    directionScopes?: DirectionScope[];
+}
+/**
+ * One `w:dir` or `w:bdo` element. Runs inside the same element share its `id`, an ordinal
+ * unique within the paragraph.
+ */
+export interface DirectionScope {
+    kind: 'dir' | 'bdo';
+    /** The `w:val` attribute, verbatim */
+    val: string;
+    id: number;
+    /** Other attributes of the element, written back verbatim */
+    extra?: {
+        name: string;
+        value: string;
+    }[];
 }

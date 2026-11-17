@@ -17,7 +17,10 @@ pub const HYPERLINK: &str = "hyperlink";
 /// Attributes protected from formatting sweeps.
 pub(crate) const RPR_CHANGE: &str = "rPrChange";
 
-pub(crate) const PROTECTED_ATTRS: [&str; 4] = [INS, DEL, HYPERLINK, RPR_CHANGE];
+/// The `w:dir` and `w:bdo` elements around a run, outermost first, as the parsed run holds them.
+pub(crate) const DIRECTION_SCOPES: &str = "directionScopes";
+
+pub(crate) const PROTECTED_ATTRS: [&str; 5] = [INS, DEL, HYPERLINK, RPR_CHANGE, DIRECTION_SCOPES];
 
 /// Word's closed highlight palette keyed by exact uppercase hex.
 const HIGHLIGHT_HEX_TO_NAME: [(&str, &str); 16] = [

@@ -631,7 +631,15 @@ function createTextRun(text: string, attributes: Attrs, format: RunFormatter): R
     ...runPropertyChanges(attributes, format),
     formatting: Object.keys(formatting).length > 0 ? formatting : undefined,
     content: runContentForText(text, () => directFormatting(attributes)),
+    ...directionScopes(attributes),
   };
+}
+
+function directionScopes(attributes: Attrs): Pick<Run, 'directionScopes'> {
+  const scopes = attributes.directionScopes;
+  return Array.isArray(scopes) && scopes.length > 0
+    ? { directionScopes: scopes as NonNullable<Run['directionScopes']> }
+    : {};
 }
 
 function runPropertyChanges(attributes: Attrs, format: RunFormatter): Pick<Run, 'propertyChanges'> {
@@ -1248,7 +1256,9 @@ function ordinaryContentForItem(
   format: RunFormatter
 ): ParagraphContent | null {
   const content = inlineContentForItem(item, recovery, format);
-  return content?.type === 'run' ? { ...content, ...runPropertyChanges(item.attributes, format) } : content;
+  return content?.type === 'run'
+    ? { ...content, ...runPropertyChanges(item.attributes, format), ...directionScopes(item.attributes) }
+    : content;
 }
 
 function inlineContentForItem(
@@ -1305,6 +1315,7 @@ function tabRun(attributes: Attrs, format: RunFormatter): Run {
     ...runPropertyChanges(attributes, format),
     content: [{ type: 'tab' }],
     ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+    ...directionScopes(attributes),
   };
 }
 
@@ -1575,7 +1586,7 @@ function buildParagraphContent(
           written = serializeRun({ ...nextRun, content: [] });
           formattingKeys.set(formatting, written);
         }
-        key = written;
+        key = nextRun.directionScopes ? written + stableStringify(nextRun.directionScopes) : written;
       }
       const source = item.sourceRun;
       const sameSource = source?.index === currentSource?.index;
@@ -1625,6 +1636,7 @@ function marksKeyToYrsAttrs(marksKey: string | undefined): Attrs | null {
     else if (name === 'boldCs' || name === 'italicCs') attrs[name] = value.value;
     else if (name === 'highlight') attrs.highlight = value.color;
     else if (name === 'rPrChange') attrs.rPrChange = value.changes;
+    else if (name === 'directionScopes') attrs.directionScopes = value.scopes;
     else if (name === 'insertion' || name === 'deletion') {
       attrs[name === 'insertion' ? 'ins' : 'del'] = dropNulls({
         id: value.revisionId,
@@ -1856,6 +1868,7 @@ function restoreOriginalRuns(
     const run: Run = {
       type: 'run',
       content: boundaryContent(boundary, attrsToTextFormatting(restoredAttrs[index])),
+      ...directionScopes(restoredAttrs[index]),
     };
     const formatting = sourceMatches ? {
       ...boundary.formatting,

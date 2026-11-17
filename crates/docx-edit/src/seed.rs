@@ -2453,6 +2453,15 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
                     .map(|(_, value)| value.clone())
                     .unwrap_or(Value::Null),
             );
+        } else if mark.name == crate::format::DIRECTION_SCOPES {
+            attrs.insert(
+                mark.name.clone(),
+                mark.attrs
+                    .iter()
+                    .find(|(key, _)| key == "scopes")
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or(Value::Null),
+            );
         } else if mark.name == "insertion" || mark.name == "deletion" {
             let get = |name: &str| {
                 mark.attrs
@@ -2525,7 +2534,14 @@ fn embed_unit(kind: &str, payload: JsonObject, marks: &[Mark], pm_size: u32) -> 
 
 fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
     let merged = styles.run_formatting(style_formatting, field(Some(run), "formatting"));
-    run_marks_from_formatting(run, style_formatting, styles, merged.as_ref())
+    let mut marks = run_marks_from_formatting(run, style_formatting, styles, merged.as_ref());
+    if let Some(Value::Array(scopes)) = field(Some(run), crate::format::DIRECTION_SCOPES)
+        && !scopes.is_empty()
+    {
+        let scopes = vec![("scopes".to_owned(), Value::Array(scopes.clone()))];
+        marks.push(mark(crate::format::DIRECTION_SCOPES, scopes));
+    }
+    marks
 }
 
 fn run_marks_from_formatting(
