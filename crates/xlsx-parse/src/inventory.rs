@@ -15,7 +15,9 @@ use crate::chart::{
 };
 use crate::package::PreservedPackage;
 use crate::tree::{Element, exceeds_limits, parse_tree_within};
-use crate::xml::{find_part, local_name, next_event, reader, resolve_part_path};
+use crate::xml::{
+    PartNames, find_part, local_name, next_event, reader, resolve_part_name, resolve_part_path,
+};
 
 const NS_MARKUP_COMPATIBILITY: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 const URI_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
@@ -275,13 +277,12 @@ impl PreservedPackage {
                 None | Some(Read::Malformed) => return ControlFlow::Continue(()),
             };
         let directory = directory_of(&sheet.path);
-        let mut drawings: Vec<String> = Vec::new();
-        for (_, kind, target) in &relationships {
-            let path = resolve_part_path(directory, target);
-            if type_is(kind, "drawing") && !drawings.contains(&path) {
-                drawings.push(path);
-            }
-        }
+        let drawings = relationships
+            .iter()
+            .filter(|(_, kind, _)| type_is(kind, "drawing"))
+            .map(|(_, _, target)| resolve_part_name(directory, target))
+            .collect::<PartNames>()
+            .into_vec();
         for drawing in drawings {
             let Some(bytes) = find_part(parts, &drawing) else {
                 visit(SourceObject::Unreadable(drawing))?;
