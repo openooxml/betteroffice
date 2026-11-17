@@ -723,6 +723,7 @@ dependencies = [
  "betteroffice-ooxml-text",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-render",
+ "image",
  "libm",
  "rustybuzz",
  "serde",

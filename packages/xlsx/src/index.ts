@@ -23,6 +23,8 @@ export type {
   PathCmd,
   TextCmd,
   TextWrap,
+  ImageCmd,
+  ImageCrop,
   DrawCmd,
   DisplayList,
   GridMeta,
@@ -89,6 +91,7 @@ export type {
 export { buildA11yGrid } from './a11y/index';
 
 export { paintDisplayList } from './render/canvas2d';
+export type { PaintOptions, PictureSource } from './render/canvas2d';
 export {
   initWasm,
   decodeFontFace,

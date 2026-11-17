@@ -48,7 +48,7 @@ use xlsx_calc::{
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor,
     DefinedName, Fill, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet,
-    SheetChart, SheetId, Stylesheet, VAlign, Workbook as WorkbookModel,
+    SheetChart, SheetId, SheetPicture, Stylesheet, VAlign, Workbook as WorkbookModel,
 };
 #[cfg(test)]
 use xlsx_ops::cell_state_for_input_no_eval;
@@ -668,6 +668,8 @@ struct ChartCache {
     /// edited charts, which resolve from their own XML, by the epoch they
     /// were resolved at.
     edited: HashMap<(String, String), (u64, Arc<ChartSpace>)>,
+    /// the pictures each source sheet draws, as authored.
+    pictures: HashMap<usize, Arc<Vec<SheetPicture>>>,
 }
 
 struct CachedChartSpace {
@@ -3278,6 +3280,7 @@ impl Workbook {
             &viewport,
             metrics,
             gridlines,
+            &self.sheet_pictures(sheet),
             |chart| self.resolve_chart_space(&sheet_ref.name, chart),
         )
         .map_err(Error::from)?;
@@ -3343,6 +3346,7 @@ impl Workbook {
             &ghosts,
             &geometry,
             Some(MAX_DISPLAY_CELLS),
+            &self.sheet_pictures(sheet),
             |chart| self.resolve_chart_space(&owner, chart),
         )
         .map_err(Error::from)
@@ -3557,15 +3561,31 @@ impl Workbook {
         height: u32,
         faces: Option<&[crate::PngFontFace<'_>]>,
     ) -> Result<RenderedPng> {
+        let media: Vec<(&str, Vec<u8>)> = display_list
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                xlsx_render::DrawCmd::Image { asset_id, .. } => Some(&**asset_id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|asset_id| Some((asset_id, self.media_bytes(asset_id).ok()?)))
+            .collect();
+        let images: xlsx_raster::ImageMap<'_> = media
+            .iter()
+            .map(|(asset_id, bytes)| (*asset_id, bytes.as_slice()))
+            .collect();
         #[cfg(feature = "fonts")]
         let bytes = match faces {
-            Some(faces) => xlsx_raster::render_png_with_fonts(
+            Some(faces) => xlsx_raster::render_png_with_fonts_and_images(
                 display_list,
                 &crate::font::supplied_fonts(display_list, faces)?,
+                &images,
             ),
             None => {
                 let fonts = self.raster_fonts(display_list)?;
-                xlsx_raster::render_png_with_fonts(display_list, fonts.fonts())
+                xlsx_raster::render_png_with_fonts_and_images(display_list, fonts.fonts(), &images)
             }
         }
         .map_err(Error::Raster)?;
@@ -3576,7 +3596,7 @@ impl Workbook {
                     family: face.family.to_owned(),
                 });
             }
-            xlsx_raster::render_png(display_list).map_err(Error::Raster)?
+            xlsx_raster::render_png_with_images(display_list, &images).map_err(Error::Raster)?
         };
         Ok(RenderedPng {
             bytes,
@@ -3653,6 +3673,7 @@ impl Workbook {
             &[],
             &geometry,
             None,
+            &self.sheet_pictures(sheet),
             |chart| self.resolve_chart_space(&owner, chart),
         )?;
         let display_list = if options.scale == 1.0 {
@@ -6544,6 +6565,55 @@ impl Workbook {
             },
         );
         Ok(space)
+    }
+
+    /// The pictures `sheet` draws, anchored where a save places them.
+    fn sheet_pictures(&self, sheet: SheetId) -> Vec<SheetPicture> {
+        let index = sheet.0 as usize;
+        let (Some(origin), Some(package)) = (
+            self.preserved.origins.get(index).copied().flatten(),
+            self.source_package.as_ref(),
+        ) else {
+            return Vec::new();
+        };
+        let authored = self.source_pictures(package, origin);
+        match self.preserved.axes.get(index).and_then(Option::as_ref) {
+            Some(axes) => authored
+                .iter()
+                .filter_map(|picture| {
+                    Some(SheetPicture {
+                        anchor: xlsx_parse::followed_anchor(&picture.anchor, axes)?,
+                        ..picture.clone()
+                    })
+                })
+                .collect(),
+            None => authored.to_vec(),
+        }
+    }
+
+    fn source_pictures(&self, package: &PackageSlot, origin: usize) -> Arc<Vec<SheetPicture>> {
+        let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(
+            cache
+                .pictures
+                .entry(origin)
+                .or_insert_with(|| Arc::new(package.source_sheet_pictures(origin))),
+        )
+    }
+
+    /// The encoded bytes of the image an `image` draw command names by `asset_id`.
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>> {
+        let missing = || Error::InvalidOperation(format!("no picture draws {asset_id}"));
+        let package = self.source_package.as_ref().ok_or_else(missing)?;
+        let drawn = (0..package.facts().source_sheet_count()).any(|origin| {
+            self.source_pictures(package, origin)
+                .iter()
+                .any(|picture| picture.media == asset_id)
+        });
+        drawn
+            .then(|| package.part_bytes(asset_id))
+            .flatten()
+            .ok_or_else(missing)
     }
 }
 

@@ -34,6 +34,7 @@ export declare class XlsxDocument {
   rangePngDisplayListJson(args: string): string
   displayListProfiledJson(viewportJson: string): string
   chartAtPointJson(args: string): string
+  mediaBytes(assetId: string): Uint8Array
   moveChartJson(args: string): string
   resizeChartJson(args: string): string
   renderPngTarget(targetJson: string, optionsJson: string, fonts?: Array<PngFontFace> | undefined | null): Uint8Array
