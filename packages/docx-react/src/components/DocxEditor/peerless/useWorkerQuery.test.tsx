@@ -63,6 +63,84 @@ test('review queries retain every frame without rendering for unchanged review d
   } finally { hook.unmount(); query.mockRestore(); h.controller.dispose(); }
 });
 
+type Host = ReturnType<typeof proposalHost>;
+
+function reads(h: Host, kind: string) {
+  return h.readAt.mock.calls.filter(([request]) => request.kind === kind).length;
+}
+
+async function settle() {
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+}
+
+async function extendSelection(h: Host, offset: number) {
+  await act(async () => {
+    const store = h.binding.viewStore;
+    const view = store.getSnapshot();
+    const throughSeq = view.throughSeq + 1;
+    store.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version, throughSeq,
+      presentedThroughSeq: view.presentedThroughSeq, editState: view.editState,
+      selection: { anchor: { story: 'body', paraId: 'p0', offset: 0 }, focus: { story: 'body', paraId: 'p0', offset } } });
+    const geometry = store.getSnapshot().geometry!;
+    store.installFrameGeometry({ ...geometry, coversThroughSeq: throughSeq, frameEpoch: geometry.frameEpoch + 1 });
+  });
+  await settle();
+}
+
+async function changeVersion(h: Host) {
+  await act(async () => {
+    const view = h.binding.viewStore.getSnapshot();
+    h.binding.viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version + 1,
+      throughSeq: view.throughSeq + 1, presentedThroughSeq: view.presentedThroughSeq, selection: view.workerSelection, editState: view.editState });
+  });
+  await settle();
+}
+
+async function changeLayout(h: Host) {
+  await act(async () => {
+    const store = h.binding.viewStore;
+    const geometry = store.getSnapshot().geometry!;
+    store.installFrameGeometry({ ...geometry, coversThroughSeq: store.getSnapshot().throughSeq,
+      frameEpoch: geometry.frameEpoch + 1, layoutRevision: geometry.layoutRevision + 1 });
+  });
+  await settle();
+}
+
+const documentReads: (DocxDocumentRead & { kind: 'reviewSnapshot' | 'toolbarMetadata' | 'sidebar' | 'contentControlHandles' })[] = [
+  { kind: 'reviewSnapshot' }, { kind: 'toolbarMetadata' }, { kind: 'sidebar', commentIds: [], expectVersion: 'native-0' }, { kind: 'contentControlHandles' },
+];
+
+for (const request of documentReads) test(`${request.kind} reads once per document version and never per selection change`, async () => {
+  const h = proposalHost({ automatic: false });
+  const hook = renderHook(() => useWorkerQuery(h.controller, request));
+  try {
+    await waitFor(() => expect(hook.result.current).not.toBeNull());
+    await settle();
+    const initial = reads(h, request.kind);
+    expect(initial).toBe(1);
+    for (let offset = 1; offset <= 8; offset++) await extendSelection(h, offset);
+    expect(reads(h, request.kind) - initial).toBe(0);
+    expect(hook.result.current).not.toBeNull();
+    await changeVersion(h);
+    expect(reads(h, request.kind) - initial).toBe(1);
+    await waitFor(() => expect(hook.result.current).not.toBeNull());
+  } finally { hook.unmount(); h.controller.dispose(); }
+});
+
+test('content control handles re-read when the layout revision changes', async () => {
+  const h = proposalHost({ automatic: false });
+  const hook = renderHook(() => useWorkerQuery<'contentControlHandles'>(h.controller, { kind: 'contentControlHandles' }));
+  try {
+    await waitFor(() => expect(hook.result.current).not.toBeNull());
+    await settle();
+    const initial = reads(h, 'contentControlHandles');
+    await changeLayout(h);
+    expect(reads(h, 'contentControlHandles') - initial).toBe(1);
+    await extendSelection(h, 3);
+    expect(reads(h, 'contentControlHandles') - initial).toBe(1);
+  } finally { hook.unmount(); h.controller.dispose(); }
+});
+
 test('toolbar metadata queries do not repeat for paint-only frames', async () => {
   const h = proposalHost({ automatic: false });
   const query = spyOn(h.controller, 'query').mockImplementation((async () => ({ version: 'native', selection: null,
