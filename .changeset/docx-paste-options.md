@@ -1,4 +1,5 @@
 ---
+'@betteroffice/docx': minor
 '@betteroffice/docx-react': minor
 '@betteroffice/docx-i18n': patch
 ---
