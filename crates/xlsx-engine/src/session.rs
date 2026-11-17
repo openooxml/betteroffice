@@ -3388,4 +3388,74 @@ mod tests {
         );
         assert!(session.render_range_png(r#"{"range":"nope"}"#).is_err());
     }
+
+    /// 2000 rows of `row` in A:J, every third row painted red by a rule that
+    /// sums its whole column for each cell.
+    fn costly_conditional_xlsx() -> Vec<u8> {
+        let rows: String = (1..=2000)
+            .map(|row| {
+                let cells: String = "ABCDEFGHIJ"
+                    .chars()
+                    .map(|col| format!(r#"<c r="{col}{row}"><v>{row}</v></c>"#))
+                    .collect();
+                format!(r#"<row r="{row}">{cells}</row>"#)
+            })
+            .collect();
+        let parts: Vec<(String, Vec<u8>)> = vec![
+            ("xl/workbook.xml".into(), br#"<workbook><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec()),
+            ("xl/_rels/workbook.xml.rels".into(), br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec()),
+            ("xl/worksheets/sheet1.xml".into(), format!(r#"<worksheet><sheetData>{rows}</sheetData><conditionalFormatting sqref="A1:J2000"><cfRule type="expression" dxfId="0" priority="1"><formula>AND(MOD(A1,3)=0,SUM(A$1:A$2000)&gt;0)</formula></cfRule></conditionalFormatting></worksheet>"#).into_bytes()),
+            ("xl/styles.xml".into(), br#"<styleSheet><cellXfs count="1"><xf/></cellXfs><dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>"#.to_vec()),
+        ];
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn red_fills(list: &serde_json::Value) -> usize {
+        list["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["op"] == "fillRect" && command["color"] == "#ffc7ce")
+            .count()
+    }
+
+    #[test]
+    fn screen_frames_settle_conditional_formats_and_exports_never_wait() {
+        let session = Session::open(&costly_conditional_xlsx(), None).unwrap();
+        let viewport = r#"{"x":0,"y":0,"width":640,"height":600}"#;
+        let frame = || -> serde_json::Value {
+            serde_json::from_str(&session.display_list_json(viewport).unwrap()).unwrap()
+        };
+        let first = frame();
+        assert!(
+            first["conditionalPending"]
+                .as_u64()
+                .is_some_and(|pending| pending > 0)
+        );
+        let (settled, frames) = (2..=10)
+            .map(|count| (frame(), count))
+            .find(|(list, _)| list.get("conditionalPending").is_none())
+            .expect("conditional formats settle within 10 frames");
+        assert!(frames > 1);
+        assert!(red_fills(&settled) > red_fills(&first));
+        let export: serde_json::Value =
+            serde_json::from_str(&session.png_display_list_json(viewport).unwrap()).unwrap();
+        assert!(export.get("conditionalPending").is_none());
+        assert_eq!(export["commands"], settled["commands"]);
+
+        let fresh = Session::open(&costly_conditional_xlsx(), None).unwrap();
+        let range: serde_json::Value = serde_json::from_str(
+            &fresh
+                .range_png_display_list_json(r#"{"range":"A1:J30"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(range.get("conditionalPending").is_none());
+        assert_eq!(red_fills(&range), 100);
+        let fresh = Session::open(&costly_conditional_xlsx(), None).unwrap();
+        let export: serde_json::Value =
+            serde_json::from_str(&fresh.png_display_list_json(viewport).unwrap()).unwrap();
+        assert!(export.get("conditionalPending").is_none());
+        assert_eq!(export["commands"], settled["commands"]);
+    }
 }

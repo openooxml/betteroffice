@@ -159,3 +159,26 @@ test('XLSX canvas previews of many workbooks with distinct families keep the fac
     expect(GlobalFonts.families.length).toBe(families);
   } finally { register.mockRestore(); }
 }, 120_000);
+
+test('XLSX canvas previews ask again until no conditional format is pending', async () => {
+  const provider = createFontProvider(undefined, { decoder: decodeFontFace });
+  const viewport = { x: 0, y: 0, width: 40, height: 16 };
+  const fill = { op: 'fillRect' as const, x: 0, y: 0, w: 40, h: 16, color: '#ff0000' };
+  const frames = [
+    { width: 40, height: 16, commands: [], conditionalPending: 2 },
+    { width: 40, height: 16, commands: [fill], conditionalPending: 1 },
+    { width: 40, height: 16, commands: [fill] },
+  ];
+  let calls = 0;
+  const book = (lists: typeof frames) => ({
+    sheetInfo: () => ({ activeSheet: 0 }),
+    setActiveSheet: () => {},
+    displayList: () => lists[Math.min(calls++, lists.length - 1)],
+    renderPngFonts: () => [],
+  });
+  const settled = await renderXlsxRange(book(frames) as never, 0, 'A1', viewport, 1, provider);
+  expect(calls).toBe(3);
+  calls = 0;
+  const direct = await renderXlsxRange(book([frames[2]]) as never, 0, 'A1', viewport, 1, provider);
+  expect(Buffer.from(settled).equals(Buffer.from(direct))).toBe(true);
+});
