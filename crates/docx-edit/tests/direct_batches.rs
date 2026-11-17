@@ -916,3 +916,402 @@ fn noop_batches_leave_direct_counter_and_events_unchanged() {
     assert!(updates_direct.events.lock().unwrap().is_empty());
     assert!(updates_replica.events.lock().unwrap().is_empty());
 }
+
+const TEXT_SCOPES: [(&str, &str, &str); 5] = [
+    ("dir", r#"<w:dir w:val="rtl">"#, "</w:dir>"),
+    ("bdo", r#"<w:bdo w:val="rtl">"#, "</w:bdo>"),
+    ("hyperlink", r#"<w:hyperlink w:anchor="target"><w:dir w:val="rtl">"#, "</w:dir></w:hyperlink>"),
+    (
+        "insertion",
+        r#"<w:ins w:id="1" w:author="Ann" w:date="2026-09-24T12:00:00Z"><w:dir w:val="rtl">"#,
+        "</w:dir></w:ins>",
+    ),
+    ("nested", r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#, "</w:dir></w:bdo>"),
+];
+
+const FIELD_OPEN: &str = concat!(
+    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+    r#"<w:r><w:instrText xml:space="preserve"> SUBJECT </w:instrText></w:r>"#,
+    r#"<w:dir w:val="rtl"><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+);
+
+const FIELD_CLOSE: &str = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:dir>"#;
+
+const SDT_OPEN: &str = concat!(
+    r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr>"#,
+    r#"<w:sdtContent><w:dir w:val="rtl">"#,
+);
+
+const DELETION_OPEN: &str = concat!(
+    r#"<w:del w:id="2" w:author="Ann" w:date="2026-09-24T12:00:00Z">"#,
+    r#"<w:dir w:val="rtl">"#,
+);
+
+const OTHER_SCOPES: [(&str, &str, &str, &str); 5] = [
+    ("deletion", DELETION_OPEN, "", "</w:dir></w:del>"),
+    ("content control", SDT_OPEN, "", "</w:dir></w:sdtContent></w:sdt>"),
+    (
+        "simple field",
+        r#"<w:fldSimple w:instr=" SUBJECT "><w:dir w:val="rtl">"#,
+        "",
+        "</w:dir></w:fldSimple>",
+    ),
+    ("complex field", FIELD_OPEN, "", FIELD_CLOSE),
+    ("adjacent", r#"<w:dir w:val="rtl">"#, r#"</w:dir><w:dir w:val="ltr">"#, "</w:dir>"),
+];
+
+fn deleted(text: &str) -> String {
+    format!(r#"<w:r><w:delText xml:space="preserve">{text}</w:delText></w:r>"#)
+}
+
+fn scoped_runs(name: &str, open: &str, middle: &str, close: &str, inner: [&str; 2]) -> String {
+    let run: fn(&str) -> String = if name == "deletion" { deleted } else { r };
+    let (first, second) = (run(inner[0]), run(inner[1]));
+    format!("{open}{first}{middle}{second}{close}")
+}
+
+fn source_body(open: &str, close: &str) -> String {
+    text_scope_body(open, close, ["Before ", "two", " runs", " after"])
+}
+
+fn direction_body(first: &str) -> String {
+    format!(
+        "{}{}",
+        p("00000001", first),
+        p("00000002", &r("Second paragraph"))
+    )
+}
+
+fn text_scope_body(open: &str, close: &str, parts: [&str; 4]) -> String {
+    direction_body(&format!(
+        "{}{open}{}{}{close}{}",
+        r(parts[0]),
+        r(parts[1]),
+        r(parts[2]),
+        r(parts[3])
+    ))
+}
+
+fn other_scope_body(scope: (&str, &str, &str, &str), before: &str) -> String {
+    let (name, open, middle, close) = scope;
+    let runs = scoped_runs(name, open, middle, close, ["two", " runs"]);
+    direction_body(&format!("{}{runs}{}", r(before), r(" after")))
+}
+
+fn first_text(doc: &EditingDoc) -> String {
+    doc.paragraphs("body").unwrap()[0].text.clone()
+}
+
+fn shown_in_session(doc: &EditingDoc) -> String {
+    let mut text = String::new();
+    for segment in doc.story_segments("body").unwrap() {
+        match segment.content {
+            SegmentContent::Text(value) => text.push_str(&value),
+            SegmentContent::OtherEmbed { payload, .. } => {
+                for value in payload.values() {
+                    text.push_str(&any_json(value).to_string());
+                }
+            }
+            SegmentContent::Pilcrow(_) => text.push('\n'),
+        }
+    }
+    text
+}
+
+fn extracted(doc: &EditingDoc) -> String {
+    let options =
+        docx_edit::structured::ExportOptions::new(docx_edit::structured::RevisionView::Markup);
+    serde_json::to_string(&doc.export_structured(&options).unwrap().content).unwrap()
+}
+
+fn document_xml(bytes: &[u8]) -> String {
+    let (_, xml) = ooxml_opc::unzip_parts(bytes)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    String::from_utf8(xml).unwrap()
+}
+
+fn saved_document_xml(doc: &EditingDoc, bytes: &[u8], edited_body: &str) -> String {
+    let plan = doc.paragraph_save_plan();
+    let package = docx_parse::parse_docx_s9_wire(&docx(edited_body), Default::default())
+        .unwrap()
+        .document
+        .package;
+    let mut body = serde_json::to_value(&package.document).unwrap();
+    body.as_object_mut().unwrap().remove("sections");
+    let mut spliced = Vec::new();
+    if let Some(part) = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+    {
+        let mut held: Vec<u32> = part.paragraphs.iter().map(|pair| pair.0).collect();
+        held.sort_unstable();
+        let mut ordinals = Vec::new();
+        for &ordinal in &held {
+            for anchor in &part.inserted {
+                if *anchor == docx_edit::SpliceAnchor::Before(ordinal) {
+                    ordinals.push(None);
+                }
+            }
+            ordinals.push(Some(ordinal));
+            for anchor in &part.inserted {
+                if *anchor == docx_edit::SpliceAnchor::After(ordinal) {
+                    ordinals.push(None);
+                }
+            }
+        }
+        let content = body["content"].as_array_mut().unwrap();
+        assert_eq!(content.len(), ordinals.len(), "{:?}", part.inserted);
+        for (paragraph, ordinal) in content.iter_mut().zip(ordinals) {
+            if let Some(ordinal) = ordinal {
+                paragraph["sourceOrdinal"] = json!(ordinal);
+            }
+        }
+        let inserted: Vec<_> = part
+            .inserted
+            .iter()
+            .map(|anchor| match anchor {
+                docx_edit::SpliceAnchor::Before(ordinal) => json!({"before": ordinal}),
+                docx_edit::SpliceAnchor::After(ordinal) => json!({"after": ordinal}),
+            })
+            .collect();
+        spliced.push(json!({
+            "part": part.part, "sha256": part.sha256, "paragraphs": held,
+            "changed": part.changed, "inserted": inserted, "removed": part.removed,
+            "paragraphPatches": part.paragraph_patches,
+            "legacyParagraphs": part.legacy_paragraphs, "formatOnly": part.format_only
+        }));
+    }
+    let patched: Vec<_> = plan
+        .patched_parts
+        .iter()
+        .map(|(part, para_ids)| json!({"part": part, "paraIds": para_ids}))
+        .collect();
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": body,
+        "headerEntries": package.header_entries.unwrap_or_default(),
+        "footnotes": package.footnotes.unwrap_or_default(),
+        "relationshipEntries": package.relationship_entries,
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"patchedParts": patched, "splicedParts": spliced},
+    }))
+    .unwrap();
+    document_xml(&write_docx_s13(request, bytes).unwrap())
+}
+
+fn shown(xml: &str) -> String {
+    let mut text = String::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find('<') {
+        let Some(end) = rest[start..].find('>') else {
+            break;
+        };
+        let tag = &rest[start + 1..start + end];
+        rest = &rest[start + end + 1..];
+        let name = tag.split([' ', '/']).next().unwrap_or_default();
+        if matches!(name, "w:t" | "w:delText") && !tag.ends_with('/') {
+            text.push_str(&rest[..rest.find('<').unwrap_or(rest.len())]);
+        }
+    }
+    text
+}
+
+fn scoped_text(xml: &str, open: &str, close: &str) -> String {
+    let mut text = String::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find(open) {
+        rest = &rest[start + open.len()..];
+        let end = rest.find(close).unwrap_or(rest.len());
+        text.push_str(&shown(&rest[..end]));
+        rest = &rest[end..];
+    }
+    text
+}
+
+fn innermost(open: &str, close: &str) -> (String, String) {
+    let open = &open[open.rfind('<').unwrap()..];
+    let close = &close[..close.find('>').unwrap() + 1];
+    (open.to_owned(), close.to_owned())
+}
+
+fn assert_scope_kept(name: &str, xml: &str, open: &str, close: &str, text: &str, inner: &[&str]) {
+    let expected = format!("{text}Second paragraph");
+    assert_eq!(shown(xml), expected, "{name}: {xml}");
+    for tag in open.split_inclusive('>') {
+        let element = tag[1..].split([' ', '>']).next().unwrap_or_default();
+        let tag = match element {
+            "w:ins" | "w:del" => &tag[..7],
+            "w:dir" | "w:bdo" | "w:hyperlink" | "w:sdtContent" | "w:fldSimple" => tag,
+            _ => continue,
+        };
+        assert!(xml.contains(tag), "{name} {tag}: {xml}");
+    }
+    let (scope_open, scope_close) = innermost(open, close);
+    let scoped = scoped_text(xml, &scope_open, &scope_close);
+    assert!(inner.contains(&scoped.as_str()), "{name}: {xml}");
+}
+
+#[test]
+fn direction_scoped_text_is_shown_found_extracted_and_kept_by_a_plain_save() {
+    let mut cases: Vec<_> = TEXT_SCOPES
+        .iter()
+        .map(|(name, opening, closing)| (*name, source_body(opening, closing)))
+        .collect();
+    cases.extend(
+        OTHER_SCOPES
+            .iter()
+            .map(|scope| (scope.0, other_scope_body(*scope, "Before "))),
+    );
+    for (name, body) in cases {
+        let bytes = docx(&body);
+        let doc = open(&bytes);
+        let embedded = matches!(name, "content control" | "simple field" | "complex field");
+        if !embedded {
+            assert_eq!(first_text(&doc), "Before two runs after", "{name}");
+            let found = doc.search_text("two", true, None).unwrap();
+            assert_eq!(found.len(), 1, "{name}: {found:?}");
+        }
+        let session = shown_in_session(&doc);
+        assert!(
+            session.contains("two") && session.contains(" runs"),
+            "{name}: {session}"
+        );
+        let export = extracted(&doc);
+        assert!(export.contains("two"), "{name}: {export}");
+        assert_eq!(
+            saved_document_xml(&doc, &bytes, &body),
+            document_xml(&bytes),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn typing_inside_a_direction_scope_saves_inside_the_wrapper() {
+    for (name, opening, closing) in TEXT_SCOPES {
+        let bytes = docx(&source_body(opening, closing));
+        let doc = open(&bytes);
+        assert_eq!(first_text(&doc), "Before two runs after", "{name}");
+        let steps = vec![insert(range("00000001", 8, 8), "X")];
+        apply(&doc, &UndoSession::new(), steps);
+        let text = "Before tXwo runs after";
+        assert_eq!(first_text(&doc), text, "{name}");
+        let edited = text_scope_body(opening, closing, ["Before ", "tXwo", " runs", " after"]);
+        let xml = saved_document_xml(&doc, &bytes, &edited);
+        assert_scope_kept(name, &xml, opening, closing, text, &["tXwo runs"]);
+    }
+}
+
+#[test]
+fn edits_across_a_direction_scope_edge_keep_the_wrapper_and_every_text() {
+    for (name, opening, closing) in TEXT_SCOPES {
+        for (step, parts, inner) in [
+            (
+                replace(range("00000001", 5, 9), "Y"),
+                ["BefoY", "wo", " runs", " after"],
+                ["wo runs", "Ywo runs"],
+            ),
+            (
+                delete(range("00000001", 12, 17)),
+                ["Before ", "two", " r", "fter"],
+                ["two r", "two r"],
+            ),
+        ] {
+            let bytes = docx(&source_body(opening, closing));
+            let doc = open(&bytes);
+            assert_eq!(first_text(&doc), "Before two runs after", "{name}");
+            apply(&doc, &UndoSession::new(), vec![step]);
+            let text = parts.concat();
+            assert_eq!(first_text(&doc), text, "{name}");
+            let edited = text_scope_body(opening, closing, parts);
+            let xml = saved_document_xml(&doc, &bytes, &edited);
+            assert_scope_kept(name, &xml, opening, closing, &text, &inner);
+        }
+    }
+}
+
+#[test]
+fn splitting_a_paragraph_inside_a_direction_scope_keeps_the_wrapper_in_both_halves() {
+    for (name, opening, closing) in TEXT_SCOPES {
+        let bytes = docx(&source_body(opening, closing));
+        let doc = open(&bytes);
+        assert_eq!(first_text(&doc), "Before two runs after", "{name}");
+        doc.split_paragraph(
+            &EditCtx::local("User", DATE),
+            docx_edit::Position::new("body", 8),
+            None,
+        )
+        .unwrap();
+        let texts: Vec<_> = doc
+            .paragraphs("body")
+            .unwrap()
+            .into_iter()
+            .map(|paragraph| paragraph.text)
+            .collect();
+        let expected = ["Before t", "wo runs after", "Second paragraph"];
+        assert_eq!(texts, expected, "{name}");
+        let first = format!("{}{opening}{}{closing}", r("Before "), r("t"));
+        let inner = format!("{}{}", r("wo"), r(" runs"));
+        let second = format!("{opening}{inner}{closing}{}", r(" after"));
+        let edited = format!(
+            "{}{}{}",
+            p("00000001", &first),
+            p("00000003", &second),
+            p("00000002", &r("Second paragraph"))
+        );
+        let xml = saved_document_xml(&doc, &bytes, &edited);
+        let text = "Before two runs after";
+        assert_scope_kept(name, &xml, opening, closing, text, &["two runs"]);
+        let (scope_open, _) = innermost(opening, closing);
+        assert_eq!(xml.matches(&scope_open).count(), 2, "{name}: {xml}");
+    }
+}
+
+#[test]
+fn typing_beside_a_direction_scope_in_other_containers_keeps_it() {
+    for scope in OTHER_SCOPES {
+        let (name, opening, _, closing) = scope;
+        let bytes = docx(&other_scope_body(scope, "Before "));
+        let doc = open(&bytes);
+        let session = shown_in_session(&doc);
+        assert!(session.contains("two"), "{name}: {session}");
+        let steps = vec![insert(range("00000001", 3, 3), "X")];
+        apply(&doc, &UndoSession::new(), steps);
+        let xml = saved_document_xml(&doc, &bytes, &other_scope_body(scope, "BefXore "));
+        let inner: &[&str] = if name == "adjacent" {
+            &["two"]
+        } else {
+            &["two runs"]
+        };
+        let text = "BefXore two runs after";
+        assert_scope_kept(name, &xml, opening, closing, text, inner);
+        if name == "adjacent" {
+            let ltr = scoped_text(&xml, r#"<w:dir w:val="ltr">"#, "</w:dir>");
+            assert_eq!(ltr, " runs", "{xml}");
+        }
+    }
+}
+
+#[test]
+fn typing_inside_the_first_of_two_adjacent_direction_scopes_stays_in_it() {
+    let scope = OTHER_SCOPES[4];
+    let bytes = docx(&other_scope_body(scope, "Before "));
+    let doc = open(&bytes);
+    assert_eq!(first_text(&doc), "Before two runs after");
+    let steps = vec![insert(range("00000001", 8, 8), "X")];
+    apply(&doc, &UndoSession::new(), steps);
+    let (_, opening, middle, closing) = scope;
+    let runs = format!("{opening}{}{middle}{}{closing}", r("tXwo"), r(" runs"));
+    let edited = direction_body(&format!("{}{runs}{}", r("Before "), r(" after")));
+    let xml = saved_document_xml(&doc, &bytes, &edited);
+    let expected = "Before tXwo runs afterSecond paragraph";
+    assert_eq!(shown(&xml), expected, "{xml}");
+    let rtl = scoped_text(&xml, r#"<w:dir w:val="rtl">"#, "</w:dir>");
+    assert_eq!(rtl, "tXwo", "{xml}");
+    let ltr = scoped_text(&xml, r#"<w:dir w:val="ltr">"#, "</w:dir>");
+    assert_eq!(ltr, " runs", "{xml}");
+}
