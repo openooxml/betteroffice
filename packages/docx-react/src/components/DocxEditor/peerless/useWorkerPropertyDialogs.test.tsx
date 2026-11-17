@@ -313,6 +313,7 @@ test('computes imageState.wrap and submits setObjectProperties patches for apply
   expect(buildImageTransformPatch({ transform: 'rotate(90deg)' }, 'rotateCCW')).toEqual({ transform: null });
 
   const { applyQuery, controller, selection } = fixture();
+  selection.focus.offset = selection.anchor.offset + 1;
   let currentProps: Record<string, unknown> = { width: 80, height: 40, wrapType: 'square', displayMode: 'float', cssFloat: 'left' };
   controller.query = (async () => ({
     version: 'captured-native',

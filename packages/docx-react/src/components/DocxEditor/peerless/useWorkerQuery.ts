@@ -10,19 +10,27 @@ const SELECTION_SCOPED = new Set<DocxDocumentRead['kind']>(['properties', 'secti
 const withBytes = (_key: string, value: unknown) => ArrayBuffer.isView(value)
   ? { $type: value.constructor.name, $bytes: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) } : value;
 
-/** Reads `request` once per document version; selection-scoped kinds also re-read for each selection, content control handles for each layout. */
-export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: ReturnType<typeof createPeerlessShellController>, request: (DocxDocumentRead & { kind: K }) | null) {
-  const frameBound = request?.kind === 'contentControlHandles';
+/**
+ * Reads `liveRequest` once per document version; selection-scoped kinds also re-read for each selection, content control handles for each layout.
+ * While `held`, the request and selection last seen unheld stay in effect.
+ */
+export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: ReturnType<typeof createPeerlessShellController>,
+  liveRequest: (DocxDocumentRead & { kind: K }) | null, { held = false }: { held?: boolean } = {}) {
+  const frameBound = liveRequest?.kind === 'contentControlHandles';
   const state = useSyncExternalStore(frameBound ? controller.subscribe : controller.subscribeShell,
     frameBound ? controller.getSnapshot : controller.getShellSnapshot, frameBound ? controller.getSnapshot : controller.getShellSnapshot);
   const [result, setResult] = useState<{ view: PeerlessViewSnapshot | null; query: PeerlessWorkerQuery<K>; key: string } | null>(null);
   const latestResult = useRef(result);
+  const shown = state.view;
+  const liveKey = JSON.stringify(liveRequest, withBytes) ?? 'null';
+  const live = { request: liveRequest, requestKey: liveKey, key: liveRequest && SELECTION_SCOPED.has(liveRequest.kind)
+    ? `${liveKey}|${JSON.stringify(shown?.workerSelection ?? null, withBytes)}` : liveKey };
+  const settled = useRef(live);
+  if (!held) settled.current = live;
+  const { request, requestKey, key } = held ? settled.current : live;
   const latestRequest = useRef(request);
   latestRequest.current = request;
-  const shown = state.view;
-  const requestKey = JSON.stringify(request, withBytes) ?? 'null';
-  const key = request && SELECTION_SCOPED.has(request.kind) ? `${requestKey}|${JSON.stringify(shown?.workerSelection ?? null, withBytes)}` : requestKey;
-  const layout = request?.kind === 'contentControlHandles' ? `${shown?.geometry?.documentVersion}:${shown?.geometry?.layoutRevision}` : null;
+  const layout = frameBound ? `${shown?.geometry?.documentVersion}:${shown?.geometry?.layoutRevision}` : null;
   useEffect(() => {
     let current = true;
     const currentRequest = latestRequest.current;

@@ -47,12 +47,20 @@ export function buildImageTransformPatch(currentAttrs: Readonly<Record<string, u
 
 type WorkerLink = { query: WorkerPropertyQuery; initialData: HyperlinkData; targetSelection: DocxCommandSelection; replaceText: boolean };
 
-export function useWorkerPropertyDialogs(controller: WorkerShellController, props: Pick<DocxEditorProps, 'onError' | 'watermarkPresets' | 'rulerUnit'>) {
+function selectsOneObject(selection: DocxCommandSelection) {
+  const { anchor, focus } = selection;
+  return anchor.story === focus.story && anchor.paraId === focus.paraId && Math.abs(anchor.offset - focus.offset) === 1;
+}
+
+/** `dragSelecting` holds the object read at the selection the drag started from until pointer-up. */
+export function useWorkerPropertyDialogs(controller: WorkerShellController, props: Pick<DocxEditorProps, 'onError' | 'watermarkPresets' | 'rulerUnit'>,
+  dragSelecting = false) {
   const state = useSyncExternalStore(controller.subscribeShell, controller.getShellSnapshot, controller.getShellSnapshot);
   const page = useWorkerPageSetupControls(controller, props.onError);
   const watermark = useWorkerWatermarkControls(controller, props.onError);
   const selection = state.view?.workerSelection;
-  const object = useWorkerQuery<'properties'>(controller, selection ? { kind: 'properties', target: { kind: 'objectSelection', selection } } : null);
+  const object = useWorkerQuery<'properties'>(controller, selection && selectsOneObject(selection)
+    ? { kind: 'properties', target: { kind: 'objectSelection', selection } } : null, { held: dragSelecting });
   const [image, setImage] = useState<{ query: WorkerPropertyQuery; position: boolean } | null>(null);
   const [paragraphSpacing, setParagraphSpacing] = useState<{ initial: ParagraphSpacingData; deferred: DocxDeferredCommand } | null>(null);
   const [notes, setNotes] = useState<WorkerPropertyQuery | null>(null);

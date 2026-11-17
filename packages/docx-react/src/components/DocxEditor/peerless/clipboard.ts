@@ -98,8 +98,11 @@ function inputSettled(binding: PeerlessEditSessionBinding): boolean {
   return !admission || (!admission.tail && admission.compositionSlot === null && admission.heldIntents === 0);
 }
 
-/** @internal Reads the settled selection's clipboard slice ahead of a copy so the copy event can fill its clipboardData. */
-export function createClipboardPrefetch(options: ClipboardSliceRead) {
+/**
+ * @internal Reads the settled selection's clipboard slice ahead of a copy so the copy event can fill its clipboardData.
+ * Nothing is read ahead while `held` answers true; `resume` reads the selection it then shows.
+ */
+export function createClipboardPrefetch(options: ClipboardSliceRead & { held?(): boolean }) {
   const { binding } = options;
   let cached: { key: string; capture: ClipboardCapture | null; error?: unknown } | null = null;
   let reading: { key: string; capture: Promise<ClipboardCapture | null> } | null = null;
@@ -114,7 +117,7 @@ export function createClipboardPrefetch(options: ClipboardSliceRead) {
     if (!options.isCurrent()) { dispose(); return; }
     const key = snapshotKey(binding);
     if (cached && key !== cached.key) cached = null;
-    if (!key || key === cached?.key || reading) return;
+    if (!key || key === cached?.key || reading || options.held?.()) return;
     const capture = readWorkerClipboardSlice(options);
     reading = { key, capture };
     void capture.then(captured => {
@@ -132,6 +135,7 @@ export function createClipboardPrefetch(options: ClipboardSliceRead) {
   schedule();
   return {
     take,
+    resume: schedule,
     /** Reads the selection as it stood at the call, whatever the selection does while the read runs; a cut rechecks it before acting. */
     async read(): Promise<ClipboardCapture | null> {
       await settleEarlierInput(binding);
