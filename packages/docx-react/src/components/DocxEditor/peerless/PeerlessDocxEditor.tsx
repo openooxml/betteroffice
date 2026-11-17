@@ -84,6 +84,7 @@ import { fontEnvironmentForRegistrations, prepareWorkerFontEnvironment, uncovere
 import type { Document } from '@betteroffice/docx/types/document';
 import type { DocxFontEnvironment } from '@betteroffice/docx/yrs';
 import { PeerlessPagedEditor } from './PeerlessPagedEditor';
+import type { PeerlessPasteRecorder } from './PeerlessInput';
 import type { PeerlessPropertyIntent } from './inputEvents';
 import { useWorkerCollaboration } from './useWorkerCollaboration';
 import { geometryMatchesDocument, type PeerlessFrameGeometry, type PeerlessViewIdentity } from './viewStore';
@@ -1136,6 +1137,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     }
   }, [controller, props.onCopy, props.onCut, reportRecoverableError, t]);
   const notifyPasteRefused = useCallback(() => { toast(t('editor.pasteFailed')); }, [t]);
+  const pasteRecorder = useRef<PeerlessPasteRecorder | null>(null);
   const onPasteFragment = useCallback((fragment: DocxClipboardFragment, inputTime: number): boolean => {
     const current = active.current;
     if (!current) return false;
@@ -1189,7 +1191,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
   const contextMenu = useWorkerContextMenu({ binding: () => active.current?.binding ?? null,
     environment: controller.environment, commands: controller.commands.store, clipboard: onClipboard,
     submit: controller.submit, onWrapImage: (handle, wrap) => propertyDialogs.applyImageWrap(wrap, handle),
-    onPaste: props.onPaste, onPasteRefused: notifyPasteRefused, onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
+    onPaste: props.onPaste, onPasteRefused: notifyPasteRefused, recordPaste: (fragment, plainText) => pasteRecorder.current?.(fragment, plainText), onError: reportRecoverableError, beginAddComment: workerComments.beginAddComment, focusEditor: focus });
   inputCommand.current = contextMenu.input;
   useLayoutEffect(() => {
     active.current?.clipboard?.dispose();
@@ -1511,7 +1513,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       {shellState.status === 'failed' && shellState.error ? <ParseError message={shellState.error.message} /> : sessionOptions ? (
         <MirrorLinkRouteContext.Provider value={mirrorLinkRoute}><PeerlessPagedEditor sessionOptions={sessionOptions} zoom={zoom} onReady={onReady} autoFocus={!effectiveReadOnly}
           overlay={workerCollaboration.overlay(displayWindow)}
-          displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} pasteOptions={props.pasteOptions} onReplacePasteFragment={onReplacePasteFragment} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={dragSelection} pictures={pictureMoves} tables={tableResize}
+          displayWindow={displayWindow} onDisplayWindowChange={showWindow} onClipboard={onClipboard} onPasteFragment={onPasteFragment} pasteOptions={props.pasteOptions} onReplacePasteFragment={onReplacePasteFragment} pasteRecorder={pasteRecorder} highlights={searchState.highlights} onNavigateCell={controller.navigateCell} onPartPoint={onPartPoint} onDragSelectionChange={dragSelection} pictures={pictureMoves} tables={tableResize}
           pageMirror={props.pageMirror} unbuiltPageMirror={props.unbuiltPageMirror} readPageTexts={readPageTexts} mirrorReadBlocked={mirrorReadBlocked} scrollToPage={navigation.scrollToPage} pageOverlays={<>{partChrome}<WorkerContentControls controller={controller} onError={reportRecoverableError} /></>} /></MirrorLinkRouteContext.Provider>
       ) : hasSource ? null : placeholder ?? <DefaultPlaceholder />}
     </div>} />
