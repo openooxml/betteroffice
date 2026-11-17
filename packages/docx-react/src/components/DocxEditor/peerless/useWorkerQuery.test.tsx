@@ -130,6 +130,29 @@ for (const request of documentReads) test(`${request.kind} reads once per docume
   } finally { hook.unmount(); h.controller.dispose(); }
 });
 
+for (const request of documentReads) test(`${request.kind} recovers a read superseded by a selection-only acknowledgement`, async () => {
+  const h = proposalHost({ automatic: false });
+  const release = h.hold(request.kind);
+  const hook = renderHook(() => useWorkerQuery(h.controller, request));
+  try {
+    await waitFor(() => expect(reads(h, request.kind)).toBe(1));
+    const { version, geometry } = h.binding.viewStore.getSnapshot();
+    await act(async () => {
+      const store = h.binding.viewStore;
+      const view = store.getSnapshot();
+      store.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version, throughSeq: view.throughSeq + 1,
+        presentedThroughSeq: view.presentedThroughSeq, editState: view.editState,
+        selection: { anchor: { story: 'body', paraId: 'p0', offset: 0 }, focus: { story: 'body', paraId: 'p0', offset: 1 } } });
+    });
+    await act(async () => { release(); });
+    await settle();
+    await waitFor(() => expect(hook.result.current).not.toBeNull());
+    expect(h.binding.viewStore.getSnapshot().version).toBe(version);
+    expect(h.binding.viewStore.getSnapshot().geometry).toBe(geometry);
+    expect(reads(h, request.kind)).toBe(2);
+  } finally { hook.unmount(); h.controller.dispose(); }
+});
+
 test('content control handles re-read when the layout revision changes', async () => {
   const h = proposalHost({ automatic: false });
   const hook = renderHook(() => useWorkerQuery<'contentControlHandles'>(h.controller, { kind: 'contentControlHandles' }));

@@ -21,6 +21,8 @@ interface ProposalHost {
   nullReads(): number;
   refuse(reason: string): void;
   assignIdentities(): void;
+  /** Holds the next versioned read of `kind` in flight until the returned release is called. */
+  hold(kind: string): () => void;
 }
 
 export const source = Uint8Array.of(1);
@@ -80,7 +82,10 @@ export function proposalHost(options: { readOnly?: boolean; mode?: DocxEditorPro
     submit, flush: mock(async () => {}) } as unknown as DocxWorkerEditSession<PeerlessEchoIntent>;
   const admission = createInputAdmission({ session, viewStore, echoPainter: { disable() {}, preview: () => undefined } as unknown as PeerlessEchoPainter });
   const binding = { session, viewStore, admission, commands: createPeerlessCommandBinding(admission) } as PeerlessEditSessionBinding;
+  const gates = new Map<string, Promise<void>>();
   const readAt = mock(async (request: { kind: string; expectPreviewVersion?: number }, version: string): Promise<ReviewRead> => {
+    const gate = gates.get(request.kind);
+    if (gate) { gates.delete(request.kind); await gate; }
     const frame = viewStore.getSnapshot().geometry!;
     if (version !== snapshot.version) return { status: 'superseded' as const };
     const available = frame.documentVersion === snapshot.version && frame.coversThroughSeq >= seq && (request.expectPreviewVersion === undefined || request.expectPreviewVersion === snapshot.previewVersion);
@@ -106,5 +111,10 @@ export function proposalHost(options: { readOnly?: boolean; mode?: DocxEditorPro
   if (options.opening) controller.opening(source);
   else controller.attach(binding);
   return { controller, binding, submit, readAt, present, settings, snapshot: () => snapshot, nullReads: () => nullReads,
-    refuse: (reason: string) => { refuse = reason; }, assignIdentities: () => { snapshot = { ...snapshot, version: `${snapshot.version}+ids` }; } };
+    refuse: (reason: string) => { refuse = reason; }, assignIdentities: () => { snapshot = { ...snapshot, version: `${snapshot.version}+ids` }; },
+    hold: (kind: string) => {
+      let release!: () => void;
+      gates.set(kind, new Promise<void>(resolve => { release = resolve; }));
+      return () => release();
+    } };
 }

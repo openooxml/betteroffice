@@ -41,13 +41,12 @@ type Selection = { anchor: { story: string; paraId: string; offset: number }; fo
 const at = (paraId: string, from: number, toPara = paraId, to = from): Selection =>
   ({ anchor: { story: 'body', paraId, offset: from }, focus: { story: 'body', paraId: toPara, offset: to } });
 
-function selectionFixture() {
+function selectionFixture(object: unknown = { kind: 'object', handle: 'picture', properties: { wrapType: 'inline' } }) {
   const listeners = new Set<() => void>();
   let state = { status: 'ready', view: { identity: { session: 's', incarnation: 1, epoch: 1 }, version: 1, throughSeq: 1,
     workerSelection: at('p0', 0), geometry: null, editState: undefined } };
   const query = mock(async (request: { kind: string }) => ({ version: 'native', selection: state.view.workerSelection,
-    value: request.kind === 'sectionProperties' ? { sections: [], paragraphs: [] }
-      : { kind: 'object', handle: 'picture', properties: { wrapType: 'inline' } } }));
+    value: request.kind === 'sectionProperties' ? { sections: [], paragraphs: [] } : object }));
   const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
   const controller = { subscribe, getSnapshot: () => state, subscribeShell: subscribe, getShellSnapshot: () => state, query,
     environment: () => ({ readOnly: false, mode: 'editing' }),
@@ -83,7 +82,7 @@ test('a pointer drag issues no selection-keyed reads until pointer-up, then one 
   expect(hook.result.current.dialogs.imagePropertiesAvailable).toBe(true);
 });
 
-test('keyboard selection keeps re-reading the ruler for each change and never reads text as an object', async () => {
+test('keyboard selection keeps re-reading the ruler for each change and asks for no object properties across paragraphs', async () => {
   const { select, reads } = selectionFixture();
   await act(async () => {});
   const properties = reads('properties');
@@ -101,6 +100,17 @@ test('clicking an object still reads its properties', async () => {
   await act(async () => {});
   expect(reads('properties') - properties).toBe(1);
   expect(hook.result.current.dialogs.imageState).toEqual({ wrap: 'inline' });
+});
+
+test('a one-unit selection over ordinary text still asks for object properties and shows none when the worker answers null', async () => {
+  const { hook, select, reads } = selectionFixture(null);
+  await act(async () => {});
+  const properties = reads('properties');
+  await select(at('p0', 3, 'p0', 4));
+  await act(async () => {});
+  expect(reads('properties') - properties).toBe(1);
+  expect(hook.result.current.dialogs.imagePropertiesAvailable).toBe(false);
+  expect(hook.result.current.dialogs.imageState).toBeNull();
 });
 
 test('caret link opens expanded, editable, and submits display text', async () => {
