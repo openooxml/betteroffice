@@ -1,6 +1,7 @@
 use betteroffice_xlsx::{
-    CalculationOptions, ChartEdit, ChartMutation, ChartSeriesName, Error, Op, SheetId,
-    SnapshotBudget, Workbook, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder,
+    CalculationOptions, ChartEdit, ChartMutation, ChartResize, ChartSeriesName, Error, Op,
+    ProtectedSheets, SheetId, SnapshotBudget, Workbook, WorkbookSnapshotBuilder,
+    WorkbookSnapshotEncoder,
 };
 
 const CHART: &str = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:style val='10'/><c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr b="1" sz="1600"/><a:t>Old </a:t></a:r><a:r><a:rPr i="1"/><a:t>title</a:t></a:r></a:p></c:rich></c:tx><c:overlay val="0"/></c:title><c:autoTitleDeleted val="0"/><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>Revenue</c:v></c:tx><c:cat><c:strRef><c:f>Data!$A$2:$A$3</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>One</c:v></c:pt><c:pt idx="1"><c:v>Two</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$3</c:f><c:numCache><c:formatCode>0.00</c:formatCode><c:ptCount val="2"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:ser><c:idx val='1'/><c:order val='1'/><c:tx><c:v>Keep</c:v></c:tx></c:ser></c:barChart><c:catAx><c:axId val='1'/></c:catAx></c:plotArea><c:legend><c:legendPos val='b'/></c:legend></c:chart></c:chartSpace>"#;
@@ -552,6 +553,111 @@ fn chart_moves_are_refused_on_a_protected_worksheet() {
         .unwrap()
         .applied
     );
+}
+
+fn protected_chart_bytes() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&bytes(CHART)).unwrap();
+    let sheet = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    sheet.1 = String::from_utf8(sheet.1.clone())
+        .unwrap()
+        .replace(
+            "</sheetData>",
+            r#"</sheetData><sheetProtection sheet="1"/>"#,
+        )
+        .into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+const RESIZE: ChartResize = ChartResize {
+    left: 0.0,
+    top: 0.0,
+    right: 40.0,
+    bottom: 30.0,
+};
+
+#[test]
+fn chart_resizes_are_refused_on_a_protected_worksheet() {
+    let source = protected_chart_bytes();
+    let mut book = Workbook::open(&source).unwrap();
+    let frame = book.model().sheets[0].charts[0].frame_id();
+    let anchor = book.model().sheets[0].charts[0].anchor;
+    let version = book.version();
+    let error = book
+        .resize_chart(SheetId(0), &frame, RESIZE, CalculationOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::LockedTarget(message) if message == r#"sheet "Data" is protected"#),
+        "{error:?}"
+    );
+    assert_eq!(book.model().sheets[0].charts[0].anchor, anchor);
+    assert_eq!(book.version(), version);
+    assert_eq!(book.save().unwrap(), source);
+
+    let mut open = Workbook::open(&bytes(CHART)).unwrap();
+    let frame = open.model().sheets[0].charts[0].frame_id();
+    assert!(
+        open.resize_chart(SheetId(0), &frame, RESIZE, CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+}
+
+#[test]
+fn protected_sheets_allow_resizes_a_chart_and_keeps_the_protection() {
+    let mut book = Workbook::open(&protected_chart_bytes()).unwrap();
+    let frame = book.model().sheets[0].charts[0].frame_id();
+    let anchor = book.model().sheets[0].charts[0].anchor;
+    assert!(
+        book.resize_chart_with_protection(
+            SheetId(0),
+            &frame,
+            RESIZE,
+            CalculationOptions::default(),
+            ProtectedSheets::Allow,
+        )
+        .unwrap()
+        .applied
+    );
+    assert_ne!(book.model().sheets[0].charts[0].anchor, anchor);
+    let saved = book.save().unwrap();
+    let sheet = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    assert!(String::from_utf8(sheet.1).unwrap().contains("<sheetProtection"));
+    let mut reopened = Workbook::open(&saved).unwrap();
+    assert!(matches!(
+        reopened.resize_chart(SheetId(0), &frame, RESIZE, CalculationOptions::default()),
+        Err(Error::LockedTarget(_))
+    ));
+}
+
+#[test]
+fn protected_sheets_allow_chart_resize_is_refused_on_a_collaborative_workbook() {
+    let mut book = Workbook::open_collaborative(&protected_chart_bytes(), 7).unwrap();
+    let frame = book.model().sheets[0].charts[0].frame_id();
+    let anchor = book.model().sheets[0].charts[0].anchor;
+    let version = book.version();
+    let message = match book.resize_chart_with_protection(
+        SheetId(0),
+        &frame,
+        RESIZE,
+        CalculationOptions::default(),
+        ProtectedSheets::Allow,
+    ) {
+        Err(Error::InvalidRequest(message)) => message,
+        other => panic!("expected an invalid request, got {other:?}"),
+    };
+    assert_eq!(
+        message,
+        "protectedSheets allow requires a standalone agent workbook"
+    );
+    assert_eq!(book.model().sheets[0].charts[0].anchor, anchor);
+    assert_eq!(book.version(), version);
 }
 
 #[test]
