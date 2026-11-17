@@ -10,8 +10,8 @@ use xlsx_model::{CellRef, SheetId, Workbook};
 use crate::read::{SharedStringCells, SourceCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
-    attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
-    text_attribute, utf8_bom_len, xml_err,
+    PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_part_name,
+    resolve_part_path, text_attribute, utf8_bom_len, xml_err,
 };
 use crate::{MAX_DEPTH, ParseError};
 
@@ -397,6 +397,8 @@ impl PreservedPackage {
                 },
                 None => continue,
             };
+            let mut table_parts = PartNames::default();
+            let mut comment_parts = PartNames::default();
             for relationship in relationships {
                 let table = relationship.has_type("table");
                 let comments =
@@ -414,7 +416,15 @@ impl PreservedPackage {
                     return Some(&sheet.path);
                 }
                 let base = sheet.path.rsplit_once('/').map_or("", |(base, _)| base);
-                let path = resolve_part_path(base, target);
+                let path = resolve_part_name(base, target);
+                let seen = if table {
+                    &mut table_parts
+                } else {
+                    &mut comment_parts
+                };
+                if !seen.push(path.clone()) {
+                    continue;
+                }
                 let Some(bytes) = find_part(&self.parts, &path) else {
                     return Some(&sheet.path);
                 };

@@ -227,15 +227,20 @@ impl PreservedPackage {
             }
         }
         let directory = directory_of(&sheet.path);
+        let mut comment_parts = PartNames::default();
+        let mut threaded_parts = PartNames::default();
         for (_, kind, target) in &relationships {
-            let local: &[u8] = if type_is(kind, "comments") {
-                b"comment"
+            let (local, seen): (&[u8], &mut PartNames) = if type_is(kind, "comments") {
+                (&b"comment"[..], &mut comment_parts)
             } else if type_is(kind, "threadedComment") {
-                b"threadedComment"
+                (&b"threadedComment"[..], &mut threaded_parts)
             } else {
                 continue;
             };
-            let path = resolve_part_path(directory, target);
+            let path = resolve_part_name(directory, target);
+            if !seen.push(path.clone()) {
+                continue;
+            }
             let Some(bytes) = find_part(parts, &path) else {
                 inventory.unreadable_parts.push(path);
                 continue;

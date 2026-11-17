@@ -258,12 +258,15 @@ pub(crate) struct PartNames {
 }
 
 impl PartNames {
-    pub(crate) fn push(&mut self, name: String) {
+    /// Keeps `name` unless already seen, returning whether it was new.
+    pub(crate) fn push(&mut self, name: String) -> bool {
         #[cfg(test)]
         count_name_probe();
-        if self.seen.insert(name.clone()) {
+        let new = self.seen.insert(name.clone());
+        if new {
             self.order.push(name);
         }
+        new
     }
 
     pub(crate) fn into_vec(self) -> Vec<String> {
