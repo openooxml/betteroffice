@@ -34,7 +34,11 @@ pub struct Run {
     pub property_changes: Option<Vec<RunPropertyChange>>,
     pub content: Vec<RunContent>,
     /// The `w:dir` and `w:bdo` elements around the run, outermost first.
-    #[serde(rename = "directionScopes", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "directionScopes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub direction_scopes: Vec<DirectionScope>,
 }
 
