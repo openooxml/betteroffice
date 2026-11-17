@@ -29,6 +29,7 @@ const WHOLE_ARGUMENTS: &[&str] = &[
     "COVARIANCE.P",
     "COVARIANCE.S",
     "DEVSQ",
+    "EUROCONVERT",
     "F.TEST",
     "FALSE",
     "FORMULATEXT",
