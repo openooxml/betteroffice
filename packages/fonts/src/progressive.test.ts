@@ -285,8 +285,6 @@ test('a face opened with file URLs names every slice file and the fetch timeout 
 });
 
 test('a file URL whose href is a path resolves against this realm, so a worker can fetch it', async () => {
-  // Turbopack compiles `new URL(asset, import.meta.url)` to a URL-like object whose href is the served
-  // path; a worker that receives that path has no document to resolve it against.
   const pathOnly = (file: string) => ({ href: `/_next/static/media/${file}` }) as URL;
   const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
   Object.defineProperty(globalThis, 'location', { value: { href: 'https://app.example/ko/room/1' }, configurable: true });

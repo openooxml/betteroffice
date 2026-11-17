@@ -104,11 +104,6 @@ export interface SliceSource {
 const opened = new WeakMap<ProgressiveFontFace, [SliceRef, SliceIndex, SliceTransport]>();
 const sources = new WeakMap<ProgressiveFontFace, Promise<SliceSource>>();
 
-/**
- * The href a worker can fetch. A bundler can name an asset with a URL-like object whose href is only
- * the served path (Turbopack compiles `new URL(asset, import.meta.url)` so); this realm resolves it
- * against its location, but the worker these hrefs are sent to cannot.
- */
 function absoluteHref(url: URL): string {
   return new URL(url.href, globalThis.location?.href).href;
 }
