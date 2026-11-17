@@ -105,3 +105,20 @@ test('a frame from a replaced workbook does not pass to the next painter', async
   expect(module.create).toHaveBeenCalledTimes(4);
   expect(module.painter.adopt).not.toHaveBeenCalled();
 });
+
+test('changing the remote font source hands the painted frame to the new painter', async () => {
+  const module = painterModule();
+  const { result, rerender } = renderHook(
+    ({ remote }: { remote: 'off' | 'bunny' }) => useDefaultFonts('workbook', decoder, undefined, () => {}, undefined, remote),
+    { initialProps: { remote: 'off' } });
+  const text = frame('Tahoma');
+  await settleModule(module);
+  result.current(frame(), () => {});
+  result.current(text, () => {});
+  module.painter.adopt.mockClear();
+  rerender({ remote: 'bunny' });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(module.create).toHaveBeenCalledTimes(2);
+  expect(module.create.mock.calls.map((call) => (call as unknown as [unknown, unknown, { remoteFonts?: unknown }])[2].remoteFonts)).toEqual(['off', 'bunny']);
+  expect(module.painter.adopt.mock.calls.map(([list]) => list)).toEqual([text]);
+});

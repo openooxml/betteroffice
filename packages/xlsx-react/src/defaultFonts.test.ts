@@ -331,6 +331,26 @@ test('a registered look-alike does not count as a locally installed family for l
   expect(remoteLoads).toHaveBeenCalledTimes(3);
 });
 
+test('a registered regular look-alike does not stop the bold and italic faces of the family from loading', async () => {
+  const { added } = browser();
+  const { fonts } = (globalThis as unknown as { document: { fonts: FontFaceSet } }).document;
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts, createElement: () => ({ getContext: () => {
+    let font = '';
+    return { set font(value: string) { font = value; }, get font() { return font; },
+      measureText: () => ({ width: font.includes('"Tahoma"') && added.some((face) => face.family === 'Tahoma') ? 2 : 1 }) };
+  } }) } });
+  provider();
+  const painter = createDefaultFontPainter(decoder(), mock(() => {}));
+  const cell = (bold: boolean, italic: boolean): DisplayList => ({ width: 200, height: 100, commands: [
+    { op: 'text', fontFamily: 'Tahoma', bold, italic, text: 'A' } as TextCmd] });
+  await painter.load(cell(false, false));
+  await painter.load(cell(true, false));
+  await painter.load(cell(false, true));
+  expect((added as unknown as { family: string; weight: number; style: string }[]).map((face) => [face.family, face.weight, face.style]))
+    .toEqual([['Tahoma', 400, 'normal'], ['Tahoma', 700, 'normal'], ['Tahoma', 400, 'italic']]);
+  painter.dispose();
+});
+
 test('characters painted while a failing remote load is pending are requested once it settles', async () => {
   browser();
   const { remoteLoads } = provider();
