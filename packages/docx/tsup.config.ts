@@ -1,4 +1,5 @@
 import { defineConfig } from 'tsup';
+import { buildWorkerStub } from '../../scripts/worker-stub';
 
 export default defineConfig([
   {
@@ -35,7 +36,7 @@ export default defineConfig([
       'yrs/index': 'src/yrs/index.ts',
       'collaboration/index': 'src/collaboration/index.ts',
       // Dedicated browser worker loaded relative to the yrs facade bundle.
-      'yrs/docxWorker': 'src/yrs/docxWorker.browser.ts',
+      'yrs/residentEngineWorker': 'src/yrs/residentEngineWorker.ts',
       'yrs/docxWorker.node': 'src/yrs/docxWorker.node.ts',
       'sessionWorker.node': 'src/yrs/sessionWorker.node.ts',
       'sessionWorker.missing': 'src/yrs/sessionWorker.missing.ts',
@@ -63,6 +64,10 @@ export default defineConfig([
     injectStyle: false,
     esbuildOptions(options) {
       options.chunkNames = 'chunk-[hash]';
+    },
+    onSuccess: async () => {
+      await buildWorkerStub({ entry: 'src/yrs/docxWorker.browser.ts', outfile: 'dist/docxWorker.mjs', start: './yrs/residentEngineWorker.mjs' });
+      await buildWorkerStub({ entry: 'src/yrs/docxWorker.browser.ts', outfile: 'dist/yrs/docxWorker.mjs', start: './residentEngineWorker.mjs' });
     },
   },
 ]);
