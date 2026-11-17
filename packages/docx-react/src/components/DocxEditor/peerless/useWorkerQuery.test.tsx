@@ -170,17 +170,17 @@ for (const request of documentReads) test(`${request.kind} keeps a read that a s
 
 for (const request of documentReads) test(`${request.kind} has its result once four selection acknowledgements in a row, each during the read, stop`, async () => {
   const h = proposalHost({ automatic: false });
-  const hold = h.hold(request.kind);
+  const release = h.hold(request.kind);
   const hook = renderHook(() => useWorkerQuery(h.controller, request));
   try {
     await waitFor(() => expect(reads(h, request.kind)).toBe(1));
     const { version } = h.binding.viewStore.getSnapshot();
-    const release = await acknowledgeDuringReads(h, request.kind, hold, 4);
+    for (let offset = 1; offset <= 4; offset++) await acknowledgeSelection(h, offset);
     await act(async () => { release(); });
     await settle();
     await waitFor(() => expect(hook.result.current).not.toBeNull());
     expect(h.binding.viewStore.getSnapshot().version).toBe(version);
-    expect(reads(h, request.kind)).toBeLessThanOrEqual(5);
+    expect(reads(h, request.kind)).toBe(1);
     expect(h.peak(request.kind)).toBe(1);
   } finally { hook.unmount(); h.controller.dispose(); }
 });
