@@ -9373,6 +9373,35 @@ mod tests {
     }
 
     #[test]
+    fn band_nil_borders_keep_the_table_outer_edge() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let nil = json!({ "style": "nil" });
+        let style = json!({
+            "type": "table", "styleId": "Ruled",
+            "tblPr": {
+                "styleRowBandSize": 1,
+                "borders": { "top": line, "bottom": line, "left": line, "right": line }
+            },
+            "tblStylePr": [
+                { "type": "band1Horz", "tcPr": { "borders": { "top": nil, "bottom": nil } } },
+                { "type": "firstCol", "tcPr": { "borders": { "bottom": nil } } }
+            ]
+        });
+        let look = json!({
+            "firstRow": false, "lastRow": false, "firstColumn": true, "noVBand": true
+        });
+        let cells = styled_cells(style, look, 3, 3);
+        let size = |row: usize, column: usize, side: &str| {
+            cells[row][column]["borders"][side]["size"].clone()
+        };
+        assert_eq!(size(2, 1, "bottom"), json!(8));
+        assert_eq!(size(2, 2, "bottom"), json!(8));
+        assert!(size(2, 0, "bottom").is_null());
+        assert_eq!(size(0, 1, "top"), json!(8));
+        assert_eq!(size(0, 2, "top"), json!(8));
+    }
+
+    #[test]
     fn replayed_drawings_capture_source_properties_and_seed_attributes() {
         let formatting = json!({"hidden": true, "position": 20});
         let run = json!({"type": "run", "formatting": formatting, "content": [

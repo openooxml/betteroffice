@@ -537,3 +537,24 @@ it('keeps style-level tcBorders off the cells in both seeders', async () => {
     ).toEqual(Array.from({ length: 4 }, () => [null, null]));
   }
 });
+
+it('keeps the table outer border where a band clears its own in both seeders', async () => {
+  const line = (side: string) => `<w:${side} w:val="single" w:sz="8" w:space="0" w:color="000000"/>`;
+  const nil = (side: string) => `<w:${side} w:val="nil"/>`;
+  const styles =
+    '<w:style w:type="table" w:styleId="Ruled"><w:tblPr><w:tblStyleRowBandSize w:val="1"/>' +
+    `<w:tblBorders>${line('top')}${line('left')}${line('bottom')}${line('right')}</w:tblBorders></w:tblPr>` +
+    `<w:tblStylePr w:type="band1Horz"><w:tcPr><w:tcBorders>${nil('top')}${nil('bottom')}</w:tcBorders></w:tcPr></w:tblStylePr>` +
+    `<w:tblStylePr w:type="firstCol"><w:tcPr><w:tcBorders>${nil('bottom')}</w:tcBorders></w:tcPr></w:tblStylePr></w:style>`;
+  const look =
+    '<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>';
+  const grid = Array.from({ length: 3 }, () => ['', '', '']);
+  const seeded = await seedBoth(styledTable('Ruled', look, grid, 3), styles);
+  for (const engine of ['projected', 'native']) {
+    const cells = seeded[engine]![0]!;
+    const size = (row: number, column: number, side: string) =>
+      cells[row]![column]!.borders?.[side]?.size ?? null;
+    expect([size(2, 0, 'bottom'), size(2, 1, 'bottom'), size(2, 2, 'bottom')]).toEqual([null, 8, 8]);
+    expect([size(0, 1, 'top'), size(0, 2, 'top')]).toEqual([8, 8]);
+  }
+});
