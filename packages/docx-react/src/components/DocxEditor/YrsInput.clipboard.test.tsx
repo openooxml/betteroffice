@@ -234,7 +234,7 @@ test('paste options text-only over a selection replaces it and one undo restores
     );
     const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
     const fragment: DocxClipboardFragment = {
-      paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { bold: true } }] }],
+      paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { other: { bold: true } } }] }],
     };
     pasteWith(textarea, clipboardFragmentHtml(fragment), 'BAR');
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
@@ -302,7 +302,7 @@ test('a paste option after the paste was undone elsewhere changes nothing', asyn
     );
     const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
     const fragment: DocxClipboardFragment = {
-      paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { bold: true } }] }],
+      paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { other: { bold: true } } }] }],
     };
     pasteWith(textarea, clipboardFragmentHtml(fragment), 'BAR');
     await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
@@ -327,10 +327,10 @@ test('pasted runs keep their own formatting instead of the previous run\'s', asy
   const { paraId } = session.createStory('body', '');
   applyClipboardFragment(session, { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, {
     paragraphs: [{ text: 'A b C d', runs: [
-      { text: 'A', format: { bold: true, fontSize: 20 } },
-      { text: ' b ' },
-      { text: 'C', format: { italic: true } },
-      { text: ' d' },
+      { text: 'A', format: { other: { bold: true, fontSize: { size: 40, sizeCs: 40 } } } },
+      { text: ' b ', format: { other: {} } },
+      { text: 'C', format: { other: { italic: true } } },
+      { text: ' d', format: { other: {} } },
     ] }],
   });
   const runs = session.storySegments('body')

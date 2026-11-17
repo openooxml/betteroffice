@@ -420,7 +420,7 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
       for (const run of paragraph.runs) {
         if (!plainObject(run) || !Object.keys(run).every(key => RUN_KEYS.has(key)) || typeof run.text !== 'string' || run.text === '' || LINE_BREAK.test(run.text) || !wellFormed(run.text)) return false;
         if (run.format !== undefined &&
-          !(plainObject(run.format) && formatOk(run.format) && runAttributesOk(run.format.other ?? {}))) return false;
+          !(plainObject(run.format) && Object.keys(run.format).every(key => key === 'other') && runAttributesOk(run.format.other ?? {}))) return false;
         if (run.href !== undefined && !validHref(run.href)) return false;
         if (run.tooltip !== undefined && !validTooltip(run.tooltip)) return false;
         joined += run.text;
@@ -453,9 +453,6 @@ export function validClipboardFragment(value: unknown): value is DocxClipboardFr
 
 /** @internal Sessions a table read needs: the raw payload plus story segments. */
 export type ClipboardTableReader = Pick<YrsSession, 'tablePayload' | 'storySegments'> & { mediaDataUrl?(source: string): string | null | undefined };
-
-const RUN_FORMAT_KEYS = ['bold', 'italic', 'underline', 'strike', 'color', 'highlight', 'fontSize', 'fontFamily'] as const;
-type RunFormatKey = typeof RUN_FORMAT_KEYS[number];
 
 /** @internal Engine surface a fragment paste needs. */
 export type ClipboardPasteEngine = Pick<
@@ -945,14 +942,11 @@ function formatInsertedRun(
   engine: ClipboardPasteEngine,
   range: YrsStoryRange,
   run: DocxClipboardRun,
-  runKeys: ReadonlySet<RunFormatKey>,
   runLinks: boolean,
 ): void {
-  const other = run.format?.other;
+  const { other, ...typed } = run.format ?? {};
   if (other) engine.clearFormatting(range);
-  const delta: YrsInlineFormatDelta = { ...run.format };
-  for (const key of runKeys) Object.assign(delta, { [key]: run.format?.[key] ?? null });
-  if (Object.keys(delta).some(key => key !== 'other') || Object.keys(other ?? {}).length > 0) engine.formatRange(range, delta);
+  if (Object.keys(typed).length > 0 || Object.keys(other ?? {}).length > 0) engine.formatRange(range, run.format!);
   if (run.href) engine.setHyperlink(range, { href: run.href, ...(run.tooltip ? { tooltip: run.tooltip } : {}) });
   else if (runLinks) engine.setHyperlink(range, null);
 }
@@ -990,14 +984,7 @@ export function applyClipboardFragment(
     };
   }
   const paragraphProperties: Array<{ range: YrsStoryRange; pStyle?: string; list?: 'bullet' | 'numbered' }> = [];
-  const runKeys = new Set<RunFormatKey>();
-  let runLinks = false;
-  for (const paragraph of fragment.paragraphs) {
-    for (const run of paragraph.runs ?? []) {
-      for (const key of RUN_FORMAT_KEYS) if (run.format?.[key] !== undefined) runKeys.add(key);
-      if (run.href) runLinks = true;
-    }
-  }
+  const runLinks = fragment.paragraphs.some(paragraph => (paragraph.runs ?? []).some(run => run.href));
   fragment.paragraphs.forEach((paragraph, index) => {
     if (index > 0) {
       const split = engine.splitParagraph(caret, suggesting);
@@ -1013,7 +1000,7 @@ export function applyClipboardFragment(
         : engine.insertText(caret, unit.text, suggesting);
       if (!inserted.range) throw new Error('Clipboard insertion receipt lacks range');
       caret = { story: inserted.range.story, ...inserted.range.end };
-      if ('text' in unit && paragraph.runs) formatInsertedRun(engine, inserted.range, unit, runKeys, runLinks);
+      if ('text' in unit && paragraph.runs) formatInsertedRun(engine, inserted.range, unit, runLinks);
     }
     if (paragraph.pStyle || paragraph.list) {
       paragraphProperties.push({

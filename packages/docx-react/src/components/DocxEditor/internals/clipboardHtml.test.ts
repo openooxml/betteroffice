@@ -157,9 +157,9 @@ test('rich html parses formatted runs with font, size, colour and link', () => {
   expect(parsed!.paragraphs[0]).toEqual({
     text: 'Rich link',
     runs: [
-      { text: 'Rich', format: { bold: true, color: { rgb: 'FF0000' }, fontSize: 20, fontFamily: { ascii: 'Georgia' } } },
-      { text: ' ' },
-      { text: 'link', href: 'https://example.com' },
+      { text: 'Rich', format: { other: { bold: true, textColor: { rgb: 'FF0000' }, fontSize: { size: 40, sizeCs: 40 }, fontFamily: { ascii: 'Georgia', hAnsi: 'Georgia' } } } },
+      { text: ' ', format: { other: {} } },
+      { text: 'link', format: { other: {} }, href: 'https://example.com' },
     ],
   });
   expect(parsed!.paragraphs[1]).toEqual({ text: 'Head', pStyle: 'Heading2' });

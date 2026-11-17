@@ -375,8 +375,8 @@ describe('validClipboardFragment runs', () => {
         pStyle: 'Heading1',
         list: 'numbered',
         runs: [
-          { text: 'Bold ', format: { bold: true, fontSize: 20, fontFamily: { ascii: 'Georgia' }, color: { rgb: 'FF0000' } } },
-          { text: 'link', href: 'https://example.com' },
+          { text: 'Bold ', format: { other: { bold: true, fontSize: { size: 40, sizeCs: 40 }, fontFamily: { ascii: 'Georgia', hAnsi: 'Georgia' }, textColor: { rgb: 'FF0000' } } } },
+          { text: 'link', format: { other: {} }, href: 'https://example.com' },
         ],
       }],
     })).toBe(true);
@@ -672,18 +672,19 @@ describe('applyClipboardFragment', () => {
           text: 'Bold link',
           pStyle: 'Heading1',
           runs: [
-            { text: 'Bold ', format: { bold: true } },
-            { text: 'link', href: 'https://example.com' },
+            { text: 'Bold ', format: { other: { bold: true } } },
+            { text: 'link', format: { other: {} }, href: 'https://example.com' },
           ],
         }],
       },
     );
     expect(calls).toEqual([
       'text:Bold ',
-      'format:0-5:{"bold":true}',
+      'clear',
+      'format:0-5:{"other":{"bold":true}}',
       'link:0-5:none',
       'text:link',
-      'format:5-9:{"bold":null}',
+      'clear',
       'link:5-9:https://example.com',
       'style:Heading1',
     ]);

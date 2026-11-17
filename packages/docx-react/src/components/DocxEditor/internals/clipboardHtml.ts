@@ -450,6 +450,24 @@ function formatDelta(state: InlineFormatState): YrsInlineFormatDelta | undefined
   return Object.keys(delta).length > 0 ? delta : undefined;
 }
 
+function runAttributes(state: InlineFormatState): Record<string, unknown> {
+  const attributes: Record<string, unknown> = {};
+  if (state.bold) attributes.bold = true;
+  if (state.italic) attributes.italic = true;
+  if (state.underline) attributes.underline = { style: 'single' };
+  if (state.strike) attributes.strike = { double: false };
+  if (state.color) attributes.textColor = { rgb: state.color };
+  if (state.fontSize !== null) {
+    const size = Math.round(state.fontSize * 2);
+    if (size >= 1 && size <= 3276) attributes.fontSize = { size, sizeCs: size };
+  }
+  if (state.fontFamily && state.fontFamily.length <= 128) {
+    attributes.fontFamily = { ascii: state.fontFamily, hAnsi: state.fontFamily };
+  }
+  if (state.highlight) attributes.highlight = state.highlight;
+  return attributes;
+}
+
 function normalizeTextPart(part: string): string {
   return part.replace(/[ \n\r\f\v\u00a0\u2028\u2029]+/g, ' ');
 }
@@ -700,7 +718,7 @@ function finishRuns(runs: DocxClipboardRun[], preformatted = false): DocxClipboa
 }
 
 function runsHaveFormatting(runs: DocxClipboardRun[]): boolean {
-  return runs.some(run => run.href !== undefined || (run.format !== undefined && Object.keys(run.format).length > 0));
+  return runs.some(run => run.href !== undefined || Object.keys(run.format?.other ?? {}).length > 0);
 }
 
 function inlineParagraphs(
@@ -746,14 +764,14 @@ function inlineParagraphs(
   const appendRun = (text: string, chain: Element[]) => {
     const state = blankInlineFormat();
     for (const ancestor of chain) applyInlineElement(state, ancestor, false);
-    const format = formatDelta(state);
+    const format = { other: runAttributes(state) };
     const link = [...chain].reverse().find(element => element.tagName.toUpperCase() === 'A');
     const href = link ? sanitizeHref(link.getAttribute('href')) : undefined;
     const last = runs[runs.length - 1];
     if (last && JSON.stringify(last.format) === JSON.stringify(format) && last.href === href) {
       last.text += text;
     } else {
-      runs.push({ text, ...(format ? { format } : {}), ...(href ? { href } : {}) });
+      runs.push({ text, format, ...(href ? { href } : {}) });
     }
   };
   const walk = (node: Node, chain: Element[]) => {

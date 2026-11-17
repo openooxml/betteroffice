@@ -1455,7 +1455,7 @@ test('the paste options control follows a window scroll only while it is shown',
       pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
     };
     act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
-    const bold: DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { bold: true } }] }] };
+    const bold: DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
     pasteWith(input, clipboardFragmentHtml(bold), 'Bold');
     const end = { story: 'body', paraId: 'a', offset: 4 };
     act(() => {

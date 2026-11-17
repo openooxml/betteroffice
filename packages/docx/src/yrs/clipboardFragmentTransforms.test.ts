@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { DocxClipboardFragment } from './clipboardFragment';
+import { validClipboardFragment, type DocxClipboardFragment } from './clipboardFragment';
 import {
   clipboardFragmentHasFormatting,
   mergeFormattingFragment,
@@ -17,20 +17,22 @@ function richFragment(): DocxClipboardFragment {
           {
             text: 'Rich ',
             format: {
-              bold: true,
-              italic: true,
-              underline: true,
-              strike: true,
-              color: { rgb: 'FF0000' },
-              highlight: 'FFFF00',
-              fontSize: 20,
-              fontFamily: { ascii: 'Georgia' },
+              other: {
+                bold: true,
+                italic: true,
+                underline: { style: 'single' },
+                strike: { double: false },
+                textColor: { rgb: 'FF0000' },
+                highlight: 'FFFF00',
+                fontSize: { size: 40, sizeCs: 40 },
+                fontFamily: { ascii: 'Georgia', hAnsi: 'Georgia' },
+              },
             },
           },
-          { text: 'link', format: { bold: true, color: { rgb: '0000FF' } }, href: 'https://example.com' },
+          { text: 'link', format: { other: { bold: true, textColor: { rgb: '0000FF' } } }, href: 'https://example.com' },
         ],
       },
-      { text: 'Second', runs: [{ text: 'Second' }] },
+      { text: 'Second', runs: [{ text: 'Second', format: { other: {} } }] },
     ],
   };
 }
@@ -41,18 +43,23 @@ describe('mergeFormattingFragment', () => {
     const paragraph = merged.paragraphs[0]!;
     expect(paragraph.pStyle).toBeUndefined();
     expect(paragraph.list).toBe('numbered');
-    expect(paragraph.runs![0]!.format).toEqual({ bold: true, italic: true, underline: true, strike: true });
-    expect(paragraph.runs![1]).toEqual({ text: 'link', format: { bold: true }, href: 'https://example.com' });
+    expect(paragraph.runs![0]!.format).toEqual({
+      other: { bold: true, italic: true, underline: { style: 'single' }, strike: { double: false } },
+    });
+    expect(paragraph.runs![1]).toEqual({ text: 'link', format: { other: { bold: true } }, href: 'https://example.com' });
+    expect(merged.paragraphs[1]!.runs).toEqual([{ text: 'Second', format: { other: {} } }]);
     expect(JSON.stringify(merged)).not.toContain('Georgia');
     expect(JSON.stringify(merged)).not.toContain('FF0000');
+    expect(JSON.stringify(merged)).not.toContain('0000FF');
     expect(JSON.stringify(merged)).not.toContain('FFFF00');
+    expect(validClipboardFragment(merged)).toBe(true);
   });
 
   test('does not mutate the source fragment', () => {
     const source = richFragment();
     mergeFormattingFragment(source);
     expect(source.paragraphs[0]!.pStyle).toBe('Heading1');
-    expect(source.paragraphs[0]!.runs![0]!.format?.fontSize).toBe(20);
+    expect(source.paragraphs[0]!.runs![0]!.format?.other?.fontSize).toEqual({ size: 40, sizeCs: 40 });
   });
 
   test('strips table cell run formatting except the kept marks', () => {
@@ -84,8 +91,8 @@ describe('mergeFormattingFragment', () => {
   test('keeps the marks an in-editor copy carries as other run attributes', () => {
     const merged = mergeFormattingFragment(editorCopyFragment());
     expect(merged.paragraphs[0]!.runs).toEqual([
-      { text: 'Marked', format: { bold: true, italic: true, underline: { style: 'single' }, strike: { double: false } } },
-      { text: ' plain' },
+      { text: 'Marked', format: { other: { bold: true, italic: true, underline: { style: 'single' }, strike: { double: false } } } },
+      { text: ' plain', format: { other: {} } },
     ]);
     expect(JSON.stringify(merged)).not.toContain('FF0000');
     expect(JSON.stringify(merged)).not.toContain('Georgia');

@@ -266,7 +266,7 @@ test('replacePasteFragment swaps the paste variant in a single undo step', async
     const before = engine.paragraphs('body').map((paragraph) => paragraph.text);
     const pasted = await client.edit(intent(++seq, version, 'pasteFragment', {
       selection: { anchor: at, focus: at },
-      fragment: { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { bold: true } }] }] },
+      fragment: { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { bold: true } } }] }] },
     }));
     expect(pasted.outcomes[0]?.status).toBe('applied');
     version = pasted.version;
@@ -313,7 +313,7 @@ test('replacePasteFragment over a replaced selection restores the replaced text 
     const fooEnd = { ...base, offset: 5 };
     const pasted = await client.edit(intent(++seq, version, 'pasteFragment', {
       selection: { anchor: fooStart, focus: fooEnd },
-      fragment: { paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { bold: true } }] }] },
+      fragment: { paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { other: { bold: true } } }] }] },
     }));
     expect(pasted.outcomes[0]?.status).toBe('applied');
     version = pasted.version;
@@ -365,7 +365,7 @@ test('replacePasteFragment after a later edit is refused and keeps both edits', 
     const paragraphText = () => engine.paragraphs('body').find((paragraph) => paragraph.paraId === split.secondParaId)?.text;
     const pasted = await client.edit(intent(++seq, version, 'pasteFragment', {
       selection: { anchor: base, focus: base },
-      fragment: { paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { bold: true } }] }] },
+      fragment: { paragraphs: [{ text: 'BAR', runs: [{ text: 'BAR', format: { other: { bold: true } } }] }] },
     }));
     expect(pasted.outcomes[0]?.status).toBe('applied');
     version = pasted.version;
@@ -402,7 +402,7 @@ test('keep text only applies the typing settings the caret had before the paste'
     version = toggled.version;
     const pasted = await client.edit(intent(++seq, version, 'pasteFragment', {
       selection: { anchor: at, focus: at },
-      fragment: { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { italic: true } }] }] },
+      fragment: { paragraphs: [{ text: 'Rich', runs: [{ text: 'Rich', format: { other: { italic: true } } }] }] },
     }));
     expect(pasted.outcomes[0]?.status).toBe('applied');
     version = pasted.version;
@@ -444,8 +444,8 @@ test('keep text only over several lines matches a plain paste with the same typi
         const pasted = await client.edit(intent(++seq, version, 'pasteFragment', {
           selection: { anchor: at, focus: at },
           fragment: { paragraphs: [
-            { text: 'Alpha', runs: [{ text: 'Alpha', format: { italic: true } }] },
-            { text: 'Beta', runs: [{ text: 'Beta', format: { italic: true } }] },
+            { text: 'Alpha', runs: [{ text: 'Alpha', format: { other: { italic: true } } }] },
+            { text: 'Beta', runs: [{ text: 'Beta', format: { other: { italic: true } } }] },
           ] },
         }));
         expect(pasted.outcomes[0]?.status).toBe('applied');

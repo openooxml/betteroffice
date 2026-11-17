@@ -2807,8 +2807,8 @@ test('replacing a paste checks the replacement fragment and submits only an allo
   await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
   const replace = surface.mock.calls.at(-1)![0].onReplacePasteFragment!;
   const at = { story: 'body', paraId: 'a', offset: 4 };
-  const refused: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Refused', runs: [{ text: 'Refused', format: { bold: true } }] }] };
-  const kept: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Kept', runs: [{ text: 'Kept', format: { bold: true } }] }] };
+  const refused: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Refused', runs: [{ text: 'Refused', format: { other: { bold: true } } }] }] };
+  const kept: yrs.DocxClipboardFragment = { paragraphs: [{ text: 'Kept', runs: [{ text: 'Kept', format: { other: { bold: true } } }] }] };
   const replacements = () => requests.filter(request => request.type === 'edit' && request.command.kind === 'replacePasteFragment');
   expect(replace(refused, { anchor: at, focus: at })).toBe(false);
   expect(allowed).toHaveBeenLastCalledWith(expect.anything(), refused);

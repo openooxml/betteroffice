@@ -20,6 +20,15 @@ function mergeFormat(format: YrsInlineFormatDelta | undefined): YrsInlineFormatD
   return Object.keys(kept).length > 0 ? kept : undefined;
 }
 
+function mergeRunFormat(format: YrsInlineFormatDelta | undefined): YrsInlineFormatDelta {
+  const kept: Record<string, unknown> = {};
+  for (const key of KEPT_FORMAT_KEYS) {
+    const value = format?.other?.[key];
+    if (value !== undefined) kept[key] = value;
+  }
+  return { other: kept };
+}
+
 function mergeAttributes(attributes: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (!attributes) return undefined;
   const kept: Record<string, unknown> = {};
@@ -128,14 +137,11 @@ export function mergeFormattingFragment(fragment: DocxClipboardFragment): DocxCl
       ...(paragraph.inlines ? { inlines: paragraph.inlines } : {}),
       ...(paragraph.runs
         ? {
-            runs: paragraph.runs.map(run => {
-              const format = mergeFormat(run.format);
-              return {
-                text: run.text,
-                ...(format ? { format } : {}),
-                ...(run.href ? { href: run.href } : {}),
-              };
-            }),
+            runs: paragraph.runs.map(run => ({
+              text: run.text,
+              format: mergeRunFormat(run.format),
+              ...(run.href ? { href: run.href } : {}),
+            })),
           }
         : {}),
       ...(paragraph.list ? { list: paragraph.list } : {}),
@@ -173,7 +179,6 @@ export function clipboardFragmentHasFormatting(fragment: DocxClipboardFragment |
     paragraph.list !== undefined ||
     (paragraph.tables ?? []).length > 0 ||
     (paragraph.inlines ?? []).some(inline => 'image' in inline) ||
-    (paragraph.runs ?? []).some(run => run.href !== undefined || (run.format !== undefined &&
-      Object.entries(run.format).some(([key, value]) => key !== 'other' || Object.keys(value ?? {}).length > 0))) ||
+    (paragraph.runs ?? []).some(run => run.href !== undefined || Object.keys(run.format?.other ?? {}).length > 0) ||
     (paragraph.tables ?? []).some(table => table.rows.some(row => row.cells.some(cell => cell.content.some(segmentHas)))));
 }

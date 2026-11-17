@@ -18,10 +18,10 @@ test('word fixture parses formatted runs', () => {
   expect(parseClipboardHtml(fixture('word.html'))).toEqual({
     paragraphs: [
       { text: 'Quarterly report', runs: [
-        { text: 'Quarterly', format: { bold: true, color: { rgb: 'C00000' }, fontSize: 14, fontFamily: { ascii: 'Calibri' } } },
-        { text: ' report', format: { fontSize: 14, fontFamily: { ascii: 'Calibri' } } },
+        { text: 'Quarterly', format: { other: { bold: true, textColor: { rgb: 'C00000' }, fontSize: { size: 28, sizeCs: 28 }, fontFamily: { ascii: 'Calibri', hAnsi: 'Calibri' } } } },
+        { text: ' report', format: { other: { fontSize: { size: 28, sizeCs: 28 }, fontFamily: { ascii: 'Calibri', hAnsi: 'Calibri' } } } },
       ] },
-      { text: 'Second line', runs: [{ text: 'Second line', format: { italic: true } }] },
+      { text: 'Second line', runs: [{ text: 'Second line', format: { other: { italic: true } } }] },
     ],
   });
 });
@@ -29,8 +29,8 @@ test('word fixture parses formatted runs', () => {
 test('google docs fixture cancels wrapper bold and keeps span formatting', () => {
   expect(parseClipboardHtml(fixture('google-docs.html'))).toEqual({
     paragraphs: [
-      { text: 'Rich heading', runs: [{ text: 'Rich heading', format: { bold: true, color: { rgb: 'FF0000' }, fontSize: 20, fontFamily: { ascii: 'Georgia' } } }] },
-      { text: 'Body note', runs: [{ text: 'Body note', format: { italic: true, fontSize: 11, fontFamily: { ascii: 'Arial' } } }] },
+      { text: 'Rich heading', runs: [{ text: 'Rich heading', format: { other: { bold: true, textColor: { rgb: 'FF0000' }, fontSize: { size: 40, sizeCs: 40 }, fontFamily: { ascii: 'Georgia', hAnsi: 'Georgia' } } } }] },
+      { text: 'Body note', runs: [{ text: 'Body note', format: { other: { italic: true, fontSize: { size: 22, sizeCs: 22 }, fontFamily: { ascii: 'Arial', hAnsi: 'Arial' } } } }] },
     ],
   });
 });
@@ -40,11 +40,11 @@ test('chrome fixture parses heading link and list', () => {
     paragraphs: [
       { text: 'Release notes', pStyle: 'Heading2' },
       { text: 'Read the guide and save your work.', runs: [
-        { text: 'Read the ' },
-        { text: 'guide', href: 'https://example.com/guide' },
-        { text: ' and ' },
-        { text: 'save', format: { bold: true } },
-        { text: ' your work.' },
+        { text: 'Read the ', format: { other: {} } },
+        { text: 'guide', format: { other: {} }, href: 'https://example.com/guide' },
+        { text: ' and ', format: { other: {} } },
+        { text: 'save', format: { other: { bold: true } } },
+        { text: ' your work.', format: { other: {} } },
       ] },
       { text: 'First item', list: 'bullet' },
       { text: 'Second item', list: 'bullet' },
@@ -56,9 +56,9 @@ test('safari fixture parses converted space and inline styles', () => {
   expect(parseClipboardHtml(fixture('safari.html'))).toEqual({
     paragraphs: [
       { text: 'Linked text bold tail', runs: [
-        { text: 'Linked text', format: { underline: true, color: { rgb: '0000FF' }, fontSize: 12, fontFamily: { ascii: 'Helvetica' } } },
-        { text: ' ' },
-        { text: 'bold tail', format: { bold: true } },
+        { text: 'Linked text', format: { other: { underline: { style: 'single' }, textColor: { rgb: '0000FF' }, fontSize: { size: 24, sizeCs: 24 }, fontFamily: { ascii: 'Helvetica', hAnsi: 'Helvetica' } } } },
+        { text: ' ', format: { other: {} } },
+        { text: 'bold tail', format: { other: { bold: true } } },
       ] },
       { text: 'Plain second' },
     ],
@@ -70,10 +70,10 @@ test('firefox fixture parses heading highlight strike and numbered list', () => 
     paragraphs: [
       { text: 'Firefox heading', pStyle: 'Heading3' },
       { text: 'Highlighted and removed text', runs: [
-        { text: 'Highlighted', format: { highlight: 'FFFF00' } },
-        { text: ' and ' },
-        { text: 'removed', format: { strike: true } },
-        { text: ' text' },
+        { text: 'Highlighted', format: { other: { highlight: 'FFFF00' } } },
+        { text: ' and ', format: { other: {} } },
+        { text: 'removed', format: { other: { strike: { double: false } } } },
+        { text: ' text', format: { other: {} } },
       ] },
       { text: 'Numbered one', list: 'numbered' },
     ],
@@ -83,8 +83,8 @@ test('firefox fixture parses heading highlight strike and numbered list', () => 
 test('outlook fixture parses word-like formatted runs', () => {
   expect(parseClipboardHtml(fixture('outlook.html'))).toEqual({
     paragraphs: [
-      { text: 'Outlook title', runs: [{ text: 'Outlook title', format: { bold: true, color: { rgb: '0070C0' }, fontSize: 12, fontFamily: { ascii: 'Aptos' } } }] },
-      { text: 'Underlined note', runs: [{ text: 'Underlined note', format: { underline: true } }] },
+      { text: 'Outlook title', runs: [{ text: 'Outlook title', format: { other: { bold: true, textColor: { rgb: '0070C0' }, fontSize: { size: 24, sizeCs: 24 }, fontFamily: { ascii: 'Aptos', hAnsi: 'Aptos' } } } }] },
+      { text: 'Underlined note', runs: [{ text: 'Underlined note', format: { other: { underline: { style: 'single' } } } }] },
     ],
   });
 });
@@ -94,22 +94,22 @@ test('dangerous link schemes drop the link but keep the text', () => {
     const parsed = parseClipboardHtml(`<body><p><b>bold</b> <a href="${href}">click</a></p></body>`);
     expect(parsed).not.toBeNull();
     expect(parsed!.paragraphs[0]!.text).toBe('bold click');
-    expect(parsed!.paragraphs[0]!.runs).toEqual([{ text: 'bold', format: { bold: true } }, { text: ' click' }]);
+    expect(parsed!.paragraphs[0]!.runs).toEqual([{ text: 'bold', format: { other: { bold: true } } }, { text: ' click', format: { other: {} } }]);
   }
 });
 
 test('allowed link schemes are kept case-insensitively', () => {
   const parsed = parseClipboardHtml(`<body><p><a href="HTTPS://example.com/x">site</a> <a href="MailTo:a@example.com">mail</a></p></body>`);
   expect(parsed!.paragraphs[0]!.runs).toEqual([
-    { text: 'site', href: 'HTTPS://example.com/x' },
-    { text: ' ' },
-    { text: 'mail', href: 'MailTo:a@example.com' },
+    { text: 'site', format: { other: {} }, href: 'HTTPS://example.com/x' },
+    { text: ' ', format: { other: {} } },
+    { text: 'mail', format: { other: {} }, href: 'MailTo:a@example.com' },
   ]);
 });
 
 test('script style template and iframe content contributes no text', () => {
   const parsed = parseClipboardHtml(`<body><p><b>keep</b></p><script>evil()</script><style>.x{color:red}</style><template><p>templ</p></template><iframe srcdoc="frame"></iframe><svg><text>svgtext</text></svg></body>`);
-  expect(parsed).toEqual({ paragraphs: [{ text: 'keep', runs: [{ text: 'keep', format: { bold: true } }] }] });
+  expect(parsed).toEqual({ paragraphs: [{ text: 'keep', runs: [{ text: 'keep', format: { other: { bold: true } } }] }] });
 });
 
 test('oversized html returns null', () => {
@@ -134,12 +134,15 @@ test('style attribute longer than 4096 returns null', () => {
 test('css validators reject url expression and oversized values', () => {
   const parsed = parseClipboardHtml(`<body><p><span style="font-family:url(evil);font-size:9999pt;color:expression(alert(1));background:url(http://x)">plain</span> <span style="font-size:12pt">sized</span></p></body>`);
   expect(parsed).not.toBeNull();
-  expect(parsed!.paragraphs[0]!.runs).toEqual([{ text: 'plain ' }, { text: 'sized', format: { fontSize: 12 } }]);
+  expect(parsed!.paragraphs[0]!.runs).toEqual([
+    { text: 'plain ', format: { other: {} } },
+    { text: 'sized', format: { other: { fontSize: { size: 24, sizeCs: 24 } } } },
+  ]);
 });
 
 test('css validators reject escaped font family and bad colours', () => {
   const parsed = parseClipboardHtml(`<body><p><span style="font-family:Ar\\ial;color:#12;font-weight:bold">x</span></p></body>`);
-  expect(parsed!.paragraphs[0]!.runs).toEqual([{ text: 'x', format: { bold: true } }]);
+  expect(parsed!.paragraphs[0]!.runs).toEqual([{ text: 'x', format: { other: { bold: true } } }]);
 });
 
 test('content with no allowlisted formatting returns null like main', () => {
@@ -197,7 +200,7 @@ test('plain text of a table-only fragment keeps the cell text', () => {
 });
 
 test('paste options are offered only for formatted text without pictures', () => {
-  const bold = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { bold: true } }] }] };
+  const bold = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
   expect(pasteOptionsApply(bold, 'Bold')).toBe(true);
   expect(pasteOptionsApply(bold, '  ')).toBe(false);
   expect(pasteOptionsApply({ paragraphs: [{ text: 'Plain' }] }, 'Plain')).toBe(false);
@@ -231,14 +234,14 @@ test('preformatted text keeps its lines and indentation', () => {
 test('non-breaking spaces at a run boundary are both kept', () => {
   expect(parseClipboardHtml('<p><b>A&nbsp;</b><i>&nbsp;B</i></p>')).toEqual({
     paragraphs: [{ text: 'A  B', runs: [
-      { text: 'A ', format: { bold: true } },
-      { text: ' B', format: { italic: true } },
+      { text: 'A ', format: { other: { bold: true } } },
+      { text: ' B', format: { other: { italic: true } } },
     ] }],
   });
 });
 
 test('private-use characters in pasted text are kept', () => {
   expect(parseClipboardHtml('<b>A\uE000B</b>')).toEqual({
-    paragraphs: [{ text: 'A\uE000B', runs: [{ text: 'A\uE000B', format: { bold: true } }] }],
+    paragraphs: [{ text: 'A\uE000B', runs: [{ text: 'A\uE000B', format: { other: { bold: true } } }] }],
   });
 });
