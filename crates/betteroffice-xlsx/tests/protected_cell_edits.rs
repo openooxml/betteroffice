@@ -327,6 +327,12 @@ fn style(book: &Workbook, sheet: SheetId, address: &str) -> Option<u32> {
         .and_then(|cell| cell.style)
 }
 
+fn format(book: &Workbook, sheet: SheetId, address: &str) -> CellFormat {
+    let model = book.model();
+    let style = model.sheet(sheet).unwrap().effective_style(cell(address));
+    model.styles.cell_format(style)
+}
+
 #[test]
 fn fill_refuses_a_locked_destination_and_writes_nothing() {
     let mut book = workbook();
@@ -420,6 +426,12 @@ fn fill_formats_unlocked_destinations_on_a_protected_sheet() {
         sheet.effective_style(cell("E1")),
         sheet.inherited_style(cell("E1"))
     );
+    assert_eq!(input(&book, BANDED, "E1"), "");
+    assert_eq!(format(&book, BANDED, "E1"), format(&book, BANDED, "D1"));
+    assert_eq!(
+        format(&book, BANDED, "E1"),
+        book.model().styles.cell_format(None)
+    );
 }
 
 #[test]
@@ -432,6 +444,12 @@ fn fill_from_a_locked_source_writes_unlocked_destinations() {
     );
     assert_eq!(input(&book, BANDED, "D2"), "8");
     assert_eq!(input(&book, BANDED, "E2"), "8");
+    assert_eq!(style(&book, BANDED, "E2"), style(&book, BANDED, "D2"));
+    assert_eq!(format(&book, BANDED, "E2"), format(&book, BANDED, "D2"));
+    assert_eq!(
+        format(&book, BANDED, "E2"),
+        book.model().styles.cell_format(None)
+    );
 }
 
 #[test]
