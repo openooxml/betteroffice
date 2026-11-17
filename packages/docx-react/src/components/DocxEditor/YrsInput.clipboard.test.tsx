@@ -355,8 +355,9 @@ test('merge formatting keeps the source marks and the destination run formatting
   const at = { paraId, offset: 1 };
   applyClipboardFragment(session, { story: 'body', start: at, end: at }, mergeFormattingFragment(source), undefined, true);
   const segments = session.storySegments('body').filter((segment) => segment.kind === 'text');
+  expect(segments.map((segment) => segment.kind === 'text' ? segment.text : '')).toEqual(['a', 'Bold', ' tailb']);
   const attributesOf = (text: string) => {
-    const found = segments.find((segment) => segment.kind === 'text' && segment.text === text);
+    const found = segments.find((segment) => segment.kind === 'text' && segment.text.includes(text));
     return found?.kind === 'text' ? found.attributes : undefined;
   };
   const destination = { fontFamily: { ascii: 'Arial' }, textColor: { rgb: '0000FF' }, fontSize: { size: 24 } };
