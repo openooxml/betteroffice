@@ -558,3 +558,24 @@ it('keeps the table outer border where a band clears its own in both seeders', a
     expect([size(0, 1, 'top'), size(0, 2, 'top')]).toEqual([8, 8]);
   }
 });
+
+it('draws the header rule of a three-line table in both seeders', async () => {
+  const line = (side: string, size: number) =>
+    `<w:${side} w:val="single" w:sz="${size}" w:space="0" w:color="000000"/>`;
+  const styles =
+    '<w:style w:type="table" w:styleId="ThreeLine"><w:tblPr>' +
+    `<w:tblBorders>${line('top', 12)}${line('bottom', 12)}</w:tblBorders></w:tblPr>` +
+    `<w:tblStylePr w:type="firstRow"><w:tcPr><w:tcBorders>${line('bottom', 4)}</w:tcBorders></w:tcPr></w:tblStylePr></w:style>`;
+  const look =
+    '<w:tblLook w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="1"/>';
+  const seeded = await seedBoth(styledTable('ThreeLine', look, [['', ''], ['', '']], 2), styles);
+  for (const engine of ['projected', 'native']) {
+    const cells = seeded[engine]![0]!;
+    const size = (row: number, column: number, side: string) =>
+      cells[row]![column]!.borders?.[side]?.size ?? null;
+    expect([size(0, 0, 'top'), size(0, 1, 'top')]).toEqual([12, 12]);
+    expect([size(0, 0, 'bottom'), size(0, 1, 'bottom')]).toEqual([4, 4]);
+    expect([size(1, 0, 'top'), size(1, 1, 'top')]).toEqual([null, null]);
+    expect([size(1, 0, 'bottom'), size(1, 1, 'bottom')]).toEqual([12, 12]);
+  }
+});

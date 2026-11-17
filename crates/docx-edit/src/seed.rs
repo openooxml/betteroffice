@@ -9410,6 +9410,32 @@ mod tests {
     }
 
     #[test]
+    fn a_three_line_table_draws_its_header_rule() {
+        let rule =
+            |size: u32| json!({ "style": "single", "size": size, "color": { "rgb": "000000" } });
+        let style = json!({
+            "type": "table", "styleId": "ThreeLine",
+            "tblPr": { "borders": { "top": rule(12), "bottom": rule(12) } },
+            "tblStylePr": [
+                { "type": "firstRow", "tcPr": { "borders": { "bottom": rule(4) } } }
+            ]
+        });
+        let look = json!({
+            "firstRow": true, "lastRow": false, "firstColumn": false, "noVBand": true
+        });
+        let cells = styled_cells(style, look, 2, 2);
+        let size = |row: usize, column: usize, side: &str| {
+            cells[row][column]["borders"][side]["size"].clone()
+        };
+        for column in 0..2 {
+            assert_eq!(size(0, column, "top"), json!(12));
+            assert_eq!(size(0, column, "bottom"), json!(4));
+            assert!(size(1, column, "top").is_null());
+            assert_eq!(size(1, column, "bottom"), json!(12));
+        }
+    }
+
+    #[test]
     fn replayed_drawings_capture_source_properties_and_seed_attributes() {
         let formatting = json!({"hidden": true, "position": 20});
         let run = json!({"type": "run", "formatting": formatting, "content": [
