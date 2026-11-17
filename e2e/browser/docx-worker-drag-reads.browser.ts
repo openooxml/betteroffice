@@ -84,7 +84,9 @@ for (const wait of [0, 200]) test(`a copy ${wait ? `${wait} ms after` : 'at'} th
 test('the toolbar Bold state follows a drag at release and Shift+Arrow at each step', async ({ page }) => {
   const input = await open(page);
   const bold = page.getByTestId('formatting-bar').getByRole('button', { name: 'Bold', exact: true });
+  const before = await caretBox(page);
   await input.press('ArrowDown');
+  await expect.poll(async () => (await caretBox(page)).y).toBeGreaterThan(before.y);
   const boldLine = await caretBox(page);
   await input.press('ArrowUp');
   await expect(bold).toHaveAttribute('aria-pressed', 'false');

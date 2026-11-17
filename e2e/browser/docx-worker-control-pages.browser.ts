@@ -28,7 +28,7 @@ test('a checkbox on a page built by scrolling gets its handle over the control',
   const sheetBox = (await sheet.boundingBox())!;
   expect(handle.y).toBeGreaterThanOrEqual(sheetBox.y);
   expect(handle.y + handle.height).toBeLessThanOrEqual(sheetBox.y + sheetBox.height);
-  const line = (await page.locator('.canvas-page-mirror .layout-paragraph').filter({ hasText: 'Tick here' }).first().boundingBox())!;
+  const line = (await sheet.locator('.canvas-page-mirror .layout-run-text').filter({ hasText: '☐' }).first().boundingBox())!;
   expect(handle.x < line.x + line.width && line.x < handle.x + handle.width).toBe(true);
   expect(handle.y < line.y + line.height && line.y < handle.y + handle.height).toBe(true);
 });

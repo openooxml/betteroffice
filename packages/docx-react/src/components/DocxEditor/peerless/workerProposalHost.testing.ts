@@ -83,7 +83,7 @@ export function proposalHost(options: { readOnly?: boolean; mode?: DocxEditorPro
   const readAt = mock(async (request: { kind: string; expectPreviewVersion?: number }, version: string): Promise<ReviewRead> => {
     const frame = viewStore.getSnapshot().geometry!;
     if (version !== snapshot.version) return { status: 'superseded' as const };
-    const available = frame.documentVersion === snapshot.version && frame.coversThroughSeq >= seq && request.expectPreviewVersion === snapshot.previewVersion;
+    const available = frame.documentVersion === snapshot.version && frame.coversThroughSeq >= seq && (request.expectPreviewVersion === undefined || request.expectPreviewVersion === snapshot.previewVersion);
     if (!available) nullReads++;
     const value: DocxReviewSnapshot | null = available ? {
       version: snapshot.version, previewVersion: snapshot.previewVersion, frameEpoch: frame.frameEpoch, layoutRevision: frame.layoutRevision,
