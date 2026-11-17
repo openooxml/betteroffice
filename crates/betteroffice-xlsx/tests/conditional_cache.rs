@@ -75,14 +75,18 @@ fn rule(sqref: &str, rules: &str) -> String {
 fn greater_than(sqref: &str, value: &str) -> String {
     rule(
         sqref,
-        &format!(r#"<cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>{value}</formula></cfRule>"#),
+        &format!(
+            r#"<cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>{value}</formula></cfRule>"#
+        ),
     )
 }
 
 fn expression(sqref: &str, priority: u32, formula: &str) -> String {
     rule(
         sqref,
-        &format!(r#"<cfRule type="expression" dxfId="0" priority="{priority}"><formula>{formula}</formula></cfRule>"#),
+        &format!(
+            r#"<cfRule type="expression" dxfId="0" priority="{priority}"><formula>{formula}</formula></cfRule>"#
+        ),
     )
 }
 
@@ -173,7 +177,10 @@ fn scrolling_back_reuses_the_cells_already_decided() {
     frame(&workbook, &view(geometry.row_y(1000), 400.0));
     let scrolled = workbook.conditional_stats();
     let back = frame(&workbook, &top);
-    assert_eq!(workbook.conditional_stats().evaluated_cells, scrolled.evaluated_cells);
+    assert_eq!(
+        workbook.conditional_stats().evaluated_cells,
+        scrolled.evaluated_cells
+    );
     assert_eq!(back, first);
 }
 
@@ -184,38 +191,70 @@ fn editing_a_cell_repaints_the_rules_that_read_it() {
             let a = if row == 1 { a1 } else { row };
             let c = if row == 2 { c2 } else { 0 };
             let e = if row == 1 { e1 } else { row };
-            format!(r#"<c r="A{row}"><v>{a}</v></c><c r="C{row}"><v>{c}</v></c><c r="E{row}"><v>{e}</v></c>"#)
+            format!(
+                r#"<c r="A{row}"><v>{a}</v></c><c r="C{row}"><v>{c}</v></c><c r="E{row}"><v>{e}</v></c>"#
+            )
         })
     };
-    let data = |a3: u32| rows(3, move |row| format!(r#"<c r="A{row}"><v>{}</v></c>"#, if row == 3 { a3 } else { 0 }));
+    let data = |a3: u32| {
+        rows(3, move |row| {
+            format!(
+                r#"<c r="A{row}"><v>{}</v></c>"#,
+                if row == 3 { a3 } else { 0 }
+            )
+        })
+    };
     let formats = [
         greater_than("A1:A10", "8"),
         expression("B1:B10", 2, "C1&gt;0"),
         expression("D1:D3", 3, "Data!A1&gt;0"),
-        rule("E1:E10", r#"<cfRule type="top10" dxfId="0" priority="4" rank="1"/>"#),
+        rule(
+            "E1:E10",
+            r#"<cfRule type="top10" dxfId="0" priority="4" rank="1"/>"#,
+        ),
     ]
     .concat();
     let book = |a1, c2, e1, a3| {
-        workbook(&[("Sheet1", values(a1, c2, e1), formats.clone()), ("Data", data(a3), String::new())])
+        workbook(&[
+            ("Sheet1", values(a1, c2, e1), formats.clone()),
+            ("Data", data(a3), String::new()),
+        ])
     };
     let mut workbook = book(1, 0, 1, 0);
     let viewport = view(0.0, 300.0);
     let before = frame(&workbook, &viewport);
     assert_eq!(painted(&before).len(), 3);
     let built = workbook.conditional_stats().aggregate_builds;
-    edit(&mut workbook, SheetId(0), &[(0, 0, "100"), (1, 2, "1"), (0, 4, "50")]);
+    edit(
+        &mut workbook,
+        SheetId(0),
+        &[(0, 0, "100"), (1, 2, "1"), (0, 4, "50")],
+    );
     edit(&mut workbook, SheetId(1), &[(2, 0, "1")]);
     let after = frame(&workbook, &viewport);
     assert_eq!(after.conditional_pending, 0);
     assert_eq!(painted(&after).len(), 6);
-    assert_eq!(painted(&after), painted(&book(100, 1, 50, 1).display_list(&viewport).unwrap()));
+    assert_eq!(
+        painted(&after),
+        painted(&book(100, 1, 50, 1).display_list(&viewport).unwrap())
+    );
     assert_eq!(workbook.conditional_stats().aggregate_builds, built + 1);
     for _ in 0..2 {
-        assert!(workbook.undo(CalculationOptions::default()).unwrap().applied);
+        assert!(
+            workbook
+                .undo(CalculationOptions::default())
+                .unwrap()
+                .applied
+        );
     }
     assert_eq!(painted(&frame(&workbook, &viewport)), painted(&before));
     for _ in 0..2 {
-        assert!(workbook.redo(CalculationOptions::default()).unwrap().applied);
+        assert!(
+            workbook
+                .redo(CalculationOptions::default())
+                .unwrap()
+                .applied
+        );
     }
     assert_eq!(painted(&frame(&workbook, &viewport)), painted(&after));
 }
@@ -241,7 +280,10 @@ fn adding_or_removing_a_rule_and_deleting_a_sheet_drop_the_cached_results() {
         (
             "Second",
             values(),
-            rule("A1:A5", r#"<cfRule type="cellIs" dxfId="0" priority="1" operator="lessThan"><formula>2</formula></cfRule>"#),
+            rule(
+                "A1:A5",
+                r#"<cfRule type="cellIs" dxfId="0" priority="1" operator="lessThan"><formula>2</formula></cfRule>"#,
+            ),
         ),
     ]);
     let viewport = view(0.0, 200.0);
@@ -421,7 +463,10 @@ fn one_shot_renders_decide_every_cell() {
     for list in [
         workbook.display_list(&viewport).unwrap(),
         workbook.display_list_for(SheetId(0), &viewport).unwrap(),
-        workbook.png_display_list_for(SheetId(0), &viewport).unwrap().0,
+        workbook
+            .png_display_list_for(SheetId(0), &viewport)
+            .unwrap()
+            .0,
     ] {
         assert_eq!(list.conditional_pending, 0);
         assert_eq!(painted(&list), painted(&reference));
@@ -473,6 +518,9 @@ fn decided_cells_stay_within_the_cap_across_a_long_scroll() {
         y += height;
     }
     let stats = workbook.conditional_stats();
-    assert!(stats.evaluated_cells > CONDITIONAL_RESULT_CAP as u64, "{stats:?}");
+    assert!(
+        stats.evaluated_cells > CONDITIONAL_RESULT_CAP as u64,
+        "{stats:?}"
+    );
     assert!(stats.cached_cells <= CONDITIONAL_RESULT_CAP);
 }
