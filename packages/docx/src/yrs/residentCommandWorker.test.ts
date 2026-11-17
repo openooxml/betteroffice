@@ -19,6 +19,7 @@ import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
 import type { DocxReviewTarget } from './residentReview';
 import type { YrsContentControlValue } from './index';
 import type { SectionProperties } from '../types/document';
+import type { TextWatermark } from '../types/content/watermark';
 import type { LayoutBlock } from '../layout/pagination/types';
 
 const TIMEOUT = 20_000;
@@ -1272,7 +1273,7 @@ test('worker accepts a read word text watermark written back with new text', asy
       '</w:pict></w:r></w:p></w:sdtContent></w:sdt></w:hdr>',
   });
   try {
-    const read = (await client.documentRead({ kind: 'properties', target: { kind: 'watermark' } })).value as unknown as { watermark: Record<string, unknown> };
+    const read = (await client.documentRead({ kind: 'properties', target: { kind: 'watermark' } })).value as unknown as { watermark: TextWatermark };
     expect(read.watermark).toMatchObject({ kind: 'text', text: 'SAMPLE', font: 'Liberation Serif' });
     const written = await client.edit(intent(1, 0, 'setWatermark', {
       watermark: { ...read.watermark, text: 'DRAFT' }, expectVersion: initial.frame.payload.documentVersion!,
