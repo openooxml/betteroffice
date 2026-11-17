@@ -16,7 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dir, '..');
 const declarationMode = process.env.BETTEROFFICE_PACKAGE_DECLARATIONS;
-const PACKAGES = ['docx-i18n', 'docx', 'docx-react'];
+const PACKAGES = ['docx-i18n', 'docx', 'docx-react', 'fonts'];
 const LINKED = ['react', 'react-dom', '@types/react', '@types/react-dom', 'csstype'];
 const DEMOS = ['ReviewPlugin.tsx', 'CompactToolbar.tsx'];
 
