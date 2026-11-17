@@ -235,7 +235,7 @@ describe('peerless worker XLSX commands', () => {
     const { controller, coordinator, sent, ack, errors } = peerlessCommands();
     const capture = deferred<string>();
     let denied = false;
-    const scoped = controller.scoped({ deny: () => denied ? 'permission-denied' : null, subscribe: () => () => {} });
+    const scoped = controller.scoped({ gesture: () => false, deny: () => denied ? 'permission-denied' : null, subscribe: () => () => {} });
     const pasted = coordinator.clipboard(() => capture.promise, (value) => ({
       kind: 'editCell', payload: { args: [0, 0, 0, value] },
     }));
@@ -581,7 +581,7 @@ describe('worker XLSX commands', () => {
     const paint = deferred<void>();
     state.preview = paint.promise;
     let denied = false;
-    const store = controller.scoped({ deny: () => denied ? 'permission-denied' : null, subscribe: () => () => {} });
+    const store = controller.scoped({ gesture: () => false, deny: () => denied ? 'permission-denied' : null, subscribe: () => () => {} });
     const command = store.execute('bold', null);
     hydrate();
     await previewEntered.promise;

@@ -2,6 +2,7 @@
 //! attribute lookup, and opc path helpers. malformed input errors, never panics.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use quick_xml::Reader;
 use quick_xml::events::attributes::Attribute;
@@ -121,17 +122,47 @@ fn is_xml_char(ch: char) -> bool {
 /// An attribute whose value keeps its CR, LF, tab and other control characters,
 /// written as character references since literal ones read back as spaces.
 pub(crate) fn text_attribute<'a>(name: &'a str, value: &str) -> Attribute<'a> {
-    let escaped = char_references(&quick_xml::escape::escape(value), &['\r', '\n', '\t']);
     Attribute {
         key: QName(name.as_bytes()),
-        value: Cow::Owned(escaped.into_bytes()),
+        value: Cow::Owned(attribute_text(value).into_bytes()),
     }
+}
+
+/// The escaped value [`text_attribute`] writes, for markup built as text.
+pub(crate) fn attribute_text(value: &str) -> String {
+    char_references(&quick_xml::escape::escape(value), &['\r', '\n', '\t'])
 }
 
 /// Encode string item text the way Excel writes ST_Xstring: a CR and the other
 /// characters XML 1.0 cannot carry become `_xHHHH_`, and an underscore that
 /// would start such an escape is written as `_x005F_`.
 pub(crate) fn encode_xstring(text: &str) -> String {
+    xstring(text, false)
+}
+
+/// A number format code (`ST_Xstring`) as element text, the way Excel writes
+/// it: [`encode_xstring`], then xml escaped. Writing one never fails.
+pub(crate) fn format_code_text(code: &str) -> String {
+    quick_xml::escape::escape(xstring(code, false)).into_owned()
+}
+
+/// An `ST_Xstring` attribute value (a number format code, a sheet, defined or
+/// font name), the way Excel writes it: [`encode_xstring`] with tab and line
+/// feed also as `_xHHHH_`, so attribute normalization cannot fold them into
+/// spaces, then xml escaped. Writing one never fails.
+pub(crate) fn xstring_attribute_value(value: &str) -> String {
+    quick_xml::escape::escape(xstring(value, true)).into_owned()
+}
+
+/// [`xstring_attribute_value`] as a writer attribute.
+pub(crate) fn xstring_attribute<'a>(name: &'a str, value: &str) -> Attribute<'a> {
+    Attribute {
+        key: QName(name.as_bytes()),
+        value: Cow::Owned(xstring_attribute_value(value).into_bytes()),
+    }
+}
+
+fn xstring(text: &str, attribute: bool) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     for (index, ch) in text.char_indices() {
@@ -146,7 +177,7 @@ pub(crate) fn encode_xstring(text: &str) -> String {
             {
                 out.push_str("_x005F_");
             }
-            '\t' | '\n' => out.push(ch),
+            '\t' | '\n' if !attribute => out.push(ch),
             _ if !is_xml_char(ch) => {
                 out.push_str(&format!("_x{:04X}_", ch as u32));
             }
@@ -194,6 +225,63 @@ pub(crate) fn resolve_part_path(base_dir: &str, target: &str) -> String {
         }
     }
     segs.join("/")
+}
+
+/// [`resolve_part_path`] in the form [`find_part`] matches, so one part has one name.
+pub(crate) fn resolve_part_name(base_dir: &str, target: &str) -> String {
+    resolve_part_path(base_dir, target)
+        .trim_start_matches('/')
+        .to_owned()
+}
+
+#[cfg(test)]
+thread_local! {
+    static NAME_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn count_name_probe() {
+    NAME_PROBES.set(NAME_PROBES.get() + 1);
+}
+
+/// Part names looked at by duplicate checks since the last call.
+#[cfg(test)]
+pub(crate) fn take_name_probes() -> usize {
+    NAME_PROBES.replace(0)
+}
+
+/// Part names in the order first seen, each kept once.
+#[derive(Default)]
+pub(crate) struct PartNames {
+    order: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl PartNames {
+    /// Keeps `name` unless already seen, returning whether it was new.
+    pub(crate) fn push(&mut self, name: String) -> bool {
+        #[cfg(test)]
+        count_name_probe();
+        let new = self.seen.insert(name.clone());
+        if new {
+            self.order.push(name);
+        }
+        new
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<String> {
+        self.order
+    }
+}
+
+impl FromIterator<String> for PartNames {
+    fn from_iter<I: IntoIterator<Item = String>>(names: I) -> Self {
+        let mut part_names = Self::default();
+        for name in names {
+            part_names.push(name);
+        }
+        part_names
+    }
 }
 
 /// find a part by name, tolerating a leading slash on either side.

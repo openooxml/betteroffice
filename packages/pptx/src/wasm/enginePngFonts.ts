@@ -109,7 +109,7 @@ async function resolve(fonts: Fonts, request: RequestedFontFace): Promise<Bundle
   const primary = await installedFace(fonts, fonts.resolveBundledFamilyFace(request.family, request.bold, request.italic));
   push(primary);
   for (const script of request.scripts ?? []) {
-    push(await installedFace(fonts, fonts.resolveScriptFallbackFace(script as BundledFontScript, request.bold, request.italic)));
+    push(await installedFace(fonts, fonts.resolveScriptFallbackFace(script as BundledFontScript, request.bold, request.italic, request.family)));
   }
   push(await installedFace(fonts, fonts.resolveGlyphFallbackFace(request.family, request.bold, request.italic, 'powerpoint')));
   const last = fonts.resolveLastResortChoice(request.family, request.bold, request.italic, 'powerpoint');

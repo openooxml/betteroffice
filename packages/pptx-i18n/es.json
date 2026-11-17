@@ -94,6 +94,7 @@
     "canvasLabelWithSelection": "Diapositiva {current} de {total}; objeto seleccionado {name}"
   },
   "a11y": {
+    "chartNoData": "Sin datos",
     "slideWithTitle": "Diapositiva {current} de {total}: {title}",
     "objectSelected": "{name} seleccionado",
     "editingText": "Editando {name}"
@@ -234,7 +235,7 @@
       "gestureActive": "Termine primero el gesto del puntero.",
       "commandFailed": "El comando no se pudo ejecutar.",
       "permissionDenied": "La aplicación host no ha permitido que este complemento use este comando.",
-      "unsupportedPolicy": "Los complementos aún no pueden ejecutar este comando. Use en su lugar un lote de ediciones.",
+      "unsupportedPolicy": "Este comando requiere una acción del usuario en la interfaz del propio complemento.",
       "pluginUnavailable": "El complemento ya no está activo.",
       "aborted": "La acción del complemento se canceló antes de que se ejecutara el comando.",
       "clipboardUnavailable": "El acceso al portapapeles no está disponible o se ha denegado.",

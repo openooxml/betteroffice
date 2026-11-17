@@ -15,8 +15,9 @@ use crate::footnotes::{NoteContent, NoteKind, note_reference_map_id};
 use crate::header_footer::{HeaderFooterKind, HeaderFooterPayload, HeaderFooterType};
 use crate::hf_bands::{BandPage, BandSettings, select_band_variant};
 use crate::types::{
-    BlockExtent, Fragment, HeaderFooterRefs, Layout, LayoutBlock, MeasuredBlock, Page,
+    BlockExtent, Fragment, HeaderFooterRefs, Layout, LayoutBlock, MeasuredBlock, NoteWindow, Page,
     ParagraphBlock, ParagraphExtent, Run, TableBlock, TableExtent, TableFragment,
+    note_window_lines,
 };
 
 /// How far a note area may reach into the body above it before it counts as overflowing, in
@@ -277,6 +278,7 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
                                         band.measured
                                             .iter()
                                             .map(|measured| (&measured.block, &measured.measure)),
+                                        None,
                                         &mut items,
                                     );
                                     (items, readable)
@@ -318,9 +320,11 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
                 NoteKind::Footnote => "pageBottom",
                 NoteKind::Endnote => "docEnd",
             });
-            let overflows = area
-                .y
-                .is_some_and(|y| y + NOTE_AREA_TOLERANCE < body_bottom);
+            let flowed = kind == NoteKind::Endnote && matches!(placement, "docEnd" | "sectEnd");
+            let overflows = !flowed
+                && area
+                    .y
+                    .is_some_and(|y| y + NOTE_AREA_TOLERANCE < body_bottom);
             for note in area.notes.iter().flatten() {
                 let Some(id) = note.id else {
                     continue;
@@ -341,7 +345,11 @@ pub fn place_layout<'a>(input: &PlacementInput<'a>) -> Placements<'a> {
                         page_index,
                         kind: PlacementIssueKind::NoteOverflow { kind, id },
                     });
-                } else if !whole_items(content.blocks.iter().zip(&content.measures), &mut items) {
+                } else if !whole_items(
+                    content.blocks.iter().zip(&content.measures),
+                    NoteWindow::of(note).as_ref(),
+                    &mut items,
+                ) {
                     output.issues.push(PlacementIssue {
                         page_index,
                         kind: PlacementIssueKind::UnresolvedFragment,
@@ -509,20 +517,32 @@ fn band_for_page<'a>(
 /// Every block of a header, footer or note story, which is placed whole: paragraphs with all
 /// their lines, and tables with all rows and what their cells show by the painting rules. False
 /// when a table cannot be read.
+/// The items of whole blocks, or of the part of them `window` shows.
 fn whole_items<'a>(
     blocks: impl Iterator<Item = (&'a LayoutBlock, &'a BlockExtent)>,
+    window: Option<&NoteWindow>,
     items: &mut Vec<PlacedItem<'a>>,
 ) -> bool {
     let mut readable = true;
-    for (block, measure) in blocks {
+    for (index, (block, measure)) in blocks.enumerate() {
+        let count = match measure {
+            BlockExtent::Paragraph(measure) => measure.lines.len(),
+            _ => 1,
+        };
+        let Some(lines) = note_window_lines(window, index, count) else {
+            continue;
+        };
+        if lines.is_empty() && count > 0 {
+            continue;
+        }
         match (block, measure) {
             (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) => {
                 items.push(PlacedItem::Paragraph(PlacedParagraph {
                     block,
                     measure,
-                    lines: 0..measure.lines.len(),
-                    continued_from_previous: false,
-                    continued_on_next: false,
+                    continued_from_previous: lines.start > 0,
+                    continued_on_next: lines.end < count,
+                    lines,
                     repeated_header: false,
                     in_row_continuation: false,
                     clipped: false,

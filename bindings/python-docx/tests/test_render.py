@@ -18,6 +18,7 @@ from betteroffice_docx import (
 )
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+LAYOUT_TESTS = Path(__file__).resolve().parents[3] / "crates" / "docx-layout" / "tests"
 
 
 def _page(width: int, height: int) -> DisplayList:
@@ -330,3 +331,100 @@ def test_png_uses_the_document_theme_accent(font_bytes: bytes) -> None:
         abs(r - 0x44) <= 12 and abs(g - 0x72) <= 12 and abs(b - 0xC4) <= 12
         for r, g, b in pixels
     )
+
+
+def _with_table_row_grid(envelope: "dict[str, Any]", value: Any) -> "dict[str, Any]":
+    envelope = json.loads(json.dumps(envelope))
+    rows = [
+        row
+        for item in envelope["measured"]
+        if item["block"]["kind"] == "table"
+        for row in item["block"]["rows"]
+    ]
+    assert rows
+    for row in rows:
+        row["gridBefore"] = value
+        row["gridAfter"] = value
+    return envelope
+
+
+def test_layout_reads_whole_number_floats_from_a_parsed_model(minimal_bytes: bytes) -> None:
+    fixture = LAYOUT_TESTS / "fixtures" / "table-splits-with-repeated-header.input.json"
+    envelope = json.loads(fixture.read_text())
+    document = Document.open(minimal_bytes)
+
+    as_integer = document.layout(_with_table_row_grid(envelope, 0))
+    as_float = document.layout(_with_table_row_grid(envelope, 0.0))
+    assert as_float.json == as_integer.json
+
+    with pytest.raises(ValueError, match="gridBefore must be a nonnegative integer, got 0.5"):
+        document.layout(_with_table_row_grid(envelope, 0.5))
+
+
+def test_a_layout_hands_out_one_display_list(
+    minimal_bytes: bytes, layout_input: "dict[str, Any]"
+) -> None:
+    layout = Document.open(minimal_bytes).layout(layout_input)
+
+    first = layout.display_list
+    assert layout.display_list is first
+    del layout
+    assert len(first) == 1
+
+
+def _layout_envelopes(layout_input: "dict[str, Any]") -> "list[dict[str, Any]]":
+    table = LAYOUT_TESTS / "fixtures" / "table-splits-with-repeated-header.input.json"
+    return [layout_input, json.loads(table.read_text())]
+
+
+def test_every_display_list_reader_agrees_on_a_layout(
+    minimal_bytes: bytes,
+    layout_input: "dict[str, Any]",
+    tmp_path: Path,
+) -> None:
+    document = Document.open(minimal_bytes)
+    for index, envelope in enumerate(_layout_envelopes(layout_input)):
+        display_list = document.layout(envelope).display_list
+        text = display_list.json
+
+        assert display_list.json == text
+        assert document.layout(envelope).display_list.json == text
+        assert DisplayList.from_json(text).json == text
+        assert display_list.to_dict() == json.loads(text)
+
+        target = tmp_path / f"display-list-{index}.json"
+        display_list.write(target)
+        assert target.read_bytes() == text.encode()
+
+        pages = json.loads(text)["pages"]
+        primitives = sum(len(page["primitives"]) for page in pages)
+        assert len(display_list) == len(pages) > 0
+        assert display_list.primitives == primitives > 0
+        assert repr(display_list) == f"DisplayList(pages={len(pages)}, primitives={primitives})"
+
+        png = document.render_display_list_png(display_list, len(pages) - 1)
+        assert png.bytes[:8] == PNG_MAGIC
+
+
+def test_a_display_list_keeps_its_json_for_every_reader(
+    minimal_bytes: bytes,
+    layout_input: "dict[str, Any]",
+    tmp_path: Path,
+) -> None:
+    overflow = LAYOUT_TESTS / "fixtures" / "multi-page-paragraph-overflow.input.json"
+    envelopes = [*_layout_envelopes(layout_input), json.loads(overflow.read_text())]
+    document = Document.open(minimal_bytes)
+    for index, envelope in enumerate(envelopes):
+        layout = document.layout(envelope)
+        display_list = layout.display_list
+        text = display_list.json
+
+        assert display_list.json == text
+        assert display_list.json is text
+        assert layout.display_list.json is text
+        assert display_list.to_dict() == json.loads(display_list.json)
+
+        target = tmp_path / f"kept-display-list-{index}.json"
+        display_list.write(target)
+        assert target.read_bytes() == display_list.json.encode()
+        assert display_list.json is text

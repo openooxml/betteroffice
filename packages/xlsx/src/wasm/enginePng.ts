@@ -1,7 +1,6 @@
-import { canvasPngAvailable, canvasUnavailable, displayListToPng, sheetFonts } from '../render/png';
+import { canvasPngAvailable, canvasUnavailable, displayListToPng, sheetFontRequests } from '../render/png';
 import { pngDisplayList, type ResolvedPngTarget } from './pngResolve';
 import type { XlsxPngOptions } from './pngTarget';
-import type { PngFontFace } from '../../../../shared/office-session/pngFonts';
 
 /** What an engine needs to draw one PNG. The workbook handle builds it; each engine reads what it uses. */
 export interface XlsxPngEngine {
@@ -26,12 +25,10 @@ let defaultFaces: typeof import('./enginePngFonts') | undefined;
 export async function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, options: XlsxPngOptions): Promise<Uint8Array> {
   if (!canvasPngAvailable()) throw canvasUnavailable();
   const { list, ...size } = pngDisplayList(engine, target, options);
-  let fonts: ReadonlyArray<PngFontFace> | undefined = options.fonts;
-  if (fonts === undefined) {
-    defaultFaces ??= await import('./enginePngFonts');
-    fonts = await defaultFaces.defaultSheetFaces(sheetFonts(list), options.signal);
-  }
-  return displayListToPng(list, { ...size, signal: options.signal, fonts });
+  if (options.fonts !== undefined) return displayListToPng(list, { ...size, signal: options.signal, fonts: options.fonts });
+  defaultFaces ??= await import('./enginePngFonts');
+  const { faces, fallbacks } = await defaultFaces.defaultSheetFaces(sheetFontRequests(list), options.signal);
+  return displayListToPng(list, { ...size, signal: options.signal, fonts: faces, fallbacks });
 }
 
 export default renderPng;

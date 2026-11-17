@@ -17,7 +17,9 @@ use std::ops::Range;
 
 use ooxml_drawingml::chart::{ChartSpace, ChartXml, parse_chart_space};
 use ooxml_drawingml::{
-    Theme as DrawingTheme, parse_color_value, resolve_color_value_to_hex_with_theme,
+    ColorTransform, ColorValue, Theme as DrawingTheme, parse_color_value,
+    resolve_color_value_alpha, resolve_color_value_to_hex_with_theme,
+    resolve_color_value_to_rgba_hex,
 };
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::numfmt::{builtin_format_code, format_value};
@@ -30,7 +32,10 @@ use xlsx_model::{
 
 use crate::package::PartContentType;
 use crate::tree::{Edit, Element, Part, Replacement, names_are_resolvable, parse_tree};
-use crate::xml::{find_part, formula_text, resolve_part_path};
+use crate::xml::{
+    PartNames, find_part, format_code_text, resolve_part_name, resolve_part_path,
+    xstring_attribute_value,
+};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
@@ -43,6 +48,9 @@ pub(crate) const NS_PACKAGE_RELATIONSHIPS: &str =
 const NS_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 /// `cx:chartSpace`, whose reference syntax and caches are their own vocabulary.
 const NS_CHART_EX: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
+/// The 2012 chart extensions, whose `f` and `sqref` hold more references: a
+/// data label range, the full range behind a filtered series.
+const NS_CHART_2012: &str = "http://schemas.microsoft.com/office/drawing/2012/chart";
 /// the worksheet drawing vocabulary that carries the anchors.
 pub(crate) const NS_SPREADSHEET_DRAWING: &str =
     "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
@@ -526,6 +534,36 @@ impl<'a> ChartNode<'a> {
                 .collect(),
         }
     }
+
+    /// An `a:srgbClr`, `a:schemeClr`, `a:sysClr` or `a:prstClr` with its
+    /// transforms in document order.
+    fn color_value(&self) -> Option<ColorValue> {
+        let value = self.attribute(None, "val");
+        let mut color = match self.local_name() {
+            "srgbClr" => parse_color_value(value, None, None, None),
+            "schemeClr" => parse_color_value(None, value.map(scheme_slot), None, None),
+            "sysClr" => parse_color_value(
+                self.attribute(None, "lastClr").or(match value {
+                    Some("windowText") => Some("000000"),
+                    Some("window") => Some("FFFFFF"),
+                    _ => None,
+                }),
+                None,
+                None,
+                None,
+            ),
+            "prstClr" => parse_color_value(value.and_then(preset_color), None, None, None),
+            _ => return None,
+        };
+        color.transforms = self
+            .children
+            .iter()
+            .filter_map(|transform| {
+                ColorTransform::from_xml(transform.local_name(), transform.attribute(None, "val"))
+            })
+            .collect();
+        Some(color)
+    }
 }
 
 impl ChartXml for ChartNode<'_> {
@@ -545,26 +583,28 @@ impl ChartXml for ChartNode<'_> {
         self.element.text_content()
     }
 
+    /// `#RRGGBB`, or `#RRGGBBAA` when the colour is translucent.
     fn solid_fill_hex(&self) -> Option<String> {
-        let color = self
-            .children
-            .iter()
-            .find_map(|child| match child.local_name() {
-                "srgbClr" => Some(parse_color_value(
-                    child.attribute(None, "val"),
-                    None,
-                    None,
-                    None,
-                )),
-                "schemeClr" => Some(parse_color_value(
-                    None,
-                    child.attribute(None, "val").map(scheme_slot),
-                    None,
-                    None,
-                )),
-                _ => None,
-            })?;
-        resolve_color_value_to_hex_with_theme(Some(&color), Some(self.theme))
+        let color = self.children.iter().find_map(ChartNode::color_value)?;
+        if resolve_color_value_alpha(&color) < 1.0 {
+            resolve_color_value_to_rgba_hex(Some(&color), Some(self.theme))
+        } else {
+            resolve_color_value_to_hex_with_theme(Some(&color), Some(self.theme))
+        }
+    }
+}
+
+fn preset_color(name: &str) -> Option<&'static str> {
+    match name {
+        "black" => Some("000000"),
+        "white" => Some("FFFFFF"),
+        "red" => Some("FF0000"),
+        "green" => Some("008000"),
+        "blue" => Some("0000FF"),
+        "yellow" => Some("FFFF00"),
+        "cyan" => Some("00FFFF"),
+        "magenta" => Some("FF00FF"),
+        _ => None,
     }
 }
 
@@ -679,28 +719,34 @@ pub(crate) fn parse_sheet_charts(
 /// Every drawing part a sheet relates to, with its bytes. A part two
 /// relationships both name is one drawing, and following it twice would emit
 /// every anchor twice, so it is walked once.
-fn sheet_drawings<'a>(
+pub(crate) fn sheet_drawings<'a>(
     parts: &'a [(String, Vec<u8>)],
     sheet_path: &str,
 ) -> Result<Vec<(String, &'a [u8])>, ParseError> {
     let Some(rels) = find_part(parts, &relationship_part_path(sheet_path)) else {
         return Ok(Vec::new());
     };
-    let sheet_dir = directory_of(sheet_path);
     let mut drawings: Vec<(String, &[u8])> = Vec::new();
-    for (_, _, target) in parse_relationships(rels)?
-        .iter()
-        .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
-    {
-        let path = resolve_part_path(sheet_dir, target);
-        if drawings.iter().any(|(walked, _)| *walked == path) {
-            continue;
-        }
+    for path in sheet_drawing_paths(rels, sheet_path)? {
         if let Some(bytes) = find_part(parts, &path) {
             drawings.push((path, bytes));
         }
     }
     Ok(drawings)
+}
+
+/// The drawing parts a sheet's relationship part names, each once, resolved against the sheet.
+pub(crate) fn sheet_drawing_paths(
+    rels: &[u8],
+    sheet_path: &str,
+) -> Result<Vec<String>, ParseError> {
+    let sheet_dir = directory_of(sheet_path);
+    Ok(parse_relationships(rels)?
+        .iter()
+        .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
+        .map(|(_, _, target)| resolve_part_name(sheet_dir, target))
+        .collect::<PartNames>()
+        .into_vec())
 }
 
 struct DrawingAnchor {
@@ -771,6 +817,11 @@ pub(crate) fn is_anchor(element: &&Element) -> bool {
 
 /// The `c:chart` under a graphic frame, searched depth-capped by expanded name
 /// so an alternate prefix still resolves, and whether it names a relationship.
+/// Whether an anchor holds a chart a sheet's model claims through a relationship.
+pub(crate) fn holds_related_chart(anchor: &Element) -> bool {
+    matches!(anchor_chart(anchor, 0), AnchorChart::Related(_))
+}
+
 fn anchor_chart(element: &Element, depth: usize) -> AnchorChart {
     if depth > MAX_DEPTH {
         return AnchorChart::None;
@@ -860,6 +911,10 @@ struct CacheSite {
     /// whether the cache carries content [`regenerated_cache`] does not
     /// re-emit, which it would therefore delete.
     unmodelled_content: bool,
+    /// whether a point carries its own `formatCode`, as Excel writes for a
+    /// point whose cell is formatted differently from the series, so a
+    /// rebuild writes one for every such point.
+    point_formats: bool,
     /// the points the file was authored with, so a rebuild that would empty a
     /// populated cache can be recognized and declined.
     authored_points: usize,
@@ -969,8 +1024,11 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
         span: cache.splice_target(),
         format_code: cache
             .child("formatCode")
-            .map(|element| element.text_content()),
+            .map(|element| crate::read::unescape_name(&element.text_content())),
         unmodelled_content: !cache_is_fully_modelled(cache),
+        point_formats: cache
+            .child_elements()
+            .any(|child| child.is(NS_CHART, "pt") && child.attribute(None, "formatCode").is_some()),
         authored_points: cache
             .child_elements()
             .filter(|child| child.is(NS_CHART, "pt"))
@@ -979,17 +1037,22 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
 }
 
 /// Whether every byte of a cache's content is something the regenerator can
-/// write back. `extLst` and a per-point `formatCode` are legal cache content
-/// this crate does not model, so a cache carrying either is left alone rather
-/// than rebuilt without it.
+/// write back. A numeric point's `formatCode` (`CT_NumVal`) is rebuilt from
+/// the number format of the cell it reads. `extLst`, and anything else, is
+/// legal cache content this crate does not model, so a cache carrying it is
+/// left alone rather than rebuilt without it.
 fn cache_is_fully_modelled(cache: &Element) -> bool {
+    let numeric = cache.local_name() == "numCache";
     cache.child_elements().all(|child| {
         child.namespace() == Some(NS_CHART)
             && match child.local_name() {
                 "formatCode" => child.attributes.is_empty(),
                 "ptCount" => child.attributes.iter().all(|value| value.name == "val"),
                 "pt" => {
-                    child.attributes.iter().all(|value| value.name == "idx")
+                    child
+                        .attributes
+                        .iter()
+                        .all(|value| value.name == "idx" || (numeric && value.name == "formatCode"))
                         && child
                             .child_elements()
                             .all(|value| value.is(NS_CHART, "v") && value.attributes.is_empty())
@@ -1026,6 +1089,19 @@ pub(crate) const MAX_CACHE_POINTS: u32 = 65_536;
 /// from, or when a moved reference changed shape or names no cells and its
 /// cache cannot be rebuilt, rather than leaving a reference pointing at one
 /// range while its cache still holds another's values.
+/// Why a chart reference cannot be written: it holds a character xml 1.0
+/// cannot carry, and `c:f` is plain text with no escape for one. Only a file
+/// that already wrote such a reference can hold it; an edit that would write
+/// it anew is refused with this reason, and a save keeps the part as authored.
+pub(crate) const UNWRITABLE_REFERENCE: &str =
+    "chart reference contains a character xml cannot carry";
+
+/// Whether `error` is a chart part refused for [`UNWRITABLE_REFERENCE`], which
+/// a save answers by keeping that part as authored.
+pub fn is_unwritable_chart_reference(error: &ParseError) -> bool {
+    matches!(error, ParseError::UnsupportedEdit(reason) if reason == UNWRITABLE_REFERENCE)
+}
+
 pub(crate) fn patch_chart_refs(
     part: &[u8],
     path: &str,
@@ -1046,6 +1122,9 @@ pub(crate) fn patch_chart_refs(
     for (site, reference) in sites.iter().zip(refs) {
         if site.formula == reference.formula {
             continue;
+        }
+        if crate::tree::escape_text(&reference.formula).is_err() {
+            return Err(ParseError::UnsupportedEdit(UNWRITABLE_REFERENCE.into()));
         }
         let Some(span) = site.span.clone() else {
             return Err(ParseError::UnsupportedEdit(
@@ -1249,22 +1328,28 @@ fn regenerated_cache_inputs(
     }
     let prefix = &cache.prefix;
     let mut out = String::new();
-    if let Some(format_code) = format_override
+    let series_format = format_override
         .filter(|_| numeric)
-        .or(cache.format_code.as_deref())
-    {
+        .or(cache.format_code.as_deref());
+    if let Some(format_code) = series_format {
         out.push_str(&format!(
             "<{prefix}formatCode>{}</{prefix}formatCode>",
-            formula_text(format_code)
+            format_code_text(format_code)
         ));
     }
+    let point_formats = numeric && cache.point_formats && fidelity == CacheFidelity::Persisted;
     out.push_str(&format!("<{prefix}ptCount val=\"{}\"/>", cells.len()));
-    for (index, text) in points.iter().enumerate() {
+    for (index, (text, (_, code))) in points.iter().zip(cells).enumerate() {
         let Some(text) = text else {
             continue;
         };
+        let format = if point_formats && *code != series_format.unwrap_or("General") {
+            format!(" formatCode=\"{}\"", xstring_attribute_value(code))
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "<{prefix}pt idx=\"{index}\"><{prefix}v>{}</{prefix}v></{prefix}pt>",
+            "<{prefix}pt idx=\"{index}\"{format}><{prefix}v>{}</{prefix}v></{prefix}pt>",
             cache_point_text(text)
         ));
     }
@@ -1473,35 +1558,64 @@ pub(crate) fn parse_area(source: &str) -> Option<(CellRef, CellRef)> {
 /// may be re-placed and resized by moving its corners. An anchor whose kind,
 /// `editAs` mode, one-cell extent or absolute position also changed is refused,
 /// because none of that is written back.
+///
+/// With `axes`, every anchor no chart claims follows the sheet's row and column
+/// edits too, by the rules chart anchors follow.
 pub(crate) fn patch_drawing_anchors(
     part: &[u8],
     anchors: &[(usize, ChartAnchor)],
+    axes: Option<&crate::axis::SheetAxes>,
 ) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let root = source.tree()?;
     let indexed = anchor_elements(&root);
-    let authored = read_anchors(&root)?;
     let mut edits: Vec<Edit> = Vec::new();
-    for (index, anchor) in anchors {
-        let (Some(element), Some(authored)) = (indexed.get(*index), authored.get(*index)) else {
-            return Err(ParseError::UnsupportedEdit(
-                "a chart anchor no longer exists in its drawing part".into(),
-            ));
-        };
-        if !only_grid_position_moved(&authored.anchor, anchor) {
-            return Err(ParseError::UnsupportedEdit(
-                "a chart anchor changed more than the grid position a save writes back".into(),
-            ));
+    if !anchors.is_empty() {
+        let authored = read_anchors(&root)?;
+        for (index, anchor) in anchors {
+            let (Some(element), Some(authored)) = (indexed.get(*index), authored.get(*index))
+            else {
+                return Err(ParseError::UnsupportedEdit(
+                    "a chart anchor no longer exists in its drawing part".into(),
+                ));
+            };
+            if !only_grid_position_moved(&authored.anchor, anchor) {
+                return Err(ParseError::UnsupportedEdit(
+                    "a chart anchor changed more than the grid position a save writes back".into(),
+                ));
+            }
+            push_anchor_edits(element, anchor, &mut edits)?;
         }
-        match anchor {
-            ChartAnchor::TwoCell { from, to, .. } => {
-                push_cell_edits(element.child("from"), *from, &mut edits)?;
-                push_cell_edits(element.child("to"), *to, &mut edits)?;
+    }
+    if let Some(axes) = axes {
+        for (index, element) in indexed.iter().enumerate() {
+            if holds_related_chart(element) || anchors.iter().any(|(claimed, _)| *claimed == index)
+            {
+                continue;
             }
-            ChartAnchor::OneCell { from, .. } => {
-                push_cell_edits(element.child("from"), *from, &mut edits)?;
+            let authored = anchor_geometry(element)?;
+            let moved = crate::drawing_anchors::followed(&authored, axes).ok_or_else(|| {
+                ParseError::UnsupportedEdit("a drawing anchor would leave the grid".into())
+            })?;
+            if moved != authored {
+                push_anchor_edits(element, &moved, &mut edits)?;
             }
-            ChartAnchor::Absolute { .. } => {}
+        }
+        for wrapper in root.child_elements().filter(|child| {
+            child.is(
+                crate::drawing_anchors::NS_MARKUP_COMPATIBILITY,
+                "AlternateContent",
+            )
+        }) {
+            for anchor in crate::drawing_anchors::alternate_anchors(wrapper)? {
+                let authored = anchor_geometry(anchor)?;
+                let moved = crate::drawing_anchors::followed(&authored, axes).ok_or_else(|| {
+                    ParseError::UnsupportedEdit("a drawing anchor would leave the grid".into())
+                })?;
+                if moved != authored {
+                    push_anchor_edits(anchor, &moved, &mut edits)?;
+                }
+            }
         }
     }
     if edits.is_empty() {
@@ -1511,6 +1625,24 @@ pub(crate) fn patch_drawing_anchors(
         left.start.cmp(&right.start)
     });
     source.splice(&edits)
+}
+
+fn push_anchor_edits(
+    element: &Element,
+    anchor: &ChartAnchor,
+    edits: &mut Vec<Edit>,
+) -> Result<(), ParseError> {
+    match anchor {
+        ChartAnchor::TwoCell { from, to, .. } => {
+            push_cell_edits(element.child("from"), *from, edits)?;
+            push_cell_edits(element.child("to"), *to, edits)?;
+        }
+        ChartAnchor::OneCell { from, .. } => {
+            push_cell_edits(element.child("from"), *from, edits)?;
+        }
+        ChartAnchor::Absolute { .. } => {}
+    }
+    Ok(())
 }
 
 /// The anchor elements [`read_anchors`] modelled, in the same order, so an
@@ -1697,22 +1829,35 @@ pub(crate) fn chart_reference_areas(
     owner: Option<&str>,
 ) -> Result<Option<Vec<(String, CellRef)>>, ParseError> {
     let root = parse_tree(part)?;
-    if !names_are_resolvable(&root) || unsupported_reference_form(&root, 0) {
+    if !names_are_resolvable(&root) || unreadable_reference_form(&root, 0) {
         return Ok(None);
     }
+    let mut formulas = ref_sites(&root)?
+        .into_iter()
+        .map(|site| site.formula)
+        .collect::<Vec<_>>();
+    extension_reference_texts(&root, 0, &mut formulas);
     let mut areas = Vec::new();
-    for site in ref_sites(&root)? {
-        let formula = site.formula.trim();
-        if formula.is_empty() || formula == ErrorValue::Ref.as_str() {
+    for formula in &formulas {
+        let formula = formula.trim();
+        if formula.is_empty()
+            || formula == ErrorValue::Ref.as_str()
+            || is_string_literal(formula)
+            || is_external_area(formula)
+        {
             continue;
         }
         let Some((qualifier, area)) = split_qualifier(formula) else {
             return Ok(None);
         };
-        let (Some(sheet), Some((_, end))) = (
-            qualifier.or_else(|| owner.map(str::to_owned)),
-            parse_area(area),
-        ) else {
+        let Some(sheet) = qualifier.or_else(|| owner.map(str::to_owned)) else {
+            return Ok(None);
+        };
+        if area == ErrorValue::Ref.as_str() {
+            areas.push((sheet, CellRef::new(0, 0)));
+            continue;
+        }
+        let Some((_, end)) = parse_area(area) else {
             return Ok(None);
         };
         areas.push((sheet, end));
@@ -1818,6 +1963,77 @@ fn chart_claims(element: &Element, depth: usize) -> usize {
 /// classic `c:chartSpace` whose references are all `c:f` is covered; ChartEx,
 /// pivot-sourced and externally-cached charts, and the `sqref` extension
 /// references filtered series carry, are not.
+/// [`unsupported_reference_form`] as the structural-edit guard reads it: the
+/// 2012 extensions' `f` and `sqref` are no reason to assume every cell named,
+/// since [`extension_reference_texts`] reads them as references of their own.
+/// Nothing rewrites them, so an edit moving what they name is still refused.
+fn unreadable_reference_form(element: &Element, depth: usize) -> bool {
+    if depth == 0 && !element.is(NS_CHART, "chartSpace") {
+        return true;
+    }
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    let extension =
+        element.namespace() == Some(NS_CHART_2012) && matches!(element.local_name(), "f" | "sqref");
+    let unsupported = !extension
+        && (element.namespace() == Some(NS_CHART_EX)
+            || element.local_name() == "sqref"
+            || element.is(NS_CHART, "pivotSource")
+            || element.is(NS_CHART, "externalData")
+            || (element.local_name() == "f" && element.namespace() != Some(NS_CHART)));
+    unsupported
+        || element
+            .child_elements()
+            .any(|child| unreadable_reference_form(child, depth + 1))
+}
+
+/// The text of every 2012 extension `f` and `sqref`, each one reference.
+fn extension_reference_texts(element: &Element, depth: usize, out: &mut Vec<String>) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    if element.namespace() == Some(NS_CHART_2012) && matches!(element.local_name(), "f" | "sqref") {
+        out.push(element.text_content());
+        return;
+    }
+    for child in element.child_elements() {
+        extension_reference_texts(child, depth + 1, out);
+    }
+}
+
+/// `"text"`, a doubled quote escaping one: series text written as a literal,
+/// which names no cell.
+fn is_string_literal(formula: &str) -> bool {
+    formula.len() >= 2
+        && formula.starts_with('"')
+        && formula.ends_with('"')
+        && !formula[1..formula.len() - 1]
+            .replace("\"\"", "")
+            .contains('"')
+}
+
+/// `[1]Sheet!$A$1` or `'[1]Sheet name'!$A$1`: an area in another workbook,
+/// which names no sheet of this one.
+fn is_external_area(formula: &str) -> bool {
+    let (quoted, body) = match formula.strip_prefix('\'') {
+        Some(rest) => (true, rest),
+        None => (false, formula),
+    };
+    let Some((index, rest)) = body.strip_prefix('[').and_then(|body| body.split_once(']')) else {
+        return false;
+    };
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let local = if quoted {
+        format!("'{rest}")
+    } else {
+        rest.to_owned()
+    };
+    matches!(split_qualifier(&local), Some((Some(_), area)) if parse_area(area).is_some())
+}
+
 fn unsupported_reference_form(element: &Element, depth: usize) -> bool {
     if depth == 0 && !element.is(NS_CHART, "chartSpace") {
         return true;

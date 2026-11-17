@@ -1571,15 +1571,16 @@ fn insert_row(workbook: &mut Workbook) {
         .unwrap();
 }
 
-/// A cache format code is not cell text: a literal `_xHHHH_` in it survives
-/// every regeneration unchanged.
+/// A cache format code is an `ST_Xstring`: a literal `_xHHHH_`, which the file
+/// writes with a leading `_x005F_`, survives every regeneration unchanged.
 #[test]
 fn a_cache_format_code_keeps_a_literal_escape_through_regenerations() {
-    let mut workbook = Workbook::open(&chart_book_with("ab", "0&quot;_x0041_&quot;")).unwrap();
+    let mut workbook =
+        Workbook::open(&chart_book_with("ab", "0&quot;_x005F_x0041_&quot;")).unwrap();
     insert_row(&mut workbook);
     let saved = workbook.save().unwrap();
     assert!(
-        chart_part(&saved).contains("<c:formatCode>0&quot;_x0041_&quot;</c:formatCode>"),
+        chart_part(&saved).contains("<c:formatCode>0&quot;_x005F_x0041_&quot;</c:formatCode>"),
         "{}",
         chart_part(&saved)
     );
@@ -1587,7 +1588,7 @@ fn a_cache_format_code_keeps_a_literal_escape_through_regenerations() {
     insert_row(&mut reopened);
     let again = reopened.save().unwrap();
     assert!(
-        chart_part(&again).contains("<c:formatCode>0&quot;_x0041_&quot;</c:formatCode>"),
+        chart_part(&again).contains("<c:formatCode>0&quot;_x005F_x0041_&quot;</c:formatCode>"),
         "{}",
         chart_part(&again)
     );

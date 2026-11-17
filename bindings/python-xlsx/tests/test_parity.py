@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import json
 import re
@@ -54,8 +55,15 @@ def export_options(args):
 
 
 def saved_bytes(workbook):
-    data = workbook.save()
-    return {"sha256": hashlib.sha256(data).hexdigest(), "byteLength": len(data)}
+    saved = workbook.save_with_warnings()
+    return {
+        "sha256": hashlib.sha256(saved.bytes).hexdigest(),
+        "byteLength": len(saved.bytes),
+        "warnings": [
+            {key: value for key, value in dataclasses.asdict(warning).items() if value is not None}
+            for warning in saved.warnings
+        ],
+    }
 
 
 def includes_target(step, target):

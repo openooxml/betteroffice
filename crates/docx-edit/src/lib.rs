@@ -82,6 +82,7 @@ mod control_values;
 mod ctx;
 mod deterministic;
 mod document_properties;
+mod empty_cells;
 mod fingerprint;
 mod fmath;
 mod format;
@@ -128,6 +129,7 @@ mod sticky_positions;
 mod stories;
 pub mod structured;
 mod target;
+mod unavailable_tables;
 mod undo;
 mod update_chunks;
 
@@ -139,8 +141,8 @@ pub mod session;
 pub use batch::{
     DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditFailureReason, EditGuard,
     EditHistory, EditOperation, EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource,
-    EditStep, EditSuggestion, EditTarget, EditValidation, ParagraphInput, ResolvedControl,
-    TargetEdge,
+    EditStep, EditSuggestion, EditTarget, EditValidation, OnUnsupported, ParagraphInput,
+    ResolvedControl, SkippedParagraph, TargetEdge, TextRun,
 };
 pub use canonical::{CanonicalItem, checksum, project_story, story_checksum, to_canonical_bytes};
 pub use ctx::{EditCtx, EditOrigin, SuggestCtx};
@@ -363,6 +365,12 @@ pub fn segments_digest(segments: &[StorySegment]) -> u128 {
             tail[..rest.len()].copy_from_slice(rest);
             self.add(u64::from_le_bytes(tail) ^ ((bytes.len() as u64) << 56));
         }
+        fn write_usize(&mut self, i: usize) {
+            self.write(&(i as u64).to_le_bytes());
+        }
+        fn write_isize(&mut self, i: isize) {
+            self.write(&(i as i64).to_le_bytes());
+        }
         fn finish(&self) -> u64 {
             self.finish128() as u64
         }
@@ -438,6 +446,84 @@ pub struct SeedParagraph {
     pub alignment: String,
 }
 
+/// A story's segments still to read.
+pub(crate) enum StorySegmentCursor {
+    Diffs(std::vec::IntoIter<PendingSegment>),
+    Segments(std::vec::IntoIter<StorySegment>),
+}
+
+/// One owned diff entry of a [`StorySegmentCursor`].
+pub(crate) struct PendingSegment {
+    insert: PendingInsert,
+    attributes: Option<Box<Attrs>>,
+}
+
+enum PendingInsert {
+    Value(Any),
+    Map(yrs::Hook<MapRef>),
+}
+
+impl PendingSegment {
+    fn new(diff: yrs::types::text::Diff<YChange>) -> Self {
+        let insert = match diff.insert {
+            Out::Any(value) => PendingInsert::Value(value),
+            Out::YMap(map) => PendingInsert::Map(yrs::SharedRef::hook(&map)),
+            _ => PendingInsert::Value(Any::Null),
+        };
+        Self {
+            insert,
+            attributes: diff.attributes,
+        }
+    }
+
+    /// The embedded map this entry holds, if it holds one.
+    pub(crate) fn map_hook(&self) -> Option<&yrs::Hook<MapRef>> {
+        match &self.insert {
+            PendingInsert::Map(hook) => Some(hook),
+            PendingInsert::Value(_) => None,
+        }
+    }
+}
+
+impl StorySegmentCursor {
+    /// The story's next `limit` segments.
+    pub(crate) fn next_chunk<T: ReadTxn>(
+        &mut self,
+        txn: &T,
+        limit: usize,
+    ) -> Option<Vec<StorySegment>> {
+        match self {
+            Self::Diffs(diffs) => diffs
+                .by_ref()
+                .take(limit)
+                .map(|pending| {
+                    ooxml_opc::progress::tick();
+                    let insert = match pending.insert {
+                        PendingInsert::Value(value) => Out::Any(value),
+                        PendingInsert::Map(hook) => Out::YMap(hook.get(txn)?),
+                    };
+                    Some(StorySegment {
+                        content: segment_content(insert, txn),
+                        attributes: ordered_attrs(pending.attributes.as_deref()),
+                    })
+                })
+                .collect(),
+            Self::Segments(segments) => Some(segments.by_ref().take(limit).collect()),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Diffs(diffs) => diffs.len(),
+            Self::Segments(segments) => segments.len(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommentAnchor {
     pub story: StoryId,
@@ -456,12 +542,27 @@ pub struct ResolvedCommentAnchor {
 pub enum EditError {
     StoryExists(String),
     StoryNotFound(String),
+    /// A table of a live story names this cell while its story is missing or removed. The cell
+    /// reads as one empty paragraph and takes no writes.
+    CellHasNoStory(String),
     CommentNotFound(String),
     ParagraphNotFound(String),
-    InvalidRange { start: u32, end: u32 },
-    OutOfBounds { index: u32, len: u32 },
-    ExpectedPilcrow { story: String, index: u32 },
-    CannotMergeFinalParagraph { story: String, index: u32 },
+    InvalidRange {
+        start: u32,
+        end: u32,
+    },
+    OutOfBounds {
+        index: u32,
+        len: u32,
+    },
+    ExpectedPilcrow {
+        story: String,
+        index: u32,
+    },
+    CannotMergeFinalParagraph {
+        story: String,
+        index: u32,
+    },
     InvalidComment(String),
     InvalidStateVector(String),
     InvalidUpdate(String),
@@ -473,6 +574,7 @@ impl fmt::Display for EditError {
         match self {
             Self::StoryExists(id) => write!(f, "story {id:?} already exists"),
             Self::StoryNotFound(id) => write!(f, "story {id:?} was not found"),
+            Self::CellHasNoStory(id) => write!(f, "table cell {id:?} has no story"),
             Self::CommentNotFound(id) => write!(f, "comment {id:?} was not found"),
             Self::ParagraphNotFound(id) => write!(f, "paragraph {id:?} was not found"),
             Self::InvalidRange { start, end } => write!(f, "invalid range {start}..{end}"),
@@ -525,6 +627,31 @@ struct StoryRevisions {
     geometry: u64,
     sections: u64,
     stamped: HashMap<Arc<str>, u64>,
+    /// The revision that last changed each story by more than inserting plain
+    /// text: deleting, formatting, embedding, a tracked change or its entry.
+    /// Text inserted without revision marks leaves the story's paragraphs,
+    /// their properties and its tracked changes as they were.
+    marked: HashMap<Arc<str>, u64>,
+}
+
+/// Inserts plain text into a story's own text and nothing else: no deletion,
+/// formatting, embed or revision mark.
+fn inserts_plain_text(txn: &yrs::TransactionMut, event: &yrs::types::Event) -> bool {
+    let yrs::types::Event::Text(event) = event else {
+        return false;
+    };
+    event.path().len() == 1
+        && event.delta(txn).iter().all(|delta| match delta {
+            Delta::Retain(_, None) => true,
+            Delta::Inserted(Out::Any(Any::String(_)), attrs) => {
+                attrs.as_ref().is_none_or(|attrs| {
+                    !attrs
+                        .keys()
+                        .any(|key| matches!(key.as_ref(), INS | DEL | format::RPR_CHANGE))
+                })
+            }
+            _ => false,
+        })
 }
 
 impl StoryRevisions {
@@ -546,6 +673,8 @@ impl StoryRevisions {
                             key.as_ref(),
                             KIND_KEY
                                 | PARA_ID
+                                | "tblPr"
+                                | "grid"
                                 | "rows"
                                 | "cells"
                                 | "story"
@@ -567,10 +696,12 @@ impl StoryRevisions {
             }),
             yrs::types::Event::Map(event) => {
                 event.path().is_empty()
-                    || event
-                        .keys(txn)
-                        .keys()
-                        .any(|key| matches!(key.as_ref(), KIND_KEY | "rows" | "cells" | "story"))
+                    || event.keys(txn).keys().any(|key| {
+                        matches!(
+                            key.as_ref(),
+                            KIND_KEY | "tblPr" | "grid" | "rows" | "cells" | "story"
+                        )
+                    })
             }
             _ => true,
         }) {
@@ -580,12 +711,16 @@ impl StoryRevisions {
             match event.path().front() {
                 Some(yrs::types::PathSegment::Key(story)) => {
                     self.stamped.insert(Arc::clone(story), self.current);
+                    if !inserts_plain_text(txn, event) {
+                        self.marked.insert(Arc::clone(story), self.current);
+                    }
                 }
                 Some(yrs::types::PathSegment::Index(_)) => {}
                 None => {
                     if let yrs::types::Event::Map(entries) = event {
                         for story in entries.keys(txn).keys() {
                             self.stamped.insert(Arc::clone(story), self.current);
+                            self.marked.insert(Arc::clone(story), self.current);
                         }
                     }
                 }
@@ -685,10 +820,15 @@ pub struct EditingDoc {
     save_story_states: Arc<Mutex<identity::StoryStateCache>>,
     /// A save seed state prime in progress; see [`EditingDoc::prime_save_seed_states_slice`].
     prime_progress: Mutex<Option<identity::PrimeProgress>>,
+    prime_last_slice_cost: AtomicU64,
+    /// The `max_bytes` the last prime slice left unspent.
+    #[cfg(test)]
+    prime_last_slice_left: AtomicU64,
     #[cfg(test)]
     save_story_cache_disabled: AtomicBool,
     sticky_positions: Mutex<sticky_positions::StickyPositions>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
+    revision_lists: Mutex<read_state::RevisionLists>,
     table_membership: Mutex<Option<TableMembership>>,
     resident_geometry: Mutex<HashMap<String, resident_geometry::ResidentGeometryIndex>>,
     shared_read_depth: AtomicU32,
@@ -796,10 +936,14 @@ impl EditingDoc {
             paragraph_indexes: Mutex::default(),
             save_story_states,
             prime_progress: Mutex::new(None),
+            prime_last_slice_cost: AtomicU64::new(0),
+            #[cfg(test)]
+            prime_last_slice_left: AtomicU64::new(0),
             #[cfg(test)]
             save_story_cache_disabled: AtomicBool::new(false),
             sticky_positions: Mutex::default(),
             chunk_snapshots: Mutex::default(),
+            revision_lists: Mutex::default(),
             table_membership: Mutex::default(),
             resident_geometry: Mutex::default(),
             shared_read_depth: AtomicU32::new(0),
@@ -957,8 +1101,13 @@ impl EditingDoc {
         if let Some(index) = self.paragraph_indexes.lock().unwrap().get(story_id, epoch) {
             return Ok(index);
         }
-        self.build_story_indexes(story_id)
-            .map(|(_, paragraphs)| paragraphs)
+        match self.build_story_indexes(story_id) {
+            Ok((_, paragraphs)) => Ok(paragraphs),
+            Err(EditError::CellHasNoStory(_)) => empty_cells::EmptyCell::new(story_id)
+                .doc()
+                .paragraph_index(story_id),
+            Err(error) => Err(error),
+        }
     }
 
     fn build_story_indexes(
@@ -1066,7 +1215,7 @@ impl EditingDoc {
                 .map_or(index, |para| para.node_start);
         }
         let txn = self.yrs_doc().transact();
-        let Ok(story) = story_ref(&txn, story_id) else {
+        let Some(story) = story_text(&txn, story_id) else {
             return index;
         };
         crate::ops::past_leading_blocks(&story, &txn, index)
@@ -1199,7 +1348,7 @@ impl EditingDoc {
             .store(self.epoch.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
-    #[cfg(all(test, feature = "wasm"))]
+    #[cfg(test)]
     pub(crate) fn forget_seeding(&self) {
         self.save_story_states.lock().unwrap().clear();
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
@@ -1432,6 +1581,7 @@ impl EditingDoc {
         if story_id_taken(&stories, &txn, &story_id) {
             return Err(EditError::StoryExists(story_id));
         }
+        empty_cells::refuse_write(&txn, &story_id)?;
         let story = insert_story(&mut txn, &stories, story_id);
         if !initial_text.is_empty() {
             story.insert_with_attributes(&mut txn, 0, initial_text, insertion_attrs(None, None));
@@ -1467,6 +1617,7 @@ impl EditingDoc {
         if story_id_taken(&stories, &txn, &story_id) {
             return Err(OpError::StoryExists(story_id));
         }
+        empty_cells::refuse_write(&txn, &story_id)?;
         let story = insert_story(&mut txn, &stories, story_id);
         let mut deltas = Vec::with_capacity(paragraphs.len() * 2);
         let mut para_ids = Vec::with_capacity(paragraphs.len());
@@ -1545,7 +1696,10 @@ impl EditingDoc {
                 .find(|pilcrow| map_string(pilcrow, &txn, PARA_ID).as_deref() == Some(para_id))
         });
         let Some(pilcrow) = found else {
-            return Err(EditError::ParagraphNotFound(para_id.to_owned()));
+            return Err(match empty_cells::empty_cell_of_paragraph(&txn, para_id) {
+                Some(story) => EditError::CellHasNoStory(story.to_owned()),
+                None => EditError::ParagraphNotFound(para_id.to_owned()),
+            });
         };
         identity::promote(self, &mut txn, &pilcrow);
         pilcrow.insert(&mut txn, key, value);
@@ -1564,6 +1718,9 @@ impl EditingDoc {
             return Err(EditError::InvalidComment(
                 "at least one anchored range is required".into(),
             ));
+        }
+        for range in ranges {
+            self.refuse_cell_write(&range.story)?;
         }
         let comment_id = self.next_id();
         let mut txn = self.doc.transact_mut_with(self.client_id);
@@ -1599,6 +1756,9 @@ impl EditingDoc {
             return Err(EditError::InvalidComment(
                 "at least one anchored range is required".into(),
             ));
+        }
+        for range in ranges {
+            self.refuse_cell_write(&range.story)?;
         }
         let mut txn = self.doc.transact_mut_with(self.client_id);
         let comments = txn.get_map(COMMENTS).expect("comments root is declared");
@@ -1721,7 +1881,17 @@ impl EditingDoc {
         anchors
             .into_iter()
             .map(|anchor| {
-                story_ref(&txn, &anchor.story)?;
+                match story_ref(&txn, &anchor.story) {
+                    Ok(_) => {}
+                    Err(EditError::CellHasNoStory(_)) => {
+                        return Ok(ResolvedCommentAnchor {
+                            story: anchor.story,
+                            start: 0,
+                            end: 0,
+                        });
+                    }
+                    Err(error) => return Err(error),
+                }
                 let start = sticky_offset(&anchor.start, &txn).ok_or_else(|| {
                     EditError::InvalidComment("start anchor no longer resolves".into())
                 })?;
@@ -1739,14 +1909,46 @@ impl EditingDoc {
 
     pub fn story_len(&self, story_id: &str) -> EditResult<u32> {
         let txn = self.doc.transact();
-        let story = story_ref(&txn, story_id)?;
-        Ok(story.len(&txn))
+        match story_ref(&txn, story_id) {
+            Ok(story) => Ok(story.len(&txn)),
+            Err(EditError::CellHasNoStory(_)) => Ok(1),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The story revision of the last commit that changed `story_id` by more
+    /// than inserting plain text, if any did.
+    pub(crate) fn story_mark(&self, story_id: &str) -> Option<u64> {
+        self.story_revisions
+            .lock()
+            .unwrap()
+            .marked
+            .get(story_id)
+            .copied()
+    }
+
+    /// The stories changed by more than inserting plain text after `since`.
+    pub(crate) fn stories_marked_since(&self, since: u64) -> HashSet<String> {
+        let revisions = self.story_revisions.lock().unwrap();
+        if since >= revisions.current {
+            return HashSet::new();
+        }
+        revisions
+            .marked
+            .iter()
+            .filter(|(_, revision)| **revision > since)
+            .map(|(story, _)| story.to_string())
+            .collect()
     }
 
     /// The current story revision, and the stories that changed after `since`
     /// (created, edited, or deleted), sorted.
     pub fn stories_changed_since(&self, since: u64) -> (u64, Vec<String>) {
         let revisions = self.story_revisions.lock().unwrap();
+        // Stamps never exceed `current`, and geometry reads ask this once per story.
+        if since >= revisions.current {
+            return (revisions.current, Vec::new());
+        }
         let mut stories: Vec<String> = revisions
             .stamped
             .iter()
@@ -1768,9 +1970,15 @@ impl EditingDoc {
         story_id: &str,
         units: &[u32],
     ) -> Result<Vec<Vec<StorySegment>>, String> {
-        let index = self
-            .segment_index(story_id)
-            .map_err(|error| error.to_string())?;
+        let index = match self.segment_index(story_id) {
+            Ok(index) => index,
+            Err(EditError::CellHasNoStory(_)) => {
+                return empty_cells::EmptyCell::new(story_id)
+                    .doc()
+                    .story_segment_units_at(story_id, units);
+            }
+            Err(error) => return Err(error.to_string()),
+        };
         let indexed = index.segment_units().expect("formatted index built");
         let txn = self.doc.transact();
         units
@@ -1800,18 +2008,35 @@ impl EditingDoc {
         txn: &T,
         story_id: &str,
     ) -> EditResult<Vec<StorySegment>> {
-        let story = story_ref(txn, story_id)?;
-        Ok(story
-            .diff(txn, YChange::identity)
-            .into_iter()
-            .map(|diff| {
-                ooxml_opc::progress::tick();
-                StorySegment {
-                    content: segment_content(diff.insert, txn),
-                    attributes: ordered_attrs(diff.attributes.as_deref()),
-                }
-            })
-            .collect())
+        self.story_segment_cursor_in(txn, story_id)?
+            .next_chunk(txn, usize::MAX)
+            .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))
+    }
+
+    /// [`Self::story_segments_in`], read a chunk at a time from the story's diff.
+    pub(crate) fn story_segment_cursor_in<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story_id: &str,
+    ) -> EditResult<StorySegmentCursor> {
+        let story = match story_ref(txn, story_id) {
+            Ok(story) => story,
+            Err(EditError::CellHasNoStory(_)) => {
+                return empty_cells::EmptyCell::new(story_id)
+                    .doc()
+                    .story_segments(story_id)
+                    .map(|segments| StorySegmentCursor::Segments(segments.into_iter()));
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(StorySegmentCursor::Diffs(
+            story
+                .diff(txn, YChange::identity)
+                .into_iter()
+                .map(PendingSegment::new)
+                .collect::<Vec<_>>()
+                .into_iter(),
+        ))
     }
 
     pub fn paragraphs(&self, story_id: &str) -> EditResult<Vec<ParagraphSnapshot>> {
@@ -1848,7 +2073,10 @@ impl EditingDoc {
                 }
             }
         }
-        Err(EditError::ParagraphNotFound(para_id.to_owned()))
+        match empty_cells::empty_cell_of_paragraph(&txn, para_id) {
+            Some(story) => Ok(Position::new(story, 0)),
+            None => Err(EditError::ParagraphNotFound(para_id.to_owned())),
+        }
     }
 
     pub fn encode_state_as_update_v1(&self) -> Vec<u8> {
@@ -2050,14 +2278,29 @@ pub(crate) fn decode_peer_update_v1(bytes: &[u8]) -> EditResult<Update> {
     Update::decode_v1(bytes).map_err(|error| EditError::InvalidUpdate(error.to_string()))
 }
 
+/// The story `story_id`, or why it cannot be read or written: a cell that a table of a live
+/// story names while its story is missing or removed is [`EditError::CellHasNoStory`], every
+/// other absent story [`EditError::StoryNotFound`]. Every write resolves its story here first,
+/// so such a cell refuses writes before anything changes.
 fn story_ref<T: ReadTxn>(txn: &T, story_id: &str) -> EditResult<TextRef> {
+    story_text(txn, story_id).ok_or_else(|| {
+        if empty_cells::named_by_live_table(txn, story_id) {
+            EditError::CellHasNoStory(story_id.to_owned())
+        } else {
+            EditError::StoryNotFound(story_id.to_owned())
+        }
+    })
+}
+
+/// The story `story_id` when it exists and is not removed. Callers that only skip an absent
+/// story use this, so they never pay for the table scan [`story_ref`] classifies one with.
+fn story_text<T: ReadTxn>(txn: &T, story_id: &str) -> Option<TextRef> {
     if story_is_removed(txn, story_id) {
-        return Err(EditError::StoryNotFound(story_id.to_owned()));
+        return None;
     }
     txn.get_map(STORIES)
         .and_then(|stories| stories.get(txn, story_id))
         .and_then(|value| value.cast::<TextRef>().ok())
-        .ok_or_else(|| EditError::StoryNotFound(story_id.to_owned()))
 }
 
 fn story_is_removed<T: ReadTxn>(txn: &T, story_id: &str) -> bool {
@@ -2467,6 +2710,41 @@ mod tests {
         let loaded = EditingDoc::new(3);
         loaded.load_state_v1(&oversized).unwrap();
         assert_eq!(loaded.encode_state_vector_v1(), a.encode_state_vector_v1());
+    }
+
+    #[test]
+    fn story_revisions_report_each_change_once_and_keep_older_readers_whole() {
+        let (a, b) = peers("one two", 1, 2);
+        let mut undo = a.undo_manager();
+        let (start, _) = a.stories_changed_since(0);
+        a.insert_text(
+            &local("A"),
+            Position::new("body", 3),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let (edited, stories) = a.stories_changed_since(start);
+        assert_eq!(stories, ["body"], "a local edit");
+        assert_eq!(a.stories_changed_since(edited), (edited, Vec::new()));
+        assert!(undo.undo());
+        let (undone, stories) = a.stories_changed_since(edited);
+        assert!(undone > edited);
+        assert_eq!(stories, ["body"], "an undo");
+        assert_eq!(a.stories_changed_since(undone), (undone, Vec::new()));
+        assert_eq!(
+            a.stories_changed_since(start).1,
+            ["body"],
+            "an older reader"
+        );
+        assert_eq!(a.stories_changed_since(undone + 1), (undone, Vec::new()));
+        let (before, _) = b.stories_changed_since(0);
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        let (after, stories) = b.stories_changed_since(before);
+        assert!(after > before);
+        assert_eq!(stories, ["body"], "a collaboration update");
+        assert_eq!(b.stories_changed_since(after), (after, Vec::new()));
+        assert_eq!(b.stories_changed_since(0).1, ["body", "header:rId7"]);
     }
 
     #[test]

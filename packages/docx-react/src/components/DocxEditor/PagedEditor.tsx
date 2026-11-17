@@ -14,8 +14,8 @@
  * 4. Selection changes → compute rects → update overlay
  */
 
-import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
-import React, { useEffect, useRef, useState, useCallback, useMemo, forwardRef, memo } from 'react';
+import { withYrsSelectionCause, type DocxClipboardFragment } from '@betteroffice/docx/yrs';
+import React, { useEffect, useRef, useState, useCallback, useMemo, useId, forwardRef, memo } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -387,6 +387,8 @@ export interface PagedEditorProps {
   onCaretInputDispatched?(): void;
   /** Selection move / blur / IME / mode change: swap to the DOM caret now. */
   onCaretInterrupt?(): void;
+  /** A cut was refused because the clipboard cannot carry part of the selection. */
+  onCutRefused?(error: Error): void;
   /** `.canvas-pages` host element — canvas-path pointer events attach here. */
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   /**
@@ -623,10 +625,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onCaretInput,
       onCaretInputDispatched,
       onCaretInterrupt,
+      onCutRefused,
       canvasHostRef,
       canvasOverlayTarget = null,
       commandBridgeRef,
     } = props;
+    const inputId = useId();
     const viewerDocumentRead = viewerDocumentReadProp;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
 
@@ -1115,12 +1119,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         inWorker?: boolean
       ): boolean => {
         if (!yrsCore.session) return false;
-        const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
-        if (docChanged) {
-          yrsCore.publishDirectInput(dirtyStory);
-        }
-        handleYrsStateChange(displaySelection, docChanged, false, false, origin, inWorker);
-        return true;
+        const publish = () => {
+          if (docChanged) yrsCore.publishDirectInput(dirtyStory);
+          const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
+          handleYrsStateChange(displaySelection, docChanged, false, false, origin, inWorker);
+          return true;
+        };
+        return origin === 'remote' ? withYrsSelectionCause(yrsCore.session, 'remote', publish) : publish();
       },
       [handleYrsStateChange, yrsCore.publishDirectInput, yrsCore.session]
     );
@@ -2247,6 +2252,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       <div
         ref={containerRef}
         className={`oox-root paged-editor ${className ?? ''}`}
+        data-docx-input={inputId}
         style={{ ...containerStyles, ...style, display: 'contents' }}
         tabIndex={0}
         onFocus={handleContainerFocus}
@@ -2257,6 +2263,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         {/* Hidden textarea input surface that writes directly to yrs. */}
         {viewerDocumentRead ? (
           <ViewerInput
+            id={inputId}
             ref={yrsInputRef}
             read={viewerDocumentRead}
             story={activeYrsRootStory}
@@ -2267,6 +2274,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           />
         ) : (
           <YrsInput
+            id={inputId}
             ref={yrsInputRef}
             enabled
             readOnly={(readOnly && !holdInput) || (!!partEdit && activeYrsRootStory === 'body')}
@@ -2306,6 +2314,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
             onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
             onCaretInterrupt={handleLocalCaretInterrupt}
+            onCutRefused={onCutRefused}
           />
         )}
 
@@ -2433,7 +2442,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           {pluginOverlays &&
             (() => {
               const overlay = (
-                <div className="paged-editor__plugin-overlays" style={pluginOverlaysStyles}>
+                <div className="paged-editor__plugin-overlays" data-plugin-overlays="" style={pluginOverlaysStyles}>
                   {pluginOverlays}
                 </div>
               );

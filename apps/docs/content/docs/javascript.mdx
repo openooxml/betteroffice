@@ -171,6 +171,38 @@ once with the reason. Plugins are matched by `id` and `revision`, so new array
 identities and reordering keep their state; React StrictMode's double setup
 creates two distinct activations.
 
+**Selection settling (experimental).** `selection-settle` carries the current
+`generation`, `version`, `selection` and `source` (`pointer`, `touch` or `keyboard`)
+after a minimum quiet window of 350 ms without selection changes following
+pointer or touch release, keyboard navigation, or programmatic selection changes.
+Programmatic changes use the `keyboard` source. Engines may wait longer for input
+or layout. Repeated clicks settle once; unchanged selections do not emit again. `snapshot.selectionSettled`
+starts true, becomes false during a gesture or selection change, and returns true
+when it settles.
+
+`geometry.getAnchorGeometry({ kind: "selection" })` returns selection fragments
+and a focus-end anchor in overlay pixels. A caret has empty `rects` and a caret
+`anchor`. Superseded retained contexts, unpresented layouts and pending input return
+`layout-unavailable` before the no-selection check, which returns `missing-target`.
+Geometry is `pending` while selection mapping or the display range is read.
+`readAnchorGeometries` waits up to two seconds for selection targets, then answers
+`layout-unavailable`; a mixed call resolves when its slowest target does.
+Selection anchors are live-only; use a range target to keep a position.
+Header and footer selections use their story's geometry; stories without geometry support return `unsupported`.
+In the read-only viewer, header and footer selections return `unsupported`; body selections still return geometry.
+
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, plugin overlays, toolbar controls, and
+host chrome are outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`geometry.viewport` is the scroller's visible client box intersected with the
+editor root, in overlay-layer pixels. Its `y` changes as the pages scroll.
+`viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`
+when no layout is shown.
+
 **Stale results.** `setState(next, atVersion)` returns `false` for a superseded
 or ended context or when the document is no longer at `atVersion`, which
 defaults to the version the context was created at. Use `context.run(action)` in
@@ -182,9 +214,13 @@ Built-in commands need their id in `commands`, and mutating ones also
 and `history: "none"` also needs `untrackedHistory`. Grants, the editor mode and
 document policy are checked again immediately before each change, so revoking a
 grant, switching to viewing mode, `readOnly`, or replacing the document refuses
-through clients obtained earlier too. Mutating built-in commands refuse plugins
-with `unsupported-policy` until they have an authoritative lock policy; edit
-batches refuse locked content in Rust. In suggesting mode each batch step needs
+through clients obtained earlier too. Mutating built-ins also require a trusted
+`click`, `keydown`, or `pointerup` in the plugin's own UI, including its contributed
+toolbar buttons. That gesture admits the plugin's mutating calls until the event
+finishes dispatching, including the handler and microtasks queued before it settles,
+whichever of the plugin's code paths makes them. Another plugin's calls and calls
+after the window closes refuse with `unsupported-policy`. Edit batches refuse locked content
+in Rust. In suggesting mode each batch step needs
 `suggest`.
 
 **Commands and toolbar.** Contributed commands register as
@@ -465,8 +501,13 @@ redo and remote updates each produce one, and refusals or no-ops none. Replacing
 removing the plugin, changing its `revision`, unmounting or a failure ends the
 activation and runs its cleanups once. Without a grant a plugin reads
 (`read.version`, `readContent`, `findText`, `validateEdits`) and navigates;
-built-in commands need an allowlisted id, mutating ones refuse with
-`unsupported-policy`, and `applyEdits` needs `document: "write"` and
+built-in commands need an allowlisted id. Mutating built-ins also need
+`document: "write"` and a trusted `click`, `keydown`, or `pointerup` in the plugin's
+own UI, including its contributed toolbar buttons. That gesture admits the plugin's
+mutating calls until the event finishes dispatching, including the handler and
+microtasks queued before it settles, whichever of the plugin's code paths makes
+them. Another plugin's calls and calls after the window closes refuse with
+`unsupported-policy`. `applyEdits` needs `document: "write"` and
 `editBatches`. Grants and `readOnly` are checked again right before each change.
 Each client call waits for pending input in order with it; plugin handlers run
 outside that queue. A contributed command's failure uses the plugin's own code,
@@ -477,6 +518,17 @@ bullets and numbered markers. Slides include `title`, `hidden` and `layout` (nam
 type); unavailable facts are `null`. These fields are optional for older engines.
 Slides also include `headerFooter` with visible slide footer, slide number and date
 placeholder text; `layout.headerFooter` reports stored layout or master settings, which do not gate those placeholders.
+
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, plugin overlays, toolbar controls, and
+host chrome are outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`geometry.viewport` is the visible slide stage in overlay-layer pixels.
+`viewport-change` carries the new rectangle on scroll, resize, or zoom, or `null`
+when no layout is shown.
 
 **Selection and navigation.** `snapshot.selection` names the current slide
 (session `slideId` and one-based `slide`) and a slide, shape or text target;
@@ -493,8 +545,19 @@ painted frame of the current version, and not during proposal review.
 converts `slide-emu` (9,525 EMU per pixel) or `slide-px` rectangles into pixels
 of the unscaled overlay layer on the slide, `getShapeRect(shapeId)` returns a
 shape's rendered bounds including group descendants, and `getPositionAtPoint`
-hit-tests client coordinates with `version` and `layoutId`. The layer
-sits below selection handles and proposal controls and ignores the pointer
+hit-tests client coordinates with `version` and `layoutId`.
+`geometry.getAnchorGeometry(target)` accepts a `PptxGeometryTarget` of
+`{ kind: "selection" }` or `{ kind: "range", version, slideId, shapeId, storyId, anchor, focus }`,
+using UTF-16 story offsets. Its `PptxAnchorGeometryResult` returns `rects` per line,
+a focus-end `anchor`, the slide's `pageRect` in overlay pixels, `version`, and `layoutId`.
+Selection anchors are live-only: a retained context whose selection has changed, including direction,
+returns `layout-unavailable`; use a range target to keep a position.
+Collapsed text has empty `rects` and a caret anchor; shape and slide selections use their bounds.
+Failures are `stale-version`, `missing-target`, or `layout-unavailable`.
+Checks run in order: layout first, then version, then target, so `layout-unavailable` overrides the other failures.
+`geometry.readAnchorGeometries(targets)` wraps the same synchronous answers in a promise,
+in target order, without pending results. Both methods are experimental.
+The layer sits below selection handles and proposal controls and ignores the pointer
 unless an element sets `pointer-events: auto`. Panels dock left, right or bottom
 of the slide beside the thumbnail rail, and become drawers in a narrow editor.
 Place `<PptxPluginToolbar />` in replacement chrome to keep contributed toolbar
@@ -573,7 +636,10 @@ rails move groups into an accessible More menu; wrap other host content in
 `pluginGrants` and `onPluginError` props as the DOCX editor. A plugin
 created with `defineXlsxPlugin` contributes a docked panel, an overlay on the
 grid and commands, and works through restricted clients. The plugin API
-can change in minor releases; changes are listed in the changelog:
+can change in minor releases; changes are listed in the changelog. The legacy
+read-only worker viewer (`legacySyncApi` with `experimentalWorkerOpen` and
+`readOnly`) does not run plugins and reports each one through `onPluginError`,
+or through `console.error` when `onPluginError` is not set:
 
 ```tsx
 import { XlsxEditor, defineXlsxPlugin } from "@betteroffice/xlsx-react";
@@ -630,18 +696,45 @@ const review = defineXlsxPlugin<{ sheets: number }>({
 />;
 ```
 
+**Selection settling (experimental).** `selection-settle` carries the current
+`generation`, `version`, `selection` and `source` (`pointer`, `touch` or `keyboard`)
+after a minimum quiet window of 350 ms without selection changes following
+pointer or touch release, keyboard navigation, or programmatic selection changes.
+Programmatic changes use the `keyboard` source. Engines may wait up to 1.5 seconds
+longer for paint. Repeated clicks settle once; unchanged selections do not emit again. `snapshot.selectionSettled`
+starts true, becomes false during a gesture or selection change, and returns true
+when it settles.
+
+`geometry.getAnchorGeometry({ kind: "selection" })` returns the selected cell
+range using `getRangeRect`, clipped to the visible grid. Superseded retained contexts
+or unpainted layouts return `layout-unavailable` before the missing-selection check.
+A selected chart or absent selection returns `missing-target`; a cell selection on
+another sheet or offscreen returns `layout-unavailable`. In-cell editing anchors to
+the cell, without exposing its text selection. Selection anchors are live-only;
+use `getRangeRect` to keep a cell range.
+`readAnchorGeometries(targets)` reads the same synchronous answers in
+order through a promise.
+
 **Lifecycle and grants** follow the DOCX editor: fresh state,
 `initialize` and one `load` event per workbook (repeated when a change the hook
 did not make arrives first, and stopped after ten runs), then coalesced
 `document-change`, `selection-change`, `mode-change` (with `readOnly`),
-`layout-change` and `grants-change` events. `document-change` comes from the
+`layout-change`, `proposal-change` and `grants-change` events. `proposal-change`
+carries `generation`, `version` and `previewVersion` when host proposals or
+their stale-decision state change, including committed edits while proposals
+remain. `document-change` comes from the
 workbook's committed versions after recalculation, so typing, commands, batches
 (a plugin's own included), undo, redo and remote updates each produce one, and
 refusals or no-ops none. Replacing the workbook, removing the plugin, changing its `revision`,
 unmounting or a failure ends the activation and runs its cleanups once. Without
 a grant a plugin reads (`read.version`, `readCells`, `findText`,
 `validateEdits`) and navigates; built-in commands need an allowlisted id,
-mutating ones refuse with `unsupported-policy`, and `applyEdits` needs
+mutating ones also need `document: "write"` and a trusted `click`, `keydown`, or
+`pointerup` in the plugin's own UI, including its contributed toolbar buttons.
+That gesture admits the plugin's mutating calls until the event finishes
+dispatching, including the handler and microtasks queued before it settles,
+whichever of the plugin's code paths makes them. Another plugin's calls and calls
+after the window closes refuse with `unsupported-policy`. `applyEdits` needs
 `document: "write"` and `editBatches`. Grants and `readOnly` are checked again
 right before each change. Each client call waits for pending input in order
 with it; plugin handlers run outside that queue. A contributed command's failure
@@ -687,6 +780,15 @@ to its plugin only, and only while its current set still has that item. A throw,
 that is too long or more than 10,000 items ends the plugin with the
 `row-decorations` phase.
 
+**Focus and locale.** `snapshot.focused` is true while focus is inside the
+editor's document surface; docked panels, plugin overlays, toolbar controls, and
+host chrome are outside. `focus-change` carries `focused`. `snapshot.locale`
+contains the canonical `i18n._lang` (`en` by default); `locale-change` carries
+`locale`. The load snapshot includes both fields. These signals are on by default
+for installed plugins.
+
+`layout.viewport` remains the visible grid in sheet pixels.
+
 **Selection and navigation.** `snapshot.selection` names the active sheet
 (session `sheetId` and zero-based `sheetIndex`), the selected cells with their
 `anchor`/`focus` direction and a selected chart's id.
@@ -706,6 +808,15 @@ zoom and sheet switch. `geometry.getCellRect({ sheetId, row, col })` and
 `getRangeRect({ sheetId, range })` return pixels of the overlay layer, zoomed
 and clipped to the visible grid, frozen panes included; a cell scrolled out of
 view returns null, and merged areas are addressed as ranges.
+`geometry.getAnchorGeometry({ kind: 'proposal', id })` returns visible proposal
+cell `rects`, their bounding `anchor` and the grid's `pageRect` in overlay
+pixels, alongside `version`, `previewVersion` and `layoutId`. XLSX does not expose
+`layout.previewVersion`; use the event's or anchor result's `previewVersion` to
+track proposal state. Anchor failures carry `{ code, message }`: `unknown-proposal`
+for an unregistered id, `missing-target` for no visible cells on this sheet,
+`pending` while proposals refresh, `read-failed` when they cannot be read, and
+`layout-unavailable` for a superseded context or unpainted layout. The result
+type also allows `stale-version`, `ambiguous-target` and `unsupported`.
 `getPositionAtPoint(clientX, clientY)` hit-tests client coordinates through the
 editor's own hit test and returns the editor's `{ sheet, row, col }` with the
 layout's `sheetId`, `version` and `layoutId`, or null outside the grid, over a

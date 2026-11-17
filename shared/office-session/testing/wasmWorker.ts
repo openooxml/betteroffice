@@ -179,6 +179,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               version: () => '0',
               sheetInfo: () => ({ sheetIds: [], sheetNames: [], activeSheet: 0 }),
               save: () => bytes.slice(),
+              saveWithWarnings: () => ({ bytes: bytes.slice(), warnings: [] }),
               dispose() {},
             };
           },

@@ -723,7 +723,7 @@ test('picture copy rejects unrepresentable visible embeds in either order', () =
       const other = embedSegment(kind);
       const reader = fakeReader({ body: first ? [image, other] : [other, image] }, {});
       expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
-      expect(readClipboardSlice(reader, { story: 'body', from: first ? 1 : 0, to: first ? 2 : 1 })).toEqual({ text: '', fragment: null });
+      expect(readClipboardSlice(reader, { story: 'body', from: first ? 1 : 0, to: first ? 2 : 1 })).toEqual({ text: '', fragment: null, leftOut: [kind] });
     }
   }
 });
@@ -733,7 +733,7 @@ for (const objectKind of ['chart', 'shape', 'image']) {
     for (const controlKind of [null, 'sdt', 'blockSdt']) {
       test(`picture copy rejects ${objectKind} in a table cell at depth ${depth} through ${controlKind ?? 'no control'}`, () => {
         const image = { src: 'data:image/png;base64,AA==' };
-        const table = (story: string) => ({ grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
+        const table = (story: string) => ({ tblPr: {}, grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
         const stories: Record<string, YrsStorySegment[]> = {};
         for (let level = 0; level < depth; level++) stories[`cell${level}`] = [embedSegment('table', table(`cell${level + 1}`))];
         const object = embedSegment(objectKind, image);
@@ -797,7 +797,9 @@ test('picture copy rejects content controls containing nested pictures and other
   for (const controlKind of ['sdt', 'blockSdt']) {
     for (const objectKind of ['image', 'chart', 'shape', 'table', 'unknown']) {
       for (const nested of [false, true]) {
-        const object = { kind: objectKind, payload: { src: 'data:image/png;base64,AA==' } };
+        const object = { kind: objectKind, payload: objectKind === 'table'
+          ? { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'tableCell', tcPr: {} }] }] }
+          : { src: 'data:image/png;base64,AA==' } };
         const content = [{ kind: 'text', text: 'kept' }, ...(nested ? [{ kind: 'sdt', payload: { content: [object] } }] : [object])];
         const payload = controlKind === 'sdt' ? { content } : { story: 'control' };
         const child = nested ? embedSegment('sdt', { content: [object] }) : embedSegment(objectKind, object.payload);
@@ -819,7 +821,7 @@ test('picture copy rejects content controls beyond the nested text depth limit',
   const reader = fakeReader({ body: [embedSegment('image', { src: 'data:image/png;base64,AA==' }), embedSegment('sdt', payload)] }, {});
   expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
   expect(readClipboardSlice(reader, { story: 'body', from: 1, to: 2 })).toEqual({
-    text: 'deep', fragment: { paragraphs: [{ text: 'deep', runs: [{ text: 'deep', format: { other: {} } }] }] },
+    text: 'deep', fragment: { paragraphs: [{ text: 'deep', runs: [{ text: 'deep', format: { other: {} } }] }] }, leftOut: ['sdt'],
   });
 });
 
@@ -946,5 +948,91 @@ describe('validClipboardFragment runs', () => {
   test('refuses more runs than the budget', () => {
     const runs = Array.from({ length: 100_001 }, () => ({ text: 'a' }));
     expect(validClipboardFragment({ paragraphs: [{ text: 'a'.repeat(runs.length), runs }] })).toBe(false);
+  });
+});
+
+describe('readClipboardSlice leftOut', () => {
+  const span = (segments: YrsStorySegment[]) => segments.reduce((sum, segment) => sum + (segment.kind === 'text' ? segment.text.length : 1), 0);
+  const read = (segments: YrsStorySegment[], from = 0, to = span(segments), stories: Record<string, YrsStorySegment[]> = {}) =>
+    readClipboardSlice(fakeReader({ ...stories, body: segments }, {}), { story: 'body', from, to });
+
+  test('names each selected object the fragment cannot carry', () => {
+    for (const kind of ['noteRef', 'shape', 'chart', 'opaqueDrawing', 'horizontalRule', 'pageBreak', 'columnBreak', 'opaque', 'field', 'unknown']) {
+      expect(read([textSegment('ab'), embedSegment(kind), textSegment('cd'), pilcrowSegment('p0')]).leftOut).toEqual([kind]);
+    }
+  });
+
+  test('names equations and content controls, which come back as bare text', () => {
+    expect(read([textSegment('ab'), embedSegment('math', { plainText: 'x=1' }), pilcrowSegment('p0')]).leftOut).toEqual(['math']);
+    expect(read([textSegment('ab'), embedSegment('sdt', { content: [{ kind: 'text', text: 'SDT' }] }), pilcrowSegment('p0')]).leftOut).toEqual(['sdt']);
+    expect(read([embedSegment('blockSdt', { story: 'control' })], 0, 1, { control: [textSegment('kept'), pilcrowSegment('pc')] }).leftOut).toEqual(['blockSdt']);
+  });
+
+  test('names each kind once in selection order', () => {
+    expect(read([embedSegment('chart'), embedSegment('noteRef'), embedSegment('chart'), pilcrowSegment('p0')]).leftOut).toEqual(['chart', 'noteRef']);
+  });
+
+  test('names objects inside a selected table', () => {
+    const table = { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'cell', tcPr: {} }] }] };
+    expect(read([embedSegment('table', table), pilcrowSegment('p0')], 0, 2, { cell: [textSegment('a'), embedSegment('noteRef'), pilcrowSegment('pc')] }).leftOut)
+      .toEqual(['noteRef']);
+  });
+
+  test('names a column break the selected paragraph records between its runs', () => {
+    const boundaries = (type: string) => ({ _originalRunBoundaries: [{ text: 'ALPHA before ' }, { text: '', breaks: [{ offset: 0, type }] }, { text: ' after ALPHA' }] });
+    const body = (type: string) => [textSegment('ALPHA before  after ALPHA'), pilcrowSegment('p0', boundaries(type)), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(body('column'), 0, 25).leftOut).toEqual(['columnBreak']);
+    expect(read(body('column'), 0, 26).leftOut).toEqual(['columnBreak']);
+    expect(read(body('column'), 26, 31).leftOut).toBeUndefined();
+    expect(read(body('column'), 0, 5).leftOut).toEqual(['columnBreak']);
+    expect(read(body('page'), 0, 25).leftOut).toBeUndefined();
+  });
+
+  test('names a column break typing moved away from its recorded offset wherever a cut touches its paragraph', () => {
+    const recorded = { _originalRunBoundaries: [{ text: 'ALPHA before', breaks: [{ offset: 6, type: 'column' }] }] };
+    const body = [textSegment('TYPEDALPHA before'), pilcrowSegment('p0', recorded), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(body, 0, 2).leftOut).toEqual(['columnBreak']);
+    expect(read(body, 10, 13).leftOut).toEqual(['columnBreak']);
+    expect(read(body, 18, 21).leftOut).toBeUndefined();
+  });
+
+  test('names a column break unit after a paragraph holding a hyperlink or a field, which records no run boundaries', () => {
+    const link = [textSegment('see '), textSegment('link', { link: { href: 'https://example.com' } }), pilcrowSegment('p0'),
+      embedSegment('columnBreak'), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(link, 0, 3).leftOut).toEqual(['columnBreak']);
+    expect(read(link, 10, 13).leftOut).toBeUndefined();
+    const field = [textSegment('page '), embedSegment('field', { displayText: '1' }), pilcrowSegment('p0'),
+      embedSegment('columnBreak'), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(field, 0, 3).leftOut).toEqual(['columnBreak']);
+    expect(read(field, 8, 11).leftOut).toBeUndefined();
+  });
+
+  test('names a column break a table cell records when the cut takes the table', () => {
+    const table = { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'cell', tcPr: {} }] }] };
+    const cell = [textSegment('ab'), pilcrowSegment('pc', { _originalRunBoundaries: [{ text: 'ab', breaks: [{ offset: 1, type: 'column' }] }] })];
+    expect(read([embedSegment('table', table), pilcrowSegment('p0')], 0, 2, { cell }).leftOut).toEqual(['columnBreak']);
+  });
+
+  test('names a column break a selected cell range records', () => {
+    const stories = stories2x2();
+    stories.c11 = [textSegment('d'), pilcrowSegment('p11', { _originalRunBoundaries: [{ text: 'd', breaks: [{ offset: 0, type: 'column' }] }] })];
+    const reader = fakeReader(stories, { 'body:0': payload2x2() });
+    const cells = (row: number, column: number) => readClipboardSlice(reader, {
+      cells: { anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 }, head: { story: 'body', tableIndex: 0, row, column } },
+    });
+    expect(cells(1, 1).leftOut).toEqual(['columnBreak']);
+    expect(cells(0, 1).leftOut).toBeUndefined();
+  });
+
+  test('names what a picture selection cannot carry in its copy error', () => {
+    const reader = fakeReader({ body: [embedSegment('image', { src: 'data:image/png;base64,AA==' }), embedSegment('chart'), pilcrowSegment('p0')] }, {});
+    expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 3 })).toThrow('Picture selection contains unsupported clipboard objects: chart');
+  });
+
+  test('leaves the report out for text and everything the fragment carries', () => {
+    const image = { src: 'data:image/png;base64,AA==' };
+    expect(read([textSegment('ab'), embedSegment('tab'), embedSegment('break'), embedSegment('bookmarkStart'), embedSegment('commentRangeStart'),
+      embedSegment('field', { displayText: 'link' }), embedSegment('image', image), pilcrowSegment('p0')]).leftOut).toBeUndefined();
+    expect(read([textSegment('ab'), embedSegment('noteRef'), textSegment('cd'), pilcrowSegment('p0')], 3, 6).leftOut).toBeUndefined();
   });
 });

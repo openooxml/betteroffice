@@ -199,14 +199,17 @@ async function properties(page: Page) {
   await expect(button).toBeAttached();
   await expect(button).not.toHaveAttribute('aria-disabled', 'true');
   const more = page.getByRole('button', { name: 'More actions', exact: true });
-  await expect(button.or(more).first()).toBeVisible();
-  if (await button.isVisible()) await button.click();
-  else {
-    await more.click();
-    await page.getByRole('menuitem', { name: 'Image properties', exact: true }).click();
-  }
   const dialog = page.getByRole('dialog', { name: 'Image Properties', exact: true });
-  await expect(dialog).toBeVisible();
+  await expect(async () => {
+    if (!await dialog.isVisible()) {
+      if (await button.isVisible()) await button.click({ timeout: 1_000 });
+      else {
+        await more.click({ timeout: 1_000 });
+        await page.getByRole('menuitem', { name: 'Image properties', exact: true }).click({ timeout: 1_000 });
+      }
+    }
+    await expect(dialog).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 15_000 });
   return dialog;
 }
 

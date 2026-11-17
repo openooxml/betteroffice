@@ -447,8 +447,12 @@ fn execute(
             &args["markdownOptions"].to_string(),
         )),
         "save" => {
-            let bytes = workbook.save().unwrap();
-            json!({ "sha256": format!("{:x}", Sha256::digest(&bytes)), "byteLength": bytes.len() })
+            let (bytes, warnings) = workbook.save_with_warnings().unwrap();
+            json!({
+                "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                "byteLength": bytes.len(),
+                "warnings": warnings,
+            })
         }
         _ => match attempt(workbook, op, args, calculation) {
             Some(result) => result.unwrap_or_else(|error| panic!("parity op {op}: {error}")),

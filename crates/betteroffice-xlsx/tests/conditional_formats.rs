@@ -363,18 +363,32 @@ fn assert_cf_op_refusal(formula: &str, op: Op) {
 }
 
 #[test]
-fn conditional_format_refuses_rename_referenced_sheet_atomically() {
-    for (formula, sheet) in [
-        ("'Inputs'!$H$12>0", SheetId(1)),
-        ("Sheet1!$A$1>0", SheetId(0)),
+fn a_rename_rewrites_a_session_rule_formula_and_undo_restores_it() {
+    for (formula, sheet, renamed) in [
+        ("'Inputs'!$H$12>0", SheetId(1), "Renamed!$H$12>0"),
+        ("Sheet1!$A$1>0", SheetId(0), "Renamed!$A$1>0"),
     ] {
-        assert_cf_op_refusal(
-            formula,
-            Op::RenameSheet {
+        let mut wb = structural_cf_workbook(formula, false);
+        let before = wb.model().sheets[0].conditional_formats.clone();
+        wb.apply_ops(
+            vec![Op::RenameSheet {
                 sheet,
                 name: "Renamed".into(),
-            },
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            wb.model().sheets[0].conditional_formats[0].rules[0].formulas,
+            [renamed]
         );
+        let reopened = Workbook::open(&wb.save().unwrap()).unwrap();
+        assert_eq!(
+            reopened.model().sheets[0].conditional_formats[0].rules[0].formulas,
+            [renamed]
+        );
+        wb.undo(CalculationOptions::default()).unwrap();
+        assert_eq!(wb.model().sheets[0].conditional_formats, before);
     }
 }
 
@@ -580,10 +594,6 @@ fn source_conditional_formats_keep_their_geometry_on_structural_edits() {
             sheet: SheetId(1),
             at: 11,
             count: 1,
-        },
-        Op::RenameSheet {
-            sheet: SheetId(1),
-            name: "Renamed".into(),
         },
     ] {
         let mut wb = structural_cf_workbook("Inputs!$H$12>0", true);

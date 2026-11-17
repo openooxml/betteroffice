@@ -3,7 +3,7 @@ use crate::{EditCtx, EditingDoc, SegmentContent, StorySegment};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use yrs::{Any, Map, MapPrelim, ReadTxn, Text, TextPrelim, Transact};
+use yrs::{Any, Map, MapPrelim, ReadTxn, Text, Transact};
 
 fn item(record: &ControlRecord) -> bool {
     record.control.metadata.control_type == "repeatingSectionItem"
@@ -225,7 +225,12 @@ impl EditingDoc {
                 }) {
                     return Err("tracked-revision-conflict".to_owned());
                 }
-                if let SegmentContent::OtherEmbed { payload, .. } = &segment.content {
+                if let SegmentContent::OtherEmbed { kind, payload } = &segment.content {
+                    if kind == "table"
+                        && crate::unavailable_tables::lacks_payload(|key| payload.contains_key(key))
+                    {
+                        return Err(crate::unavailable_tables::TABLE_UNAVAILABLE.to_owned());
+                    }
                     let mut children = Vec::new();
                     for value in payload.values() {
                         references(value, &mut children);
@@ -267,7 +272,7 @@ impl EditingDoc {
             return Ok(true);
         }
         for (id, segments) in graph {
-            let copied = root.insert(&mut txn, names[&id].clone(), TextPrelim::new(""));
+            let copied = crate::insert_story(&mut txn, &root, names[&id].clone());
             let mut offset = 0;
             for segment in segments {
                 let attrs = segment

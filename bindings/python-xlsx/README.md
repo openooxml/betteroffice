@@ -248,8 +248,8 @@ wb.apply_ops([
 
 Ops keep the wire field names, sheets are zero-based indices and ranges are
 inclusive; `betteroffice_xlsx.ops` types each public op (`XlsxOp`). The
-whole-table replacements `setCharts`, `setConditionalFormats` and
-`setDefinedNames` are internal and refused, as in TypeScript. `move_range`,
+whole-table replacements `setCharts`, `setConditionalFormats`,
+`setDefinedNames` and `setTables` are internal and refused, as in TypeScript. `move_range`,
 `set_hyperlink`, `remove_hyperlink`, `edit_charts`, `move_chart`,
 `capture_format` and `apply_format` mirror the TypeScript handle's methods of
 the same names, with the same arguments. Formulas that depend on moved cells

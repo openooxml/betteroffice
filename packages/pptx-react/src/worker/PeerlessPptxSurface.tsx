@@ -1,3 +1,4 @@
+import { usePluginGestures } from '../../../../shared/plugin-host/usePluginGestures';
 import { initialPptxZoom } from '../initialPptxZoom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, RefObject } from 'react';
@@ -156,6 +157,7 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
 export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const { t } = useTranslation();
   const editor = useRef<HTMLDivElement>(null);
+  usePluginGestures(editor);
   const canvas = useRef<HTMLCanvasElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const slideFrame = useRef<HTMLDivElement>(null);
@@ -282,7 +284,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     });
     return () => { current = false; api.current = null; if (typeof cleanup === 'function') cleanup(); };
   }, [presentation, focus, commands]);
-  const plugins = usePeerlessPluginHost(presentation, commands, canvas, api, props, review.diff);
+  const plugins = usePeerlessPluginHost(presentation, commands, canvas, api, props, review.diff, stage);
   useEffect(() => {
     const collaboration = props.collaboration;
     if (!presentation?.current || failure || !collaboration?.onReplica) return;

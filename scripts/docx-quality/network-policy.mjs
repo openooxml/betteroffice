@@ -7,8 +7,12 @@ const fontUrl = new RegExp(
   `^https://cdn\\.jsdelivr\\.net/npm/@betteroffice/(?:fonts@${version('fonts')}/dist/decoder/fontpack\\.wasm|fonts-latin@${version('fonts-latin')}/assets/[A-Za-z0-9-]+\\.ttf\\.zst|fonts-cjk@${version('fonts-cjk')}/assets/[A-Za-z0-9-]+\\.otf\\.zst|fonts-intl@${version('fonts-intl')}/assets/[A-Za-z0-9-]+\\.ttf\\.zst)$`
 );
 
-/** Allow only the jsDelivr font binaries the capture harness requests, fetched without credentials. */
-export function isAllowedFontRequest(request) {
+/**
+ * Allow only the jsDelivr font binaries the capture harness requests, fetched without credentials.
+ * A published-channel capture serves its release's font packages locally and fetches no font remotely.
+ */
+export function isAllowedFontRequest(request, environment = process.env) {
+  if (environment.QUALITY_PUBLISHED_FONTS?.trim()) return false;
   return (
     fontUrl.test(request.url) &&
     request.method === 'GET' &&

@@ -146,7 +146,13 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
         .child_elements()
         .filter(|child| matches!(child.local_name(), "catAx" | "dateAx" | "valAx" | "serAx"))
         .take(MAX_AXES)
-        .map(parse_axis)
+        .map(|element| {
+            let mut axis = parse_axis(element);
+            if let Some(code) = linked_value_format(element, &axis, &plot_groups) {
+                axis.number_format = Some(code);
+            }
+            axis
+        })
         .collect::<Vec<_>>();
     let axes = parse_axes(plot_area, series.first());
     let title = first_deep(chart_space, "title", 0);
@@ -605,7 +611,7 @@ fn parse_series<E: ChartXml>(
                             .or_else(|| first_deep(element, "numLit", 0))
                     })
                     .and_then(|cache| child(cache, "formatCode"))
-                    .map(|code| code.descendant_text())
+                    .map(|code| decode_xstring(&code.descendant_text()))
                     .filter(|code| !code.is_empty()),
                 axis_ids: (!axis_ids.is_empty()).then(|| axis_ids.to_vec()),
                 points: (!points.is_empty()).then_some(points),
@@ -682,10 +688,18 @@ fn label_switches<E: ChartXml>(labels: &E) -> ChartDataLabels {
         position: val_attr(child(labels, "dLblPos")).map(str::to_owned),
         number_format: child(labels, "numFmt")
             .and_then(|value| value.attribute(None, "formatCode"))
-            .map(str::to_owned),
+            .map(decode_xstring),
+        source_linked: child(labels, "numFmt")
+            .is_some_and(source_linked)
+            .then_some(true),
         text: parse_text_properties(child(labels, "txPr")),
         points: None,
     }
+}
+
+/// Whether a `c:numFmt` defers to the format of the cells it plots.
+fn source_linked<E: ChartXml>(format: &E) -> bool {
+    matches!(format.attribute(None, "sourceLinked"), Some("1" | "true"))
 }
 
 /// The title's style: the first run of its `c:rich` over its `c:txPr`, because
@@ -762,6 +776,30 @@ fn parse_legend<E: ChartXml>(chart_space: &E) -> Option<ChartLegend> {
     })
 }
 
+/// The format a source-linked value axis reads: the one its first series'
+/// values were cached with. A percent-stacked axis plots shares and the x axis
+/// of an x-y group plots `c:xVal`, so both keep the code they were saved with.
+fn linked_value_format<E: ChartXml>(
+    element: &E,
+    axis: &ChartAxis,
+    groups: &[ChartPlotGroup],
+) -> Option<String> {
+    if element.local_name() != "valAx" || !child(element, "numFmt").is_some_and(source_linked) {
+        return None;
+    }
+    let id = axis.id.as_deref()?;
+    let group = groups
+        .iter()
+        .find(|group| group.axis_ids.iter().any(|axis_id| axis_id == id))?;
+    if group.grouping.as_deref() == Some("percentStacked")
+        || (matches!(group.chart_type.as_deref(), Some("scatter" | "bubble"))
+            && group.axis_ids.first().map(String::as_str) == Some(id))
+    {
+        return None;
+    }
+    group.series.first()?.value_format.clone()
+}
+
 fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
     let scaling = child(axis, "scaling");
     let crosses = val_attr(child(axis, "crosses"));
@@ -800,7 +838,7 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
         reversed: val_attr(scaling.and_then(|value| child(value, "orientation"))) == Some("maxMin"),
         number_format: child(axis, "numFmt")
             .and_then(|value| value.attribute(None, "formatCode"))
-            .map(str::to_owned),
+            .map(decode_xstring),
         major_tick_mark: val_attr(child(axis, "majorTickMark")).map(str::to_owned),
         minor_tick_mark: val_attr(child(axis, "minorTickMark")).map(str::to_owned),
         tick_label_position: val_attr(child(axis, "tickLblPos")).map(str::to_owned),
@@ -2369,6 +2407,74 @@ mod tests {
         assert_eq!(points[0].labels.show_value, Some(false));
         assert_eq!(points[0].labels.show_category_name, Some(true));
         assert!(points[0].labels.points.is_none());
+    }
+
+    /// Format codes are `ST_Xstring` wherever a chart holds one: the value
+    /// cache's `c:formatCode` and a `c:numFmt@formatCode` on labels or an axis
+    /// read decoded, and a literal escape written with `_x005F_` reads literal.
+    #[test]
+    fn chart_format_codes_read_their_xstring_escapes() {
+        let series = Node::el(
+            "c:ser",
+            vec![
+                Node::el(
+                    "c:dLbls",
+                    vec![Node::el("c:numFmt", Vec::new()).attr("formatCode", "0_x005F_x0041_0")],
+                ),
+                Node::el(
+                    "c:val",
+                    vec![Node::el(
+                        "c:numRef",
+                        vec![
+                            Node::text("c:f", "Sheet1!$B$2:$B$3"),
+                            Node::el(
+                                "c:numCache",
+                                vec![
+                                    Node::text("c:formatCode", r"mmm\_x000a_yyyy"),
+                                    Node::val("c:ptCount", "1"),
+                                    Node::el("c:pt", vec![Node::text("c:v", "1")]).attr("idx", "0"),
+                                ],
+                            ),
+                        ],
+                    )],
+                ),
+            ],
+        );
+        let space = parse_chart_space(&Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![
+                        Node::el("c:barChart", vec![series]),
+                        Node::el(
+                            "c:valAx",
+                            vec![
+                                Node::val("c:axId", "1"),
+                                Node::el("c:numFmt", Vec::new()).attr("formatCode", "0_x0001_"),
+                            ],
+                        ),
+                    ],
+                )],
+            )],
+        ))
+        .expect("chart space parses");
+        let series = &space.plot_groups[0].series[0];
+        assert_eq!(series.value_format.as_deref(), Some("mmm\\\nyyyy"));
+        assert_eq!(
+            series
+                .data_labels
+                .as_ref()
+                .and_then(|labels| labels.number_format.as_deref()),
+            Some("0_x0041_0")
+        );
+        assert_eq!(
+            space.axis_list.as_ref().unwrap()[0]
+                .number_format
+                .as_deref(),
+            Some("0\u{1}")
+        );
     }
 
     #[test]

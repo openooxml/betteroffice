@@ -59,6 +59,8 @@ use crate::sticky_positions::sticky_offset;
 
 pub(crate) mod group_pictures;
 mod group_transforms;
+#[cfg(test)]
+mod hidden_rows_tests;
 pub(crate) mod local;
 pub(crate) mod preview;
 pub mod reservations;
@@ -126,6 +128,10 @@ pub struct RenderEnv {
     /// sections. `None` disables snapping.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_grid_pitch_px: Option<f64>,
+    /// Each region section's note numbering, which the body's note reference marks follow.
+    /// Empty numbers them in decimal from 1.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub note_numbering: Vec<docx_layout::footnotes::SectionNoteNumbering>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
     /// Resolved paragraph style chain font size in pt, keyed by style id.
@@ -441,6 +447,10 @@ pub fn yrs_doc_to_mapped_layout_blocks(
     story_id: &str,
     env: &RenderEnv,
 ) -> Result<(Vec<LayoutBlock>, LoweringMap), BridgeError> {
+    if crate::empty_cells::is_empty_cell(&doc.yrs_doc().transact(), story_id) {
+        let cell = crate::empty_cells::EmptyCell::new(story_id);
+        return yrs_doc_to_mapped_layout_blocks(cell.doc(), story_id, env);
+    }
     let mut local = local::LocalLowering::new(false);
     yrs_doc_to_mapped_layout_blocks_inner(doc, story_id, env, &mut None, &mut local, &mut None)
 }
@@ -563,6 +573,9 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
             &mut blocks,
             opaque_sequences,
         );
+    }
+    if story_id == "body" {
+        docx_layout::footnotes::number_note_references(&mut blocks, &env.note_numbering);
     }
     map.finish();
     Ok((blocks, map.map))
@@ -743,18 +756,13 @@ fn can_omit_trailing_body_page_break<T: ReadTxn>(
         .or_else(|| read.settings.as_ref()?.get("footnotePr")?.get("position"))
         .and_then(Value::as_str)
         .unwrap_or("pageBottom");
-    !txn.get_map(crate::STORIES).is_some_and(|stories| {
-        stories.iter(txn).any(|(id, _)| {
-            let note_id = id.strip_prefix("en:").or_else(|| {
-                if matches!(footnote_position, "docEnd" | "sectEnd") {
-                    id.strip_prefix("fn:")
-                } else {
-                    None
-                }
-            });
-            note_id.is_some_and(|id| id.parse::<i64>().is_ok_and(|id| id > 0))
+    !matches!(footnote_position, "docEnd" | "sectEnd")
+        || !txn.get_map(crate::STORIES).is_some_and(|stories| {
+            stories.iter(txn).any(|(id, _)| {
+                id.strip_prefix("fn:")
+                    .is_some_and(|id| id.parse::<i64>().is_ok_and(|id| id > 0))
+            })
         })
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1171,32 +1179,50 @@ fn walk_story_chunks<T: ReadTxn>(
                         detail: "table embed interrupts paragraph content".to_owned(),
                     });
                 }
-                let previewed_out = env.revision_hidden(attributes);
-                let hidden = previewed_out
-                    || shared_map_string(table, txn, "blockId")
-                        .is_some_and(|id| hidden_field_blocks.contains(&id));
-                map.tables.push((pm_cursor, story_slot, table_ordinal));
-                table_ordinal += 1;
-                let mut unnumbered = previewed_out.then(|| list_state.clone());
-                let (lowered, node_size) = lower_table(
-                    table,
-                    txn,
-                    story_id,
-                    story_index,
-                    pm_cursor,
-                    env,
-                    active_stories,
-                    unnumbered.as_mut().unwrap_or(&mut *list_state),
-                    map,
-                    opaque_sequences,
-                    revealable,
-                    local,
-                )?;
-                if !hidden {
-                    blocks.push(LayoutBlock::Table(lowered));
-                } else if !previewed_out && let Some(revealed) = revealable {
-                    revealed.push(LayoutBlock::Table(lowered));
-                }
+                let payload = crate::unavailable_tables::table_payload(table, txn);
+                let node_size = if let Some(payload) = payload {
+                    let previewed_out = env.revision_hidden(attributes);
+                    let hidden = previewed_out
+                        || shared_map_string(table, txn, "blockId")
+                            .is_some_and(|id| hidden_field_blocks.contains(&id));
+                    map.tables.push((pm_cursor, story_slot, table_ordinal));
+                    table_ordinal += 1;
+                    let mut unnumbered = previewed_out.then(|| list_state.clone());
+                    let (lowered, node_size) = lower_table(
+                        &payload,
+                        txn,
+                        story_id,
+                        story_index,
+                        pm_cursor,
+                        env,
+                        active_stories,
+                        unnumbered.as_mut().unwrap_or(&mut *list_state),
+                        map,
+                        opaque_sequences,
+                        revealable,
+                        local,
+                    )?;
+                    let rows_shown = !lowered.rows.is_empty();
+                    if story_id == "body"
+                        && active_stories.len() == 1
+                        && let BlockId::Str(id) = &lowered.id
+                    {
+                        local.table_embeds.insert(id.clone(), table.clone());
+                    }
+                    if rows_shown && !hidden {
+                        blocks.push(LayoutBlock::Table(lowered));
+                    } else if rows_shown
+                        && !previewed_out
+                        && let Some(revealed) = revealable
+                    {
+                        revealed.push(LayoutBlock::Table(lowered));
+                    }
+                    node_size
+                } else {
+                    map.tables.push((pm_cursor, story_slot, table_ordinal));
+                    table_ordinal += 1;
+                    UNAVAILABLE_TABLE_NODE_SIZE
+                };
                 story_index += 1;
                 paragraph_start = story_index;
                 pm_cursor += node_size;
@@ -1638,6 +1664,7 @@ fn walk_story_chunks<T: ReadTxn>(
                 if shapes::inline_native_shape(&block) {
                     let image = ImageRun {
                         src: String::new(),
+                        relationship_id: None,
                         width: block.width,
                         height: block.height,
                         alt: block.description.clone().or_else(|| block.title.clone()),
@@ -2179,9 +2206,13 @@ fn note_ref_label(id: f64) -> String {
     }
 }
 
+/// Display units of a table embed that lost its payload: an empty table node, so display
+/// positions after it match the editor projection, which counts it as a table without rows.
+const UNAVAILABLE_TABLE_NODE_SIZE: u64 = 2;
+
 #[allow(clippy::too_many_arguments)]
 fn lower_table<T: ReadTxn>(
-    table: &MapRef,
+    payload: &crate::unavailable_tables::TablePayload,
     txn: &T,
     parent_story: &str,
     story_index: u32,
@@ -2194,11 +2225,15 @@ fn lower_table<T: ReadTxn>(
     revealable: &mut Option<Vec<LayoutBlock>>,
     local: &mut local::LocalLowering,
 ) -> Result<(TableBlock, u64), BridgeError> {
-    let tbl_pr_value = shared_any(table, txn, "tblPr")
+    let plain = |value: &Out| match value {
+        Out::Any(value) => Some(value.clone()),
+        _ => None,
+    };
+    let tbl_pr_value = plain(&payload.tbl_pr)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing tblPr"))?;
     let tbl_pr = any_map(&tbl_pr_value)
         .ok_or_else(|| malformed_table(parent_story, story_index, "tblPr must be a map"))?;
-    let grid_value = shared_any(table, txn, "grid")
+    let grid_value = plain(&payload.grid)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing grid"))?;
     let grid = match &grid_value {
         Any::Array(values) => values,
@@ -2210,7 +2245,7 @@ fn lower_table<T: ReadTxn>(
             ));
         }
     };
-    let rows_value = shared_any(table, txn, "rows")
+    let rows_value = plain(&payload.rows)
         .ok_or_else(|| malformed_table(parent_story, story_index, "missing rows"))?;
     let row_values = match &rows_value {
         Any::Array(values) => values,
@@ -2318,22 +2353,42 @@ fn lower_table<T: ReadTxn>(
                     format!("row {row_index} cell {cell_index} is missing story"),
                 )
             })?;
-            let (mut blocks, content_size) = lower_story(
-                txn,
-                &cell_story,
-                env,
-                cell_pm_start + 1,
-                active_stories,
-                list_state,
-                CellEdges {
-                    before: true,
-                    after: true,
-                },
-                map,
-                opaque_sequences,
-                revealable,
-                local,
-            )?;
+            let cell_edges = CellEdges {
+                before: true,
+                after: true,
+            };
+            let (mut blocks, content_size) = if crate::story_text(txn, &cell_story).is_some() {
+                lower_story(
+                    txn,
+                    &cell_story,
+                    env,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    cell_edges,
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?
+            } else {
+                local.block(true);
+                let cell = crate::empty_cells::EmptyCell::new(&cell_story);
+                let scratch = cell.doc().yrs_doc().transact();
+                lower_story(
+                    &scratch,
+                    &cell_story,
+                    env,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    cell_edges,
+                    map,
+                    opaque_sequences,
+                    revealable,
+                    local,
+                )?
+            };
 
             for block in &mut blocks {
                 if let LayoutBlock::Paragraph(paragraph) = block
@@ -2410,6 +2465,12 @@ fn lower_table<T: ReadTxn>(
                 padding: Some(lower_cell_padding(tc_pr, table_margins, default_margins)),
                 no_wrap: (map_bool(tc_pr, "noWrap") == Some(true)).then_some(true),
                 tracked_marker: tc_pr.get("cellMarker").and_then(any_json),
+                merge_continuation: tc_pr
+                    .get("_originalFormatting")
+                    .and_then(any_map)
+                    .and_then(|formatting| map_string(formatting, "vMerge"))
+                    .is_some_and(|merge| merge == "continue")
+                    .then_some(true),
             });
             for end in column_row_ends.iter_mut().skip(column).take(colspan) {
                 *end = row_index.saturating_add(row_span.unwrap_or(1.0) as usize);
@@ -2430,6 +2491,13 @@ fn lower_table<T: ReadTxn>(
             cant_split: row_formatting
                 .and_then(|value| map_bool(value, "cantSplit"))
                 .filter(|value| *value),
+            hidden: row_formatting
+                .and_then(|value| map_bool(value, "hidden"))
+                .filter(|value| *value),
+            hidden_content_only: row_formatting
+                .and_then(|value| map_bool(value, "hiddenContentOnly"))
+                .filter(|value| *value),
+            source_row: None,
             grid_before,
             grid_after,
             width_before: grid_before
@@ -2482,34 +2550,51 @@ fn lower_table<T: ReadTxn>(
         (twips > 0.0).then(|| twips_to_pixels(twips))
     };
 
-    Ok((
-        TableBlock {
-            sdt_groups: None,
-            id: BlockId::Str(table_id),
-            rows,
-            column_widths: (!column_widths.is_empty()).then_some(column_widths),
-            grid_widths: None,
-            width: map_number(tbl_pr, "width"),
-            width_type: map_string(tbl_pr, "widthType"),
-            preferred_width: None,
-            layout_mode: None,
-            table_layout: Some(layout_mode.unwrap_or_else(|| "autofit".to_owned())),
-            width_algorithm: None,
-            style_cascade: None,
-            background: None,
-            justification: map_string(tbl_pr, "justification"),
-            bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
-            indent,
-            floating,
-            compatibility_mode,
-            cell_margin_left: table_margin("left"),
-            cell_margin_right: table_margin("right"),
-            gridlines: env.show_table_gridlines.then_some(true),
-            pm_start: Some(pm_start as f64),
-            pm_end: Some((pm_start + node_size) as f64),
-        },
-        node_size,
-    ))
+    let mut block = TableBlock {
+        sdt_groups: None,
+        id: BlockId::Str(table_id),
+        rows,
+        column_widths: (!column_widths.is_empty()).then_some(column_widths),
+        grid_widths: None,
+        width: map_number(tbl_pr, "width"),
+        width_type: map_string(tbl_pr, "widthType"),
+        preferred_width: None,
+        layout_mode: None,
+        table_layout: Some(layout_mode.unwrap_or_else(|| "autofit".to_owned())),
+        width_algorithm: None,
+        style_cascade: None,
+        background: None,
+        justification: map_string(tbl_pr, "justification"),
+        bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
+        indent,
+        floating,
+        compatibility_mode,
+        cell_margin_left: table_margin("left"),
+        cell_margin_right: table_margin("right"),
+        gridlines: env.show_table_gridlines.then_some(true),
+        first_column: table_look_first_column(tbl_pr).then_some(true),
+        pm_start: Some(pm_start as f64),
+        pm_end: Some((pm_start + node_size) as f64),
+    };
+    if !env.show_hidden_text {
+        docx_layout::table_grid::drop_hidden_rows(&mut block);
+    }
+    Ok((block, node_size))
+}
+
+/// The table's own `w:tblLook` asks for first-column formatting, by its
+/// attribute or by bit `0x0080` of its legacy hex value.
+fn table_look_first_column(tbl_pr: &std::collections::HashMap<String, Any>) -> bool {
+    let Some(look) = tbl_pr.get("look").and_then(any_map) else {
+        return false;
+    };
+    map_bool(look, "firstColumn")
+        .or_else(|| {
+            map_string(look, "value")
+                .and_then(|value| u32::from_str_radix(value.trim(), 16).ok())
+                .map(|bits| bits & 0x0080 != 0)
+        })
+        .unwrap_or(false)
 }
 
 fn resolve_paragraph_auto_text_color(
@@ -2563,7 +2648,8 @@ fn resolve_auto_text_color(
 fn automatic_text_needs_white(color: &str) -> bool {
     let Some(value) = color
         .strip_prefix('#')
-        .filter(|value| value.len() == 6)
+        .filter(|value| matches!(value.len(), 6 | 8))
+        .and_then(|value| value.get(..6))
         .and_then(|value| u32::from_str_radix(value, 16).ok())
     else {
         return false;
@@ -2741,6 +2827,7 @@ fn lower_image_values(
             Some(Any::String(src)) => env.media.token(src).unwrap_or_else(|| src.to_string()),
             value => value_string(value).unwrap_or_default(),
         },
+        relationship_id: map_string(values, "rId").filter(|id| !id.is_empty()),
         width,
         height,
         alt: map_string(values, "alt"),
@@ -3168,13 +3255,35 @@ fn chart_drawing_anchored(chart: &Value) -> bool {
             .is_some_and(|wrap_type| wrap_type != "inline")
 }
 
+/// Replaces `+mj-*` and `+mn-*` typefaces in a chart's layout copy with the
+/// theme's fonts; the chart part keeps the references.
+fn resolve_chart_theme_fonts(value: &mut Value, theme: Option<&docx_parse::Theme>) {
+    match value {
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| resolve_chart_theme_fonts(item, theme)),
+        Value::Object(fields) => {
+            if let Some(Value::String(font)) = fields.get_mut("font")
+                && (font.starts_with("+mj-") || font.starts_with("+mn-"))
+            {
+                *font = docx_parse::resolve_theme_font_ref(theme, font);
+            }
+            fields
+                .values_mut()
+                .for_each(|field| resolve_chart_theme_fonts(field, theme));
+        }
+        _ => {}
+    }
+}
+
 fn lower_chart_block(
     values: &std::collections::HashMap<String, Any>,
     pm_start: Option<u64>,
     env: &RenderEnv,
 ) -> Option<ChartBlock> {
-    let chart = map_string(values, "chartJson")
+    let mut chart = map_string(values, "chartJson")
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())?;
+    resolve_chart_theme_fonts(&mut chart, env.font_theme.as_ref());
     let (width, height) = constrain_to_page(
         map_number(values, "width")
             .filter(|value| *value != 0.0)
@@ -4205,6 +4314,7 @@ fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun 
     };
     let image = ImageRun {
         src: String::new(),
+        relationship_id: None,
         width,
         height,
         alt,
@@ -4904,6 +5014,97 @@ fn has_nonfinite(formatting: &RunFormatting) -> bool {
         .any(|value| !value.is_finite())
 }
 
+/// The text a run draws: a character whose `w:rFonts` slot names a symbol
+/// face (Symbol, Wingdings, Webdings) addresses a glyph by font position, so
+/// layout gets the covered character the face's table names for it. A slot
+/// the table does not name stays as stored, and so does a private-use slot
+/// the base-latin backstop draws with its own glyph for that face.
+///
+/// A replacement can fall in another slot than the character it replaces
+/// (`a` is ASCII, `α` is not), so that slot is pointed at the symbol face too,
+/// and every slot is then named explicitly so none follows the re-pointed one
+/// through fallback; a combining mark keeps its base's family. When another
+/// character of the run still needs a slot's own family, the slots stay as
+/// they are. Display only: the story, saves, find and copy keep the stored
+/// characters, and every replacement keeps the UTF-16 width.
+pub(super) fn symbol_display_run(formatting: &mut RunFormatting, text: String) -> String {
+    let slots = formatting.font_slots.as_ref();
+    let family = |slot: usize| -> Option<String> {
+        slots
+            .and_then(|slots| match slot {
+                0 => slots.ascii.as_deref(),
+                1 => slots.h_ansi.as_deref(),
+                2 => slots.east_asia.as_deref(),
+                _ => slots.cs.as_deref(),
+            })
+            .or_else(|| slots.and_then(|slots| slots.h_ansi.as_deref()))
+            .or_else(|| slots.and_then(|slots| slots.ascii.as_deref()))
+            .or(formatting.font_family.as_deref())
+            .map(str::to_owned)
+    };
+    let symbol_face = |slot: usize| {
+        family(slot)
+            .as_deref()
+            .and_then(ooxml_text::SymbolFont::named)
+    };
+    if (0..4).all(|slot| symbol_face(slot).is_none()) {
+        return text;
+    }
+    let hint = slots.and_then(|slots| slots.hint.as_deref()) == Some("eastAsia");
+    let complex_script = formatting.complex_script.unwrap_or(false);
+    let mut wanted: Vec<Option<String>> = Vec::new();
+    let drawn: String = ooxml_text::font_slot_characters(&text, complex_script, hint)
+        .map(|(character, slot)| {
+            wanted.push(family(slot));
+            symbol_face(slot)
+                .filter(|_| !ooxml_text::font_store::base_latin_alias(character))
+                .and_then(|face| face.shape(character))
+                .unwrap_or(character)
+        })
+        .collect();
+    if drawn == text {
+        return text;
+    }
+    let mut targets: [Option<Option<String>>; 4] = [None, None, None, None];
+    let mut conflict = false;
+    for ((_, slot), want) in
+        ooxml_text::font_slot_characters(&drawn, complex_script, hint).zip(wanted)
+    {
+        match &targets[slot] {
+            None => targets[slot] = Some(want),
+            Some(existing) if *existing == want => {}
+            Some(_) => {
+                conflict = true;
+                break;
+            }
+        }
+    }
+    if conflict {
+        return drawn;
+    }
+    let pinned: Vec<Option<String>> = (0..4)
+        .map(|slot| targets[slot].clone().unwrap_or_else(|| family(slot)))
+        .collect();
+    if (0..4).all(|slot| pinned[slot] == family(slot)) {
+        return drawn;
+    }
+    let mut repointed = formatting.font_slots.clone().unwrap_or_default();
+    for (slot, target) in pinned.into_iter().enumerate() {
+        let (name, theme) = match slot {
+            0 => (&mut repointed.ascii, &mut repointed.ascii_theme),
+            1 => (&mut repointed.h_ansi, &mut repointed.h_ansi_theme),
+            2 => (&mut repointed.east_asia, &mut repointed.east_asia_theme),
+            _ => (&mut repointed.cs, &mut repointed.cs_theme),
+        };
+        if *name != target {
+            *name = target;
+            *theme = None;
+        }
+    }
+    formatting.font_slots = Some(repointed);
+    drawn
+}
+
 fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
     let pm_start = Some((paragraph_pm_start + 1 + u64::from(raw.pm_start)) as f64);
     let pm_end = Some((paragraph_pm_start + 1 + u64::from(raw.pm_end)) as f64);
@@ -4915,13 +5116,17 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
             pm_end,
             inline_sdt_widget: raw.inline_sdt_widget,
         }),
-        RawRunKind::Text(text) => Run::Text(TextRun {
-            fmt: raw.formatting,
-            text,
-            pm_start,
-            pm_end,
-            inline_sdt_widget: raw.inline_sdt_widget,
-        }),
+        RawRunKind::Text(text) => {
+            let mut fmt = raw.formatting;
+            let text = symbol_display_run(&mut fmt, text);
+            Run::Text(TextRun {
+                fmt,
+                text,
+                pm_start,
+                pm_end,
+                inline_sdt_widget: raw.inline_sdt_widget,
+            })
+        }
         RawRunKind::Tab => Run::Tab(TabRun {
             fmt: raw.formatting,
             pm_start,
@@ -5055,6 +5260,10 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
     lower_font_size(attributes, &mut result);
     lower_language(attributes, &mut result);
     lower_character_spacing(attributes, &mut result);
+    if let Some(Any::Map(map)) = attribute(attributes, "typography") {
+        result.ligatures = map_string(map, "ligatures");
+        result.contextual_alternates = map_bool(map, "contextualAlternates");
+    }
 
     result.superscript = mark_bool(attributes, "superscript");
     result.subscript = mark_bool(attributes, "subscript");
@@ -5236,7 +5445,10 @@ fn lower_character_spacing(attributes: Option<&Attrs>, result: &mut RunFormattin
     if let Some(position) = map_number(map, "position").filter(|value| *value != 0.0) {
         result.position_px = Some(half_points_to_pixels(position));
     }
-    if let Some(scale) = map_number(map, "scale").filter(|value| *value != 100.0) {
+    if let Some(scale) = map_number(map, "scale")
+        .and_then(docx_parse::formatting::text_scale)
+        .filter(|value| *value != 100.0)
+    {
         result.horizontal_scale = Some(scale);
     }
     if let Some(kerning) = map_number(map, "kerning").filter(|value| *value > 0.0) {
@@ -6386,6 +6598,38 @@ mod tests {
     }
 
     #[test]
+    fn hostile_colour_value_does_not_panic() {
+        assert!(!automatic_text_needs_white("#abcde\u{20ac}"));
+    }
+
+    #[test]
+    fn chart_theme_typefaces_lower_to_the_theme_fonts() {
+        let mut theme = docx_parse::Theme::default();
+        theme.font_scheme.major_font.latin = "Theme Major".to_owned();
+        theme.font_scheme.minor_font.latin = "Theme Minor".to_owned();
+        let env = RenderEnv {
+            font_theme: Some(theme),
+            ..RenderEnv::default()
+        };
+        let chart = json!({
+            "chartType": "column",
+            "text": {"font": "+mn-lt", "bold": true},
+            "titleText": {"font": "+mj-lt"},
+            "legend": {"text": {"font": "Georgia"}},
+            "series": [{"name": "+mn-lt"}]
+        });
+        let values = std::collections::HashMap::from([(
+            "chartJson".to_owned(),
+            Any::from(chart.to_string()),
+        )]);
+        let block = lower_chart_block(&values, None, &env).unwrap();
+        assert_eq!(block.chart["text"]["font"], json!("Theme Minor"));
+        assert_eq!(block.chart["titleText"]["font"], json!("Theme Major"));
+        assert_eq!(block.chart["legend"]["text"]["font"], json!("Georgia"));
+        assert_eq!(block.chart["series"][0]["name"], json!("+mn-lt"));
+    }
+
+    #[test]
     fn theme_font_precedence_is_applied_only_to_layout_fonts() {
         let mut theme = docx_parse::Theme::default();
         theme.font_scheme.major_font.latin = "Calibri".to_owned();
@@ -6770,6 +7014,27 @@ mod tests {
     }
 
     #[test]
+    fn a_run_scale_outside_the_schema_never_reaches_layout() {
+        for (scale, expected) in [
+            (0.0, None),
+            (-5.0, None),
+            (100.0, None),
+            (50.0, Some(50.0)),
+            (700.0, Some(600.0)),
+        ] {
+            let spacing = Any::Map(std::sync::Arc::new(HashMap::from([(
+                "scale".to_owned(),
+                Any::Number(scale),
+            )])));
+            let attributes: Attrs =
+                HashMap::from([(std::sync::Arc::from("characterSpacing"), spacing)]);
+            let mut lowered = RunFormatting::default();
+            lower_character_spacing(Some(&attributes), &mut lowered);
+            assert_eq!(lowered.horizontal_scale, expected, "scale {scale}");
+        }
+    }
+
+    #[test]
     fn horizontal_rule_payloads_reject_invalid_values_and_recover_positions() {
         let cases: Vec<Value> = serde_json::from_str(include_str!(
             "../../tests/fixtures/horizontal_rule_payloads.json"
@@ -7092,6 +7357,64 @@ mod tests {
             &EditCtx::local("", DATE),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_table_look_first_column_reaches_the_layout_table() {
+        let first_column = |tbl_pr: &str| {
+            let doc = EditingDoc::new(43);
+            replace_story_with_paragraph(&doc, "body:t0:r0c0", "c00p", "A");
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            doc.apply_raw_ops(
+                "body",
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "table".to_owned(),
+                        payload: vec![
+                            ("tblPr".to_owned(), Any::from_json(tbl_pr).unwrap()),
+                            ("grid".to_owned(), Any::from_json("[]").unwrap()),
+                            (
+                                "rows".to_owned(),
+                                Any::from_json(
+                                    r#"[{"trPr":{"isHeader":true},"cells":[
+                                      {"tcPr":{"colspan":1,"rowspan":1},"story":"body:t0:r0c0"}
+                                    ]}]"#,
+                                )
+                                .unwrap(),
+                            ),
+                        ],
+                        attrs: Attrs::new(),
+                    },
+                ],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let blocks = serde_json::to_value(
+                yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
+            )
+            .unwrap();
+            blocks.pointer("/0/firstColumn").cloned()
+        };
+        assert_eq!(
+            first_column(r#"{"look":{"firstColumn":true}}"#),
+            Some(json!(true))
+        );
+        assert_eq!(
+            first_column(r#"{"look":{"value":"04A0"}}"#),
+            Some(json!(true))
+        );
+        assert_eq!(
+            first_column(r#"{"look":{"value":"04A0","firstColumn":false}}"#),
+            None
+        );
+        assert_eq!(first_column(r#"{"look":{"value":"0420"}}"#), None);
+        assert_eq!(
+            first_column("{}"),
+            None,
+            "a table without its own look asks for nothing"
+        );
     }
 
     #[test]
@@ -7424,7 +7747,7 @@ mod tests {
             yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
         )
         .unwrap();
-        assert_eq!(body[0]["runs"][1]["text"], json!("5"));
+        assert_eq!(body[0]["runs"][1]["text"], json!("1"));
         assert_eq!(body[0]["runs"][1]["footnoteRefId"], json!(5.0));
         assert_eq!(body[0]["runs"][1]["superscript"], json!(true));
 
@@ -7467,17 +7790,136 @@ mod tests {
         )
         .unwrap();
         replace_story_with_paragraph(&doc, "fn:12", "fn-p", "Footnote text");
+        let env = RenderEnv {
+            note_numbering: vec![docx_layout::footnotes::SectionNoteNumbering {
+                footnote: docx_layout::regions::NoteProperties {
+                    num_start: Some(12),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..RenderEnv::default()
+        };
 
-        let body = serde_json::to_value(
-            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
-        )
-        .unwrap();
+        let body =
+            serde_json::to_value(yrs_doc_to_layout_blocks(&doc, "body", &env).unwrap()).unwrap();
         assert_eq!(body[0]["runs"][1]["text"], json!("12"));
         assert_eq!(body[0]["runs"][1]["pmStart"], json!(2.0));
         assert_eq!(body[0]["runs"][1]["pmEnd"], json!(3.0));
         assert_eq!(body[0]["runs"][2]["text"], json!("B"));
         assert_eq!(body[0]["runs"][2]["pmStart"], json!(3.0));
         assert_eq!(body[0]["pmEnd"], json!(5.0));
+    }
+
+    fn note_ref_embed(index: u32, key: &str, id: f64) -> RawOp {
+        RawOp::InsertEmbed {
+            index,
+            kind: "noteRef".to_owned(),
+            payload: vec![(key.to_owned(), Any::Number(id))],
+            attrs: Attrs::new(),
+        }
+    }
+
+    fn inline_control_note_ref(index: u32, key: &'static str, id: f64) -> RawOp {
+        RawOp::InsertEmbed {
+            index,
+            kind: "sdt".to_owned(),
+            payload: vec![(
+                "content".to_owned(),
+                Any::Array(Arc::from([any_map([
+                    ("kind", Any::from("noteRef")),
+                    ("payload", any_map([(key, Any::Number(id))])),
+                ])])),
+            )],
+            attrs: Attrs::new(),
+        }
+    }
+
+    fn note_ref_doc(
+        client_id: u64,
+        embeds: impl Fn(u32, usize) -> RawOp,
+        count: usize,
+    ) -> EditingDoc {
+        let doc = EditingDoc::new(client_id);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
+        let mut cursor = 0;
+        for slot in 0..count {
+            ops.push(RawOp::Insert {
+                index: cursor,
+                text: "ab".to_owned(),
+                attrs: Attrs::new(),
+            });
+            ops.push(embeds(cursor + 2, slot));
+            cursor += 3;
+        }
+        ops.push(RawOp::InsertEmbed {
+            index: cursor,
+            kind: "pilcrow".to_owned(),
+            payload: vec![("paraId".to_owned(), Any::from("body-p"))],
+            attrs: Attrs::new(),
+        });
+        doc.apply_raw_ops("body", ops, &EditCtx::local("", DATE))
+            .unwrap();
+        doc
+    }
+
+    fn note_ref_marks(doc: &EditingDoc) -> Vec<String> {
+        yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default())
+            .unwrap()
+            .into_iter()
+            .flat_map(|block| match block {
+                LayoutBlock::Paragraph(paragraph) => paragraph.runs,
+                _ => Vec::new(),
+            })
+            .filter_map(|run| match run {
+                Run::Text(text)
+                    if text.fmt.footnote_ref_id.is_some() || text.fmt.endnote_ref_id.is_some() =>
+                {
+                    Some(text.text)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_lone_note_ref_marks_its_ordinal_not_its_id() {
+        for key in ["footnoteRefId", "endnoteRefId"] {
+            let doc = note_ref_doc(7301, |index, _| note_ref_embed(index, key, 2.0), 1);
+            assert_eq!(note_ref_marks(&doc), ["1"], "{key}");
+            let doc = note_ref_doc(7302, |index, _| inline_control_note_ref(index, key, 2.0), 1);
+            assert_eq!(note_ref_marks(&doc), ["1"], "inline control {key}");
+        }
+    }
+
+    #[test]
+    fn note_refs_out_of_id_order_mark_their_document_order() {
+        let ids = [7.0, 3.0, 5.0];
+        for key in ["footnoteRefId", "endnoteRefId"] {
+            let doc = note_ref_doc(7303, |index, slot| note_ref_embed(index, key, ids[slot]), 3);
+            assert_eq!(note_ref_marks(&doc), ["1", "2", "3"], "{key}");
+        }
+        let doc = note_ref_doc(
+            7304,
+            |index, slot| inline_control_note_ref(index, "footnoteRefId", ids[slot]),
+            3,
+        );
+        assert_eq!(note_ref_marks(&doc), ["1", "2", "3"]);
+    }
+
+    #[test]
+    fn footnote_and_endnote_refs_count_apart() {
+        let doc = note_ref_doc(
+            7305,
+            |index, slot| match slot {
+                0 => note_ref_embed(index, "footnoteRefId", 4.0),
+                1 => note_ref_embed(index, "endnoteRefId", 9.0),
+                _ => note_ref_embed(index, "footnoteRefId", 6.0),
+            },
+            3,
+        );
+        assert_eq!(note_ref_marks(&doc), ["1", "1", "2"]);
     }
 
     #[test]

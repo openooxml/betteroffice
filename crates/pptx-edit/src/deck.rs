@@ -2412,6 +2412,8 @@ pub(crate) fn slide_scope(
 }
 
 pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
+    #[cfg(feature = "test-counters")]
+    crate::test_counters::bump(|work| work.live_snapshots += 1);
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
     let slides = required_map(&txn, SLIDES)?;
@@ -2596,15 +2598,15 @@ fn validate_background_color(color: &ColorValue) -> EditResult<()> {
             "the background colour needs an RGB or theme value".to_owned(),
         ));
     }
-    for (name, value) in [
-        ("alpha", color.alpha),
-        ("luminance modulation", color.luminance_modulation),
-        ("luminance offset", color.luminance_offset),
-        ("saturation modulation", color.saturation_modulation),
+    for (name, value, minimum) in [
+        ("alpha", color.alpha, 0.0),
+        ("luminance modulation", color.luminance_modulation, 0.0),
+        ("luminance offset", color.luminance_offset, -1.0),
+        ("saturation modulation", color.saturation_modulation, 0.0),
     ] {
-        if value.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
+        if value.is_some_and(|value| !value.is_finite() || !(minimum..=1.0).contains(&value)) {
             return Err(EditError::InvalidFill(format!(
-                "background colour {name} is outside 0..=1"
+                "background colour {name} is outside {minimum}..=1"
             )));
         }
     }
@@ -2621,8 +2623,10 @@ fn validate_background_color(color: &ColorValue) -> EditResult<()> {
         use ooxml_drawingml::ColorTransform::*;
 
         let valid = match *transform {
-            Tint(value) | Shade(value) | LumMod(value) | LumOff(value) | SatMod(value)
-            | Alpha(value) => value.is_finite() && (0.0..=1.0).contains(&value),
+            Tint(value) | Shade(value) | LumMod(value) | SatMod(value) | Alpha(value) => {
+                value.is_finite() && (0.0..=1.0).contains(&value)
+            }
+            LumOff(value) => value.is_finite() && (-1.0..=1.0).contains(&value),
             Hue(value) | HueMod(value) | HueOff(value) | Sat(value) | SatOff(value)
             | Lum(value) | Red(value) | RedMod(value) | RedOff(value) | Green(value)
             | GreenMod(value) | GreenOff(value) | Blue(value) | BlueMod(value) | BlueOff(value)
@@ -2800,6 +2804,8 @@ pub(crate) fn legacy_baseline_snapshot(package: &PptxPackage) -> EditResult<Deck
 }
 
 fn seeded_snapshot(package: &PptxPackage, color_map: bool) -> EditResult<DeckSnapshot> {
+    #[cfg(feature = "test-counters")]
+    crate::test_counters::bump(|work| work.seeded_snapshots += 1);
     let mut slide_id_by_part = HashMap::new();
     let mut slides = Vec::with_capacity(package.slides.len());
     for (slide_index, slide) in package.slides.iter().enumerate() {

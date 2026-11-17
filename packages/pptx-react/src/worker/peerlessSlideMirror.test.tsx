@@ -1,6 +1,7 @@
 import { expect, mock, spyOn, test } from 'bun:test';
 import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import type { SlideDisplayList, TextBoxPrimitive, TextLanguage, TextLinkTarget } from '@betteroffice/pptx';
+import { de } from '@betteroffice/pptx-i18n';
 import { LocaleProvider } from '../i18n';
 import { PeerlessSlideMirror } from './PeerlessSlideMirror';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
@@ -200,4 +201,81 @@ test('one link spanning language boundaries has one accessible name', () => {
   view.rerender(<LocaleProvider><PeerlessSlideMirror run={view.run} list={{ ...view.list }} label="Slide links" scale={1} /></LocaleProvider>);
   expect(view.getAllByRole('link')).toHaveLength(1);
   expect(view.getByRole('link', { name: 'Read bonjour' }).querySelector('span')?.textContent).toBe('Read ');
+});
+
+test('a table with a grid renders table, row and header roles with spans and counts', () => {
+  const cell = (text: string): TextBoxPrimitive => ({
+    kind: 'textBox', objectId: 1, x: 0, y: 0, w: 100, h: 30, anchor: 'top', lines: [],
+    paragraphs: text ? [{ level: 0, runs: [{ text, fontFamily: 'Arial', fontSizePt: 12, color: '#000000' }] }] : [],
+  });
+  const texts = ['Region', 'Total', 'North', 'Q1', '', 'Q2', '9'];
+  const headers: ('column' | 'row' | undefined)[] = ['column', 'column', 'row'];
+  const spans = [[0, 0, 1, 2], [0, 2, 1, 1], [1, 0, 2, 1], [1, 1, 1, 1], [1, 2, 1, 1], [2, 1, 1, 1], [2, 2, 1, 1]];
+  const list: SlideDisplayList = {
+    contractVersion: 2, width: 960, height: 540, primitives: [{
+      kind: 'table', objectId: 1, shapeId: 'table', x: 0, y: 0, w: 600, h: 120, name: 'Table 1',
+      label: 'Table, 3 rows, 3 columns', primitives: texts.map(cell),
+      grid: { rows: 3, columns: 3, cells: spans.map(([row, column, rowSpan, columnSpan], index) => ({
+        row: row!, column: column!, rowSpan: rowSpan!, columnSpan: columnSpan!,
+        ...(headers[index] ? { header: headers[index] } : {}), primitives: [index, index + 1] as [number, number],
+      })) },
+    }],
+  };
+  const view = render(<LocaleProvider><PeerlessSlideMirror run={{} as PeerlessPresentation} list={list} label="Slide 1" scale={1} /></LocaleProvider>);
+  const table = view.getByRole('table', { name: 'Table, 3 rows, 3 columns' });
+  expect(table.getAttribute('aria-rowcount')).toBe('3');
+  expect(table.getAttribute('aria-colcount')).toBe('3');
+  const rows = [...table.querySelectorAll('[role="row"]')];
+  expect(rows.map((row) => row.getAttribute('aria-rowindex'))).toEqual(['1', '2', '3']);
+  expect(rows.map((row) => [...row.children].map((node) => [
+    node.getAttribute('role'), node.getAttribute('aria-colindex'), node.getAttribute('aria-rowspan'),
+    node.getAttribute('aria-colspan'), node.textContent,
+  ]))).toEqual([
+    [['columnheader', '1', null, '2', 'Region'], ['columnheader', '3', null, null, 'Total']],
+    [['rowheader', '1', '2', null, 'North'], ['cell', '2', null, null, 'Q1'], ['cell', '3', null, null, '']],
+    [['cell', '2', null, null, 'Q2'], ['cell', '3', null, null, '9']],
+  ]);
+  expect(view.getByRole('columnheader', { name: 'Region' })).toBeTruthy();
+  expect(view.getByRole('rowheader', { name: 'North' })).toBeTruthy();
+});
+
+test('a chart that caches no points is described as having no data in the editor language', () => {
+  const list: SlideDisplayList = {
+    contractVersion: 2, width: 960, height: 540, primitives: [{
+      kind: 'chart', objectId: 1, shapeId: 'chart', x: 0, y: 0, w: 600, h: 300, name: 'Chart 1',
+      label: 'Untitled chart, doughnut chart, 0 series, 0 categories', primitives: [], data: { categories: [], series: [] },
+    }],
+  };
+  const description = (i18n?: typeof de) => {
+    const view = render(<LocaleProvider i18n={i18n}><PeerlessSlideMirror run={{} as PeerlessPresentation} list={list} label="Slide 1" scale={1} /></LocaleProvider>);
+    const chart = view.getByRole('img', { name: 'Untitled chart, doughnut chart, 0 series, 0 categories' });
+    const text = chart.getAttribute('aria-description');
+    view.unmount();
+    return text;
+  };
+  expect(description()).toBe('No data');
+  expect(description(de)).toBe('Keine Daten');
+});
+
+test('a chart with data renders a figure holding its values as a table with series and category headers', () => {
+  const list: SlideDisplayList = {
+    contractVersion: 2, width: 960, height: 540, primitives: [{
+      kind: 'chart', objectId: 1, shapeId: 'chart', x: 0, y: 0, w: 600, h: 300, name: 'Chart 1',
+      label: 'Revenue, column chart, 2 series, 2 categories', primitives: [],
+      data: { categories: ['Q1', ''], series: [{ name: 'North', values: ['12', null] }, { values: ['8', '14'] }] },
+    }],
+  };
+  const view = render(<LocaleProvider><PeerlessSlideMirror run={{} as PeerlessPresentation} list={list} label="Slide 1" scale={1} /></LocaleProvider>);
+  const figure = view.getByRole('figure', { name: 'Revenue, column chart, 2 series, 2 categories' });
+  const table = figure.querySelector('[role="table"]')!;
+  expect(table.getAttribute('aria-rowcount')).toBe('3');
+  expect(table.getAttribute('aria-colcount')).toBe('3');
+  expect([...table.querySelectorAll('[role="row"]')].map((row) => [...row.children].map((node) => [
+    node.getAttribute('role'), node.getAttribute('aria-colindex'), node.textContent,
+  ]))).toEqual([
+    [['cell', '1', ''], ['columnheader', '2', 'North'], ['cell', '3', '']],
+    [['rowheader', '1', 'Q1'], ['cell', '2', '12'], ['cell', '3', '8']],
+    [['cell', '1', ''], ['cell', '2', ''], ['cell', '3', '14']],
+  ]);
+  expect(view.queryByRole('img', { name: 'Revenue, column chart, 2 series, 2 categories' })).toBeNull();
 });

@@ -8,6 +8,29 @@ pub fn region_layout_request(package: &Value, page_gap: f64) -> Value {
     request
 }
 
+/// The measurement settings the product measures with, before the host adds its `fontChains`.
+pub fn measurement(package: &Value) -> Value {
+    let flags = &package["settings"]["compatibilityFlags"];
+    let flag = |name: &str, default: Value| -> Value {
+        flags
+            .get(name)
+            .filter(|value| !value.is_null())
+            .cloned()
+            .unwrap_or(default)
+    };
+    let mut measurement = json!({
+        "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+        "compat": {
+            "compatibilityMode": flag("compatibilityMode", json!(12)),
+            "noLeading": flag("noLeading", json!(false)),
+            "doNotExpandShiftReturn": flag("doNotExpandShiftReturn", json!(false))
+        },
+        "authoritativeShaping": true
+    });
+    integral_numbers(&mut measurement);
+    measurement
+}
+
 /// The request with every number as the parse model holds it.
 fn raw_request(package: &Value, page_gap: f64) -> Value {
     let body = package.get("document").filter(|value| !value.is_null());
@@ -473,6 +496,33 @@ mod tests {
                 laid_out(&bytes, &floats),
                 laid_out(&bytes, &integral),
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn measures_with_the_document_compatibility() {
+        let flagged = measurement(&json!({"settings": {"compatibilityFlags": {
+            "compatibilityMode": 15.0, "noLeading": true, "doNotExpandShiftReturn": false,
+            "useWord97LineBreakRules": true
+        }}}));
+        assert_eq!(
+            flagged,
+            json!({
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "compat": {"compatibilityMode": 15, "noLeading": true, "doNotExpandShiftReturn": false},
+                "authoritativeShaping": true
+            })
+        );
+        assert!(flagged["compat"]["compatibilityMode"].is_u64());
+        for package in [
+            json!({}),
+            json!({"settings": null}),
+            json!({"settings": {}}),
+        ] {
+            assert_eq!(
+                measurement(&package)["compat"],
+                json!({"compatibilityMode": 12, "noLeading": false, "doNotExpandShiftReturn": false})
             );
         }
     }

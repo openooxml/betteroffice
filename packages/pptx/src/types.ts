@@ -636,6 +636,23 @@ export interface ChartPrimitive extends PrimitiveBase {
   name: string;
   label: string;
   primitives: SlidePrimitive[];
+  /** The plotted values as text, for assistive technology, with no categories
+   *  or series when the chart caches no points. Older engines and charts over
+   *  the size cap leave it out. */
+  data?: ChartData;
+}
+
+/** What a chart plots: one row per category and one column per series. */
+export interface ChartData {
+  categories: string[];
+  series: ChartDataSeries[];
+}
+
+export interface ChartDataSeries {
+  name?: string;
+  /** Each category's value as the chart's data labels would show it; `null`
+   *  where the chart has no number. */
+  values: (string | null)[];
 }
 
 /** A laid-out table. Its cells paint clipped to the table rectangle, and
@@ -645,6 +662,30 @@ export interface TablePrimitive extends PrimitiveBase {
   name: string;
   label: string;
   primitives: SlidePrimitive[];
+  /** The row and column structure, for assistive technology. Older engines
+   *  leave it out. */
+  grid?: TableGrid;
+}
+
+export interface TableGrid {
+  rows: number;
+  columns: number;
+  /** Cells that start a span, in row then column order; cells merged into
+   *  another one are left out. */
+  cells: TableGridCell[];
+}
+
+export interface TableGridCell {
+  row: number;
+  column: number;
+  rowSpan: number;
+  columnSpan: number;
+  /** `column` heads its column (the header row), `row` heads its row (the
+   *  first column). */
+  header?: 'column' | 'row';
+  /** The `[start, end)` range of the table's `primitives` that hold the
+   *  cell's text. */
+  primitives: [number, number];
 }
 
 export type SlidePrimitive =

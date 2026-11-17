@@ -1,7 +1,9 @@
+import { fontPreflightFixture } from '../../packages/xlsx/src/wasm/__fixtures__/fontPreflight';
 // Normalization: ZIP container headers, entry order, directory entries and compression only.
 // These can differ between Rust targets; every part name and uncompressed byte must match.
 // Both opens recalculate with nowSerial=45000.75 and randSeed=42; the fixture and edits contain no volatile functions.
 import { readFileSync } from 'node:fs';
+import JSZip from 'jszip';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import * as wasm from '../../packages/xlsx/src/wasm/loader';
 import { FORMATS } from '../../scripts/api-surface';
@@ -20,12 +22,96 @@ beforeAll(async () => {
   await wasm.initWasm(readFileSync(new URL('../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)));
 });
 
-async function compare(script: (workbook: WorkbookHandle) => unknown) {
-  const nativeWorkbook = native.openWorkbook(fixture, { calculation });
-  const wasmWorkbook = wasm.openWorkbook(fixture, { calculation });
+const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+const DOC_RELS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+
+/** `First`, `Data` holding table `Amounts` (1, 2), `Later` holding table `Prices` (10, 20), and `Other`
+ * summing both through structured references. */
+async function tablesFixture() {
+  const rels = (entries: [string, string, string][]) =>
+    `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${entries
+      .map(([id, kind, target]) => `<Relationship Id="${id}" Type="${DOC_RELS}/${kind}" Target="${target}"/>`)
+      .join('')}</Relationships>`;
+  const sheet = (rows: string, tail = '') =>
+    `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="${MAIN}" xmlns:r="${DOC_RELS}"><sheetData>${rows}</sheetData>${tail}</worksheet>`;
+  const column = (header: string, values: number[]) =>
+    `<row r="1"><c r="A1" t="inlineStr"><is><t>${header}</t></is></c></row>` +
+    values.map((value, at) => `<row r="${at + 2}"><c r="A${at + 2}"><v>${value}</v></c></row>`).join('');
+  const table = (id: number, name: string, header: string) =>
+    `<?xml version="1.0" encoding="UTF-8"?><table xmlns="${MAIN}" id="${id}" name="${name}" displayName="${name}" ref="A1:A3"><tableColumns count="1"><tableColumn id="1" name="${header}"/></tableColumns></table>`;
+  const tablePart = '<tableParts count="1"><tablePart r:id="rIdT"/></tableParts>';
+  const override = (part: string, type: string) =>
+    `<Override PartName="${part}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.${type}+xml"/>`;
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+    override('/xl/workbook.xml', 'sheet.main') +
+    [1, 2, 3, 4].map((n) => override(`/xl/worksheets/sheet${n}.xml`, 'worksheet')).join('') +
+    [1, 2].map((n) => override(`/xl/tables/table${n}.xml`, 'table')).join('') + '</Types>');
+  zip.file('_rels/.rels', rels([['rId1', 'officeDocument', 'xl/workbook.xml']]));
+  zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="${MAIN}" xmlns:r="${DOC_RELS}"><sheets>${['First', 'Data', 'Later', 'Other']
+    .map((name, at) => `<sheet name="${name}" sheetId="${at + 1}" r:id="rId${at + 1}"/>`).join('')}</sheets></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', rels([1, 2, 3, 4].map((n) => [`rId${n}`, 'worksheet', `worksheets/sheet${n}.xml`])));
+  zip.file('xl/worksheets/sheet1.xml', sheet('<row r="1"><c r="A1"><v>100</v></c></row>'));
+  zip.file('xl/worksheets/sheet2.xml', sheet(column('Amt', [1, 2]), tablePart));
+  zip.file('xl/worksheets/_rels/sheet2.xml.rels', rels([['rIdT', 'table', '../tables/table1.xml']]));
+  zip.file('xl/worksheets/sheet3.xml', sheet(column('Price', [10, 20]), tablePart));
+  zip.file('xl/worksheets/_rels/sheet3.xml.rels', rels([['rIdT', 'table', '../tables/table2.xml']]));
+  zip.file('xl/worksheets/sheet4.xml', sheet('<row r="1"><c r="A1"><f>SUM(Amounts[Amt])</f><v>3</v></c></row><row r="2"><c r="A2"><f>SUM(Prices[Price])</f><v>30</v></c></row>'));
+  zip.file('xl/tables/table1.xml', table(1, 'Amounts', 'Amt'));
+  zip.file('xl/tables/table2.xml', table(2, 'Prices', 'Price'));
+  return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
+}
+
+/** `Data` holding 1234.5 as `#,##0.00` in A1, `Alpha` in A2, 123 in A3 and `=A3+1` in B1, and a
+ * hidden `Hidden` sheet holding `alpha` in A1. */
+async function findFixture() {
+  const rels = (entries: [string, string, string][]) =>
+    `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${entries
+      .map(([id, kind, target]) => `<Relationship Id="${id}" Type="${DOC_RELS}/${kind}" Target="${target}"/>`)
+      .join('')}</Relationships>`;
+  const sheet = (rows: string) =>
+    `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="${MAIN}"><sheetData>${rows}</sheetData></worksheet>`;
+  const override = (part: string, type: string) =>
+    `<Override PartName="${part}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.${type}+xml"/>`;
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+    override('/xl/workbook.xml', 'sheet.main') + override('/xl/styles.xml', 'styles') +
+    [1, 2].map((n) => override(`/xl/worksheets/sheet${n}.xml`, 'worksheet')).join('') + '</Types>');
+  zip.file('_rels/.rels', rels([['rId1', 'officeDocument', 'xl/workbook.xml']]));
+  zip.file('xl/workbook.xml', `<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="${MAIN}" xmlns:r="${DOC_RELS}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Hidden" sheetId="2" state="hidden" r:id="rId2"/></sheets></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', rels([['rId1', 'worksheet', 'worksheets/sheet1.xml'], ['rId2', 'worksheet', 'worksheets/sheet2.xml'], ['rId3', 'styles', 'styles.xml']]));
+  zip.file('xl/styles.xml', `<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="${MAIN}"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>`);
+  zip.file('xl/worksheets/sheet1.xml', sheet(
+    '<row r="1"><c r="A1" s="1"><v>1234.5</v></c><c r="B1"><f>A3+1</f><v>124</v></c></row>' +
+    '<row r="2"><c r="A2" t="inlineStr"><is><t>Alpha</t></is></c></row>' +
+    '<row r="3"><c r="A3"><v>123</v></c></row>'));
+  zip.file('xl/worksheets/sheet2.xml', sheet('<row r="1"><c r="A1" t="inlineStr"><is><t>alpha</t></is></c></row>'));
+  return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
+}
+
+function unversioned(result: object) {
+  const rest: Record<string, unknown> = { ...result };
+  delete rest.version;
+  return rest;
+}
+
+const generatedVersions = <T>(value: T): T =>
+  JSON.parse(JSON.stringify(value).replace(/"[0-9a-f]{32}-(\d+)"/g, '"<version>-$1"'));
+
+function cellsOf(result: object) {
+  const { matches } = result as { matches?: { cell: { sheetId: string; a1: string } }[] };
+  return matches?.map((match) => `${match.cell.sheetId}!${match.cell.a1}`) ?? result;
+}
+
+async function compare<T>(script: (workbook: WorkbookHandle) => T, bytes: Uint8Array = fixture) {
+  const nativeWorkbook = native.openWorkbook(bytes, { calculation });
+  const wasmWorkbook = wasm.openWorkbook(bytes, { calculation });
   try {
-    expect(script(nativeWorkbook)).toEqual(script(wasmWorkbook));
+    const nativeResult = script(nativeWorkbook);
+    const wasmResult = script(wasmWorkbook);
+    expect(nativeResult).toEqual(wasmResult);
     await expectSavedPartsEqual(nativeWorkbook.save(), wasmWorkbook.save());
+    return wasmResult;
   } finally {
     nativeWorkbook.dispose();
     wasmWorkbook.dispose();
@@ -118,6 +204,115 @@ describe('xlsx native/wasm package parity', () => {
     expect(await native.exportXlsxStructured(fixture)).toEqual(await wasm.exportXlsxStructured(fixture));
   });
 
+  test('findText matches displayed values and letter case alike on both engines', async () => {
+    const found = await compare((workbook) => ({
+      formatted: unversioned(workbook.findText({ text: '1,234.5', lookIn: 'values', sheetIds: ['sheet:0'] })),
+      anyCase: unversioned(workbook.findText({ text: 'ALPHA', sheetIds: ['sheet:0'] })),
+    }), await findFixture());
+    expect(cellsOf(found.formatted)).toEqual(['sheet:0!A1']);
+    expect(cellsOf(found.anyCase)).toEqual(['sheet:0!A2']);
+  });
+
+  test('findText with matchCase matches on both engines', async () => {
+    const found = await compare((workbook) => ({
+      upper: unversioned(workbook.findText({ text: 'ALPHA', matchCase: true, sheetIds: ['sheet:0'] })),
+      exact: unversioned(workbook.findText({ text: 'Alpha', matchCase: true, sheetIds: ['sheet:0'] })),
+    }), await findFixture());
+    expect(cellsOf(found.upper)).toEqual([]);
+    expect(cellsOf(found.exact)).toEqual(['sheet:0!A2']);
+  });
+
+  test('findText over the workbook skips a hidden sheet on both engines', async () => {
+    const found = await compare((workbook) => unversioned(workbook.findText({ text: 'alpha' })), await findFixture());
+    expect(cellsOf(found)).toEqual(['sheet:0!A2']);
+  });
+
+  const replaceTarget = (a1: string) => ({ sheetId: 'sheet:0', range: { kind: 'a1' as const, a1 } });
+  const applyReplace = (workbook: WorkbookHandle) => workbook.applyEdits({
+    expectVersion: workbook.version(),
+    steps: [
+      { op: 'replaceText', target: replaceTarget('A3:A3'), query: '1', replacement: '2' },
+      { op: 'replaceText', target: replaceTarget('B1:B1'), query: 'A3', replacement: '(', lookIn: 'formulas' },
+    ],
+  });
+
+  test('replaceText edits entered text and refuses a formula break on both engines', async () => {
+    const result = await compare((workbook) => ({
+      applied: generatedVersions(unversioned(applyReplace(workbook))),
+      edited: unversioned(workbook.findText({ text: '223', entireCell: true, sheetIds: ['sheet:0'] })),
+      kept: unversioned(workbook.findText({ text: 'A3+1', lookIn: 'formulas', sheetIds: ['sheet:0'] })),
+    }), await findFixture());
+    if (!('receipts' in result.applied)) throw new Error('Expected applied edits');
+    expect(result.applied).toMatchObject({ baseVersion: '<version>-0' });
+    const receipts = result.applied.receipts as { replace?: { refused?: number; refusedCells?: { cell: string }[] } }[];
+    expect(receipts[1]?.replace?.refusedCells?.map((refused) => refused.cell)).toEqual(['B1']);
+    expect(receipts[1]?.replace?.refused).toBe(1);
+    expect(receipts[0]?.replace?.refused).toBe(0);
+    expect(cellsOf(result.edited)).toEqual(['sheet:0!A3']);
+    expect(cellsOf(result.kept)).toEqual(['sheet:0!B1']);
+  });
+
+  test('replaceText base versions differ between two loads of the same workbook on each engine', async () => {
+    const bytes = await findFixture();
+    const baseVersions = (engine: Xlsx) => [0, 1].map(() => {
+      const workbook = engine.openWorkbook(bytes, { calculation });
+      try {
+        const applied = applyReplace(workbook) as unknown as { baseVersion?: unknown };
+        expect(applied.baseVersion).toMatch(/^[0-9a-f]{32}-0$/);
+        return String(applied.baseVersion);
+      } finally {
+        workbook.dispose();
+      }
+    });
+    const [a, b] = baseVersions(native);
+    const [c, d] = baseVersions(wasm);
+    console.log(`BASEVERSION-PROBE native ${a} ${b} wasm ${c} ${d}`);
+    expect(a).not.toBe(b);
+    expect(c).not.toBe(d);
+  });
+
+  test('deleting and inserting sheets around tables, with undo and redo, matches on both engines', async () => {
+    const bytes = await tablesFixture();
+    const nativeWorkbook = native.openWorkbook(bytes, { calculation });
+    const wasmWorkbook = wasm.openWorkbook(bytes, { calculation });
+    const sums = (workbook: WorkbookHandle) => {
+      const other = workbook.sheetInfo().sheetNames.length - 1;
+      return [workbook.cell(other, 0, 0), workbook.cell(other, 1, 0)];
+    };
+    const script = (workbook: WorkbookHandle) => {
+      let internal = 'applied';
+      try {
+        workbook.applyOps([{ type: 'setTables', tables: [] }]);
+      } catch (error) {
+        internal = String((error as Error)?.message ?? error);
+      }
+      const opened = sums(workbook);
+      workbook.applyOps([{ type: 'removeSheet', index: 1 }]);
+      const removed = sums(workbook);
+      workbook.undo();
+      const undone = sums(workbook);
+      workbook.redo();
+      const redone = sums(workbook);
+      workbook.undo();
+      workbook.applyOps([{ type: 'addSheet', index: 0, name: 'New' }]);
+      const inserted = sums(workbook);
+      return { internal, opened, removed, undone, redone, inserted };
+    };
+    try {
+      const nativeResult = script(nativeWorkbook);
+      const wasmResult = script(wasmWorkbook);
+      expect(nativeResult).toEqual(wasmResult);
+      expect(wasmResult.internal).toContain('restore sheet operations are internal');
+      expect(wasmResult.undone).toEqual(wasmResult.opened);
+      expect(wasmResult.inserted).toEqual(wasmResult.opened);
+      expect(wasmResult.redone).toEqual(wasmResult.removed);
+      await expectSavedPartsEqual(nativeWorkbook.save(), wasmWorkbook.save());
+    } finally {
+      nativeWorkbook.dispose();
+      wasmWorkbook.dispose();
+    }
+  });
+
   test('PNG range targets refuse bad ranges with the same error as the wasm range path', async () => {
     const nativeWorkbook = native.openWorkbook(fixture, { calculation });
     const wasmWorkbook = wasm.openWorkbook(fixture, { calculation });
@@ -155,4 +350,12 @@ describe('xlsx native/wasm package parity', () => {
       wasmWorkbook.dispose();
     }
   });
+});
+
+test('standalone font preflight matches through both package entries', async () => {
+  const bytes = await fontPreflightFixture();
+  const wasmCore = await import('../../packages/xlsx/src/index');
+  const nativeCore = await import('./dist/index.js') as unknown as typeof wasmCore;
+  await nativeCore.preloadPreflightWasm();
+  expect(await nativeCore.fontPreflight(bytes)).toEqual(await wasmCore.fontPreflight(bytes));
 });

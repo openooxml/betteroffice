@@ -634,6 +634,7 @@ fn read_ids_match_export_search_and_edit_targets_in_every_story_with_duplicate_s
             source: EditSource::Host,
             history: EditHistory::Separate,
             steps: vec![EditStep::new(EditOperation::ReplaceText {
+                runs: None,
                 target: TextTarget::Paragraph(ParagraphTarget {
                     story: paragraph.story.clone(),
                     para_id: paragraph.para_id.clone(),

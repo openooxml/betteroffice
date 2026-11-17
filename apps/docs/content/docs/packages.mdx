@@ -57,6 +57,12 @@ Install `@betteroffice/fonts-intl` for additional international script coverage.
 `@betteroffice/fonts-latin` is installed automatically with `@betteroffice/fonts`.
 All font packages are optional and must be installed explicitly.
 
+For missing packs, `fonts.configureFontCdn({ baseUrl: "https://assets.example/fonts/" })`
+enables a fallback at `<base>/<pack>/<version>/<file>`. Installed packs take priority;
+base Latin and the decoder stay in the package. CDN loading is off by default.
+`timeoutMs` defaults to `30000`; `baseUrl: false` disables the fallback.
+Configure it before opening worker sessions.
+
 For headless PPTX (`openPresentation`), pass the faces in `fonts` and
 `fallbackFonts`; `loadBundledFontBytes` from `@betteroffice/fonts` returns a
 bundled face's bytes.

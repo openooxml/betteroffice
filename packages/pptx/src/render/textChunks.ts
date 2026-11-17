@@ -9,8 +9,9 @@ export function paintTextChunks(
   runBaseline: number,
   spacing: number
 ): void {
-  for (const chunk of positionedTextChunks(run).chunks) {
-    const scale = chunkScale(chunk, spacing, (text) => ctx.measureText(text)?.width);
+  const { chunks, fitted } = positionedTextChunks(run);
+  for (const chunk of chunks) {
+    const scale = chunkScale(chunk, spacing, (text) => ctx.measureText(text)?.width, fitted ? PIECE_FIT_MAX : WORD_FIT_MAX);
     if (scale === 1) {
       ctx.fillText(chunk.text, chunk.x, runBaseline);
     } else {
@@ -23,11 +24,18 @@ export function paintTextChunks(
   }
 }
 
-function chunkScale(chunk: TextChunk, spacing: number, measure: (text: string) => number | undefined): number {
+/** The widest stretch of a word fitted to its caret stops. */
+const WORD_FIT_MAX = 1.33;
+/** The widest stretch of a piece laid out on another family's stored widths; the native engine uses the same. */
+const PIECE_FIT_MAX = 1.45;
+
+function chunkScale(
+  chunk: TextChunk, spacing: number, measure: (text: string) => number | undefined, limit: number,
+): number {
   const cjk = Array.from(chunk.text).some((character) => isCjkCharacter(character.codePointAt(0)));
   const measured = cjk || chunk.width === undefined || spacing !== 0 ? 0 : measure(chunk.fitText ?? chunk.text);
   let scale = measured && measured > 0 ? (chunk.width ?? 0) / measured : 1;
-  if (Math.abs(scale - 1) < 0.001 || scale < 0.75 || scale > 1.33) scale = 1;
+  if (Math.abs(scale - 1) < 0.001 || scale < 0.75 || scale > limit) scale = 1;
   return scale;
 }
 
@@ -41,7 +49,7 @@ export function fittedPieceDecisions(
 ): Array<{ start: number; scale: number }> | null {
   const { chunks, fitted } = positionedTextChunks(run);
   if (!fitted) return null;
-  return chunks.map((chunk) => ({ start: chunk.start, scale: chunkScale(chunk, run.letterSpacingPx ?? 0, measure) }));
+  return chunks.map((chunk) => ({ start: chunk.start, scale: chunkScale(chunk, run.letterSpacingPx ?? 0, measure, PIECE_FIT_MAX) }));
 }
 
 /** The run in the single precision the engine laid it out in, so every decision reads the values it has. */

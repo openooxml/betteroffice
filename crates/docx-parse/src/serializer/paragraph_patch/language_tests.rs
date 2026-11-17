@@ -28,6 +28,7 @@ fn run_language_preserves_other_properties_and_revision_bytes() {
         &[delta("latin", json!("de-DE"))],
         &Attrs::new(),
         &Attrs::new(),
+        true,
     ));
     assert_eq!(after, source.replace("'en-US'", "'de-DE'"));
     let after = ok(run_properties(
@@ -35,6 +36,7 @@ fn run_language_preserves_other_properties_and_revision_bytes() {
         &[delta("eastAsia", Value::Null)],
         &Attrs::new(),
         &Attrs::new(),
+        true,
     ));
     assert_eq!(after, source.replace(" w:eastAsia=\"ja-JP\"", ""));
     let after = ok(run_properties(
@@ -46,6 +48,7 @@ fn run_language_preserves_other_properties_and_revision_bytes() {
         ],
         &Attrs::new(),
         &Attrs::new(),
+        true,
     ));
     assert_eq!(
         after,
@@ -64,6 +67,7 @@ fn missing_language_is_inserted_at_schema_rank() {
         &[delta("latin", json!("de-DE"))],
         &Attrs::new(),
         &Attrs::new(),
+        true,
     ));
     assert_eq!(
         after,
@@ -77,7 +81,8 @@ fn missing_language_is_inserted_at_schema_rank() {
             "",
             &[delta("latin", json!("de-DE"))],
             &Attrs::new(),
-            &Attrs::new()
+            &Attrs::new(),
+            true
         )),
         r#"<w:rPr><w:lang w:val="de-DE"/></w:rPr>"#
     );
@@ -92,6 +97,7 @@ fn paragraph_mark_language_preserves_other_paragraph_properties() {
         &Attrs::new(),
         &Attrs::new(),
         &Attrs::new(),
+        true,
     ));
     assert_eq!(after, source.replace("en-US", "de-DE"));
     let source = "<w:pPr><w:jc w:val=\"center\"/><w:sectPr/></w:pPr>";
@@ -101,6 +107,7 @@ fn paragraph_mark_language_preserves_other_paragraph_properties() {
         &Attrs::new(),
         &Attrs::new(),
         &Attrs::new(),
+        true,
     ));
     assert_eq!(
         after,
@@ -115,7 +122,8 @@ fn paragraph_mark_language_preserves_other_paragraph_properties() {
             &[delta("latin", Value::Null)],
             &Attrs::new(),
             &Attrs::new(),
-            &Attrs::new()
+            &Attrs::new(),
+            true
         )),
         ""
     );
@@ -154,6 +162,7 @@ fn language_only_paragraph_with_run_revision_stays_patchable() {
         para_inherit: Attrs::new(),
         mark_inherit: Attrs::new(),
         result_sha256: result_sha256(&result, &Attrs::new()),
+        inheritance: Default::default(),
     };
     assert_eq!(
         ok(patch_inner(source, &patch, &PatchContext::word_document())),

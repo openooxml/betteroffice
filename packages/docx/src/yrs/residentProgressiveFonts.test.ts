@@ -1,6 +1,11 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { decodeFontFace } from '../../../fonts/src/decode';
+import {
+  NATIVE_ENGINE_OBJECT_FAILED,
+  NATIVE_MEMORY_BUDGET_EXCEEDED,
+  NATIVE_PANIC_CODE,
+} from '../../../../shared/office-session/trap';
 import { glyphsByFont, ResidentProgressiveFonts, type ProgressiveFontSpec } from './residentProgressiveFonts';
 
 const assets = new URL('../../../fonts-cjk/assets/', import.meta.url);
@@ -111,6 +116,31 @@ test('a frame stops waiting at the guard, logs once, and repaints when the outli
   expect([chunkFile(50), chunkFile(51)].map((file) => hits.get(file))).toEqual([1, 1]);
 });
 
+test('frames arriving during the progressive module import install after their guards and repaint', async () => {
+  const module = await import('@betteroffice/fonts/progressive');
+  let arrive!: (value: typeof module) => void;
+  const imported = new Promise<typeof module>((resolve) => { arrive = resolve; });
+  let loads = 0;
+  let updates = 0;
+  let repaints = 0;
+  const resident = new ResidentProgressiveFonts([spec], [10, 11], [undefined, 0], {
+    updateFontOutlines() { updates++; },
+  }, decode, () => {}, () => { loads++; return imported; });
+  resident.onLateInstall(() => { repaints++; });
+  try {
+    expect(await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]), 10)).toEqual(new Set());
+    expect(await resident.ensure(new Map([[11, new Set([glyphIn(42)])]]), 10)).toEqual(new Set());
+    expect(loads).toBe(1);
+    expect(updates).toBe(0);
+    arrive(module);
+    await resident.whenInstalled();
+    expect(updates).toBeGreaterThanOrEqual(1);
+    expect(repaints).toBeGreaterThanOrEqual(1);
+    expect([ref.index, chunkFile(41), chunkFile(42)].map((file) => hits.get(file))).toEqual([1, 1, 1]);
+    expect(loads).toBe(1);
+  } finally { resident.dispose(); }
+});
+
 test('a chunk that fails to load is fetched again', async () => {
   const { resident, updates, logs } = fonts();
   failing.add(chunkFile(60));
@@ -134,6 +164,22 @@ test('an engine refusal is reported for a whole-face reload and is never retried
   expect(calls).toBe(1);
   expect(logs.some((message) => message.includes('refused the outlines') && message.includes('tables differ'))).toBe(true);
   expect(hits.get(chunkFile(71))).toBeUndefined();
+});
+
+test.each([
+  ['a WebAssembly trap', () => new WebAssembly.RuntimeError('unreachable')],
+  ['a native budget failure', () => new Error(`${NATIVE_MEMORY_BUDGET_EXCEEDED} (64 bytes over a 0-byte budget)`)],
+  ['a native panic', () => Object.assign(new Error('panicked at engine'), { code: NATIVE_PANIC_CODE })],
+  ['a native failed object', () => new Error(NATIVE_ENGINE_OBJECT_FAILED)],
+] as const)('an engine trap from installing outlines (%s) is rethrown, not taken as a refusal', async (_, trap) => {
+  const thrown = trap();
+  const { resident } = fonts(() => {
+    throw thrown;
+  });
+  const refused: number[] = [];
+  resident.onRefused((fontId) => refused.push(fontId));
+  await expect(resident.ensure(new Map([[10, new Set([glyphIn(72)])]]))).rejects.toBe(thrown);
+  expect(refused).toEqual([]);
 });
 
 test('slots registered with the same sliced face share one outline state and install to every slot', async () => {

@@ -68,6 +68,8 @@ export interface PeerlessPresentation {
   readonly hydrated: boolean;
   readonly failure: PptxWorkerEditorFailedError | undefined;
   getVisualSnapshot(): PeerlessVisualSnapshot | null;
+  /** @internal */
+  pluginVisual(): PeerlessVisualSnapshot | null;
   subscribeVisual(listener: () => void): () => void;
   require(): void;
   fit(value: SlideFit): void;
@@ -162,6 +164,7 @@ export function usePeerlessPresentation(
     let fit: SlideFit | undefined;
     let queuedFrame: PeerlessConfirmedFrame | undefined;
     let visual: PeerlessVisualSnapshot | null = null;
+    let prerenderPresented = false;
     let cancelIdle: (() => void) | undefined;
     let draining = false;
     let changeSeq: number | undefined;
@@ -269,7 +272,7 @@ export function usePeerlessPresentation(
 
     function paintLocal(view: PeerlessViewSnapshot, restore = false): void {
       if (!current() || !firstPainted || !visual || fit !== visual.fit || view.confirmed !== visual.view.confirmed) return;
-      if (framePainter && peerlessPrerenders.get(framePainter)?.presented()) return;
+      if (prerenderPresented) return;
       if (restore) echoPainter?.restoreLine(view); else echoPainter?.paintEcho(view);
       paintedView = view;
       visual = { ...visual, view };
@@ -287,6 +290,7 @@ export function usePeerlessPresentation(
       firstPainted = false;
       cancelIdle?.(); cancelIdle = undefined;
       signal();
+      if (visual?.view.confirmed?.frame.slideId !== frame.frame.slideId) notifyVisual();
       if (!fit?.scale || !framePainter) return;
       const supplied = [...pendingMedia].map(([assetId, bytes]) => ({ assetId, bytes }));
       pendingMedia.clear();
@@ -460,7 +464,7 @@ export function usePeerlessPresentation(
             const restoreFrame = framePainter?.checkpoint(pixels);
             const restoreEcho = echoPainter?.checkpoint();
             const savedImages = activeImages?.retain();
-            const saved = { queuedFrame, paintedFrame, paintedView, firstPainted, fit, visual,
+            const saved = { queuedFrame, paintedFrame, paintedView, firstPainted, fit, visual, prerenderPresented,
               pendingMedia: new Map(pendingMedia) };
             let settled = false;
             const finish = () => {
@@ -471,7 +475,7 @@ export function usePeerlessPresentation(
             return Object.assign(() => {
               if (settled) return;
               if (current() && fit === saved.fit) {
-                ({ queuedFrame, paintedFrame, paintedView, firstPainted, visual } = saved);
+                ({ queuedFrame, paintedFrame, paintedView, firstPainted, visual, prerenderPresented } = saved);
                 activeImages?.release(); activeImages = savedImages?.retain();
                 pendingMedia.clear();
                 for (const [assetId, bytes] of saved.pendingMedia) pendingMedia.set(assetId, bytes);
@@ -586,7 +590,10 @@ export function usePeerlessPresentation(
             (family) => suppliedFamilies.has(family.trim().toLowerCase())),
           fileGeneration, session: owner, client, store, images, thumbnailImages, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
-          getVisualSnapshot: () => visual, subscribeVisual,
+          getVisualSnapshot: () => visual,
+          pluginVisual: () => prerenderPresented ||
+            visual?.view.confirmed?.frame.slideId !== getSnapshot().confirmed?.frame.slideId ? null : visual,
+          subscribeVisual,
           get ready() { return whenPainted(); },
           get current() { return current(); },
           get selectionEnabled() { return selectionEnabled(); },
@@ -662,12 +669,18 @@ export function usePeerlessPresentation(
             if (framePainter) peerlessPrerenders.get(framePainter)?.drop();
           },
           presentPrerendered(slideId) {
-            return Boolean(current() && framePainter && peerlessPrerenders.get(framePainter)?.present(slideId, client.state.version));
+            const presented = Boolean(current() && framePainter && peerlessPrerenders.get(framePainter)?.present(slideId, client.state.version));
+            if (presented) { prerenderPresented = true; notifyVisual(); }
+            return presented;
           },
           settlePrerendered(slideId) {
             const prerender = framePainter && peerlessPrerenders.get(framePainter);
             if (!current() || !prerender?.presented() || getSnapshot().confirmed?.frame.slideId === slideId) return;
-            if (prerender.restore()) paintLocal(getSnapshot());
+            if (prerender.restore()) {
+              prerenderPresented = false;
+              paintLocal(getSnapshot());
+              notifyVisual();
+            }
           },
           fit(token) {
             if (!current() || !getSnapshot().confirmed || fit === token) return;
@@ -728,6 +741,7 @@ export function usePeerlessPresentation(
                 paintedView = view;
                 firstPainted = true;
                 visual = { view, fit: token };
+                prerenderPresented = false;
                 echoPainter = preparedEcho ?? peerlessPainterFactories.echo(surface, { ...token,
                   current: () => current() && firstPainted && fit === token });
                 if (preparedEcho) { preparedEcho.attach(surface); preparedEcho = undefined; }

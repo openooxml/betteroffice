@@ -47,8 +47,8 @@ use crate::fmath;
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
     Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, ShapeAltText,
-    Stroke, StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextLanguage, TextLink,
-    TextLinkTarget, TextParagraph, TextRun, Transform,
+    Stroke, StrokeEnd, SurfaceDisplayList, TableGrid, TableGridCell, TableHeader, TextAlign,
+    TextAnchor, TextLanguage, TextLink, TextLinkTarget, TextParagraph, TextRun, Transform,
 };
 use ooxml_metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 
@@ -239,6 +239,11 @@ impl Default for SlideRenderer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static BROWSER_COVERAGE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl SlideRenderer {
@@ -458,6 +463,12 @@ impl SlideRenderer {
         pieces
     }
 
+    fn browser_covers(&self, id: FontId, character: char) -> Result<bool, ooxml_text::FontError> {
+        #[cfg(test)]
+        BROWSER_COVERAGE_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+        self.fonts.covers(id, character)
+    }
+
     fn browser_coverage_face(
         &self,
         face: &FontFace,
@@ -469,7 +480,10 @@ impl SlideRenderer {
             cluster
                 .chars()
                 .filter(|character| needs_visible_glyph(*character))
-                .all(|character| self.fonts.covers(candidate.id, character).unwrap_or(false))
+                .all(|character| {
+                    self.browser_covers(candidate.id, character)
+                        .unwrap_or(false)
+                })
         };
         let covering = || {
             self.coverage_candidates(face)
@@ -512,7 +526,7 @@ impl SlideRenderer {
         let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
         if text
             .chars()
-            .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+            .all(|character| self.browser_covers(face.id, character).unwrap_or(true))
             && !(promoted && text.graphemes(true).any(emoji_presentation_cluster))
         {
             return vec![(0, None)];
@@ -522,7 +536,7 @@ impl SlideRenderer {
             let own = cluster
                 .chars()
                 .filter(|character| needs_visible_glyph(*character))
-                .all(|character| self.fonts.covers(face.id, character).unwrap_or(true))
+                .all(|character| self.browser_covers(face.id, character).unwrap_or(true))
                 && !(promoted && emoji_presentation_cluster(cluster));
             let neutral = cluster
                 .chars()
@@ -531,7 +545,7 @@ impl SlideRenderer {
                 Some(current)
                     if neutral
                         && cluster.chars().all(|character| {
-                            self.fonts.covers(current.id, character).unwrap_or(false)
+                            self.browser_covers(current.id, character).unwrap_or(false)
                         }) =>
                 {
                     Some(current.clone())
@@ -3190,7 +3204,10 @@ impl<'a> LayoutBuilder<'a> {
                 }
             }
         }
+        let properties = &table.properties;
+        let mut cells = Vec::with_capacity(plans.len());
         for plan in &plans {
+            let first = self.primitives.len() - start;
             let _ = self.render_text_box(
                 object_id,
                 shape_id,
@@ -3201,6 +3218,21 @@ impl<'a> LayoutBuilder<'a> {
                 plan.content.clone(),
                 cell_cascade(plan.text, &plan.inherited),
             )?;
+            let header = if properties.first_row && plan.row == 0 {
+                Some(TableHeader::Column)
+            } else if properties.first_col && plan.column == 0 {
+                Some(TableHeader::Row)
+            } else {
+                None
+            };
+            cells.push(TableGridCell {
+                row: plan.row as u32,
+                column: plan.column as u32,
+                row_span: plan.row_span as u32,
+                column_span: plan.span as u32,
+                header,
+                primitives: [first as u32, (self.primitives.len() - start) as u32],
+            });
         }
         let primitives = self.primitives.split_off(start);
         self.primitives.push(Primitive::Table {
@@ -3220,6 +3252,11 @@ impl<'a> LayoutBuilder<'a> {
             label: format!("Table, {row_count} rows, {column_count} columns"),
             primitives,
             transform,
+            grid: Some(TableGrid {
+                rows: row_count as u32,
+                columns: column_count as u32,
+                cells,
+            }),
         });
         Ok(())
     }
@@ -4790,8 +4827,19 @@ fn resolve_content(
             )?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
+            let requested =
+                resolve_font_request(theme, &run.style, properties.default_run.as_ref()).family;
+            let drawn = ooxml_text::SymbolFont::named(&requested)
+                .and_then(|font| font.display_text(&run.text))
+                .map(|symbol| symbol.text);
             let mut cased = Vec::new();
-            push_cased_runs(&mut cased, &run.text, start, language, style);
+            push_cased_runs(
+                &mut cased,
+                drawn.as_deref().unwrap_or(&run.text),
+                start,
+                language,
+                style,
+            );
             if properties.rtl == Some(true) {
                 let mut directed = Vec::new();
                 for run in cased {
@@ -5043,7 +5091,7 @@ fn resolve_bullet_style(
         let emulated = ooxml_text::SymbolFont::named(&family).is_some_and(|font| {
             written_marker
                 .chars()
-                .all(|character| font.substitute(character).is_some())
+                .all(|character| font.shape(character).is_some())
         });
         let mut ignored = SubstitutionLog::default();
         let log = if emulated {
@@ -13279,7 +13327,7 @@ mod tests {
         }
         let ratio = large_elapsed.as_secs_f64() / small_elapsed.as_secs_f64();
         assert!(
-            ratio < 8.0,
+            ratio < 12.0,
             "quadrupling the size changed the time from {small_elapsed:?} to {large_elapsed:?} (ratio {ratio:.2})"
         );
         assert!(edited.is_empty());

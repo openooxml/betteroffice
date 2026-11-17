@@ -109,9 +109,7 @@ impl Document {
         let package =
             serde_json::to_value(package).map_err(|error| Error::Render(error.to_string()))?;
         let mut request = docx_edit::layout_request::region_layout_request(&package, 24.0);
-        request["measurement"] = serde_json::json!({
-            "defaults": {"fontFamily": "Calibri", "fontSize": 11}
-        });
+        request["measurement"] = docx_edit::layout_request::measurement(&package);
         let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
         #[cfg(feature = "fonts")]
         {
@@ -171,7 +169,8 @@ impl Document {
 
     /// Rasterizes one display-list page to deterministic PNG bytes. A page past
     /// [`MAX_PIXMAP_DIM`] or [`MAX_PIXMAP_PIXELS`] is refused before any surface
-    /// is allocated; an image the backend cannot draw is skipped and counted.
+    /// is allocated; an image the backend cannot draw is drawn as a placeholder
+    /// in its frame and counted.
     /// Glyph outlines and decoded images are cached on the document, so a page
     /// reuses what earlier pages extracted and decoded; an export past either
     /// cache's cap re-does what it evicted.

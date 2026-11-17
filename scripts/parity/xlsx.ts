@@ -103,7 +103,7 @@ export const xlsx: Format = {
         redo: () => mutationResult(workbook.redo()),
         exportStructured: (args) => workbook.exportStructured(args as XlsxExportOptions),
         exportMarkdown: (args) => workbook.exportMarkdown(args.options as XlsxExportOptions, args.markdownOptions as XlsxMarkdownOptions),
-        save: () => workbook.save()
+        save: () => workbook.saveWithWarnings()
       },
       dispose: () => workbook.dispose()
     };

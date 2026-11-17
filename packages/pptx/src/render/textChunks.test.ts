@@ -46,3 +46,16 @@ test('a run whose clusters run backwards is not fitted', () => {
   } as PositionedTextRun;
   expect(fittedPieceDecisions(run, (text) => text.length * 8)).toBeNull();
 });
+
+test('a piece laid out on stored widths stretches up to 1.45, past the word-fit limit of 1.33', () => {
+  const glyph = (cluster: number, x: number, advance: number) => ({ glyphId: cluster + 1, cluster, x, advance, xOffset: 0, yOffset: 0 });
+  const run = (span: number) => ({
+    text: 'ab', start: 0, end: 2, x: 40, width: span + 8, fontId: 1, fontFamily: 'Corbel', fontSizePx: 20,
+    bold: false, italic: false, underline: false, color: '#000000',
+    glyphs: [glyph(0, 40, 8), glyph(1, 40 + span, 8)],
+  } as PositionedTextRun);
+  const [wide] = fittedPieceDecisions(run(11.2), (text) => text.length * 8)!;
+  expect(wide!.scale).toBeCloseTo(1.4, 5);
+  const [tooWide] = fittedPieceDecisions(run(12), (text) => text.length * 8)!;
+  expect(tooWide!.scale).toBe(1);
+});

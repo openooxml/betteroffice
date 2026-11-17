@@ -44,10 +44,12 @@ export interface BundledFontSource {
     bold: boolean,
     italic: boolean,
   ): BundledFontLoader | undefined;
+  /** Coverage for a script; `family`, the family the text requests, can select a closer face of it. */
   resolveScriptFallback(
     script: BundledFontScript,
     bold: boolean,
     italic: boolean,
+    family?: string,
   ): BundledFontLoader | undefined;
   /** Coverage for characters absent from a bundled substitute. */
   resolveGlyphFallback?(
@@ -107,8 +109,8 @@ export function fontProvider(
       const face = resolveBundledFamilyFace(family, bold, italic);
       return face ? load(face) : undefined;
     },
-    resolveScriptFallback(script, bold, italic) {
-      const face = resolveScriptFallbackFace(script, bold, italic);
+    resolveScriptFallback(script, bold, italic, family) {
+      const face = resolveScriptFallbackFace(script, bold, italic, family);
       return face ? load(face) : undefined;
     },
     resolveGlyphFallback(family, bold, italic, office = 'powerpoint') {

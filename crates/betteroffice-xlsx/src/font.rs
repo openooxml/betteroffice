@@ -5,7 +5,7 @@ use betteroffice_fonts::LastResortOffice;
 use xlsx_raster::RasterFonts;
 use xlsx_render::{DisplayList, DrawCmd};
 
-use crate::{Error, Result, Workbook};
+use crate::{Error, PngFontFace, Result, Workbook};
 
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONT_FACES: usize = 256;
@@ -171,6 +171,94 @@ fn primary_family(family: &str) -> &str {
     if head.is_empty() { family } else { head }
 }
 
+/// The family a run can take a supplied face for: its own name, or a chart's first named family.
+fn suppliable_family(family: &str, chart: bool) -> Option<&str> {
+    const GENERIC: [&str; 9] = [
+        "serif",
+        "sans-serif",
+        "monospace",
+        "cursive",
+        "fantasy",
+        "system-ui",
+        "ui-sans-serif",
+        "ui-serif",
+        "ui-monospace",
+    ];
+    if family.is_empty() {
+        return None;
+    }
+    if !chart {
+        return Some(family);
+    }
+    let head = primary_family(family);
+    (!head.is_empty() && !GENERIC.contains(&head.to_lowercase().as_str())).then_some(head)
+}
+
+/// The supplied face for a font: its family, dropping bold before italic, the last of equal faces winning.
+fn supplied_face<'a, 'b>(
+    faces: &'b [PngFontFace<'a>],
+    family: &str,
+    bold: bool,
+    italic: bool,
+) -> Option<&'b PngFontFace<'a>> {
+    let family = family.trim().to_lowercase();
+    [
+        (bold, italic),
+        (bold, false),
+        (false, italic),
+        (false, false),
+    ]
+    .into_iter()
+    .find_map(|(bold, italic)| {
+        faces.iter().rev().find(|face| {
+            face.family.trim().to_lowercase() == family
+                && face.bold == bold
+                && face.italic == italic
+        })
+    })
+}
+
+/// The fonts for an export given `faces`: those alone, as the canvas export paints without the bundled faces.
+pub(crate) fn supplied_fonts(
+    display: &DisplayList,
+    faces: &[PngFontFace<'_>],
+) -> Result<RasterFonts> {
+    let mut fonts = RasterFonts::default();
+    let mut seen = HashSet::new();
+    for command in &display.commands {
+        let DrawCmd::Text {
+            font_family: Some(family),
+            bold,
+            italic,
+            chart,
+            ..
+        } = command
+        else {
+            continue;
+        };
+        if !seen.insert((family.trim().to_lowercase(), *bold, *italic, *chart)) {
+            continue;
+        }
+        if let Some(face) = suppliable_family(family, *chart)
+            .and_then(|name| supplied_face(faces, name, *bold, *italic))
+        {
+            fonts
+                .register_font(
+                    family,
+                    *bold,
+                    *italic,
+                    face.bytes.to_vec(),
+                    face.bold,
+                    face.italic,
+                )
+                .map_err(|_| Error::FontUnavailable {
+                    family: face.family.to_owned(),
+                })?;
+        }
+    }
+    Ok(fonts)
+}
+
 impl FontRegistry {
     pub(crate) fn fonts(&self) -> &RasterFonts {
         &self.fonts
@@ -179,6 +267,39 @@ impl FontRegistry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn supplied_faces_match_as_the_canvas_export_does() {
+        let face = |family, bold, italic, bytes| PngFontFace {
+            family,
+            bold,
+            italic,
+            bytes,
+        };
+        let faces = [
+            face("Body", false, false, &b"regular"[..]),
+            face(" body ", false, true, &b"italic"[..]),
+            face("BODY", false, false, &b"last regular"[..]),
+        ];
+        let chosen = |family, bold, italic| {
+            supplied_face(&faces, family, bold, italic).map(|face| face.bytes)
+        };
+        assert_eq!(chosen("body", false, false), Some(&b"last regular"[..]));
+        assert_eq!(chosen("Body", true, true), Some(&b"italic"[..]));
+        assert_eq!(chosen("Body", true, false), Some(&b"last regular"[..]));
+        assert_eq!(chosen("Other", false, false), None);
+    }
+
+    #[test]
+    fn charts_supply_their_first_named_family_only() {
+        assert_eq!(
+            suppliable_family("\"Aptos\", sans-serif", true),
+            Some("Aptos")
+        );
+        assert_eq!(suppliable_family("sans-serif, Aptos", true), None);
+        assert_eq!(suppliable_family("A, B", false), Some("A, B"));
+        assert_eq!(suppliable_family("", false), None);
+    }
+
     use super::*;
     use crate::{Cell, CellRef, CellValue, OpenOptions, Sheet, SheetId, Viewport, WorkbookModel};
     #[cfg(feature = "fonts-latin")]
@@ -212,6 +333,39 @@ mod tests {
         );
         model.sheets.push(sheet);
         Workbook::from_model(model).unwrap().save().unwrap()
+    }
+
+    #[test]
+    fn every_png_target_paints_with_the_supplied_faces() {
+        let workbook = Workbook::open(&fixture()).unwrap();
+        let faces = [PngFontFace {
+            family: "Calibri",
+            bold: false,
+            italic: false,
+            bytes: &[1, 2, 3],
+        }];
+        let targets = [
+            crate::PngTarget::Viewport {
+                sheet: SheetId(0),
+                viewport: viewport(),
+            },
+            crate::PngTarget::Range {
+                sheet: SheetId(0),
+                range: crate::CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)),
+            },
+            crate::PngTarget::UsedRange { sheet: SheetId(0) },
+        ];
+        for target in targets {
+            let result = workbook.render_png_with_faces(
+                target.clone(),
+                &crate::RenderOptions::default(),
+                Some(&faces),
+            );
+            assert!(
+                matches!(&result, Err(Error::FontUnavailable { family }) if family == "Calibri"),
+                "{target:?}: {result:?}"
+            );
+        }
     }
 
     fn viewport() -> Viewport {

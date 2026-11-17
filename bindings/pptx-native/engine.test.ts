@@ -1,3 +1,5 @@
+import initPreflight, { font_preflight as wasmFontPreflight } from '../../packages/pptx/src/wasm/generated/preflight/pptx_preflight.js';
+import { fontPreflightFixture } from '../../packages/pptx/src/wasm/__fixtures__/fontPreflight';
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import JSZip from 'jszip';
@@ -32,6 +34,9 @@ type Snapshot = {
 let wasmMemory: WebAssembly.Memory;
 
 beforeAll(async () => {
+  await initPreflight({
+    module_or_path: readFileSync(new URL('../../packages/pptx/src/wasm/generated/preflight/pptx_preflight_bg.wasm', import.meta.url)),
+  });
   ({ memory: wasmMemory } = await initWasm({
     module_or_path: readFileSync(new URL('../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm', import.meta.url)),
   }));
@@ -456,6 +461,77 @@ describe('pptx native engine parity', () => {
     expect(run(native)).toEqual(run(wasm));
   });
 
+  test('table grids match native and wasm with spans, headers and cell ranges', async () => {
+    const zip = new JSZip();
+    const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+    const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>');
+    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
+    zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>`);
+    zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
+    const cell = (attributes: string, text: string) => `<a:tc${attributes}><a:txBody><a:bodyPr/><a:lstStyle/>${text ? `<a:p><a:r><a:t>${text}</a:t></a:r></a:p>` : '<a:p/>'}</a:txBody><a:tcPr/></a:tc>`;
+    const rows = [
+      [cell(' gridSpan="2"', 'Region'), cell(' hMerge="1"', ''), cell('', 'Total')],
+      [cell(' rowSpan="2"', 'North'), cell('', 'Q1'), cell('', '')],
+      [cell(' vMerge="1"', ''), cell('', 'Q2'), cell('', '9')],
+    ].map((cells) => `<a:tr h="400000">${cells.join('')}</a:tr>`).join('');
+    const table = `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="2" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="6000000" cy="1200000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblPr firstRow="1" firstCol="1"/><a:tblGrid>${'<a:gridCol w="2000000"/>'.repeat(3)}</a:tblGrid>${rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
+    zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${table}</p:spTree></p:cSld></p:sld>`);
+    const input = await zip.generateAsync({ type: 'uint8array' });
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const tables = list.primitives.flatMap((primitive) => primitive.kind === 'table' ? [primitive] : []);
+        expect(tables).toHaveLength(1);
+        const grid = tables[0]!.grid;
+        expect(grid).toBeDefined();
+        expect({ rows: grid!.rows, columns: grid!.columns }).toEqual({ rows: 3, columns: 3 });
+        expect(grid!.cells.map(({ primitives: _range, ...cell }) => cell)).toEqual([
+          { row: 0, column: 0, rowSpan: 1, columnSpan: 2, header: 'column' },
+          { row: 0, column: 2, rowSpan: 1, columnSpan: 1, header: 'column' },
+          { row: 1, column: 0, rowSpan: 2, columnSpan: 1, header: 'row' },
+          { row: 1, column: 1, rowSpan: 1, columnSpan: 1 },
+          { row: 1, column: 2, rowSpan: 1, columnSpan: 1 },
+          { row: 2, column: 1, rowSpan: 1, columnSpan: 1 },
+          { row: 2, column: 2, rowSpan: 1, columnSpan: 1 },
+        ]);
+        return grid;
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
+  test('chart data matches native and wasm for a chart with two series', () => {
+    const input = new Uint8Array(readFileSync(new URL('../../crates/pptx-render/tests/fixtures/data-labels.pptx', import.meta.url)));
+    const font = new Uint8Array(readFileSync(new URL('../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url)));
+    const run = (engine: Engine) => {
+      const doc = engine.PptxDocument.openCollaborative(input.slice(), 7);
+      const renderer = new engine.PptxRenderer();
+      try {
+        renderer.registerFont('Arial', false, false, font);
+        const list = JSON.parse(renderer.layoutSlideJson(doc, 0)) as SlideDisplayList;
+        const charts = list.primitives.flatMap((primitive) => primitive.kind === 'chart' ? [primitive] : []);
+        expect(charts).toHaveLength(1);
+        expect(charts[0]!.data).toEqual({
+          categories: ['Q1', 'Q2', 'Q3'],
+          series: [{ name: 'North', values: ['12', '19', '7'] }, { name: 'South', values: ['8', '14', '21'] }],
+        });
+        return charts[0]!.data;
+      } finally {
+        renderer.free();
+        doc.free();
+      }
+    };
+    expect(run(native)).toEqual(run(wasm));
+  });
+
   test('native versions differ between sessions opened from the same bytes and client id', () => {
     const first = native.PptxDocument.openCollaborative(bytes(), 7);
     const second = native.PptxDocument.openCollaborative(bytes(), 7);
@@ -773,4 +849,15 @@ test.each(['setSlideLayout', 'setSlideBackground'] as const)('%s proposal JSON, 
     for (const renderer of renderers) renderer.free();
     for (const doc of docs) doc.free();
   }
+});
+
+test('standalone font preflight has native and wasm parity on synthetic bytes', async () => {
+  const nativePreflight = (native as unknown as { font_preflight: typeof wasmFontPreflight }).font_preflight;
+  const bytes = await fontPreflightFixture();
+  const expected = JSON.parse(wasmFontPreflight(bytes, 0));
+  expect(expected.complete).toBe(true);
+  expect(expected.faces.length).toBeGreaterThan(0);
+  expect(JSON.parse(nativePreflight(bytes, 0))).toEqual(expected);
+  const invalid = new Uint8Array([1, 2, 3]);
+  expectThrownParity(() => wasmFontPreflight(invalid, 0), () => nativePreflight(invalid, 0));
 });

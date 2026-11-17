@@ -23,6 +23,17 @@ export interface ChartInfo {
     richTitle: boolean;
     series: ChartSeriesInfo[];
 }
+/**
+ * How far each edge of a chart frame moves, in content pixels: a positive
+ * value moves the left or right edge right and the top or bottom edge down.
+ * The engine computes the new anchor and clamps the result to the grid.
+ */
+export interface ChartResizeEdges {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+}
 export type ChartSeriesName = {
     text: string;
 } | {
@@ -341,6 +352,8 @@ export interface TextCmd {
     bold?: boolean;
     italic?: boolean;
     underline?: boolean;
+    /** The kind of `underline` when it is not single. */
+    underlineStyle?: 'double' | 'singleAccounting' | 'doubleAccounting';
     strike?: boolean;
     highlight?: string;
     dashedUnderline?: boolean;
@@ -370,10 +383,32 @@ export interface NumberFormatLayout {
     general?: number;
     overflow?: boolean;
 }
+/** Fractions of an image discarded from each edge; absent edges are `0`. */
+export interface ImageCrop {
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+}
+/**
+ * A worksheet picture: the image part `assetId` names, its `crop` discarded and
+ * the rest stretched over the rect. The host supplies the image, for example
+ * from `XlsxDocument.mediaBytes(assetId)`.
+ */
+export interface ImageCmd {
+    op: 'image';
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    assetId: string;
+    crop?: ImageCrop;
+    clip?: Rect;
+}
 /**
  * One draw command; discriminated on `op`.
  */
-export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd;
+export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd | ImageCmd;
 /**
  * Grid metadata for the frame: which sheet cells the visible tracks map to and
  * their viewport-local pixel boundaries. `rowOffsets[i]`/`colOffsets[i]` is the
@@ -388,12 +423,25 @@ export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd
 export interface GridMeta {
     startRow: number;
     startCol: number;
+    /** Leading tracks pinned by a frozen pane; absent when nothing is frozen. */
+    frozenRows?: number;
+    frozenCols?: number;
+    /** Viewport-pixel freeze line on each axis; absent when there is no split. */
+    dividerX?: number;
+    dividerY?: number;
     hiddenRowSpans?: [number, number][];
     hiddenColSpans?: [number, number][];
     rowIndices?: number[];
     colIndices?: number[];
     rowOffsets: number[];
     colOffsets: number[];
+    /**
+     * Full track sizes parallel to `rowOffsets`/`colOffsets`: the sheet-px extent
+     * of each visible track, independent of scroll and of a frozen pane clipping
+     * its leading edge. Absent on lists that predate the field.
+     */
+    rowSizes?: number[];
+    colSizes?: number[];
 }
 export interface HyperlinkRegion {
     top: number;
@@ -430,6 +478,8 @@ export interface ChartRegion {
     clip: Rect;
     /** whether the anchor can be repinned; an absolute one cannot. */
     movable: boolean;
+    /** whether the anchor can be resized. A two-cell anchor writes both corners back, so it can. */
+    resizable: boolean;
 }
 /** Former name of {@link ChartRegion}, when it carried the label alone. */
 export type ChartA11yAttrs = ChartRegion;
@@ -549,6 +599,28 @@ export type XlsxEditOperation = {
     op: 'patchStyle';
     target: XlsxRangeTarget;
     patch: RangeStylePatch;
+} | {
+    /**
+     * Literal replacement in each cell's entered text inside `target`, case-insensitive
+     * unless `matchCase`; the result is entered as if typed, as `setCellInputs` does.
+     *
+     * `values` reports formula cells as skipped; `formulas` rewrites them too. Dates,
+     * booleans, errors, merged-follower, array-filled and locked cells are skipped; a rich
+     * text cell or an entry that would not parse is refused alone while the rest applies.
+     * Limit exhaustion refuses the whole batch. It takes no `expect` guards.
+     */
+    op: 'replaceText';
+    target: XlsxRangeTarget;
+    query: string;
+    replacement: string;
+    /** Match only a cell whose whole searched text equals `query`. */
+    entireCell?: boolean;
+    /** Defaults to `values`. */
+    lookIn?: 'values' | 'formulas';
+    /** Match letter case exactly. */
+    matchCase?: boolean;
+    /** Defaults to `sheet`. `workbook` skips a hidden, very hidden or non-worksheet target. */
+    within?: 'sheet' | 'workbook';
 };
 export type XlsxEditStep = XlsxEditOperation & {
     expect?: {
@@ -578,12 +650,35 @@ export interface XlsxEditRequest {
 export type XlsxEditFailureCode = 'stale-version' | 'missing-target' | 'content-mismatch' | 'overlapping-steps' | 'locked-target' | 'read-only' | 'unsupported' | 'invalid-step' | 'limit-exceeded';
 export type XlsxEditFailure = OperationFailure<XlsxEditFailureCode, XlsxRangeTarget>;
 export type XlsxEditRefusal = OperationRefusal<XlsxEditFailure>;
+/** Counts for one `replaceText` step; omitted for other operations. */
+export interface XlsxReplaceStats {
+    /** Cells whose searched text matched, including cells that could not be rewritten. */
+    matched: number;
+    /** Cells whose stored input changed. */
+    replaced: number;
+    /** Formula results that matched in `values` mode; their formulas are untouched. */
+    skippedFormulas: number;
+    /** Matches on merged followers, array fills or locked cells of a protected sheet. */
+    skippedLocked: number;
+    /** Dates, booleans and errors whose displayed or entered text matched; they are untouched. */
+    skippedValues?: number;
+    /** A1 references of the first skipped values, at most 10,000. */
+    skippedCells?: string[];
+    /** Matched cells left unchanged because their new entry cannot be stored, at most 10,000. */
+    refusedCells?: {
+        cell: string;
+        reason: string;
+    }[];
+    /** Every refused cell, including those past the `refusedCells` cap. */
+    refused?: number;
+}
 export interface XlsxEditReceipt {
     stepIndex: number;
     changed: boolean;
     target: XlsxRangeTarget;
     /** Row-major. */
     changedCells: XlsxCellAddress[];
+    replace?: XlsxReplaceStats;
 }
 /** What one step would do; it cannot be committed later. */
 export interface XlsxEditPreview {
@@ -591,6 +686,7 @@ export interface XlsxEditPreview {
     target: XlsxRangeTarget;
     wouldChange: boolean;
     changedCellCount: number;
+    replace?: XlsxReplaceStats;
 }
 export interface XlsxEditCalculation {
     /** Dependents whose value moved. */
@@ -637,6 +733,8 @@ export interface XlsxSheetEntry {
     /** Null means known absent or empty; omitted means source facts are unknown. */
     headerFooter?: XlsxSheetHeaderFooter | null;
     visibility?: XlsxSheetVisibility;
+    /** The source part's sheet type; `worksheet` for sheets without a source. */
+    kind?: 'worksheet' | 'chartsheet' | 'dialogsheet' | 'macrosheet' | 'other';
     sheetId: string;
     name: string;
     /**
@@ -681,11 +779,22 @@ export type XlsxReadResult = {
     ranges: XlsxRangeRead[];
     calculation: XlsxReadCalculation;
 } | XlsxEditRefusal;
-/** An exact, case-sensitive substring search over display text. */
+/** A literal substring search over display text, case-insensitive unless `matchCase`. */
 export interface XlsxFindRequest {
     text: string;
     /** Defaults to every sheet. */
     sheetIds?: readonly string[];
+    /** Restricts the search to one rectangle. Takes precedence over `sheetIds`. */
+    range?: XlsxRangeTarget;
+    /**
+     * Omit or pass `values` to search the display text of every stored cell; `formulas`
+     * searches the entered text the formula bar shows, which is what `replaceText` edits.
+     */
+    lookIn?: 'values' | 'formulas';
+    /** Match only cells whose whole searched text equals `text`. */
+    entireCell?: boolean;
+    /** Match letter case exactly. */
+    matchCase?: boolean;
     /** Defaults to 100; at most 10,000. */
     limit?: number;
 }
@@ -929,6 +1038,9 @@ export type XlsxExportResult<T> = {
 } | OperationRefusal<XlsxExportFailure>;
 export type { XlsxHeaderFooterText, XlsxHeaderFooterPair, XlsxSheetHeaderFooter } from './edits';
 
+// ---- saveWarnings.d.ts ----
+export type { SaveResult, SaveWarning, SaveWarningCode } from '../../../shared/office-session/saveWarnings';
+
 // ---- selection/types.d.ts ----
 /**
  * Pure selection types. Plain data only — no DOM, no framework — so the model
@@ -1038,6 +1150,7 @@ import { type PipeCommandPayload } from '../../../../shared/collaboration-pipe/p
 import type { AwarenessCursor } from '../collaboration/types';
 import { type SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type Promisified } from '../../../../shared/office-session/types';
+import { type SaveResult } from '../../../../shared/office-session/saveWarnings';
 import { type OpenWorkbookOptions, type Viewport, type WorkbookHandle } from '../wasm/loader';
 import { type WorkbookFrame, type WorkbookFrameOptions, type WorkbookInitialPaint, type WorkbookSessionEvents, type WorkbookSessionMethods, type WorkbookSessionOpenOptions, type WorkbookSessionState } from './methods';
 import type { CommandBasis, CommandIdentity, CommandStatus, WorkbookAck, WorkbookCommand, WorkbookCommandFrame, WorkbookCommandSelection, WorkbookEditState } from './commandProtocol';
@@ -1092,7 +1205,10 @@ export interface WorkbookSession {
          */
         frame(viewport: Viewport, options?: WorkbookFrameOptions): Promise<WorkbookFrame>;
     };
+    /** saved bytes; each save warning is also emitted as a Node process warning on this thread. */
     save(): Promise<Uint8Array>;
+    /** saved bytes with a warning for every part the save wrote differently from what the workbook holds. */
+    saveWithWarnings(): Promise<SaveResult>;
     on<K extends keyof WorkbookSessionEvents>(name: K, listener: (payload: WorkbookSessionEvents[K]) => void): () => void;
     onFailure(listener: (failure: SessionFailure) => void): () => void;
     readonly failure: SessionFailure | undefined;
@@ -1407,6 +1523,8 @@ export {};
 
 // ---- session/methods.d.ts ----
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import type { SaveWarning } from '../../../../shared/office-session/saveWarnings';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
@@ -1477,6 +1595,8 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
  */
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
     wasm?: ArrayBuffer | WebAssembly.Module;
+    /** @internal */
+    fontCdn?: FontCdnConfiguration;
     png?: boolean;
     initialViewport?: WorkbookInitialPaintRequest;
     includeEditState?: boolean;
@@ -1551,7 +1671,7 @@ export interface WorkbookSessionEvents {
 export type WorkbookSessionMethods = FontDecoderMethods & {
     open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
     /** Checkpoints are only restorable by the same engine version and codec. */
-    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
+    openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png' | 'fontCdn'>): WorkbookSessionOpenReply;
     version(): string;
     collaborationStateVector(): Uint8Array;
     collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
@@ -1595,6 +1715,10 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
     exportMarkdown(options?: XlsxExportOptions, markdownOptions?: XlsxMarkdownOptions): XlsxExportResult<XlsxMarkdownContent>;
     printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): ArrayBuffer;
     save(): ArrayBuffer;
+    saveWithWarnings(): {
+        bytes: ArrayBuffer;
+        warnings: SaveWarning[];
+    };
     dispose(): void;
 };
 export declare const WORKBOOK_SESSION_METHODS: {
@@ -1628,6 +1752,7 @@ export declare const WORKBOOK_SESSION_METHODS: {
     exportMarkdown: true;
     printDisplayList: true;
     save: true;
+    saveWithWarnings: true;
     dispose: true;
 };
 export declare const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods>;
@@ -1650,6 +1775,7 @@ import type { WorkbookFrame, WorkbookWireFrame } from './methods';
 export declare const WORKBOOK_REPLAY_MUTATORS: {
     editCell: true;
     editCells: true;
+    fillRange: true;
     applyEdits: true;
     applyOps: true;
     propose: true;
@@ -1659,6 +1785,7 @@ export declare const WORKBOOK_REPLAY_MUTATORS: {
     setNumberFormat: true;
     applyFormat: true;
     moveChart: true;
+    resizeChart: true;
     moveRange: true;
     undo: true;
     redo: true;
@@ -2306,6 +2433,7 @@ export type CommandAck<S, E, F> = {
     version: number;
     outcomes: CommandOutcome[];
     selection?: S;
+    cause?: 'remote';
     editState?: E;
     frame?: FrameEnvelope<F>;
     revisions?: {
@@ -2383,6 +2511,7 @@ export type EditSessionState<S, E> = {
     throughSeq: number;
     presentedThroughSeq: number;
     selection: S | undefined;
+    selectionCause?: 'remote';
     editState: E | undefined;
 };
 /** @internal Shared asynchronous editor contract for worker and legacy backends. */
@@ -2626,6 +2755,17 @@ export declare function isCommandAck(value: unknown): value is CommandAck<unknow
 /** @internal Identifies the unknown-outcome reply error and its preserved sequence. */
 export declare function isCommandOutcomeUnknownError(value: unknown): value is CommandOutcomeUnknownError;
 
+// ---- shared/office-session/fontCdn.d.ts ----
+/** @internal */
+export interface FontCdnConfiguration {
+    baseUrl: string | false;
+    timeoutMs: number;
+}
+/** @internal */
+export declare function getFontCdnConfiguration(): FontCdnConfiguration | undefined;
+/** @internal */
+export declare function setFontCdnConfiguration(configuration: FontCdnConfiguration | undefined): void;
+
 // ---- shared/office-session/fontDecoder.d.ts ----
 export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {
     codec: string;
@@ -2682,6 +2822,57 @@ export declare class PngExportError extends Error {
     readonly code: PngExportCode;
     constructor(code: PngExportCode, message: string);
 }
+/** Why a picture was left as a placeholder. */
+export type PngPictureUnavailableReason = 'missing' | 'unsupported' | 'decode-failed' | 'metafile' | 'too-large' | 'budget';
+/** A picture a PNG export drew as a placeholder. `limit` and `actual` say by how much a size or budget limit was passed. */
+export interface PngUnavailablePicture {
+    /** The engine's reference for the picture; empty for one whose relationship has no part, which has nothing to name it by. */
+    id: string;
+    reason: PngPictureUnavailableReason;
+    limit?: number;
+    actual?: number;
+    unit?: 'pixels' | 'bytes' | 'work';
+}
+/**
+ * The kinds of effect a PNG export can leave off a page:
+ * - `text.outline`: a run's classic hollow outline.
+ * - `text.emphasisMark`: the dots, commas or circles marking emphasised characters.
+ * - `text.effect`: a legacy animated text effect such as a blinking background.
+ * - `text.modernEffects`: a run's glow, shadow, reflection, fill or outline text effects.
+ * - `text.shadow`: a run's classic shadow, emboss or engrave.
+ * - `text.leaderGlyphs`: the dots or dashes a tab leader repeats.
+ * - `shape.effects`: a shape's effects, such as a soft edge or a second shadow.
+ * - `image.filter`: a picture's colour filter, such as a watermark washout.
+ * - `image.effects`: a picture's colour or blur effects.
+ *
+ * A page reports a kind when it carries at least one drawing primitive with an
+ * effect of that kind that the engine does not draw on its normal path. A
+ * picture whose bytes cannot be loaded or decoded reports `picture-unavailable`
+ * and nothing else. Kinds come in the order listed here.
+ *
+ * The report describes each engine's normal path, not the pixels of one page.
+ * A degenerate primitive that carries an effect, such as an empty crop, a run
+ * of spaces or a leader with no advance, still reports it.
+ */
+export declare const PNG_SKIPPED_EFFECT_KINDS: readonly ["text.outline", "text.emphasisMark", "text.effect", "text.modernEffects", "text.shadow", "text.leaderGlyphs", "shape.effects", "image.filter", "image.effects"];
+export type PngSkippedEffectKind = (typeof PNG_SKIPPED_EFFECT_KINDS)[number];
+/** Pictures a PNG export drew as a placeholder. */
+export interface PngPictureUnavailableDiagnostic {
+    code: 'picture-unavailable';
+    pictures: PngUnavailablePicture[];
+}
+/**
+ * Effects a PNG export left off a page, sent at most once per page and only
+ * when `effects` is not empty. `page` is zero-based, as the export target is.
+ * `effects` names each kind once, in {@link PNG_SKIPPED_EFFECT_KINDS} order.
+ */
+export interface PngEffectsSkippedDiagnostic {
+    code: 'effects-skipped';
+    page: number;
+    effects: PngSkippedEffectKind[];
+}
+/** A problem a PNG export worked around: the page still exports. */
+export type PngDiagnostic = PngPictureUnavailableDiagnostic | PngEffectsSkippedDiagnostic;
 
 // ---- shared/office-session/protocol.d.ts ----
 import type { SessionFailureCode } from './types';
@@ -2773,6 +2964,38 @@ export declare function hasOwn(value: object, key: PropertyKey): boolean;
 export declare function isClientMessage(value: unknown): value is ClientMessage;
 export declare function isHostMessage(value: unknown): value is HostMessage;
 export {};
+
+// ---- shared/office-session/saveWarnings.d.ts ----
+/**
+ * `unwritable-reference`: the document holds a reference with a character XML 1.0 cannot carry, which the
+ * part cannot be written with, so the save kept the part as the file wrote it. `unrewritable-formula`: the part
+ * holds a formula, kept as the file wrote it, that a sheet rename could not rewrite, so it was kept unrenamed.
+ * New codes may be added; handle a code you do not know as a generic warning.
+ */
+export type SaveWarningCode = 'unwritable-reference' | 'unrewritable-formula';
+/** A part a save wrote differently from what the document holds, and why. */
+export interface SaveWarning {
+    /** Stable, to match on. */
+    code: SaveWarningCode;
+    /** The package part, such as `xl/charts/chart1.xml`. */
+    part: string;
+    /** What inside the part, such as `chart`. */
+    element?: string;
+    /** The sheet the part belongs to, in a workbook. */
+    sheet?: string;
+    /** A sentence for people; not stable, match on `code`. */
+    message: string;
+}
+/** The saved bytes and the warnings the save carries; `warnings` is empty on an ordinary save. */
+export interface SaveResult {
+    bytes: Uint8Array;
+    warnings: SaveWarning[];
+}
+/**
+ * Emits each warning as a Node process warning with code `BETTEROFFICE_SAVE_WARNING`, so server hosts can
+ * filter it. Does nothing outside Node.
+ */
+export declare function warnSaveWarnings(warnings: readonly SaveWarning[]): void;
 
 // ---- shared/office-session/scheduler.d.ts ----
 export type SchedulerLane = 'input' | 'collab' | 'interactive' | 'background';
@@ -2993,6 +3216,7 @@ export class XlsxDocument {
      * Export the committed workbook with the version it was read at; nothing recalculates.
      */
     exportStructuredJson(options: string): string;
+    fillRangeJson(args: string): string;
     findTextJson(request: string): string;
     historyStateJson(): string;
     listDefinedNamesJson(request: string): string;
@@ -3000,6 +3224,10 @@ export class XlsxDocument {
      * the pending proposals: `{"proposals":[...]}`.
      */
     listProposalsJson(): string;
+    /**
+     * the encoded bytes of the image an `image` draw command names.
+     */
+    mediaBytes(asset_id: string): Uint8Array;
     mergedRangesJson(args: string): string;
     /**
      * slide a chart by a pixel delta as one undo step.
@@ -3052,9 +3280,19 @@ export class XlsxDocument {
      */
     rejectProposalJson(args: string): string;
     /**
+     * move a chart's edges by pixel deltas as one undo step.
+     */
+    resizeChartJson(args: string): string;
+    /**
      * serialize the current workbook back to `.xlsx` bytes.
      */
     saveBytes(): Uint8Array;
+    /**
+     * The warnings a save of the workbook as it is now carries, as a JSON
+     * array of `{ code, part, element?, sheet?, message }`; `[]` on an
+     * ordinary save.
+     */
+    saveWarningsJson(): string;
     searchTextJson(args: string): string;
     selectionDataJson(args: string): string;
     selectionFormattingJson(args: string): string;
@@ -3183,10 +3421,12 @@ export interface InitOutput {
     readonly xlsxdocument_endPeerSnapshot: (a: number) => void;
     readonly xlsxdocument_exportMarkdownJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly xlsxdocument_exportStructuredJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_fillRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listDefinedNamesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3208,7 +3448,9 @@ export interface InitOutput {
     readonly xlsxdocument_recoveryCheckpoint: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_resizeChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_saveWarningsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionDataJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3253,7 +3495,7 @@ export function initSync(module: { module: SyncInitInput } | SyncInitInput): Ini
 export default function __wbg_init (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>): Promise<InitOutput>;
 
 // ---- wasm/loader.d.ts ----
-import type { ChartInfo, ChartMutation } from '../charts';
+import type { ChartInfo, ChartMutation, ChartResizeEdges } from '../charts';
 /**
  * Wasm loader for the xlsx-wasm core.
  *
@@ -3265,6 +3507,7 @@ import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../defined
 import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { type SaveResult } from '../../../../shared/office-session/saveWarnings';
 export declare const decodeFontFace: FontDecoder;
 import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from './pngTarget';
 export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
@@ -3454,6 +3697,7 @@ export interface CapturedCellFormat {
         bold?: boolean;
         italic?: boolean;
         underline?: boolean;
+        underline_style?: 'double' | 'singleAccounting' | 'doubleAccounting';
         strike?: boolean;
         color?: CapturedColor | null;
     };
@@ -3696,12 +3940,25 @@ export interface WorkbookHandle extends CollaborationReplica {
      */
     chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null;
     /**
+     * the encoded bytes (PNG, JPEG, GIF, ...) of the image an `image` draw
+     * command names by `assetId`. throws for a part no picture draws.
+     */
+    mediaBytes(assetId: string): Uint8Array;
+    /**
      * slide the chart frame `chart` names — a {@link ChartRegion} id — by a
      * content-pixel delta, clamped to the grid, as one undo step. the new anchor
      * is written back on save. throws for a chart pinned to the sheet by an
      * absolute anchor.
      */
     moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult;
+    /**
+     * move the edges of the chart frame `chart` names — a {@link ChartRegion} id
+     * — by content-pixel deltas, clamped to the grid and a 1x1px minimum, as one
+     * undo step. the new two-cell anchor is written back on save. throws for a
+     * chart pinned by an absolute anchor or held by a one-cell extent, neither of
+     * which a save can rewrite.
+     */
+    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult;
     setActiveSheet(index: number): void;
     /**
      * apply one user input to a cell (parses number/bool/formula/text) and
@@ -3713,6 +3970,14 @@ export interface WorkbookHandle extends CollaborationReplica {
     editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
     /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
     editCells(sheet: number, edits: CellInputEdit[]): EditResult;
+    /**
+     * Fill copies `source` over the complete rectangle `destination` as one undo
+     * step. `destination` includes the source and must start at its top-left
+     * corner; values and styles are copied, formulas are translated with `$`
+     * preserved. Array formulas, merged cells, tables, and charts anchored in
+     * either rectangle are refused without changing the workbook.
+     */
+    fillRange(sheet: number, source: string, destination: string): EditResult;
     /** Move a range within one sheet and rewrite references in one native undo step. */
     moveRange(sheet: number, source: string, destination: string): EditResult;
     setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult;
@@ -3756,8 +4021,16 @@ export interface WorkbookHandle extends CollaborationReplica {
      * @internal
      */
     renderPngFonts(target: XlsxPngTarget, options?: XlsxPngOptions): XlsxPngFont[];
-    /** serialize the workbook back to .xlsx bytes. */
+    /**
+     * serialize the workbook back to .xlsx bytes. each save warning is also emitted as a Node process
+     * warning with code `BETTEROFFICE_SAVE_WARNING`; {@link WorkbookHandle.saveWithWarnings} returns them.
+     */
     save(): Uint8Array;
+    /**
+     * serialize the workbook back to .xlsx bytes, with a warning for every part the save wrote differently
+     * from what the workbook holds; none on an ordinary save.
+     */
+    saveWithWarnings(): SaveResult;
     /**
      * stage an agent's proposed edits for human review without applying them.
      * returns the {@link Proposal} with per-cell formatted before/after previews.
@@ -3795,7 +4068,7 @@ export interface WorkbookHandle extends CollaborationReplica {
     listDefinedNames(request?: XlsxDefinedNamesRequest): XlsxDefinedNamesResult;
     /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
     readCells(request: XlsxReadRequest): XlsxReadResult;
-    /** Exact, case-sensitive search over display text, one match per cell. */
+    /** Literal search over display text, one match per cell; ignores case unless `matchCase`. */
     findText(request: XlsxFindRequest): XlsxFindResult;
     /** Resolves, stages and rehearses a batch like `applyEdits`, changing nothing. */
     validateEdits(request: XlsxEditRequest): XlsxValidationResult;
@@ -3962,8 +4235,11 @@ export interface XlsxPngOptions {
      * Faces to paint the sheet's fonts with, matched by family and style. Each
      * export installs them under private names and drops them afterwards; one
      * that fails to load rejects with `PngExportError` `font-unavailable`. The
-     * editors pass the faces they paint with; without faces the export loads the
-     * bundled faces `@betteroffice/xlsx-native` draws the sheet's fonts with.
+     * editors pass the faces they paint with. Without this option the export
+     * loads the bundled faces `@betteroffice/xlsx-native` draws the sheet's fonts
+     * with, and rejects if one fails to load. A list, even an empty one, replaces
+     * them: a family it does not cover is painted with the engine's built-in
+     * substitute.
      */
     fonts?: ReadonlyArray<XlsxFontFace>;
 }
@@ -4004,6 +4280,7 @@ export { createWorkbookEditSession } from './session/editSession';
 export { WorkbookPngUnavailableError } from './session/methods';
 export { PngExportError } from '../../../shared/office-session/pngExportError';
 export type { PngExportCode } from '../../../shared/office-session/pngExportError';
+export type { SaveResult, SaveWarning, SaveWarningCode } from './saveWarnings';
 export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './wasm/pngTarget';
 export type { WorkbookEditSession } from './session/editSession';
 /** @experimental */

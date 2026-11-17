@@ -89,7 +89,7 @@ export function CanvasPagedArea({
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
-          <ParseError message={renderer.error?.message ?? t('errors.canvasRendererFailed')} />
+          <ParseError opening={false} message={renderer.error?.message ?? t('errors.canvasRendererFailed')} />
         </div>
       ) : null}
       {children}

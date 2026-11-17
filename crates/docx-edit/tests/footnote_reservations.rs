@@ -263,10 +263,35 @@ fn endnotes_taller_than_a_page_do_not_push_out_blank_pages() {
     let layout: Value =
         serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap()).unwrap();
     let pages = layout["layout"]["pages"].as_array().unwrap();
-    let blank = pages
-        .iter()
-        .filter(|page| page["fragments"].as_array().is_none_or(Vec::is_empty))
-        .count();
-    assert_eq!(blank, 0);
-    assert!(pages.len() <= 17, "{} pages", pages.len());
+    let body = |page: &Value| {
+        page["fragments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|fragment| fragment["kind"] != "reserved")
+            .map(|fragment| {
+                fragment["y"].as_f64().unwrap() + fragment["height"].as_f64().unwrap()
+                    - page["margins"]["top"].as_f64().unwrap()
+            })
+            .fold(0.0, f64::max)
+    };
+    let notes = |page: &Value| {
+        page["noteAreas"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|area| area["height"].as_f64().unwrap())
+            .sum::<f64>()
+    };
+    assert!(pages.iter().all(|page| body(page) + notes(page) > 0.0));
+    let content: f64 = pages.iter().map(|page| body(page) + notes(page)).sum();
+    let page = &pages[0];
+    let room = page["size"]["h"].as_f64().unwrap()
+        - page["margins"]["top"].as_f64().unwrap()
+        - page["margins"]["bottom"].as_f64().unwrap();
+    assert!(
+        pages.len() as f64 <= (content / room).ceil() + 2.0,
+        "{} pages for {content}px of text at {room}px a page",
+        pages.len()
+    );
 }

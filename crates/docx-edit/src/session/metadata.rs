@@ -90,7 +90,7 @@ impl EditSessionCore {
             .engine
             .doc()
             .create_story(story_id, initial_text, p_style, alignment)
-            .map_err(EngineError::message)?;
+            .map_err(EngineError::from)?;
         Ok(json!({ "paraId": para_id }).to_string())
     }
 
@@ -99,6 +99,6 @@ impl EditSessionCore {
         self.engine
             .doc()
             .delete_story(story_id)
-            .map_err(EngineError::message)
+            .map_err(EngineError::from)
     }
 }

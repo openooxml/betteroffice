@@ -23,7 +23,7 @@ const engineFaces = new WeakMap<FontDecoder, Map<string, Promise<ProgressiveFont
  * @public
  */
 export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFontFace> {
-  const { ref, base, url, timeoutMs, decode, decoder, retain } = location;
+  const { ref, base, url, timeoutMs, requestTimeoutMs, decode, decoder, retain } = location;
   let cache = faces;
   if (decoder !== undefined) {
     cache = engineFaces.get(decoder) ?? new Map();
@@ -32,12 +32,19 @@ export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFont
   const key = `${ref.indexSha256}|${base}|${timeoutMs ?? ''}`;
   let pending = cache.get(key);
   if (pending === undefined) {
-    pending = openProgressiveFace(ref, {
-      read: async (file) => readFontAsset(file, await url(file), timeoutMs),
-      url,
-      timeoutMs,
-      decode,
-    });
+    pending = (async () => {
+      const indexUrl = await url(ref.index);
+      const transportTimeout = requestTimeoutMs ? requestTimeoutMs(indexUrl) : timeoutMs;
+      return openProgressiveFace(ref, {
+        read: async (file) => {
+          const asset = file === ref.index ? indexUrl : await url(file);
+          return readFontAsset(file, asset, requestTimeoutMs ? requestTimeoutMs(asset) : timeoutMs);
+        },
+        url,
+        timeoutMs: transportTimeout,
+        decode,
+      });
+    })();
     cache.set(key, pending);
     const current = pending;
     const forget = () => {

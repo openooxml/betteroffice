@@ -302,7 +302,13 @@ pub(crate) struct Numbering<'a> {
 }
 
 impl<'a> Numbering<'a> {
-    pub(crate) fn new(root: &'a Node) -> Self {
+    pub(crate) fn new(root: &'a Node, complete: &mut bool) -> Self {
+        let canonical = |id: &str| {
+            id == "0"
+                || (!id.is_empty()
+                    && !id.starts_with('0')
+                    && id.bytes().all(|byte| byte.is_ascii_digit()))
+        };
         let mut numbering = Self {
             instances: BTreeMap::new(),
             abstracts: Vec::new(),
@@ -310,6 +316,9 @@ impl<'a> Numbering<'a> {
             by_style_link: BTreeMap::new(),
             markers: RefCell::new(BTreeMap::new()),
         };
+        let mut order: Vec<usize> = Vec::new();
+        let mut positions = BTreeMap::new();
+        let mut links = Vec::new();
         for node in &root.children {
             visited(1);
             match node.name {
@@ -317,22 +326,28 @@ impl<'a> Numbering<'a> {
                     let Some(id) = node.attr("numId") else {
                         continue;
                     };
-                    numbering.instances.entry(id).or_insert_with(|| {
-                        let mut overrides = BTreeMap::new();
-                        for child in &node.children {
-                            if child.name == "w:lvlOverride"
-                                && let Some(ilvl) = child.attr("ilvl")
-                            {
-                                overrides
-                                    .entry(ilvl)
-                                    .or_insert_with(|| child.child("w:lvl"));
-                            }
+                    if !canonical(id)
+                        || node.val("w:abstractNumId").is_some_and(|id| !canonical(id))
+                    {
+                        *complete = false;
+                    }
+                    let mut overrides = BTreeMap::new();
+                    for child in &node.children {
+                        if child.name == "w:lvlOverride"
+                            && let Some(ilvl) = child.attr("ilvl")
+                        {
+                            overrides
+                                .entry(ilvl)
+                                .or_insert_with(|| child.child("w:lvl"));
                         }
+                    }
+                    numbering.instances.insert(
+                        id,
                         NumInstance {
                             abstract_id: node.val("w:abstractNumId"),
                             overrides,
-                        }
-                    });
+                        },
+                    );
                 }
                 "w:abstractNum" => {
                     let index = numbering.abstracts.len();
@@ -351,14 +366,32 @@ impl<'a> Numbering<'a> {
                         has_levels,
                         style_link: node.val("w:numStyleLink"),
                     });
-                    if let Some(id) = node.attr("abstractNumId") {
-                        numbering.by_id.entry(id).or_insert(index);
+                    let id = node.attr("abstractNumId");
+                    if !id.is_some_and(canonical) {
+                        *complete = false;
                     }
-                    if let Some(link) = node.val("w:styleLink") {
-                        numbering.by_style_link.entry(link).or_insert(index);
+                    if let Some(id) = id {
+                        numbering.by_id.insert(id, index);
                     }
+                    if let Some(id) = id {
+                        match positions.get(id).copied() {
+                            Some(position) => order[position] = index,
+                            None => {
+                                positions.insert(id, order.len());
+                                order.push(index);
+                            }
+                        }
+                    }
+                    links.push(node.val("w:styleLink"));
                 }
                 _ => {}
+            }
+        }
+        for index in order {
+            if numbering.abstracts[index].has_levels
+                && let Some(link) = links[index]
+            {
+                numbering.by_style_link.entry(link).or_insert(index);
             }
         }
         numbering
@@ -777,32 +810,35 @@ impl<'a> Scan<'a> {
             .or_else(|| style.and_then(|style| style.look.clone()))
             .unwrap_or_default();
         let rows = wrapped_children(node, "w:tr");
-        let columns = node
-            .child("w:tblGrid")
-            .map(|grid| {
-                grid.children
-                    .iter()
-                    .filter(|node| node.name == "w:gridCol")
-                    .count()
-            })
-            .filter(|&count| count > 0)
-            .unwrap_or_else(|| {
-                rows.iter()
-                    .map(|row| {
-                        wrapped_children(row, "w:tc")
-                            .into_iter()
-                            .map(|cell| {
-                                number(
-                                    cell.path(&["w:tcPr"])
-                                        .and_then(|node| node.val("w:gridSpan")),
-                                )
-                                .unwrap_or(1)
-                            })
-                            .fold(0usize, usize::saturating_add)
+        let grid = node.child("w:tblGrid").map_or(0, |grid| {
+            grid.children
+                .iter()
+                .filter(|node| node.name == "w:gridCol")
+                .count()
+        });
+        let columns = rows
+            .iter()
+            .map(|row| {
+                let omitted = ["w:gridBefore", "w:gridAfter"]
+                    .into_iter()
+                    .map(|name| {
+                        number(row.path(&["w:trPr"]).and_then(|node| node.val(name))).unwrap_or(0)
                     })
-                    .max()
-                    .unwrap_or(0)
-            });
+                    .fold(0usize, usize::saturating_add);
+                wrapped_children(row, "w:tc")
+                    .into_iter()
+                    .map(|cell| {
+                        number(
+                            cell.path(&["w:tcPr"])
+                                .and_then(|node| node.val("w:gridSpan")),
+                        )
+                        .unwrap_or(1)
+                    })
+                    .fold(omitted, usize::saturating_add)
+            })
+            .max()
+            .unwrap_or(0)
+            .max(grid);
         for (row_index, row) in rows.iter().enumerate() {
             if self.collector.limited {
                 break;

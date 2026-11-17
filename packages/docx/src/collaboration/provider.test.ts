@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from 'bun:test';
+import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import {
   MAX_AWARENESS_CURSOR_BYTES,
   MAX_AWARENESS_ENTRIES_PER_UPDATE,
@@ -139,10 +139,15 @@ class FakeTransport implements CollaborationTransport {
   attempted: Uint8Array[] = [];
   readonly listenerHistory: Array<(event: CollaborationTransportEvent) => void> = [];
   private readonly listeners = new Set<(event: CollaborationTransportEvent) => void>();
+  private readonly sendWaiters: Array<() => void> = [];
 
   connect(): void {
     this.connectCount += 1;
     if (this.connectError) throw this.connectError;
+  }
+
+  nextSend(): Promise<void> {
+    return new Promise((resolve) => this.sendWaiters.push(resolve));
   }
 
   disconnect(): void {
@@ -153,6 +158,7 @@ class FakeTransport implements CollaborationTransport {
   send(data: Uint8Array): boolean {
     if (this.sendError) throw this.sendError;
     this.attempted.push(data);
+    for (const resolve of this.sendWaiters.splice(0)) resolve();
     if (this.accept === false) {
       if (this.mutateRejectedFrame) data.fill(0xff);
       return false;
@@ -298,6 +304,20 @@ describe('CollaborationProvider sync', () => {
 });
 
 describe('CollaborationProvider awareness', () => {
+  const cleanups: Array<() => void> = [];
+  afterEach(() => {
+    const errors: unknown[] = [];
+    for (const cleanup of cleanups.splice(0).reverse()) {
+      try {
+        cleanup();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'collaboration test cleanups failed');
+  });
+
   for (const leaveArrives of [false, true]) {
     it(`shows the new cursor after a same-clientId provider restart when the leave ${leaveArrives ? 'arrives' : 'is lost'}`, () => {
       const time = spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
@@ -791,14 +811,24 @@ describe('CollaborationProvider awareness', () => {
   });
 
   it('coalesces cursor movement and keeps typing updates local', async () => {
+    const clock = spyOn(performance, 'now').mockReturnValue(1_000);
+    cleanups.push(() => clock.mockRestore());
+    const timers = spyOn(globalThis, 'setTimeout');
+    cleanups.push(() => timers.mockRestore());
+    const cleared = spyOn(globalThis, 'clearTimeout');
+    cleanups.push(() => cleared.mockRestore());
     const replica = new FakeReplica();
     const transport = new FakeTransport();
     const provider = new CollaborationProvider(replica, transport, {
       user: { name: 'Calm Otter' },
     });
+    cleanups.push(() => provider.destroy());
     provider.connect();
     transport.emit({ type: 'open' });
     const initialFrames = transport.sent.length;
+    const trailing = transport.nextSend();
+    timers.mockClear();
+    cleared.mockClear();
 
     provider.setCursor({
       story: 'body',
@@ -810,8 +840,12 @@ describe('CollaborationProvider awareness', () => {
       anchor: Uint8Array.of(2),
       head: Uint8Array.of(2),
     });
-    await Bun.sleep(100);
+    expect(transport.sent).toHaveLength(initialFrames);
+    expect(timers).toHaveBeenCalledTimes(1);
+    await trailing;
 
+    expect(timers).toHaveBeenCalledTimes(1);
+    expect(cleared).not.toHaveBeenCalled();
     expect(transport.sent).toHaveLength(initialFrames + 1);
     const movement = decodeMessages(transport.sent.at(-1) ?? Uint8Array.of())[0];
     expect(movement.type).toBe('awareness');
@@ -822,11 +856,14 @@ describe('CollaborationProvider awareness', () => {
       head: Uint8Array.of(2),
     });
 
+    timers.mockClear();
     provider.setCursor({
       story: 'body',
       anchor: Uint8Array.of(3),
       head: Uint8Array.of(3),
     });
+    expect(timers).toHaveBeenCalledTimes(1);
+    const pending = timers.mock.results[0]?.value;
     provider.setCursor(
       {
         story: 'body',
@@ -835,9 +872,10 @@ describe('CollaborationProvider awareness', () => {
       },
       false
     );
-    await Bun.sleep(100);
+    expect(cleared).toHaveBeenCalledTimes(1);
+    expect(cleared).toHaveBeenCalledWith(pending);
+    expect(timers).toHaveBeenCalledTimes(1);
     expect(transport.sent).toHaveLength(initialFrames + 1);
-    provider.destroy();
   });
 
   it('truncates an overlength user name and keeps document sync alive', () => {

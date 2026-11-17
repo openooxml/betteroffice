@@ -109,10 +109,11 @@ export function createRustMeasureSource(options: {
   runtime?: { decoder?: FontDecoder };
   /** Register sliced script-fallback faces from their skeleton and core. */
   progressive?: boolean;
-  /** With the default provider, give families it doesn't carry the last-resort face. */
+  /** With the default provider, give families it doesn't carry the last-resort face. On unless `false`. */
   standIns?: boolean;
 }): RustMeasureSource {
   const engine = options.engine;
+  const standIns = options.standIns !== false;
   const hosted = hostedFontFamilies(options.bundled);
   let implicit = false;
   let generation = 0;
@@ -129,10 +130,10 @@ export function createRustMeasureSource(options: {
     },
     { baseLatin: () => import('./baseLatinFaces').then(tier => tier.resolveBaseLatinProvider(baseLatinFontState(), options.runtime)), bundled: (hosted ? undefined : options.bundled) ?? (async () => {
       const current = generation;
-      const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime, options.standIns), hosted);
+      const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime, standIns), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
-    }), progressive: options.progressive
+    }), standInTail: options.standIns === true, progressive: options.progressive
       ? async (slices) => import('@betteroffice/fonts/progressive').then(async ({ openSlicedFace, sliceSourceOf }) => {
         const face = await openSlicedFace(slices as Parameters<typeof openSlicedFace>[0]);
         if (!sliceSourceOf(face)) throw new Error('A sliced face opened without file URLs cannot load its outlines in the worker');
@@ -193,11 +194,11 @@ export function createRustMeasureSource(options: {
                 if (implicit) return false;
               }
               if (
-                registry.getCachedScriptFallbackIds([script], false) !==
+                registry.getCachedScriptFallbackIds([script], false, requirement.family) !==
                 undefined
               )
                 return false;
-              await registry.getScriptFallbackIds([script]);
+              await registry.getScriptFallbackIds([script], requirement.family);
               return true;
             } catch {
               return false;
@@ -210,7 +211,7 @@ export function createRustMeasureSource(options: {
         const earlier = [
           ...(registry.getCachedFontIdChain(requirement.family, requirement.bold, requirement.italic, false) ?? []),
           ...(implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] :
-            registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false) ?? []),
+            registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false, requirement.family) ?? []),
         ];
         return registry.prepareBaseLatin(requirement.family, requirement.bold, requirement.italic,
           requirement.characters ?? [], earlier, requirement.key);
@@ -233,6 +234,7 @@ export function createRustMeasureSource(options: {
         scriptIds: implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] : registry.getCachedScriptFallbackIds(
           requirement.scripts ?? [],
           false,
+          requirement.family,
         ),
       }));
       if (
@@ -254,6 +256,8 @@ export function createRustMeasureSource(options: {
         );
         const scriptIds = implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] : registry.getCachedScriptFallbackIds(
           requirement.scripts ?? [],
+          true,
+          requirement.family,
         );
         if (familyIds === undefined || scriptIds === undefined)
           return undefined;
@@ -272,7 +276,7 @@ export function createRustMeasureSource(options: {
       if (implicit) {
         const ids = [...new Set(Object.values(fontChains).flat())];
         if (ids.length > 0) fontChains[IMPLICIT_FONT_COVERAGE] = ids;
-        if (ids.length > 0 && options.standIns) fontChains[IMPLICIT_SYMBOL_SHAPING] = ids;
+        if (ids.length > 0 && options.standIns === true) fontChains[IMPLICIT_SYMBOL_SHAPING] = ids;
       }
       return {
         fontChains,
@@ -293,7 +297,7 @@ export function createRustMeasureSource(options: {
         settled.set(requirement.key, registry.settledBaseLatinCharacters(requirement.key));
         const familyIds = registry.getCachedFontIdChain(requirement.family, requirement.bold, requirement.italic, false);
         const scriptIds = implicit && hosted?.has(requirement.family.trim().toLowerCase()) ? [] :
-          registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false);
+          registry.getCachedScriptFallbackIds(requirement.scripts ?? [], false, requirement.family);
         if (familyIds === undefined || scriptIds === undefined) continue;
         const earlier = [...familyIds, ...scriptIds];
         const coverage = earlier.map(id => registry.coverageOf(id));

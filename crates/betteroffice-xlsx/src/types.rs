@@ -118,6 +118,39 @@ pub struct EditProfile {
     pub result_ms: f64,
 }
 
+/// Why a save wrote a part differently from what the workbook holds. A stable
+/// code to match on; new codes may be added, so treat an unknown one as a
+/// generic warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum SaveWarningCode {
+    /// The workbook holds a reference with a character xml 1.0 cannot carry,
+    /// which the part cannot be written with, so it was kept as authored.
+    UnwritableReference,
+    /// The part holds a formula, kept as the file wrote it, that does not read
+    /// as text a sheet rename can rewrite, so it was kept unrenamed.
+    UnrewritableFormula,
+}
+
+/// A part a save wrote differently from what the workbook holds, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct SaveWarning {
+    pub code: SaveWarningCode,
+    /// The package part, such as `xl/charts/chart1.xml`.
+    pub part: String,
+    /// What inside the part, such as `chart`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element: Option<String>,
+    /// The sheet the part belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
+    /// A sentence for people; not stable, match on `code`.
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MutationResult {
     pub applied: bool,
@@ -219,6 +252,15 @@ pub enum PngTarget {
     UsedRange {
         sheet: SheetId,
     },
+}
+
+/// A face one PNG export paints with, matched to the sheet's fonts by family and style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PngFontFace<'a> {
+    pub family: &'a str,
+    pub bold: bool,
+    pub italic: bool,
+    pub bytes: &'a [u8],
 }
 
 #[derive(Debug, Clone, PartialEq)]

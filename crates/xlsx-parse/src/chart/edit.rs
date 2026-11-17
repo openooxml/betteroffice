@@ -596,8 +596,9 @@ fn cache_markup(
         span: None,
         format_code: existing
             .and_then(|item| child(item, "formatCode"))
-            .map(Element::text_content),
+            .map(|item| crate::read::unescape_name(&item.text_content())),
         unmodelled_content: false,
+        point_formats: false,
         authored_points: 0,
     };
     match regenerated_cache(

@@ -7,7 +7,7 @@ import { activatePeerlessSlide, jumpPeerlessSlide, navigatePeerlessSlide } from 
 import type { PeerlessPresentation } from './usePeerlessPresentation';
 import {
   sameSlideLink, slideLinkOptions, slideMirrorItems,
-  type SlideMirrorItem, type SlideMirrorParagraph, type SlideMirrorSegment,
+  type SlideMirrorCell, type SlideMirrorItem, type SlideMirrorParagraph, type SlideMirrorSegment,
 } from './slideMirror';
 
 const SETTLE_MS = 150;
@@ -72,13 +72,51 @@ function followLink(event: MouseEvent<HTMLDivElement>, run: PeerlessPresentation
   if (safe) window.open(safe, '_blank', 'noopener,noreferrer');
 }
 
-function MirrorItem({ item, run }: { item: SlideMirrorItem; run: PeerlessPresentation }) {
+function mirrorParagraphs(paragraphs: SlideMirrorParagraph[], run: PeerlessPresentation) {
+  return paragraphs.map((paragraph, index) => paragraph.heading
+    ? <div key={index} role="heading" aria-level={2} lang={paragraph.lang ?? undefined}>{paragraphText(paragraph, run)}</div>
+    : <p key={index} lang={paragraph.lang ?? undefined} style={{ margin: 0 }}>{paragraphText(paragraph, run)}</p>);
+}
+
+const cellRole = (cell: SlideMirrorCell) => cell.header === 'column' ? 'columnheader' : cell.header === 'row' ? 'rowheader' : 'cell';
+
+function MirrorItem({ item, run, noData }: { item: SlideMirrorItem; run: PeerlessPresentation; noData: string }) {
   const style: CSSProperties = { position: 'absolute', left: item.x, top: item.y, width: item.w, height: item.h, margin: 0 };
-  if (item.paragraphs.length === 0) return <div role="img" aria-label={item.label!} style={style} />;
-  return <div role={item.label ? 'group' : undefined} aria-label={item.label ?? undefined} style={style}>
-    {item.paragraphs.map((paragraph, index) => paragraph.heading
-      ? <div key={index} role="heading" aria-level={2} lang={paragraph.lang ?? undefined}>{paragraphText(paragraph, run)}</div>
-      : <p key={index} lang={paragraph.lang ?? undefined} style={{ margin: 0 }}>{paragraphText(paragraph, run)}</p>)}
+  const { table, chart } = item;
+  if (chart) {
+    return <div role="figure" aria-label={item.label ?? undefined} style={style}>
+      <div role="table" aria-rowcount={chart.rows.length + 1} aria-colcount={chart.series.length + 1}>
+        <div role="row" aria-rowindex={1}>
+          <div role="cell" aria-colindex={1} />
+          {chart.series.map((name, index) => <div key={index} role={name ? 'columnheader' : 'cell'} aria-colindex={index + 2}>
+            {name ?? ''}
+          </div>)}
+        </div>
+        {chart.rows.map((row, rowIndex) => <div key={rowIndex} role="row" aria-rowindex={rowIndex + 2}>
+          <div role={row.category.trim() ? 'rowheader' : 'cell'} aria-colindex={1}>{row.category}</div>
+          {row.values.map((value, index) => <div key={index} role="cell" aria-colindex={index + 2}>{value ?? ''}</div>)}
+        </div>)}
+      </div>
+      {mirrorParagraphs(item.paragraphs, run)}
+    </div>;
+  }
+  if (table) {
+    const grid = <div role="table" aria-label={item.label ?? undefined} aria-rowcount={table.rows.length}
+      aria-colcount={table.columns} style={item.paragraphs.length ? undefined : style}>
+      {table.rows.map((cells, row) => cells.length > 0 && <div key={row} role="row" aria-rowindex={row + 1}>
+        {cells.map((cell) => <div key={cell.column} role={cellRole(cell)} aria-colindex={cell.column + 1}
+          aria-rowspan={cell.rowSpan > 1 ? cell.rowSpan : undefined}
+          aria-colspan={cell.columnSpan > 1 ? cell.columnSpan : undefined}>
+          {mirrorParagraphs(cell.paragraphs, run)}
+        </div>)}
+      </div>)}
+    </div>;
+    return item.paragraphs.length ? <div style={style}>{grid}{mirrorParagraphs(item.paragraphs, run)}</div> : grid;
+  }
+  const description = item.chartNoData ? noData : undefined;
+  if (item.paragraphs.length === 0) return <div role="img" aria-label={item.label!} aria-description={description} style={style} />;
+  return <div role={item.label ? 'group' : undefined} aria-label={item.label ?? undefined} aria-description={item.label ? description : undefined} style={style}>
+    {mirrorParagraphs(item.paragraphs, run)}
   </div>;
 }
 
@@ -96,6 +134,7 @@ export const PeerlessSlideMirror = memo(function PeerlessSlideMirror({ run, list
   const { t } = useTranslation();
   const [focused, setFocused] = useState(false);
   const picture = t('objects.defaultPictureName');
+  const noData = t('a11y.chartNoData');
   const items = useMemo(() => slideMirrorItems(list, picture), [list, picture]);
   return <div role="document" tabIndex={0} aria-label={label} data-testid="pptx-slide-mirror"
     onKeyDown={(event) => navigatePeerlessSlide(event, run)}
@@ -104,7 +143,7 @@ export const PeerlessSlideMirror = memo(function PeerlessSlideMirror({ run, list
     style={{ position: 'absolute', inset: 0, pointerEvents: 'none', outline: focused ? '2px solid #2563eb' : 'none', outlineOffset: -2 }}>
     <div style={{ position: 'absolute', left: 0, top: 0, width: list.width, height: list.height, opacity: 0,
       overflow: 'hidden', userSelect: 'none', transform: `scale(${scale})`, transformOrigin: '0 0' }}>
-      {items.map((item) => <MirrorItem key={item.key} item={item} run={run} />)}
+      {items.map((item) => <MirrorItem key={item.key} item={item} run={run} noData={noData} />)}
     </div>
   </div>;
 });

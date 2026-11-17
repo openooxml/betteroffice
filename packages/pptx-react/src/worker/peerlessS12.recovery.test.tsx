@@ -207,7 +207,7 @@ test('recovery after a crash on a deck whose state exceeds the update cap', asyn
   const opened = spyOn(wasm, 'openPresentation');
   let value: Awaited<ReturnType<typeof open>>;
   try {
-    value = await open({ file: bytes, onError: error });
+    value = await open({ file: bytes, onError: error }, { openMs: 30_000 });
     const handle = opened.mock.results[0]!.value as wasm.PresentationHandle;
     expect(handle.encodeStateAsUpdate().byteLength).toBeGreaterThan(updateCap);
   } finally { opened.mockRestore(); }

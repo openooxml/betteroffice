@@ -1747,6 +1747,10 @@ describe('workbook commands', () => {
     { method: 'applyOps', message: 'defined name Dynamic cannot be safely rewritten', reason: 'unsupported' },
     { method: 'applyOps', message: 'chart reference in xl/charts/chart1.xml cannot be safely rewritten', reason: 'unsupported' },
     { method: 'applyOps', message: 'xl/tables/table1.xml references cells this edit would move, and it cannot be rewritten', reason: 'unsupported' },
+    { method: 'applyOps', message: 'sheet name contains a character xml cannot carry, and the workbook references the sheet', reason: 'invalid-step' },
+    { method: 'applyOps', message: "the data validation formulas on sheet 'Other' cannot follow the sheet rename", reason: 'invalid-step' },
+    { method: 'applyOps', message: "the sparkline formulas on sheet 'Q1 Sales' cannot follow the sheet rename", reason: 'invalid-step' },
+    { method: 'applyOps', message: "the extension data validation formulas on sheet 'Other' cannot follow the sheet removal", reason: 'invalid-step' },
   ] as const) {
     for (const fault of ['precommit', 'postcommit', 'trap'] as const) {
       test(`${fault} ${refusal.message} retains refusal and context guards`, async () => {
@@ -2075,8 +2079,19 @@ describe('workbook commands', () => {
       ['applyOps', 'chart reference in xl/charts/chart1.xml cannot be safely rewritten', 'chart'],
       ['applyOps', 'anchor 0 of xl/drawings/drawing1.xml is held by two sheets that disagree on where it sits', 'chart'],
       ['applyOps', 'chart xl/charts/chart1.xml cannot change how it follows a grid edit', 'chart'],
+      ['resizeChart', 'chart xl/drawings/drawing1.xml#0 is pinned to the sheet and cannot be resized', 'chart'],
+      ['resizeChart', 'chart xl/drawings/drawing1.xml#0 cannot be resized: a one-cell extent is not written back', 'chart'],
       ['applyOps', 'formula at sheet 0, B1 cannot be safely rewritten', 'other'],
       ['applyOps', 'defined name Dynamic cannot be safely rewritten', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: merged range B4:D5 crosses the moved tracks', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: table Sales covers the moved tracks', 'table'],
+      ['applyOps', 'cannot move sheet 1 tracks: the run or its destination is outside the worksheet', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: the source run is outside the worksheet', 'other'],
+      ['applyOps', 'cannot move sheet 0 tracks: moving rows or columns is not supported yet', 'other'],
+      ['fillRange', 'fill cannot safely preserve hyperlinks', 'fill'],
+      ['fillRange', 'fill cannot safely preserve comments', 'fill'],
+      ['fillRange', 'fill cannot safely preserve data validations', 'fill'],
+      ['fillRange', 'fill cannot safely preserve conditional formats', 'fill'],
       ['moveRange', 'range move cannot safely preserve charts', 'chart'],
       ['moveRange', 'range move cannot safely preserve Excel tables', 'table'],
       ['moveRange', 'range move cannot safely preserve merged cells', 'other'],
@@ -2099,8 +2114,28 @@ describe('workbook commands', () => {
     }
   });
 
+  test('an unsupported column move is an ordinary structural refusal', async () => {
+    const session = await createTestWorkbookSession(bytes);
+    try {
+      const saved = await session.save();
+      const version = session.confirmedBasis.version;
+      expect(await session.submit(command(session, 1, 'applyOps', { args: [[
+        { type: 'moveCols', sheet: 0, col: 3, count: 1, before: 5 },
+      ]] }))).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false,
+        result: { failure: { code: 'unsupported', cause: 'other',
+          message: 'cannot move sheet 0 tracks: moving rows or columns is not supported yet' } } });
+      expect(await session.save()).toEqual(saved);
+      expect(session.confirmedBasis.version).toBe(version);
+      expect(await session.submit(command(session, 2, 'editCell', { args: [0, 0, 0, '2'] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect(session.failure).toBeUndefined();
+    } finally { await session.dispose(); }
+  });
+
   test('copy origin errors from batch edits are classified as invalid commands', () => {
     expect(classifyRefusal(new Error('bad edit args: copy origin is outside the grid'), 'editCells'))
+      .toMatchObject({ reason: 'invalid-command' });
+    expect(classifyRefusal(new Error('bad chart resize args: missing field `sheet`'), 'resizeChart'))
       .toMatchObject({ reason: 'invalid-command' });
   });
 
@@ -2143,6 +2178,36 @@ describe('workbook commands', () => {
     } finally { await session.dispose(); }
   });
 
+  test('fillRange tiles copied cells and refuses protected features without mutating', async () => {
+    const session = await createTestWorkbookSession(plainBytes);
+    try {
+      expect(await session.submit(command(session, 1, 'editCell', {
+        args: [0, 0, 0, '7'],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      const before = session.confirmedBasis.version;
+      expect(await session.submit(command(session, 2, 'fillRange', {
+        args: [0, 'A1', 'A1:A3'],
+      }))).toMatchObject({ status: 'applied', committed: true });
+      expect(session.confirmedBasis.version).not.toBe(before);
+      expect((await session.call.cellInputs(0, 'A1:A3')).cells.map((row) => row[0].input))
+        .toEqual(['7', '7', '7']);
+      expect(await session.submit(command(session, 3, 'undo', { args: [] })))
+        .toMatchObject({ status: 'applied', committed: true });
+      expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('');
+    } finally { await session.dispose(); }
+
+    const refusing = await createTestWorkbookSession(bytes);
+    try {
+      const version = refusing.confirmedBasis.version;
+      expect(await refusing.submit(command(refusing, 1, 'fillRange', {
+        args: [0, 'A1', 'A1:E2'],
+      }))).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false });
+      expect(refusing.confirmedBasis.version).toBe(version);
+      expect((await refusing.call.cellInputs(0, 'A1:E2')).cells.flat()
+        .filter((cell) => cell.input !== '').map((cell) => cell.a1)).toEqual(['A1', 'B1']);
+    } finally { await refusing.dispose(); }
+  });
+
   test('moveRange rewrites dependent formulas and undoes through worker commands', async () => {
     const session = await createTestWorkbookSession(plainBytes);
     try {
@@ -2174,7 +2239,7 @@ describe('workbook commands', () => {
 
   for (const kind of Object.keys(WORKBOOK_REPLAY_MUTATORS) as WorkbookReplayMethod[]) {
     test(`applies replay mutator ${kind} without an edit peer`, async () => {
-      const source = kind === 'moveRange' ? plainBytes : bytes;
+      const source = kind === 'moveRange' || kind === 'fillRange' ? plainBytes : bytes;
       const session = await createTestWorkbookSession(source);
       let seq = 0;
       const send = (op: WorkbookCommand) => session.submit(op);
@@ -2199,7 +2264,14 @@ describe('workbook commands', () => {
             payload = { args: [0, chart.id, 24, 12] };
             break;
           }
+          case 'resizeChart': {
+            const chart = main.displayList({ x: 0, y: 0, width: 800, height: 800 }).charts?.find((item) => item.resizable);
+            if (!chart) throw new Error('Missing synthetic resizable chart');
+            payload = { args: [0, chart.id, { left: 0, top: 0, right: 24, bottom: 12 }] };
+            break;
+          }
           case 'moveRange': payload = { args: [0, 'A1', 'A2'] }; break;
+          case 'fillRange': payload = { args: [0, 'A1', 'A1:A2'] }; break;
           case 'setActiveSheet': payload = { args: [1] }; break;
           case 'undo':
           case 'redo':
@@ -2233,6 +2305,7 @@ describe('workbook commands', () => {
           expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe(kind === 'undo' ? '1' : '7');
         }
         if (kind === 'moveRange') expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('1');
+        if (kind === 'fillRange') expect((await session.call.cellInputs(0, 'A2')).cells[0][0].input).toBe('1');
         if (kind === 'patchRangeStyle' || kind === 'applyFormat') expect(session.editState.formatting?.bold).toBe(true);
         if (kind === 'setNumberFormat') expect(session.editState.formatting?.numberFormat).toBe('percent');
         if (kind === 'setActiveSheet') expect(session.state.activeSheet).toBe(1);

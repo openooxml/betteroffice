@@ -1,3 +1,4 @@
+import { getFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import {
   createSessionClient, requestWasmCompile, type SessionClient,
 } from '../../../../shared/office-session/client';
@@ -96,7 +97,9 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenPresentationS
 } {
   const document = copyBytes(bytes).buffer;
   const transfer: Transferable[] = [document];
+  const fontCdn = getFontCdnConfiguration();
   const input: PresentationSessionOpenOptions = {
+    ...(fontCdn ? { fontCdn } : {}),
     clientId: options.clientId,
     fonts: copyFonts(options.fonts, transfer),
     fallbackFonts: copyFonts(options.fallbackFonts, transfer),

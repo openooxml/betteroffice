@@ -318,6 +318,19 @@ describe('resolution', () => {
     expect(resolveScriptFallbackFace('hebrew', true, false)?.file).toBe('NotoSansHebrew-Bold.ttf.zst');
   });
 
+  test('Naskh-styled Word families fall back to Noto Naskh Arabic in every style', () => {
+    for (const family of ['Simplified Arabic', 'Traditional Arabic', ' traditional ARABIC ']) {
+      for (const bold of [false, true]) for (const italic of [false, true]) {
+        expect(resolveScriptFallbackFace('arabic', bold, italic, family)?.file).toBe('NotoNaskhArabic-Regular.ttf.zst');
+      }
+      expect(resolveScriptFallbackFace('hebrew', false, false, family)?.file).toBe('NotoSansHebrew-Regular.ttf.zst');
+    }
+    expect(resolveScriptFallbackFace('arabic', false, false, 'Arial')?.file).toBe('NotoSansArabic-Regular.ttf.zst');
+    expect(resolveScriptFallbackFace('arabic', true, false, 'Arial')?.file).toBe('NotoSansArabic-Bold.ttf.zst');
+    expect(resolveScriptFallbackFace('arabic', false, false, 'Times New Roman')?.file)
+      .toBe('NotoSansArabic-Regular.ttf.zst');
+  });
+
   test('known heavy family names select the bold face and preserve italics', () => {
     for (const family of ['Arial Black', ' ARIAL-BLACK ', 'Arial Heavy', 'Arial ExtraBold']) {
       expect(resolveLastResortFace(family, false, false).file).toBe('LiberationSans-Bold.ttf.zst');

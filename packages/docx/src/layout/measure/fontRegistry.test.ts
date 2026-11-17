@@ -411,3 +411,26 @@ test('a family mapped to a sliced face registers it progressively once, shared w
   expect(chain[0]).toBe(100 + script!);
   expect(views).toEqual(['MS Gothic']);
 });
+
+test('script fallbacks resolve and cache per requested family', async () => {
+  const families: Array<string | undefined> = [];
+  const naskh = async () => new ArrayBuffer(8);
+  const sans = async () => new ArrayBuffer(16);
+  const registry = new TextMeasureFontRegistry(
+    { registerFont: (bytes) => bytes.byteLength },
+    {
+      bundled: {
+        resolve: () => undefined,
+        resolveScriptFallback: (_script, _bold, _italic, family) => {
+          families.push(family);
+          return family?.trim().toLowerCase() === 'simplified arabic' ? naskh : sans;
+        },
+      },
+    }
+  );
+  expect(await registry.getScriptFallbackIds(['arabic'], 'Simplified Arabic')).toEqual([8]);
+  expect(await registry.getScriptFallbackIds(['arabic'], 'Arial')).toEqual([16]);
+  expect(registry.getCachedScriptFallbackIds(['arabic'], false, ' simplified ARABIC ')).toEqual([8]);
+  expect(registry.getCachedScriptFallbackIds(['arabic'], false, 'Arial')).toEqual([16]);
+  expect(families).toEqual(['Simplified Arabic', 'Arial']);
+});

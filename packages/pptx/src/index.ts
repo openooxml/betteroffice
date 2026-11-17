@@ -171,6 +171,10 @@ export type {
   TextLanguage,
   TextLink,
   TextLinkTarget,
+  TableGrid,
+  TableGridCell,
+  ChartData,
+  ChartDataSeries,
   SlideDisplayList,
   SlidePrimitive,
   SlideReceipt,
@@ -203,3 +207,8 @@ export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/
 export { openPresentationSession } from './session/client';
 /** @internal */
 export { createPptxWorkerEditorSession } from './session/editorSession';
+export { fontPackDiagnostics } from './fontPackDiagnostics';
+export type { FontPackDiagnostic } from './fontPackDiagnostics';
+
+export { fontPreflight, preloadPreflightWasm } from './wasm/preflight';
+export type { FontPreflight, FontPreflightFace } from './wasm/preflight';

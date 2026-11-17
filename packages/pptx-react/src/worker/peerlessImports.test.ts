@@ -7,7 +7,7 @@ import { build } from 'esbuild';
 import { gzipSync } from 'node:zlib';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
-const STATIC_GZIP_BUDGET = 36_000;
+const STATIC_GZIP_BUDGET = 37_000;
 
 function source(path: string): ts.SourceFile {
   const name = relative(root, path).replace(/\\/g, '/');

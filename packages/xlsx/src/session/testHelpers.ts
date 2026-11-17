@@ -1,3 +1,4 @@
+import { expect } from 'bun:test';
 import { createRequire } from 'node:module';
 import { engineKind } from '../wasm/engine';
 import JSZip from 'jszip';
@@ -111,6 +112,40 @@ export function limitEngineMemoryHeadroom(bytes: number): void {
     return;
   }
   exhaustEngineMemory();
+}
+
+const OWN_PROCESS = 'BETTEROFFICE_ENGINE_MEMORY_TEST';
+
+export function isOwnEngineProcess(name: string): boolean {
+  return process.env[OWN_PROCESS] === name;
+}
+
+/** On the native engine, runs test `name` of `file` alone in a child process and returns true once
+ * the child reported exactly one passing and no failing test; returns false inside the child and on
+ * the wasm engine, where the caller runs the test body itself. The native budget counts every live
+ * byte of the process's engine thread, so a child keeps other test files' frees out of it. */
+export async function ranInOwnEngineProcess(file: string, name: string): Promise<boolean> {
+  if (engineKind !== 'native' || isOwnEngineProcess(name)) return false;
+  const { BUN_OPTIONS, ...env } = process.env;
+  const preload = (globalThis as Record<symbol, unknown>)[Symbol.for('betteroffice.testPreload')];
+  const options = typeof preload === 'string' ? ['--preload', preload] : [];
+  const pattern = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const child = Bun.spawn([process.execPath, 'test', ...options, file, '-t', pattern], {
+    env: { ...env, [OWN_PROCESS]: name }, stdout: 'pipe', stderr: 'pipe',
+  });
+  const deadline = setTimeout(() => child.kill(), 50_000);
+  const [status, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ]);
+  clearTimeout(deadline);
+  const output = stdout + stderr;
+  const counts = (pattern: RegExp) => [...output.matchAll(pattern)].map((match) => match[1]);
+  const ranAlone = status === 0
+    && counts(/^\s*(\d+) pass$/gm).join() === '1'
+    && counts(/^\s*(\d+) fail$/gm).join() === '0'
+    && counts(/^Ran (\d+) tests? across \d+ files?\./gm).join() === '1';
+  expect({ status, ranAlone, output: ranAlone ? '' : output }).toEqual({ status: 0, ranAlone: true, output: '' });
+  return true;
 }
 
 /** Restores the native engine memory budget after `exhaustEngineMemory`; wasm memories are per test file. */

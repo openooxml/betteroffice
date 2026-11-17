@@ -21,6 +21,18 @@
 
 @tailwind utilities;
 
+/* Preflight is intentionally omitted above, but native buttons still need its
+ * reset. Without it, toolbar icon buttons that carry no border or background
+ * utility render with the UA's `2px outset` border and ButtonFace fill in hosts
+ * that do not load Tailwind. The fill is most visible in dark mode, where
+ * ButtonFace paints light grey chips on the rail.
+ * :where keeps component classes such as `.border` and `.bg-*` authoritative,
+ * while `0 solid` lets width-only utilities render. */
+:where(.oox-root) :where(button) {
+  border: 0 solid;
+  background-color: transparent;
+}
+
 /* ============================================================================
  * CSS CUSTOM PROPERTIES (shadcn theme)
  * ============================================================================ */

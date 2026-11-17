@@ -13,9 +13,11 @@ mod reference;
 mod sanitize;
 mod style;
 
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tiny_skia::{IntSize, Pixmap, PremultipliedColorU8, Transform};
 
@@ -379,9 +381,28 @@ pub fn parse_metafile_within(
     let mut options = sandbox();
     let decoded_pixels = Arc::clone(&image_pixels);
     let decode_refused = Arc::clone(&image_refused);
+    let kept = Mutex::new(HashMap::<u64, Vec<(bool, Arc<Vec<u8>>)>>::new());
     options.image_href_resolver.resolve_data = Box::new(move |mime, data, _| {
         if !matches!(mime, "image/png" | "image/jpeg") {
             return None;
+        }
+        let png = mime == "image/png";
+        let kind = |data| {
+            if png {
+                usvg::ImageKind::PNG(data)
+            } else {
+                usvg::ImageKind::JPEG(data)
+            }
+        };
+        let mut hasher = DefaultHasher::new();
+        data.hash(&mut hasher);
+        let mut kept = kept.lock().ok()?;
+        let same = kept.entry(hasher.finish()).or_default();
+        if let Some((_, earlier)) = same
+            .iter()
+            .find(|(earlier_png, earlier)| *earlier_png == png && **earlier == *data)
+        {
+            return Some(kind(Arc::clone(earlier)));
         }
         let dimensions = image::ImageReader::new(std::io::Cursor::new(data.as_slice()))
             .with_guessed_format()
@@ -397,11 +418,8 @@ pub fn parse_metafile_within(
             return None;
         }
         decoded_pixels.store(total, Ordering::Relaxed);
-        Some(if mime == "image/png" {
-            usvg::ImageKind::PNG(data)
-        } else {
-            usvg::ImageKind::JPEG(data)
-        })
+        same.push((png, Arc::clone(&data)));
+        Some(kind(data))
     });
     if let Some(fontdb) = fontdb {
         options.fontdb = fontdb;
@@ -734,6 +752,38 @@ mod tests {
         assert!(priced(&clipped(2, &picture)).is_ok());
         assert_eq!(
             priced(&clipped(40, &picture)).err(),
+            Some(SvgRefusal::RenderTooCostly)
+        );
+    }
+
+    #[test]
+    fn a_bitmap_drawn_several_times_is_charged_its_decoded_pixels_once() {
+        let png = |shade: u8| {
+            let image = image::RgbaImage::from_pixel(2100, 2100, image::Rgba([shade, 2, 3, 255]));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .expect("png");
+            encode64(&bytes.into_inner())
+        };
+        let pictures = |shades: [u8; 4]| {
+            canvas(
+                &shades
+                    .map(|shade| {
+                        format!(
+                            r#"<image width="2100" height="2100" transform="scale(0.1)" href="data:image/png;base64,{}"/>"#,
+                            png(shade)
+                        )
+                    })
+                    .concat(),
+            )
+        };
+        let budget = MAX_IMAGE_PIXELS / 2;
+        let same =
+            parse_metafile(pictures([1; 4]).as_bytes(), budget, None).expect("one decode charged");
+        assert!(same.pixels() < 2 * 2100 * 2100);
+        assert_eq!(
+            parse_metafile(pictures([1, 2, 3, 4]).as_bytes(), budget, None).err(),
             Some(SvgRefusal::RenderTooCostly)
         );
     }

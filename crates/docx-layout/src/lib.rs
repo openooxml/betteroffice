@@ -72,6 +72,7 @@ mod fmath;
 pub mod hooks;
 mod line_fit;
 pub mod page_flow;
+pub mod page_text;
 pub mod paragraph_spacing;
 pub mod place;
 pub mod placement;
@@ -81,11 +82,14 @@ pub mod regions;
 pub mod resolve_lines;
 mod transcode;
 pub mod types;
+mod utf16_index;
+mod whole_number;
 
 pub mod break_policy;
 pub mod cell_layout;
 pub mod column_balancing;
 pub mod display_list;
+pub mod endnote_flow;
 pub mod floating_objects;
 pub mod footnotes;
 pub mod header_footer;
@@ -96,6 +100,7 @@ pub mod measure_blocks;
 pub mod section_breaks;
 pub mod sequence_fields;
 pub mod session;
+pub mod skipped_effects;
 pub mod table_grid;
 pub mod table_row_break;
 
@@ -1081,6 +1086,7 @@ pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
         serde_json::from_str(input).map_err(|error| format!("invalid: parse: {error}"))?;
     let mut input: ooxml_text::measure::MeasureInput =
         serde_json::from_str(input).map_err(|error| format!("invalid: parse: {error}"))?;
+    apply_word_features(&mut input.block, &envelope["block"]);
     input.compat.space_shrink_limit =
         Some(docx_space_shrink_limit(&envelope["compat"], &input.block));
     let extent = with_measure_fonts(|store| {
@@ -1088,6 +1094,18 @@ pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
             .map_err(|error| error.to_string())
     })?;
     serde_json::to_string(&extent).map_err(|error| format!("invalid: serialize: {error}"))
+}
+
+fn apply_word_features(block: &mut ooxml_text::measure::BlockIn, source: &serde_json::Value) {
+    for (index, run) in block.runs.iter_mut().enumerate() {
+        if matches!(run.kind.as_str(), "text" | "tab" | "field") {
+            let source = &source["runs"][index];
+            run.word_features = ooxml_text::ligature_features(
+                source["ligatures"].as_str(),
+                source["contextualAlternates"].as_bool(),
+            );
+        }
+    }
 }
 
 pub(crate) fn docx_space_shrink_limit(

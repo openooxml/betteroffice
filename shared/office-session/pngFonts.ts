@@ -24,6 +24,11 @@ export interface InstalledPngFaces {
   family(font: PngRunFont): string | undefined;
   /** The supplied face chosen for `font`. */
   face(font: PngRunFont): PngFontFace | undefined;
+  /**
+   * The private families that paint `font`, in order: the chosen face's, then its fallbacks', so a canvas font list
+   * of them draws each character with the first that covers it.
+   */
+  families(font: PngRunFont): string[];
   /** Removes the export's faces from the font set. */
   release(): void;
 }
@@ -37,6 +42,8 @@ export interface InstallPngFacesOptions {
   faces: ReadonlyArray<PngFontFace>;
   /** The supplied face that paints `font`, chosen as the format's layout chooses. */
   choose(faces: ReadonlyArray<PngFontFace>, font: PngRunFont): PngFontFace | undefined;
+  /** Faces that paint the characters of `font` its chosen face lacks, in the order the native engine tries them. */
+  fallbacks?(font: PngRunFont): ReadonlyArray<PngFontFace>;
   /** The canvas font string for `font` painted with `family`. */
   canvasFont(font: PngRunFont, family: string): string;
   /** What is exported, for error messages: "page" or "sheet". */
@@ -67,26 +74,37 @@ export async function installPngFaces(options: InstallPngFacesOptions): Promise<
   const set = pngFontSet();
   const installed = new Map<PngFontFace, string>();
   const chosen = new Map<string, { family: string; face: PngFontFace }>();
+  const lists = new Map<string, string[]>();
   const added: FontFace[] = [];
   const release = () => { for (const face of added) set?.delete(face); };
   const id = (counters.get(options.prefix) ?? 0) + 1;
   counters.set(options.prefix, id);
+  const install = async (face: PngFontFace): Promise<string> => {
+    let family = installed.get(face);
+    if (!family) {
+      if (!set || typeof FontFace === 'undefined') throw fontUnavailable(face.family, options.subject);
+      family = `${options.prefix}-${id}-${installed.size}`;
+      const loaded = await new FontFace(family, face.bytes.slice().buffer as ArrayBuffer, {
+        weight: (face.face?.bold ?? face.bold) ? '700' : '400', style: (face.face?.italic ?? face.italic) ? 'italic' : 'normal',
+      }).load().catch(() => { throw fontUnavailable(face.family, options.subject); });
+      set.add(loaded);
+      added.push(loaded);
+      installed.set(face, family);
+    }
+    return family;
+  };
   try {
     for (const [key, font] of fonts) {
       const face = options.choose(options.faces, font);
       if (!face) continue;
-      let family = installed.get(face);
-      if (!family) {
-        if (!set || typeof FontFace === 'undefined') throw fontUnavailable(face.family, options.subject);
-        family = `${options.prefix}-${id}-${installed.size}`;
-        const loaded = await new FontFace(family, face.bytes.slice().buffer as ArrayBuffer, {
-          weight: (face.face?.bold ?? face.bold) ? '700' : '400', style: (face.face?.italic ?? face.italic) ? 'italic' : 'normal',
-        }).load().catch(() => { throw fontUnavailable(face.family, options.subject); });
-        set.add(loaded);
-        added.push(loaded);
-        installed.set(face, family);
-      }
+      const family = await install(face);
       chosen.set(key, { family, face });
+      const list = [family];
+      for (const fallback of options.fallbacks?.(font) ?? []) {
+        const name = await install(fallback);
+        if (!list.includes(name)) list.push(name);
+      }
+      lists.set(key, list);
     }
     if (set && typeof set.load === 'function') {
       for (const [key, font] of fonts) {
@@ -99,6 +117,7 @@ export async function installPngFaces(options: InstallPngFacesOptions): Promise<
     return {
       family: (font) => chosen.get(pngFontKey(font))?.family,
       face: (font) => chosen.get(pngFontKey(font))?.face,
+      families: (font) => [...(lists.get(pngFontKey(font)) ?? [])],
       release,
     };
   } catch (error) {

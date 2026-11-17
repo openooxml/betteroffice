@@ -1,3 +1,4 @@
+import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 import { DocxSectionError, type SectionInfo } from './sections';
 import { formattingFailure } from './formattingError';
 import { PARAGRAPH_PATCH_WRITER_VERSION, paragraphPatchWriterVersionWire } from '../docx/parseWasm';
@@ -31,6 +32,7 @@ import type {
   YrsSplitReceipt,
   YrsStoryRange,
   YrsStorySegment,
+  YrsTableLoc,
   YrsTableRange,
   YrsTableReceipt,
   YrsTableFragmentReceipt,
@@ -69,6 +71,7 @@ import type {
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
 import { editSessionUpdateEvents } from './updateEvents';
+import { recordYrsSelectionCause, withYrsSelectionCause } from './selectionChanges';
 import { createProposalRegistry, type DocxProposalSession } from './proposals';
 import type { DocxContentControlsResult } from './contentControls';
 import type {
@@ -330,6 +333,7 @@ export function wrapSession(
       while (!destroyed && pendingUpdates.length > 0) {
         const event = pendingUpdates.shift();
         if (!event) break;
+        recordYrsSelectionCause(facade, event.origin === 'remote' ? 'remote' : undefined);
         for (const [id, listener] of [...listeners]) {
           if (destroyed) return;
           if (listeners.get(id) !== listener) continue;
@@ -366,6 +370,7 @@ export function wrapSession(
       if (wasmCallDepth === 0) {
         hub.drain();
         flushUpdates();
+        if (!destroyed) recordYrsSelectionCause(facade);
       }
     }
   };
@@ -669,6 +674,7 @@ export function wrapSession(
     },
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    retainedHeadersFootersJson: () => session.retained_headers_footers_json(),
     setDisplayWindow: (start, end) => session.set_display_window(start, end),
     setDisplayRetainBuiltPages: (retain) => session.set_display_retain_built_pages(retain),
     setWindowedIncrementalBuilds: (enabled) => session.set_windowed_incremental_builds(enabled),
@@ -857,6 +863,7 @@ export function wrapSession(
       return bytes && mimeType ? { bytes, mimeType } : null;
     },
     loadMediaSources: (json) => session.load_media_sources(json),
+    rebuildMediaSources: () => session.rebuild_media_sources(),
     loadNoteSeparators: (state) => session.load_note_separators(state),
     mediaDataUrl,
     mediaScope: () => mediaScope,
@@ -890,16 +897,16 @@ export function wrapSession(
     },
     applyUpdate: (update) => {
       markDirty('all');
-      return mutate(
+      return withYrsSelectionCause(facade, 'remote', () => mutate(
         () =>
           JSON.parse(
             session.apply_update_with_inference(update)
           ) as CollaborationTextInsertion | null
-      );
+      ));
     },
     applyUpdateChunks: (updates) => {
       markDirty('all');
-      mutate(() => session.apply_update_chunks([...updates]));
+      withYrsSelectionCause(facade, 'remote', () => mutate(() => session.apply_update_chunks([...updates])));
     },
     applyLocalUpdate: (update) => {
       ensureUndo();
@@ -945,10 +952,17 @@ export function wrapSession(
         anchor: { ...anchor },
         head: { ...head },
       };
+      recordYrsSelectionCause(facade, undefined, cachedSelection);
     },
     selection: () => {
       if (cachedSelection !== undefined) return cloneSelection(cachedSelection);
-      cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
+      try {
+        cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
+      } catch (error) {
+        const encoded = decodeEncodedSelection(session.encoded_selection());
+        if (!encoded || session.has_story(encoded.story)) throw error;
+        cachedSelection = null;
+      }
       return cloneSelection(cachedSelection);
     },
     encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
@@ -961,7 +975,11 @@ export function wrapSession(
         return null;
       }
     },
-    setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
+    setCellSelection: (range) => {
+      session.set_cell_selection(JSON.stringify(range));
+      cachedSelection = undefined;
+      recordYrsSelectionCause(facade);
+    },
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
     beginUndoCapture: ensureUndo,
     addUndoBoundary: () => session.add_undo_boundary(),
@@ -1696,10 +1714,10 @@ export function wrapSession(
         destroy: () => { registry.destroy(); detachedProposals.delete(registry); },
       };
     },
-    mirrorWorkerDocument: (mirror) => {
+    mirrorWorkerDocument: (mirror) => withYrsSelectionCause(facade, 'remote', () => {
       workerDocumentVersion = mirror?.version ?? null;
       proposals.mirror(mirror);
-    },
+    }),
     workerDocumentMirrored: () => workerDocumentVersion !== null,
     onProposalChange: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
@@ -1747,6 +1765,12 @@ export function wrapSession(
     renderPngTarget: (displayListJson, targetJson, optionsJson) =>
       (session as unknown as { renderPngTarget(list: string, target: string, options: string): Uint8Array })
         .renderPngTarget(displayListJson, targetJson, optionsJson),
+    renderPngTargetReport: (displayListJson, targetJson, optionsJson) =>
+      (session as unknown as { renderPngTargetReport(list: string, target: string, options: string): { png: Uint8Array; pictures: PngUnavailablePicture[]; skippedEffects: string[] } })
+        .renderPngTargetReport(displayListJson, targetJson, optionsJson),
+    canvasSkippedEffects: (pageIndex, unavailable) =>
+      (session as unknown as { canvasSkippedEffects(page: number, unavailable: Uint32Array): number })
+        .canvasSkippedEffects(pageIndex, unavailable),
     renderPng: async (target, options) => {
       if (destroyed) throw new Error('YrsSession is destroyed');
       if (!pngExporter) {
@@ -1786,6 +1810,7 @@ export function wrapSession(
 
   registerSessionInternals(facade, {
     headerFooterAliases,
+    unavailableTablesFrom: (roots) => JSON.parse(session.unavailable_tables_from(JSON.stringify(roots))) as YrsTableLoc[] | null,
     mediaSources: () => session.media_sources_json(),
     materializedSource,
     setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),

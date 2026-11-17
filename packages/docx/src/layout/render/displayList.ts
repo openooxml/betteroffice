@@ -94,6 +94,12 @@ export interface NoteRegion {
    * `noteIds`; undefined = legacy region without backlink data.
    */
   notes?: NoteRegionNote[];
+  /** Notes this region continues from an earlier page, which shows their opening. */
+  continuedNoteIds?: number[];
+  /** Left edge of the column the region paints in; undefined = the page's text area. */
+  x?: number;
+  /** Width of that column; undefined = the page's text area. */
+  width?: number;
 }
 
 /** Backlink metadata for one note in a NoteRegion. */
@@ -144,6 +150,9 @@ export interface TableCellRef {
   cellId?: string;
   /** Cell participates as a row/column header. */
   isHeader?: boolean;
+  /** Cell heads its row: the table has header rows and first-column
+   *  formatting, and the cell starts in grid column 0. */
+  isRowHeader?: boolean;
   /** Header cell was repeated on a continuation page. */
   repeatedHeader?: boolean;
   /** Word `w:noWrap` cell behavior. */
@@ -273,6 +282,15 @@ export interface ChartA11yAttrs {
   label: string;
   /** The placed chart box every primitive of the chart paints inside. */
   frame?: { x?: number; y?: number; w?: number; h?: number };
+  /** The plotted values as text, on the chart's first primitive only: one
+   *  row per category, one column per series; empty when the chart caches
+   *  no points. */
+  data?: ChartData;
+}
+
+export interface ChartData {
+  categories: string[];
+  series: { name?: string; values: (string | null)[] }[];
 }
 
 // attributes shared by primitives that map back to document content; replaces
@@ -306,6 +324,16 @@ export interface DocAttrs {
   /** Resolved line index within the owning paragraph. */
   lineIndex?: number;
   /**
+   * Text the paragraph reads before this run: `"\n"` per explicit line break
+   * and `"\t"` per tab between it and the previous run, which paint nothing.
+   */
+  separatorBefore?: string;
+  /**
+   * As `separatorBefore`, for line breaks and tabs that end the fragment's
+   * lines with nothing after them in it: read after this, its last text run.
+   */
+  separatorAfter?: string;
+  /**
    * Table cell the primitive paints inside, when any. The a11y mirror builds
    * real ARIA table semantics (role table/row/cell, aria-row/colindex) from
    * this — without it a table block reads as a flat run of text.
@@ -338,6 +366,10 @@ export interface DocAttrs {
   revision?: { author: string; date: string; revisionId: string; kind: 'ins' | 'del' | 'format' };
   /** Synthetic numbering glyph for the first line of a list paragraph. */
   listMarker?: boolean;
+  /** The marker is a number or label a reader needs, not a bullet. */
+  listMarkerNumbered?: boolean;
+  /** The marker is a visible bullet, whatever its stored character. */
+  listMarkerBullet?: boolean;
   /** Pending suggestion paint for a synthetic numbering glyph. */
   listMarkerRevision?: 'ins' | 'del';
   structuralRevision?: StructuralRevision;
@@ -376,6 +408,8 @@ export interface DocAttrs {
 }
 
 export interface TextRunPrimitive extends DocAttrs {
+  /** Enabled optional switches; absence selects DOCX defaults. */
+  fontFeatures?: string[];
   kind: 'text';
   text: string;
   /** Canvas-only glyph stand-in text. */
@@ -455,6 +489,8 @@ export interface PositionedGlyph {
 
 /** Shaped glyph run with source text for accessibility. */
 export interface GlyphRunPrimitive extends DocAttrs {
+  /** Enabled optional switches for browser text fallback. */
+  fontFeatures?: string[];
   kind: 'glyphRun';
   fontId: number;
   size: number; // px
@@ -605,6 +641,8 @@ export interface ImagePrimitive extends DocAttrs {
   // alternative text (wp:docPr descr → ImageRun/ImageBlock alt); file-derived
   // attacker-controlled data, capped at 2048 chars by the builder
   altText?: string;
+  /** The picture's relationship id (`r:embed`), which names it when `relId` resolves to nothing; at most 255 characters. */
+  relationshipId?: string;
   /** Ordered image effects. Undefined = use legacy `filter` only. */
   effects?: Array<{
     kind?: string;

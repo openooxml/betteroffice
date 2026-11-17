@@ -8,6 +8,14 @@ export interface ProgressiveFontFace {
 
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
 
+const standInKey = Symbol.for('@betteroffice/docx/standInFamily');
+
+/** What the default provider tells the registry about the families it stands in for. */
+interface StandInHook {
+  standsIn(family: string): boolean;
+  report(family: string): boolean;
+}
+
 async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {
   try {
     const words = (await import('./cmapCoverage')).fontCoverageWords(data);
@@ -83,12 +91,14 @@ export interface BundledFontProvider {
    * contract as {@link BundledFontProvider.resolve}; providers without
    * script faces simply omit the method. These faces are coverage fallbacks
    * first, metric approximations second — CJK metric compatibility is much
-   * weaker than the Carlito/Calibri class of substitutes.
+   * weaker than the Carlito/Calibri class of substitutes. `family` is the
+   * family the text requests, which can select a closer face of the script.
    */
   resolveScriptFallback?(
     script: FontScript,
     bold: boolean,
-    italic: boolean
+    italic: boolean,
+    family?: string
   ): (() => Promise<ArrayBuffer>) | undefined;
   /** Coverage for characters absent from a bundled substitute. */
   resolveGlyphFallback?(
@@ -154,6 +164,10 @@ function familyKey(family: string): string {
 
 function chainKey(family: string, bold: boolean, italic: boolean): string {
   return `${familyKey(family)}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
+}
+
+function scriptKey(script: FontScript, family: string | undefined): string {
+  return family === undefined ? script : `${script}|${familyKey(family)}`;
 }
 
 /** A provider or async factory; `undefined` means no bundled bytes. @public */
@@ -230,9 +244,9 @@ export class TextMeasureFontRegistry {
    */
   private bufferIds = new WeakMap<ArrayBuffer, Promise<number>>();
   private loaderIds = new WeakMap<() => Promise<ArrayBuffer>, Promise<number>>();
-  private scriptIds = new Map<FontScript, Promise<ScriptResolution>>();
-  /** Settled per-script results for the synchronous view. */
-  private scriptResults = new Map<FontScript, ScriptResolution>();
+  private scriptIds = new Map<string, Promise<ScriptResolution>>();
+  /** Settled per-script, per-requested-family results for the synchronous view. */
+  private scriptResults = new Map<string, ScriptResolution>();
   /** Chain memo — concurrent `getFontIdChain` calls share one resolution. */
   private chains = new Map<string, Promise<ChainResolution>>();
   /** Settled chains for the synchronous view. */
@@ -243,17 +257,21 @@ export class TextMeasureFontRegistry {
   /** Script-fallback faces registered from their skeleton and core, by font id. */
   private progressiveIds = new Map<number, ProgressiveFontFace>();
   private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+  private readonly standInTail: boolean;
 
   /** `progressive` opens sliced faces, which register from their skeleton and core. */
   constructor(sink: TextEngineFontSink, opts?: {
     bundled?: BundledFontProviderSource;
     baseLatin?: BundledFontProviderSource;
     progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+    /** Explicit stand-ins always append the last-resort face. */
+    standInTail?: boolean;
   }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
     this.baseLatinSource = opts?.baseLatin;
     this.progressive = opts?.progressive;
+    this.standInTail = opts?.standInTail === true;
   }
 
   /** The sliced faces registered from their skeleton and core, by font id. */
@@ -429,9 +447,9 @@ export class TextMeasureFontRegistry {
   }
 
   /** Resolves unique script fallbacks in order; stable misses cache and failures retry. */
-  getScriptFallbackIds(scripts: FontScript[]): Promise<number[]> {
+  getScriptFallbackIds(scripts: FontScript[], family?: string): Promise<number[]> {
     const unique = [...new Set(scripts)];
-    return Promise.all(unique.map((script) => this.resolveScript(script))).then((resolutions) => {
+    return Promise.all(unique.map((script) => this.resolveScript(script, family))).then((resolutions) => {
       const out: number[] = [];
       for (const { id } of resolutions) {
         if (id !== null && !out.includes(id)) out.push(id);
@@ -443,22 +461,24 @@ export class TextMeasureFontRegistry {
   /** Synchronous settled view; retryable results are evicted after one pass. */
   getCachedScriptFallbackIds(
     scripts: FontScript[],
-    consumeRetryable = true
+    consumeRetryable = true,
+    family?: string
   ): readonly number[] | undefined {
     const results = this.scriptResults;
-    const resolutions: Array<[FontScript, ScriptResolution]> = [];
+    const resolutions: Array<[string, ScriptResolution]> = [];
     for (const script of scripts) {
-      const resolution = results.get(script);
+      const key = scriptKey(script, family);
+      const resolution = results.get(key);
       if (!resolution) return undefined;
-      resolutions.push([script, resolution]);
+      resolutions.push([key, resolution]);
     }
     const out: number[] = [];
-    for (const [script, resolution] of resolutions) {
+    for (const [key, resolution] of resolutions) {
       const { id } = resolution;
       if (id !== null && !out.includes(id)) out.push(id);
       if (consumeRetryable && resolution.retryable) {
         queueMicrotask(() => {
-          if (results.get(script) === resolution) results.delete(script);
+          if (results.get(key) === resolution) results.delete(key);
         });
       }
     }
@@ -541,9 +561,13 @@ export class TextMeasureFontRegistry {
     // bytes to measure with, keeping the block on the native path instead of the
     // browser fallback. Deduped by engine id (a family whose metric-compat IS
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
+    const standIn = (bundled as { [standInKey]?: StandInHook } | undefined)?.[standInKey];
+    const standsIn = standIn?.standsIn(family) === true;
+    const noOtherFace = ids.length === 0;
+    const tail = !standsIn || noOtherFace || this.standInTail;
     let lastResort: BundledFontLoader | undefined;
     try {
-      lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
+      if (tail) lastResort = bundled?.resolveLastResort?.(family, bold, italic, 'word');
     } catch (error) {
       retryable = true;
       this.warnFailure(
@@ -555,10 +579,11 @@ export class TextMeasureFontRegistry {
       const id = await this.registerLastResort(key, lastResort, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
+      else if (standsIn && noOtherFace && standIn?.report(family)) this.warnStandIn(family);
     }
 
     try {
-      const coverage = bundled?.resolveGlyphFallback?.(family, bold, italic, 'word');
+      const coverage = tail ? bundled?.resolveGlyphFallback?.(family, bold, italic, 'word') : undefined;
       if (coverage) {
         const id = await this.registerLastResort(`${key}|coverage`, coverage, family);
         if (id !== null && !ids.includes(id)) ids.push(id);
@@ -577,6 +602,14 @@ export class TextMeasureFontRegistry {
     }
 
     return { ids, retryable };
+  }
+
+  private warnStandIn(family: string): void {
+    console.warn(
+      `[fontRegistry] no font bytes for "${family}": a last-resort face stands in for it, so line ` +
+        'breaks can differ from Word. Pass the font to the editor or embed it in the document. ' +
+        'Reported once per family.'
+    );
   }
 
   /**
@@ -813,8 +846,9 @@ export class TextMeasureFontRegistry {
     return pending;
   }
 
-  private resolveScript(script: FontScript): Promise<ScriptResolution> {
-    let pending = this.scriptIds.get(script);
+  private resolveScript(script: FontScript, family: string | undefined): Promise<ScriptResolution> {
+    const key = scriptKey(script, family);
+    let pending = this.scriptIds.get(key);
     if (!pending) {
       const ids = this.scriptIds;
       const results = this.scriptResults;
@@ -825,7 +859,9 @@ export class TextMeasureFontRegistry {
         if (bundled === undefined && typeof this.bundledSource === 'function') retryable = true;
         let loader: (() => Promise<ArrayBuffer>) | undefined;
         try {
-          loader = bundled?.resolveScriptFallback?.(script, false, false);
+          loader = family === undefined
+            ? bundled?.resolveScriptFallback?.(script, false, false)
+            : bundled?.resolveScriptFallback?.(script, false, false, family);
         } catch (error) {
           retryable = true;
           this.warnFailure(
@@ -845,11 +881,11 @@ export class TextMeasureFontRegistry {
           }
         }
         const resolution = { id, retryable };
-        results.set(script, resolution);
+        results.set(key, resolution);
         return resolution;
       })();
-      evictFailedPromise(ids, script, pending, (resolution) => resolution.retryable);
-      ids.set(script, pending);
+      evictFailedPromise(ids, key, pending, (resolution) => resolution.retryable);
+      ids.set(key, pending);
     }
     return pending;
   }

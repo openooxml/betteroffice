@@ -2334,6 +2334,24 @@ test('worker column edge drags converge with a concurrent edit in a cell of the 
   }
 }, TIMEOUT);
 
+test('a cell holding only a block control has a working object handle', async () => {
+  const cellXml = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  const bodyXml = '<w:p/><w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+    `<w:tr>${cellXml(text('A'))}${cellXml(`<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>${text('B')}</w:sdtContent></w:sdt>`)}</w:tr></w:tbl><w:p/>`;
+  const { client, engine, initial } = await openWorker({ bodyXml });
+  try {
+    const cell = initial.frame.payload.geometry!.objects.find(object => object.kind === 'cell' && object.story === 'body:t0:r0c1');
+    if (!cell) throw new Error('Control-only cell has no object');
+    const resized = await client.edit(intent(1, 0, 'resizeObject', {
+      handle: cell.handle, expectVersion: initial.frame.payload.documentVersion!, columnEdge: 1, deltaTwips: 200,
+    }));
+    expect(resized.outcomes[0]?.status).toBe('applied');
+    expect(engine.tablePayload('body', 0)).toHaveProperty('grid', [2200, 1800]);
+    expect(engine.paragraphs('body:t0:r0c1:sdt0')[0]?.text).toBe('B');
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('worker row border drags set an at-least height in one undo step and never start below the stored height', async () => {
   const { client, engine, initial } = await openWorker({ bodyXml: THREE_COLUMNS });
   try {
@@ -2817,6 +2835,62 @@ test('round two break sections preserve current and existing closing properties'
     expect((await client.edit(intent(2, 1, 'undo', {}))).outcomes[0]?.status).toBe('applied');
     expect(engine.paragraphs('body').map(paragraph => paragraph.text)).toEqual(['Seed', 'Tail']);
     expect(engine.sectionProperties().sections).toHaveLength(2);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a section read limited to paragraphs matches the full read through typing and section edits', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:tabs><w:tab w:val="right" w:pos="4320"/></w:tabs><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  try {
+    const expectLimitedMatchesFull = async () => {
+      const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+      const wanted = engine.paragraphs('body').slice(0, 1).map(({ paraId }) => ({ story: 'body', paraId }));
+      const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [...wanted, { story: 'body', paraId: 'missing' }] })).value;
+      expect(limited).toEqual({ ...full, paragraphs: full.paragraphs.filter(({ paraId }) => paraId === wanted[0]!.paraId) });
+      return limited;
+    };
+    expect((await expectLimitedMatchesFull()).paragraphs[0]!.tabs).toEqual([expect.objectContaining({ alignment: 'right' })]);
+    expect((await client.edit(intent(1, 0, 'insertText', { text: '!' }))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(2);
+    expect((await client.edit(intent(2, 1, 'insertSectionBreak', { type: 'nextPage' }))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(3);
+    expect((await client.edit(intent(3, 2, 'insertSectionBreak', { type: 'nextPage' }))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(4);
+    expect((await client.edit(intent(4, 3, 'undo', {}))).outcomes[0]?.status).toBe('applied');
+    expect((await expectLimitedMatchesFull()).sections).toHaveLength(3);
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('a section read limited to paragraphs follows a remote paragraph id change', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  const remote = await createYrsSession({ clientId: 8322 });
+  try {
+    const before = engine.paragraphs('body')[0]!.paraId;
+    expect((await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value.sections[0]!.section).toBe(before);
+    remote.loadState(engine.encodeState());
+    remote.applyRawOps('body', [{ op: 'setEmbedAttr', index: remote.paragraphs('body')[0]!.text.length, key: 'paraId', value: 'remote-first' }]);
+    await client.applyRemoteUpdate(remote.encodeStateAsUpdate(engine.encodeStateVector()));
+    const after = engine.paragraphs('body')[0]!.paraId;
+    expect(after).not.toBe(before);
+    const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+    const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value;
+    expect(full.sections[0]!.section).toBe(after);
+    expect(limited.sections[0]!.section).toBe(after);
+    expect(limited.sections).toEqual(full.sections);
+  } finally { remote.destroy(); client.destroy(); }
+}, TIMEOUT);
+
+test('a section read limited to paragraphs follows a local paragraph id change', async () => {
+  const { client, engine } = await openWorker({ bodyXml: '<w:p w14:paraId="00000001"><w:pPr><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Seed</w:t></w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p>' });
+  try {
+    const before = engine.paragraphs('body')[0]!.paraId;
+    expect((await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value.sections[0]!.section).toBe(before);
+    engine.applyRawOps('body', [{ op: 'setEmbedAttr', index: engine.paragraphs('body')[0]!.text.length, key: 'paraId', value: 'local-first' }]);
+    expect(engine.paragraphs('body')[0]!.paraId).toBe('local-first');
+    const full = (await client.documentRead({ kind: 'sectionProperties' })).value;
+    const limited = (await client.documentRead({ kind: 'sectionProperties', paragraphs: [] })).value;
+    expect(full.sections[0]!.section).toBe('local-first');
+    expect(limited.sections[0]!.section).toBe('local-first');
+    expect(limited.sections).toEqual(full.sections);
   } finally { client.destroy(); }
 }, TIMEOUT);
 
@@ -3716,6 +3790,32 @@ function cellPoint(engine: { paragraphs(story: string): { paraId: string; text: 
 function cellObjects(response: { frame?: DocxCommandFrame | null }) {
   return response.frame!.payload.geometry!.objects.filter((object) => object.kind === 'cell');
 }
+
+test('merging cells across a block control keeps the control through save and reopen', async () => {
+  const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
+  const bodyXml = '<w:p/><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>' +
+    `<w:tr><w:tc>${text('A')}</w:tc><w:tc><w:sdt><w:sdtPr><w:id w:val="9"/><w:tag w:val="keep"/></w:sdtPr><w:sdtContent>${text('B')}</w:sdtContent></w:sdt></w:tc></w:tr></w:tbl><w:p/>`;
+  const { client, engine } = await openWorker({ bodyXml });
+  let reopened: Awaited<ReturnType<typeof openWorker>> | undefined;
+  try {
+    const inside = cellPoint(engine, 'B');
+    expect(inside.story).toContain(':sdt');
+    expect((await client.edit(intent(1, 0, 'select', { selection: inside.selection }))).outcomes[0]?.status).toBe('noop');
+    const at = (column: number) => ({ story: 'body', tableIndex: 0, row: 0, column });
+    engine.setCellSelection({ anchor: at(0), head: at(1) });
+    expect((await client.edit(intent(2, 0, 'mergeTableCells', {}))).outcomes[0]?.status).toBe('applied');
+    const saved = await savedWorkerDocumentXml(client);
+    const control = /<w:sdt[ >][\s\S]*?<\/w:sdt>/.exec(saved)?.[0];
+    if (!control) throw new Error('Merge lost the block control');
+    expect(control).toContain('w:val="keep"');
+    expect(control).toContain('>B<');
+    expect(saved).toContain('>A<');
+    expect(saved.match(/<w:tc[ >]/g)).toHaveLength(1);
+    const body = /<w:body>([\s\S]*?)(?:<w:sectPr[\s\S]*)?<\/w:body>/.exec(saved)![1]!;
+    reopened = await openWorker({ bodyXml: body });
+    expect(cellPoint(reopened.engine, 'B').story).toContain(':sdt');
+  } finally { reopened?.client.destroy(); client.destroy(); }
+}, TIMEOUT);
 
 test('worker orders table structure commands with single version steps duplicates and refusals', async () => {
   const { client, engine, initial } = await openWorker({ bodyXml: TABLE_BODY });

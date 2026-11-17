@@ -601,18 +601,37 @@ export function resolveBundledFamilyFace(
 }
 
 /**
+ * Requested Word families (lowercase) whose script text Word draws in a
+ * style one bundled script face approximates better than the bucket's sans
+ * default, keyed by script, naming that face's family. The face serves every
+ * weight and style; the engine synthesizes what it lacks.
+ */
+const REQUESTED_FAMILY_SCRIPT_FALLBACK: Record<string, Partial<Record<BundledFontScript, string>>> = {
+  'simplified arabic': { arabic: 'Noto Naskh Arabic' },
+  'traditional arabic': { arabic: 'Noto Naskh Arabic' },
+};
+
+/**
  * Pick the bundled face that provides glyph coverage for a script bucket.
- * Preference order: exact (weight, style) -> same weight upright -> the
- * script's Regular -> the first face of the bucket. Ties resolve to the
- * earlier manifest entry, i.e. the sans face (Noto Naskh Arabic is reachable
- * by requesting it as a family, not through the script fallback).
+ * A requested `family` listed in `REQUESTED_FAMILY_SCRIPT_FALLBACK` for the
+ * script gets that face's Regular whatever the style. Otherwise preference
+ * order: exact (weight, style) -> same weight upright -> the script's
+ * Regular -> the first face of the bucket. Ties resolve to the earlier
+ * manifest entry, i.e. the sans face.
  */
 export function resolveScriptFallbackFace(
   script: BundledFontScript,
   bold: boolean,
   italic: boolean,
+  family?: string,
 ): BundledFontFace | undefined {
+  const preferred = family === undefined ? undefined
+    : REQUESTED_FAMILY_SCRIPT_FALLBACK[family.trim().toLowerCase()]?.[script];
   const faces = BUNDLED_FONTS.filter((f) => f.script === script);
+  if (preferred !== undefined) {
+    const face = faces.find((f) => f.family === preferred && f.weight === 400 && f.style === 'normal');
+    if (face !== undefined) return face;
+  }
   if (faces.length === 0) return undefined;
   const weight = bold ? 700 : 400;
   const style = italic ? 'italic' : 'normal';

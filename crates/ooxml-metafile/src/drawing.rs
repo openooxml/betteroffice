@@ -182,14 +182,14 @@ pub struct Image {
     pub clip: Clip,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Bitmap {
     pub width: u32,
     pub height: u32,
     pub pixels: Pixels,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Pixels {
     /// Straight (not premultiplied) RGBA, row by row from the top.
     Rgba(Vec<u8>),

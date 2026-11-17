@@ -1,3 +1,4 @@
+import { usePluginGestures } from '../../../shared/plugin-host/usePluginGestures';
 import type { ResolvedFontProps } from './bundledFonts';
 import { ProposalSlideStrip } from './components/ProposalSlideStrip';
 import { installBrowserFonts, useFontWarning, useStableFonts as useStableFontFaces } from './fontFaces';
@@ -385,7 +386,7 @@ export function PptxEditorContent({
   backend?: (changed: () => void) => EditablePresentation;
   onWorkerReady?: (api: PptxWorkerEditorApi) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
   const collaborationClientId = collaboration?.clientId ?? clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -475,6 +476,7 @@ export function PptxEditorContent({
   initialZoomRef.current = initialZoom;
   const onErrorRef = useRef(onError);
   const rootRef = useRef<HTMLDivElement>(null);
+  usePluginGestures(rootRef);
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -807,7 +809,7 @@ export function PptxEditorContent({
         !Number.isInteger(target.start) ||
         !Number.isInteger(target.end) ||
         target.start < 0 ||
-        target.end < target.start
+        target.end < 0
       ) {
         return false;
       }
@@ -816,7 +818,7 @@ export function PptxEditorContent({
       if (!shape?.textStories.some((story) => story.id === target.storyId)) return false;
       try {
         const story = handle.story(target.storyId);
-        if (target.end > story.length) return false;
+        if (target.start > story.length || target.end > story.length) return false;
         if (!showSlide(target.slide - 1, false)) return false;
         setSelection({
           shapeId: target.shapeId,
@@ -944,7 +946,7 @@ export function PptxEditorContent({
     }
     return { ...on, target: { kind: 'slide' } };
   }, [model, selection, shapeSelection]);
-  const pluginHost = usePptxPluginHost({
+  const pluginHost = usePptxPluginHost({ locale: lang, focusRoot: stageRef,
     plugins,
     pluginGrants,
     onPluginError,
@@ -954,6 +956,7 @@ export function PptxEditorContent({
     handle: openedHandle,
     reviewing: canvasReview.reviewing,
     selection: pluginSelection,
+    textSelection: selection,
     pointAt: (frame, clientX, clientY) =>
       (backend ? workerRef.current?.frame(workerRef.current.active)?.displayList === frame :
         modelRef.current?.frame === frame) ? hostPointRef.current(clientX, clientY) : null,

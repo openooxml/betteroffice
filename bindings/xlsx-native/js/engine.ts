@@ -1,6 +1,9 @@
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { warnFontPackDiagnostics, type FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+import { installDispose } from '../../../shared/nativeDispose';
 import type * as Wasm from '../../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
+import type { XlsxNativeExtras } from '../../native-extras-types';
 
 export type { InitInput } from '../../../packages/xlsx/src/wasm/generated/xlsx_wasm.js';
 
@@ -13,15 +16,16 @@ type Engine = Pick<
   | 'displayListCellLimit'
   | 'exportXlsxMarkdownJson'
   | 'exportXlsxStructuredJson'
+  | 'install_panic_hook'
   | 'renderXlsxMarkdownJson'
 >;
 
-type NativeFontLoader = {
-  configureFontPacks(latin?: string, intl?: string, cjk?: string): boolean;
-};
+type NativeFontLoader = Pick<XlsxNativeExtras['functions'], 'configureFontPacks' | 'fontPackDiagnosticsJson'>;
 
 const require = createRequire(import.meta.url);
 const binding = require('../index.js') as Engine & NativeFontLoader;
+binding.install_panic_hook();
+installDispose(binding.XlsxDocument, binding.XlsxSnapshotBuilder);
 
 function packDirectory(pack: 'latin' | 'intl' | 'cjk'): string | undefined {
   try {
@@ -32,6 +36,13 @@ function packDirectory(pack: 'latin' | 'intl' | 'cjk'): string | undefined {
 }
 
 binding.configureFontPacks(packDirectory('latin'), packDirectory('intl'), packDirectory('cjk'));
+const packDiagnostics = JSON.parse(binding.fontPackDiagnosticsJson()) as FontPackDiagnostic[];
+warnFontPackDiagnostics(packDiagnostics);
+
+/** The installed font add-on packages that cannot be used, and why; their faces are substituted. */
+export async function fontPackDiagnostics(): Promise<FontPackDiagnostic[]> {
+  return packDiagnostics.map((diagnostic) => ({ ...diagnostic }));
+}
 
 export const XlsxDocument = binding.XlsxDocument;
 export type XlsxDocument = Wasm.XlsxDocument;
@@ -42,6 +53,7 @@ export const decodeFontFace = binding.decodeFontFace;
 export const displayListCellLimit = binding.displayListCellLimit;
 export const exportXlsxMarkdownJson = binding.exportXlsxMarkdownJson;
 export const exportXlsxStructuredJson = binding.exportXlsxStructuredJson;
+export const install_panic_hook = binding.install_panic_hook;
 export const renderXlsxMarkdownJson = binding.renderXlsxMarkdownJson;
 
 export const engineKind: 'wasm' | 'native' = 'native';

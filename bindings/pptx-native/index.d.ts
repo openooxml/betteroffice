@@ -156,6 +156,11 @@ export declare function exportPptxMarkdownJson(data: Uint8Array, options: string
 
 export declare function exportPptxStructuredJson(data: Uint8Array, options: string): string
 
+export declare function font_preflight(bytes: Uint8Array, activeSlide: number): string
+
+/** Internal: the installed font packs `configureFontPacks` left out, and why, as JSON. */
+export declare function fontPackDiagnosticsJson(): string
+
 export declare function parsePptxJson(data: Uint8Array): string
 
 export declare function parsePptxJsonWithoutMedia(data: Uint8Array): string

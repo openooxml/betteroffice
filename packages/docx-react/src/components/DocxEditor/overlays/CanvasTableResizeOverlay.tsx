@@ -32,6 +32,7 @@ import { createPortal } from 'react-dom';
 import {
   deriveDisplayListSelectedCellRects,
   deriveDisplayListTableFragmentsOnPages,
+  displayListTableFragmentEndsTable,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
 import { projectPageLocalRect } from '../internals/canvasProjection';
@@ -191,12 +192,8 @@ export function CanvasTableResizeOverlay({
         });
       }
 
-      const bands = frag.rowBands;
-
       // Edge handles only on the fragment that ends the table.
-      const lastRowIndex = rowCount - 1;
-      const endsTable = bands.length > 0 && bands[bands.length - 1].rowIndex === lastRowIndex;
-      if (endsTable) {
+      if (displayListTableFragmentEndsTable(frag, rowCount)) {
         out.push({
           id: `${frag.tableKey}-p${frag.pageIndex}-right`,
           type: 'right',

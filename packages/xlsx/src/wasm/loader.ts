@@ -1,4 +1,4 @@
-import type { ChartInfo, ChartMutation } from '../charts';
+import type { ChartInfo, ChartMutation, ChartResizeEdges } from '../charts';
 /**
  * Wasm loader for the xlsx-wasm core.
  *
@@ -23,6 +23,7 @@ import type { Direction, SelectionData } from '../selection/types';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { isEngineTrap } from '../../../../shared/office-session/trap';
+import { warnSaveWarnings, type SaveResult, type SaveWarning } from '../../../../shared/office-session/saveWarnings';
 
 export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
   await initWasm();
@@ -30,6 +31,7 @@ export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutpu
     dict === undefined ? undefined : fontBytes(dict), maxOutput));
 };
 import { wasmAssetUrl } from './asset';
+import { packagedWasmError, packagedWasmInput } from '../../../../shared/office-session/readWasmAsset';
 import { pngFontReaders, workbookPngFonts } from './pngDisplayList';
 import { renderPng as renderEnginePng, type XlsxPngEngine } from './enginePng';
 import { pngDisplayList, resolvePngTarget, type ResolvedPngTarget } from './pngResolve';
@@ -57,6 +59,11 @@ import type {
   XlsxStructuredContent,
 } from '../exports';
 
+
+function docSaveWarnings(doc: object): SaveWarning[] {
+  const fn = (doc as { saveWarningsJson?: () => string }).saveWarningsJson;
+  return typeof fn === 'function' ? (JSON.parse(fn.call(doc)) as SaveWarning[]) : [];
+}
 /**
  * A scrolled window into a sheet. `x`/`y` are content-pixel offsets into the
  * non-frozen body. Mirrors the Rust `Viewport`.
@@ -277,6 +284,7 @@ export interface CapturedCellFormat {
     bold?: boolean;
     italic?: boolean;
     underline?: boolean;
+    underline_style?: 'double' | 'singleAccounting' | 'doubleAccounting';
     strike?: boolean;
     color?: CapturedColor | null;
   };
@@ -577,12 +585,25 @@ export interface WorkbookHandle extends CollaborationReplica {
    */
   chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null;
   /**
+   * the encoded bytes (PNG, JPEG, GIF, ...) of the image an `image` draw
+   * command names by `assetId`. throws for a part no picture draws.
+   */
+  mediaBytes(assetId: string): Uint8Array;
+  /**
    * slide the chart frame `chart` names — a {@link ChartRegion} id — by a
    * content-pixel delta, clamped to the grid, as one undo step. the new anchor
    * is written back on save. throws for a chart pinned to the sheet by an
    * absolute anchor.
    */
   moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult;
+  /**
+   * move the edges of the chart frame `chart` names — a {@link ChartRegion} id
+   * — by content-pixel deltas, clamped to the grid and a 1x1px minimum, as one
+   * undo step. the new two-cell anchor is written back on save. throws for a
+   * chart pinned by an absolute anchor or held by a one-cell extent, neither of
+   * which a save can rewrite.
+   */
+  resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult;
   setActiveSheet(index: number): void;
   /**
    * apply one user input to a cell (parses number/bool/formula/text) and
@@ -594,6 +615,14 @@ export interface WorkbookHandle extends CollaborationReplica {
   editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
   /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
+  /**
+   * Fill copies `source` over the complete rectangle `destination` as one undo
+   * step. `destination` includes the source and must start at its top-left
+   * corner; values and styles are copied, formulas are translated with `$`
+   * preserved. Array formulas, merged cells, tables, and charts anchored in
+   * either rectangle are refused without changing the workbook.
+   */
+  fillRange(sheet: number, source: string, destination: string): EditResult;
   /** Move a range within one sheet and rewrite references in one native undo step. */
   moveRange(sheet: number, source: string, destination: string): EditResult;
   setHyperlink(sheet: number, hyperlink: WorkbookHyperlink): EditResult;
@@ -637,8 +666,16 @@ export interface WorkbookHandle extends CollaborationReplica {
    * @internal
    */
   renderPngFonts(target: XlsxPngTarget, options?: XlsxPngOptions): XlsxPngFont[];
-  /** serialize the workbook back to .xlsx bytes. */
+  /**
+   * serialize the workbook back to .xlsx bytes. each save warning is also emitted as a Node process
+   * warning with code `BETTEROFFICE_SAVE_WARNING`; {@link WorkbookHandle.saveWithWarnings} returns them.
+   */
   save(): Uint8Array;
+  /**
+   * serialize the workbook back to .xlsx bytes, with a warning for every part the save wrote differently
+   * from what the workbook holds; none on an ordinary save.
+   */
+  saveWithWarnings(): SaveResult;
   /**
    * stage an agent's proposed edits for human review without applying them.
    * returns the {@link Proposal} with per-cell formatted before/after previews.
@@ -672,7 +709,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   listDefinedNames(request?: XlsxDefinedNamesRequest): XlsxDefinedNamesResult;
   /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
   readCells(request: XlsxReadRequest): XlsxReadResult;
-  /** Exact, case-sensitive search over display text, one match per cell. */
+  /** Literal search over display text, one match per cell; ignores case unless `matchCase`. */
   findText(request: XlsxFindRequest): XlsxFindResult;
   /** Resolves, stages and rehearses a batch like `applyEdits`, changing nothing. */
   validateEdits(request: XlsxEditRequest): XlsxValidationResult;
@@ -748,9 +785,11 @@ export function initWasm(
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
   const png = options.png !== false;
+  let asset: URL | undefined;
+  const resolved = input ?? packagedWasmInput(asset = wasmAssetUrl(engineKind === 'native' || png));
   const source = engineKind === 'native' || (input === undefined && png)
-    ? input ?? wasmAssetUrl()
-    : compileWasmInput(input ?? wasmAssetUrl(png));
+    ? resolved
+    : compileWasmInput(resolved);
   initialization = initWasmModule({ module_or_path: source }).then(
     (output) => {
       engineMemory = output.memory;
@@ -758,7 +797,7 @@ export function initWasm(
     },
     (error: unknown) => {
       initialization = undefined;
-      throw toError(error);
+      throw asset && engineKind !== 'native' ? packagedWasmError(asset, error) : toError(error);
     }
   );
   return initialization;
@@ -1183,8 +1222,14 @@ function wrapWorkbookDocument(
     chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null {
       return parseJson(() => doc.chartAtPointJson(JSON.stringify({ viewport, x, y })));
     },
+    mediaBytes(assetId: string): Uint8Array {
+      return wasmCall(() => doc.mediaBytes(assetId));
+    },
     moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult {
       return parseJson(() => doc.moveChartJson(JSON.stringify({ sheet, chart, dx, dy })), true);
+    },
+    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult {
+      return parseJson(() => doc.resizeChartJson(JSON.stringify({ sheet, chart, ...edges })), true);
     },
     setActiveSheet(index: number): void {
       mutatingWasmCall(() => doc.setActiveSheet(index));
@@ -1200,6 +1245,9 @@ function wrapWorkbookDocument(
     },
     editCells(sheet: number, edits: CellInputEdit[]): EditResult {
       return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
+    },
+    fillRange(sheet: number, source: string, destination: string): EditResult {
+      return parseJson(() => doc.fillRangeJson(JSON.stringify({ sheet, source, destination })), true);
     },
     moveRange(sheet: number, source: string, destination: string): EditResult {
       return parseJson(() => doc.moveRangeJson(JSON.stringify({ sheet, source, destination })), true);
@@ -1334,7 +1382,13 @@ function wrapWorkbookDocument(
     },
     renderPngFonts: (target: XlsxPngTarget, options: XlsxPngOptions = {}): XlsxPngFont[] => workbookPngFonts(handle, target, options),
     save(): Uint8Array {
-      return wasmCall(() => doc.saveBytes());
+      const bytes = wasmCall(() => doc.saveBytes());
+      warnSaveWarnings(wasmCall(() => docSaveWarnings(doc)));
+      return bytes;
+    },
+    saveWithWarnings(): SaveResult {
+      const bytes = wasmCall(() => doc.saveBytes());
+      return { bytes, warnings: wasmCall(() => docSaveWarnings(doc)) };
     },
     propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal {
       const proposal = mutatingWasmCall(() => {

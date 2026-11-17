@@ -10,6 +10,7 @@ export { createWorkbookEditSession } from './session/editSession';
 export { WorkbookPngUnavailableError } from './session/methods';
 export { PngExportError } from '../../../shared/office-session/pngExportError';
 export type { PngExportCode } from '../../../shared/office-session/pngExportError';
+export type { SaveResult, SaveWarning, SaveWarningCode } from './saveWarnings';
 export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './wasm/pngTarget';
 export type { WorkbookEditSession } from './session/editSession';
 /** @experimental */

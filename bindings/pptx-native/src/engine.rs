@@ -13,6 +13,19 @@ use napi::{Env, Error, Result, Status};
 use napi_derive::napi;
 use pptx_engine::{Document, EngineError, ErrorKind, Host, Renderer};
 
+#[napi(catch_unwind, js_name = "font_preflight")]
+pub fn font_preflight(env: Env, bytes: Uint8Array, active_slide: u32) -> Result<String> {
+    ooxml_font_preflight::pptx_font_preflight(&bytes, active_slide as usize)
+        .map(|result| result.to_json())
+        .map_err(|error| {
+            let message = error.to_string();
+            match env.throw(&message) {
+                Ok(()) => Error::new(Status::PendingException, message),
+                Err(error) => error,
+            }
+        })
+}
+
 /// Internal, called by the package loader.
 #[napi(catch_unwind, js_name = "configureFontPacks")]
 pub fn configure_font_packs(
@@ -36,9 +49,32 @@ pub fn configure_font_packs(
     .collect();
     let fonts = BundledFonts::from_pack_directories(directories)
         .map_err(|error| throw_error(&env, &error.to_string()))?;
+    let diagnostics = fonts
+        .pack_diagnostics()
+        .iter()
+        .map(|diagnostic| {
+            serde_json::json!({
+                "pack": diagnostic.pack.as_str(),
+                "reason": diagnostic.reason(),
+                "detail": diagnostic.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let _ = PACK_DIAGNOSTICS.set(serde_json::Value::Array(diagnostics).to_string());
     let installed = set_default_font_source(FontSource::Provider(Arc::new(fonts))).is_ok();
     *configured = true;
     Ok(installed)
+}
+
+static PACK_DIAGNOSTICS: OnceLock<String> = OnceLock::new();
+
+/// Internal: the installed font packs `configureFontPacks` left out, and why, as JSON.
+#[napi(catch_unwind, js_name = "fontPackDiagnosticsJson")]
+pub fn font_pack_diagnostics_json() -> String {
+    PACK_DIAGNOSTICS
+        .get()
+        .cloned()
+        .unwrap_or_else(|| "[]".into())
 }
 
 fn font_manager(env: &Env) -> Result<&'static FontManager> {

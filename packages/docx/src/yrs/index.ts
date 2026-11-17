@@ -84,7 +84,8 @@ import type {
 import { preparedDigests, randomClientId, wrapSession } from './yrsSessionFacade';
 export { decodeDocxHostJson } from './yrsSessionFacade';
 import type { DocxPngOptions, DocxPngTarget } from '../layout/render/png';
-export { PngExportError, type PngExportCode } from '../../../../shared/office-session/pngExportError';
+import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
+export { PngExportError, PNG_SKIPPED_EFFECT_KINDS, type PngExportCode, type PngDiagnostic, type PngPictureUnavailableDiagnostic, type PngEffectsSkippedDiagnostic, type PngSkippedEffectKind, type PngPictureUnavailableReason, type PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 export type { DocxPngFontFace, DocxPngOptions, DocxPngTarget } from '../layout/render/png';
 
 /** @internal */
@@ -124,8 +125,11 @@ export { breakRefusedWhileSuggesting } from './sectionBreak';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
+/** @internal */
+export { subscribeYrsSelection, withYrsSelectionCause, yrsSelectionCause } from './selectionChanges';
 export * from './storyPlainText';
 export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
+export { isCellHasNoStoryRefusal } from './cellRefusal';
 export * from './clipboardFragment';
 export * from './stories';
 export type { DocxResolvedPointPosition } from './pointPosition';
@@ -171,6 +175,7 @@ export {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 export {
+  startHeapCounting,
   WASM32_MEMORY_LIMIT_BYTES,
   wasmModuleMemories,
   type WasmHeapStats,
@@ -255,7 +260,13 @@ export interface YrsAuthor {
   date: string;
 }
 
-/** One position: `(story, paraId, offset)` — offsets are UTF-16 units within the paragraph. */
+/**
+ * One position: `(story, paraId, offset)` — offsets count the paragraph's UTF-16 text units,
+ * inline embeds and the block embeds (table, block content control) that lead it, as
+ * {@link YrsSession.paragraphSpans} measures them. In a paragraph that follows one table,
+ * offset 0 is before the table and the text starts at offset 1; each further leading table or
+ * block content control adds one.
+ */
 export interface YrsLoc {
   story: string;
   paraId: string;
@@ -397,6 +408,10 @@ export function preparedDocxDigest(bytes: Uint8Array): string | undefined {
 export interface YrsParagraph {
   /** Session key; not the paragraph's Word `w14:paraId`. */
   paraId: string;
+  /**
+   * The paragraph's text without its embeds (inline or block); use
+   * {@link YrsSession.paragraphSpans} for its length in offset units.
+   */
   text: string;
   /** pStyle / alignment plus any op-set extras. */
   properties: Record<string, unknown>;
@@ -569,7 +584,10 @@ export interface YrsParagraphSpan {
 /** Compact paragraph entry used to build the live input-position projection. */
 export interface YrsParagraphLength {
   paraId: string;
-  /** UTF-16 text and inline embed units before the paragraph's pilcrow. */
+  /**
+   * UTF-16 text units, inline embed units and one unit per block embed (table, block content
+   * control) that leads the paragraph, before its pilcrow.
+   */
   length: number;
 }
 
@@ -1126,6 +1144,8 @@ export interface YrsSession extends CollaborationReplica {
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
   buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+  /** The retained layout's header and footer payload. @internal */
+  retainedHeadersFootersJson(): string | undefined;
   /**
    * Limit full display builds to pages `start..end` plus the pages already
    * built; the rest stay unbuilt placeholders carrying their geometry. @internal
@@ -1269,6 +1289,13 @@ export interface YrsSession extends CollaborationReplica {
    * snapshot's `mediaSources` names. @internal
    */
   loadMediaSources(json: string): void;
+  /**
+   * Adds to this replica's media sources every part of its own media table
+   * they lack, so it resolves the `data:` URLs seeding wrote whether or not
+   * it was seeded itself; `false` when nothing was added or it has no table.
+   * @internal
+   */
+  rebuildMediaSources(): boolean;
   /** Loads the opened package's separator notes for this replica. @internal */
   loadNoteSeparators(state: Uint8Array): void;
   /**
@@ -1524,7 +1551,7 @@ export interface YrsSession extends CollaborationReplica {
   paragraphs(story: string): YrsParagraph[];
   /** Literal search in document order. */
   searchText(query: string, options?: YrsTextSearchOptions): YrsTextMatch[];
-  /** Paragraph ids and inline-unit lengths, resolved in one Rust story traversal. */
+  /** Paragraph ids and lengths in {@link YrsLoc} offset units, resolved in one Rust story traversal. */
   paragraphSpans(story: string): YrsParagraphLength[];
   /** The raw formatted-segment view (the render bridge's input). */
   storySegments(story: string): YrsStorySegment[];
@@ -1727,10 +1754,18 @@ export interface YrsSession extends CollaborationReplica {
    * Draws a page as PNG bytes with the editor's layout and painter, on a replica
    * of this session's state. Rejects with `PngExportError` rather than paint a
    * substitute font; where no canvas exists names `@betteroffice/docx-native`.
+   * A picture it cannot draw paints a placeholder, reported to `onDiagnostic`.
    */
   renderPng(target: DocxPngTarget, options?: DocxPngOptions): Promise<Uint8Array>;
   /** The native engine's rasterizer; the wasm engine has none. @internal */
   renderPngTarget?(displayListJson: string, targetJson: string, optionsJson: string): Uint8Array;
+  /** {@link renderPngTarget}, with the pictures it drew as placeholders and the kinds of effect it skipped. @internal */
+  renderPngTargetReport?(displayListJson: string, targetJson: string, optionsJson: string): { png: Uint8Array; pictures: PngUnavailablePicture[]; skippedEffects: string[] };
+  /**
+   * The kinds of effect the canvas backend leaves off a resident display page, as bits in
+   * `skippedEffectKinds()` order; `unavailable` holds `(region, area, index)` triples. @internal
+   */
+  canvasSkippedEffects?(pageIndex: number, unavailable: Uint32Array): number;
 
   /** Drops the observer and frees the wasm-side replica. Idempotent. */
   destroy(): void;

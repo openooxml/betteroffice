@@ -109,6 +109,31 @@ describe('@betteroffice/docx-native', () => {
 });
 
 describe('@betteroffice/docx-native allocator', () => {
+  test('heap counting is off in a fresh process until a host starts it, then stays on', () => {
+    const index = fileURLToPath(new URL('./index.js', import.meta.url));
+    const script = [
+      `const n = require(${JSON.stringify(index)});`,
+      'const idle = new n.EditSession(1);',
+      'const before = { counted: n.wasm_heap_counted(), live: n.wasm_live_bytes(), peak: n.wasm_peak_bytes(), stop: n.set_wasm_heap_counting(false) };',
+      'idle.free();',
+      'const started = n.set_wasm_heap_counting(true);',
+      'const session = new n.EditSession(2);',
+      'const live = n.wasm_live_bytes();',
+      'session.free();',
+      'console.log(JSON.stringify({ before, started, counted: n.wasm_heap_counted(), live, stop: n.set_wasm_heap_counting(false), after: n.wasm_heap_counted() }));',
+    ].join('\n');
+    const result = spawnSync(process.execPath, ['--eval', script], { cwd: import.meta.dir, encoding: 'utf8', timeout: 60_000 });
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    const report = JSON.parse(result.stdout.trim().split('\n').at(-1) as string);
+    expect(report.before).toEqual({ counted: false, live: 0, peak: 0, stop: false });
+    expect(report.started).toBe(true);
+    expect(report.counted).toBe(true);
+    expect(report.live).toBeGreaterThan(0);
+    expect(report.stop).toBe(true);
+    expect(report.after).toBe(true);
+  });
+
   const runtimes = [process.execPath, Bun.which('node')].filter((runtime): runtime is string => Boolean(runtime));
   test.each(runtimes.flatMap((runtime) => [
     [runtime, 'in load order', []],

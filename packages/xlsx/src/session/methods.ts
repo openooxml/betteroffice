@@ -1,4 +1,6 @@
 import type { FontDecoderMethods } from '../../../../shared/office-session/fontDecoder';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import type { SaveWarning } from '../../../../shared/office-session/saveWarnings';
 import type { XlsxDefinedNamesRequest, XlsxDefinedNamesResult } from '../definedNames';
 import type { PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
@@ -93,6 +95,8 @@ export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
  */
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
   wasm?: ArrayBuffer | WebAssembly.Module;
+  /** @internal */
+  fontCdn?: FontCdnConfiguration;
   png?: boolean;
   initialViewport?: WorkbookInitialPaintRequest;
   includeEditState?: boolean;
@@ -168,7 +172,7 @@ export interface WorkbookSessionEvents {
 export type WorkbookSessionMethods = FontDecoderMethods & {
   open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionOpenReply;
   /** Checkpoints are only restorable by the same engine version and codec. */
-  openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png'>): WorkbookSessionOpenReply;
+  openRecovery(checkpoint: Checkpoint, options?: Pick<WorkbookSessionOpenOptions, 'wasm' | 'png' | 'fontCdn'>): WorkbookSessionOpenReply;
   version(): string;
   collaborationStateVector(): Uint8Array;
   collaborationStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
@@ -204,6 +208,7 @@ export type WorkbookSessionMethods = FontDecoderMethods & {
   exportMarkdown(options?: XlsxExportOptions, markdownOptions?: XlsxMarkdownOptions): XlsxExportResult<XlsxMarkdownContent>;
   printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): ArrayBuffer;
   save(): ArrayBuffer;
+  saveWithWarnings(): { bytes: ArrayBuffer; warnings: SaveWarning[] };
   dispose(): void;
 };
 
@@ -238,6 +243,7 @@ export const WORKBOOK_SESSION_METHODS = {
   exportMarkdown: true,
   printDisplayList: true,
   save: true,
+  saveWithWarnings: true,
   dispose: true,
 } satisfies { readonly [K in keyof WorkbookSessionMethods]-?: true };
 
@@ -272,5 +278,6 @@ export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> =
   exportMarkdown: { lane: 'interactive', reorderable: false },
   printDisplayList: { lane: 'interactive', reorderable: false },
   save: { lane: 'interactive' },
+  saveWithWarnings: { lane: 'interactive' },
   dispose: { lane: 'interactive' },
 };

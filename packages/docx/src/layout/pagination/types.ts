@@ -135,6 +135,8 @@ export type RunFormatting = {
    * threshold, the painter enables font-kerning: normal.
    */
   kerningMinPt?: number;
+  ligatures?: string;
+  contextualAlternates?: boolean;
   /** Engraved/imprint effect (OOXML w:imprint, §17.3.2.18). */
   imprint?: boolean;
   /** Embossed/raised effect (OOXML w:emboss, §17.3.2.13). */
@@ -623,6 +625,13 @@ export type TableRow = {
    * page rather than splitting its content.
    */
   cantSplit?: boolean;
+  /**
+   * `w:hidden` (§17.4.20). With hidden text not shown, the engine leaves out
+   * marked rows whose cells show nothing; marked rows with visible content stay.
+   */
+  hidden?: boolean;
+  /** The source row held only vanished runs when read; a hidden row without this is never left out. */
+  hiddenContentOnly?: boolean;
   /** Leading omitted grid columns (`w:gridBefore`). Undefined = 0. */
   gridBefore?: number;
   /** Trailing omitted grid columns (`w:gridAfter`). Undefined = 0. */
@@ -1094,6 +1103,8 @@ export type TypesetRow = {
   clusterAdvances?: TypesetClusterAdvance[];
   /** Bidi slices with separate visual/logical order. */
   bidiSlices?: TypesetBidiSlice[];
+  /** Glyph runs measurement shaped the line with, packed; only the Rust engines read them. Undefined = paint reshapes. */
+  glyphRuns?: string;
 };
 
 export type TypesetRunAdvance = {
@@ -1449,7 +1460,11 @@ export type NoteSettingsContract = {
   footnoteColumns?: number;
 };
 
-/** One measured, non-fragmented note in a page note region. */
+/**
+ * One measured note in a page note region. The window fields, when present, name the part of
+ * the note this page shows: blocks `blockStart..=blockEnd`, from line `lineStart` of the first
+ * to line `lineEnd` (exclusive) of the last; a block other than a paragraph is one line.
+ */
 export type NoteLayoutItem = {
   kind?: 'footnote' | 'endnote';
   id?: number;
@@ -1460,6 +1475,10 @@ export type NoteLayoutItem = {
   anchorDocStart?: number;
   anchorDocEnd?: number;
   customMarkFollows?: boolean;
+  blockStart?: number;
+  lineStart?: number;
+  blockEnd?: number;
+  lineEnd?: number;
 };
 
 /** Footnote/endnote area attached to a page/section boundary. */
@@ -1472,6 +1491,12 @@ export type NoteAreaContract = {
   separator?: NoteLayoutItem;
   notes?: NoteLayoutItem[];
   sectionId?: string;
+  /** The area continues notes from the previous page, under a continuation separator. */
+  continuation?: boolean;
+  /** Left edge of the column the area paints in; undefined = the page's text area. */
+  x?: number;
+  /** Width of that column; undefined = the page's text area. */
+  width?: number;
 };
 
 /**

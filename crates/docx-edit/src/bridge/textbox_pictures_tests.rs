@@ -433,7 +433,8 @@ fn inline_picture_in_text_box_paints_with_body_image_properties() {
         assert_eq!(boxed_images.len(), 1);
         assert_eq!(body_images.len(), 1);
         let image = boxed_images[0];
-        for key in ["relId", "w", "h", "crop", "altText"] {
+        assert_eq!(image["relationshipId"], "rId9");
+        for key in ["relId", "relationshipId", "w", "h", "crop", "altText"] {
             assert_eq!(image[key], body_images[0][key], "{key}");
         }
         if media_tokens {

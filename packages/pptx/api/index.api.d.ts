@@ -471,6 +471,12 @@ export type PptxFindResult = {
     truncated: boolean;
 } | PptxEditRefusal;
 
+// ---- fontPackDiagnostics.d.ts ----
+import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
+export type { FontPackDiagnostic };
+/** The installed font add-on packages that cannot be used, and why; their faces are substituted. */
+export declare function fontPackDiagnostics(): Promise<FontPackDiagnostic[]>;
+
 // ---- index.d.ts ----
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
@@ -489,7 +495,7 @@ export { PptxExportError } from './structuredExport';
 export type { ExportCompletion, ExportDiagnostic, ExportSeverity, MarkdownAnchor, PptxAnchor, PptxAnchorScope, PptxExportComment, PptxExportDiagnostic, PptxExportDiagnosticCode, PptxExportFailure, PptxExportFailureCode, PptxExportList, PptxExportMark, PptxExportNotes, PptxExportObject, PptxExportObjectKind, PptxExportOptions, PptxExportParagraph, PptxExportRefusal, PptxExportResult, PptxExportRun, PptxExportShape, PptxExportShapeKind, PptxExportSlide, PptxExportStory, PptxExportTable, PptxExportTableCell, PptxMarkdownContent, PptxMarkdownOptions, PptxSourceProvenance, PptxStructuredContent, PptxTextSpan, } from './structuredExport';
 export type { InspectPresentationOptions, OpenPresentationOptions, SavePresentationOptions, PresentationHandle, UndoCaptureMode, WasmInitInput, } from './wasm/loader';
 export type { EditSuccess, OperationFailure, OperationRefusal, PptxEditFailure, PptxEditFailureCode, PptxEditHistory, PptxEditPreview, PptxEditReceipt, PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxEditSource, PptxEditStep, PptxEditTarget, PptxFindMatch, PptxFindRequest, PptxFindResult, PptxFindScope, PptxParagraphText, PptxReadRequest, PptxReadResult, PptxShapeTarget, PptxSlideTarget, PptxStoryTarget, PptxStoryText, PptxTextField, PptxTextGuard, PptxTextRange, PptxTextTarget, PptxValidationResult, ValidationSuccess, } from './edits';
-export type { BlipEffect, CaretStop, ColorTransform, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditProfile, GeometryPathCommand, HistoryProfile, HistoryResult, HitTestResult, ImageEffect, ImageCrop, ImagePrimitive, InheritedGeometry, LayoutProfile, Paint, ParagraphAlignment, ParagraphSnapshot, PictureDraft, PlaceholderPrimitive, PositionedGlyph, PositionedTextLine, PositionedTextRun, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, PrimitiveTransform, ShapeAdjustReceipt, ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeGradient, ShapeKind, ShapeLineEnd, ShapeOutline, ShapePrimitive, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, ShapeAltText, TextLanguage, TextLink, TextLinkTarget, SlideDisplayList, SlidePrimitive, SlideReceipt, SlideSnapshot, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter, StorySnapshot, Stroke, StrokeEnd, TextBoxPrimitive, TextReceipt, TextParagraphDraft, TextRunSnapshot, TextStyle, TextStylePatch, TextStyleSnapshot, TransformReceipt, TableReceipt, UpdateEvent, } from './types';
+export type { BlipEffect, CaretStop, ColorTransform, ColorValue, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditProfile, GeometryPathCommand, HistoryProfile, HistoryResult, HitTestResult, ImageEffect, ImageCrop, ImagePrimitive, InheritedGeometry, LayoutProfile, Paint, ParagraphAlignment, ParagraphSnapshot, PictureDraft, PlaceholderPrimitive, PositionedGlyph, PositionedTextLine, PositionedTextRun, PresetShapeDraft, Profiled, ProfiledLayout, PptxFontFace, PptxCaretAnchor, PptxTextMatch, PptxTextSearchOptions, PrimitiveTransform, ShapeAdjustReceipt, ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeGradient, ShapeKind, ShapeLineEnd, ShapeOutline, ShapePrimitive, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, ShapeAltText, TextLanguage, TextLink, TextLinkTarget, TableGrid, TableGridCell, ChartData, ChartDataSeries, SlideDisplayList, SlidePrimitive, SlideReceipt, SlideSnapshot, SlideLayoutSnapshot, HeaderFooterSettings, SlideHeaderFooterText, SlideDateText, SlideHeaderFooter, StorySnapshot, Stroke, StrokeEnd, TextBoxPrimitive, TextReceipt, TextParagraphDraft, TextRunSnapshot, TextStyle, TextStylePatch, TextStyleSnapshot, TransformReceipt, TableReceipt, UpdateEvent, } from './types';
 /** @internal */
 export { metafileImageBytes } from './render/image';
 /** @internal */
@@ -498,6 +504,10 @@ export { PptxPeerNotReadyError, PptxWorkerEditorDisposedError } from './session/
 export { openPresentationSession } from './session/client';
 /** @internal */
 export { createPptxWorkerEditorSession } from './session/editorSession';
+export { fontPackDiagnostics } from './fontPackDiagnostics';
+export type { FontPackDiagnostic } from './fontPackDiagnostics';
+export { fontPreflight, preloadPreflightWasm } from './wasm/preflight';
+export type { FontPreflight, FontPreflightFace } from './wasm/preflight';
 
 // ---- proposals.d.ts ----
 import type { DeckSnapshot, ParagraphAlignment, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeFill, ShapeRect, ShapeSnapshot, ShapeStroke, SlideDisplayList, TextParagraphDraft, TextStyleSnapshot } from './types';
@@ -915,6 +925,7 @@ export declare function createPresentationEditorSession(bytes: Uint8Array | Arra
 
 // ---- session/methods.d.ts ----
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
+import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type { PptxEditRequest, PptxEditResult, PptxFindRequest, PptxFindResult, PptxReadRequest, PptxReadResult, PptxValidationResult } from '../edits';
 import type { SlideDisplayList } from '../types';
 import type { OpenPresentationOptions } from '../wasm/loader';
@@ -955,6 +966,8 @@ export interface PresentationSessionOpenOptions extends Omit<OpenPresentationOpt
     fonts?: readonly PresentationSessionFont[];
     fallbackFonts?: readonly PresentationSessionFont[];
     wasm?: ArrayBuffer | WebAssembly.Module;
+    /** @internal */
+    fontCdn?: FontCdnConfiguration;
 }
 /**
  * Slide metadata without layout; indices are zero-based.
@@ -1519,6 +1532,22 @@ export interface CollaborationPipeHost<C = PipeCursor, P = PipePeer> {
 export declare function createCollaborationPipeHost<Prov extends PipeProvider<C, P>, C = PipeCursor, P = PipePeer>(options: CollaborationPipeHostOptions<Prov, C, P>): CollaborationPipeHost<C, P>;
 export {};
 
+// ---- shared/fontPackDiagnostics.d.ts ----
+/** An installed font pack that cannot be used, so its faces are substituted. */
+export interface FontPackDiagnostic {
+    /** The add-on package: `@betteroffice/fonts-latin`, `-intl` or `-cjk`. */
+    pack: 'latin' | 'intl' | 'cjk';
+    /** `version-mismatch`: another release is installed; `missing-file`: files are absent; `invalid-manifest`: its manifest cannot be read. */
+    reason: 'version-mismatch' | 'missing-file' | 'invalid-manifest';
+    /** A sentence naming the package and what is wrong. */
+    detail: string;
+}
+/**
+ * Emits each diagnostic once per pack and process as a Node process warning with code `BETTEROFFICE_FONT_PACK`,
+ * so server hosts can filter it. Does nothing outside Node.
+ */
+export declare function warnFontPackDiagnostics(diagnostics: readonly FontPackDiagnostic[]): void;
+
 // ---- shared/host-contracts/edits.d.ts ----
 /**
  * Result envelopes shared by the formats' host edit APIs. Targets, steps, receipts and failure
@@ -1624,6 +1653,17 @@ export interface SessionClient<M extends SessionMethods, E extends SessionEvents
 /** Creates a typed client over an existing transport. */
 export declare function createSessionClient<M extends SessionMethods, E extends SessionEvents>(transport: SessionTransport, options: SessionClientOptions<M>): SessionClient<M, E>;
 
+// ---- shared/office-session/fontCdn.d.ts ----
+/** @internal */
+export interface FontCdnConfiguration {
+    baseUrl: string | false;
+    timeoutMs: number;
+}
+/** @internal */
+export declare function getFontCdnConfiguration(): FontCdnConfiguration | undefined;
+/** @internal */
+export declare function setFontCdnConfiguration(configuration: FontCdnConfiguration | undefined): void;
+
 // ---- shared/office-session/fontDecoder.d.ts ----
 export type FontDecoder = (bytes: ArrayBuffer | Uint8Array, options: {
     codec: string;
@@ -1643,6 +1683,34 @@ export declare function copyDecodedFace(face: {
     font: Uint8Array;
     payload?: Uint8Array;
 }): FontDecodeResult;
+
+// ---- shared/office-session/fontPreflight.d.ts ----
+export type PreflightWasmInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+/** @experimental */
+export interface FontPreflightFace {
+    family: string;
+    bold: boolean;
+    italic: boolean;
+    scripts: string[];
+}
+/** @experimental */
+export interface FontPreflight {
+    faces: FontPreflightFace[];
+    /** False when some font rules could not be resolved. */
+    complete: boolean;
+}
+/** @internal */
+export declare function createPreflightState(options: {
+    assetUrl: () => URL;
+    engineKind: 'wasm' | 'native';
+    initAsync: (input: {
+        module_or_path: PreflightWasmInput;
+    }) => Promise<unknown>;
+}): {
+    status(): "idle" | "loading" | "ready";
+    memory(): WebAssembly.Memory | undefined;
+    preload(input?: PreflightWasmInput): Promise<void>;
+};
 
 // ---- shared/office-session/host.d.ts ----
 import { type TaskExecutor } from './scheduler';
@@ -1680,6 +1748,57 @@ export declare class PngExportError extends Error {
     readonly code: PngExportCode;
     constructor(code: PngExportCode, message: string);
 }
+/** Why a picture was left as a placeholder. */
+export type PngPictureUnavailableReason = 'missing' | 'unsupported' | 'decode-failed' | 'metafile' | 'too-large' | 'budget';
+/** A picture a PNG export drew as a placeholder. `limit` and `actual` say by how much a size or budget limit was passed. */
+export interface PngUnavailablePicture {
+    /** The engine's reference for the picture; empty for one whose relationship has no part, which has nothing to name it by. */
+    id: string;
+    reason: PngPictureUnavailableReason;
+    limit?: number;
+    actual?: number;
+    unit?: 'pixels' | 'bytes' | 'work';
+}
+/**
+ * The kinds of effect a PNG export can leave off a page:
+ * - `text.outline`: a run's classic hollow outline.
+ * - `text.emphasisMark`: the dots, commas or circles marking emphasised characters.
+ * - `text.effect`: a legacy animated text effect such as a blinking background.
+ * - `text.modernEffects`: a run's glow, shadow, reflection, fill or outline text effects.
+ * - `text.shadow`: a run's classic shadow, emboss or engrave.
+ * - `text.leaderGlyphs`: the dots or dashes a tab leader repeats.
+ * - `shape.effects`: a shape's effects, such as a soft edge or a second shadow.
+ * - `image.filter`: a picture's colour filter, such as a watermark washout.
+ * - `image.effects`: a picture's colour or blur effects.
+ *
+ * A page reports a kind when it carries at least one drawing primitive with an
+ * effect of that kind that the engine does not draw on its normal path. A
+ * picture whose bytes cannot be loaded or decoded reports `picture-unavailable`
+ * and nothing else. Kinds come in the order listed here.
+ *
+ * The report describes each engine's normal path, not the pixels of one page.
+ * A degenerate primitive that carries an effect, such as an empty crop, a run
+ * of spaces or a leader with no advance, still reports it.
+ */
+export declare const PNG_SKIPPED_EFFECT_KINDS: readonly ["text.outline", "text.emphasisMark", "text.effect", "text.modernEffects", "text.shadow", "text.leaderGlyphs", "shape.effects", "image.filter", "image.effects"];
+export type PngSkippedEffectKind = (typeof PNG_SKIPPED_EFFECT_KINDS)[number];
+/** Pictures a PNG export drew as a placeholder. */
+export interface PngPictureUnavailableDiagnostic {
+    code: 'picture-unavailable';
+    pictures: PngUnavailablePicture[];
+}
+/**
+ * Effects a PNG export left off a page, sent at most once per page and only
+ * when `effects` is not empty. `page` is zero-based, as the export target is.
+ * `effects` names each kind once, in {@link PNG_SKIPPED_EFFECT_KINDS} order.
+ */
+export interface PngEffectsSkippedDiagnostic {
+    code: 'effects-skipped';
+    page: number;
+    effects: PngSkippedEffectKind[];
+}
+/** A problem a PNG export worked around: the page still exports. */
+export type PngDiagnostic = PngPictureUnavailableDiagnostic | PngEffectsSkippedDiagnostic;
 
 // ---- shared/office-session/protocol.d.ts ----
 import type { SessionFailureCode } from './types';
@@ -2825,6 +2944,21 @@ export interface ChartPrimitive extends PrimitiveBase {
     name: string;
     label: string;
     primitives: SlidePrimitive[];
+    /** The plotted values as text, for assistive technology, with no categories
+     *  or series when the chart caches no points. Older engines and charts over
+     *  the size cap leave it out. */
+    data?: ChartData;
+}
+/** What a chart plots: one row per category and one column per series. */
+export interface ChartData {
+    categories: string[];
+    series: ChartDataSeries[];
+}
+export interface ChartDataSeries {
+    name?: string;
+    /** Each category's value as the chart's data labels would show it; `null`
+     *  where the chart has no number. */
+    values: (string | null)[];
 }
 /** A laid-out table. Its cells paint clipped to the table rectangle, and
  *  `label` is the screen-reader summary of the whole table. */
@@ -2833,6 +2967,28 @@ export interface TablePrimitive extends PrimitiveBase {
     name: string;
     label: string;
     primitives: SlidePrimitive[];
+    /** The row and column structure, for assistive technology. Older engines
+     *  leave it out. */
+    grid?: TableGrid;
+}
+export interface TableGrid {
+    rows: number;
+    columns: number;
+    /** Cells that start a span, in row then column order; cells merged into
+     *  another one are left out. */
+    cells: TableGridCell[];
+}
+export interface TableGridCell {
+    row: number;
+    column: number;
+    rowSpan: number;
+    columnSpan: number;
+    /** `column` heads its column (the header row), `row` heads its row (the
+     *  first column). */
+    header?: 'column' | 'row';
+    /** The `[start, end)` range of the table's `primitives` that hold the
+     *  cell's text. */
+    primitives: [number, number];
 }
 export type SlidePrimitive = ShapePrimitive | ImagePrimitive | TextBoxPrimitive | PlaceholderPrimitive | ChartPrimitive | TablePrimitive;
 /** What `p:cNvPr` says about a shape for assistive technology. */
@@ -3634,3 +3790,16 @@ export interface PptxPngOptions {
      */
     fonts?: ReadonlyArray<PptxFontFace>;
 }
+
+// ---- wasm/preflight.d.ts ----
+import { type FontPreflight, type PreflightWasmInput } from '../../../../shared/office-session/fontPreflight';
+export type { FontPreflight, FontPreflightFace } from '../../../../shared/office-session/fontPreflight';
+export declare const preflightWasmState: {
+    status(): "idle" | "loading" | "ready";
+    memory(): WebAssembly.Memory | undefined;
+    preload(input?: PreflightWasmInput): Promise<void>;
+};
+/** @experimental Load the font preflight wasm on demand. Idempotent. */
+export declare function preloadPreflightWasm(input?: PreflightWasmInput): Promise<void>;
+/** @experimental Font faces for a zero-based slide index. Defaults to the first slide. */
+export declare function fontPreflight(bytes: Uint8Array, activeSlide?: number): Promise<FontPreflight>;

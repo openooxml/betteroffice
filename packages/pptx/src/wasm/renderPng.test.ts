@@ -148,6 +148,50 @@ describe('PresentationHandle.renderPng', () => {
     } finally { handle.dispose(); }
   });
 
+  test('a picture whose fill sits in alternate content paints the branch it supports on both engines', async () => {
+    const browser = stubBrowser();
+    const decoded: Uint8Array[] = [];
+    Object.assign(globalThis, {
+      createImageBitmap: async (blob: Blob) => {
+        decoded.push(new Uint8Array(await blob.arrayBuffer()));
+        return { width: 1, height: 1, close() {} };
+      },
+    });
+    const fallback = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0));
+    const withPicture = async (picture: boolean) => {
+      const zip = await JSZip.loadAsync(fixture);
+      zip.file('ppt/media/alternate.pdf', new TextEncoder().encode('%PDF-1.4\n%%EOF\n'));
+      zip.file('ppt/media/alternate.png', fallback);
+      const rels = (await zip.file('ppt/slides/_rels/slide1.xml.rels')!.async('string')).replace(
+        '</Relationships>',
+        '<Relationship Id="rIdAltPdf" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/alternate.pdf"/><Relationship Id="rIdAltPng" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/alternate.png"/></Relationships>'
+      );
+      zip.file('ppt/slides/_rels/slide1.xml.rels', rels);
+      if (picture) {
+        const slide = (await zip.file('ppt/slides/slide1.xml')!.async('string')).replace(
+          '</p:spTree>',
+          '<p:pic><p:nvPicPr><p:cNvPr id="900" name="Alternate"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice xmlns:ma="http://schemas.microsoft.com/office/mac/drawingml/2008/main" Requires="ma"><p:blipFill><a:blip r:embed="rIdAltPdf"/><a:stretch><a:fillRect/></a:stretch></p:blipFill></mc:Choice><mc:Fallback><p:blipFill><a:blip r:embed="rIdAltPng"/><a:stretch><a:fillRect/></a:stretch></p:blipFill></mc:Fallback></mc:AlternateContent><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="3000000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic></p:spTree>'
+        );
+        zip.file('ppt/slides/slide1.xml', slide);
+      }
+      return zip.generateAsync({ type: 'uint8array' });
+    };
+    const render = async (deck: Uint8Array, clientId: number) => {
+      const handle = openPresentation(deck, { clientId, fonts: [{ family: 'Liberation Sans', bytes: font }] });
+      try { return await handle.renderPng({ slide: 0 }); } finally { handle.dispose(); }
+    };
+    const without = await render(await withPicture(false), 7110);
+    const seenWithout = decoded.length;
+    const painted = await render(await withPicture(true), 7111);
+    if (native) {
+      expect(isPng(painted)).toBe(true);
+      expect(Buffer.from(painted).equals(Buffer.from(without))).toBe(false);
+    } else {
+      expect(decoded.slice(seenWithout).some((bytes) => Buffer.from(bytes).equals(Buffer.from(fallback)))).toBe(true);
+      expect(browser.sizes).toHaveLength(2);
+    }
+  });
+
   test('a picture the engine cannot decode rejects natively and is left out on the canvas', async () => {
     const browser = stubBrowser();
     const zip = await JSZip.loadAsync(fixture);

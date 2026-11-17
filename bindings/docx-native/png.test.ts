@@ -35,6 +35,10 @@ function pagePng(session: Session, list: string, page: number, scale: number): U
   return session.renderPngTarget(list, `{"page":${page}}`, `{"scale":${scale}}`);
 }
 
+function pageReport(session: Session, list: string, page: number, scale: number) {
+  return session.renderPngTargetReport(list, `{"page":${page}}`, `{"scale":${scale}}`);
+}
+
 function pngDisplayList(
   session: Session,
   families = ['Calibri'],
@@ -86,6 +90,50 @@ test('native docx rasterizes the compiled page at two scales', () => {
   } finally {
     session.free();
   }
+});
+
+test('native docx draws a run scale of 0 at full width, as Word does', () => {
+  const scaled = (properties: string) => {
+    const session = new raw.EditSession(405);
+    try {
+      session.open_docx(raw.rezip_docx({
+        '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+        '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+        'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r>${properties}<w:t>Engine text</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
+      }), true);
+      return Buffer.from(pagePng(session, pngDisplayList(session), 0, 1));
+    } finally {
+      session.free();
+    }
+  };
+  const plain = scaled('');
+  expect(scaled('<w:rPr><w:w w:val="0"/></w:rPr>').equals(plain)).toBe(true);
+  expect(scaled('<w:rPr><w:w w:val="50"/></w:rPr>').equals(plain)).toBe(false);
+});
+
+test('native docx PNG draws a dotted tab leader, as on a contents page', () => {
+  const page = (leader: string) => {
+    const session = new raw.EditSession(406);
+    try {
+      session.open_docx(raw.rezip_docx({
+        '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+        '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+        'word/document.xml': encoder.encode(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="${leader}" w:pos="3600"/></w:tabs></w:pPr><w:r><w:t>Chapter</w:t></w:r><w:r><w:tab/><w:t>9</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`),
+      }), true);
+      const list = pngDisplayList(session);
+      const primitives = (JSON.parse(list) as DisplayList).pages[0]?.primitives ?? [];
+      const leaders = primitives.filter((p) => p.kind === 'decoration' && (p as DecorationPrimitive).dotted).length;
+      const darkness = pngPixels(pagePng(session, list, 0, 1)).reduce((sum, value, index) => (index % 4 === 0 ? sum + 255 - value : sum), 0);
+      return { leaders, darkness };
+    } finally {
+      session.free();
+    }
+  };
+  const dotted = page('dot');
+  const plain = page('none');
+  expect(plain.leaders).toBe(0);
+  expect(dotted.leaders).toBeGreaterThan(0);
+  expect(dotted.darkness - plain.darkness).toBeGreaterThan(20 * 255);
 });
 
 test('native docx PNG refuses invalid input, missing fonts and oversized surfaces', () => {
@@ -190,7 +238,50 @@ test('native docx PNG uses display list font chains for text primitives', () => 
   }
 });
 
-test('native docx PNG resolves media tokens in every page region and refuses a picture it cannot draw', () => {
+const smartArtParts = (drawingRels = '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>') => ({
+  '[Content_Types].xml': encoder.encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'),
+  '_rels/.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'),
+  'word/_rels/document.xml.rels': encoder.encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDm" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="diagrams/data1.xml"/></Relationships>'),
+  'word/document.xml': encoder.encode('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Diagram"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="rIdDm"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p><w:sectPr/></w:body></w:document>'),
+  'word/diagrams/data1.xml': encoder.encode('<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"/>'),
+  'word/diagrams/drawing1.xml': encoder.encode('<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dsp:spTree><dsp:nvGrpSpPr/><dsp:grpSpPr/><dsp:sp modelId="{1}"><dsp:nvSpPr><dsp:cNvPr id="0" name=""/><dsp:cNvSpPr/></dsp:nvSpPr><dsp:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></a:blipFill></dsp:spPr></dsp:sp></dsp:spTree></dsp:drawing>'),
+  'word/diagrams/_rels/drawing1.xml.rels': encoder.encode(drawingRels),
+  'word/media/image1.png': new Uint8Array(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==', 'base64')),
+});
+
+test('native docx draws a SmartArt picture fill from the drawing part\'s own relationships', () => {
+  const session = new raw.EditSession(407);
+  try {
+    session.set_media_tokens(true);
+    session.open_docx(raw.rezip_docx(smartArtParts()), true);
+    const pixels = pngPixels(pagePng(session, pngDisplayList(session), 0, 1));
+    let blue = 0;
+    for (let offset = 0; offset < pixels.length; offset += 4) {
+      if (pixels[offset]! < 40 && pixels[offset + 2]! > 200) blue++;
+    }
+    expect(blue).toBeGreaterThan(1000);
+  } finally {
+    session.free();
+  }
+});
+
+test('native docx opens a document whose SmartArt drawing relationships cannot be read, and warns', () => {
+  const session = new raw.EditSession(408);
+  try {
+    session.set_media_tokens(true);
+    session.open_docx(raw.rezip_docx(smartArtParts('<Relationships><not closed')), true);
+    const { document } = JSON.parse(session.materialize_docx()!) as { document: { warnings?: string[] } };
+    expect(document.warnings?.some((warning) => warning.includes('SmartArt pictures were left unresolved'))).toBe(true);
+    const report = pageReport(session, pngDisplayList(session), 0, 1);
+    expectPlainBytes(report.png);
+    expect(report.pictures.length).toBeGreaterThan(0);
+    expect(report.pictures.every((picture) => picture.reason === 'missing')).toBe(true);
+  } finally {
+    session.free();
+  }
+});
+
+test('native docx PNG resolves media tokens in every page region and draws a placeholder for a picture it cannot draw', () => {
   const parts = raw.unzip_docx(fixture) as Record<string, Uint8Array>;
   const blue = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg==';
   parts['word/media/image1.png'] = new Uint8Array(Buffer.from(blue, 'base64'));
@@ -225,7 +316,22 @@ test('native docx PNG resolves media tokens in every page region and refuses a p
       expect(pixel(115)).toEqual([255, 255, 255, 255]);
     }
     const dropped = JSON.stringify({ pages: [{ pageIndex: 0, width: 160, height: 60, primitives: [image(10), image(110, 'media:999')] }] });
-    expect(() => pagePng(session, dropped, 0, 1)).toThrow('png-picture-unavailable: 1 picture(s) on this page could not be drawn');
+    for (const scale of [1, 2]) {
+      const report = pageReport(session, dropped, 0, scale);
+      expect(report.pictures).toEqual([{ id: 'media:999', reason: 'missing' }]);
+      expect(pagePng(session, dropped, 0, scale)).toEqual(report.png);
+      const width = Buffer.from(report.png).readUInt32BE(16);
+      const pixels = pngPixels(report.png);
+      const pixel = (x: number, y: number) => {
+        const offset = (y * scale * width + x * scale) * 4;
+        return [...pixels.subarray(offset, offset + 4)];
+      };
+      expect(pixel(15, 15)).toEqual([0, 0, 255, 255]);
+      expect(pixel(115, 15)).toEqual([242, 242, 242, 255]);
+      expect(pixel(110, 15)).toEqual([191, 191, 191, 255]);
+      expect(pixel(119, 19)).toEqual([191, 191, 191, 255]);
+      expect(pixel(125, 15)).toEqual([255, 255, 255, 255]);
+    }
   } finally {
     session.free();
   }

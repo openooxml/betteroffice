@@ -1,13 +1,14 @@
-import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv, getLayoutKernelInputs } from '../editor/computeLayout';
-import { createRustMeasureSource, resolveCompleteFontProvider, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
+import { buildResidentRegionLayoutRequest, computeLayout, documentRenderEnv } from '../editor/computeLayout';
+import { createRustMeasureSource, type BundledFontProvider, type ResidentFontRequirement } from '../layout/measure';
+import { resolveCompleteFontSelection } from '../layout/measure/defaultFontProvider';
 import type { EmbeddedFaceInput } from '../layout/measure/fontRegistry';
 import { fontUnavailable, pngPage, pngScale, type DocxPngFontFace, type DocxPngOptions, type DocxPngTarget } from '../layout/render/png';
-import { buildRustDisplayList } from '../layout/render/rustDisplayList';
-import type { DisplayList } from '../layout/render/displayList';
+import { openPagedDisplay } from '../layout/render/rustDisplayList';
 import { extractEmbeddedFontFaces } from '../utils';
 import { engineKind, renderPng as renderEnginePng } from '../wasm/enginePng';
+import { faceLoadFailure, recordProviderFaceLoads, untilAborted } from '../wasm/enginePngFonts';
 import { createYrsSession, type YrsSession } from './index';
-import { sessionMediaSources } from './sessionInternals';
+import { sessionMediaSources, sessionSourcePackage } from './sessionInternals';
 
 const IDLE_RELEASE_MS = 30_000;
 
@@ -15,7 +16,7 @@ interface Held {
   version: string;
   fonts: ReadonlyArray<DocxPngFontFace> | undefined;
   fontProvider: BundledFontProvider | undefined;
-  laidOut: Promise<{ copy: YrsSession; displayList: DisplayList; fontChains: Record<string, number[]> }>;
+  laidOut: Promise<{ copy: YrsSession; display: ReturnType<typeof openPagedDisplay>; fontChains: Record<string, number[]> }>;
   users: number;
   stale: boolean;
 }
@@ -55,29 +56,43 @@ export function createPngExporter(session: YrsSession) {
       const host = copy.openDocx(bytes, false, { mediaTokens: true });
       copy.bootstrapPeer(state, metadata, bytes, host, { mediaTokens: true });
       if (media) copy.loadMediaSources(media);
+      copy.rebuildMediaSources();
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
-      const bundled = fontProvider ?? (engineKind === 'native' ? await resolveCompleteFontProvider() : undefined);
-      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : { standIns: true }) });
+      const complete = fontProvider ? undefined : await resolveCompleteFontSelection();
+      const recorded = complete?.provider && !complete.configured
+        ? await recordProviderFaceLoads(complete.provider) : undefined;
+      const bundled = fontProvider ?? recorded?.provider ?? complete?.provider;
+      const rejectFailedLoads = async () => {
+        if (!recorded) return;
+        await recorded.settled();
+        const failed = faceLoadFailure(recorded.failures);
+        if (failed) throw failed;
+      };
+      const measure = createRustMeasureSource({ engine: copy, ...(bundled ? { bundled } : {}) });
       measure.setCompat(document.package.settings?.compatibilityFlags);
       measure.setEmbeddedFaces(await extractEmbeddedFontFaces(document), appFaces(fonts));
       const renderEnv = documentRenderEnv(document);
       const request = buildResidentRegionLayoutRequest(document, 0, renderEnv);
       const requirements = JSON.parse(copy.layoutFontRequirementsJson(JSON.stringify(request))) as ResidentFontRequirement[];
       await measure.prepareFontRequirements(requirements);
+      await rejectFailedLoads();
       const measurement = measure.measurementConfigForRequirements(requirements);
       if (!measurement) throw fontUnavailable('The fonts this document lays out with could not be loaded. Install @betteroffice/fonts, or pass them in `fonts`.');
-      const { layout } = computeLayout({ document, pageGap: 0, session: copy, renderEnv, measurement });
-      const displayList = await buildRustDisplayList({ ...getLayoutKernelInputs(layout)!, layout, fontChains: measurement.fontChains }, copy);
-      return { copy, displayList, fontChains: measurement.fontChains ?? {} };
-    } catch (error) { copy.destroy(); throw error; }
+      computeLayout({ document, pageGap: 0, session: copy, renderEnv, measurement });
+      await rejectFailedLoads();
+      return { copy, display: openPagedDisplay(copy, measurement.fontChains), fontChains: measurement.fontChains ?? {} };
+    } catch (error) {
+      try { copy.destroy(); } catch { /* the layout failure is the one to report */ }
+      throw error;
+    }
   }
 
   function current(fonts: Held['fonts'], fontProvider: Held['fontProvider']): Held {
     const version = session.version();
     if (held && held.version === version && held.fonts === fonts && held.fontProvider === fontProvider) return held;
     release();
-    const source = session.materializeDocx()?.originalBuffer;
+    const source = (engineKind === 'native' ? sessionSourcePackage(session)?.buffer : undefined) ?? session.materializeDocx()?.originalBuffer;
     if (!source) throw new Error('renderPng needs a session opened from DOCX bytes');
     const entry: Held = {
       version, fonts, fontProvider, users: 0, stale: false,
@@ -99,12 +114,12 @@ export function createPngExporter(session: YrsSession) {
       if (idle !== undefined) clearTimeout(idle);
       idle = undefined;
       try {
-        const { copy, displayList, fontChains } = await entry.laidOut;
+        const { copy, display, fontChains } = await untilAborted(entry.laidOut, options.signal);
         assertAlive();
-        const page = displayList.pages[index];
-        if (!page) throw new RangeError(`page index ${index} out of range for ${displayList.pages.length} page(s)`);
+        const page = display.page(index);
+        if (!page) throw new RangeError(`page index ${index} out of range for ${display.pageCount} page(s)`);
         const bytes = await renderEnginePng({
-          displayList, fontChains, page, session: copy,
+          displayList: display.displayList, fontChains, page, session: copy,
           outlineGlyph: (fontId, glyphId) => copy.outlineGlyphJson(fontId, glyphId),
           media: (token) => copy.mediaSource(token),
         }, options);

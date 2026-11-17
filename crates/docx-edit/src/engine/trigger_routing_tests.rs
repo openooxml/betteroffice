@@ -402,7 +402,9 @@ fn assert_resumed_matches_fresh(engine: &EngineSession, request: &Value) {
         after.incremental_pagination_calls,
         before.incremental_pagination_calls + 1
     );
-    assert!(after.pagination_blocks_placed - before.pagination_blocks_placed <= 4);
+    // The block after a changed one is placed again before placement is
+    // allowed to converge, since what a block does can depend on the one before it.
+    assert!(after.pagination_blocks_placed - before.pagination_blocks_placed <= 5);
     assert!(after.rebuilt_pages < after.retained_pages);
     let fresh = EngineSession::new(75302);
     fresh

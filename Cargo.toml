@@ -25,7 +25,7 @@ base-latin = { package = "betteroffice-base-latin", path = "crates/base-latin", 
 betteroffice-fonts = { path = "crates/betteroffice-fonts", version = "0.5.1", default-features = false }
 quick-xml = "0.41"
 wasm-bindgen = "0.2"
-libm = "=0.2.15"
+libm = "=0.2.16"
 betteroffice-xlsx = { path = "crates/betteroffice-xlsx", version = "0.5.1", default-features = false }
 ooxml-opc = { package = "betteroffice-opc", path = "crates/ooxml-opc", version = "0.5.1" }
 xlsx-model = { package = "betteroffice-xlsx-model", path = "crates/xlsx-model", version = "0.5.1" }
@@ -78,9 +78,6 @@ strip = "symbols"
 [profile.release.package.betteroffice-docx-layout]
 opt-level = 3
 
-[profile.release.package.betteroffice-docx-parse]
-opt-level = 3
-
 [profile.release.package.betteroffice-ooxml-font-preflight]
 opt-level = "z"
 
@@ -97,4 +94,4 @@ opt-level = 3
 opt-level = 3
 
 [patch.crates-io]
-yrs = { git = "https://github.com/openooxml/y-crdt.git", rev = "e785c00611ebce79ece115defa25295982cac165" }
+yrs = { git = "https://github.com/openooxml/y-crdt.git", rev = "5349f4e11ec46a5ad842f08415b315cb6d5c53af" }

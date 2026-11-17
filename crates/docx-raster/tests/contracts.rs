@@ -171,6 +171,70 @@ fn glyph_id_scene(font_id: u32, glyph_id: u32) -> DisplayList {
 
 /// A glyph id past the outline range, so the page fails before the cache holds
 /// anything.
+fn gradient_scene(kind: &str) -> DisplayList {
+    list(
+        40.0,
+        40.0,
+        vec![json!({
+            "kind": "shape",
+            "x": 0,
+            "y": 0,
+            "w": 40,
+            "h": 40,
+            "geometryPath": [
+                {"type":"move","x":0,"y":0},
+                {"type":"line","x":40,"y":0},
+                {"type":"line","x":40,"y":40},
+                {"type":"line","x":0,"y":40},
+                {"type":"close"}
+            ],
+            "fillPaint": {
+                "kind": "gradient",
+                "gradientType": kind,
+                "stops": [
+                    {"position":0,"color":"#ff0000"},
+                    {"position":1,"color":"#0000ff"}
+                ]
+            }
+        })],
+    )
+}
+
+fn assert_paints_like_radial(kind: &str) {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let radial = render_page(&gradient_scene("radial"), 0, &resources).expect("radial");
+    let page = render_page(&gradient_scene(kind), 0, &resources).expect(kind);
+    assert_eq!(page.bytes, radial.bytes, "{kind}");
+    let pixels = image::load_from_memory(&page.bytes)
+        .expect("png")
+        .into_rgba8();
+    let centre = pixels.get_pixel(20, 20).0;
+    assert!(centre[0] > 240 && centre[2] < 16, "centre {centre:?}");
+    assert_eq!(pixels.get_pixel(0, 0).0, [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_rectangular_gradient_paints_like_a_radial_gradient() {
+    assert_paints_like_radial("rectangular");
+}
+
+#[test]
+fn a_path_gradient_paints_like_a_radial_gradient() {
+    assert_paints_like_radial("path");
+}
+
+#[test]
+fn an_unknown_gradient_kind_still_fails_the_page() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let error = render_page(&gradient_scene("conic"), 0, &resources).expect_err("unknown kind");
+    assert!(
+        error.contains("unsupported gradient type: conic"),
+        "{error}"
+    );
+}
+
 fn missing_glyph_scene() -> DisplayList {
     list(
         60.0,
@@ -714,7 +778,7 @@ fn a_tile_grid_past_the_cap_stretches_the_picture_once() {
 }
 
 #[test]
-fn a_picture_fill_it_cannot_resolve_keeps_the_solid_fill_and_counts_it() {
+fn a_picture_fill_it_cannot_resolve_paints_a_placeholder_and_counts_it() {
     let (fonts, chains, images) = empty_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);
     let scene = list(
@@ -726,7 +790,7 @@ fn a_picture_fill_it_cannot_resolve_keeps_the_solid_fill_and_counts_it() {
         )],
     );
     let rendered = render_page(&scene, 0, &resources).unwrap();
-    assert_eq!(pixel(&rendered.bytes, 14, 14), [0, 0, 255, 255]);
+    assert_eq!(pixel(&rendered.bytes, 14, 14), [242, 242, 242, 255]);
     assert_eq!(rendered.skipped_images, 1);
 }
 
@@ -819,6 +883,67 @@ fn carlito_text(extra: Value) -> Value {
         run[key] = value.clone();
     }
     run
+}
+
+#[test]
+fn text_primitives_paint_their_optional_feature_list() {
+    let (fonts, chains, images) = carlito_resources();
+    let font = chains["carlito|0|0"][0];
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let mut painted = Vec::new();
+    for (source, setting, kern) in [
+        ("fi ti", None, false),
+        ("fi ti", Some("standardContextual"), false),
+        ("AV", None, false),
+        ("AV", None, true),
+    ] {
+        let mut features = ooxml_text::kern_features(kern);
+        features.extend(ooxml_text::ligature_features(setting, None));
+        let mut listed: Vec<_> = features
+            .iter()
+            .copied()
+            .filter(|feature| feature.value != 0)
+            .collect();
+        if kern {
+            listed.insert(
+                0,
+                ooxml_text::ShapeFeature {
+                    tag: *b"kern",
+                    value: 1,
+                },
+            );
+        }
+        let mut text = carlito_text(json!({"text": source}));
+        if !listed.is_empty() {
+            text["fontFeatures"] = json!(listed);
+        }
+        let actual = render_png(&list(100.0, 30.0, vec![text]), 0, &resources).unwrap();
+        let glyphs: Vec<Value> = shape(&fonts, font, source, 16.0, &features)
+            .unwrap()
+            .iter()
+            .scan(4.0_f32, |pen, glyph| {
+                let placed = json!({
+                    "id": glyph.glyph_id, "x": *pen + glyph.x_offset,
+                    "y": 20.0 - glyph.y_offset, "cluster": glyph.cluster,
+                    "advance": glyph.x_advance,
+                });
+                *pen += glyph.x_advance;
+                Some(placed)
+            })
+            .collect();
+        let expected = list(
+            100.0,
+            30.0,
+            vec![json!({
+                "kind": "glyphRun", "fontId": font.to_u32(), "size": 16,
+                "color": "#000000", "text": source, "glyphs": glyphs,
+            })],
+        );
+        assert_eq!(actual, render_png(&expected, 0, &resources).unwrap());
+        painted.push(actual);
+    }
+    assert_ne!(painted[0], painted[1]);
+    assert_ne!(painted[2], painted[3]);
 }
 
 #[test]
@@ -1307,8 +1432,8 @@ fn a_shared_cache_does_not_spend_the_next_pages_budget_on_refusals() {
 }
 
 /// PNG headers declaring a bomb-sized surface, with an IDAT too short to
-/// decode. The declared extent is the only thing the budget may consult, so
-/// these skip on the cap and never on the truncated stream.
+/// decode. The larger is past what a reduced decode may read and skips on its
+/// header; the smaller reaches the reduced decode and skips on its stream.
 const BOMB_40000_SQUARE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAnEAAAJxACAIAAADebplSAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
 const BOMB_9000_SQUARE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAIygAACMoCAIAAADit+XtAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
 
@@ -1382,7 +1507,7 @@ fn an_image_past_the_pixel_budget_is_skipped_not_an_error() {
     for reference in [BOMB_40000_SQUARE, BOMB_9000_SQUARE] {
         let png = render_png(&image_list(reference), 0, &resources)
             .unwrap_or_else(|error| panic!("an oversized image failed the page: {error}"));
-        assert_eq!(pixel(&png, 10, 10), [255, 255, 255, 255]);
+        assert_eq!(pixel(&png, 10, 10), [242, 242, 242, 255]);
     }
 }
 
@@ -1444,7 +1569,7 @@ fn a_page_stops_decoding_once_its_pixel_budget_is_spent() {
     );
     let rendered = render_page(&list, 0, &resources).expect("render");
     assert_eq!(rendered.skipped_images, 3);
-    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [242, 242, 242, 255]);
 }
 
 /// `ImageMap` shipped documented and keyed by bare relationship id, and a
@@ -1460,8 +1585,6 @@ fn a_legacy_unscoped_image_key_still_resolves_in_the_body() {
     assert_eq!(pixel(&rendered.bytes, 10, 10), [0x11, 0x66, 0xcc, 255]);
 }
 
-/// The legacy key is the body's alone. Reaching one from a header is the
-/// cross-part lookup scoping exists to prevent, so it stays a hole.
 #[test]
 fn a_legacy_unscoped_image_key_resolves_in_no_other_part() {
     let (fonts, chains) = (FontStore::new(), FontChains::new());
@@ -1487,7 +1610,7 @@ fn a_legacy_unscoped_image_key_resolves_in_no_other_part() {
     .expect("display list");
     let rendered = render_page(&scene, 0, &resources).expect("render");
     assert_eq!(rendered.skipped_images, 1);
-    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [242, 242, 242, 255]);
 }
 
 /// Scoping runs both ways. A body relationship id that spells a header's
@@ -1503,11 +1626,9 @@ fn a_body_relationship_id_cannot_spell_another_parts_scoped_key() {
     let rendered =
         render_page(&image_list("hf:rId7\u{1f}rIdImage"), 0, &resources).expect("render");
     assert_eq!(rendered.skipped_images, 1);
-    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [242, 242, 242, 255]);
 }
 
-/// A skipped reference leaves a hole in an otherwise successful page, so the
-/// count is the only thing a caller can log about it.
 #[test]
 fn a_render_reports_every_image_reference_it_skipped() {
     let (fonts, chains, images) = empty_resources();
@@ -1540,7 +1661,7 @@ fn undecodable_image_bytes_are_skipped_like_an_unresolvable_reference() {
     ] {
         let png = render_png(&image_list(reference), 0, &resources)
             .unwrap_or_else(|error| panic!("`{reference}` failed the page: {error}"));
-        assert_eq!(pixel(&png, 10, 10), [255, 255, 255, 255]);
+        assert_eq!(pixel(&png, 10, 10), [242, 242, 242, 255]);
     }
 }
 
