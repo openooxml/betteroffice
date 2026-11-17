@@ -1567,6 +1567,45 @@ fn a_simple_row_patch_keeps_an_untouched_table_with_omitted_nested_content() {
 }
 
 #[test]
+fn a_row_patch_keeps_untouched_row_header_and_cant_split_flags() {
+    let rows: Vec<String> = [
+        "",
+        "<w:trPr><w:cantSplit/><w:tblHeader/></w:trPr>",
+        r#"<w:trPr><w:cantSplit w:val="0"/><w:tblHeader w:val="0"/></w:trPr>"#,
+        "",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, properties)| {
+        format!(
+            "<w:tr>{properties}{}</w:tr>",
+            table_cell("", &paragraph(index as u32 + 1, "abc")),
+        )
+    })
+    .collect();
+    let xml = table_document(&rows.concat(), 1);
+    let (doc, mut model) = open(&xml);
+    doc.set_cell_shading(
+        &ctx(),
+        &TableRange::cell(CellLoc::new("body", 0, 0, 0)),
+        Some("112233"),
+    )
+    .unwrap();
+    let entry = save_entry(&doc).unwrap();
+    assert!(!entry["tablePatches"].as_array().unwrap().is_empty());
+    model_cell(&mut model, 0)["formatting"]["shading"]["fill"] = json!({"rgb": "112233"});
+    let (output, warnings) = save(&xml, &doc, model);
+    assert!(output.contains(r#"w:fill="112233""#), "{output}");
+    for row in &rows[1..] {
+        assert!(output.contains(row.as_str()), "{output}");
+    }
+    assert_eq!(
+        warnings,
+        [r#"DOCX_MINIMAL_PATCH replace counts {"table:backgroundColor":1}"#],
+    );
+}
+
+#[test]
 fn merge_with_a_cell_text_edit_splices_the_merged_row_and_keeps_unrelated_paragraphs_byte_for_byte()
 {
     let xml = source(&paragraph(1, "abc"));
@@ -1679,4 +1718,78 @@ fn table_width_patches_tbl_pr_and_keeps_rows_byte_identical() {
         )
     );
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn touched_paragraphs_come_sorted_and_the_same_in_every_session() {
+    let body: String = (1..=48).map(|id| paragraph(id, "abc")).collect();
+    let xml = format!(r#"<w:document {NS}><w:body>{body}</w:body></w:document>"#);
+    let touched = || {
+        let (doc, _) = open(&xml);
+        let end = doc.story_len("body").unwrap();
+        doc.delete_range(&ctx(), StoryRange::new("body", 1, end - 2))
+            .unwrap();
+        doc.paragraph_save_plan().touched_parts
+    };
+    let first = touched();
+    let second = touched();
+    let parts: Vec<&str> = first.iter().map(|(part, _)| part.as_str()).collect();
+    assert!(parts.windows(2).all(|pair| pair[0] < pair[1]), "{parts:?}");
+    let ordinals: Vec<u32> = first
+        .iter()
+        .find(|(part, _)| part == "word/document.xml")
+        .map(|(_, touched)| touched.clone())
+        .unwrap_or_default();
+    assert!(ordinals.len() >= 40, "{first:?}");
+    for (part, touched) in &first {
+        assert!(
+            touched.windows(2).all(|pair| pair[0] < pair[1]),
+            "{part}: {touched:?}"
+        );
+    }
+    assert_eq!(first, second);
+}
+
+#[test]
+fn touched_parts_of_one_save_come_sorted_by_path() {
+    let story = |root: &str, first: u32| -> String {
+        let paragraphs: String = (first..first + 6).map(|id| paragraph(id, "abc")).collect();
+        format!(r#"<w:{root} {NS}>{paragraphs}</w:{root}>"#)
+    };
+    let body: String = (1..=6).map(|id| paragraph(id, "abc")).collect();
+    let document = format!(
+        r#"<w:document {NS} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>{body}<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr></w:body></w:document>"#
+    );
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/aheader1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/bfooter1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "word/_rels/document.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="aheader1.xml"/><Relationship Id="rIdFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="bfooter1.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("word/document.xml".to_owned(), document.into_bytes()),
+        ("word/aheader1.xml".to_owned(), story("hdr", 11).into_bytes()),
+        ("word/bfooter1.xml".to_owned(), story("ftr", 21).into_bytes()),
+    ];
+    let doc = EditingDoc::new(71);
+    seed_from_docx(&doc, &ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    for story in ["body", "hf:rIdHeader", "hf:rIdFooter"] {
+        let end = doc.story_len(story).unwrap();
+        doc.delete_range(&ctx(), StoryRange::new(story, 1, end - 2))
+            .unwrap();
+    }
+    let touched = doc.paragraph_save_plan().touched_parts;
+    let paths: Vec<&str> = touched.iter().map(|(part, _)| part.as_str()).collect();
+    let expected = [
+        "word/aheader1.xml",
+        "word/bfooter1.xml",
+        "word/document.xml",
+    ];
+    assert_eq!(paths, expected, "{touched:?}");
 }

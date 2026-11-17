@@ -803,6 +803,66 @@ test('queries pin the native version and refuse commands after replacement', asy
   expect(submit).toHaveBeenCalledTimes(1);
 });
 
+function versionedFixture() {
+  const base = fixture();
+  let native = 'native-0';
+  base.read.mockImplementation(async () => ({ status: 'ok', version: native, value: { version: native, paragraphs: [] } }));
+  const readAt = mock(async (_request: { kind: string }, version: string): Promise<{ status: 'ok'; version: string; value: unknown } | { status: 'superseded' }> =>
+    version === native ? { status: 'ok', version, value: { styles: [], fontFamilies: [] } } : { status: 'superseded' });
+  base.controller.update({ read: base.read as never, readAt: readAt as never, focus() {}, zoom: 1 });
+  base.controller.attach(base.binding);
+  const edit = (next: string) => {
+    native = next;
+    const view = base.viewStore.getSnapshot();
+    base.viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version + 1, throughSeq: view.throughSeq + 1,
+      presentedThroughSeq: view.presentedThroughSeq, selection: null, editState: view.editState });
+  };
+  return { ...base, readAt, edit, moveWorker: (next: string) => { native = next; } };
+}
+
+test('queries at one document version share a single version probe', async () => {
+  const { controller, read, readAt, edit } = versionedFixture();
+  await Promise.all(Array.from({ length: 3 }, () => controller.query({ kind: 'toolbarMetadata' })));
+  for (let index = 0; index < 3; index++) await controller.query({ kind: 'toolbarMetadata' });
+  expect(readAt).toHaveBeenCalledTimes(6);
+  expect(read.mock.calls.length).toBeLessThanOrEqual(1);
+  edit('native-1');
+  for (let index = 0; index < 3; index++) expect((await controller.query({ kind: 'toolbarMetadata' })).version).toBe('native-1');
+  expect(readAt).toHaveBeenCalledTimes(9);
+  expect(read.mock.calls.length).toBeLessThanOrEqual(2);
+});
+
+test('a query whose document changes before the reply is refused, not applied to the newer document', async () => {
+  const { controller, readAt, edit } = versionedFixture();
+  await controller.query({ kind: 'toolbarMetadata' });
+  let reply!: () => void;
+  let asked!: () => void;
+  const reached = new Promise<void>(resolve => { asked = resolve; });
+  readAt.mockImplementationOnce((_request, version) => new Promise(resolve => {
+    asked();
+    reply = () => resolve({ status: 'ok', version, value: { styles: [], fontFamilies: [] } });
+  }));
+  const applied = mock((_query: unknown) => {});
+  const pending = controller.query({ kind: 'toolbarMetadata' }).then(applied);
+  await reached;
+  edit('native-1');
+  reply();
+  await expect(pending).rejects.toThrow('superseded');
+  expect(applied).not.toHaveBeenCalled();
+  const fresh = await controller.query({ kind: 'toolbarMetadata' });
+  expect(fresh.version).toBe('native-1');
+  expect(readAt.mock.calls.at(-1)![1]).toBe('native-1');
+});
+
+test('a query reads again at the worker version when the worker moved ahead of the view', async () => {
+  const { controller, readAt, moveWorker } = versionedFixture();
+  expect((await controller.query({ kind: 'toolbarMetadata' })).version).toBe('native-0');
+  moveWorker('native-1');
+  const query = await controller.query({ kind: 'toolbarMetadata' });
+  expect(query.version).toBe('native-1');
+  expect(readAt.mock.calls.at(-1)![1]).toBe('native-1');
+});
+
 test('part queries pin the native version and refuse commands after replacement', async () => {
   const { controller, binding, read } = fixture();
   const readAt = mock(async () => ({ status: 'ok', version: 'native', value: { metadata: {}, geometry: [], frameEpoch: 1, layoutRevision: 1 } }));

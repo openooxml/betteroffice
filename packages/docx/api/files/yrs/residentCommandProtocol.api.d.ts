@@ -46,6 +46,8 @@ export interface DocxCommandTableContext {
     rowCount: number;
     columnCount: number;
     hasMultiCellSelection: boolean;
+    /** The selected cells, when more than one is selected. */
+    cells?: YrsTableRange;
     canSplitCell: boolean;
     rowSpan?: number;
     columnSpan?: number;

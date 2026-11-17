@@ -11,7 +11,16 @@ import betteroffice_xlsx as bo
 from betteroffice_xlsx import ops as op_types
 
 FIXTURES = Path(__file__).resolve().parents[3] / "packages" / "xlsx" / "test-fixtures"
-ACCEPTED_UNTYPED_TAGS = {"restoreColDimension", "restoreRowDimension"}
+ACCEPTED_UNTYPED_TAGS = {
+    "clipArrayFormula",
+    "moveCols",
+    "moveRows",
+    "restoreArrayFormula",
+    "restoreColDimension",
+    "restoreRowDimension",
+    "setColsVisibility",
+    "setRowsVisibility",
+}
 INTERNAL_TAGS = {
     "setCharts",
     "setConditionalFormats",
@@ -120,6 +129,42 @@ def test_apply_ops_refuses_the_internal_ops_as_every_binding_does(sample_bytes):
     for op in ({"type": "setCharts", "sheet": 0, "charts": []}, {"type": "setTables", "tables": []}):
         with pytest.raises(bo.OperationError, match="^restore sheet operations are internal$"):
             workbook.apply_ops([op])
+    assert workbook.save() == before
+
+
+def test_apply_ops_refuses_track_moves_before_the_batch_applies(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    before = workbook.save()
+    version = workbook.version()
+    for move in (
+        {"type": "moveCols", "sheet": 0, "col": 6, "count": 1, "before": 9},
+        {"type": "moveRows", "sheet": 0, "row": 5, "count": 1, "before": 8},
+    ):
+        with pytest.raises(
+            bo.OperationError,
+            match="^cannot move sheet 0 tracks: moving rows or columns is not supported yet$",
+        ):
+            workbook.apply_ops([{"type": "setCell", "sheet": 0, "at": {"row": 0, "col": 9}, "cell": {}}, move])
+    assert workbook.version() == version
+    assert workbook.can_undo is False
+    assert workbook.save() == before
+
+
+def test_apply_ops_refuses_track_visibility_ranges_before_the_batch_applies(sample_bytes):
+    workbook = bo.Workbook.open(sample_bytes)
+    before = workbook.save()
+    version = workbook.version()
+    for visibility in (
+        {"type": "setColsVisibility", "sheet": 0, "col": 6, "count": 2, "hidden": True},
+        {"type": "setRowsVisibility", "sheet": 0, "row": 5, "count": 2, "hidden": True},
+    ):
+        with pytest.raises(
+            bo.OperationError,
+            match="^cannot hide or unhide sheet 0 tracks: hiding or unhiding rows or columns is not supported yet$",
+        ):
+            workbook.apply_ops([{"type": "setCell", "sheet": 0, "at": {"row": 0, "col": 9}, "cell": {}}, visibility])
+    assert workbook.version() == version
+    assert workbook.can_undo is False
     assert workbook.save() == before
 
 
