@@ -1014,6 +1014,24 @@ describe('XlsxEditor fill handle', () => {
     expect(view.nameBox().value).toBe('B3');
   });
 
+  it('shows the protected-sheet notice when sheet protection refuses the fill', async () => {
+    const view = await mountEditor();
+    const workbook = view.workbook();
+    view.click({ row: 2, col: 1 });
+    const before = workbook.save();
+    const fill = spyOn(workbook, 'fillRange').mockImplementation(() => {
+      throw new Error('B4 is locked on protected sheet "Sheet1"');
+    });
+
+    dragHandle(view, { row: 2, col: 1 }, { row: 4, col: 1 });
+
+    await waitFor(() => expect(view.view.getByTestId('xlsx-input-refusal').textContent)
+      .toBe('This cell is on a protected sheet.'));
+    expect(fill).toHaveBeenCalledTimes(1);
+    expect(view.error()).toBeNull();
+    expect(workbook.save()).toEqual(before);
+  });
+
   it('does not render the handle by default', async () => {
     const editor = await mountEditor(plain, undefined, false, false);
     editor.click({ row: 2, col: 1 });
@@ -1453,6 +1471,27 @@ describe('XlsxEditor chart objects', () => {
     });
     // one gesture is one undo step.
     expect(view.workbook().historyState().undoDepth).toBe(undoDepth + 1);
+  });
+
+  it('shows the protected-sheet notice when sheet protection refuses a resize', async () => {
+    const [chart] = charted.charts;
+    const view = await mountEditor(charted);
+    await selectChart(view, chart);
+    const before = view.workbook().save();
+    const resize = spyOn(view.workbook(), 'resizeChart').mockImplementation(() => {
+      throw new Error('sheet "Data" is protected');
+    });
+    const se = view.handle('se')!;
+
+    fireEvent.pointerDown(se, { button: 0, pointerId: 9, clientX: 200, clientY: 200 });
+    fireEvent.pointerMove(window, { pointerId: 9, clientX: 220, clientY: 210 });
+    fireEvent.pointerUp(window, { pointerId: 9, button: 0, clientX: 220, clientY: 210 });
+
+    expect(resize).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(view.view.queryByTestId('xlsx-input-refusal')?.textContent)
+      .toBe('This cell is on a protected sheet.'));
+    expect(view.error()).toBeNull();
+    expect(view.workbook().save()).toEqual(before);
   });
 
   it('cancels a resize preview on escape without touching the workbook', async () => {

@@ -54,6 +54,7 @@ fn fixture(protected: bool) -> Workbook {
     put(&mut open, "B1", 5.0, None);
     let mut styled = Sheet::new("Styled");
     put(&mut styled, "A1", 6.0, None);
+    put(&mut styled, "B1", 7.0, Some(1));
     model.sheets.extend([form, open, styled]);
     let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
     let protections = [
@@ -283,6 +284,74 @@ fn move_range_refuses_locked_source_or_destination_cells() {
             .applied
     );
     assert_eq!(input(&open, FORM, "C3"), "1");
+}
+
+fn style(book: &Workbook, sheet: SheetId, address: &str) -> Option<u32> {
+    book.model()
+        .sheet(sheet)
+        .unwrap()
+        .cell(cell(address))
+        .and_then(|cell| cell.style)
+}
+
+#[test]
+fn fill_refuses_a_locked_destination_and_writes_nothing() {
+    let mut book = workbook();
+    let version = book.version();
+    assert_eq!(
+        locked(book.fill_range(FORM, range("B1"), range("B1:C1"), options())),
+        r#"C1 is locked on protected sheet "Form""#
+    );
+    assert_eq!(
+        locked(book.fill_range(FORM, range("B1"), range("B1:C2"), options())),
+        r#"C1 is locked on protected sheet "Form""#
+    );
+    assert_eq!(book.version(), version);
+    assert!(!book.can_undo());
+    assert_eq!(input(&book, FORM, "B2"), "4");
+    assert_eq!(input(&book, FORM, "C1"), "");
+    assert_eq!(input(&book, FORM, "C2"), "");
+    assert_eq!(style(&book, FORM, "C1"), None);
+    assert_eq!(style(&book, FORM, "C2"), None);
+}
+
+#[test]
+fn fill_refuses_a_differing_style_on_a_sheet_that_does_not_allow_formatting() {
+    let mut book = workbook();
+    let version = book.version();
+    assert_eq!(
+        locked(book.fill_range(FORM, range("A1"), range("A1:B1"), options())),
+        r#"sheet "Form" is protected"#
+    );
+    assert_eq!(book.version(), version);
+    assert_eq!(input(&book, FORM, "B1"), "2");
+    assert_eq!(style(&book, FORM, "B1"), Some(1));
+}
+
+#[test]
+fn fill_writes_unlocked_destinations_and_unprotected_sheets() {
+    let mut book = workbook();
+    assert!(
+        book.fill_range(FORM, range("B1"), range("B1:B2"), options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(input(&book, FORM, "B2"), "2");
+    assert_eq!(style(&book, FORM, "B2"), Some(1));
+    assert!(
+        book.fill_range(STYLED, range("A1"), range("A1:B1"), options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(input(&book, STYLED, "B1"), "6");
+    assert_eq!(style(&book, STYLED, "B1"), None);
+    let mut open = fixture(false);
+    assert!(
+        open.fill_range(FORM, range("A1"), range("A1:C1"), options())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(input(&open, FORM, "C1"), "1");
 }
 
 #[test]

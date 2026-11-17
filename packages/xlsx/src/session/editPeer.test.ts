@@ -976,6 +976,9 @@ describe('workbook edit peers', () => {
         { ...envelope, sequence: 2, op: { method: 'editCell', args: [0, , 1, 'invalid'] } },
         { ...envelope, sequence: 2, op: { method: 'editCells', args: [0, [{ row: 1, col: 1, input: 4 }]] } },
         { ...envelope, sequence: 2, op: { method: 'applyEdits', args: [{ expectVersion: '', steps: [null] }] } },
+        { ...envelope, sequence: 2, op: { method: 'applyEdits', args: [{
+          ...request(peer, 'B3', 'through'), source: 'agent', protectedSheets: 'allow',
+        }] } },
         { ...envelope, sequence: 2, op: { method: 'patchRangeStyle', args: [0, 'B3', { bold: 1 }] } },
         { ...envelope, sequence: 2, op: { method: 'undo', args: [0] } },
         { ...envelope, sequence: 2, op: { method: 'applyOps', args: [[{ op: 'insertRows' }]] } },
