@@ -48,7 +48,7 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
       void controller.query<K>(currentRequest).then(query => {
         if (!current || requestSerial !== serial) return;
         const previous = latestResult.current;
-        const next = { view, query, key, layout: frameLayoutKey(view) };
+        const next = { view, query, key, layout: currentRequest.kind === 'contentControlHandles' ? frameLayoutKey(view) : null };
         latestResult.current = next;
         if (!previous || previous.key !== key || previous.layout !== next.layout || !sameQueryView(previous.view, view) ||
           !sameQuery(previous.query, query, currentRequest.kind)) setResult(next);
