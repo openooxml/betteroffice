@@ -16,7 +16,12 @@ async function open(page: Page, count: number, near = false) {
   await page.goto('/?format=docx&peerless=1');
   await page.locator('input[type=file]').last().setInputFiles({ name: 'control-pages.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
   await expect(page.locator('.paged-editor__page canvas').first()).toBeVisible({ timeout: 60_000 });
-  await expect(page.locator('.paged-editor__page')).toHaveCount(count, { timeout: 60_000 });
+  if (count <= 12) {
+    await expect(page.locator('.paged-editor__page')).toHaveCount(count, { timeout: 60_000 });
+    return;
+  }
+  const h = (await page.locator('.paged-editor__page').first().boundingBox())!.height;
+  await expect.poll(() => page.locator('[data-docx-caret-host]').evaluate(n => n.getBoundingClientRect().height), { timeout: 60_000 }).toBeGreaterThan((count - 1) * h);
 }
 
 const handleFor = (page: Page, name: string) => page.locator('[data-worker-control]').getByRole('checkbox', { name, exact: true });
@@ -66,8 +71,8 @@ test('a checkbox on a page built by scrolling a long document gets its handle ov
       resolve(before.x === after.x && before.y === after.y && before.width === after.width && before.height === after.height);
     }));
   }))).toBe(true);
-  expect(await far.locator('canvas').count(), `precondition: page ${count} must still be unbuilt before scrolling, or this test cannot exercise the viewport build`).toBe(0);
-  expect(await far.locator('.canvas-page-mirror .layout-run-text').filter({ hasText: '☐' }).count(), `precondition: page ${count} must not have a built mirror before scrolling`).toBe(0);
-  await far.evaluate(node => node.scrollIntoView({ block: 'center' }));
+  await expect(far, `precondition: page ${count} must not be mounted before scrolling, or this test cannot exercise the viewport build`).toHaveCount(0);
+  await page.locator('[data-docx-caret-host]').evaluate(n => n.scrollIntoView({ block: 'end' }));
+  await expect(far.locator('canvas')).toHaveCount(1, { timeout: 30_000 });
   await expectOverControl(handleFor(page, 'Far flag'), far);
 });
