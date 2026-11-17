@@ -42,3 +42,19 @@ No patched release exists: every braces version up to the latest, 3.0.3, is
 affected.
 
 Remove this exemption when a patched braces release is published.
+
+### GHSA-fc5q-39xc-vjpf: picomatch ReDoS through single-branch repeated extglobs
+
+Reached only through build and dev tooling: `tailwindcss` and `shadcn` in the
+private demo app (via `fast-glob › micromatch` and `@shadcn/registry`),
+`@opennextjs/cloudflare` in the private demo app (via `@dotenvx/dotenvx › fdir`),
+`fumadocs-mdx` and `fumadocs-core` in the private docs site, `vite` in the
+private desktop app (via `tinyglobby › fdir`), `tsup` in devDependencies (via
+`sucrase › tinyglobby › fdir`), and `@changesets/cli` (via `micromatch`). These
+match glob patterns from this repository's own configuration and never see user
+input. No published package depends on picomatch at runtime.
+
+No patched release exists: every picomatch version up to the latest, 4.0.7, is
+affected.
+
+Remove this exemption when a patched picomatch release is published.
