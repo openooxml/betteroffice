@@ -849,6 +849,7 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
       }
     }
   }
+  const rejectedPayload = payloadElement !== null;
   const body = document_.body;
   if (!body) return null;
   const paragraphs: DocxClipboardParagraph[] = [];
@@ -956,10 +957,12 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
   while (end > first && blank(paragraphs[end - 1]!)) end -= 1;
   const cleaned = paragraphs.slice(first, end);
   const hasRichContent = cleaned.some((paragraph) =>
-    (paragraph.tables ?? []).length > 0 || paragraph.runs !== undefined ||
-    paragraph.pStyle !== undefined || paragraph.list !== undefined);
+    (paragraph.tables ?? []).length > 0 || (!rejectedPayload && (paragraph.runs !== undefined ||
+    paragraph.pStyle !== undefined || paragraph.list !== undefined)));
   if (!hasRichContent) return null;
-  const fragment: DocxClipboardFragment = { paragraphs: cleaned };
+  const fragment: DocxClipboardFragment = {
+    paragraphs: rejectedPayload ? cleaned.map(({ tables, text }) => (tables ? { tables, text } : { text })) : cleaned,
+  };
   return validClipboardFragment(fragment) ? fragment : null;
 }
 
