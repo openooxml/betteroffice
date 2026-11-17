@@ -1,7 +1,8 @@
 import { XlsxCommandAdmissionError, type XlsxCommandAdmissionCode } from './createXlsxCommandStore';
+import { commandReason } from './evaluate';
 
-/** The English notice for an edit sheet protection refuses. */
-export const SHEET_PROTECTED_MESSAGE = 'This cell is on a protected sheet.';
+/** The English notice for an edit sheet protection refuses; editors show its localized reason. */
+export const SHEET_PROTECTED_MESSAGE = commandReason('sheet-protected', null).message;
 
 /** Whether an engine refusal names a locked cell or a protected sheet. */
 export function isSheetProtectedMessage(message: string): boolean {
