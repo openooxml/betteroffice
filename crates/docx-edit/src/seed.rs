@@ -5299,7 +5299,11 @@ fn table_cell_style_properties(
             let conditional = parts
                 .iter()
                 .find(|part| string(field(Some(part), "type")) == Some(region));
-            (field(conditional, "tcPr"), edges, region.starts_with("band"))
+            (
+                field(conditional, "tcPr"),
+                edges,
+                region.starts_with("band"),
+            )
         });
     let mut borders = Map::new();
     for (properties, [top, bottom, left, right], band) in layers {
