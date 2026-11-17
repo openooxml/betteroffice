@@ -391,10 +391,16 @@ export function createPeerlessShellController(initial: Options) {
     probe.token.catch(() => { if (nativeProbe === probe) nativeProbe = null; });
     return { probe, cached: false };
   };
-  const query = async <K extends DocxDocumentRead['kind']>(request: DocxDocumentRead & { kind: K }): Promise<PeerlessWorkerQuery<K>> => {
+  /** `selectionIndependent` reads are kept across selection-only acknowledgements: they are superseded only by a new document version. */
+  const query = async <K extends DocxDocumentRead['kind']>(request: DocxDocumentRead & { kind: K },
+    { selectionIndependent = false }: { selectionIndependent?: boolean } = {}): Promise<PeerlessWorkerQuery<K>> => {
     const current = await flush();
     const view = current.viewStore.getSnapshot();
-    const moved = () => current !== binding || !sameIdentity(view.identity, current.viewStore.getSnapshot().identity) || view.throughSeq !== current.viewStore.getSnapshot().throughSeq;
+    const moved = () => {
+      const latest = current.viewStore.getSnapshot();
+      return current !== binding || !sameIdentity(view.identity, latest.identity) ||
+        (selectionIndependent ? view.version !== latest.version : view.throughSeq !== latest.throughSeq);
+    };
     const pinned = async () => {
       const { probe, cached } = nativeVersion(current, view);
       const token = await probe.token;
@@ -410,7 +416,7 @@ export function createPeerlessShellController(initial: Options) {
       token = (await pinned()).token;
       value = await readAt<K>(request, token);
     }
-    if (view.throughSeq !== current.viewStore.getSnapshot().throughSeq) throw new Error('Worker read was superseded');
+    if (moved()) throw new Error('Worker read was superseded');
     if (request.kind === 'reviewSnapshot') rememberComments(current, view, (value as DocxDocumentReadValues['reviewSnapshot'])?.uiComments);
     const result = { version: token, value, selection: structuredClone(view.workerSelection) };
     queryOrigins.set(result, { binding: current, identity: view.identity, version: view.version });

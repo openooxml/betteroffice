@@ -6,7 +6,6 @@ import type { PeerlessViewSnapshot } from './viewStore';
 import { reviewVersionOf } from './workerReview';
 
 const SELECTION_SCOPED = new Set<DocxDocumentRead['kind']>(['properties', 'sectionProperties']);
-const SUPERSEDED_RETRIES = 3;
 
 const withBytes = (_key: string, value: unknown) => ArrayBuffer.isView(value)
   ? { $type: value.constructor.name, $bytes: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) } : value;
@@ -14,7 +13,9 @@ const withBytes = (_key: string, value: unknown) => ArrayBuffer.isView(value)
 /**
  * Reads `liveRequest` once per document version; selection-scoped kinds also re-read for each selection, content control handles and
  * the review snapshot for each layout or built page set.
- * A read rejected because a selection-only acknowledgement moved `throughSeq` is asked again, at most `SUPERSEDED_RETRIES` times per key.
+ * Kinds that are not selection-scoped keep a read across selection-only acknowledgements. One read is in flight at a time: a
+ * selection-scoped read superseded by an acknowledgement is asked again once it settles, and a frame that lands during a review read
+ * asks again after it, if the answer is not placed on that frame.
  * Content control handles are returned only while the frame shows the layout they were read on.
  * While `held`, the request and selection last seen unheld stay in effect.
  */
@@ -39,25 +40,36 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
     let current = true;
     const currentRequest = latestRequest.current;
     if (state.status !== 'ready' || !currentRequest) return;
-    let serial = 0;
-    let retries = 0;
+    const selectionIndependent = !SELECTION_SCOPED.has(currentRequest.kind);
+    let reading = false;
+    let stale = false;
     let frameEpoch = controller.getSnapshot().view?.geometry?.frameEpoch;
-    const load = () => {
-      const requestSerial = ++serial;
+    const placed = () => {
+      const held = latestResult.current;
       const view = controller.getSnapshot().view;
-      void controller.query<K>(currentRequest).then(query => {
-        if (!current || requestSerial !== serial) return;
+      return held?.key === key && reviewPlaced(view, held.query.value as DocxReviewSnapshot | null) && frameLayoutKey(held.view) === frameLayoutKey(view);
+    };
+    const load = () => {
+      if (reading) { stale = true; return; }
+      reading = true;
+      stale = false;
+      const view = controller.getSnapshot().view;
+      void controller.query<K>(currentRequest, { selectionIndependent }).then(query => {
+        reading = false;
+        if (!current) return;
         const previous = latestResult.current;
         const next = { view, query, key, layout: currentRequest.kind === 'contentControlHandles' ? frameLayoutKey(view) : null };
         latestResult.current = next;
         if (!previous || previous.key !== key || previous.layout !== next.layout || !sameQueryView(previous.view, view) ||
           !sameQuery(previous.query, query, currentRequest.kind)) setResult(next);
+        if (stale && !placed()) load();
       }, () => {
-        if (!current || requestSerial !== serial) return;
+        reading = false;
+        if (!current) return;
         const now = controller.getSnapshot().view;
-        if (retries < SUPERSEDED_RETRIES && now?.throughSeq !== view?.throughSeq && sameQueryView(view, now)) { retries++; load(); return; }
-        latestResult.current = null;
-        setResult(null);
+        const superseded = now?.throughSeq !== view?.throughSeq && sameQueryView(view, now);
+        if (!superseded) { latestResult.current = null; setResult(null); }
+        if (superseded || (stale && sameQueryView(view, now))) load();
       });
     };
     load();
@@ -65,10 +77,7 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
       const latest = controller.getSnapshot();
       if (latest.status !== 'ready' || !sameQueryView(state.view, latest.view) || frameEpoch === latest.view?.geometry?.frameEpoch) return;
       frameEpoch = latest.view?.geometry?.frameEpoch;
-      const held = latestResult.current;
-      if (held?.key === key && reviewPlaced(latest.view, held.query.value as DocxReviewSnapshot | null) &&
-        frameLayoutKey(held.view) === frameLayoutKey(latest.view)) return;
-      load();
+      if (!placed()) load();
     }) : undefined;
     return () => { current = false; remove?.(); };
   }, [controller, state.status, shown?.identity.session, shown?.identity.incarnation, shown?.identity.epoch, shown?.version, layout, key]);
