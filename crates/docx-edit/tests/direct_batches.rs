@@ -180,6 +180,12 @@ fn apply(doc: &EditingDoc, undo: &UndoSession, steps: Vec<EditStep>) -> EditAppl
     apply_request(doc, &request(doc, steps, EditHistory::None), undo).unwrap()
 }
 
+fn assert_tracked_conflict(doc: &EditingDoc, steps: Vec<EditStep>) {
+    let held = request(doc, steps, EditHistory::None);
+    let refused = apply_request(doc, &held, &UndoSession::new()).unwrap_err();
+    assert_eq!(refused.failure.code, EditFailureCode::TrackedRevisionConflict);
+}
+
 fn apply_request(
     doc: &EditingDoc,
     request: &EditRequest,
@@ -1151,8 +1157,14 @@ fn scoped_text(xml: &str, open: &str, close: &str) -> String {
 }
 
 fn innermost(open: &str, close: &str) -> (String, String) {
-    let open = &open[open.rfind('<').unwrap()..];
-    let close = &close[..close.find('>').unwrap() + 1];
+    let open = &open[open.rfind("<w:dir ").max(open.rfind("<w:bdo ")).unwrap()..];
+    let open = &open[..open.find('>').unwrap() + 1];
+    let end = ["</w:dir>", "</w:bdo>"]
+        .into_iter()
+        .filter_map(|tag| close.find(tag))
+        .min()
+        .unwrap();
+    let close = &close[end..end + "</w:dir>".len()];
     (open.to_owned(), close.to_owned())
 }
 
@@ -1215,6 +1227,10 @@ fn typing_inside_a_direction_scope_saves_inside_the_wrapper() {
         let doc = open(&bytes);
         assert_eq!(first_text(&doc), "Before two runs after", "{name}");
         let steps = vec![insert(range("00000001", 8, 8), "X")];
+        if name == "insertion" {
+            assert_tracked_conflict(&doc, steps);
+            continue;
+        }
         apply(&doc, &UndoSession::new(), steps);
         let text = "Before tXwo runs after";
         assert_eq!(first_text(&doc), text, "{name}");
@@ -1230,8 +1246,8 @@ fn edits_across_a_direction_scope_edge_keep_the_wrapper_and_every_text() {
         for (step, parts, inner) in [
             (
                 replace(range("00000001", 5, 9), "Y"),
-                ["BefoY", "wo", " runs", " after"],
-                ["wo runs", "Ywo runs"],
+                ["BeforY", "o", " runs", " after"],
+                ["o runs", "Yo runs"],
             ),
             (
                 delete(range("00000001", 12, 17)),
@@ -1242,6 +1258,10 @@ fn edits_across_a_direction_scope_edge_keep_the_wrapper_and_every_text() {
             let bytes = docx(&source_body(opening, closing));
             let doc = open(&bytes);
             assert_eq!(first_text(&doc), "Before two runs after", "{name}");
+            if name == "insertion" {
+                assert_tracked_conflict(&doc, vec![step]);
+                continue;
+            }
             apply(&doc, &UndoSession::new(), vec![step]);
             let text = parts.concat();
             assert_eq!(first_text(&doc), text, "{name}");
