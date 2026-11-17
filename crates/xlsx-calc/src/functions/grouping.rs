@@ -216,8 +216,14 @@ fn kept_data_rows(
         return Err(ErrorValue::Value);
     }
     let mut kept = Vec::with_capacity(total_rows - data_start);
-    for row in data_start..total_rows {
-        if to_bool(&filter.values[row])? {
+    for (row, value) in filter
+        .values
+        .iter()
+        .enumerate()
+        .take(total_rows)
+        .skip(data_start)
+    {
+        if to_bool(value)? {
             kept.push(row);
         }
     }
