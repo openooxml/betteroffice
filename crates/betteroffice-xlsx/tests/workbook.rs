@@ -4588,6 +4588,7 @@ fn fill_range_refuses_a_table_in_the_filled_range() {
         header_rows: 1,
         totals_rows: 0,
         columns: vec!["A".into(), "B".into()],
+        style: Vec::new(),
     });
     assert_fill_refused(model, "A1", "A1:A3", "Excel tables");
 }

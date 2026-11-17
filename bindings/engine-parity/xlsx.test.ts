@@ -697,6 +697,19 @@ const rows: Row<Xlsx>[] = [
     call: ({ doc }, id) => doc.rejectProposalJson(json({ id })),
   }),
   { method: 'XlsxDocument.displayListJson', call: ({ doc }) => doc.displayListJson(VIEWPORT) },
+  {
+    method: 'XlsxDocument.displayListJson',
+    name: 'XlsxDocument.displayListJson (wrapped text in a row scrolled partly under the frozen pane)',
+    mutates: true,
+    call: ({ doc }) => {
+      const cell = { row: 1, col: 0 };
+      doc.applyOpsJson(json({ ops: [{ type: 'patchRangeStyle', sheet: 0, range: { start: cell, end: cell }, patch: { textWrapping: 'wrap' } }] }));
+      const list = JSON.parse(doc.displayListJson(json({ x: 0, y: 10, width: 800, height: 400 }))) as { commands: { wrap?: { maxLines?: number } }[] };
+      const wraps = list.commands.flatMap((command) => (command.wrap ? [command.wrap] : []));
+      if (wraps.length === 0 || wraps.some((wrap) => wrap.maxLines === undefined)) throw new Error(`no line limit: ${JSON.stringify(wraps)}`);
+      return wraps;
+    },
+  },
   { method: 'XlsxDocument.displayListForJson', call: ({ doc }) => doc.displayListForJson(1, VIEWPORT) },
   { method: 'XlsxDocument.pngDisplayListJson', call: ({ doc }) => doc.pngDisplayListJson(VIEWPORT) },
   { method: 'XlsxDocument.rangePngDisplayListJson', call: ({ doc }) => [doc.rangePngDisplayListJson('{}'), doc.rangePngDisplayListJson(json({ range: 'A1:C5', scale: 2 }))] },
@@ -714,6 +727,11 @@ const rows: Row<Xlsx>[] = [
     method: 'XlsxDocument.resizeChartJson',
     mutates: true,
     call: ({ doc }) => doc.resizeChartJson(json({ sheet: 0, chart: 'xl/drawings/drawing1.xml#0', left: 0, top: 0, right: 40, bottom: 30 })),
+  },
+  {
+    method: 'XlsxDocument.mediaBytes',
+    throws: { name: 'string', reason: 'no picture draws xl/media/image1.png' },
+    call: ({ doc }) => doc.mediaBytes('xl/media/image1.png'),
   },
   { method: 'XlsxDocument.cellRectJson', call: ({ doc }) => doc.cellRectJson(json({ sheet: 0, row: 4, col: 1 })) },
   { method: 'XlsxDocument.cellPositionJson', call: ({ doc }) => doc.cellPositionJson(json({ sheet: 0, row: 4, col: 0 })) },

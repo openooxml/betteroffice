@@ -861,7 +861,7 @@ function runContentToUnits(
           hasCachedResult: false,
           modelKind: 'commentReference',
           ...(content.id !== undefined ? { commentId: content.id } : {}),
-        }),
+        }, marks.filter((mark) => mark.name === 'insertion' || mark.name === 'deletion')),
       ];
     case 'drawing':
       return [embedUnit('image', { ...imagePayload(content.image), ...(content.drawing ? { docPr: content.drawing } : {}) }, trackedMarks(marks))];

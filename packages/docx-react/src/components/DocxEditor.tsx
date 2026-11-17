@@ -1429,6 +1429,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
     },
     [untakenWorkerSession, reportLayoutError]
   );
+  const reportCutRefused = useCallback((error: Error) => onError?.(error, { recoverable: true }), [onError]);
   const readOnly = modeReadOnly || opening;
   const holdOpeningInput = workerOpen && opening && !modeReadOnly && !viewerSession;
   if (opening) writeModeRef.current = 'viewing';
@@ -2900,6 +2901,7 @@ const LegacyDocxEditor = forwardRef<DocxEditorRef, DocxEditorBaseProps>(function
               onCaretInput={canvasRenderer.notifyCaretInput}
               onCaretInputDispatched={canvasRenderer.notifyCaretInputDispatched}
               onCaretInterrupt={canvasRenderer.notifyCaretInterrupt}
+              onCutRefused={reportCutRefused}
               canvasHostRef={canvasRenderer.canvasHostRef}
               floatingCommentBtn={floatingCommentBtn}
               isAddingComment={isAddingComment}

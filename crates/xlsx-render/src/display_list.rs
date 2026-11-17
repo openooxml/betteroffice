@@ -25,13 +25,18 @@ pub enum TextValign {
 
 /// wrapped cell text: the painter breaks the run into lines no wider than
 /// `width` and steps their baselines by `line_height`, the block anchored by
-/// `valign` on the single-line baseline `y`.
+/// `valign` on the single-line baseline `y`. `max_lines` is the most lines the
+/// cell keeps, from its whole row or merged area: the painter paints at most
+/// that many and aligns them as a block of their own. A list without it paints
+/// every line.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextWrap {
     pub width: f32,
     pub line_height: f32,
     pub valign: TextValign,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lines: Option<u32>,
 }
 
 /// a rectangle in viewport-local pixels.
@@ -41,6 +46,25 @@ pub struct Rect {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+}
+
+/// fractions of a picture's source discarded from each edge by `a:srcRect`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct ImageCrop {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub left: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub top: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub right: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bottom: f32,
+}
+
+impl ImageCrop {
+    pub fn is_whole(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// a single primitive. `op` tags the variant with a stable string discriminant;
@@ -142,10 +166,27 @@ pub enum DrawCmd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wrap: Option<TextWrap>,
     },
+    /// a picture: the image part `asset_id` names, its `crop` discarded and the
+    /// rest stretched over the rect. The host supplies the encoded bytes.
+    Image {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        asset_id: Arc<str>,
+        #[serde(default, skip_serializing_if = "ImageCrop::is_whole")]
+        crop: ImageCrop,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<Rect>,
+    },
 }
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn is_zero(value: &f32) -> bool {
+    *value == 0.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -387,7 +428,25 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                     width: wrap.width * factor,
                     line_height: wrap.line_height * factor,
                     valign: wrap.valign,
+                    max_lines: wrap.max_lines,
                 }),
+            },
+            DrawCmd::Image {
+                x,
+                y,
+                w,
+                h,
+                asset_id,
+                crop,
+                clip,
+            } => DrawCmd::Image {
+                x: x * factor,
+                y: y * factor,
+                w: w * factor,
+                h: h * factor,
+                asset_id,
+                crop,
+                clip: clip.map(|clip| scale_rect(clip, factor)),
             },
         })
         .collect();
@@ -581,6 +640,24 @@ mod tests {
                         width: 8.0,
                         line_height: 18.0,
                         valign: TextValign::Top,
+                        max_lines: Some(2),
+                    }),
+                },
+                DrawCmd::Image {
+                    x: 5.0,
+                    y: 6.0,
+                    w: 7.0,
+                    h: 8.0,
+                    asset_id: "xl/media/image1.png".into(),
+                    crop: ImageCrop {
+                        left: 0.25,
+                        ..ImageCrop::default()
+                    },
+                    clip: Some(Rect {
+                        x: 5.0,
+                        y: 6.0,
+                        w: 3.0,
+                        h: 8.0,
                     }),
                 },
             ],
@@ -686,6 +763,7 @@ mod tests {
                         width: 16.0,
                         line_height: 36.0,
                         valign: TextValign::Top,
+                        max_lines: Some(2),
                     })
                 );
                 assert_eq!(*x, 6.0);
@@ -694,6 +772,15 @@ mod tests {
                 assert_eq!(&**text, "hi");
             }
             _ => panic!("expected text"),
+        }
+        match &dl.commands[4] {
+            DrawCmd::Image {
+                x, w, crop, clip, ..
+            } => {
+                assert_eq!((*x, *w, crop.left), (10.0, 14.0, 0.25));
+                assert_eq!(clip.map(|clip| clip.w), Some(6.0));
+            }
+            _ => panic!("expected image"),
         }
         assert_eq!(dl.grid.start_row, 1);
         assert_eq!(dl.grid.frozen_rows, Some(1));

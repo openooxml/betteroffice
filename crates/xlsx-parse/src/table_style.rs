@@ -1,0 +1,386 @@
+//! `tableStyleInfo` plus the workbook's `tableStyles` or Excel's presets ->
+//! the [`TableStyleElement`]s a table draws.
+
+use std::collections::HashMap;
+
+use quick_xml::events::{BytesStart, Event};
+use xlsx_model::{
+    Color, DifferentialFormat, Stylesheet, Table, TableStyleElement, TableStyleElementType,
+};
+
+use crate::read::is_truthy;
+use crate::table_style_presets::{PRESETS, Preset};
+use crate::xml::{attr, local_name, next_event, reader};
+use crate::{MAX_STYLE_ENTRIES, ParseError};
+
+/// A table's `tableStyleInfo`.
+pub(crate) struct TableStyleInfo {
+    name: String,
+    first_column: bool,
+    last_column: bool,
+    row_stripes: bool,
+    column_stripes: bool,
+}
+
+impl TableStyleInfo {
+    pub(crate) fn parse(e: &BytesStart) -> Result<Option<Self>, ParseError> {
+        let Some(name) = attr(e, b"name")? else {
+            return Ok(None);
+        };
+        let flag = |key: &[u8]| -> Result<bool, ParseError> {
+            Ok(attr(e, key)?.is_some_and(|value| is_truthy(&value)))
+        };
+        Ok(Some(Self {
+            name,
+            first_column: flag(b"showFirstColumn")?,
+            last_column: flag(b"showLastColumn")?,
+            row_stripes: flag(b"showRowStripes")?,
+            column_stripes: flag(b"showColumnStripes")?,
+        }))
+    }
+
+    fn shows(&self, kind: TableStyleElementType) -> bool {
+        use TableStyleElementType::*;
+        match kind {
+            FirstRowStripe | SecondRowStripe => self.row_stripes,
+            FirstColumnStripe | SecondColumnStripe => self.column_stripes,
+            FirstColumn | FirstHeaderCell | FirstTotalCell => self.first_column,
+            LastColumn | LastHeaderCell | LastTotalCell => self.last_column,
+            WholeTable | HeaderRow | TotalRow => true,
+        }
+    }
+
+    /// The elements of `style` these flags turn on, none when they paint nothing.
+    fn select(&self, style: &[TableStyleElement]) -> Vec<TableStyleElement> {
+        let shown: Vec<_> = style
+            .iter()
+            .filter(|element| self.shows(element.kind))
+            .cloned()
+            .collect();
+        if shown
+            .iter()
+            .all(|element| element.format == DifferentialFormat::default())
+        {
+            return Vec::new();
+        }
+        shown
+    }
+}
+
+/// A `tableStyleElement` in `styles.xml`: its type, `dxfId` and size.
+type DefinedElement = (TableStyleElementType, Option<u32>, u32);
+
+/// A `tableStyle` in `styles.xml`: its name and elements.
+type WorkbookTableStyle = (String, Vec<DefinedElement>);
+
+/// Fill each table's style from its `tableStyleInfo`, preferring a style the
+/// workbook defines with elements over a preset of the same name.
+pub(crate) fn resolve_tables(
+    tables: Vec<(Table, Option<TableStyleInfo>)>,
+    styles_xml: Option<&[u8]>,
+    styles: &Stylesheet,
+) -> Result<Vec<Table>, ParseError> {
+    let defined = match styles_xml {
+        Some(xml) if tables.iter().any(|(_, info)| info.is_some()) => workbook_table_styles(xml)?,
+        _ => Vec::new(),
+    };
+    let mut by_name: HashMap<&str, &[DefinedElement]> = HashMap::new();
+    for (name, elements) in &defined {
+        if !elements.is_empty() {
+            by_name.entry(name.as_str()).or_insert(elements.as_slice());
+        }
+    }
+    let mut named: HashMap<String, Vec<TableStyleElement>> = HashMap::new();
+    Ok(tables
+        .into_iter()
+        .map(|(mut table, info)| {
+            if let Some(info) = info {
+                table.style = match named.get(&info.name) {
+                    Some(style) => info.select(style),
+                    None => {
+                        let style = resolve(&info.name, &by_name, styles);
+                        let selected = info.select(&style);
+                        named.insert(info.name, style);
+                        selected
+                    }
+                };
+            }
+            table
+        })
+        .collect())
+}
+
+/// A named style's elements, one per type, before any `tableStyleInfo` flag.
+fn resolve(
+    name: &str,
+    defined: &HashMap<&str, &[DefinedElement]>,
+    styles: &Stylesheet,
+) -> Vec<TableStyleElement> {
+    let mut elements = match defined.get(name) {
+        Some(elements) => elements
+            .iter()
+            .map(|&(kind, dxf, size)| {
+                #[cfg(test)]
+                tests::VISITS.with(|visits| visits.set(visits.get() + 1));
+                TableStyleElement {
+                    kind,
+                    size,
+                    format: dxf
+                        .and_then(|dxf| styles.dxfs.get(dxf as usize))
+                        .cloned()
+                        .unwrap_or_default(),
+                }
+            })
+            .collect(),
+        None => preset(name, styles),
+    };
+    let painting = elements
+        .iter()
+        .filter(|element| element.format != Default::default())
+        .fold(0, |kinds, element| kinds | bit(element.kind));
+    elements.retain(|element| {
+        #[cfg(test)]
+        tests::PROBES.with(|probes| probes.set(probes.get() + 1));
+        element.format != Default::default()
+            || (spans(element.kind, element.size) && painting & bit(element.kind) == 0)
+    });
+    elements.sort_by_key(|element| element.kind);
+    elements.dedup_by_key(|element| element.kind);
+    elements
+}
+
+/// The bit of `kind` in a set of element types.
+fn bit(kind: TableStyleElementType) -> u16 {
+    1 << kind as u16
+}
+
+/// Whether an element that paints nothing still sets a stripe band wider than one.
+fn spans(kind: TableStyleElementType, size: u32) -> bool {
+    use TableStyleElementType::*;
+    size > 1
+        && matches!(
+            kind,
+            FirstRowStripe | SecondRowStripe | FirstColumnStripe | SecondColumnStripe
+        )
+}
+
+fn preset(name: &str, styles: &Stylesheet) -> Vec<TableStyleElement> {
+    let Some((_, presets)) = PRESETS.iter().find(|(preset, _)| *preset == name) else {
+        return Vec::new();
+    };
+    let color = |color: Option<(u8, f64)>| {
+        color.and_then(|(idx, tint)| styles.resolve_color(&Color::Theme { idx, tint }))
+    };
+    presets
+        .iter()
+        .map(|&Preset(kind, bold, font, fill)| TableStyleElement {
+            kind,
+            size: 1,
+            format: DifferentialFormat {
+                font_color: color(font),
+                bold: bold.then_some(true),
+                italic: None,
+                fill: color(fill),
+            },
+        })
+        .collect()
+}
+
+fn workbook_table_styles(data: &[u8]) -> Result<Vec<WorkbookTableStyle>, ParseError> {
+    let mut reader = reader(data);
+    let mut buf = Vec::new();
+    let mut depth = 0;
+    let mut styles: Vec<WorkbookTableStyle> = Vec::new();
+    let mut open = false;
+    let mut counted = 0;
+    let mut plain = 0;
+    let mut plain_spans = 0;
+    loop {
+        match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) if local_name(&e) == b"tableStyle" => {
+                open = styles.len() < MAX_STYLE_ENTRIES
+                    && attr(&e, b"table")?.is_none_or(|value| is_truthy(&value));
+                if open && let Some(name) = attr(&e, b"name")? {
+                    styles.push((name, Vec::new()));
+                    (counted, plain, plain_spans) = (0, 0, 0);
+                } else {
+                    open = false;
+                }
+            }
+            Event::Start(e) if open && local_name(&e) == b"tableStyleElement" => {
+                let Some(kind) = attr(&e, b"type")?.and_then(|value| element_type(&value)) else {
+                    continue;
+                };
+                let dxf = attr(&e, b"dxfId")?.and_then(|value| value.parse::<u32>().ok());
+                let size = attr(&e, b"size")?
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(1)
+                    .max(1);
+                let Some((_, elements)) = styles.last_mut() else {
+                    continue;
+                };
+                let keep = if dxf.is_some() {
+                    let room = counted < MAX_STYLE_ENTRIES;
+                    counted += usize::from(room);
+                    room
+                } else {
+                    let spanning = spans(kind, size);
+                    let keep = plain & bit(kind) == 0 || (spanning && plain_spans & bit(kind) == 0);
+                    plain |= bit(kind);
+                    if spanning {
+                        plain_spans |= bit(kind);
+                    }
+                    keep
+                };
+                if keep {
+                    elements.push((kind, dxf, size));
+                }
+            }
+            Event::End(e) if e.local_name().as_ref() == b"tableStyle" => open = false,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(styles)
+}
+
+fn element_type(token: &str) -> Option<TableStyleElementType> {
+    use TableStyleElementType::*;
+    Some(match token {
+        "wholeTable" => WholeTable,
+        "firstColumnStripe" => FirstColumnStripe,
+        "secondColumnStripe" => SecondColumnStripe,
+        "firstRowStripe" => FirstRowStripe,
+        "secondRowStripe" => SecondRowStripe,
+        "lastColumn" => LastColumn,
+        "firstColumn" => FirstColumn,
+        "headerRow" => HeaderRow,
+        "totalRow" => TotalRow,
+        "firstHeaderCell" => FirstHeaderCell,
+        "lastHeaderCell" => LastHeaderCell,
+        "firstTotalCell" => FirstTotalCell,
+        "lastTotalCell" => LastTotalCell,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use xlsx_model::{CellRange, CellRef, SheetId};
+
+    use super::*;
+
+    thread_local! {
+        pub(super) static VISITS: Cell<usize> = const { Cell::new(0) };
+        pub(super) static PROBES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    const STYLES: &[u8] = br#"<styleSheet><tableStyles count="1"><tableStyle name="Budget" pivot="0" count="2"><tableStyleElement type="headerRow" dxfId="0"/><tableStyleElement type="firstRowStripe" dxfId="1"/></tableStyle></tableStyles></styleSheet>"#;
+
+    fn table(name: &str) -> (Table, Option<TableStyleInfo>) {
+        let table = Table {
+            name: name.into(),
+            sheet: SheetId(0),
+            range: CellRange::new(CellRef::new(0, 0), CellRef::new(4, 2)),
+            header_rows: 1,
+            totals_rows: 0,
+            columns: Vec::new(),
+            style: Vec::new(),
+        };
+        let info = TableStyleInfo {
+            name: "Budget".into(),
+            first_column: false,
+            last_column: false,
+            row_stripes: true,
+            column_stripes: false,
+        };
+        (table, Some(info))
+    }
+
+    #[test]
+    fn tables_sharing_a_style_visit_its_elements_once() {
+        let mut styles = Stylesheet::default();
+        styles.dxfs = vec![
+            DifferentialFormat {
+                bold: Some(true),
+                ..Default::default()
+            },
+            DifferentialFormat {
+                fill: Some("#fff78c".into()),
+                ..Default::default()
+            },
+        ];
+        let tables = (0..3).map(|n| table(&format!("T{n}"))).collect();
+        VISITS.with(|visits| visits.set(0));
+        let resolved = resolve_tables(tables, Some(STYLES), &styles).unwrap();
+        assert!(resolved.iter().all(|table| table.style.len() == 2));
+        assert_eq!(VISITS.with(Cell::get), 2);
+    }
+
+    fn budget(elements: &str) -> Vec<u8> {
+        format!(
+            r#"<styleSheet><tableStyles count="1"><tableStyle name="Budget" pivot="0">{elements}</tableStyle></tableStyles></styleSheet>"#
+        )
+        .into_bytes()
+    }
+
+    fn two_dxfs() -> Stylesheet {
+        let mut styles = Stylesheet::default();
+        styles.dxfs = vec![
+            DifferentialFormat {
+                bold: Some(true),
+                ..Default::default()
+            },
+            DifferentialFormat {
+                fill: Some("#fff78c".into()),
+                ..Default::default()
+            },
+        ];
+        styles
+    }
+
+    #[test]
+    fn plain_stripes_check_painting_types_in_constant_time() {
+        let styles = two_dxfs();
+        let count = 200;
+        let xml = budget(
+            &(r#"<tableStyleElement type="headerRow" dxfId="0"/>"#.repeat(count)
+                + &r#"<tableStyleElement type="firstRowStripe" dxfId="9" size="3"/>"#
+                    .repeat(count)),
+        );
+        PROBES.with(|probes| probes.set(0));
+        let resolved = resolve_tables(vec![table("T")], Some(&xml), &styles).unwrap();
+        assert_eq!(
+            resolved[0]
+                .style
+                .iter()
+                .map(|element| (element.kind, element.size))
+                .collect::<Vec<_>>(),
+            [
+                (TableStyleElementType::FirstRowStripe, 3),
+                (TableStyleElementType::HeaderRow, 1),
+            ]
+        );
+        assert!(PROBES.with(Cell::get) <= 2 * count);
+    }
+
+    #[test]
+    fn plain_stripes_at_the_cap_keep_a_later_painting_stripe() {
+        let styles = two_dxfs();
+        let xml = budget(
+            &(r#"<tableStyleElement type="firstRowStripe" size="3"/>"#.repeat(MAX_STYLE_ENTRIES)
+                + r#"<tableStyleElement type="firstRowStripe" dxfId="1"/>"#),
+        );
+        let resolved = resolve_tables(vec![table("T")], Some(&xml), &styles).unwrap();
+        assert_eq!(
+            resolved[0].style,
+            [TableStyleElement {
+                kind: TableStyleElementType::FirstRowStripe,
+                size: 1,
+                format: styles.dxfs[1].clone(),
+            }]
+        );
+    }
+}

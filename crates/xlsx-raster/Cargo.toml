@@ -18,6 +18,7 @@ name = "xlsx_raster"
 fonts = []
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png"] }
 ooxml-raster.workspace = true
 ooxml-text.workspace = true
 tiny-skia = "0.12"

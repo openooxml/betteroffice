@@ -318,6 +318,7 @@ fn all_ops() -> Vec<Op> {
                 header_rows: 1,
                 totals_rows: 0,
                 columns: vec!["Year".into()],
+                style: Vec::new(),
             }],
         },
         Op::MoveCols {
@@ -354,6 +355,25 @@ fn all_ops() -> Vec<Op> {
             anchor: at,
             spill: range,
         },
+        Op::SetTables {
+            tables: vec![xlsx_model::Table {
+                name: "Styled".into(),
+                sheet,
+                range,
+                header_rows: 1,
+                totals_rows: 1,
+                columns: vec!["Year".into()],
+                style: vec![xlsx_model::TableStyleElement {
+                    kind: xlsx_model::TableStyleElementType::HeaderRow,
+                    size: 1,
+                    format: xlsx_model::DifferentialFormat {
+                        bold: Some(true),
+                        fill: Some("#4472c4".into()),
+                        ..Default::default()
+                    },
+                }],
+            }],
+        },
     ]
 }
 
@@ -374,7 +394,7 @@ fn recoverable_ops() -> Vec<Op> {
 #[test]
 fn every_op_has_a_fixed_tag_and_round_trips() {
     let ops = all_ops();
-    assert_eq!(ops.len(), 44);
+    assert_eq!(ops.len(), 45);
     for (tag, op) in ops.into_iter().enumerate() {
         assert_eq!(encoded(&op)[0], tag as u8);
         if refused_on_recovery(&op) {

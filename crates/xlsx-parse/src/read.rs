@@ -14,9 +14,10 @@ use xlsx_model::{
 
 use crate::formula::SharedFormulas;
 use crate::styles::parse_stylesheet;
+use crate::table_style::TableStyleInfo;
 use crate::xml::{
-    attr, collect_text, find_part, local_name, next_event, reader, resolve_entity,
-    resolve_part_path, xml_err,
+    PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_entity,
+    resolve_part_name, resolve_part_path, xml_err,
 };
 use crate::{
     MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAME_BYTES, MAX_HYPERLINKS, MAX_ROW_STYLES,
@@ -135,6 +136,7 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
+    let tables = crate::table_style::resolve_tables(tables, styles_bytes, &styles)?;
     if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
         styles.cell_xfs.push(xlsx_model::Xf::default());
     }
@@ -431,14 +433,18 @@ fn collect_tables(
     worksheet_path: &str,
     sheet_rels: &BTreeMap<String, Relationship>,
     sheet: SheetId,
-    out: &mut Vec<Table>,
+    out: &mut Vec<(Table, Option<TableStyleInfo>)>,
 ) -> Result<(), ParseError> {
     let base = worksheet_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let mut seen = PartNames::default();
     for relationship in sheet_rels.values() {
         if relationship.external || !relationship.is_table() {
             continue;
         }
-        let path = resolve_part_path(base, &relationship.target);
+        let path = resolve_part_name(base, &relationship.target);
+        if !seen.push(path.clone()) {
+            continue;
+        }
         let Some(bytes) = find_part(parts, &path) else {
             continue;
         };
@@ -452,13 +458,30 @@ fn collect_tables(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static TABLE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Table parts parsed since the last call.
+#[cfg(test)]
+pub(crate) fn take_table_parses() -> usize {
+    TABLE_PARSES.replace(0)
+}
+
 /// One `xl/tables/tableN.xml` part. `headerRowCount` defaults to 1 and
 /// `totalsRowCount` to 0, both clamped to the rows the `ref` actually spans.
-fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError> {
+fn parse_table(
+    data: &[u8],
+    sheet: SheetId,
+) -> Result<Option<(Table, Option<TableStyleInfo>)>, ParseError> {
+    #[cfg(test)]
+    TABLE_PARSES.set(TABLE_PARSES.get() + 1);
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
     let mut table: Option<Table> = None;
+    let mut style = None;
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) if local_name(&e) == b"table" && table.is_none() => {
@@ -481,7 +504,11 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError>
                     header_rows,
                     totals_rows,
                     columns: Vec::new(),
+                    style: Vec::new(),
                 });
+            }
+            Event::Start(e) if local_name(&e) == b"tableStyleInfo" && table.is_some() => {
+                style = TableStyleInfo::parse(&e)?;
             }
             Event::Start(e) if local_name(&e) == b"tableColumn" => {
                 if let Some(table) = table.as_mut() {
@@ -498,7 +525,7 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError>
             _ => {}
         }
     }
-    Ok(table)
+    Ok(table.map(|table| (table, style)))
 }
 
 fn row_count_attr(
@@ -986,7 +1013,9 @@ fn parse_conditional_formats(
                     rule.formulas.push(formula);
                 }
             }
-            Event::End(e) if e.name().local_name().as_ref() == b"cfRule" && rule.is_some() => {
+            Event::End(e)
+                if e.name().local_name().as_ref() == b"cfRule" && depth == 2 && rule.is_some() =>
+            {
                 let mut rule = rule.take().unwrap();
                 rule.raw_xml = std::str::from_utf8(&data[rule_start.min(after)..after])
                     .ok()
@@ -997,6 +1026,7 @@ fn parse_conditional_formats(
             }
             Event::End(e)
                 if e.name().local_name().as_ref() == b"conditionalFormatting"
+                    && depth == 1
                     && group.is_some() =>
             {
                 groups.push(group.take().unwrap());

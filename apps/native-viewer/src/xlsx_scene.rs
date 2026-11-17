@@ -132,6 +132,7 @@ fn translate_command(
     tiles: &mut PatternTiles,
 ) -> Result<(), String> {
     match command {
+        DrawCmd::Image { .. } => Err("pictures are not translated".into()),
         DrawCmd::PatternFill {
             x,
             y,
@@ -271,11 +272,13 @@ fn translate_command(
                 let lines = xlsx_render::wrap::wrap_lines(text, wrap.width, |line| {
                     measure_text(line, *font_size)
                 });
+                let count = xlsx_render::wrap::wrapped_lines_kept(lines.len(), wrap);
                 lines
                     .iter()
+                    .take(count)
                     .enumerate()
                     .map(|(index, line)| {
-                        let y = xlsx_render::wrap::wrapped_line_y(*y, index, lines.len(), wrap);
+                        let y = xlsx_render::wrap::wrapped_line_y(*y, index, count, wrap);
                         prepare(*x, y, line, *align)
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -772,14 +775,15 @@ fn command_kind(command: &DrawCmd) -> &'static str {
         DrawCmd::Line { .. } => "line",
         DrawCmd::Path { .. } => "path",
         DrawCmd::Text { .. } => "text",
+        DrawCmd::Image { .. } => "image",
     }
 }
 
 fn command_bounds(command: &DrawCmd) -> Option<Rect> {
     match command {
-        DrawCmd::FillRect { x, y, w, h, .. } | DrawCmd::PatternFill { x, y, w, h, .. } => {
-            loose_rectangle(*x, *y, *w, *h)
-        }
+        DrawCmd::FillRect { x, y, w, h, .. }
+        | DrawCmd::PatternFill { x, y, w, h, .. }
+        | DrawCmd::Image { x, y, w, h, .. } => loose_rectangle(*x, *y, *w, *h),
         DrawCmd::Line { x1, y1, x2, y2, .. } => loose_extents(*x1, *y1, *x2, *y2),
         DrawCmd::Path { commands, .. } => path_bounds(commands),
         DrawCmd::Text { clip, .. } => loose_rectangle(clip.x, clip.y, clip.w, clip.h),
@@ -1010,6 +1014,7 @@ mod tests {
                 width: 30.0,
                 line_height: 14.0,
                 valign: TextValign::Top,
+                max_lines: None,
             });
         }
         for (command, width, overflow) in
@@ -1027,6 +1032,35 @@ mod tests {
         }
         let page = translate_sheet(&display_list(vec![wrapped, formatted, overflowing])).unwrap();
         assert_eq!(page.skipped.total(), 0);
+    }
+
+    fn wrapped_glyph_runs(max_lines: Option<u32>, zoom: f32) -> usize {
+        let wrap = serde_json::json!({
+            "width": 100.0,
+            "lineHeight": 12.0,
+            "valign": "center",
+            "maxLines": max_lines,
+        });
+        let mut wrapped = text("a\nb\nc\nd");
+        if let DrawCmd::Text { y, wrap: slot, .. } = &mut wrapped {
+            *y = 30.0;
+            *slot = Some(serde_json::from_value(wrap).unwrap());
+        }
+        let dl = xlsx_render::scaled(display_list(vec![wrapped]), zoom);
+        let page = translate_sheet(&dl).unwrap();
+        page.scene.encoding().resources.glyph_runs.len()
+    }
+
+    #[test]
+    fn wrapped_text_paints_at_most_the_lines_its_display_list_keeps() {
+        let kept = [Some(1), Some(2), Some(u32::MAX), None].map(|max| wrapped_glyph_runs(max, 1.0));
+        assert_eq!(kept, [1, 2, 4, 4]);
+    }
+
+    #[test]
+    fn wrapped_text_keeps_the_same_lines_at_every_zoom() {
+        let runs = [1.0, 2.0, 4.0].map(|zoom| wrapped_glyph_runs(Some(2), zoom));
+        assert_eq!(runs, [2, 2, 2]);
     }
 
     #[test]

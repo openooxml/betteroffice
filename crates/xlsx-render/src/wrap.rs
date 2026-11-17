@@ -135,6 +135,34 @@ pub fn wrapped_line_y(y: f32, index: usize, count: usize, wrap: &TextWrap) -> f3
         }
 }
 
+/// share of a line by which a wrapped line may pass the cell's height and
+/// still count as fitting.
+const FIT_TOLERANCE: f64 = 1e-4;
+
+/// the most wrapped lines excel paints in a row or merged area `height` px
+/// tall: those whose top half is inside it, to a ten-thousandth of a line, at
+/// least one. `None` when the height or the arithmetic is not a number: every
+/// line paints.
+pub fn max_wrapped_lines(height: f32, line_height: f32, font_size_pt: f32) -> Option<u32> {
+    if !height.is_finite() {
+        return None;
+    }
+    let font = f64::from(font_size_pt) * crate::geometry::PX_PER_PT;
+    let room = (f64::from(height) - font / 2.0) / f64::from(line_height) + FIT_TOLERANCE;
+    if room.is_nan() {
+        return None;
+    }
+    Some(room.floor().clamp(0.0, f64::from(u32::MAX - 1)) as u32 + 1)
+}
+
+/// how many of `count` wrapped lines a painter paints: at most the wrap's
+/// `max_lines`, every line without it.
+pub fn wrapped_lines_kept(count: usize, wrap: &TextWrap) -> usize {
+    wrap.max_lines.map_or(count, |max| {
+        count.min(usize::try_from(max).unwrap_or(usize::MAX))
+    })
+}
+
 /// lines a wrapped cell takes in a text box `width` px wide, measured with
 /// [`estimate_text_width`]: what row autofit counts without a font engine.
 pub fn estimated_line_count(text: &str, width: f32, size_pt: f64) -> usize {
@@ -267,6 +295,7 @@ mod tests {
             width: 10.0,
             line_height: 18.0,
             valign,
+            max_lines: None,
         };
         let ys = |valign| -> Vec<f32> {
             (0..3)

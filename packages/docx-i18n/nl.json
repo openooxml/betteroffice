@@ -730,6 +730,7 @@
     "linkRemoved": "Koppeling verwijderd",
     "linkCopied": "Koppeling gekopieerd naar klembord",
     "pasteFailed": "Plakken kon niet worden voltooid. Er is niets gewijzigd.",
+    "cutRefused": "De selectie bevat objecten die niet kunnen worden geknipt. Er is niets gewijzigd.",
     "failedToSave": "Kan document niet opslaan",
     "documentInput": "Documentinvoer",
     "documentPreview": "Documentvoorbeeld",

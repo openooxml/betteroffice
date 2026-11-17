@@ -322,12 +322,16 @@ export interface PathCmd {
 /**
  * Wrapped cell text: the painter breaks the run into lines no wider than
  * `width` and steps their baselines by `lineHeight`, the block anchored by
- * `valign` on the single-line baseline `y`.
+ * `valign` on the single-line baseline `y`. `maxLines` is the most lines the
+ * cell keeps, from its whole row or merged area: the painter paints at most
+ * that many and aligns them as a block of their own. A list without it paints
+ * every line.
  */
 export interface TextWrap {
     width: number;
     lineHeight: number;
     valign: 'top' | 'center' | 'bottom';
+    maxLines?: number;
 }
 /**
  * Paint a text run clipped to the cell box: `clip` is the cell rect and
@@ -383,10 +387,32 @@ export interface NumberFormatLayout {
     general?: number;
     overflow?: boolean;
 }
+/** Fractions of an image discarded from each edge; absent edges are `0`. */
+export interface ImageCrop {
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+}
+/**
+ * A worksheet picture: the image part `assetId` names, its `crop` discarded and
+ * the rest stretched over the rect. The host supplies the image, for example
+ * from `XlsxDocument.mediaBytes(assetId)`.
+ */
+export interface ImageCmd {
+    op: 'image';
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    assetId: string;
+    crop?: ImageCrop;
+    clip?: Rect;
+}
 /**
  * One draw command; discriminated on `op`.
  */
-export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd;
+export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd | ImageCmd;
 /**
  * Grid metadata for the frame: which sheet cells the visible tracks map to and
  * their viewport-local pixel boundaries. `rowOffsets[i]`/`colOffsets[i]` is the
@@ -3202,6 +3228,10 @@ export class XlsxDocument {
      * the pending proposals: `{"proposals":[...]}`.
      */
     listProposalsJson(): string;
+    /**
+     * the encoded bytes of the image an `image` draw command names.
+     */
+    mediaBytes(asset_id: string): Uint8Array;
     mergedRangesJson(args: string): string;
     /**
      * slide a chart by a pixel delta as one undo step.
@@ -3400,6 +3430,7 @@ export interface InitOutput {
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listDefinedNamesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -3912,6 +3943,11 @@ export interface WorkbookHandle extends CollaborationReplica {
      * mutation the canvas has not drawn yet will move the answer off the pixels.
      */
     chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null;
+    /**
+     * the encoded bytes (PNG, JPEG, GIF, ...) of the image an `image` draw
+     * command names by `assetId`. throws for a part no picture draws.
+     */
+    mediaBytes(assetId: string): Uint8Array;
     /**
      * slide the chart frame `chart` names — a {@link ChartRegion} id — by a
      * content-pixel delta, clamped to the grid, as one undo step. the new anchor

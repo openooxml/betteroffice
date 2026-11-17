@@ -113,6 +113,18 @@
       "id": 53054099,
       "signed_at": "2026-11-11T17:42:42Z",
       "pull_request_no": 2485
+    },
+    {
+      "name": "marsimon",
+      "id": 20870550,
+      "signed_at": "2026-11-15T14:49:24Z",
+      "pull_request_no": 2618
+    },
+    {
+      "name": "deungjaho",
+      "id": 282940667,
+      "signed_at": "2026-11-17T02:04:14Z",
+      "pull_request_no": 2647
     }
   ]
 }

@@ -114,12 +114,16 @@ export interface PathCmd {
 /**
  * Wrapped cell text: the painter breaks the run into lines no wider than
  * `width` and steps their baselines by `lineHeight`, the block anchored by
- * `valign` on the single-line baseline `y`.
+ * `valign` on the single-line baseline `y`. `maxLines` is the most lines the
+ * cell keeps, from its whole row or merged area: the painter paints at most
+ * that many and aligns them as a block of their own. A list without it paints
+ * every line.
  */
 export interface TextWrap {
   width: number;
   lineHeight: number;
   valign: 'top' | 'center' | 'bottom';
+  maxLines?: number;
 }
 
 /**
@@ -174,10 +178,34 @@ export interface NumberFormatLayout {
   overflow?: boolean;
 }
 
+/** Fractions of an image discarded from each edge; absent edges are `0`. */
+export interface ImageCrop {
+  left?: number;
+  top?: number;
+  right?: number;
+  bottom?: number;
+}
+
+/**
+ * A worksheet picture: the image part `assetId` names, its `crop` discarded and
+ * the rest stretched over the rect. The host supplies the image, for example
+ * from `XlsxDocument.mediaBytes(assetId)`.
+ */
+export interface ImageCmd {
+  op: 'image';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  assetId: string;
+  crop?: ImageCrop;
+  clip?: Rect;
+}
+
 /**
  * One draw command; discriminated on `op`.
  */
-export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd;
+export type DrawCmd = FillRectCmd | PatternFillCmd | LineCmd | PathCmd | TextCmd | ImageCmd;
 
 /**
  * Grid metadata for the frame: which sheet cells the visible tracks map to and

@@ -3176,7 +3176,12 @@ fn run_content_to_units(
                     .unwrap()
                     .insert("commentId".to_owned(), id.clone());
             }
-            vec![embed_unit("field", map_from_value(value), &[], 1)]
+            let revisions: Vec<Mark> = marks
+                .iter()
+                .filter(|mark| matches!(mark.name.as_str(), "insertion" | "deletion"))
+                .cloned()
+                .collect();
+            vec![embed_unit("field", map_from_value(value), &revisions, 1)]
         }
         "drawing" => vec![embed_unit(
             "image",
@@ -7601,8 +7606,9 @@ pub(crate) fn seed_parsed_docx(
 /// generation, so its session anchors are its own; see
 /// [`EditingDoc::begin_opening`].
 pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     seed_stories(document, bytes)?;
-    document.begin_opening(None);
+    begin_seeded_opening(document, None, fresh_seed);
     Ok(())
 }
 
@@ -7613,9 +7619,19 @@ pub fn seed_from_docx_with_generation(
     bytes: &[u8],
     generation: &str,
 ) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     seed_stories(document, bytes)?;
-    document.begin_opening(Some(generation));
+    begin_seeded_opening(document, Some(generation), fresh_seed);
     Ok(())
+}
+
+/// Starts the opening and, when the stories were seeded into an empty replica,
+/// records them as a fresh seed of the retained package.
+fn begin_seeded_opening(document: &EditingDoc, generation: Option<&str>, fresh_seed: bool) {
+    document.begin_opening(generation);
+    if fresh_seed {
+        document.mark_seeded();
+    }
 }
 
 /// Seeds every story of a DOCX without starting an opening.
@@ -7740,6 +7756,7 @@ fn retain_referenced_body_stories(plans: &mut Vec<StoryPlan>) {
 /// stories, tokens in layout.
 #[cfg(test)]
 pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let fresh_seed = document.holds_nothing();
     let source = PackageBytes::from(bytes);
     let digest = package_digest(&source);
     let (envelope, parts, media) = parse_docx_package_with_media(source.clone(), digest.clone())?;
@@ -7755,7 +7772,7 @@ pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Re
         },
     )?;
     document.install_media(media);
-    document.begin_opening(None);
+    begin_seeded_opening(document, None, fresh_seed);
     Ok(())
 }
 
@@ -8511,6 +8528,77 @@ mod tests {
         assert_eq!(rows[0]["cells"][0]["tcPr"]["colspan"], 2);
         assert_eq!(rows[1]["cells"].as_array().unwrap().len(), 1);
         assert_eq!(doc.paragraphs("body:t0:r1c0").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn seeding_skips_the_merge_continuations_the_serializer_exempts() {
+        type Rows<'a> = &'a [&'a [(u32, Option<&'a str>)]];
+        let skipped = |rows: Rows<'_>| {
+            let table = json!({
+                "type": "table",
+                "rows": rows.iter().map(|cells| json!({
+                    "type": "tableRow",
+                    "cells": cells.iter().map(|(span, merge)| json!({
+                        "type": "tableCell",
+                        "formatting": {"gridSpan": span, "vMerge": merge},
+                        "content": []
+                    })).collect::<Vec<_>>()
+                })).collect::<Vec<_>>()
+            });
+            super::source_cells(&table)
+                .iter()
+                .zip(rows)
+                .map(|(kept, cells)| {
+                    (0..cells.len())
+                        .map(|index| !kept.contains(&index))
+                        .collect()
+                })
+                .collect::<Vec<Vec<bool>>>()
+        };
+        let cases: [(Rows<'_>, &[&[bool]]); 6] = [
+            (
+                &[
+                    &[(1, Some("restart")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                ],
+                &[&[false, false], &[true, false]],
+            ),
+            (
+                &[&[(1, Some("continue")), (1, None)], &[(1, None), (1, None)]],
+                &[&[false, false], &[false, false]],
+            ),
+            (
+                &[&[(1, None), (1, None)], &[(1, Some("continue")), (1, None)]],
+                &[&[false, false], &[false, false]],
+            ),
+            (
+                &[
+                    &[(1, Some("restart")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                    &[(1, Some("continue")), (1, None)],
+                ],
+                &[&[false, false], &[true, false], &[true, false]],
+            ),
+            (
+                &[
+                    &[(1, None), (1, Some("restart")), (1, None)],
+                    &[(2, None), (1, Some("continue"))],
+                    &[(1, None), (1, Some("continue")), (1, None)],
+                ],
+                &[
+                    &[false, false, false],
+                    &[false, false],
+                    &[false, true, false],
+                ],
+            ),
+            (
+                &[&[(2, Some("restart"))], &[(2, Some("continue"))]],
+                &[&[false], &[false]],
+            ),
+        ];
+        for (rows, expected) in cases {
+            assert_eq!(skipped(rows), expected, "{rows:?}");
+        }
     }
 
     #[test]
@@ -9458,6 +9546,37 @@ mod tests {
                 assert!(!payload.contains_key("sourceRun"));
             }
         }
+    }
+
+    #[test]
+    fn tracked_comment_references_keep_revision_marks() {
+        let info = json!({"id": 11, "author": "Ada", "date": "2024-01-01T00:00:00Z"});
+        let reference = |id: u32| json!({"type": "run", "formatting": {"bold": true}, "content": [{"type": "commentReference", "id": id}]});
+        let tracked = |node_type: &str, id: u32| json!({"type": node_type, "info": info, "content": [reference(id)]});
+        let paragraph = json!({"content": [
+            tracked("insertion", 3),
+            tracked("deletion", 4),
+            reference(5),
+        ]});
+        let styles = StyleResolver::new(None);
+        let ParagraphUnits { units, .. } =
+            paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        assert_eq!(units.len(), 3);
+        for (unit, id) in units.iter().zip([3, 4, 5]) {
+            let UnitContent::Embed { kind, payload } = &unit.content else {
+                panic!("expected comment reference embed");
+            };
+            assert_eq!(kind, "field");
+            assert_eq!(payload["modelKind"], json!("commentReference"));
+            assert_eq!(payload["commentId"], json!(id));
+        }
+        let keys = |unit: &InlineUnit| unit.attrs.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&units[0]), ["ins"]);
+        assert_eq!(units[0].attrs["ins"]["author"], json!("Ada"));
+        assert_eq!(units[0].attrs["ins"]["id"], json!(11));
+        assert_eq!(keys(&units[1]), ["del"]);
+        assert_eq!(units[1].attrs["del"]["author"], json!("Ada"));
+        assert!(keys(&units[2]).is_empty());
     }
 
     #[test]

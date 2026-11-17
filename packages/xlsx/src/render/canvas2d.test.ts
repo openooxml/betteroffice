@@ -609,7 +609,7 @@ describe('Canvas2D text', () => {
 });
 
 describe('Canvas2D wrapped text', () => {
-  function wrappedFills(text: string, align: 'left' | 'center' | 'right', valign: 'top' | 'center' | 'bottom', width = 60) {
+  function wrappedFills(text: string, align: 'left' | 'center' | 'right', valign: 'top' | 'center' | 'bottom', width = 60, maxLines?: number) {
     const fills: { text: string; x: number; y: number; align: string }[] = [];
     const context = {
       font: '', fillStyle: '', textAlign: '', textBaseline: '',
@@ -624,7 +624,7 @@ describe('Canvas2D wrapped text', () => {
       width: 200, height: 200,
       commands: [{ op: 'text', x: 40, y: 50, text, fontSize: 11, color: '#000000',
         align, clip: { x: 0, y: 0, w: 200, h: 200 },
-        wrap: { width, lineHeight: 18, valign },
+        wrap: { width, lineHeight: 18, valign, maxLines },
       } as unknown as TextCmd],
     }, 1);
     return fills;
@@ -641,6 +641,40 @@ describe('Canvas2D wrapped text', () => {
   it('word-wraps at spaces and anchors top and bottom blocks on the baseline', () => {
     expect(wrappedFills('ab cd ef', 'left', 'top').map((f) => [f.text, f.y])).toEqual([['ab cd', 50], ['ef', 68]]);
     expect(wrappedFills('ab cd ef', 'right', 'bottom').map((f) => [f.text, f.y])).toEqual([['ab cd', 32], ['ef', 50]]);
+  });
+
+  function paintedLines(maxLines: number | undefined, zoom: number): number {
+    let lines = 0;
+    const context = {
+      font: '', fillStyle: '', textAlign: '', textBaseline: '',
+      save() {}, restore() {}, setTransform() {}, clearRect() {},
+      beginPath() {}, rect() {}, clip() {}, fillRect() {},
+      measureText(value: string) {
+        return { width: value.length * 10, actualBoundingBoxAscent: 12, actualBoundingBoxDescent: 4 };
+      },
+      fillText() { lines += 1; },
+    };
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, {
+      width: 100 * zoom, height: 100 * zoom,
+      commands: [{ op: 'text', x: 4 * zoom, y: 50 * zoom, text: 'a\nb\nc\nd', fontSize: 11 * zoom,
+        color: '#000000', align: 'left', clip: { x: 0, y: 0, w: 100 * zoom, h: 100 * zoom },
+        wrap: { width: 1000 * zoom, lineHeight: 18 * zoom, valign: 'center', maxLines },
+      } as unknown as TextCmd],
+    }, 1);
+    return lines;
+  }
+
+  it('paints at most the wrapped lines the display list keeps, at every zoom', () => {
+    expect([1, 2, 4].map((zoom) => paintedLines(2, zoom))).toEqual([2, 2, 2]);
+    expect([1, 4294967295, undefined].map((maxLines) => paintedLines(maxLines, 1))).toEqual([1, 4, 4]);
+  });
+
+  it('aligns the kept lines as a block of their own', () => {
+    const kept = (valign: 'top' | 'center' | 'bottom') =>
+      wrappedFills('a\nb\nc', 'left', valign, 60, 2).map((f) => [f.text, f.y]);
+    expect(kept('top')).toEqual([['a', 50], ['b', 68]]);
+    expect(kept('center')).toEqual([['a', 41], ['b', 59]]);
+    expect(kept('bottom')).toEqual([['a', 32], ['b', 50]]);
   });
 });
 
@@ -673,5 +707,43 @@ describe('wrapped text breaker', () => {
     expect(wrapLines(spaced, Number.NaN, measure)).toEqual([spaced]);
     expect(calls).toBeLessThanOrEqual(64);
     expect(measured).toBeLessThanOrEqual(8 * spaced.length);
+  });
+});
+
+describe('Canvas2D images', () => {
+  it('draws the kept crop of a resolved image over its rect inside its clip', () => {
+    const calls: unknown[][] = [];
+    const context = {
+      save() {}, restore() {}, setTransform() {}, clearRect() {}, beginPath() {}, clip() {},
+      rect(...args: number[]) { calls.push(['rect', ...args]); },
+      drawImage(...args: unknown[]) { calls.push(['drawImage', ...args]); },
+    };
+    const bitmap = { width: 200, height: 100 } as ImageBitmap;
+    const dl = { width: 400, height: 300, commands: [
+      { op: 'image', x: 10, y: 20, w: 80, h: 40, assetId: 'xl/media/image1.png',
+        crop: { left: 0.25, bottom: 0.5 }, clip: { x: 0, y: 0, w: 50, h: 300 } },
+      { op: 'image', x: 0, y: 0, w: 10, h: 10, assetId: 'xl/media/missing.png' },
+    ] } as DisplayList;
+    const requested: string[] = [];
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 1, undefined, {
+      resolveImage: (assetId) => { requested.push(assetId); return assetId === 'xl/media/image1.png' ? bitmap : null; },
+    });
+    expect(requested).toEqual(['xl/media/image1.png', 'xl/media/missing.png']);
+    expect(calls).toEqual([
+      ['rect', 0, 0, 400, 300],
+      ['rect', 0, 0, 50, 300],
+      ['drawImage', bitmap, 50, 0, 150, 50, 10, 20, 80, 40],
+    ]);
+  });
+
+  it('skips images when the host resolves none', () => {
+    const context = {
+      save() {}, restore() {}, setTransform() {}, clearRect() {}, beginPath() {}, rect() {}, clip() {},
+      drawImage() { throw new Error('unexpected drawImage'); },
+    };
+    const dl = { width: 40, height: 40, commands: [
+      { op: 'image', x: 0, y: 0, w: 10, h: 10, assetId: 'xl/media/image1.png' },
+    ] } as DisplayList;
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 1);
   });
 });

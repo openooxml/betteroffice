@@ -113,7 +113,7 @@ jobs:
           bun scripts/check-embedded-fonts.mjs
           bun test scripts/check-embedded-fonts.test.ts
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.13"
 
@@ -198,7 +198,7 @@ jobs:
           NEXT_TELEMETRY_DISABLED: "1"
         run: bunx next build
 
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
 
@@ -522,7 +522,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.13"
 
@@ -586,7 +586,7 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
 
@@ -676,7 +676,7 @@ jobs:
         run: |
           bun run build:docx-wasm
           bun run build:fonts
-          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx packages/xlsx-react scripts/parity/parity.test.ts scripts/native-engine.test.ts
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx/ packages/xlsx-i18n/ packages/xlsx-react scripts/parity/parity.test.ts scripts/native-engine.test.ts
 
       - name: Check engine surface
         run: |
@@ -693,17 +693,17 @@ jobs:
 
       - name: Test the pptx packages on the native engine
         run: |
-          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/ packages/pptx-react/
+          bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/ packages/pptx-i18n/ packages/pptx-react/
 
       - name: Test the docx packages on the native engine
-        run: bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-react/
+        run: bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-i18n/ packages/docx-react/
 
       - name: Test the agents package on the native engine
         run: bun test --isolate --preload ./scripts/native-engine-preload.ts packages/agents/
 
       - name: Check native and wasm parity
         run: |
-          bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts bindings/engine-parity/docx.test.ts bindings/engine-parity/xlsx.test.ts bindings/engine-parity/pptx.test.ts
+          bun test bindings/xlsx-native/parity.test.ts bindings/pptx-native/parity.test.ts bindings/xlsx-native/engine.test.ts bindings/pptx-native/engine.test.ts bindings/docx-native/parity.test.ts bindings/docx-native/engine.test.ts bindings/docx-native/png.test.ts bindings/docx-native/pngEffectsSkipped.test.ts bindings/docx-native/displayListParity.test.ts bindings/pptx-native/png.test.ts bindings/engine-parity/docx.test.ts bindings/engine-parity/xlsx.test.ts bindings/engine-parity/pptx.test.ts bindings/engine-parity/harness.test.ts
           bun test bindings/raw-surface.test.ts
 
       - name: Check the crate save against the product save
@@ -760,7 +760,7 @@ jobs:
           workspaces: bindings
           key: native-hooks
 
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
 
