@@ -377,8 +377,9 @@ beforeEach(() => {
   restorers.push(() => coreSession.mockRestore(), () => surface.mockRestore());
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await act(async () => { await new Promise<void>(resolve => setTimeout(resolve, 0)); });
   for (const restore of restorers.splice(0).reverse()) restore();
   resetEngineChoiceForTests();
 });
@@ -3482,8 +3483,42 @@ test('the worker editor keeps a search listener registered before a strict mode 
     found = settled(editor.current!.search('Hello'));
     await found;
   });
-  await expect(found).resolves.toEqual(expect.objectContaining({ total: 1 }));
   expect(listener).toHaveBeenCalledWith(expect.objectContaining({ query: 'Hello', total: 1 }));
+  await expect(found).resolves.toEqual(expect.objectContaining({ total: 1 }));
+});
+
+test('the worker editor keeps change listeners registered before a strict mode remount', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const original = sessionHook.usePeerlessEditSession;
+  const hook = spyOn(sessionHook, 'usePeerlessEditSession').mockImplementation(options => {
+    const result = original(options);
+    if (result.binding) binding = result.binding;
+    return result;
+  });
+  restorers.push(() => hook.mockRestore());
+  const documentListener = mock((_change: unknown) => {});
+  const selectionListener = mock((_selection: unknown) => {});
+  let registered = false;
+  const attach = (instance: DocxEditorRef | null) => {
+    if (instance && !registered) {
+      registered = true;
+      instance.onDocumentChange(documentListener);
+      instance.onSelectionChange(selectionListener);
+    }
+  };
+  render(<StrictMode><DocxEditor {...peerlessProps} ref={attach} showToolbar={false} /></StrictMode>);
+  await waitFor(() => expect(binding).toBeDefined());
+  expect(registered).toBe(true);
+  await act(async () => {
+    const edit = binding!.commands.submit({ kind: 'insertText', payload: { text: 'x' } });
+    if (edit.status === 'submitted') await edit.ticket.ack;
+    const at = { story: 'body', paraId: 'a', offset: 0 };
+    const select = binding!.commands.submit({ kind: 'select', payload: { selection: { anchor: at, focus: at } } });
+    if (select.status === 'submitted') await select.ticket.ack;
+  });
+  await waitFor(() => expect(documentListener).toHaveBeenCalledWith(expect.objectContaining({ version: expect.any(String) })));
+  await waitFor(() => expect(selectionListener).toHaveBeenCalledWith(expect.objectContaining({ hasSelection: true })));
 });
 
 test('a real unmount of the worker editor releases it within one task', async () => {
