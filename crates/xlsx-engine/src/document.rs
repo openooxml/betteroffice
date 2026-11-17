@@ -165,6 +165,25 @@ impl Document {
             .map_err(type_error)
     }
 
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        context: Option<&str>,
+        host: Host,
+    ) -> Result<Self, EngineError> {
+        let now_serial = match context {
+            Some(_) => None,
+            None => (host.now_serial)()?,
+        };
+        Self::opened(host, || {
+            Session::open_recalculating_stale(bytes, now_serial, context)
+        })
+        .map_err(if context.is_some() {
+            type_error
+        } else {
+            message
+        })
+    }
+
     pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), EngineError> {
         self.session
             .set_calculation_context_json(context)

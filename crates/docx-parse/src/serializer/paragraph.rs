@@ -16,9 +16,12 @@ use crate::paragraph_identity::W14_NAMESPACE;
 use crate::section::SectionProperties;
 use crate::xml::ParseError;
 
-use super::context::SerializerContext;
+use super::context::{DeferredFormData, SerializerContext};
 use super::foundation::{BorderSide, write_border};
-use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
+use super::raw::{
+    validate_form_field_data, validate_math_subtree, validate_raw_subtree,
+    validate_replayed_fragment,
+};
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, serialize_deleted_run,
     serialize_run, serialize_text_formatting, write_shading,
@@ -602,7 +605,29 @@ fn serialize_complex_field(
     if field.fld_lock == Some(true) {
         output.push_str(" w:fldLock=\"true\"");
     }
-    output.push_str("/></w:r>");
+    if field.dirty == Some(true) {
+        output.push_str(" w:dirty=\"true\"");
+    }
+    if let Some(raw) = field.raw_form_data_xml.as_deref() {
+        output.push('>');
+        match validate_form_field_data(raw) {
+            Ok(()) => {
+                context.note_form_data(raw);
+                output.push_str(raw);
+            }
+            Err(error) => {
+                let name = form_field_name(field, raw);
+                let detail = error.to_string();
+                let Some(token) = context.defer_form_data(&name, &detail) else {
+                    return Err(form_data_error(&name, &detail));
+                };
+                output.push_str(&token);
+            }
+        }
+        output.push_str("</w:fldChar></w:r>");
+    } else {
+        output.push_str("/></w:r>");
+    }
     let code_nodes = field
         .structured_code
         .as_ref()
@@ -699,6 +724,64 @@ pub fn serialize_inline_sdt(
     result?;
     writer.end_element().end_element();
     Ok(writer.finish())
+}
+
+fn form_field_name(field: &ComplexField, raw: &str) -> String {
+    raw.split_once(":name ")
+        .and_then(|(_, rest)| rest.split_once(":val=\""))
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(name, _)| name)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| field.instruction.clone(), str::to_owned)
+}
+
+pub(crate) fn form_data_error(field: &str, detail: &str) -> ParseError {
+    ParseError::Canonical(format!(
+        "the form field data of field {field:?} cannot be written: {detail}"
+    ))
+}
+
+/// Fails when `xml` still holds a token written in place of form field data.
+pub(crate) fn reject_form_data_tokens(
+    xml: &str,
+    deferred: &DeferredFormData,
+) -> Result<(), ParseError> {
+    if deferred.tokens.is_empty() {
+        return Ok(());
+    }
+    let outside = deferred
+        .in_written_data
+        .then(|| comments_outside_form_data(xml))
+        .flatten();
+    let left = deferred.tokens.iter().find(|(token, _, _)| match &outside {
+        Some(comments) => comments.contains(token.as_str()),
+        None => xml.contains(token.as_str()),
+    });
+    match left {
+        Some((_, field, detail)) => Err(form_data_error(field, detail)),
+        None => Ok(()),
+    }
+}
+
+/// Every comment of `xml` outside all `w:ffData`, where tokens sit and written data never does.
+fn comments_outside_form_data(xml: &str) -> Option<std::collections::HashSet<String>> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut comments = std::collections::HashSet::new();
+    let mut depth = 0usize;
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(element) if element.name().as_ref() == b"w:ffData" => depth += 1,
+            Event::End(element) if depth > 0 && element.name().as_ref() == b"w:ffData" => {
+                depth -= 1;
+            }
+            Event::Comment(text) if depth == 0 => {
+                comments.insert(format!("<!--{}-->", std::str::from_utf8(&text).ok()?));
+            }
+            Event::Eof => return Some(comments),
+            _ => {}
+        }
+    }
 }
 
 pub(crate) fn serialize_sdt_properties(

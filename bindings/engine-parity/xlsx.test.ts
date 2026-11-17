@@ -378,6 +378,10 @@ const rows: Row<Xlsx>[] = [
     method: 'XlsxDocument.openWithCalculationJson',
     call: ({ engine }) => scoped(engine.XlsxDocument.openWithCalculationJson(fixture, CONTEXT), (d) => [d.sheetInfoJson(), d.calculationStatusJson()]),
   },
+  {
+    method: 'XlsxDocument.openRecalculatingStale',
+    call: ({ engine }) => scoped(engine.XlsxDocument.openRecalculatingStale(fixture, CONTEXT), (d) => [d.sheetInfoJson(), d.calculationStatusJson()]),
+  },
   { method: 'XlsxDocument.openCollaborative', call: ({ engine }) => scoped(engine.XlsxDocument.openCollaborative(fixture, CLIENT), (d) => d.sheetInfoJson()) },
   {
     method: 'XlsxDocument.openCollaborative',
