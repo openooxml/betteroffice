@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build as esbuild } from 'esbuild';
 import { build as vite } from 'vite';
@@ -11,6 +11,8 @@ const cache = join(root, 'node_modules/.cache');
 await mkdir(cache, { recursive: true });
 const directory = await mkdtemp(join(cache, 'worker-bundling-'));
 const formats = { xlsx: 'xlsxSessionWorker', pptx: 'pptxSessionWorker', docx: 'docxWorker' };
+const publishedWorkers = { xlsx: 'dist/xlsxSessionWorker.mjs', pptx: 'dist/pptxSessionWorker.mjs', docx: 'dist/yrs/docxWorker.mjs' };
+const staticImport = /\b(?:from|import)\s*["'`]([^"'`]+)["'`]/g;
 const app = `
 import { openWorkbookSession } from '@betteroffice/xlsx/worker';
 import { openPresentationSession } from '@betteroffice/pptx/worker';
@@ -44,7 +46,40 @@ async function checkOutput(directory, { namedWorkers = true } = {}) {
   assert.match(javascript, /new Worker\s*\(/, 'Browser worker constructors must survive bundling');
 }
 
+async function checkWorkerEntriesLoadOnce(directory) {
+  const scripts = (await outputFiles(directory)).filter(path => /\.(?:m?js)$/.test(path));
+  const imports = new Map();
+  for (const path of scripts) {
+    const contents = await readFile(path, 'utf8');
+    imports.set(path, [...contents.matchAll(staticImport)].map(([, specifier]) => basename(specifier)));
+  }
+  const offenders = [];
+  for (const worker of Object.values(formats)) {
+    const entries = scripts.filter(path => new RegExp(`^${worker}-[\\w-]+\\.m?js$`).test(basename(path)));
+    assert.ok(entries.length > 0, `Missing emitted ${worker} entry chunk`);
+    for (const entry of entries) {
+      const importers = scripts.filter(path => path !== entry && imports.get(path).includes(basename(entry)));
+      if (importers.length > 0) {
+        offenders.push(`${relative(directory, entry)} <- ${importers.map(path => relative(directory, path)).join(', ')}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `Worker chunks statically import their worker entry, so a WebKit worker evaluates it twice:\n${offenders.join('\n')}`);
+}
+
+async function checkPublishedWorkerStubs() {
+  for (const [format, file] of Object.entries(publishedWorkers)) {
+    const contents = await readFile(join(root, 'packages', format, file), 'utf8');
+    const imported = [...contents.matchAll(staticImport)].map(([, specifier]) => specifier);
+    assert.deepEqual(imported, [], `${format} ${file} statically imports ${imported.join(', ')}; it must only import its code dynamically`);
+    const dynamic = contents.match(/\bimport\s*\(/g)?.length ?? 0;
+    assert.equal(dynamic, 1, `${format} ${file} has ${dynamic} dynamic imports; it must load its code with exactly one`);
+  }
+}
+
 try {
+  await checkPublishedWorkerStubs();
   await writeFile(join(directory, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
   const workers = {};
   for (const [format, worker] of Object.entries(formats)) {
@@ -104,6 +139,7 @@ try {
     build: { outDir: viteDirectory, emptyOutDir: true, assetsInlineLimit: 0, minify: false },
   });
   await checkOutput(viteDirectory);
+  await checkWorkerEntriesLoadOnce(viteDirectory);
 
   const webpack = nextWebpack();
   const bundle = (context, app, output) => new Promise((done, fail) => webpack({
