@@ -133,15 +133,30 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
 }
 
 pub fn render_png_with_fonts(dl: &DisplayList, fonts: &RasterFonts) -> Result<Vec<u8>, String> {
+    render_png_with_fonts_and_images(dl, fonts, &ImageMap::new())
+}
+
+/// [`render_png`], painting each image command from `images`.
+pub fn render_png_with_images(dl: &DisplayList, images: &ImageMap<'_>) -> Result<Vec<u8>, String> {
+    render_png_with_fonts_and_images(dl, &RasterFonts::default(), images)
+}
+
+pub fn render_png_with_fonts_and_images(
+    dl: &DisplayList,
+    fonts: &RasterFonts,
+    images: &ImageMap<'_>,
+) -> Result<Vec<u8>, String> {
     let w = (dl.width.ceil() as u32).max(1);
     let h = (dl.height.ceil() as u32).max(1);
     let mut pixmap = Pixmap::new(w, h).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut clip_surface = ClipSurface::default();
     let mut patterns = HashMap::new();
+    let mut pictures = super::picture::Pictures::new(images);
 
     for cmd in &dl.commands {
         match cmd {
+            DrawCmd::Image { .. } => pictures.paint(&mut pixmap, &mut clip_surface, cmd)?,
             DrawCmd::PatternFill {
                 x,
                 y,
