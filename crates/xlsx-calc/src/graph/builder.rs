@@ -189,6 +189,7 @@ mod tests {
             header_rows: 1,
             totals_rows: 1,
             columns: vec!["Qty".into(), "Cost".into()],
+            style: Vec::new(),
         }
     }
 

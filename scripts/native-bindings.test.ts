@@ -529,7 +529,7 @@ describe('native package release wiring', () => {
       (step: any) => step.name === 'Test the xlsx packages on the native engine'
     );
     expect(xlsx.run).toContain(
-      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx packages/xlsx-react scripts/parity/parity.test.ts scripts/native-engine.test.ts'
+      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/xlsx/ packages/xlsx-i18n/ packages/xlsx-react scripts/parity/parity.test.ts scripts/native-engine.test.ts'
     );
     expect(xlsx.run).toContain('bun run build:docx-wasm');
     expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(parity));
@@ -537,14 +537,14 @@ describe('native package release wiring', () => {
       (step: any) => step.name === 'Test the docx packages on the native engine'
     );
     expect(docx.run).toBe(
-      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-react/'
+      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/docx/ packages/docx-i18n/ packages/docx-react/'
     );
     expect(job.steps.indexOf(xlsx)).toBeLessThan(job.steps.indexOf(docx));
     const pptx = job.steps.find(
       (step: any) => step.name === 'Test the pptx packages on the native engine'
     );
     expect(pptx.run).toContain(
-      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/ packages/pptx-react/'
+      'bun test --isolate --preload ./scripts/native-engine-preload.ts packages/pptx/ packages/pptx-i18n/ packages/pptx-react/'
     );
     const agents = job.steps.find(
       (step: any) => step.name === 'Test the agents package on the native engine'

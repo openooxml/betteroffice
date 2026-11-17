@@ -198,6 +198,107 @@ pub fn rebuild_and_recalc_all_after(
     (graph, result)
 }
 
+/// [`rebuild_and_recalc_all_after`] over `graph`, still current for `wb`, without rebuilding it.
+pub fn recalc_all_kept(
+    wb: &mut Workbook,
+    graph: &mut DepGraph,
+    now_serial: Option<f64>,
+    rand_seed: Option<u32>,
+) -> RecalcResult {
+    graph.clear_unevaluated();
+    graph.computed_with_currency_of(wb);
+    graph.refresh_spills(wb);
+    let recompute: HashSet<Key> = graph.formula_cells().map(|(s, c)| key(s, c)).collect();
+    let context = RecalcContext {
+        now_serial,
+        rand_seed,
+    };
+    let result = run_recalc(wb, graph, recompute, context, None);
+    xlsx_model::progress::pulse();
+    graph.refresh_spills(wb);
+    xlsx_model::progress::pulse();
+    result
+}
+
+/// [`rebuild_and_recalc_all_after`] leaving `previous` intact and recording no evaluations.
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn rebuild_and_recalc_all_beside(
+    wb: &mut Workbook,
+    previous: Option<&DepGraph>,
+    now_serial: Option<f64>,
+    rand_seed: Option<u32>,
+) -> (DepGraph, RecalcResult) {
+    let tracked = EVALUATED_FORMULAS.with(|cells| cells.borrow_mut().take());
+    let mut graph = DepGraph::build(wb);
+    if let Some(previous) = previous {
+        graph.adopt_answered(previous);
+    }
+    let recompute: HashSet<Key> = graph.formula_cells().map(|(s, c)| key(s, c)).collect();
+    let context = RecalcContext {
+        now_serial,
+        rand_seed,
+    };
+    let result = run_recalc(wb, &graph, recompute, context, None);
+    graph.refresh_spills(wb);
+    EVALUATED_FORMULAS.with(|cells| *cells.borrow_mut() = tracked);
+    (graph, result)
+}
+
+/// how full recalculations over `kept` and a fresh build differ; `evaluated` adds what runs decide.
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn full_recalculation_difference(
+    kept: (&Workbook, &DepGraph),
+    fresh: (&Workbook, &DepGraph),
+    evaluated: bool,
+) -> Option<String> {
+    let ((kept_wb, kept), (fresh_wb, fresh)) = (kept, fresh);
+    if let Some(part) = kept.structural_difference(fresh, evaluated) {
+        return Some(format!("the graphs differ in their {part}"));
+    }
+    if !evaluated {
+        return None;
+    }
+    let every: HashSet<Key> = kept.formula_cells().map(|(s, c)| key(s, c)).collect();
+    if topo_order(kept, &every) != topo_order(fresh, &every) {
+        return Some("the evaluation orders differ".to_owned());
+    }
+    if kept_wb.sheets.len() != fresh_wb.sheets.len() {
+        return Some("the sheet counts differ".to_owned());
+    }
+    let sheets = kept_wb.sheets.iter().zip(&fresh_wb.sheets);
+    for (index, (kept, fresh)) in sheets.enumerate() {
+        let mut fresh_cells = fresh.iter_cells();
+        for (at, cell) in kept.iter_cells() {
+            let same = fresh_cells
+                .next()
+                .is_some_and(|(fresh_at, fresh)| fresh_at == at && same_cell(cell, fresh));
+            if !same {
+                return Some(format!("sheet {index} differs at {}", at.to_a1()));
+            }
+        }
+        if fresh_cells.next().is_some() {
+            return Some(format!("sheet {index} holds more cells afresh"));
+        }
+        if !kept.array_formulas().eq(fresh.array_formulas()) {
+            return Some(format!("sheet {index} spills differently"));
+        }
+    }
+    None
+}
+
+#[cfg(feature = "test-counters")]
+fn same_cell(left: &xlsx_model::Cell, right: &xlsx_model::Cell) -> bool {
+    let value = match (&left.value, &right.value) {
+        (CellValue::Number { value: left }, CellValue::Number { value: right }) => {
+            left.to_bits() == right.to_bits()
+        }
+        (left, right) => left == right,
+    };
+    value && left.formula == right.formula
+}
+
 /// marks what a recalculation would leave unevaluated on a graph built over
 /// values no recalculation over it produced, writing nothing: each formula
 /// whose evaluation over the current values reaches an uncomputable or

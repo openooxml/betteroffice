@@ -90,6 +90,10 @@ export class XlsxDocument {
      * the pending proposals: `{"proposals":[...]}`.
      */
     listProposalsJson(): string;
+    /**
+     * the encoded bytes of the image an `image` draw command names.
+     */
+    mediaBytes(asset_id: string): Uint8Array;
     mergedRangesJson(args: string): string;
     /**
      * slide a chart by a pixel delta as one undo step.
@@ -288,6 +292,7 @@ export interface InitOutput {
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listDefinedNamesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];

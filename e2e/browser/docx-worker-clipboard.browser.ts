@@ -69,6 +69,37 @@ async function savedXml(page: Page, info: TestInfo, name: string): Promise<strin
   return (await JSZip.loadAsync(await readFile(file))).file('word/document.xml')!.async('string');
 }
 
+async function holdClipboardReads(page: Page, releaseOnClipboardEvent: boolean) {
+  await page.addInitScript((releaseOnClipboardEvent) => {
+    let waiting = true;
+    const held: (() => void)[] = [];
+    const OriginalWorker = window.Worker;
+    window.Worker = class extends OriginalWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options);
+        const reads = new Set<number>();
+        const send = this.postMessage.bind(this);
+        this.postMessage = ((message: { id?: number; type?: string; read?: { kind?: string } }, ...args: unknown[]) => {
+          if (message.type === 'documentRead' && message.read?.kind === 'clipboardSlice' && message.id !== undefined) reads.add(message.id);
+          Reflect.apply(send, this, [message, ...args]);
+        }) as typeof this.postMessage;
+        const replayed = new WeakSet<Event>();
+        this.addEventListener('message', event => {
+          if (!waiting || replayed.has(event) || !reads.has(event.data.id)) return;
+          event.stopImmediatePropagation();
+          held.push(() => { const replay = new MessageEvent('message', { data: event.data }); replayed.add(replay); this.dispatchEvent(replay); });
+        });
+      }
+    };
+    const release = () => { waiting = false; for (const send of held.splice(0)) queueMicrotask(send); };
+    (window as unknown as { releaseClipboardReads: () => void }).releaseClipboardReads = release;
+    (window as unknown as { heldClipboardReads: () => number }).heldClipboardReads = () => held.length;
+    if (!releaseOnClipboardEvent) return;
+    document.addEventListener('copy', release, { capture: true, once: true });
+    document.addEventListener('cut', release, { capture: true, once: true });
+  }, releaseOnClipboardEvent);
+}
+
 test('copy and cut fill the native clipboard when the async Clipboard API is denied', async ({ page }, info) => {
   const input = await open(page);
   await input.press('ControlOrMeta+a');
@@ -91,31 +122,7 @@ test('copy and cut fill the native clipboard when the async Clipboard API is den
 
 
 for (const cut of [false, true]) test(`immediate native ${cut ? 'cut' : 'copy'} completes a cache miss with the async Clipboard API denied`, async ({ page }, info) => {
-  await page.addInitScript(() => {
-    let waiting = true;
-    const held: (() => void)[] = [];
-    const OriginalWorker = window.Worker;
-    window.Worker = class extends OriginalWorker {
-      constructor(url: string | URL, options?: WorkerOptions) {
-        super(url, options);
-        const reads = new Set<number>();
-        const send = this.postMessage.bind(this);
-        this.postMessage = ((message: { id?: number; type?: string; read?: { kind?: string } }, ...args: unknown[]) => {
-          if (message.type === 'documentRead' && message.read?.kind === 'clipboardSlice' && message.id !== undefined) reads.add(message.id);
-          Reflect.apply(send, this, [message, ...args]);
-        }) as typeof this.postMessage;
-        const replayed = new WeakSet<Event>();
-        this.addEventListener('message', event => {
-          if (!waiting || replayed.has(event) || !reads.has(event.data.id)) return;
-          event.stopImmediatePropagation();
-          held.push(() => { const replay = new MessageEvent('message', { data: event.data }); replayed.add(replay); this.dispatchEvent(replay); });
-        });
-      }
-    };
-    const release = () => { waiting = false; for (const send of held.splice(0)) queueMicrotask(send); };
-    document.addEventListener('copy', release, { capture: true, once: true });
-    document.addEventListener('cut', release, { capture: true, once: true });
-  });
+  await holdClipboardReads(page, true);
   const input = await open(page, true, true);
   await page.evaluate(() => { const sink = document.createElement('textarea'); sink.id = 'plain-sink'; document.body.append(sink); });
   await input.press('ControlOrMeta+a');
@@ -137,4 +144,22 @@ test('native copy retains table HTML with the async Clipboard API granted', asyn
   expect(copied.text).toContain('Before');
   expect(copied.text).toContain('RIGHT');
   expect(copied.html).toContain('<table');
+});
+
+for (const next of ['click', 'caret move'] as const) test(`a copy lands when a ${next} follows the key press at once`, async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await holdClipboardReads(page, false);
+  const input = await open(page, false, true);
+  await page.evaluate(() => navigator.clipboard.writeText('sentinel'));
+  await input.press('ControlOrMeta+a');
+  await input.press('ControlOrMeta+c');
+  const highlight = page.locator('[data-docx-worker-editor] div[aria-hidden="true"][style*="rgba(59, 130, 246"]');
+  await expect.poll(() => highlight.count()).toBeGreaterThan(0);
+  if (next === 'click') await page.locator('.paged-editor__page canvas').first().click({ position: { x: 300, y: 300 } });
+  else await input.press('ArrowDown');
+  await expect.poll(() => page.evaluate(() => (window as unknown as { heldClipboardReads: () => number }).heldClipboardReads())).toBeGreaterThan(0);
+  await expect(highlight).toHaveCount(0);
+  await expect(page.locator('[data-docx-worker-editor] [data-docx-caret]')).toHaveCount(1);
+  await page.evaluate(() => (window as unknown as { releaseClipboardReads: () => void }).releaseClipboardReads());
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 5_000 }).toBe('Immediate clipboard text');
 });

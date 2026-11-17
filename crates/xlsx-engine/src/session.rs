@@ -599,6 +599,12 @@ impl Session {
         serde_json::to_string(&hit).map_err(|error| error.to_string())
     }
 
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>, String> {
+        self.workbook
+            .media_bytes(asset_id)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn move_chart_json(
         &mut self,
         args: &str,
