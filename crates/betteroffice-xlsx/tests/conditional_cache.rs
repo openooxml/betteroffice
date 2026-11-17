@@ -557,6 +557,55 @@ fn a_rule_formula_is_parsed_once_per_epoch_across_its_cells() {
     assert_eq!(painted(&edited), painted(&first));
 }
 
+fn whole_reference_book(formula: &str) -> Workbook {
+    workbook(&sheet(
+        rows(200, numbers(4, |row, col| row + col)),
+        expression("A1:D200", 1, formula),
+    ))
+}
+
+#[test]
+fn an_absolute_whole_column_rule_is_parsed_once_per_epoch() {
+    let workbook = whole_reference_book("A1*1000&gt;SUM($D:$D)+SUM($1:$1)");
+    let viewport = view(0.0, 2000.0);
+    let start = workbook.conditional_stats();
+    let list = frame(&workbook, &viewport);
+    let stats = workbook.conditional_stats();
+    assert_eq!(list.conditional_pending, 0);
+    assert!(stats.evaluated_cells - start.evaluated_cells >= 200, "{stats:?}");
+    assert!(stats.formula_parses - start.formula_parses <= 2, "{stats:?}");
+    assert_eq!(stats.slow_rules, start.slow_rules, "{stats:?}");
+    assert!(!painted(&list).is_empty());
+}
+
+#[test]
+fn a_relative_whole_row_or_column_rule_parses_each_cell() {
+    for formula in [
+        "A1*1000&gt;SUM(D:D)",
+        "A1*1000&gt;SUM($D:E)",
+        "A1*1000&gt;SUM(D:$E)",
+        "A1&gt;SUM(1:1)",
+    ] {
+        let workbook = whole_reference_book(formula);
+        let viewport = view(0.0, 2000.0);
+        let start = workbook.conditional_stats();
+        let list = frame(&workbook, &viewport);
+        let stats = workbook.conditional_stats();
+        let cells = stats.evaluated_cells - start.evaluated_cells;
+        assert_eq!(list.conditional_pending, 0, "{formula}");
+        assert!(cells >= 200, "{formula}: {stats:?}");
+        assert!(
+            stats.formula_parses - start.formula_parses >= cells,
+            "{formula}: {stats:?}"
+        );
+        assert_eq!(
+            stats.slow_rules,
+            start.slow_rules + 1,
+            "{formula}: {stats:?}"
+        );
+    }
+}
+
 /// The `A1+$B$1>50` workbook of the parse test as a cellIs rule over the
 /// same values: `$B$1` holds 2.
 fn workbook_with_threshold(value: &str) -> Workbook {

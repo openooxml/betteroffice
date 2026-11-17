@@ -98,6 +98,9 @@ pub struct ConditionalStats {
     pub pending: u32,
     /// Rule formula texts parsed into expressions.
     pub formula_parses: u64,
+    /// Rules built whose cells parse their translated formula text instead of
+    /// shifting the anchor's parse.
+    pub slow_rules: u64,
     /// Rule checks plus cell visits the last display list spent.
     pub units: u64,
     /// Decided cells held.
@@ -247,6 +250,14 @@ impl Cache {
                 .flat_map(|rule| &rule.formulas)
                 .map(|formula| u64::from(formula.parses))
                 .sum::<u64>();
+            self.stats.slow_rules += built
+                .iter()
+                .filter(|rule| {
+                    rule.formulas
+                        .iter()
+                        .any(|formula| formula.relative && !formula.shifts)
+                })
+                .count() as u64;
             self.rules.insert(sheet, built);
         }
         let rules = Arc::clone(&self.rules[&sheet]);
