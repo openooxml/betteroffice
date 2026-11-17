@@ -628,7 +628,11 @@ fn protected_sheets_allow_resizes_a_chart_and_keeps_the_protection() {
         .into_iter()
         .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
         .unwrap();
-    assert!(String::from_utf8(sheet.1).unwrap().contains("<sheetProtection"));
+    assert!(
+        String::from_utf8(sheet.1)
+            .unwrap()
+            .contains("<sheetProtection")
+    );
     let mut reopened = Workbook::open(&saved).unwrap();
     assert!(matches!(
         reopened.resize_chart(SheetId(0), &frame, RESIZE, CalculationOptions::default()),
