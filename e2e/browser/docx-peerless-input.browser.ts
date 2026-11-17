@@ -1508,3 +1508,72 @@ test(`viewport-first ${feature} open paints later pages after certified geometry
   await expect.poll(() => later.evaluate((element) => (element as HTMLCanvasElement).width)).toBeGreaterThan(0);
 });
 }
+
+async function checklistBytes() {
+  const zip = await JSZip.loadAsync(await documentBytes());
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const checkbox = (id: number) => `<w:sdt><w:sdtPr><w:id w:val="${id}"/><w:alias w:val="Done"/>` +
+    '<w14:checkbox><w14:checked w14:val="0"/></w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:t>☐</w:t></w:r></w:sdtContent></w:sdt>';
+  zip.file('word/document.xml', xml
+    .replace('<w:document ', '<w:document xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" ')
+    .replace('<w:p><w:r><w:t>abcd</w:t></w:r></w:p>',
+      `<w:p>${checkbox(1)}<w:r><w:t>Item one</w:t></w:r></w:p><w:p>${checkbox(2)}<w:r><w:t>Item two</w:t></w:r></w:p>`));
+  return zip.generateAsync({ type: 'nodebuffer' });
+}
+
+async function workerFocus(page: Page) {
+  return page.evaluate(() => {
+    const probe = window.__docxPeerlessInput;
+    return ([...probe.acks].reverse().find((ack) => ack.selection)?.selection ?? probe.initial?.selection)?.focus;
+  });
+}
+
+async function savedParagraphs(page: Page) {
+  const xml = await savedXml(page);
+  return page.evaluate((xml) => Array.from(
+    new DOMParser().parseFromString(xml, 'application/xml').getElementsByTagNameNS('*', 'p')
+  ).map((paragraph) => Array.from(paragraph.getElementsByTagNameNS('*', 't')).map((node) => node.textContent ?? '').join('')), xml);
+}
+
+test('worker click beside the checkbox of checklist line 2 types into paragraph 2 before the control', async ({ page }) => {
+  await open(page, true, null, 1, await checklistBytes());
+  const input = await focusDocument(page);
+  const first = (await workerFocus(page))!.paraId;
+  const checkbox = page.locator('[data-worker-control]').getByRole('checkbox', { name: 'Done', exact: true }).nth(1);
+  const box = (await checkbox.boundingBox())!;
+  await page.mouse.click(box.x - 12, box.y + box.height / 2);
+  await settled(page);
+  const focus = (await workerFocus(page))!;
+  expect(focus.paraId).not.toBe(first);
+  expect(focus.offset).toBe(0);
+  await beforeinput(input, 'Z');
+  await settled(page);
+  expect(await savedParagraphs(page)).toEqual(['☐Item one', 'Z☐Item two']);
+});
+
+test('worker ArrowDown from checklist line 1 types into checklist line 2', async ({ page }) => {
+  await open(page, true, null, 1, await checklistBytes());
+  const input = await focusDocument(page);
+  const first = (await workerFocus(page))!.paraId;
+  await input.press('ArrowRight');
+  await settled(page);
+  expect(await workerFocus(page)).toMatchObject({ paraId: first, offset: 1 });
+  await input.press('ArrowDown');
+  await settled(page);
+  const focus = (await workerFocus(page))!;
+  expect(focus.paraId).not.toBe(first);
+  expect(focus.offset).toBe(1);
+  await beforeinput(input, 'Z');
+  await settled(page);
+  expect(await savedParagraphs(page)).toEqual(['☐Item one', '☐ZItem two']);
+});
+
+test('today: Ctrl+Home before a leading checkbox control draws no caret and typing inserts before the control', async ({ page }) => {
+  await open(page, true, null, 1, await checklistBytes());
+  const input = await focusDocument(page);
+  expect(await workerFocus(page)).toMatchObject({ offset: 0 });
+  await expect(page.locator('[data-docx-worker-editor] [data-docx-caret]')).toHaveCount(0);
+  await beforeinput(input, 'Z');
+  await settled(page);
+  expect(await savedParagraphs(page)).toEqual(['Z☐Item one', '☐Item two']);
+});

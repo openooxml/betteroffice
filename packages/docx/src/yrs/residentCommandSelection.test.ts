@@ -1168,3 +1168,174 @@ test('d2a_repeated_end_of_document_drag_and_line_results_use_indexed_positions',
     queries.mockRestore();
   }
 });
+
+type ControlPart = string | { control: string };
+
+const CHECKBOX = { control: '☐' };
+
+function controlSegments(story: string, index: number, parts: readonly ControlPart[]): YrsStorySegment[] {
+  return [
+    ...parts.map<YrsStorySegment>((part) => typeof part === 'string'
+      ? { kind: 'text', text: part, attributes: {} }
+      : { kind: 'embed', embedKind: 'sdt', attributes: {}, payload: { content: [{ kind: 'text', text: part.control }] } }),
+    { kind: 'pilcrow', paraId: `${story}-${index}`, properties: {}, attributes: {} },
+  ];
+}
+
+function controlArm(stories: Record<string, ControlPart[][]>): CommandArm {
+  const arm = fakeArm(Object.fromEntries(Object.entries(stories).map(([story, paragraphs]) =>
+    [story, paragraphs.map((parts) => parts.map((part) => typeof part === 'string' ? part : '￼').join(''))])));
+  arm.engine.geometryReader.storySegments = (story) =>
+    stories[story]!.flatMap((parts, index) => controlSegments(story, index, parts));
+  Object.assign(arm.engine, {
+    paragraphSegments: (story: string, indices: readonly number[]) =>
+      indices.map((index) => controlSegments(story, index, stories[story]![index]!)),
+  });
+  return arm;
+}
+
+function pointer(arm: CommandArm, lines: queryModule.DisplayListVisualLine[] = []) {
+  const frame = fakeFrame([{ pageIndex: 0, width: 600, height: 800, primitives: [] }]);
+  let hit: number | null = null;
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    hitTestRegions: () => hit === null ? null : { region: 'body', pos: hit, target: 'text' },
+    visualLinesOnPage: () => lines,
+  }));
+  releasesAfterTest.push(() => queries.mockRestore());
+  return (position: number | null, kind: 'selectPoint' | 'extendSelection' = 'selectPoint', shift = false, y = 40) => {
+    hit = position;
+    const intent = command(arm, kind, {
+      page: { pageId: '1', pageIndex: 0 }, x: 0, y, layoutRevision: 0, frameEpoch: 1, clickCount: 1,
+      modifiers: { shift, alt: false, ctrl: false, meta: false },
+    }) as DocxSelectionCommandIntent;
+    return resolveDocxSelectionIntent({
+      engine: arm.engine, state: arm.state, command: intent, context: context(arm, intent),
+      readLayout: () => ({ frame, layoutRevision: 0 }),
+    });
+  };
+}
+
+test('click_before_and_after_a_checkbox_control_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['ab', CHECKBOX, 'cd']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [1, 1], [2, 2], [3, 2], [4, 3], [5, 3], [6, 4], [7, 5]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_before_and_after_a_plain_text_control_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['ab', { control: 'Value 1' }, 'cd']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [1, 1], [2, 2], [6, 2], [7, 3], [11, 3], [12, 4], [13, 5]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_between_and_after_two_controls_in_one_paragraph_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['a', CHECKBOX, 'b', { control: 'Value 2' }, 'c']] });
+  const click = pointer(arm);
+  for (const [content, offset] of [[0, 0], [1, 1], [4, 2], [5, 3], [14, 4], [15, 5]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+});
+
+test('click_on_line_two_of_a_wrapped_paragraph_with_a_control_on_line_one_lands_at_the_clicked_story_offset', () => {
+  const arm = controlArm({ body: [['Intro'], ['Check ', CHECKBOX, ' first line second line ', { control: 'Value 4' }, ' tail']] });
+  const lines = [{ ...fakeLine(1, 6), y: 0 }, { ...fakeLine(8, 29), y: 20 }, { ...fakeLine(29, 55), y: 40 }];
+  const click = pointer(arm, lines);
+  for (const [content, offset] of [[21, 19], [33, 31], [47, 37]] as const) {
+    arm.state.selection = selection('body-0', 2);
+    expect(click(8 + content).selection, `content unit ${content}`).toEqual(selection('body-1', offset));
+  }
+  arm.state.selection = selection('body-0', 2);
+  expect(click(null, 'selectPoint', false, 45).selection).toEqual(selection('body-1', 19));
+});
+
+test('click_in_a_table_cell_paragraph_with_a_checkbox_control_lands_at_the_clicked_story_offset', () => {
+  const cell = 'body:t0:r0c0';
+  const arm = controlArm({ body: [['Before'], ['After']], [cell]: [['ab', CHECKBOX, 'cd']] });
+  const segments = arm.engine.geometryReader.storySegments;
+  arm.engine.geometryReader.storySegments = (story) => story === 'body' ? [
+    ...segments(story).slice(0, 2),
+    { kind: 'embed', embedKind: 'table', attributes: {}, payload: { tblPr: {}, grid: [], rows: [{ cells: [{ story: cell }] }] } },
+    ...segments(story).slice(2),
+  ] : segments(story);
+  const index = new DisplayPositionIndex({
+    ...arm.engine.geometryReader, selectionText: arm.engine.selectionText, resolveComment: arm.engine.resolveComment,
+  });
+  const click = pointer(arm);
+  for (let offset = 0; offset <= 5; offset++) {
+    arm.state.selection = selection('body-0', 2);
+    const position = index.positionOf({ story: cell, paraId: `${cell}-0`, offset }, 'body')!;
+    expect(click(position).selection, `story offset ${offset}`).toEqual(selection(`${cell}-0`, offset, offset, cell));
+  }
+});
+
+test('arrow_down_and_up_through_checklist_paragraphs_keep_the_goal_column', () => {
+  const arm = controlArm({ body: [['Intro'], [CHECKBOX, 'One'], [CHECKBOX, 'Two'], [CHECKBOX, 'Three']] });
+  const frame = fakeFrame([{ pageIndex: 0, width: 600, height: 800, primitives: [] }]);
+  const lines = [fakeLine(1, 6), fakeLine(8, 14), fakeLine(16, 22), fakeLine(24, 32)];
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    verticalMove: (position, direction, goalX = 0) => {
+      const line = lines.findIndex((line) => line.from <= position && position <= line.to);
+      const target = lines[line + (direction === 'down' ? 1 : -1)]!;
+      return { position: Math.min(target.from + goalX / 10, target.to), goalX };
+    },
+  }));
+  try {
+    for (const [goalX, start, offset] of [[0, 0, 0], [20, 0, 1], [40, 2, 2]] as const) {
+      arm.state.selection = selection('body-1', start);
+      for (const [direction, paragraph] of [['down', 2], ['down', 3], ['up', 2], ['up', 1]] as const) {
+        const moved = runNavigation(arm, frame, { unit: 'line', direction, extend: false, goalX });
+        expect(moved.selection, `${direction} to paragraph ${paragraph} at goal ${goalX}`).toEqual(selection(`body-${paragraph}`, offset));
+        expect(moved.goalX).toBe(goalX);
+        arm.state.selection = moved.selection;
+      }
+    }
+    arm.state.selection = selection('body-1', 2);
+    const extended = runNavigation(arm, frame, { unit: 'line', direction: 'down', extend: true, goalX: 0 });
+    expect(extended.selection).toEqual({ anchor: { story: 'body', paraId: 'body-1', offset: 2 }, focus: { story: 'body', paraId: 'body-2', offset: 0 } });
+  } finally {
+    queries.mockRestore();
+  }
+});
+
+test('home_and_end_on_a_checklist_line_land_before_the_control_and_at_the_line_end', () => {
+  const arm = controlArm({ body: [['Intro'], [CHECKBOX, 'One']] });
+  const frame = fakeFrame([{ pageIndex: 0, width: 600, height: 800, primitives: [] }]);
+  const queries = spyOn(queryModule, 'createDisplayListQueries').mockReturnValue(fakeQueries({
+    caretRect: () => ({ pageIndex: 0, x: 0, y: 0, width: 0, height: 10 }),
+    visualLinesOnPage: () => [fakeLine(8, 14)],
+  }));
+  try {
+    for (const [direction, extend, expected] of [
+      ['backward', false, selection('body-1', 0)],
+      ['forward', false, selection('body-1', 4)],
+      ['backward', true, selection('body-1', 3, 0)],
+    ] as const) {
+      arm.state.selection = selection('body-1', 3);
+      expect(runNavigation(arm, frame, { unit: 'line', direction, extend }).selection, `${direction} ${extend}`).toEqual(expected);
+    }
+  } finally {
+    queries.mockRestore();
+  }
+});
+
+test('shift_click_and_drag_extend_put_the_focus_at_the_story_offset_before_a_control', () => {
+  const arm = controlArm({ body: [['Intro'], ['ab', CHECKBOX, 'cd']] });
+  const click = pointer(arm);
+  for (const [kind, shift, content, offset] of [
+    ['selectPoint', true, 1, 1],
+    ['selectPoint', true, 2, 2],
+    ['extendSelection', false, 0, 0],
+    ['extendSelection', false, 3, 2],
+    ['extendSelection', false, 6, 4],
+  ] as const) {
+    arm.state.selection = selection('body-1', 5);
+    expect(click(8 + content, kind, shift).selection, `${kind} at content unit ${content}`)
+      .toEqual(selection('body-1', 5, offset));
+  }
+});
