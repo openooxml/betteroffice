@@ -9,7 +9,7 @@ export function WorkerContentControls({ controller, onError }: { controller: Wor
   const [busy, setBusy] = useState<string | null>(null);
   const geometry = state.view?.geometry;
   const env = controller.environment();
-  if (!query || !geometry || query.value.frameEpoch !== geometry.frameEpoch || query.value.layoutRevision !== geometry.layoutRevision ||
+  if (!query || !geometry || query.value.layoutRevision !== geometry.layoutRevision ||
     geometry.coversThroughSeq < (state.view?.throughSeq ?? 0)) return null;
   const change = async (handle: string, value: YrsContentControlValue | 'add' | 'remove') => {
     if (busy) return;

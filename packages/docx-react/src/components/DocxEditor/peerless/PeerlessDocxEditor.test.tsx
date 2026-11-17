@@ -2102,7 +2102,12 @@ test('a property-dialog command failure reports a recoverable error and keeps th
   const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
   const view = render(<DocxEditor {...peerlessProps} ref={ref} onError={onError} />);
   await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
-  const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentRead').mockRejectedValueOnce(failure);
+  const original = yrs.ResidentEngineWorkerClient.prototype.documentReadAt;
+  const read = spyOn(yrs.ResidentEngineWorkerClient.prototype, 'documentReadAt').mockImplementation(function (
+    this: yrs.ResidentEngineWorkerClient, request: { kind: string; target?: { kind: string } }, token: string) {
+    return request.kind === 'properties' && request.target?.kind === 'watermark'
+      ? Promise.reject(failure) : original.call(this, request as never, token);
+  } as never);
   restorers.push(() => read.mockRestore());
   await act(async () => { expect(await ref.current!.commands.execute('watermark', null)).toMatchObject({ ok: false }); });
   expect(onError.mock.calls).toEqual([[failure, { recoverable: true }]]);
