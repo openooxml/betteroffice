@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { basename, join, relative, resolve } from 'node:path';
+import { access, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build as esbuild } from 'esbuild';
 import { build as vite } from 'vite';
@@ -11,8 +11,15 @@ const cache = join(root, 'node_modules/.cache');
 await mkdir(cache, { recursive: true });
 const directory = await mkdtemp(join(cache, 'worker-bundling-'));
 const formats = { xlsx: 'xlsxSessionWorker', pptx: 'pptxSessionWorker', docx: 'docxWorker' };
-const publishedWorkers = { xlsx: 'dist/xlsxSessionWorker.mjs', pptx: 'dist/pptxSessionWorker.mjs', docx: 'dist/yrs/docxWorker.mjs' };
+const publishedWorkers = [
+  ['xlsx', 'dist/xlsxSessionWorker.mjs'],
+  ['pptx', 'dist/pptxSessionWorker.mjs'],
+  ['docx', 'dist/docxWorker.mjs'],
+  ['docx', 'dist/yrs/docxWorker.mjs'],
+];
 const staticImport = /\b(?:from|import)\s*["'`]([^"'`]+)["'`]/g;
+const dynamicImport = /(?<![\w$.])import\s*\(/g;
+const dynamicTarget = /(?<![\w$.])import\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
 const app = `
 import { openWorkbookSession } from '@betteroffice/xlsx/worker';
 import { openPresentationSession } from '@betteroffice/pptx/worker';
@@ -69,13 +76,28 @@ async function checkWorkerEntriesLoadOnce(directory) {
 }
 
 async function checkPublishedWorkerStubs() {
-  for (const [format, file] of Object.entries(publishedWorkers)) {
-    const contents = await readFile(join(root, 'packages', format, file), 'utf8');
+  const failures = [];
+  for (const [format, file] of publishedWorkers) {
+    const dist = join(root, 'packages', format, 'dist');
+    const path = join(root, 'packages', format, file);
+    const contents = await readFile(path, 'utf8').catch(() => null);
+    if (contents === null) {
+      failures.push(`${format} ${file} is missing`);
+      continue;
+    }
     const imported = [...contents.matchAll(staticImport)].map(([, specifier]) => specifier);
-    assert.deepEqual(imported, [], `${format} ${file} statically imports ${imported.join(', ')}; it must only import its code dynamically`);
-    const dynamic = contents.match(/\bimport\s*\(/g)?.length ?? 0;
-    assert.equal(dynamic, 1, `${format} ${file} has ${dynamic} dynamic imports; it must load its code with exactly one`);
+    if (imported.length > 0) failures.push(`${format} ${file} statically imports ${imported.join(', ')}; it must only import its code dynamically`);
+    const dynamic = contents.match(dynamicImport)?.length ?? 0;
+    if (dynamic !== 1) failures.push(`${format} ${file} has ${dynamic} dynamic imports; it must load its code with exactly one`);
+    for (const [, target] of contents.matchAll(dynamicTarget)) {
+      const resolved = resolve(dirname(path), target);
+      const inside = !relative(dist, resolved).startsWith('..');
+      if (!inside || !await access(resolved).then(() => true, () => false)) {
+        failures.push(`${format} ${file} dynamically imports ${target}, which is not a file in ${format}/dist`);
+      }
+    }
   }
+  assert.deepEqual(failures, [], `Published worker entries must import nothing statically and one file of their dist dynamically:\n${failures.join('\n')}`);
 }
 
 try {
