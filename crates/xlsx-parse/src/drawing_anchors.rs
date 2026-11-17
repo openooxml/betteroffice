@@ -75,6 +75,13 @@ pub(crate) fn sheet_drawing_anchors(
         .collect()
 }
 
+/// Where a save places an anchor no chart claims, authored in source coordinates, once the
+/// sheet's rows and columns moved as `axes` records; `None` when a corner would leave the grid.
+#[doc(hidden)]
+pub fn followed_anchor(anchor: &ChartAnchor, axes: &SheetAxes) -> Option<ChartAnchor> {
+    followed(anchor, axes)
+}
+
 /// The relationship part of the part at `path`, as a save looks it up.
 #[doc(hidden)]
 pub fn relationship_part_of(path: &str) -> String {

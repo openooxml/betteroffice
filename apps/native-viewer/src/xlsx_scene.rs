@@ -132,6 +132,7 @@ fn translate_command(
     tiles: &mut PatternTiles,
 ) -> Result<(), String> {
     match command {
+        DrawCmd::Image { .. } => Err("pictures are not translated".into()),
         DrawCmd::PatternFill {
             x,
             y,
@@ -772,14 +773,15 @@ fn command_kind(command: &DrawCmd) -> &'static str {
         DrawCmd::Line { .. } => "line",
         DrawCmd::Path { .. } => "path",
         DrawCmd::Text { .. } => "text",
+        DrawCmd::Image { .. } => "image",
     }
 }
 
 fn command_bounds(command: &DrawCmd) -> Option<Rect> {
     match command {
-        DrawCmd::FillRect { x, y, w, h, .. } | DrawCmd::PatternFill { x, y, w, h, .. } => {
-            loose_rectangle(*x, *y, *w, *h)
-        }
+        DrawCmd::FillRect { x, y, w, h, .. }
+        | DrawCmd::PatternFill { x, y, w, h, .. }
+        | DrawCmd::Image { x, y, w, h, .. } => loose_rectangle(*x, *y, *w, *h),
         DrawCmd::Line { x1, y1, x2, y2, .. } => loose_extents(*x1, *y1, *x2, *y2),
         DrawCmd::Path { commands, .. } => path_bounds(commands),
         DrawCmd::Text { clip, .. } => loose_rectangle(clip.x, clip.y, clip.w, clip.h),

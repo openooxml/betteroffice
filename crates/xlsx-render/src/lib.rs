@@ -7,6 +7,7 @@ mod fmath;
 pub mod geometry;
 pub mod hit;
 pub mod number_format;
+mod picture;
 pub mod region;
 mod table_style;
 pub mod wrap;
@@ -28,7 +29,7 @@ use xlsx_model::value::CellValue;
 use xlsx_model::workbook::{ColumnDefaults, Hyperlink, Sheet};
 use xlsx_model::{
     CellRange, CellRef, DifferentialFormat, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId,
-    Table, VAlign, Workbook,
+    SheetPicture, Table, VAlign, Workbook,
 };
 
 use table_style::SheetTables;
@@ -39,7 +40,7 @@ pub use chart::{
     resolve_chart_anchor,
 };
 pub use display_list::{
-    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
+    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, ImageCrop,
     PathStroke, Rect, TextValign, TextWrap, border_dash, scaled,
 };
 pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
@@ -650,10 +651,11 @@ where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
 {
-    build_frame(wb, sheet, viewport, ghosts, resolver, None)
+    build_frame(wb, sheet, viewport, ghosts, &[], resolver, None)
 }
 
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
 pub fn build_display_list_with_geometry<F, R>(
     wb: &Workbook,
     sheet: SheetId,
@@ -661,6 +663,7 @@ pub fn build_display_list_with_geometry<F, R>(
     ghosts: &[GhostEdit],
     geometry: &GridGeometry,
     max_cells: Option<u64>,
+    pictures: &[SheetPicture],
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
@@ -672,6 +675,7 @@ where
         sheet,
         viewport,
         ghosts,
+        pictures,
         resolver,
         None,
         Some(geometry),
@@ -685,6 +689,7 @@ pub fn build_print_display_list_with_charts<F, R>(
     viewport: &Viewport,
     metrics: &PrintMetrics,
     gridlines: bool,
+    pictures: &[SheetPicture],
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
@@ -696,6 +701,7 @@ where
         sheet,
         viewport,
         &[],
+        pictures,
         resolver,
         Some((metrics, gridlines)),
     )
@@ -706,6 +712,7 @@ fn build_frame<F, R>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
     resolver: F,
     print: Option<(&PrintMetrics, bool)>,
 ) -> Result<DisplayList, RenderError>
@@ -724,6 +731,7 @@ where
         sheet,
         viewport,
         ghosts,
+        pictures,
         resolver,
         print,
         geometry.as_ref(),
@@ -737,6 +745,7 @@ fn build_frame_with_geometry<F, R>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
+    pictures: &[SheetPicture],
     mut resolver: F,
     print: Option<(&PrintMetrics, bool)>,
     geometry: Option<&GridGeometry>,
@@ -1258,6 +1267,8 @@ where
     }
 
     let mut charts = Vec::new();
+    let mut pictures =
+        picture::PictureLayer::new(pictures, geom, &paint_viewport, frozen_rows, frozen_cols);
     chart::render_charts(
         sheet_ref,
         geom,
@@ -1267,7 +1278,9 @@ where
         &mut commands,
         &mut charts,
         &mut resolver,
+        &mut |chart, commands| pictures.paint_below(chart, commands),
     )?;
+    pictures.paint_rest(&mut commands);
 
     if let Some(x) = cols.divider {
         commands.push(DrawCmd::Line {
@@ -4344,6 +4357,7 @@ mod tests {
             },
             &metrics,
             true,
+            &[],
             |_| {
                 Err::<std::sync::Arc<ooxml_drawingml::chart::ChartSpace>, _>(
                     RenderError::ChartSourceUnavailable {
@@ -4592,6 +4606,7 @@ mod tests {
             SheetId(0),
             &vp,
             &[],
+            &[],
             |chart| {
                 Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
                     part: chart.part.clone(),
@@ -4669,6 +4684,7 @@ mod tests {
             &wb,
             SheetId(0),
             &vp,
+            &[],
             &[],
             |chart| {
                 Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {

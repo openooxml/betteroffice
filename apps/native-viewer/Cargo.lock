@@ -491,6 +491,7 @@ dependencies = [
  "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "betteroffice-xlsx-render",
+ "image",
  "libm",
  "rustybuzz",
  "tiny-skia 0.12.0",
