@@ -254,6 +254,54 @@ test('a rejected payload reads as plain text even around formatted markup', () =
   expect(parseClipboardHtml(`<div data-betteroffice-docx="${payload}">text</div>`)).toBeNull();
 });
 
+test('a rejected payload is read exactly as the plain fallback reads it', () => {
+  const crafted = JSON.stringify({ v: 1, fragment: { paragraphs: [{ text: 'text', runs: [
+    { text: 'text', format: { other: { runStyle: { styleId: 'Evil' } } } },
+  ] }] } }).replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+  const unknownVersion = JSON.stringify({ v: 99, fragment: { paragraphs: [{ text: 'x' }] } }).replaceAll('"', '&quot;');
+  const table = '<table><tr><td>C</td></tr></table>';
+  const parsedTable: DocxTableFragment = {
+    tblPr: { width: 9360, widthType: 'dxa' },
+    grid: [],
+    rows: [{ trPr: {}, cells: [{ tcPr: { borders }, content: [{ kind: 'text', text: 'C' }, { kind: 'pilcrow' }] }] }],
+  };
+  const cases: Array<{ name: string; html: string; expected: DocxClipboardFragment | null }> = [
+    {
+      name: 'line breaks before a table',
+      html: `<div data-betteroffice-docx="{}"><p>A<br><br>B</p>${table}</div>`,
+      expected: { paragraphs: [{ text: 'A' }, { text: 'B' }, { tables: [parsedTable], text: '' }] },
+    },
+    {
+      name: 'bold markup without a table',
+      html: `<div data-betteroffice-docx="${crafted}"><b>text</b></div>`,
+      expected: null,
+    },
+    {
+      name: 'plain text only',
+      html: `<div data-betteroffice-docx="${unknownVersion}">plain text</div>`,
+      expected: null,
+    },
+    {
+      name: 'blank lines and non-breaking spaces',
+      html: `<div data-betteroffice-docx="${unknownVersion}"><p>&nbsp;</p><p>X&nbsp;&nbsp;Y</p><p></p><p>Z</p>${table}</div>`,
+      expected: { paragraphs: [{ text: 'X Y' }, { text: 'Z' }, { tables: [parsedTable], text: '' }] },
+    },
+    {
+      name: 'a list before a table',
+      html: `<div data-betteroffice-docx="${crafted}"><ul><li>One</li><li>Two</li></ul>${table}</div>`,
+      expected: { paragraphs: [{ text: 'OneTwo' }, { tables: [parsedTable], text: '' }] },
+    },
+    {
+      name: 'a heading before a table',
+      html: `<div data-betteroffice-docx="{}"><h1><b>Title</b></h1>${table}</div>`,
+      expected: { paragraphs: [{ text: 'Title' }, { tables: [parsedTable], text: '' }] },
+    },
+  ];
+  for (const { name, html, expected } of cases) {
+    expect({ name, parsed: parseClipboardHtml(html) }).toEqual({ name, parsed: expected });
+  }
+});
+
 test('a valid payload beside external markup reads as the payload', () => {
   const fragment: DocxClipboardFragment = { paragraphs: [{ text: 'Kept', runs: [{ text: 'Kept', format: { other: { italic: true } } }] }] };
   expect(parseClipboardHtml(`<p><b>outside</b></p>${clipboardFragmentHtml(fragment)}`)).toEqual(fragment);

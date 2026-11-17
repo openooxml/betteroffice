@@ -5,10 +5,10 @@ import type { CommandTicket, SubmitOptions, TicketOutcome } from '../../../../..
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessFrameGeometry, PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';
 import { Activity } from 'react';
-import { PeerlessInput, type PeerlessInputProps } from './PeerlessInput';
+import { PeerlessInput, type PeerlessInputProps, type PeerlessPasteRecorder } from './PeerlessInput';
 import { clipboardFragmentHtml } from '../internals/clipboardHtml';
 import type { DocxClipboardFragment } from '@betteroffice/docx/yrs';
-import { admitIntent, createInputAdmission, submitFormattingIntent } from './inputAdmission';
+import { admitIntent, createInputAdmission, submitFormattingIntent, submitPasteFragment, type PeerlessInputAdmission } from './inputAdmission';
 import { installCompositionEventPolyfill } from './compositionEventPolyfill.testing';
 import { PLAIN_CONTEXT } from '../../../commands/testing';
 
@@ -16,13 +16,14 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const restoreCompositionEvent = installCompositionEventPolyfill();
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+await import('../pasteOptions/PasteOptionsControl');
 afterEach(cleanup);
 afterAll(async () => {
   restoreCompositionEvent();
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onCompositionChange' | 'onRecoverableText' | 'onClipboard' | 'onNavigateCell' | 'onPasteFragment' | 'caretHostRef' | 'zoom' | 'autoFocus'> = {}) {
+function mount(readOnly = false, callbacks: Pick<PeerlessInputProps, 'onCompositionChange' | 'onRecoverableText' | 'onClipboard' | 'onNavigateCell' | 'onPasteFragment' | 'pasteRecorder' | 'caretHostRef' | 'zoom' | 'autoFocus'> = {}) {
   const submitted: string[] = [];
   const entries: Array<{
     payload: DocxCommandPayload; options: SubmitOptions<PeerlessEchoIntent>; ticket: CommandTicket;
@@ -1454,85 +1455,158 @@ test('a rejected clipboard payload pastes as its plain text', () => {
   }
 });
 
-test('a paste recorded from outside the input offers paste options until the next edit', async () => {
-  const host = document.createElement('div');
-  host.style.position = 'relative';
-  document.body.appendChild(host);
-  host.getBoundingClientRect = () => ({ x: 0, y: 100, top: 100, bottom: 700, left: 0, right: 600, width: 600, height: 600, toJSON() {} });
-  const recorder: { current: ((fragment: DocxClipboardFragment, plainText: string) => void) | null } = { current: null };
-  const input = mount(false, { caretHostRef: { current: host }, ...({ pasteRecorder: recorder } as object) });
-  const control = () => host.querySelector<HTMLElement>('[data-paste-options]');
-  try {
-    const geometry: PeerlessFrameGeometry = {
-      identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
-      pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
-    };
-    act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
-    expect(typeof recorder.current).toBe('function');
-    const end = { story: 'body', paraId: 'a', offset: 4 };
-    const settle = (version: number, frameEpoch: number) => act(() => {
-      input.snapshot.version = version;
-      input.snapshot.workerSelection = { anchor: end, focus: end };
-      input.viewStore.installFrameGeometry({ ...geometry, frameEpoch });
-      input.refresh();
-    });
-    act(() => recorder.current?.({ paragraphs: [{ text: 'Plain' }] }, 'Plain'));
-    settle(1, 2);
-    expect(control()).toBeNull();
-    const bold: DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
-    act(() => recorder.current?.(bold, 'Bold'));
-    settle(2, 3);
-    await waitFor(() => expect(control()).not.toBeNull());
-    beforeinput(input.textarea, 'insertText', 'x');
-    expect(control()).toBeNull();
-  } finally {
-    input.unmount();
-    input.admission.dispose();
-    host.remove();
-  }
-});
+function boldFragment(): DocxClipboardFragment {
+  return { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
+}
 
-test('the paste options control follows a window scroll only while it is shown', async () => {
+function mountPasteOptions() {
   const host = document.createElement('div');
   host.style.position = 'relative';
   document.body.appendChild(host);
   let hostTop = 100;
-  let measured = 0;
+  const measured = { count: 0 };
   host.getBoundingClientRect = () => {
-    measured += 1;
+    measured.count += 1;
     return { x: 0, y: hostTop, top: hostTop, bottom: hostTop + 600, left: 0, right: 600, width: 600, height: 600, toJSON() {} };
   };
-  const input = mount(false, { caretHostRef: { current: host }, onPasteFragment: () => true });
-  const control = () => host.querySelector<HTMLElement>('[data-paste-options]');
+  const recorder: { current: PeerlessPasteRecorder | null } = { current: null };
+  const admitted: { current: PeerlessInputAdmission | null } = { current: null };
+  const record = (fragment: DocxClipboardFragment, plainText: string) => {
+    recorder.current?.(fragment, plainText, submitPasteFragment(admitted.current!, fragment, { source: 'paste', fence: true }, () => {}));
+  };
+  const input = mount(false, {
+    caretHostRef: { current: host }, pasteRecorder: recorder,
+    onPasteFragment: (fragment, _inputTime, plainText = '') => { record(fragment, plainText); return true; },
+  });
+  admitted.current = input.admission;
+  const geometry: PeerlessFrameGeometry = {
+    identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+    pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
+  };
+  act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
+  let frameEpoch = 1;
+  const present = (version: number) => act(() => {
+    frameEpoch += 1;
+    input.snapshot.version = version;
+    input.viewStore.installFrameGeometry({ ...geometry, coversThroughSeq: input.snapshot.throughSeq, frameEpoch });
+    input.refresh();
+  });
+  const settle = (index: number, status: TicketOutcome['status'], selection?: DocxCommandSelection) => act(async () => {
+    input.entries[index]!.settle({ status, seq: index + 1 }, selection);
+  });
+  return {
+    input, recorder, record, present, settle, measured,
+    control: () => host.querySelector<HTMLElement>('[data-paste-options]'),
+    idle: () => act(() => new Promise<void>((resolve) => { setTimeout(resolve, 50); })),
+    moveHost: (top: number) => { hostTop = top; },
+    dispose() {
+      input.unmount();
+      input.admission.dispose();
+      host.remove();
+    },
+  };
+}
+
+test('a paste recorded from outside the input offers paste options until the next edit', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
   try {
-    const geometry: PeerlessFrameGeometry = {
-      identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
-      pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
-    };
-    act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
-    const bold: DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { other: { bold: true } } }] }] };
-    pasteWith(input, clipboardFragmentHtml(bold), 'Bold');
+    expect(typeof paste.recorder.current).toBe('function');
+    act(() => paste.record({ paragraphs: [{ text: 'Plain' }] }, 'Plain'));
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control()).toBeNull();
+    act(() => paste.record(boldFragment(), 'Bold'));
+    await paste.settle(1, 'applied', { anchor: end, focus: end });
+    paste.present(2);
+    await waitFor(() => expect(paste.control()).not.toBeNull());
+    expect(paste.control()!.style.left).toBe('86px');
+    expect(paste.control()!.style.top).toBe('316px');
+    beforeinput(paste.input.textarea, 'insertText', 'x');
+    expect(paste.control()).toBeNull();
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('a selection change while a paste is pending leaves no Paste Options control', async () => {
+  const paste = mountPasteOptions();
+  const end = { story: 'body', paraId: 'a', offset: 4 };
+  const moved = { story: 'body', paraId: 'b', offset: 0 };
+  try {
+    act(() => paste.record(boldFragment(), 'Bold'));
+    admitIntent(paste.input.admission, { kind: 'navigate', payload: { unit: 'document-boundary', direction: 'backward', extend: false } },
+      { source: 'selection' });
+    expect(paste.input.submitted).toEqual(['pasteFragment', 'navigate']);
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
+    await paste.settle(1, 'applied', { anchor: moved, focus: moved });
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control()).toBeNull();
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('a refused or cancelled paste leaves no Paste Options control', async () => {
+  for (const status of ['refused', 'cancelled'] as const) {
+    const paste = mountPasteOptions();
     const end = { story: 'body', paraId: 'a', offset: 4 };
-    act(() => {
-      input.snapshot.version = 1;
-      input.snapshot.workerSelection = { anchor: end, focus: end };
-      input.viewStore.installFrameGeometry({ ...geometry, frameEpoch: 2 });
-      input.refresh();
+    try {
+      act(() => paste.record(boldFragment(), 'Bold'));
+      await paste.settle(0, status);
+      act(() => { paste.input.snapshot.workerSelection = { anchor: end, focus: end }; });
+      paste.present(1);
+      await paste.idle();
+      expect({ status, control: paste.control() }).toEqual({ status, control: null });
+    } finally {
+      paste.dispose();
+    }
+  }
+});
+
+test('a later command presented in the same frame as the paste leaves no Paste Options control', async () => {
+  const paste = mountPasteOptions();
+  const later = { story: 'body', paraId: 'b', offset: 9 };
+  try {
+    act(() => paste.record(boldFragment(), 'Bold'));
+    paste.input.session.submit('navigate', { unit: 'document-boundary', direction: 'forward', extend: false });
+    expect(paste.input.submitted).toEqual(['pasteFragment', 'navigate']);
+    await act(async () => {
+      paste.input.entries[0]!.settle({ status: 'applied', seq: 1 });
+      paste.input.entries[1]!.settle({ status: 'applied', seq: 2 }, { anchor: later, focus: later });
     });
+    paste.present(1);
+    await paste.idle();
+    expect(paste.control()).toBeNull();
+  } finally {
+    paste.dispose();
+  }
+});
+
+test('the paste options control follows a window scroll only while it is shown', async () => {
+  const paste = mountPasteOptions();
+  const control = paste.control;
+  try {
+    pasteWith(paste.input, clipboardFragmentHtml(boldFragment()), 'Bold');
+    expect(paste.input.submitted).toEqual(['pasteFragment']);
+    const end = { story: 'body', paraId: 'a', offset: 4 };
+    await paste.settle(0, 'applied', { anchor: end, focus: end });
+    paste.present(1);
     await waitFor(() => expect(control()).not.toBeNull());
     expect(control()!.style.left).toBe('86px');
     expect(control()!.style.top).toBe('316px');
-    act(() => { hostTop = 20; fireEvent.scroll(window); });
+    act(() => { paste.moveHost(20); fireEvent.scroll(window); });
     expect(control()!.style.top).toBe('236px');
     act(() => { fireEvent.pointerDown(document.body); });
     expect(control()).toBeNull();
-    measured = 0;
-    act(() => { hostTop = 60; fireEvent.scroll(window); });
-    expect(measured).toBe(0);
+    paste.measured.count = 0;
+    act(() => { paste.moveHost(60); fireEvent.scroll(window); });
+    expect(paste.measured.count).toBe(0);
     expect(control()).toBeNull();
   } finally {
-    input.unmount();
-    input.admission.dispose();
-    host.remove();
+    paste.dispose();
   }
 });
