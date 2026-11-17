@@ -23,6 +23,8 @@ interface ProposalHost {
   assignIdentities(): void;
   /** Holds the next versioned read of `kind` in flight until the returned release is called. */
   hold(kind: string): () => void;
+  /** The most versioned reads of `kind` that were in flight at once. */
+  peak(kind: string): number;
 }
 
 export const source = Uint8Array.of(1);
@@ -83,7 +85,15 @@ export function proposalHost(options: { readOnly?: boolean; mode?: DocxEditorPro
   const admission = createInputAdmission({ session, viewStore, echoPainter: { disable() {}, preview: () => undefined } as unknown as PeerlessEchoPainter });
   const binding = { session, viewStore, admission, commands: createPeerlessCommandBinding(admission) } as PeerlessEditSessionBinding;
   const gates = new Map<string, Promise<void>>();
+  const active = new Map<string, number>();
+  const peaks = new Map<string, number>();
   const readAt = mock(async (request: { kind: string; expectPreviewVersion?: number }, version: string): Promise<ReviewRead> => {
+    const running = (active.get(request.kind) ?? 0) + 1;
+    active.set(request.kind, running);
+    peaks.set(request.kind, Math.max(peaks.get(request.kind) ?? 0, running));
+    try { return await answer(request, version); } finally { active.set(request.kind, active.get(request.kind)! - 1); }
+  });
+  const answer = async (request: { kind: string; expectPreviewVersion?: number }, version: string): Promise<ReviewRead> => {
     const gate = gates.get(request.kind);
     if (gate) { gates.delete(request.kind); await gate; }
     const frame = viewStore.getSnapshot().geometry!;
@@ -103,7 +113,7 @@ export function proposalHost(options: { readOnly?: boolean; mode?: DocxEditorPro
       })) as DocxReviewSnapshot['revisions'], commentGeometry: {}, revisionGeometry: {},
     } : null;
     return { status: 'ok' as const, version, value };
-  });
+  };
   const read = mock(async () => ({ version: snapshot.version, value: { ok: true, view: 'accepted', version: snapshot.version, paragraphs: [] } }));
   const settings = { read: read as never, readAt: readAt as never, focus() {}, zoom: 1, readOnly: options.readOnly, mode: options.mode,
     allowHostProposals: options.allowHostProposals ?? true };
@@ -116,5 +126,6 @@ export function proposalHost(options: { readOnly?: boolean; mode?: DocxEditorPro
       let release!: () => void;
       gates.set(kind, new Promise<void>(resolve => { release = resolve; }));
       return () => release();
-    } };
+    },
+    peak: (kind: string) => peaks.get(kind) ?? 0 };
 }

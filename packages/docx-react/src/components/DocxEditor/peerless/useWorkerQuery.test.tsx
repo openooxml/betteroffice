@@ -130,26 +130,98 @@ for (const request of documentReads) test(`${request.kind} reads once per docume
   } finally { hook.unmount(); h.controller.dispose(); }
 });
 
-for (const request of documentReads) test(`${request.kind} recovers a read superseded by a selection-only acknowledgement`, async () => {
+async function acknowledgeSelection(h: Host, offset: number) {
+  await act(async () => {
+    const store = h.binding.viewStore;
+    const view = store.getSnapshot();
+    store.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version, throughSeq: view.throughSeq + 1,
+      presentedThroughSeq: view.presentedThroughSeq, editState: view.editState,
+      selection: { anchor: { story: 'body', paraId: 'p0', offset: 0 }, focus: { story: 'body', paraId: 'p0', offset } } });
+  });
+}
+
+async function acknowledgeDuringReads(h: Host, kind: string, release: () => void, count: number) {
+  for (let offset = 1; offset <= count; offset++) {
+    await acknowledgeSelection(h, offset);
+    const next = h.hold(kind);
+    await act(async () => { release(); });
+    await settle();
+    release = next;
+  }
+  return release;
+}
+
+for (const request of documentReads) test(`${request.kind} keeps a read that a selection-only acknowledgement lands during`, async () => {
   const h = proposalHost({ automatic: false });
   const release = h.hold(request.kind);
   const hook = renderHook(() => useWorkerQuery(h.controller, request));
   try {
     await waitFor(() => expect(reads(h, request.kind)).toBe(1));
     const { version, geometry } = h.binding.viewStore.getSnapshot();
-    await act(async () => {
-      const store = h.binding.viewStore;
-      const view = store.getSnapshot();
-      store.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: view.version, throughSeq: view.throughSeq + 1,
-        presentedThroughSeq: view.presentedThroughSeq, editState: view.editState,
-        selection: { anchor: { story: 'body', paraId: 'p0', offset: 0 }, focus: { story: 'body', paraId: 'p0', offset: 1 } } });
-    });
+    await acknowledgeSelection(h, 1);
     await act(async () => { release(); });
     await settle();
     await waitFor(() => expect(hook.result.current).not.toBeNull());
     expect(h.binding.viewStore.getSnapshot().version).toBe(version);
     expect(h.binding.viewStore.getSnapshot().geometry).toBe(geometry);
-    expect(reads(h, request.kind)).toBe(2);
+    expect(reads(h, request.kind)).toBe(1);
+  } finally { hook.unmount(); h.controller.dispose(); }
+});
+
+for (const request of documentReads) test(`${request.kind} has its result once four selection acknowledgements in a row, each during the read, stop`, async () => {
+  const h = proposalHost({ automatic: false });
+  const hold = h.hold(request.kind);
+  const hook = renderHook(() => useWorkerQuery(h.controller, request));
+  try {
+    await waitFor(() => expect(reads(h, request.kind)).toBe(1));
+    const { version } = h.binding.viewStore.getSnapshot();
+    const release = await acknowledgeDuringReads(h, request.kind, hold, 4);
+    await act(async () => { release(); });
+    await settle();
+    await waitFor(() => expect(hook.result.current).not.toBeNull());
+    expect(h.binding.viewStore.getSnapshot().version).toBe(version);
+    expect(reads(h, request.kind)).toBeLessThanOrEqual(5);
+    expect(h.peak(request.kind)).toBe(1);
+  } finally { hook.unmount(); h.controller.dispose(); }
+});
+
+for (const request of documentReads) test(`${request.kind} keeps one read in flight through a drag and issues none for its moves`, async () => {
+  const h = proposalHost({ automatic: false });
+  const release = h.hold(request.kind);
+  const hook = renderHook(({ dragging }: { dragging: boolean }) => useWorkerQuery(h.controller, request, { held: dragging }),
+    { initialProps: { dragging: false } });
+  try {
+    await waitFor(() => expect(reads(h, request.kind)).toBe(1));
+    hook.rerender({ dragging: true });
+    for (let offset = 1; offset <= 6; offset++) await extendSelection(h, offset);
+    const next = h.hold(request.kind);
+    await act(async () => { release(); });
+    await settle();
+    expect(reads(h, request.kind)).toBe(1);
+    for (let offset = 7; offset <= 12; offset++) await extendSelection(h, offset);
+    expect(reads(h, request.kind)).toBe(1);
+    hook.rerender({ dragging: false });
+    await act(async () => { next(); });
+    await settle();
+    await waitFor(() => expect(hook.result.current).not.toBeNull());
+    expect(h.peak(request.kind)).toBe(1);
+    expect(reads(h, request.kind)).toBeLessThanOrEqual(7);
+  } finally { hook.unmount(); h.controller.dispose(); }
+});
+
+test('a selection-scoped read held through a drag has its result once four acknowledgements during it stop', async () => {
+  const h = proposalHost({ automatic: false });
+  const request: DocxDocumentRead & { kind: 'sectionProperties' } = { kind: 'sectionProperties', paragraphs: [] };
+  const hold = h.hold(request.kind);
+  const hook = renderHook(() => useWorkerQuery(h.controller, request, { held: true }));
+  try {
+    await waitFor(() => expect(reads(h, request.kind)).toBe(1));
+    const release = await acknowledgeDuringReads(h, request.kind, hold, 4);
+    await act(async () => { release(); });
+    await settle();
+    await waitFor(() => expect(hook.result.current).not.toBeNull());
+    expect(reads(h, request.kind)).toBeLessThanOrEqual(5);
+    expect(h.peak(request.kind)).toBe(1);
   } finally { hook.unmount(); h.controller.dispose(); }
 });
 
