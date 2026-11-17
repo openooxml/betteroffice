@@ -1,5 +1,6 @@
 import { afterAll, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { access, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { buildWorkerStub as BuildWorkerStub } from './worker-stub';
@@ -34,3 +35,20 @@ for (const { name, entry, outfile, start } of stubs) {
     expect([...contents.matchAll(dynamicTarget)].map(([, specifier]) => specifier)).toEqual([start]);
   });
 }
+
+test('a docx build into another directory writes both worker stubs there and none into the package dist', async () => {
+  const docx = join(packages, 'docx');
+  const out = join(directory, 'docx-out');
+  const published = ['dist/docxWorker.mjs', 'dist/yrs/docxWorker.mjs'].map((file) => join(docx, file));
+  const snapshot = () => Promise.all(published.map((file) => stat(file).then(({ mtimeMs, size }) => ({ mtimeMs, size }), () => null)));
+  const before = await snapshot();
+  const build = spawnSync(process.execPath, ['x', 'tsup', '--out-dir', out], {
+    cwd: docx,
+    encoding: 'utf8',
+    env: { ...process.env, NODE_OPTIONS: '--max-old-space-size=8192' },
+  });
+  if (build.status !== 0) throw new Error(build.stdout + build.stderr);
+  const emitted = ['docxWorker.mjs', 'yrs/docxWorker.mjs', 'yrs/residentEngineWorker.mjs'];
+  const present = await Promise.all(emitted.map((file) => access(join(out, file)).then(() => file, () => `${file} missing`)));
+  expect({ present, packageDist: await snapshot() }).toEqual({ present: emitted, packageDist: before });
+}, 300_000);
