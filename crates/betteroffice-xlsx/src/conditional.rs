@@ -1107,4 +1107,254 @@ mod tests {
             assert!(compile(source, anchor).counts.is_empty(), "{source}");
         }
     }
+
+    fn number(value: f64) -> CellValue {
+        CellValue::Number { value }
+    }
+
+    fn text(value: &str) -> CellValue {
+        CellValue::Text {
+            value: value.to_owned(),
+        }
+    }
+
+    fn error(value: ErrorValue) -> CellValue {
+        CellValue::Error { value }
+    }
+
+    fn put(sheet: &mut xlsx_model::Sheet, at: CellRef, value: CellValue, formula: Option<&str>) {
+        sheet.set_cell(
+            at,
+            xlsx_model::Cell {
+                value,
+                formula: formula.map(str::to_owned),
+                ..xlsx_model::Cell::default()
+            },
+        );
+    }
+
+    fn expression_rule(sqref: &str, source: &str) -> Rule {
+        let ranges: Vec<CellRange> = sqref
+            .split_whitespace()
+            .map(|range| CellRange::parse_a1(range).unwrap())
+            .collect();
+        let anchor = ranges[0].start;
+        Rule {
+            formulas: vec![compile(source, anchor)],
+            anchor,
+            ranges,
+            test: Test::Expression,
+            format: Arc::new(DifferentialFormat::default()),
+            stop: false,
+        }
+    }
+
+    /// Each cell of `rule` whose formula value through `cache` differs from
+    /// evaluating its text translated to that cell, `None` where that text
+    /// does not parse.
+    fn disagreements(cache: &mut Cache, model: &Workbook, rule: &Rule) -> Vec<String> {
+        let mut context = EvalContext::new(model, SheetId(0));
+        let mut spent = 0;
+        let aggregate = cache.aggregate(model, SheetId(0), 0, rule, &mut context, &mut spent);
+        let source = &rule.formulas[0].source;
+        let mut out = Vec::new();
+        for range in &rule.ranges {
+            for row in range.start.row..=range.end.row {
+                for col in range.start.col..=range.end.col {
+                    let at = CellRef::new(row, col);
+                    context.restart();
+                    context.cell = Some(at);
+                    let cached = cache.formula(rule, 0, &aggregate, at, &context);
+                    context.restart();
+                    let reference = xlsx_parse::translate_formula(source, rule.anchor, at)
+                        .ok()
+                        .and_then(|text| parse_formula(&text).ok())
+                        .map(|expr| evaluate(&expr, &context));
+                    if cached != reference {
+                        out.push(format!(
+                            "{source} at {}: {cached:?} != {reference:?}",
+                            at.to_a1()
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_shifted_rule_formula_evaluates_as_its_translated_text_at_every_cell() {
+        let mut model = Workbook::default();
+        for name in ["Sheet1", "Other", "Sheet2"] {
+            let mut sheet = xlsx_model::Sheet::new(name);
+            for row in 0..12 {
+                for col in 0..6 {
+                    put(
+                        &mut sheet,
+                        CellRef::new(row, col),
+                        number(f64::from(row * 10 + col + 1)),
+                        None,
+                    );
+                }
+            }
+            model.sheets.push(sheet);
+        }
+        put(&mut model.sheets[1], CellRef::new(MAX_ROWS - 3, 0), number(7.0), None);
+        for (name, formula) in [("Rate", "Sheet1!$C$1"), ("Left", "Sheet1!A1")] {
+            model.defined_names.push(xlsx_model::DefinedName {
+                name: name.to_owned(),
+                formula: formula.to_owned(),
+                local_sheet: None,
+                hidden: false,
+            });
+        }
+        let mut mismatches = Vec::new();
+        for (sqref, source) in [
+            ("B2:D5", "A1+$B1+C$1+$D$2"),
+            ("B2:D5 F1:G3", "A1+$B1+C$1"),
+            ("B2:D5", "SUM(1:1)+SUM(A:A)+SUM($A:$A)+SUM($C:A)"),
+            ("C3:E8", "'Other'!A1+SUM(Sheet2!$B$2:B10)"),
+            ("B2:D5", "Rate*A1+Left"),
+            ("A1048570:B1048576", "A1048574+B$1048576"),
+            ("A1048570:B1048576", "SUM(A1048574:B1048575)"),
+            ("A1048570:B1048576", "'Other'!A1048574+1"),
+            ("A1048576:C1048576", "A1+B1048576"),
+            ("XFA1:XFD3", "XFC1+SUM(XFB1:XFC2)"),
+            ("XFD1:XFD4", "A1+XFD1"),
+            ("A1048570:A1048576", "SUM(1048574:1048575)"),
+            ("XFA1:XFD3", "SUM(XFB:XFC)"),
+            ("B1:C3 A5:A6", "SUM(A:B)"),
+        ] {
+            let rule = expression_rule(sqref, source);
+            mismatches.extend(disagreements(&mut Cache::default(), &model, &rule));
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    /// Checks `rule` cell by cell against the general path in a new `epoch`,
+    /// and its counts at the first and thirteenth cells against `expected`.
+    fn check_counts(
+        cache: &mut Cache,
+        model: &Workbook,
+        rule: &Rule,
+        epoch: u64,
+        expected: [f64; 2],
+    ) {
+        let rows = rule.ranges[0].end.row + 1;
+        cache.effects(epoch, model, SheetId(0), &[0..rows], &[1..2], Budget::Complete);
+        let mismatches = disagreements(cache, model, rule);
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+        let mut context = EvalContext::new(model, SheetId(0));
+        let mut spent = 0;
+        let aggregate = cache.aggregate(model, SheetId(0), 0, rule, &mut context, &mut spent);
+        let table = aggregate.tables[0][0].as_ref().unwrap();
+        let answered = (0..rows)
+            .filter(|&row| {
+                let criterion = model
+                    .sheet(SheetId(0))
+                    .and_then(|sheet| sheet.cell(CellRef::new(row, 1)))
+                    .map_or(CellValue::Empty, |cell| cell.value.clone());
+                table.count(&criterion, &context).is_some()
+            })
+            .count();
+        assert!(answered >= 10, "{answered}");
+        for (row, count) in [0, 12].into_iter().zip(expected) {
+            let at = CellRef::new(row, 1);
+            context.restart();
+            context.cell = Some(at);
+            assert_eq!(
+                cache.formula(rule, 0, &aggregate, at, &context),
+                Some(number(count)),
+                "{}",
+                at.to_a1()
+            );
+        }
+    }
+
+    #[test]
+    fn a_count_table_counts_as_countif_does_before_and_after_an_edit() {
+        let mut data = xlsx_model::Sheet::new("Sheet1");
+        let values = [
+            text("abc"),
+            text("ABC"),
+            text("Abc "),
+            number(1.0),
+            text("1"),
+            text("1.0"),
+            CellValue::Bool { value: true },
+            text("TRUE"),
+            error(ErrorValue::NA),
+            error(ErrorValue::Div0),
+            CellValue::Empty,
+            CellValue::Bool { value: false },
+            number(0.0),
+        ];
+        for (row, value) in values.into_iter().enumerate() {
+            if value != CellValue::Empty {
+                put(&mut data, CellRef::new(row as u32, 0), value, None);
+            }
+        }
+        put(&mut data, CellRef::new(13, 0), number(5.0), Some("C1"));
+        put(&mut data, CellRef::new(14, 0), text("X"), Some("UPPER(C2)"));
+        put(&mut data, CellRef::new(0, 2), number(5.0), None);
+        put(&mut data, CellRef::new(1, 2), text("x"), None);
+        let criteria = [
+            text("abc"),
+            text("ABC"),
+            number(1.0),
+            text("1"),
+            text("1.0"),
+            CellValue::Bool { value: true },
+            CellValue::Bool { value: false },
+            error(ErrorValue::NA),
+            error(ErrorValue::Div0),
+            CellValue::Empty,
+            text(""),
+            text("x"),
+            number(5.0),
+            number(0.0),
+            text("true"),
+            text("abc*"),
+            text(">0"),
+        ];
+        let rows = criteria.len();
+        for (row, value) in criteria.into_iter().enumerate() {
+            if value != CellValue::Empty {
+                put(&mut data, CellRef::new(row as u32, 1), value, None);
+            }
+        }
+        let mut model = Workbook::default();
+        model.sheets.push(data);
+        let mut workbook = crate::Workbook::from_model(model).unwrap();
+        let rule = expression_rule(&format!("B1:B{rows}"), "COUNTIF($A$1:$A$15,B1)");
+        assert!(rule.formulas[0].shifts);
+        assert_eq!(rule.formulas[0].counts, [Vec::<usize>::new()]);
+        let mut cache = Cache::default();
+        check_counts(&mut cache, workbook.model(), &rule, 0, [2.0, 1.0]);
+        workbook
+            .edit_cells(
+                SheetId(0),
+                &[
+                    crate::CellInput {
+                        cell: CellRef::new(0, 2),
+                        input: "ABC".into(),
+                    },
+                    crate::CellInput {
+                        cell: CellRef::new(1, 2),
+                        input: "abc".into(),
+                    },
+                ],
+                crate::CalculationOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            workbook
+                .model()
+                .sheet(SheetId(0))
+                .and_then(|sheet| sheet.cell(CellRef::new(14, 0)))
+                .map(|cell| cell.value.clone()),
+            Some(text("ABC"))
+        );
+        check_counts(&mut cache, workbook.model(), &rule, 1, [4.0, 0.0]);
+    }
 }
