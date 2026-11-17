@@ -8,6 +8,11 @@ import type { DocxCommandSelection, DocxOutlineHeading, DocxReviewTarget } from 
 import { createDisplayListQueries, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 
+const samePoint = (a: DocxCommandSelection['anchor'], b: DocxCommandSelection['anchor']) =>
+  a.story === b.story && a.paraId === b.paraId && a.offset === b.offset;
+const samePosition = (shown: DocxCommandSelection | null | undefined, ours: DocxCommandSelection) =>
+  !!shown && samePoint(shown.anchor, ours.anchor) && samePoint(shown.focus, ours.focus);
+
 export function useWorkerNavigation(controller: ReturnType<typeof createPeerlessShellController>,
   binding: () => PeerlessEditSessionBinding | null, scroller: RefObject<HTMLDivElement | null>,
   host: RefObject<HTMLDivElement | null>, zoom: number, props: DocxEditorProps) {
@@ -120,7 +125,9 @@ export function useWorkerNavigation(controller: ReturnType<typeof createPeerless
       check();
       if (!isCurrent() || (outcome.status !== 'applied' && outcome.status !== 'noop')) return false;
       const seq = outcome.seq ?? result.ticket.seq ?? throughSeq;
-      return presented === 'presented' && current.viewStore.getSnapshot().throughSeq <= seq;
+      const view = current.viewStore.getSnapshot();
+      return presented === 'presented' && (view.throughSeq <= seq ||
+        view.versionSinceSeq !== undefined && view.versionSinceSeq <= seq && samePosition(view.workerSelection, value));
     };
     if (!await select({ anchor: selection.anchor, focus: selection.anchor })) return false;
     const shown = current.viewStore.getSnapshot().geometry?.caret;
