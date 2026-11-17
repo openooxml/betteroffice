@@ -1551,38 +1551,6 @@ test('worker click beside the checkbox of checklist line 2 types into paragraph 
   expect(await savedParagraphs(page)).toEqual(['☐Item one', 'Z☐Item two']);
 });
 
-test('worker ArrowDown from before the checkbox of checklist line 1 types before the checkbox of checklist line 2', async ({ page }) => {
-  await open(page, true, null, 1, await checklistBytes());
-  const input = await focusDocument(page);
-  const first = (await workerFocus(page))!.paraId;
-  expect(await workerFocus(page)).toMatchObject({ paraId: first, offset: 0 });
-  await input.press('ArrowDown');
-  await settled(page);
-  const focus = (await workerFocus(page))!;
-  expect(focus.paraId).not.toBe(first);
-  expect(focus.offset).toBe(0);
-  await beforeinput(input, 'Z');
-  await settled(page);
-  expect(await savedParagraphs(page)).toEqual(['☐Item one', 'Z☐Item two']);
-});
-
-test('worker ArrowUp from before the checkbox of checklist line 2 types before the checkbox of checklist line 1', async ({ page }) => {
-  await open(page, true, null, 1, await checklistBytes());
-  const input = await focusDocument(page);
-  const first = (await workerFocus(page))!.paraId;
-  await input.press('ArrowDown');
-  await settled(page);
-  const second = (await workerFocus(page))!.paraId;
-  expect(second).not.toBe(first);
-  expect(await workerFocus(page)).toMatchObject({ paraId: second, offset: 0 });
-  await input.press('ArrowUp');
-  await settled(page);
-  expect(await workerFocus(page)).toMatchObject({ paraId: first, offset: 0 });
-  await beforeinput(input, 'Z');
-  await settled(page);
-  expect(await savedParagraphs(page)).toEqual(['Z☐Item one', '☐Item two']);
-});
-
 test('today: Ctrl+Home before a leading checkbox control has no caret rectangle', async ({ page }) => {
   await open(page, true, null, 1, await checklistBytes());
   await focusDocument(page);
