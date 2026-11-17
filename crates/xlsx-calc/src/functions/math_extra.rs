@@ -618,12 +618,16 @@ fn block_cells(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Vec<CellValue>, Erro
 }
 
 /// PERCENTOF(data_subset, data_all): SUM(data_subset) / SUM(data_all), each
-/// read the way SUM reads it; a zero total is `#DIV/0!`.
+/// read the way SUM reads it; a sum that overflows is `#NUM!` and a zero
+/// total is `#DIV/0!`.
 pub(crate) fn percentof(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     compute(|| {
         arity(args, 2, 2)?;
         let part: f64 = collect_numbers(&args[..1], ctx)?.iter().sum();
         let whole: f64 = collect_numbers(&args[1..], ctx)?.iter().sum();
+        if !part.is_finite() || !whole.is_finite() {
+            return Err(ErrorValue::Num);
+        }
         if whole == 0.0 {
             return Err(ErrorValue::Div0);
         }
