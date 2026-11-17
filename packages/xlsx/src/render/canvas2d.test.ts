@@ -675,3 +675,41 @@ describe('wrapped text breaker', () => {
     expect(measured).toBeLessThanOrEqual(8 * spaced.length);
   });
 });
+
+describe('Canvas2D images', () => {
+  it('draws the kept crop of a resolved image over its rect inside its clip', () => {
+    const calls: unknown[][] = [];
+    const context = {
+      save() {}, restore() {}, setTransform() {}, clearRect() {}, beginPath() {}, clip() {},
+      rect(...args: number[]) { calls.push(['rect', ...args]); },
+      drawImage(...args: unknown[]) { calls.push(['drawImage', ...args]); },
+    };
+    const bitmap = { width: 200, height: 100 } as ImageBitmap;
+    const dl = { width: 400, height: 300, commands: [
+      { op: 'image', x: 10, y: 20, w: 80, h: 40, assetId: 'xl/media/image1.png',
+        crop: { left: 0.25, bottom: 0.5 }, clip: { x: 0, y: 0, w: 50, h: 300 } },
+      { op: 'image', x: 0, y: 0, w: 10, h: 10, assetId: 'xl/media/missing.png' },
+    ] } as DisplayList;
+    const requested: string[] = [];
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 1, undefined, {
+      resolveImage: (assetId) => { requested.push(assetId); return assetId === 'xl/media/image1.png' ? bitmap : null; },
+    });
+    expect(requested).toEqual(['xl/media/image1.png', 'xl/media/missing.png']);
+    expect(calls).toEqual([
+      ['rect', 0, 0, 400, 300],
+      ['rect', 0, 0, 50, 300],
+      ['drawImage', bitmap, 50, 0, 150, 50, 10, 20, 80, 40],
+    ]);
+  });
+
+  it('skips images when the host resolves none', () => {
+    const context = {
+      save() {}, restore() {}, setTransform() {}, clearRect() {}, beginPath() {}, rect() {}, clip() {},
+      drawImage() { throw new Error('unexpected drawImage'); },
+    };
+    const dl = { width: 40, height: 40, commands: [
+      { op: 'image', x: 0, y: 0, w: 10, h: 10, assetId: 'xl/media/image1.png' },
+    ] } as DisplayList;
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, dl, 1);
+  });
+});

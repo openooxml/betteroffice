@@ -20,7 +20,12 @@ export declare function nativeTabStops(value: unknown): NonNullable<YrsParagraph
 export declare function validSectionMargins(value: unknown): value is DocxSectionMargins;
 export declare function residentSectionPropertiesAt(engine: ResidentEngineSession, at: YrsLoc): SectionProperties | null;
 export declare function sectionMarkKey(mark: unknown): string;
-export declare function readSectionSnapshot(engine: ResidentEngineSession, base: Document, margins: Record<string, DocxSectionMargins>, seeded: ReadonlyMap<string, string>, nativeSections?: boolean): ResidentSectionSnapshot;
+/** Limits a section snapshot's `paragraphs` to these paragraphs. */
+export type ResidentSectionParagraphs = readonly {
+    story: string;
+    paraId: string;
+}[];
+export declare function readSectionSnapshot(engine: ResidentEngineSession, base: Document, margins: Record<string, DocxSectionMargins>, seeded: ReadonlyMap<string, string>, nativeSections?: boolean, only?: ResidentSectionParagraphs): ResidentSectionSnapshot;
 /** `document` with each section keyed by the body paragraph that closes it in the freshly seeded session. */
 export declare function withSectionIds(document: Document, closing: readonly string[]): Document;
 export declare function withSectionNames(document: Document, names: ReadonlyMap<string, string>): Document;

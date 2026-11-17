@@ -46,6 +46,7 @@ fn workbook() -> Workbook {
             .iter()
             .map(|name| name.to_string())
             .collect(),
+        style: Vec::new(),
     });
     workbook
 }
@@ -324,6 +325,7 @@ fn spaced_workbook() -> Workbook {
         header_rows: 1,
         totals_rows: 0,
         columns: columns.iter().map(|name| name.to_string()).collect(),
+        style: Vec::new(),
     });
     workbook
 }
