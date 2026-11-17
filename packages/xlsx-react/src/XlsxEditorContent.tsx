@@ -1646,7 +1646,9 @@ export function XlsxEditorContent({
           applyResult(handle.fillRange(sheet, from === sourceEnd ? from : `${from}:${sourceEnd}`, `${from}:${end}`));
           return true;
         } catch (error) {
-          setRefusal({ message: error instanceof Error ? error.message : String(error) });
+          setRefusal(isSheetProtectedError(error)
+            ? { code: 'sheet-protected' }
+            : { message: error instanceof Error ? error.message : String(error) });
           return true;
         }
       });
@@ -1728,12 +1730,12 @@ export function XlsxEditorContent({
           applyResult(handle.resizeChart(sheet, chart.id, edges));
           return true;
         } catch (e) {
-          setError(e instanceof Error ? e.message : String(e));
+          reportEditFailure(e);
           return false;
         }
       });
     },
-    [activeSheet, applyResult, readOnly, coordinator]
+    [activeSheet, applyResult, readOnly, coordinator, reportEditFailure]
   );
   resizeChartRef.current = resizeChartBy;
 
