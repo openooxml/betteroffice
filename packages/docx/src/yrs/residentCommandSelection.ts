@@ -137,7 +137,7 @@ function locationAt(reads: SelectionReads, engine: DocxWorkerCommandEngine, root
         const ordinal = paragraphs.indices.get(paraId);
         if (ordinal === undefined) throw new Error('Projected selection lacks paragraph');
         const length = node.nodeSize - 2;
-        const leading = paragraphs.spans[ordinal]!.length - length;
+        const leading = paragraphs.spans[ordinal]!.length - (projection.inlineStoryOffset(node.story, paraId, length) ?? length);
         positions.push({ from, to: from, at: { story: node.story, paraId, offset: Math.max(0, leading - 1) }, length: 0 });
         positions.push({ from: from + 1, to: from + node.nodeSize - 1, at: { story: node.story, paraId, offset: leading }, length });
         reads.roots.set(node.story, root);
@@ -160,8 +160,10 @@ function locationAt(reads: SelectionReads, engine: DocxWorkerCommandEngine, root
     else high = middle;
   }
   const entry = positions[low - 1];
-  return entry && bounded <= entry.to
-    ? { ...entry.at, offset: entry.at.offset + Math.min(entry.length, bounded - entry.from) } : null;
+  if (!entry || bounded > entry.to) return null;
+  const display = Math.min(entry.length, bounded - entry.from);
+  const inline = display && (projection.inlineStoryOffset(entry.at.story, entry.at.paraId, display) ?? display);
+  return { ...entry.at, offset: entry.at.offset + inline };
 }
 
 function scopedList(list: DisplayList, root: string, pageIndex?: number): DisplayList {
