@@ -5,16 +5,24 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use xlsx_calc::eval::MAX_EVALUATION_CELL_VISITS;
-use xlsx_calc::{BinaryOp, EvalContext, Expr, evaluate, parse_formula};
+use xlsx_calc::functions::criteria::CountTable;
+use xlsx_calc::{BinaryOp, ColumnRange, EvalContext, Expr, RowRange, evaluate, parse_formula};
 use xlsx_model::styles::DifferentialFormat;
 use xlsx_model::value::CellValue;
-use xlsx_model::{CellRange, CellRef, MAX_COLS, MAX_ROWS, SheetId, Workbook};
+use xlsx_model::{CellRange, CellRef, ErrorValue, MAX_COLS, MAX_ROWS, SheetId, Workbook};
 use xlsx_render::CellFormats;
 
 /// Rule checks plus cell visits one frame on screen spends deciding cells.
 pub const CONDITIONAL_FRAME_BUDGET: u64 = 200_000;
 /// Milliseconds one timed frame on screen spends deciding cells.
 pub const CONDITIONAL_FRAME_MS: f64 = 10.0;
+/// A timed frame's unit cap in untimed frames, which still ends a frame whose
+/// clock does not advance.
+const TIMED_FRAMES: u64 = 10;
+/// Cells decided between two reads of a frame's clock.
+const CLOCK_STRIDE: u64 = 8;
+/// Units spent since the last read that make the next cell read it anyway.
+const CLOCK_UNITS: u64 = 4_096;
 /// Decided cells kept per model epoch; past it, cells outside the frame go.
 pub const CONDITIONAL_RESULT_CAP: usize = 262_144;
 /// Parsed shifted formulas kept across epochs; cleared when full.
@@ -67,10 +75,11 @@ impl<F: Fn() -> f64> FrameClock for F {
 }
 
 /// How much evaluation a display list spends on conditional formats.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Budget {
-    /// One frame's budget; later frames decide the rest.
-    Frame,
+#[derive(Clone, Copy)]
+pub(crate) enum Budget<'c> {
+    /// One frame's budget, ended early once the clock passes the frame's
+    /// time; later frames decide the rest.
+    Frame(Option<&'c dyn FrameClock>),
     /// Every visible cell, for output no later frame replaces.
     Complete,
 }
@@ -162,8 +171,14 @@ struct Formula {
     base: Option<Arc<Expr>>,
     /// Whether a cell other than the anchor reads it shifted.
     relative: bool,
+    /// Whether moving the references of `base` gives what parsing the
+    /// translated text gives, so a cell shifts `base` instead of parsing.
+    shifts: bool,
     /// Paths in `base` of the calls whose value is the same for every cell.
     constants: Vec<Vec<usize>>,
+    /// Paths in `base` of `COUNTIF` calls over a fixed range whose criterion
+    /// is a reference that moves with the cell.
+    counts: Vec<Vec<usize>>,
     /// Texts parsed to compile it.
     parses: u8,
 }
@@ -174,6 +189,10 @@ struct Aggregate {
     stats: Option<Stats>,
     /// Each formula's constant calls, in `Formula::constants` order.
     constants: Vec<Vec<CellValue>>,
+    /// Each formula's `base` with its constant calls read in.
+    bases: Vec<Option<Arc<Expr>>>,
+    /// Each formula's count tables, in `Formula::counts` order.
+    tables: Vec<Vec<Option<CountTable>>>,
 }
 
 enum Stats {
@@ -213,7 +232,7 @@ impl Cache {
         sheet: SheetId,
         rows: &[Range<u32>],
         cols: &[Range<u32>],
-        budget: Budget,
+        budget: Budget<'_>,
     ) -> (CellFormats, u32) {
         if self.epoch != Some(epoch) {
             self.epoch = Some(epoch);
@@ -237,10 +256,15 @@ impl Cache {
         if rules.is_empty() {
             return (formats, 0);
         }
-        let limit = match budget {
-            Budget::Frame => self.budget,
-            Budget::Complete => u64::MAX,
+        let (limit, clock) = match budget {
+            Budget::Frame(None) => (self.budget, None),
+            Budget::Frame(Some(clock)) => (self.budget.saturating_mul(TIMED_FRAMES), Some(clock)),
+            Budget::Complete => (u64::MAX, None),
         };
+        let mut deadline = None;
+        let mut decided = 0u64;
+        let mut checked = 0u64;
+        let mut stopped = false;
         let mut context = EvalContext::new(model, sheet);
         let mut spent = 0;
         let mut pending = 0u32;
@@ -267,11 +291,24 @@ impl Cache {
                         self.stats.hits += 1;
                         result
                     }
-                    None if spent >= limit => {
+                    None if stopped || spent >= limit => {
                         pending += 1;
                         continue;
                     }
                     None => {
+                        if let Some(clock) = clock
+                            && (decided.is_multiple_of(CLOCK_STRIDE)
+                                || spent >= checked + CLOCK_UNITS)
+                        {
+                            let now = clock.now_ms();
+                            checked = spent;
+                            if now >= *deadline.get_or_insert(now + CONDITIONAL_FRAME_MS) {
+                                stopped = true;
+                                pending += 1;
+                                continue;
+                            }
+                        }
+                        decided += 1;
                         self.stats.evaluated_cells += 1;
                         let result = self.decide(
                             model,
@@ -453,7 +490,8 @@ impl Cache {
         matched
     }
 
-    /// The value of a rule's formula at `at`, its constant calls read from
+    /// The value of a rule's formula at `at`: its parse at the anchor with the
+    /// references moved to `at`, its constant calls and count tables read from
     /// `aggregate`.
     fn formula(
         &mut self,
@@ -464,22 +502,40 @@ impl Cache {
         ctx: &EvalContext<'_>,
     ) -> Option<CellValue> {
         let formula = rule.formulas.get(slot)?;
-        let expr = if formula.relative {
+        if !formula.relative {
+            return Some(evaluate(aggregate.bases.get(slot)?.as_deref()?, ctx));
+        }
+        if !formula.shifts {
             let shifted = xlsx_parse::translate_formula(&formula.source, rule.anchor, at).ok()?;
-            self.parse(shifted)?
-        } else {
-            Arc::clone(formula.base.as_ref()?)
-        };
-        let values = aggregate.constants.get(slot).map_or(&[][..], Vec::as_slice);
-        if values.is_empty() {
+            let parsed = self.parse(shifted)?;
+            let values = aggregate.constants.get(slot).map_or(&[][..], Vec::as_slice);
+            if values.is_empty() {
+                return Some(evaluate(&parsed, ctx));
+            }
+            let mut expr = (*parsed).clone();
+            read_in(&mut expr, &formula.constants, values);
             return Some(evaluate(&expr, ctx));
         }
-        let mut expr = (*expr).clone();
-        for (path, value) in formula.constants.iter().zip(values) {
-            if let Some(call) = node_mut(&mut expr, path)
-                && matches!(call, Expr::FuncCall { .. })
-            {
-                *call = Expr::Literal(value.clone());
+        let mut expr = shift(
+            aggregate.bases.get(slot)?.as_deref()?,
+            i64::from(at.row) - i64::from(rule.anchor.row),
+            i64::from(at.col) - i64::from(rule.anchor.col),
+        );
+        let tables = aggregate.tables.get(slot).map_or(&[][..], Vec::as_slice);
+        for (path, table) in formula.counts.iter().zip(tables) {
+            let (Some(table), Some(call)) = (table, node_mut(&mut expr, path)) else {
+                continue;
+            };
+            let count = match &*call {
+                Expr::FuncCall { args, .. } => args
+                    .get(1)
+                    .and_then(|criterion| table.count(&evaluate(criterion, ctx), ctx)),
+                _ => None,
+            };
+            if let Some(count) = count {
+                *call = Expr::Literal(CellValue::Number {
+                    value: count as f64,
+                });
             }
         }
         Some(evaluate(&expr, ctx))
@@ -536,7 +592,34 @@ impl Cache {
                 *spent += MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
                 built = true;
             }
+            let mut tables = Vec::with_capacity(formula.counts.len());
+            for path in &formula.counts {
+                let range = formula
+                    .base
+                    .as_deref()
+                    .and_then(|base| node(base, path))
+                    .and_then(|call| match call {
+                        Expr::FuncCall { args, .. } => args.first(),
+                        _ => None,
+                    });
+                context.restart();
+                context.cell = Some(rule.anchor);
+                tables.push(range.and_then(|range| CountTable::build(range, &*context)));
+                *spent += MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
+                built = true;
+            }
+            let base = formula.base.as_ref().map(|base| {
+                if values.is_empty() {
+                    Arc::clone(base)
+                } else {
+                    let mut base = (**base).clone();
+                    read_in(&mut base, &formula.constants, &values);
+                    Arc::new(base)
+                }
+            });
+            aggregate.bases.push(base);
             aggregate.constants.push(values);
+            aggregate.tables.push(tables);
         }
         self.stats.aggregate_builds += u64::from(built);
         let aggregate = Arc::new(aggregate);
@@ -673,27 +756,48 @@ fn compile(source: &str, anchor: CellRef) -> Formula {
         .as_deref()
         .and_then(|text| parse_formula(text).ok())
         .map(Arc::new);
+    let moved = shifted.as_deref().and_then(|text| parse_formula(text).ok());
     let mut constants = Vec::new();
-    if let (Some(base), Some(shifted)) = (
-        &base,
-        shifted.as_deref().and_then(|text| parse_formula(text).ok()),
-    ) {
-        constant_calls(base, &shifted, &mut Vec::new(), &mut constants);
+    let mut counts = Vec::new();
+    let mut shifts = false;
+    if let (Some(base), Some(moved)) = (&base, &moved) {
+        fixed_calls(base, moved, &mut Vec::new(), &mut constants, &mut counts);
+        let (down, right) = (
+            i64::from(probe.row) - i64::from(anchor.row),
+            i64::from(probe.col) - i64::from(anchor.col),
+        );
+        shifts = shift(base, down, right) == *moved;
+    }
+    if !shifts {
+        counts.clear();
     }
     Formula {
         source: source.to_owned(),
         base,
         relative,
+        shifts,
         constants,
+        counts,
         parses: u8::from(at_anchor.is_some()) + u8::from(shifted.is_some()),
     }
 }
 
 /// Collects the paths of the calls `base` and `shifted` share that aggregate
-/// absolute references alone.
-fn constant_calls(base: &Expr, shifted: &Expr, path: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+/// absolute references alone, and of the `COUNTIF` calls whose range stays
+/// while their criterion reference moves.
+fn fixed_calls(
+    base: &Expr,
+    shifted: &Expr,
+    path: &mut Vec<usize>,
+    constants: &mut Vec<Vec<usize>>,
+    counts: &mut Vec<Vec<usize>>,
+) {
     if base == shifted && aggregates_absolute(base) {
-        out.push(path.clone());
+        constants.push(path.clone());
+        return;
+    }
+    if counts_each_cell(base, shifted) {
+        counts.push(path.clone());
         return;
     }
     if std::mem::discriminant(base) != std::mem::discriminant(shifted) {
@@ -705,9 +809,35 @@ fn constant_calls(base: &Expr, shifted: &Expr, path: &mut Vec<usize>, out: &mut 
     }
     for (index, (left, right)) in left.into_iter().zip(right).enumerate() {
         path.push(index);
-        constant_calls(left, right, path, out);
+        fixed_calls(left, right, path, constants, counts);
         path.pop();
     }
+}
+
+/// Whether `base` is `COUNTIF(range, reference)` and `shifted` keeps the range
+/// but moves the reference.
+fn counts_each_cell(base: &Expr, shifted: &Expr) -> bool {
+    let Expr::FuncCall { name, args, .. } = base else {
+        return false;
+    };
+    let Expr::FuncCall { args: moved, .. } = shifted else {
+        return false;
+    };
+    let upper = name.to_ascii_uppercase();
+    upper.strip_prefix("_XLFN.").unwrap_or(&upper) == "COUNTIF"
+        && args.len() == 2
+        && moved.len() == 2
+        && args[0] == moved[0]
+        && is_reference(&args[0])
+        && matches!(args[1], Expr::Ref { .. })
+        && args[1] != moved[1]
+}
+
+fn is_reference(arg: &Expr) -> bool {
+    matches!(
+        arg,
+        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. }
+    )
 }
 
 fn aggregates_absolute(expr: &Expr) -> bool {
@@ -716,23 +846,114 @@ fn aggregates_absolute(expr: &Expr) -> bool {
     };
     let upper = name.to_ascii_uppercase();
     let name = upper.strip_prefix("_XLFN.").unwrap_or(&upper);
-    let reference = |arg: &Expr| {
-        matches!(
-            arg,
-            Expr::Ref { .. }
-                | Expr::Range { .. }
-                | Expr::ColumnRange { .. }
-                | Expr::RowRange { .. }
-        )
-    };
     AGGREGATES.contains(&name)
-        && args.iter().any(reference)
+        && args.iter().any(is_reference)
         && args.iter().all(|arg| {
-            reference(arg) || matches!(arg, Expr::Number(_) | Expr::Text(_) | Expr::Bool(_))
+            is_reference(arg) || matches!(arg, Expr::Number(_) | Expr::Text(_) | Expr::Bool(_))
         })
 }
 
-/// The operands `constant_calls` descends into; a range join's ends stay
+/// `expr` with its relative references moved `down` rows and `right` columns,
+/// as `translate_formula` moves them in text; one moved off the sheet reads
+/// `#REF!`.
+fn shift(expr: &Expr, down: i64, right: i64) -> Expr {
+    let moved = |index: u32, absolute: bool, delta: i64, limit: u32| {
+        let index = i64::from(index) + if absolute { 0 } else { delta };
+        u32::try_from(index).ok().filter(|&index| index < limit)
+    };
+    let cell = |at: CellRef| {
+        Some(CellRef {
+            row: moved(at.row, at.abs_row, down, MAX_ROWS)?,
+            col: moved(at.col, at.abs_col, right, MAX_COLS)?,
+            ..at
+        })
+    };
+    let all = |values: &[Expr]| -> Vec<Expr> {
+        values.iter().map(|value| shift(value, down, right)).collect()
+    };
+    let boxed = |inner: &Expr| Box::new(shift(inner, down, right));
+    match expr {
+        Expr::Ref { sheet, cell: at } => match cell(*at) {
+            Some(at) => Expr::Ref {
+                sheet: sheet.clone(),
+                cell: at,
+            },
+            None => Expr::Error(ErrorValue::Ref),
+        },
+        Expr::Range { sheet, range } => match (cell(range.start), cell(range.end)) {
+            (Some(start), Some(end)) => Expr::Range {
+                sheet: sheet.clone(),
+                range: CellRange::new(start, end),
+            },
+            _ => Expr::Error(ErrorValue::Ref),
+        },
+        Expr::ColumnRange { sheet, range } => match (
+            moved(range.start, range.abs_start, right, MAX_COLS),
+            moved(range.end, range.abs_end, right, MAX_COLS),
+        ) {
+            (Some(start), Some(end)) => Expr::ColumnRange {
+                sheet: sheet.clone(),
+                range: ColumnRange {
+                    start: start.min(end),
+                    end: start.max(end),
+                    ..*range
+                },
+            },
+            _ => Expr::Error(ErrorValue::Ref),
+        },
+        Expr::RowRange { sheet, range } => match (
+            moved(range.start, range.abs_start, down, MAX_ROWS),
+            moved(range.end, range.abs_end, down, MAX_ROWS),
+        ) {
+            (Some(start), Some(end)) => Expr::RowRange {
+                sheet: sheet.clone(),
+                range: RowRange {
+                    start: start.min(end),
+                    end: start.max(end),
+                    ..*range
+                },
+            },
+            _ => Expr::Error(ErrorValue::Ref),
+        },
+        Expr::ArrayLiteral { cols, values } => Expr::ArrayLiteral {
+            cols: *cols,
+            values: all(values),
+        },
+        Expr::Unary { op, expr: inner } => Expr::Unary {
+            op: *op,
+            expr: boxed(inner),
+        },
+        Expr::Binary { op, lhs, rhs } => Expr::Binary {
+            op: *op,
+            lhs: boxed(lhs),
+            rhs: boxed(rhs),
+        },
+        Expr::Percent(inner) => Expr::Percent(boxed(inner)),
+        Expr::RangeJoin { start, end } => Expr::RangeJoin {
+            start: boxed(start),
+            end: boxed(end),
+        },
+        Expr::FuncCall { name, func, args } => Expr::FuncCall {
+            name: name.clone(),
+            func: *func,
+            args: all(args),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Writes `values` over the calls at `paths` in `expr`.
+fn read_in(expr: &mut Expr, paths: &[Vec<usize>], values: &[CellValue]) {
+    for (path, value) in paths.iter().zip(values) {
+        if let Some(call) = node_mut(expr, path)
+            && matches!(call, Expr::FuncCall { .. })
+        {
+            *call = Expr::Literal(value.clone());
+        }
+    }
+}
+
+/// The operands `fixed_calls` descends into; a range join's ends stay
 /// whole, since they are references.
 fn children(expr: &Expr) -> Vec<&Expr> {
     match expr {
@@ -840,4 +1061,50 @@ fn key(value: &CellValue) -> Option<Key> {
         CellValue::Bool { value } => Key::Bool(*value),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shifting_a_parsed_formula_matches_parsing_its_translated_text() {
+        let anchor = CellRef::new(4, 3);
+        for source in [
+            "A1+$B$1>50",
+            "COUNTIF($A$1:$A$50000,A1)>1",
+            "SUM(A$1:B$20)+$C3",
+            "AND(MOD(D5,3)=0,Sheet2!E6<>\"x\")",
+            "SUM(A:A)+SUM($B:C)+SUM(2:3)",
+            "A1:INDEX($B$1:$B$9,2)",
+            "{1,2;3,4}",
+            "-A1%",
+        ] {
+            let text = xlsx_parse::translate_formula(source, anchor, anchor).unwrap();
+            let base = parse_formula(&text).unwrap();
+            for at in [
+                CellRef::new(4, 3),
+                CellRef::new(9, 3),
+                CellRef::new(4, 8),
+                CellRef::new(1000, 50),
+            ] {
+                let text = xlsx_parse::translate_formula(source, anchor, at).unwrap();
+                let shifted = shift(&base, i64::from(at.row) - 4, i64::from(at.col) - 3);
+                assert_eq!(shifted, parse_formula(&text).unwrap(), "{source} at {at:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_countif_over_a_fixed_range_compiles_to_a_count_table() {
+        let anchor = CellRef::new(0, 0);
+        assert_eq!(compile("COUNTIF($A$1:$A$50000,A1)>1", anchor).counts, [vec![0]]);
+        for source in [
+            "COUNTIF(A1:A50000,A1)>1",
+            "COUNTIF($A$1:$A$50000,$A$1)>1",
+            "COUNTIF($A$1:$A$50000,A1&\"*\")>1",
+        ] {
+            assert!(compile(source, anchor).counts.is_empty(), "{source}");
+        }
+    }
 }

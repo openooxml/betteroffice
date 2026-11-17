@@ -736,17 +736,17 @@ const rows: Row<Xlsx>[] = [
   },
   {
     method: 'XlsxDocument.displayListJson',
-    name: 'XlsxDocument.displayListJson (conditional formats left pending across frames)',
+    name: 'XlsxDocument.displayListJson (conditional formats settled across frames)',
     call: ({ engine }) => scoped(engine.XlsxDocument.openWithCalculationJson(conditionalFixture, CONTEXT), (d) => {
       const viewport = json({ x: 0, y: 0, width: 640, height: 600 });
-      const pending: (number | undefined)[] = [];
+      let frames = 0;
       let list: { commands: unknown[]; conditionalPending?: number };
       do {
         list = JSON.parse(d.displayListJson(viewport)) as typeof list;
-        pending.push(list.conditionalPending);
-      } while (list.conditionalPending && pending.length < 10);
-      if (!(pending[0]! > 0) || list.conditionalPending) throw new Error(`conditional formats did not settle over frames: ${json(pending)}`);
-      return { pending, settled: list.commands, export: d.pngDisplayListJson(viewport) };
+        frames++;
+      } while (list.conditionalPending && frames < 50);
+      if (list.conditionalPending) throw new Error(`conditional formats still pending after ${frames} frames`);
+      return { settled: list.commands, export: d.pngDisplayListJson(viewport) };
     }),
   },
   { method: 'XlsxDocument.displayListForJson', call: ({ doc }) => doc.displayListForJson(1, VIEWPORT) },

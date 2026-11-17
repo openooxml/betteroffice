@@ -3312,7 +3312,7 @@ impl Workbook {
         sheet: SheetId,
         viewport: &Viewport,
     ) -> Result<DisplayList> {
-        self.display_list_within(sheet, viewport, Budget::Frame)
+        self.display_list_within(sheet, viewport, Budget::Frame(None))
     }
 
     /// [`Self::display_list_frame_for`] with the frame's conditional formats
@@ -3323,15 +3323,14 @@ impl Workbook {
         viewport: &Viewport,
         clock: &dyn crate::FrameClock,
     ) -> Result<DisplayList> {
-        let _ = clock;
-        self.display_list_within(sheet, viewport, Budget::Frame)
+        self.display_list_within(sheet, viewport, Budget::Frame(Some(clock)))
     }
 
     fn display_list_within(
         &self,
         sheet: SheetId,
         viewport: &Viewport,
-        budget: Budget,
+        budget: Budget<'_>,
     ) -> Result<DisplayList> {
         let sheet_ref = self.sheet(sheet)?;
         validate_viewport(viewport)?;
@@ -6521,7 +6520,7 @@ impl Workbook {
         sheet: SheetId,
         rows: &[std::ops::Range<u32>],
         cols: &[std::ops::Range<u32>],
-        budget: Budget,
+        budget: Budget<'_>,
     ) -> (xlsx_render::CellFormats, u32) {
         self.conditional_cache
             .lock()

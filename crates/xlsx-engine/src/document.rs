@@ -286,7 +286,9 @@ impl Document {
     }
 
     pub fn display_list_json(&self, args: &str) -> Result<String, EngineError> {
-        self.session.display_list_json(args).map_err(message)
+        self.session
+            .display_list_timed_json(None, args, &self.host.timer_ms)
+            .map_err(message)
     }
 
     pub fn display_list_for_json(
@@ -295,7 +297,7 @@ impl Document {
         viewport_json: &str,
     ) -> Result<String, EngineError> {
         self.session
-            .display_list_for_json(sheet, viewport_json)
+            .display_list_timed_json(Some(sheet), viewport_json, &self.host.timer_ms)
             .map_err(message)
     }
 

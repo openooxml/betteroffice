@@ -555,17 +555,40 @@ impl Session {
 
     /// @experimental
     pub fn display_list_for_json(&self, sheet: u32, viewport_json: &str) -> Result<String, String> {
+        self.frame_json(SheetId(sheet), viewport_json, None)
+    }
+
+    /// [`Self::display_list_for_json`] with the frame's conditional formats
+    /// also bounded by `clock`; no `sheet` is the active one.
+    pub fn display_list_timed_json(
+        &self,
+        sheet: Option<u32>,
+        viewport_json: &str,
+        clock: &dyn betteroffice_xlsx::FrameClock,
+    ) -> Result<String, String> {
+        let sheet = sheet.map_or(self.workbook.active_sheet(), SheetId);
+        self.frame_json(sheet, viewport_json, Some(clock))
+    }
+
+    fn frame_json(
+        &self,
+        sheet: SheetId,
+        viewport_json: &str,
+        clock: Option<&dyn betteroffice_xlsx::FrameClock>,
+    ) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
-        let display_list = self
-            .workbook
-            .display_list_frame_for(SheetId(sheet), &viewport)
-            .map_err(display_error)?;
+        let display_list = match clock {
+            Some(clock) => self.workbook.display_list_frame_timed(sheet, &viewport, clock),
+            None => self.workbook.display_list_frame_for(sheet, &viewport),
+        }
+        .map_err(display_error)?;
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
     }
 
     /// `display_list_json` split into build and encode time by `now`, returned
-    /// as `{"displayList": ..., "profile": {"buildMs", "encodeMs"}}`.
+    /// as `{"displayList": ..., "profile": {"buildMs", "encodeMs"}}`; `now`
+    /// also bounds the frame's conditional formats.
     pub fn display_list_profiled_json(
         &self,
         viewport_json: &str,
@@ -573,14 +596,16 @@ impl Session {
     ) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
-        let started = now();
+        let now = std::cell::RefCell::new(now);
+        let clock = || (*now.borrow_mut())();
+        let started = clock();
         let display_list = self
             .workbook
-            .display_list_frame_for(self.workbook.active_sheet(), &viewport)
+            .display_list_frame_timed(self.workbook.active_sheet(), &viewport, &clock)
             .map_err(display_error)?;
-        let built = now();
+        let built = clock();
         let json = serde_json::to_string(&display_list).map_err(|error| error.to_string())?;
-        let encoded = now();
+        let encoded = clock();
         let profile = serde_json::to_string(&DisplayListProfile {
             build_ms: built - started,
             encode_ms: encoded - built,
