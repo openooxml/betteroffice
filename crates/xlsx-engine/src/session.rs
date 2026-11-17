@@ -579,7 +579,9 @@ impl Session {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
         let display_list = match clock {
-            Some(clock) => self.workbook.display_list_frame_timed(sheet, &viewport, clock),
+            Some(clock) => self
+                .workbook
+                .display_list_frame_timed(sheet, &viewport, clock),
             None => self.workbook.display_list_frame_for(sheet, &viewport),
         }
         .map_err(display_error)?;

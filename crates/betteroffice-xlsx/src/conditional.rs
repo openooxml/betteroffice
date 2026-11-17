@@ -891,7 +891,10 @@ fn shift(expr: &Expr, down: i64, right: i64) -> Expr {
         })
     };
     let all = |values: &[Expr]| -> Vec<Expr> {
-        values.iter().map(|value| shift(value, down, right)).collect()
+        values
+            .iter()
+            .map(|value| shift(value, down, right))
+            .collect()
     };
     let boxed = |inner: &Expr| Box::new(shift(inner, down, right));
     match expr {
@@ -1120,7 +1123,10 @@ mod tests {
     #[test]
     fn a_countif_over_a_fixed_range_compiles_to_a_count_table() {
         let anchor = CellRef::new(0, 0);
-        assert_eq!(compile("COUNTIF($A$1:$A$50000,A1)>1", anchor).counts, [vec![0]]);
+        assert_eq!(
+            compile("COUNTIF($A$1:$A$50000,A1)>1", anchor).counts,
+            [vec![0]]
+        );
         for source in [
             "COUNTIF(A1:A50000,A1)>1",
             "COUNTIF($A$1:$A$50000,$A$1)>1",
@@ -1221,7 +1227,12 @@ mod tests {
             }
             model.sheets.push(sheet);
         }
-        put(&mut model.sheets[1], CellRef::new(MAX_ROWS - 3, 0), number(7.0), None);
+        put(
+            &mut model.sheets[1],
+            CellRef::new(MAX_ROWS - 3, 0),
+            number(7.0),
+            None,
+        );
         for (name, formula) in [("Rate", "Sheet1!$C$1"), ("Left", "Sheet1!A1")] {
             model.defined_names.push(xlsx_model::DefinedName {
                 name: name.to_owned(),
@@ -1263,7 +1274,14 @@ mod tests {
         expected: [f64; 2],
     ) {
         let rows = rule.ranges[0].end.row + 1;
-        cache.effects(epoch, model, SheetId(0), &[0..rows], &[1..2], Budget::Complete);
+        cache.effects(
+            epoch,
+            model,
+            SheetId(0),
+            &[0..rows],
+            &[1..2],
+            Budget::Complete,
+        );
         let mismatches = disagreements(cache, model, rule);
         assert!(mismatches.is_empty(), "{mismatches:#?}");
         let mut context = EvalContext::new(model, SheetId(0));
