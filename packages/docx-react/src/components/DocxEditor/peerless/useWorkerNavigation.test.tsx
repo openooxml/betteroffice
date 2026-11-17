@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import { useRef } from 'react';
 import { createPeerlessShellController, WorkerReadSupersededError } from './shellController';
-import { createPeerlessViewStore } from './viewStore';
+import { createPeerlessViewStore, type PeerlessViewSnapshot } from './viewStore';
 import { useWorkerNavigation } from './useWorkerNavigation';
 import { createInputAdmission } from './inputAdmission';
 import { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
@@ -337,13 +337,14 @@ for (const destroyed of [true, false]) {
 const collapsedTargets = { [JSON.stringify({ kind: 'comment', id: 7 })]: { id: 'native',
   ranges: [{ story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'p', offset: 3 } }] } };
 
-function presentWithForeignCommand(navigation: ReturnType<typeof reviewNavigation>, at: { paraId: string; offset: number }, version = 1) {
+function presentWithForeignCommand(navigation: ReturnType<typeof reviewNavigation>, at: { paraId: string; offset: number }, version = 1,
+  editState?: PeerlessViewSnapshot['editState']) {
   const { submit, viewStore } = navigation;
   submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }),
     presented: Promise.resolve().then(() => {
       const view = viewStore.getSnapshot();
       viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version, throughSeq: 2, presentedThroughSeq: 2,
-        selection: { anchor: { story: 'body', ...at }, focus: { story: 'body', ...at } }, editState: view.editState });
+        selection: { anchor: { story: 'body', ...at }, focus: { story: 'body', ...at } }, editState: editState ?? view.editState });
       viewStore.installFrameGeometry({ ...view.geometry!, frameEpoch: view.geometry!.frameEpoch + 1, coversThroughSeq: 2,
         caret: { x: 10, y: 600, width: 1, height: 12 } });
       return 'presented';
@@ -374,3 +375,36 @@ for (const [name, at, version] of [
     } finally { navigation.dispose(); }
   });
 }
+
+test('review navigation resolves false without scrolling when a table cell selection replaced its selection', async () => {
+  const navigation = reviewNavigation(collapsedTargets);
+  presentWithForeignCommand(navigation, { paraId: 'p', offset: 3 }, 1, { readOnly: false, toolbar: null, effectiveFormatting: null,
+    storedMarks: null, canUndo: false, canRedo: false, hyperlink: null, tableContext: { story: 'body', tableIndex: 0, rowIndex: 0,
+      columnIndex: 0, rowCount: 2, columnCount: 3, hasMultiCellSelection: true, canSplitCell: true } });
+  try {
+    expect(await navigation.controller.ref.scrollToComment(7)).toBe(false);
+    expect(navigation.scroller.scrollTop).toBe(0);
+  } finally { navigation.dispose(); }
+});
+
+test('review navigation scrolls a range start to where the final frame shows it after a relayout', async () => {
+  const range = { story: 'body', start: { paraId: 'p', offset: 3 }, end: { paraId: 'q', offset: 2 } };
+  const navigation = reviewNavigation({ [JSON.stringify({ kind: 'comment', id: 7 })]: { id: 'native', ranges: [range] } });
+  const { submit, viewStore } = navigation;
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }),
+    presented: Promise.resolve('presented') } }));
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 2, ack: Promise.resolve({ status: 'noop', seq: 2 }),
+    presented: Promise.resolve().then(() => {
+      const view = viewStore.getSnapshot();
+      viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: 1, throughSeq: 3, presentedThroughSeq: 3,
+        selection: { anchor: { story: 'body', ...range.end }, focus: { story: 'body', ...range.start } }, editState: view.editState });
+      viewStore.installFrameGeometry({ ...view.geometry!, frameEpoch: view.geometry!.frameEpoch + 1,
+        layoutRevision: view.geometry!.layoutRevision + 1, coversThroughSeq: 3, caret: { x: 10, y: 700, width: 1, height: 12 } });
+      return 'presented';
+    }) } }));
+  try {
+    expect(await navigation.controller.ref.scrollToComment(7)).toBe(true);
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(navigation.scroller.scrollTop).toBe(700 * 2 - 24);
+  } finally { navigation.dispose(); }
+});
