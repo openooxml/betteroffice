@@ -920,13 +920,21 @@ fn noop_batches_leave_direct_counter_and_events_unchanged() {
 const TEXT_SCOPES: [(&str, &str, &str); 5] = [
     ("dir", r#"<w:dir w:val="rtl">"#, "</w:dir>"),
     ("bdo", r#"<w:bdo w:val="rtl">"#, "</w:bdo>"),
-    ("hyperlink", r#"<w:hyperlink w:anchor="target"><w:dir w:val="rtl">"#, "</w:dir></w:hyperlink>"),
+    (
+        "hyperlink",
+        r#"<w:hyperlink w:anchor="target"><w:dir w:val="rtl">"#,
+        "</w:dir></w:hyperlink>",
+    ),
     (
         "insertion",
         r#"<w:ins w:id="1" w:author="Ann" w:date="2026-09-24T12:00:00Z"><w:dir w:val="rtl">"#,
         "</w:dir></w:ins>",
     ),
-    ("nested", r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#, "</w:dir></w:bdo>"),
+    (
+        "nested",
+        r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#,
+        "</w:dir></w:bdo>",
+    ),
 ];
 
 const FIELD_OPEN: &str = concat!(
@@ -949,7 +957,12 @@ const DELETION_OPEN: &str = concat!(
 
 const OTHER_SCOPES: [(&str, &str, &str, &str); 5] = [
     ("deletion", DELETION_OPEN, "", "</w:dir></w:del>"),
-    ("content control", SDT_OPEN, "", "</w:dir></w:sdtContent></w:sdt>"),
+    (
+        "content control",
+        SDT_OPEN,
+        "",
+        "</w:dir></w:sdtContent></w:sdt>",
+    ),
     (
         "simple field",
         r#"<w:fldSimple w:instr=" SUBJECT "><w:dir w:val="rtl">"#,
@@ -957,7 +970,12 @@ const OTHER_SCOPES: [(&str, &str, &str, &str); 5] = [
         "</w:dir></w:fldSimple>",
     ),
     ("complex field", FIELD_OPEN, "", FIELD_CLOSE),
-    ("adjacent", r#"<w:dir w:val="rtl">"#, r#"</w:dir><w:dir w:val="ltr">"#, "</w:dir>"),
+    (
+        "adjacent",
+        r#"<w:dir w:val="rtl">"#,
+        r#"</w:dir><w:dir w:val="ltr">"#,
+        "</w:dir>",
+    ),
 ];
 
 fn deleted(text: &str) -> String {

@@ -1571,8 +1571,14 @@ mod tests {
         for (open, close) in [
             (r#"<w:dir w:val="rtl">"#, "</w:dir>"),
             (r#"<w:bdo w:val="rtl">"#, "</w:bdo>"),
-            (r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#, "</w:dir></w:bdo>"),
-            (r#"<w:hyperlink w:anchor="kept"><w:dir w:val="rtl">"#, "</w:dir></w:hyperlink>"),
+            (
+                r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#,
+                "</w:dir></w:bdo>",
+            ),
+            (
+                r#"<w:hyperlink w:anchor="kept"><w:dir w:val="rtl">"#,
+                "</w:dir></w:hyperlink>",
+            ),
         ] {
             let written = try_replace_with_run_edits(
                 &direction_source(open, close),

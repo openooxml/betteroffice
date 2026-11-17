@@ -1144,10 +1144,16 @@ mod tests {
 
     #[test]
     fn text_bearing_unmodeled_inline_elements_warn_once_per_document() {
-        let parts = vec![(
-            "word/document.xml".to_owned(),
-            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>a</w:t></w:r><w:zzz><w:r><w:t>x</w:t></w:r></w:zzz></w:p><w:p><w:zzz><w:r><w:t>y</w:t></w:r></w:zzz><w:yyy/></w:p></w:body></w:document>"#.to_vec(),
-        )];
+        let parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "word/document.xml".to_owned(),
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>a</w:t></w:r><w:zzz><w:r><w:t>x</w:t></w:r></w:zzz></w:p><w:p><w:zzz><w:r><w:t>y</w:t></w:r></w:zzz><w:yyy/></w:p></w:body></w:document>"#.to_vec(),
+            ),
+        ];
         let package = ooxml_opc::rezip_parts(&parts).unwrap();
         let parsed = parse_docx_s9_wire(&package, S9ParseOptions::default()).unwrap();
         let warnings = parsed.document.warnings.unwrap_or_default();

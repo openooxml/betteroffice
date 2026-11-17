@@ -3188,15 +3188,30 @@ mod tests {
             "",
             "</w:dir></w:del>",
         ),
-        ("content control", SDT_OPEN, "", "</w:dir></w:sdtContent></w:sdt>"),
+        (
+            "content control",
+            SDT_OPEN,
+            "",
+            "</w:dir></w:sdtContent></w:sdt>",
+        ),
         (
             "simple field",
             r#"<w:fldSimple w:instr=" SUBJECT "><w:dir w:val="rtl">"#,
             "",
             "</w:dir></w:fldSimple>",
         ),
-        ("nested", r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#, "", "</w:dir></w:bdo>"),
-        ("adjacent", r#"<w:dir w:val="rtl">"#, r#"</w:dir><w:dir w:val="ltr">"#, "</w:dir>"),
+        (
+            "nested",
+            r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:bdo>",
+        ),
+        (
+            "adjacent",
+            r#"<w:dir w:val="rtl">"#,
+            r#"</w:dir><w:dir w:val="ltr">"#,
+            "</w:dir>",
+        ),
         ("complex field", FIELD_OPEN, "", FIELD_CLOSE),
     ];
 
