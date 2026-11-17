@@ -12980,7 +12980,11 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
         {
             rect(x, y, w, h);
         }
-        if let Some(clip) = doc_attrs_mut(primitive)
+        let attrs = match primitive {
+            Primitive::Line(line) => Some(&mut line.attrs),
+            other => doc_attrs_mut(other),
+        };
+        if let Some(clip) = attrs
             .and_then(|attrs| attrs.clip_group.as_deref_mut())
             .and_then(|group| group.clip.as_mut())
         {
