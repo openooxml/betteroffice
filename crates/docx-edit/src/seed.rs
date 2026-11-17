@@ -5285,6 +5285,7 @@ fn table_cell_style_properties(
         columns,
         rowspan,
     );
+    let outer = regions.first().map_or([false; 4], |(_, edges)| *edges);
     let mut shading = field(field(style, "tcPr"), "shading");
     let layers = regions
         .into_iter()
@@ -5293,16 +5294,23 @@ fn table_cell_style_properties(
             let conditional = parts
                 .iter()
                 .find(|part| string(field(Some(part), "type")) == Some(region));
-            (field(conditional, "tcPr"), edges)
+            (field(conditional, "tcPr"), edges, region.starts_with("band"))
         });
     let mut borders = Map::new();
-    for (properties, [top, bottom, left, right]) in layers {
+    for (properties, [top, bottom, left, right], band) in layers {
         if let Some(value) = field(properties, "shading") {
             shading = Some(value);
         }
         if let Some(sides) = object(field(properties, "borders")) {
-            for (edge, side) in border_side_sources(top, bottom, left, right) {
-                if let Some(border) = sides.get(side) {
+            for ((edge, side), on_outer) in border_side_sources(top, bottom, left, right)
+                .into_iter()
+                .zip(outer)
+            {
+                let Some(border) = sides.get(side) else {
+                    continue;
+                };
+                let cleared = matches!(string(field(Some(border), "style")), Some("nil" | "none"));
+                if !(band && on_outer && cleared) {
                     borders.insert(edge.to_owned(), border.clone());
                 }
             }

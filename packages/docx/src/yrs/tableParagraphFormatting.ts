@@ -56,28 +56,34 @@ export function tableCellStyleProperties(
   rowspan = 1
 ): Pick<TableCellFormatting, 'shading' | 'borders'> | undefined {
   if (!style?.tcPr && !style?.tblStylePr?.some((part) => part.tcPr)) return undefined;
-  const layers: Array<[TableCellFormatting | undefined, RegionEdges]> = [
-    [style.tcPr && { shading: style.tcPr.shading }, [true, true, true, true]],
-    ...tableStyleRegions(table, style, rowIndex, startColumn, endColumn, columns, rowspan)
+  const regions = tableStyleRegions(table, style, rowIndex, startColumn, endColumn, columns, rowspan);
+  const [outerTop, outerBottom, outerLeft, outerRight] = regions[0]![1];
+  const layers: Array<[TableCellFormatting | undefined, RegionEdges, boolean]> = [
+    [style.tcPr && { shading: style.tcPr.shading }, [true, true, true, true], false],
+    ...regions
       .filter(([region]) => region !== 'wholeTable')
-      .map(([region, edges]): [TableCellFormatting | undefined, RegionEdges] => [
+      .map(([region, edges]): [TableCellFormatting | undefined, RegionEdges, boolean] => [
         style.tblStylePr?.find((part) => part.type === region)?.tcPr,
         edges,
+        region.startsWith('band'),
       ]),
   ];
   let shading: TableCellFormatting['shading'];
   const borders: TableBorders = {};
-  for (const [properties, [top, bottom, left, right]] of layers) {
+  for (const [properties, [top, bottom, left, right], band] of layers) {
     if (properties?.shading) shading = properties.shading;
     const sides = properties?.borders;
     if (!sides) continue;
-    for (const [edge, side] of [
-      ['top', top ? 'top' : 'insideH'],
-      ['bottom', bottom ? 'bottom' : 'insideH'],
-      ['left', left ? 'left' : 'insideV'],
-      ['right', right ? 'right' : 'insideV'],
+    for (const [edge, side, onOuter] of [
+      ['top', top ? 'top' : 'insideH', outerTop],
+      ['bottom', bottom ? 'bottom' : 'insideH', outerBottom],
+      ['left', left ? 'left' : 'insideV', outerLeft],
+      ['right', right ? 'right' : 'insideV', outerRight],
     ] as const) {
-      if (sides[side]) borders[edge] = sides[side];
+      const border = sides[side];
+      if (!border) continue;
+      const cleared = border.style === 'nil' || border.style === 'none';
+      if (!(band && onOuter && cleared)) borders[edge] = border;
     }
   }
   const hasBorders = Object.keys(borders).length > 0;
