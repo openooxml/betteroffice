@@ -6,6 +6,7 @@ import type { PeerlessViewSnapshot } from './viewStore';
 import { reviewVersionOf } from './workerReview';
 
 const SELECTION_SCOPED = new Set<DocxDocumentRead['kind']>(['properties', 'sectionProperties']);
+const SUPERSEDED_RETRIES = 3;
 
 const withBytes = (_key: string, value: unknown) => ArrayBuffer.isView(value)
   ? { $type: value.constructor.name, $bytes: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) } : value;
@@ -13,6 +14,8 @@ const withBytes = (_key: string, value: unknown) => ArrayBuffer.isView(value)
 /**
  * Reads `liveRequest` once per document version; selection-scoped kinds also re-read for each selection, content control handles and
  * the review snapshot for each layout or built page set.
+ * A read rejected because a selection-only acknowledgement moved `throughSeq` is asked again, at most `SUPERSEDED_RETRIES` times per key.
+ * Content control handles are returned only while the frame shows the layout they were read on.
  * While `held`, the request and selection last seen unheld stay in effect.
  */
 export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: ReturnType<typeof createPeerlessShellController>,
@@ -20,7 +23,7 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
   const frameBound = liveRequest?.kind === 'contentControlHandles';
   const state = useSyncExternalStore(frameBound ? controller.subscribe : controller.subscribeShell,
     frameBound ? controller.getSnapshot : controller.getShellSnapshot, frameBound ? controller.getSnapshot : controller.getShellSnapshot);
-  const [result, setResult] = useState<{ view: PeerlessViewSnapshot | null; query: PeerlessWorkerQuery<K>; key: string } | null>(null);
+  const [result, setResult] = useState<{ view: PeerlessViewSnapshot | null; query: PeerlessWorkerQuery<K>; key: string; layout: string | null } | null>(null);
   const latestResult = useRef(result);
   const shown = state.view;
   const liveKey = JSON.stringify(liveRequest, withBytes) ?? 'null';
@@ -37,6 +40,7 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
     const currentRequest = latestRequest.current;
     if (state.status !== 'ready' || !currentRequest) return;
     let serial = 0;
+    let retries = 0;
     let frameEpoch = controller.getSnapshot().view?.geometry?.frameEpoch;
     const load = () => {
       const requestSerial = ++serial;
@@ -44,10 +48,17 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
       void controller.query<K>(currentRequest).then(query => {
         if (!current || requestSerial !== serial) return;
         const previous = latestResult.current;
-        const next = { view, query, key };
+        const next = { view, query, key, layout: frameLayoutKey(view) };
         latestResult.current = next;
-        if (!previous || previous.key !== key || !sameQueryView(previous.view, view) || !sameQuery(previous.query, query, currentRequest.kind)) setResult(next);
-      }, () => { if (current && requestSerial === serial) { latestResult.current = null; setResult(null); } });
+        if (!previous || previous.key !== key || previous.layout !== next.layout || !sameQueryView(previous.view, view) ||
+          !sameQuery(previous.query, query, currentRequest.kind)) setResult(next);
+      }, () => {
+        if (!current || requestSerial !== serial) return;
+        const now = controller.getSnapshot().view;
+        if (retries < SUPERSEDED_RETRIES && now?.throughSeq !== view?.throughSeq && sameQueryView(view, now)) { retries++; load(); return; }
+        latestResult.current = null;
+        setResult(null);
+      });
     };
     load();
     const remove = currentRequest.kind === 'reviewSnapshot' ? controller.subscribe(() => {
@@ -62,7 +73,8 @@ export function useWorkerQuery<K extends DocxDocumentRead['kind']>(controller: R
     return () => { current = false; remove?.(); };
   }, [controller, state.status, shown?.identity.session, shown?.identity.incarnation, shown?.identity.epoch, shown?.version, layout, key]);
   const latest = latestResult.current;
-  return requestKey !== 'null' && state.status === 'ready' && latest?.key === key && sameQueryView(latest.view, state.view) ? latest.query : null;
+  return requestKey !== 'null' && state.status === 'ready' && latest?.key === key && sameQueryView(latest.view, state.view) &&
+    (!frameBound || latest.layout === layout) ? latest.query : null;
 }
 
 function sameQueryView(first: PeerlessViewSnapshot | null, second: PeerlessViewSnapshot | null) {

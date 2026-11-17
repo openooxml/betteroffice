@@ -47,7 +47,8 @@ export function buildImageTransformPatch(currentAttrs: Readonly<Record<string, u
 
 type WorkerLink = { query: WorkerPropertyQuery; initialData: HyperlinkData; targetSelection: DocxCommandSelection; replaceText: boolean };
 
-function selectsOneObject(selection: DocxCommandSelection) {
+/** One unit within a paragraph: the only shape that can be an object, though one ordinary character also matches and the worker answers it with null. */
+function selectsOneUnit(selection: DocxCommandSelection) {
   const { anchor, focus } = selection;
   return anchor.story === focus.story && anchor.paraId === focus.paraId && Math.abs(anchor.offset - focus.offset) === 1;
 }
@@ -59,7 +60,7 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
   const page = useWorkerPageSetupControls(controller, props.onError);
   const watermark = useWorkerWatermarkControls(controller, props.onError);
   const selection = state.view?.workerSelection;
-  const object = useWorkerQuery<'properties'>(controller, selection && selectsOneObject(selection)
+  const object = useWorkerQuery<'properties'>(controller, selection && selectsOneUnit(selection)
     ? { kind: 'properties', target: { kind: 'objectSelection', selection } } : null, { held: dragSelecting });
   const [image, setImage] = useState<{ query: WorkerPropertyQuery; position: boolean } | null>(null);
   const [paragraphSpacing, setParagraphSpacing] = useState<{ initial: ParagraphSpacingData; deferred: DocxDeferredCommand } | null>(null);
