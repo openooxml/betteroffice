@@ -164,7 +164,10 @@ function locationAt(reads: SelectionReads, engine: DocxWorkerCommandEngine, root
         const ordinal = paragraphs.indices.get(paraId);
         if (ordinal === undefined) throw new Error('Projected selection lacks paragraph');
         const length = node.nodeSize - 2;
-        const controls = inlineControlsAt(projection, from + 1, length);
+        const boundary = projection.blockBoundaryAt(from);
+        const blocks = !boundary ? 0 : boundary.story === node.story && boundary.paraId === paraId ? boundary.offset : null;
+        const controls = blocks !== null && paragraphs.spans[ordinal]!.length - blocks === length
+          ? [] : inlineControlsAt(projection, from + 1, length);
         const leading = paragraphs.spans[ordinal]!.length - inlineStoryOffset(length, controls);
         positions.push({ from, to: from, at: { story: node.story, paraId, offset: Math.max(0, leading - 1) }, length: 0 });
         positions.push({ from: from + 1, to: from + node.nodeSize - 1, at: { story: node.story, paraId, offset: leading }, length, controls });
