@@ -1278,8 +1278,8 @@ mod tests {
             epoch,
             model,
             SheetId(0),
-            &[0..rows],
-            &[1..2],
+            std::slice::from_ref(&(0..rows)),
+            std::slice::from_ref(&(1..2)),
             Budget::Complete,
         );
         let mismatches = disagreements(cache, model, rule);

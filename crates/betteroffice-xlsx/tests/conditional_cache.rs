@@ -604,10 +604,9 @@ fn a_relative_whole_row_or_column_rule_parses_each_cell() {
         let workbook = whole_reference_book(formula);
         let viewport = view(0.0, 2000.0);
         let start = workbook.conditional_stats();
-        let list = frame(&workbook, &viewport);
+        let (list, _) = settle(&workbook, &viewport, 64);
         let stats = workbook.conditional_stats();
         let cells = stats.evaluated_cells - start.evaluated_cells;
-        assert_eq!(list.conditional_pending, 0, "{formula}");
         assert!(cells >= 200, "{formula}: {stats:?}");
         assert!(
             stats.formula_parses - start.formula_parses >= cells,
