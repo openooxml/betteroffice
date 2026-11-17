@@ -74,6 +74,7 @@ fn is_chart_command(command: &DrawCmd) -> bool {
         | DrawCmd::Line { clip, .. }
         | DrawCmd::Path { clip, .. } => clip.is_some(),
         DrawCmd::Text { chart, .. } => *chart,
+        DrawCmd::Image { .. } => false,
     }
 }
 

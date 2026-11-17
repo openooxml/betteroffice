@@ -715,6 +715,11 @@ const rows: Row<Xlsx>[] = [
     mutates: true,
     call: ({ doc }) => doc.resizeChartJson(json({ sheet: 0, chart: 'xl/drawings/drawing1.xml#0', left: 0, top: 0, right: 40, bottom: 30 })),
   },
+  {
+    method: 'XlsxDocument.mediaBytes',
+    throws: { name: 'string', reason: 'no picture draws xl/media/image1.png' },
+    call: ({ doc }) => doc.mediaBytes('xl/media/image1.png'),
+  },
   { method: 'XlsxDocument.cellRectJson', call: ({ doc }) => doc.cellRectJson(json({ sheet: 0, row: 4, col: 1 })) },
   { method: 'XlsxDocument.cellPositionJson', call: ({ doc }) => doc.cellPositionJson(json({ sheet: 0, row: 4, col: 0 })) },
   {

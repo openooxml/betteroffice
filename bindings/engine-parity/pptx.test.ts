@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import JSZip from 'jszip';
@@ -19,6 +20,7 @@ import {
   type EngineHandle,
   type Exclusion,
   type KnownDifference,
+  type MaskedPath,
   type OneEngineOnly,
   type Row,
 } from './harness';
@@ -226,6 +228,44 @@ const editRequest = (doc: Doc) => {
   return json({ expectVersion: doc.documentVersion(), steps: [step(body, 'Draft: '), step(closing, 'Final: ')] });
 };
 const layout = ({ doc, renderer }: Pptx) => renderer.layoutSlideJson(doc, 0);
+const PEER_FONTS = json([{ family: 'Arial', bold: false, italic: false, fallback: false, fingerprint: createHash('sha256').update(fontBytes).digest('hex') }]);
+const sessionState = (doc: Doc) => ({
+  documentVersion: doc.documentVersion(),
+  clientId: doc.clientId,
+  canUndo: doc.canUndo(),
+  undoCaptureMode: doc.undoCaptureMode(),
+  snapshot: JSON.parse(doc.snapshotJson()) as unknown,
+});
+const replayBaseline = (engine: PptxEngine) => engine.PptxDocument.openReplayBaseline(bytes(), CLIENT, undefined);
+const pinnedIdentity = (engine: PptxEngine) => scoped(replayBaseline(engine), (worker) =>
+  json({ ...JSON.parse(worker.peerHydrationJson(PEER_FONTS)) as Record<string, unknown>, versionNonce: '1' }));
+const openPeer = (engine: PptxEngine) => engine.PptxDocument.openPeerDeckJson(bytes(), pinnedIdentity(engine), undefined);
+const adoptedPeer = (engine: PptxEngine) => {
+  const doc = openPeer(engine);
+  try {
+    doc.registerPeerFontsJson(PEER_FONTS);
+    doc.adoptPeerIdentity();
+    return doc;
+  } catch (error) {
+    doc.free();
+    throw error;
+  }
+};
+const U64_MAX = 18446744073709551615n;
+const openingVersion = (path: string): MaskedPath => ({
+  path,
+  shape: (value) => {
+    if (typeof value !== 'string' || !/^[0-9a-f]{16}-0$/.test(value)) throw new Error(`${JSON.stringify(value)} is not {nonce:016x}-0`);
+    return value.slice(value.lastIndexOf('-'));
+  },
+});
+const decimalU64 = (path: string): MaskedPath => ({
+  path,
+  shape: (value) => {
+    if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value) || BigInt(value) > U64_MAX) throw new Error(`${JSON.stringify(value)} is not a decimal u64`);
+    return 'u64';
+  },
+});
 
 const rows: Row<Pptx>[] = [
   { method: 'PptxDocument.openCollaborative', call: ({ engine }) => scoped(engine.PptxDocument.openCollaborative(bytes(), CLIENT), (d) => [d.snapshotJson(), d.clientId]) },
@@ -243,6 +283,40 @@ const rows: Row<Pptx>[] = [
     },
     call: ({ engine }, update) => scoped(engine.PptxDocument.openCollaborativeFromUpdate(update, CLIENT + 1, bytes()), (d) => [d.snapshotJson(), new ZipReturn(d.saveBytes())]),
   }),
+  {
+    method: 'PptxDocument.openReplayBaseline',
+    masked: [openingVersion('documentVersion')],
+    call: ({ engine }) => scoped(replayBaseline(engine), sessionState),
+  },
+  {
+    method: 'PptxDocument.peerHydrationJson',
+    masked: [decimalU64('hydration.versionNonce'), openingVersion('after.documentVersion')],
+    call: ({ engine }) => scoped(replayBaseline(engine), (worker) => ({ hydration: JSON.parse(worker.peerHydrationJson(PEER_FONTS)) as unknown, after: sessionState(worker) })),
+  },
+  {
+    method: 'PptxDocument.openPeerDeckJson',
+    masked: [openingVersion('documentVersion')],
+    call: ({ engine }) => scoped(openPeer(engine), sessionState),
+  },
+  {
+    method: 'PptxDocument.registerPeerFontsJson',
+    masked: [openingVersion('after.documentVersion')],
+    call: ({ engine }) => scoped(openPeer(engine), (doc) => ({ returned: doc.registerPeerFontsJson(PEER_FONTS), after: sessionState(doc) })),
+  },
+  {
+    method: 'PptxDocument.adoptPeerIdentity',
+    call: ({ engine }) => scoped(openPeer(engine), (doc) => {
+      doc.registerPeerFontsJson(PEER_FONTS);
+      return { returned: doc.adoptPeerIdentity(), after: sessionState(doc) };
+    }),
+  },
+  {
+    method: 'PptxDocument.replayJson',
+    call: ({ engine }) => scoped(adoptedPeer(engine), (doc) => {
+      const envelope = { sequence: 1, baseVersion: doc.documentVersion(), op: { method: 'insertText', args: [story(doc), 0, 'Replayed '] } };
+      return { reply: JSON.parse(doc.replayJson(json(envelope))) as unknown, after: sessionState(doc) };
+    }),
+  },
   { method: 'PptxDocument.saveBytes', call: ({ doc }) => new ZipReturn(doc.saveBytes()) },
   { method: 'PptxRenderer.saveBytes', call: ({ doc, renderer }) => new ZipReturn(renderer.saveBytes(doc)) },
   { method: 'PptxDocument.version', call: ({ engine }) => engine.PptxDocument.version() },
@@ -528,13 +602,11 @@ const exclusions: Exclusion[] = [
 const knownDifferences: KnownDifference[] = [];
 
 const notYetCovered: string[] = [
-  'PptxDocument.acceptProposalJson', 'PptxDocument.adoptPeerIdentity', 'PptxDocument.anchorCaretJson', 'PptxDocument.applyUpdateJson',
-  'PptxDocument.clearUpdateObservation', 'PptxDocument.drainUpdateEvent', 'PptxDocument.encodeDiff', 'PptxDocument.encodeStateAsUpdate',
-  'PptxDocument.encodeStateVector', 'PptxDocument.listProposalsJson', 'PptxDocument.openPeerDeckJson', 'PptxDocument.openReplayBaseline',
-  'PptxDocument.peerHydrationJson', 'PptxDocument.previewProposalJson', 'PptxDocument.proposalSlideStripJson', 'PptxDocument.proposeJson',
-  'PptxDocument.registerPeerFontsJson', 'PptxDocument.rejectProposalJson', 'PptxDocument.replayJson', 'PptxDocument.resolveCaretAnchorJson',
-  'PptxDocument.sessionMetadataJson', 'PptxDocument.setCollaborative', 'PptxDocument.setShapeAdjustJson', 'PptxDocument.startUpdateObservation',
-  'PptxDocument.validateProposalJson',
+  'PptxDocument.acceptProposalJson', 'PptxDocument.anchorCaretJson', 'PptxDocument.applyUpdateJson', 'PptxDocument.clearUpdateObservation',
+  'PptxDocument.drainUpdateEvent', 'PptxDocument.encodeDiff', 'PptxDocument.encodeStateAsUpdate', 'PptxDocument.encodeStateVector',
+  'PptxDocument.listProposalsJson', 'PptxDocument.previewProposalJson', 'PptxDocument.proposalSlideStripJson', 'PptxDocument.proposeJson',
+  'PptxDocument.rejectProposalJson', 'PptxDocument.resolveCaretAnchorJson', 'PptxDocument.sessionMetadataJson', 'PptxDocument.setCollaborative',
+  'PptxDocument.setShapeAdjustJson', 'PptxDocument.startUpdateObservation', 'PptxDocument.validateProposalJson',
   'PptxRenderer.layoutProposalDiffSlideByIdJson', 'PptxRenderer.layoutProposalDiffSlideJson', 'PptxRenderer.layoutProposalSlideJson',
   'compileSlideJson', 'decodeFontFace', 'decodeTiffPng',
 ];
@@ -576,7 +648,7 @@ describe('pptx native and wasm parity table', () => {
   });
 
   test('the not yet covered list only shrinks', () => {
-    expect(notYetCovered.length).toBe(31);
+    expect(notYetCovered.length).toBe(25);
   });
 
   for (const row of rows) {

@@ -531,8 +531,9 @@ fn visible_charts<'a>(
     Ok(visible)
 }
 
+/// `below` paints what the drawing stacks beneath each chart before it is drawn.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_charts<F, R>(
+pub(crate) fn render_charts<F, R, B>(
     sheet: &Sheet,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -541,10 +542,12 @@ pub(crate) fn render_charts<F, R>(
     commands: &mut Vec<DrawCmd>,
     regions: &mut Vec<ChartRegion>,
     resolver: &mut F,
+    below: &mut B,
 ) -> Result<(), RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
+    B: FnMut(&SheetChart, &mut Vec<DrawCmd>),
 {
     render_charts_with_budget(
         sheet,
@@ -555,12 +558,13 @@ where
         commands,
         regions,
         resolver,
+        below,
         MAX_CHART_OPS_PER_FRAME,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_charts_with_budget<F, R>(
+fn render_charts_with_budget<F, R, B>(
     sheet: &Sheet,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -569,11 +573,13 @@ fn render_charts_with_budget<F, R>(
     commands: &mut Vec<DrawCmd>,
     regions: &mut Vec<ChartRegion>,
     resolver: &mut F,
+    below: &mut B,
     max_ops: usize,
 ) -> Result<(), RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
     R: Into<Arc<ChartSpace>>,
+    B: FnMut(&SheetChart, &mut Vec<DrawCmd>),
 {
     let mut remaining = max_ops;
     for visible in visible_charts(sheet, geometry, viewport, frozen_rows, frozen_cols)? {
@@ -586,6 +592,7 @@ where
         if remaining == 0 {
             return Err(RenderError::ChartOpBudgetExceeded { max: max_ops });
         }
+        below(chart, commands);
         let (label, placeholder) = match plot_one_chart(
             chart,
             rect,
@@ -990,7 +997,7 @@ fn has_primary_xy_axes(space: &ChartSpace) -> bool {
         })
 }
 
-fn viewport_geometry(
+pub(crate) fn viewport_geometry(
     anchor: ResolvedChartAnchor,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -1052,7 +1059,7 @@ fn intersect_f64(left: PlotRect, right: PlotRect) -> Option<PlotRect> {
     })
 }
 
-fn plot_rect_to_rect(rect: PlotRect) -> Option<Rect> {
+pub(crate) fn plot_rect_to_rect(rect: PlotRect) -> Option<Rect> {
     Some(Rect {
         x: finite_f32(rect.x).ok()?,
         y: finite_f32(rect.y).ok()?,
@@ -1513,6 +1520,7 @@ mod tests {
             &mut commands,
             &mut a11y,
             &mut resolver,
+            &mut |_, _| {},
             1,
         )
         .unwrap_err();
@@ -1612,6 +1620,7 @@ mod tests {
                 &mut commands,
                 &mut a11y,
                 &mut resolver,
+                &mut |_, _| {},
                 max_ops,
             )
             .map(|()| (commands.len(), a11y.len()))
@@ -1956,6 +1965,7 @@ mod tests {
             &mut commands,
             &mut regions,
             &mut resolver,
+            &mut |_, _| {},
         )
         .unwrap();
         assert_eq!(regions.len(), 1);

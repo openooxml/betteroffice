@@ -1677,6 +1677,7 @@ fn moved_tables_recover_after_move_undo_and_redo() {
             header_rows: 1,
             totals_rows: 0,
             columns: vec!["Value".into()],
+            style: Vec::new(),
         });
         model.defined_names.push(DefinedName {
             name: "LocalValue".into(),

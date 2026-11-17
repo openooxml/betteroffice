@@ -35,7 +35,8 @@ macro_rules! open_timing {
 pub use addr::{CellRange, CellRef, ColId, MAX_COLS, MAX_ROWS, RowId, SheetId};
 pub use chart::{
     AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, ChartAnchor, ChartEdit, ChartMetadata,
-    ChartRef, ChartRefKind, ChartSeriesInfo, ChartSeriesName, SheetChart,
+    ChartRef, ChartRefKind, ChartSeriesInfo, ChartSeriesName, PictureCrop, SheetChart,
+    SheetPicture,
 };
 pub use date::DateSystem;
 pub use rich_text::{RichRun, RunBaseline, RunStyle, RunUnderline};
@@ -48,5 +49,5 @@ pub use value::{CellValue, ErrorValue};
 pub use workbook::{
     AutoFilter, Cell, CellProvider, ColStyle, ConditionalFormatRule, ConditionalFormatting,
     DefinedName, FreezePane, Hyperlink, MAX_SPILL_CELLS, Sheet, SheetFormat, SparseCells, Table,
-    Workbook,
+    TableStyleElement, TableStyleElementType, Workbook,
 };
