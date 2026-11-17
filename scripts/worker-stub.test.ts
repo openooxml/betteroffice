@@ -2,7 +2,12 @@ import { afterAll, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { buildWorkerStub } from './worker-stub';
+import type { buildWorkerStub as BuildWorkerStub } from './worker-stub';
+
+const buildWorkerStub: typeof BuildWorkerStub | undefined = await import('./worker-stub').then(
+  (module) => module.buildWorkerStub,
+  () => undefined,
+);
 
 const packages = resolve(import.meta.dir, '../packages');
 const staticImport = /\b(?:from|import)\s*["'`]([^"'`]+)["'`]/g;
@@ -20,8 +25,9 @@ afterAll(() => rm(directory, { recursive: true, force: true }));
 
 for (const { name, entry, outfile, start } of stubs) {
   test(`${name} worker stub imports nothing statically and its start file once`, async () => {
+    expect(buildWorkerStub).toBeFunction();
     const file = join(directory, outfile);
-    await buildWorkerStub({ entry: join(packages, entry), outfile: file, start });
+    await buildWorkerStub!({ entry: join(packages, entry), outfile: file, start });
     const contents = await readFile(file, 'utf8');
     expect([...contents.matchAll(staticImport)].map(([, specifier]) => specifier)).toEqual([]);
     expect(contents.match(dynamicImport)?.length ?? 0).toBe(1);
