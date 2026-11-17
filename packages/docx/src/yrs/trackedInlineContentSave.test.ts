@@ -1,9 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parseDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
+import { documentToYrs } from './documentToYrs';
 import { createYrsSession, saveYrsDocx, type YrsAuthor, type YrsSession } from './index';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -19,7 +21,9 @@ const SECTION = '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>';
 
 const INS = { tag: 'ins', kind: 'insertion', id: '41', author: 'Grace', date: '2025-03-04T05:06:07Z' } as const;
 const DEL = { tag: 'del', kind: 'deletion', id: '42', author: 'Grace', date: '2025-03-04T05:06:07Z' } as const;
-type Change = typeof INS | typeof DEL;
+const MOVE_FROM = { tag: 'moveFrom', kind: 'deletion', id: '43', author: 'Grace', date: '2025-03-04T05:06:07Z' } as const;
+const MOVE_TO = { tag: 'moveTo', kind: 'insertion', id: '44', author: 'Grace', date: '2025-03-04T05:06:07Z' } as const;
+type Change = typeof INS | typeof DEL | typeof MOVE_FROM | typeof MOVE_TO;
 const SUGGESTER: YrsAuthor = { name: 'Ada', date: '2026-01-01T00:00:00Z' };
 
 const open = (change: Change) => `<w:${change.tag} w:id="${change.id}" w:author="${change.author}" w:date="${change.date}">`;
@@ -33,7 +37,7 @@ const SIMPLE_FIELD = `<w:fldSimple w:instr=" PAGE ">${t('1')}</w:fldSimple>`;
 const MATH = '<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>';
 const COMMENTED = '<w:commentRangeStart w:id="5"/><w:r><w:t>noted</w:t></w:r><w:commentRangeEnd w:id="5"/>';
 
-const textFor = (change: Change) => (change === DEL ? dt : t);
+const textFor = (change: Change) => (change.kind === 'deletion' ? dt : t);
 const paragraph = (inner: string) => `<w:p w14:paraId="1A2B3C01" w14:textId="1A2B3C01">${t('Head')}${inner}${t(' tail')}</w:p>`;
 const documentXml = (body: string) => `<w:document ${NAMESPACES}><w:body>${body}${SECTION}</w:body></w:document>`;
 
@@ -49,6 +53,7 @@ function docx(body: string): Uint8Array {
 
 const part = (bytes: Uint8Array, name: string) => new TextDecoder().decode(unzipContainer(bytes)[name]);
 const count = (xml: string, pattern: RegExp) => xml.match(pattern)?.length ?? 0;
+const EMPTY_RUN = /<w:r\b[^>]*\/>|<w:r\b[^>]*><\/w:r>/g;
 
 const TOKEN = /<w:(t|delText)\b[^>]*>([^<]*)<\/w:\1>|<w:br\b[^>]*\/>|<w:commentReference\b[^>]*w:id="(\d+)"[^>]*\/>/g;
 
@@ -203,12 +208,14 @@ describe('a line break and a comment reference inside a tracked change', () => {
     ].join(''));
     const first = await typedAndSaved(docx(source), 'X');
     const firstXml = part(first, 'word/document.xml');
+    expect(count(firstXml, EMPTY_RUN)).toBe(0);
     expect(trackedContent(firstXml, INS).content).toBe('a[br]b');
     expect(trackedContent(firstXml, DEL).content).toBe('c[ref 5]d');
     expectCommentResolves(first);
 
     const second = await typedAndSaved(first, 'Y');
     const secondXml = part(second, 'word/document.xml');
+    expect(count(secondXml, EMPTY_RUN)).toBe(0);
     expect(trackedContent(secondXml, INS).content).toBe(trackedContent(firstXml, INS).content);
     expect(trackedContent(secondXml, DEL).content).toBe(trackedContent(firstXml, DEL).content);
     expect(render(body(secondXml))).toBe(`Y${render(body(firstXml))}`);
@@ -216,6 +223,50 @@ describe('a line break and a comment reference inside a tracked change', () => {
     const counts = (xml: string) => patterns.map(pattern => [String(pattern), count(xml, pattern)]);
     expect(counts(secondXml)).toEqual(counts(firstXml));
     expectCommentResolves(second);
+  });
+
+  for (const change of [MOVE_FROM, MOVE_TO]) {
+    it(`a comment reference inside a tracked ${change.tag} stays inside it after typing elsewhere in the paragraph`, async () => {
+      const text = textFor(change);
+      const source = paragraph(`${COMMENTED}${tracked(change, `${text('left')}${COMMENT_REFERENCE}${text('right')}`)}`);
+      const saved = await typedAndSaved(docx(source), 'X');
+      const xml = part(saved, 'word/document.xml');
+      const wrapper = trackedContent(xml, change);
+      expect(wrapper.wrappers).toBeGreaterThan(0);
+      expect(wrapper.content).toBe('left[ref 5]right');
+      expect(count(wrapper.raw, /<w:commentReference\b/g)).toBe(1);
+      expect(count(xml, /<w:commentReference\b/g)).toBe(1);
+      expect(count(xml, /<w:(ins|del)\b/g)).toBe(0);
+      expect(render(body(xml))).toBe(`X${render(source)}`);
+      expectCommentResolves(saved);
+    });
+  }
+
+  it('both seeders give a comment reference the insertion, deletion or move it sits in', async () => {
+    for (const change of [INS, DEL, MOVE_FROM, MOVE_TO]) {
+      const text = textFor(change);
+      const bytes = docx(paragraph(`${COMMENTED}${tracked(change, `${text('left')}${COMMENT_REFERENCE}${text('right')}`)}`));
+      const engine = await createYrsSession({ clientId: (clientId += 1) });
+      const projected = await createYrsSession({ clientId: (clientId += 1) });
+      sessions.push(engine, projected);
+      engine.seedFromDocx(bytes);
+      documentToYrs(projected, await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false }));
+      const reference = (session: YrsSession) => {
+        const found = session.storySegments('body').filter(segment =>
+          segment.kind === 'embed' && segment.payload.modelKind === 'commentReference');
+        expect(found).toHaveLength(1);
+        return found[0]!.attributes;
+      };
+      const key = change.kind === 'insertion' ? 'ins' : 'del';
+      const attributes = reference(projected);
+      expect(Object.keys(attributes)).toEqual([key]);
+      const revision = attributes[key] as Record<string, unknown>;
+      expect(String(revision.id)).toBe(change.id);
+      expect(revision.author).toBe(change.author);
+      expect(revision.date).toBe(change.date);
+      expect(revision.isMovePair === true).toBe(change === MOVE_FROM || change === MOVE_TO);
+      expect(reference(engine)).toEqual(attributes);
+    }
   });
 
   it('a field and an equation inside a tracked insertion are not yet kept after typing elsewhere in the paragraph', async () => {
