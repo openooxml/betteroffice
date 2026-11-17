@@ -8974,6 +8974,37 @@ mod tests {
     }
 
     #[test]
+    fn tracked_comment_references_keep_revision_marks() {
+        let info = json!({"id": 11, "author": "Ada", "date": "2024-01-01T00:00:00Z"});
+        let reference = |id: u32| json!({"type": "run", "formatting": {"bold": true}, "content": [{"type": "commentReference", "id": id}]});
+        let tracked = |node_type: &str, id: u32| json!({"type": node_type, "info": info, "content": [reference(id)]});
+        let paragraph = json!({"content": [
+            tracked("insertion", 3),
+            tracked("deletion", 4),
+            reference(5),
+        ]});
+        let styles = StyleResolver::new(None);
+        let ParagraphUnits { units, .. } =
+            paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        assert_eq!(units.len(), 3);
+        for (unit, id) in units.iter().zip([3, 4, 5]) {
+            let UnitContent::Embed { kind, payload } = &unit.content else {
+                panic!("expected comment reference embed");
+            };
+            assert_eq!(kind, "field");
+            assert_eq!(payload["modelKind"], json!("commentReference"));
+            assert_eq!(payload["commentId"], json!(id));
+        }
+        let keys = |unit: &InlineUnit| unit.attrs.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&units[0]), ["ins"]);
+        assert_eq!(units[0].attrs["ins"]["author"], json!("Ada"));
+        assert_eq!(units[0].attrs["ins"]["id"], json!(11));
+        assert_eq!(keys(&units[1]), ["del"]);
+        assert_eq!(units[1].attrs["del"]["author"], json!("Ada"));
+        assert!(keys(&units[2]).is_empty());
+    }
+
+    #[test]
     fn tracked_embeds_keep_revision_marks_and_comment_ids() {
         let info = json!({"id": 11, "author": "Ada", "date": "2024-01-01T00:00:00Z"});
         let run = |content: Value| json!({"type": "run", "content": [content]});
