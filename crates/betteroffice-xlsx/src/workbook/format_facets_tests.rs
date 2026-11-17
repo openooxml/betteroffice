@@ -907,3 +907,42 @@ fn format_facets_cleared_in_a_current_state_stay_cleared_when_adopted() {
         );
     }
 }
+
+#[test]
+fn accept_refuses_a_number_format_proposed_before_the_sheet_was_protected() {
+    let cell_xfs = r#"<xf/><xf applyProtection="1"><protection locked="0"/></xf>"#;
+    let cells = r#"<c r="A1" s="1"><v>7</v></c>"#;
+    let mut open = Workbook::open(&package(cell_xfs, cells, false)).unwrap();
+    let request = |number_format| ProposalRequest {
+        agent_id: "agent".to_owned(),
+        note: None,
+        edits: vec![crate::ProposalEditInput {
+            sheet: SheetId(0),
+            cell: r("A1"),
+            input: "9".to_owned(),
+            number_format,
+        }],
+    };
+    let input = |workbook: &Workbook| workbook.cell(SheetId(0), r("A1")).unwrap().input;
+    for number_format in [None, Some(NumberFormatMutation::Percent)] {
+        let refused = number_format.is_some();
+        let proposal = open.propose(request(number_format), options()).unwrap();
+        let mut protected = Workbook::open(&package(cell_xfs, cells, true)).unwrap();
+        protected.proposals.add(proposal.clone());
+        let version = protected.version();
+        let accepted = protected.accept_proposal(&proposal.id, false, options());
+        if refused {
+            let Err(Error::LockedTarget(message)) = &accepted else {
+                panic!("expected a protection refusal, got {accepted:?}");
+            };
+            assert_eq!(message, r#"sheet "Sheet1" is protected"#);
+            assert_eq!(input(&protected), "7");
+            assert_eq!(protected.version(), version);
+            assert_eq!(protected.proposals().len(), 1);
+        } else {
+            accepted.unwrap();
+            assert_eq!(input(&protected), "9");
+            assert!(protected.proposals().is_empty());
+        }
+    }
+}

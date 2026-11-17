@@ -3,7 +3,7 @@ use betteroffice_xlsx::{
     NumberFormatMutation, ProposalEditInput, ProposalRequest, ProtectedSheets, Sheet, SheetId,
     StylePatch, Workbook, WorkbookModel,
 };
-use xlsx_model::{CellFormat, ColStyle, Color, Fill, Protection, Xf};
+use xlsx_model::{CellFormat, ColStyle, Color, Fill, NumberFormat, Protection, Xf};
 
 const FORM: SheetId = SheetId(0);
 const OPEN: SheetId = SheetId(1);
@@ -475,6 +475,41 @@ fn proposals_refuse_locked_cells_on_a_protected_sheet() {
         book.accept_proposal(&proposal.id, false, options())
             .unwrap();
         assert_eq!(input(&book, sheet, address), "proposed");
+    }
+}
+
+#[test]
+fn proposals_refuse_a_number_format_on_a_sheet_that_does_not_allow_formatting() {
+    let mut book = workbook();
+    let request = |sheet, number_format| ProposalRequest {
+        agent_id: "agent".to_owned(),
+        note: None,
+        edits: vec![ProposalEditInput {
+            sheet,
+            cell: cell("B1"),
+            input: "9".to_owned(),
+            number_format,
+        }],
+    };
+    let version = book.version();
+    let percent = Some(NumberFormatMutation::Percent);
+    assert_eq!(
+        locked(book.propose(request(FORM, percent.clone()), options())),
+        r#"sheet "Form" is protected"#
+    );
+    assert!(book.proposals().is_empty());
+    assert_eq!(book.version(), version);
+    for (sheet, number_format) in [(FORM, None), (STYLED, None), (STYLED, percent)] {
+        let proposal = book
+            .propose(request(sheet, number_format.clone()), options())
+            .unwrap();
+        book.accept_proposal(&proposal.id, false, options())
+            .unwrap();
+        assert_eq!(input(&book, sheet, "B1"), "9");
+        assert_eq!(
+            format(&book, sheet, "B1").number_format == NumberFormat::Builtin { id: 10 },
+            number_format.is_some()
+        );
     }
 }
 
