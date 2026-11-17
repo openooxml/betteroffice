@@ -200,6 +200,8 @@ struct ResizeChartArgs {
     right: f32,
     #[serde(default)]
     bottom: f32,
+    #[serde(default, rename = "protectedSheets", deserialize_with = "supplied")]
+    protected_sheets: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -647,7 +649,7 @@ impl Session {
             .map_err(|error| format!("bad chart resize args: {error}"))?;
         let result = self
             .workbook
-            .resize_chart(
+            .resize_chart_with_protection(
                 SheetId(args.sheet),
                 &args.chart,
                 betteroffice_xlsx::ChartResize {
@@ -657,6 +659,7 @@ impl Session {
                     bottom: args.bottom,
                 },
                 self.calculation_options(now_serial),
+                protected_sheets(args.protected_sheets.as_ref())?,
             )
             .map_err(|error| error.to_string())?;
         self.edit_result(result)

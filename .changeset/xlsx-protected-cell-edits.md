@@ -6,4 +6,4 @@
 "@betteroffice/rust-crates": minor
 ---
 
-Editors and direct writes now refuse locked cells, formats and chart moves on protected sheets by default, like Excel. Direct writes accept opt-in `protectedSheets: "allow"` (Python `protected_sheets="allow"`), which writes through and keeps the protection.
+Editors and direct writes now refuse locked cells, formats and chart moves and resizes on protected sheets by default, like Excel. Direct writes accept opt-in `protectedSheets: "allow"` (Python `protected_sheets="allow"`), which writes through and keeps the protection.

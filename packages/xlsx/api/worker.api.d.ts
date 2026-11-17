@@ -1792,7 +1792,7 @@ export declare const WORKBOOK_REPLAY_MUTATORS: {
     setActiveSheet: true;
 };
 export type WorkbookReplayMethod = keyof typeof WORKBOOK_REPLAY_MUTATORS;
-type DirectWriteMethod = 'editCell' | 'editCells' | 'patchRangeStyle' | 'setNumberFormat' | 'applyFormat' | 'moveChart';
+type DirectWriteMethod = 'editCell' | 'editCells' | 'patchRangeStyle' | 'setNumberFormat' | 'applyFormat' | 'moveChart' | 'resizeChart';
 type WithoutLast<P extends unknown[]> = P extends [...infer Head, unknown] ? Head : P;
 /** Replayed arguments; a direct write's trailing `XlsxWriteOptions` never replays. */
 type WorkbookReplayArgs<K extends WorkbookReplayMethod> = K extends DirectWriteMethod ? WithoutLast<Required<Parameters<WorkbookHandle[K]>>> : Parameters<WorkbookHandle[K]>;
@@ -3817,7 +3817,7 @@ export interface CellEdit {
 }
 /**
  * Options for a direct cell or format write. `protectedSheets: 'allow'` writes locked cells,
- * formats and chart moves on protected sheets, as edit batches' opt-in does; the protection
+ * formats and chart moves and resizes on protected sheets, as edit batches' opt-in does; the protection
  * itself is kept. The default `'refuse'` throws like Excel. `'allow'` throws on a collaborative
  * workbook, and any other value throws as an invalid request.
  */
@@ -3972,7 +3972,7 @@ export interface WorkbookHandle extends CollaborationReplica {
      * chart pinned by an absolute anchor or held by a one-cell extent, neither of
      * which a save can rewrite.
      */
-    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult;
+    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges, options?: XlsxWriteOptions): EditResult;
     setActiveSheet(index: number): void;
     /**
      * apply one user input to a cell (parses number/bool/formula/text) and

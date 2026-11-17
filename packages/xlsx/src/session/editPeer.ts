@@ -47,6 +47,7 @@ export class WorkbookEditPeerFailedError extends Error {
 /** Arguments a replayed direct write carries; a trailing `XlsxWriteOptions` never replays. */
 const DIRECT_WRITE_ARITY: Partial<Record<WorkbookReplayMethod, number>> = {
   editCell: 4, editCells: 2, patchRangeStyle: 3, setNumberFormat: 3, applyFormat: 3, moveChart: 4,
+  resizeChart: 3,
 };
 
 function randomSeed(): number {

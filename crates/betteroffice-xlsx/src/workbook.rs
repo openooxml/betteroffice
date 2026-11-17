@@ -3583,7 +3583,20 @@ impl Workbook {
         edges: ChartResize,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.resize_chart_with_protection(sheet, frame, edges, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::resize_chart`] under a [`ProtectedSheets`] policy.
+    pub fn resize_chart_with_protection(
+        &mut self,
+        sheet: SheetId,
+        frame: &str,
+        edges: ChartResize,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         let sheet_ref = self.sheet(sheet)?;
+        self.ensure_objects_movable(sheet, protection)?;
         let chart = sheet_ref
             .charts
             .iter()

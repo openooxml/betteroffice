@@ -35,7 +35,7 @@ Cell input parses text, numbers, booleans, and formulas;
 formulas start with `=`. Editing a cell recalculates its dependents.
 
 On a protected sheet, `editCell`, `editCells`, `patchRangeStyle`, `setNumberFormat`,
-`applyFormat` and `moveChart` throw for locked cells, formats and chart moves the protection
+`applyFormat`, `moveChart` and `resizeChart` throw for locked cells, formats and chart moves and resizes the protection
 forbids, as Excel does. Pass `{ protectedSheets: 'allow' }` as their last argument to write
 through the protection, which stays in the file; a collaborative workbook refuses it.
 

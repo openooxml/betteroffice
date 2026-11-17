@@ -400,7 +400,7 @@ export interface CellEdit {
 
 /**
  * Options for a direct cell or format write. `protectedSheets: 'allow'` writes locked cells,
- * formats and chart moves on protected sheets, as edit batches' opt-in does; the protection
+ * formats and chart moves and resizes on protected sheets, as edit batches' opt-in does; the protection
  * itself is kept. The default `'refuse'` throws like Excel. `'allow'` throws on a collaborative
  * workbook, and any other value throws as an invalid request.
  */
@@ -613,7 +613,7 @@ export interface WorkbookHandle extends CollaborationReplica {
    * chart pinned by an absolute anchor or held by a one-cell extent, neither of
    * which a save can rewrite.
    */
-  resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult;
+  resizeChart(sheet: number, chart: string, edges: ChartResizeEdges, options?: XlsxWriteOptions): EditResult;
   setActiveSheet(index: number): void;
   /**
    * apply one user input to a cell (parses number/bool/formula/text) and
@@ -1240,8 +1240,10 @@ function wrapWorkbookDocument(
         sheet, chart, dx, dy, protectedSheets: options?.protectedSheets,
       })), true);
     },
-    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges): EditResult {
-      return parseJson(() => doc.resizeChartJson(JSON.stringify({ sheet, chart, ...edges })), true);
+    resizeChart(sheet: number, chart: string, edges: ChartResizeEdges, options?: XlsxWriteOptions): EditResult {
+      return parseJson(() => doc.resizeChartJson(JSON.stringify({
+        sheet, chart, ...edges, protectedSheets: options?.protectedSheets,
+      })), true);
     },
     setActiveSheet(index: number): void {
       mutatingWasmCall(() => doc.setActiveSheet(index));
