@@ -541,8 +541,14 @@ fn a_rule_formula_is_parsed_once_per_epoch_across_its_cells() {
     let first = frame(&workbook, &viewport);
     let stats = workbook.conditional_stats();
     assert_eq!(first.conditional_pending, 0);
-    assert!(stats.evaluated_cells - start.evaluated_cells >= 200, "{stats:?}");
-    assert!(stats.formula_parses - start.formula_parses <= 2, "{stats:?}");
+    assert!(
+        stats.evaluated_cells - start.evaluated_cells >= 200,
+        "{stats:?}"
+    );
+    assert!(
+        stats.formula_parses - start.formula_parses <= 2,
+        "{stats:?}"
+    );
     let reference = workbook_with_threshold("48");
     assert_eq!(
         painted(&first),
@@ -553,7 +559,10 @@ fn a_rule_formula_is_parsed_once_per_epoch_across_its_cells() {
     let edited = frame(&workbook, &viewport);
     let after = workbook.conditional_stats();
     assert_eq!(edited.conditional_pending, 0);
-    assert!(after.formula_parses - stats.formula_parses <= 2, "{after:?}");
+    assert!(
+        after.formula_parses - stats.formula_parses <= 2,
+        "{after:?}"
+    );
     assert_eq!(painted(&edited), painted(&first));
 }
 
@@ -572,8 +581,14 @@ fn an_absolute_whole_column_rule_is_parsed_once_per_epoch() {
     let list = frame(&workbook, &viewport);
     let stats = workbook.conditional_stats();
     assert_eq!(list.conditional_pending, 0);
-    assert!(stats.evaluated_cells - start.evaluated_cells >= 200, "{stats:?}");
-    assert!(stats.formula_parses - start.formula_parses <= 2, "{stats:?}");
+    assert!(
+        stats.evaluated_cells - start.evaluated_cells >= 200,
+        "{stats:?}"
+    );
+    assert!(
+        stats.formula_parses - start.formula_parses <= 2,
+        "{stats:?}"
+    );
     assert_eq!(stats.slow_rules, start.slow_rules, "{stats:?}");
     assert!(!painted(&list).is_empty());
 }
