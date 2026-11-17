@@ -701,14 +701,16 @@ impl EditingDoc {
         Ok(result)
     }
 
+    /// Moves the resident geometry from epoch `before` to `after` past text
+    /// edits of `story`, each `(para_id, offset, delta, insertion)` in turn:
+    /// `delta` units inserted at `offset` or deleted up to it. `None` drops
+    /// the indexes holding the story.
     pub(crate) fn advance_resident_geometry(
         &self,
         story: &str,
         before: u64,
         after: u64,
-        at: Option<(&str, u32)>,
-        delta: i64,
-        insertion: bool,
+        moves: Option<&[(&str, u32, i64, bool)]>,
     ) {
         let revision = self.story_revisions.lock().unwrap().geometry;
         self.resident_geometry.lock().unwrap().retain(|_, index| {
@@ -716,10 +718,12 @@ impl EditingDoc {
                 return false;
             }
             if index.stories.contains(story) {
-                let Some((para_id, offset)) = at else {
+                let Some(moves) = moves else {
                     return false;
                 };
-                if !index.move_text(story, para_id, offset, delta, insertion) {
+                if !moves.iter().all(|&(para_id, offset, delta, insertion)| {
+                    index.move_text(story, para_id, offset, delta, insertion)
+                }) {
                     return false;
                 }
             }
@@ -1214,6 +1218,51 @@ mod tests {
             start + 1,
         );
         check("deleting after the inline control", true);
+        for (label, para_id, offset, text) in [
+            (
+                "typing over text after the inline control",
+                "00000004",
+                7,
+                "ab",
+            ),
+            (
+                "typing over text inside the block control",
+                "00000003",
+                1,
+                "q",
+            ),
+        ] {
+            let story = outline_paragraphs(&doc)
+                .into_iter()
+                .find(|paragraph| paragraph.1 == para_id)
+                .unwrap()
+                .0;
+            let start = raw(&story, para_id, offset);
+            assert!(
+                doc.segment_index(&story)
+                    .unwrap()
+                    .is_text_range(start, start + 1),
+                "{label}"
+            );
+            let before = doc.committed_epoch();
+            let mut attrs = None;
+            doc.replace_range_placed_observed(
+                &ctx,
+                StoryRange::new(story.as_str(), start, start + 1),
+                text,
+                |effective| attrs = Some(effective.clone()),
+            )
+            .unwrap();
+            doc.advance_indexes_after_text_replace(
+                &story,
+                before,
+                doc.committed_epoch(),
+                (start, start + 1),
+                text,
+                attrs.as_ref(),
+            );
+            check(label, true);
+        }
         let fill: crate::EditRequest = serde_json::from_value(json!({
             "expectVersion": doc.version().as_str(),
             "steps": [{"op": "setContentControlText", "target": {"kind": "tag", "tag": "name"}, "text": "Longer name"}]

@@ -1280,8 +1280,11 @@ function applyPreparedDocxCommand(
       break;
     }
     case 'insertText': case 'replaceSelection': {
+      // A composition step that empties the composition removes what it typed (one paragraph).
+      const removal = command.kind === 'insertText' && command.payload.replaceBefore !== undefined && !command.payload.text;
       const receipt = collapsed(range)
         ? engine.insertText({ story: range.story, ...range.start }, command.payload.text, command.payload.suggesting)
+        : removal ? engine.deleteRange(range, command.payload.suggesting)
         : engine.replaceRange(range, command.payload.text, command.payload.suggesting);
       if (!receipt.range) throw new Error('Text receipt lacks range');
       const stored = state.storedMarks;

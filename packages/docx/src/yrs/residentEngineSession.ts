@@ -882,8 +882,9 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       : session.edit_text_resident(at.story, at.paraId, at.offset, at.paraId, at.offset, text))),
     insertLineBreak: (at, author) => applyCommandMutation(at.story, () =>
       JSON.parse(session.insert_line_break(at.story, at.paraId, at.offset, author?.name, author?.date))),
-    replaceRange: (range, text, author) => applyCommandMutation(range.story, () =>
-      JSON.parse(session.replace_range(...rangeArgs(range), text, author?.name, author?.date))),
+    replaceRange: (range, text, author) => applyCommandMutation(range.story, () => JSON.parse(author || !text
+      ? session.replace_range(...rangeArgs(range), text, author?.name, author?.date)
+      : session.edit_text_resident(...rangeArgs(range), text))),
     deleteRange: (range, author) => applyCommandMutation(range.story, () => JSON.parse(author
       ? session.delete_range(...rangeArgs(range), author.name, author.date)
       : session.edit_text_resident(...rangeArgs(range), undefined))),

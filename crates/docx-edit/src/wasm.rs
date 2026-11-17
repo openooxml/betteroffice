@@ -1640,11 +1640,12 @@ impl EditSession {
     /// A plain local text edit that the resident lowering records, so the next
     /// [`Self::layout_document_with_regions_after_edit`] re-lowers and
     /// re-measures only its paragraph: inserts `text` at the collapsed range,
-    /// or deletes `[start, end)` without it. The document changes exactly as
-    /// through [`Self::insert_text`] or [`Self::delete_range`] without an
-    /// author, and the receipt is theirs. An empty insertion, an edit that
-    /// spans paragraphs, or one whose paragraph resident input is not ready
-    /// for goes through them instead and records nothing for the relayout.
+    /// types it over `[start, end)`, or deletes `[start, end)` without it. The
+    /// document changes exactly as through [`Self::insert_text`],
+    /// [`Self::replace_range`] or [`Self::delete_range`] without an author,
+    /// and the receipt is theirs. An empty text, an edit that spans
+    /// paragraphs, or one whose paragraph resident input is not ready for goes
+    /// through them instead and records nothing for the relayout.
     pub fn edit_text_resident(
         &self,
         story: &str,
@@ -5724,6 +5725,84 @@ mod tests {
                 .unwrap(),
             generic
                 .insert_text("hf:rId1", header, 1, "y", None, None)
+                .unwrap()
+        );
+        assert!(resident.core.resident_text_edit.borrow().is_none());
+        for story in ["body", "hf:rId1"] {
+            assert_eq!(
+                resident.core.engine.doc().story_segments(story).unwrap(),
+                generic.core.engine.doc().story_segments(story).unwrap(),
+                "{story}"
+            );
+        }
+    }
+
+    #[test]
+    fn typing_over_plain_text_edits_resident_text_as_replace_range_does() {
+        let resident = shown_text_session(80.0);
+        let generic = shown_text_session(80.0);
+        let paragraphs = resident.core.engine.doc().paragraphs("body").unwrap();
+        let (first, second) = (&paragraphs[0].para_id, &paragraphs[1].para_id);
+        let header = &resident.core.engine.doc().paragraphs("hf:rId1").unwrap()[0].para_id;
+        for session in [&resident, &generic] {
+            session
+                .format_range("body", first, 1, first, 3, r#"{"bold":true}"#, None, None)
+                .unwrap();
+        }
+        // The first replaced unit is bold and the one before it is not, so the
+        // typed text keeps the replaced formatting rather than inheriting.
+        for (start, end, text) in [(1, 3, "xyz"), (0, 2, "Q")] {
+            assert_eq!(
+                resident
+                    .edit_text_resident("body", first, start, first, end, Some(text.to_owned()))
+                    .unwrap(),
+                generic
+                    .replace_range("body", first, start, first, end, text, None, None)
+                    .unwrap(),
+                "{start}..{end}"
+            );
+            assert!(resident.core.resident_text_edit.borrow().is_some());
+        }
+        // A range from inside a surrogate pair types over the whole pair, as
+        // replace_range does.
+        for (at, start, end, text) in [(2, 2, 4, "v"), (3, 4, 6, "w")] {
+            resident
+                .edit_text_resident("body", first, at, first, at, Some("\u{1F600}".to_owned()))
+                .unwrap();
+            generic
+                .insert_text("body", first, at, "\u{1F600}", None, None)
+                .unwrap();
+            assert_eq!(
+                resident
+                    .edit_text_resident("body", first, start, first, end, Some(text.to_owned()))
+                    .unwrap(),
+                generic
+                    .replace_range("body", first, start, first, end, text, None, None)
+                    .unwrap(),
+                "{start}..{end}"
+            );
+            assert!(resident.core.resident_text_edit.borrow().is_some());
+        }
+        let segments = resident.core.engine.doc().story_segments("body").unwrap();
+        assert!(segments.iter().any(|segment| {
+            matches!(&segment.content, crate::SegmentContent::Text(text) if text.contains("yvw"))
+                && segment.attributes.get("bold") == Some(&yrs::Any::Bool(true))
+        }));
+        assert_eq!(
+            resident
+                .edit_text_resident("body", first, 2, second, 1, Some("w".to_owned()))
+                .unwrap(),
+            generic
+                .replace_range("body", first, 2, second, 1, "w", None, None)
+                .unwrap()
+        );
+        assert!(resident.core.resident_text_edit.borrow().is_none());
+        assert_eq!(
+            resident
+                .edit_text_resident("hf:rId1", header, 1, header, 3, Some("y".to_owned()))
+                .unwrap(),
+            generic
+                .replace_range("hf:rId1", header, 1, header, 3, "y", None, None)
                 .unwrap()
         );
         assert!(resident.core.resident_text_edit.borrow().is_none());

@@ -81,6 +81,11 @@ impl<'a> CommandHost<'a> {
         }
         let ctx = crate::EditCtx::local("", "");
         match text {
+            Some(text) if start != end => self.engine.doc().replace_range(
+                &ctx,
+                crate::StoryRange::new(story, start, end),
+                text,
+            ),
             Some(text) => self.engine.doc().insert_text(
                 &ctx,
                 crate::Position::new(story, start),
@@ -1461,7 +1466,15 @@ fn cell_edits_re_lower_only_their_table_and_lay_out_as_a_full_recompute_does() {
                 host.assert_matches_cold(&label);
             }
             let work = keystroke_work(&engine, || {
-                // the 한 typed after the x, before the emoji typed last
+                // a composition step typing over the 한, between the emoji and the x
+                assert!(host.command(&story, at + 2, at + 3, Some("글")), "{label}");
+            });
+            if patched {
+                assert_eq!(work.full_lowerings, 0, "{label}: type over {work:?}");
+            }
+            host.assert_matches_cold(&format!("{label}: type over"));
+            let work = keystroke_work(&engine, || {
+                // the 글 that typed over the 한
                 assert!(host.command(&story, at + 2, at + 3, None), "{label}");
             });
             if patched {
@@ -1478,7 +1491,7 @@ fn cell_edits_re_lower_only_their_table_and_lay_out_as_a_full_recompute_does() {
         );
         assert_eq!(
             placed + copied,
-            16,
+            20,
             "floating {floating}: every patched keystroke patches"
         );
         let after = paragraph_start(&engine, "00000F51") + 3;

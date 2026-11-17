@@ -87,17 +87,22 @@ impl EditSessionCore {
         writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        if text.is_some() && start != end {
-            return Err(EngineError::message(
-                "resident text insertion needs a collapsed range",
-            ));
-        }
         if !self
             .engine
             .takes_resident_text_edit(story, start_para, end_para, text.as_deref())
         {
             self.resident_text_edit.replace(None);
             return match text {
+                Some(text) if start != end => self.replace_range(
+                    story,
+                    start_para,
+                    start_offset,
+                    end_para,
+                    end_offset,
+                    &text,
+                    None,
+                    None,
+                ),
                 Some(text) => self.insert_text(story, start_para, start_offset, &text, None, None),
                 None => self.delete_range(
                     story,

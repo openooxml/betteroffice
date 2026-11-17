@@ -30,6 +30,34 @@ test('composition_steps_replace_the_text_before_the_caret_and_keep_stored_marks'
   expect(arm.engine.selectionContext(storyRange(selection(id, 1, 2))).bold).toBe(true);
 }, TIMEOUT);
 
+test('composition_steps_take_the_resident_text_edit_and_keep_the_typed_over_formatting', async () => {
+  const arm = await openCommandEngine(['abc def']);
+  const id = arm.engine.paragraphs('body')[0]!.paraId;
+  expect(execute(arm, command(arm, 'toggleMark', { mark: { type: 'bold' }, selection: selection(id, 4, 7) })).status).toBe('applied');
+  const resident = spyOn(arm.native, 'edit_text_resident');
+  const replaced = spyOn(arm.native, 'replace_range');
+  try {
+    // Typing over a bold word: the composition keeps the bold although the space before it is not bold.
+    expect(execute(arm, command(arm, 'replaceSelection', { text: 'ㄱ', selection: selection(id, 4, 7) })).status).toBe('applied');
+    expect(step(arm, '가', 'ㄱ').status).toBe('applied');
+    expect(step(arm, '각', '가').status).toBe('applied');
+    expect(texts(arm)).toEqual(['abc 각']);
+    expect(arm.engine.selectionContext(storyRange(selection(id, 4, 5))).bold).toBe(true);
+    expect(replaced).not.toHaveBeenCalled();
+    expect(resident.mock.calls.map(call => [call[2], call[4], call[5]])).toEqual([[4, 7, 'ㄱ'], [4, 5, '가'], [4, 5, '각']]);
+    resident.mockClear();
+    const removed = step(arm, '', '각');
+    expect(removed.status).toBe('applied');
+    expect(texts(arm)).toEqual(['abc ']);
+    expectCaret(removed, { story: 'body', paraId: id, offset: 4 });
+    expect(resident.mock.calls.map(call => [call[2], call[4], call[5]])).toEqual([[4, 5, undefined]]);
+    expect(replaced).not.toHaveBeenCalled();
+  } finally {
+    resident.mockRestore();
+    replaced.mockRestore();
+  }
+}, TIMEOUT);
+
 test('composition_step_is_refused_without_writing_when_other_text_is_before_the_caret', async () => {
   const arm = await openCommandEngine(['abc']);
   const id = arm.engine.paragraphs('body')[0]!.paraId;

@@ -1178,9 +1178,17 @@ impl EditingDoc {
             story_id,
             before,
             after,
-            at.as_ref().map(|(id, offset)| (id.as_str(), *offset)),
-            text.encode_utf16().count() as i64,
-            true,
+            at.as_ref()
+                .map(|(id, offset)| {
+                    [(
+                        id.as_str(),
+                        *offset,
+                        text.encode_utf16().count() as i64,
+                        true,
+                    )]
+                })
+                .as_ref()
+                .map(|moves| moves.as_slice()),
         );
         {
             let mut indexes = self.paragraph_indexes.lock().unwrap();
@@ -1251,9 +1259,17 @@ impl EditingDoc {
             story_id,
             before,
             after,
-            at.as_ref().map(|(id, offset)| (id.as_str(), *offset)),
-            -i64::from(end.saturating_sub(start)),
-            false,
+            at.as_ref()
+                .map(|(id, offset)| {
+                    [(
+                        id.as_str(),
+                        *offset,
+                        -i64::from(end.saturating_sub(start)),
+                        false,
+                    )]
+                })
+                .as_ref()
+                .map(|moves| moves.as_slice()),
         );
         {
             let mut indexes = self.paragraph_indexes.lock().unwrap();
@@ -1266,6 +1282,78 @@ impl EditingDoc {
         let mut indexes = self.segment_indexes.lock().unwrap();
         if let Some(mut segments) = indexes.take(story_id, before) {
             if Arc::make_mut(&mut segments).shift_for_text_delete(start, end) {
+                indexes.insert(story_id, after, segments);
+            }
+        }
+        self.advance_table_membership(before, after);
+    }
+
+    /// Advances cached story indexes after `[start, end)` of plain text in one
+    /// paragraph was replaced by `text` with `attrs` in one edit, as the delete
+    /// and the insertion would one after the other.
+    pub(crate) fn advance_indexes_after_text_replace(
+        &self,
+        story_id: &str,
+        before: u64,
+        after: u64,
+        (start, end): (u32, u32),
+        text: &str,
+        attrs: Option<&Attrs>,
+    ) {
+        if before.checked_add(1) != Some(after) {
+            return;
+        }
+        let inserted = text.encode_utf16().count() as u32;
+        let at = self
+            .paragraph_indexes
+            .lock()
+            .unwrap()
+            .get(story_id, before)
+            .and_then(|paragraphs| {
+                paragraphs
+                    .para_at(start)
+                    .filter(|para| start <= end && start >= para.node_start && end <= para.pilcrow)
+                    .map(|para| (para.para_id.to_string(), para.node_start))
+            });
+        let moves = at.as_ref().map(|(id, node_start)| {
+            [
+                (
+                    id.as_str(),
+                    end - node_start,
+                    -i64::from(end - start),
+                    false,
+                ),
+                (id.as_str(), start - node_start, i64::from(inserted), true),
+            ]
+        });
+        self.advance_resident_geometry(
+            story_id,
+            before,
+            after,
+            moves.as_ref().map(|moves| moves.as_slice()),
+        );
+        {
+            let mut indexes = self.paragraph_indexes.lock().unwrap();
+            if let Some(mut paragraphs) = indexes.take(story_id, before) {
+                let paragraphs_mut = Arc::make_mut(&mut paragraphs);
+                if paragraphs_mut.shift_for_text_delete(start, end)
+                    && paragraphs_mut.shift_for_text_insert(start, inserted)
+                {
+                    indexes.insert(story_id, after, paragraphs);
+                }
+            }
+        }
+        let mut indexes = self.segment_indexes.lock().unwrap();
+        if let Some(mut segments) = indexes.take(story_id, before) {
+            let segments_mut = Arc::make_mut(&mut segments);
+            if segments_mut.shift_for_text_delete(start, end)
+                && match attrs {
+                    Some(attrs) => {
+                        segments_mut.shift_for_text_insert_formatted(start, text, Some(attrs))
+                    }
+                    None => segments_mut.shift_for_text_insert(start, text),
+                }
+            {
                 indexes.insert(story_id, after, segments);
             }
         }
