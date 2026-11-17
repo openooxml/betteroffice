@@ -15,7 +15,7 @@ import { PLAIN_CONTEXT } from '../../../commands/testing';
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const restoreCompositionEvent = installCompositionEventPolyfill();
-const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 afterEach(cleanup);
 afterAll(async () => {
   restoreCompositionEvent();
@@ -1434,5 +1434,50 @@ test('paste_fragment_callback_false_falls_back_to_text', () => {
   } finally {
     input.unmount();
     input.admission.dispose();
+  }
+});
+
+test('the paste options control follows a window scroll only while it is shown', async () => {
+  const host = document.createElement('div');
+  host.style.position = 'relative';
+  document.body.appendChild(host);
+  let hostTop = 100;
+  let measured = 0;
+  host.getBoundingClientRect = () => {
+    measured += 1;
+    return { x: 0, y: hostTop, top: hostTop, bottom: hostTop + 600, left: 0, right: 600, width: 600, height: 600, toJSON() {} };
+  };
+  const input = mount(false, { caretHostRef: { current: host }, onPasteFragment: () => true });
+  const control = () => host.querySelector<HTMLElement>('[data-paste-options]');
+  try {
+    const geometry: PeerlessFrameGeometry = {
+      identity: input.snapshot.identity, coversThroughSeq: 0, frameEpoch: 1, layoutRevision: 1,
+      pages: [], caret: { x: 80, y: 200, width: 1, height: 12 }, selectionRects: [],
+    };
+    act(() => { input.viewStore.installFrameGeometry(geometry); input.refresh(); });
+    const bold: DocxClipboardFragment = { paragraphs: [{ text: 'Bold', runs: [{ text: 'Bold', format: { bold: true } }] }] };
+    pasteWith(input, clipboardFragmentHtml(bold), 'Bold');
+    const end = { story: 'body', paraId: 'a', offset: 4 };
+    act(() => {
+      input.snapshot.version = 1;
+      input.snapshot.workerSelection = { anchor: end, focus: end };
+      input.viewStore.installFrameGeometry({ ...geometry, frameEpoch: 2 });
+      input.refresh();
+    });
+    await waitFor(() => expect(control()).not.toBeNull());
+    expect(control()!.style.left).toBe('86px');
+    expect(control()!.style.top).toBe('316px');
+    act(() => { hostTop = 20; fireEvent.scroll(window); });
+    expect(control()!.style.top).toBe('236px');
+    act(() => { fireEvent.pointerDown(document.body); });
+    expect(control()).toBeNull();
+    measured = 0;
+    act(() => { hostTop = 60; fireEvent.scroll(window); });
+    expect(measured).toBe(0);
+    expect(control()).toBeNull();
+  } finally {
+    input.unmount();
+    input.admission.dispose();
+    host.remove();
   }
 });
