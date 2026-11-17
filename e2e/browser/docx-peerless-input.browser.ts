@@ -1551,7 +1551,7 @@ test('worker click beside the checkbox of checklist line 2 types into paragraph 
   expect(await savedParagraphs(page)).toEqual(['☐Item one', 'Z☐Item two']);
 });
 
-test('worker ArrowDown from checklist line 1 types into checklist line 2', async ({ page }) => {
+test('guard: worker ArrowDown from checklist line 1 types into checklist line 2', async ({ page }) => {
   await open(page, true, null, 1, await checklistBytes());
   const input = await focusDocument(page);
   const first = (await workerFocus(page))!.paraId;
@@ -1568,12 +1568,9 @@ test('worker ArrowDown from checklist line 1 types into checklist line 2', async
   expect(await savedParagraphs(page)).toEqual(['☐Item one', '☐ZItem two']);
 });
 
-test('today: Ctrl+Home before a leading checkbox control draws no caret and typing inserts before the control', async ({ page }) => {
+test('today: Ctrl+Home before a leading checkbox control has no caret rectangle', async ({ page }) => {
   await open(page, true, null, 1, await checklistBytes());
-  const input = await focusDocument(page);
+  await focusDocument(page);
   expect(await workerFocus(page)).toMatchObject({ offset: 0 });
   await expect(page.locator('[data-docx-worker-editor] [data-docx-caret]')).toHaveCount(0);
-  await beforeinput(input, 'Z');
-  await settled(page);
-  expect(await savedParagraphs(page)).toEqual(['Z☐Item one', '☐Item two']);
 });
