@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# Test builds keep the default 16 codegen units: one unit nearly doubles the wasm build time for smaller bytes that only
+# the release and deploy workflows ship.
+env:
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
 concurrency:
   # run_id, not ref: a shared group still drops a queued run between two
   # quick main pushes even with cancel-in-progress false.
