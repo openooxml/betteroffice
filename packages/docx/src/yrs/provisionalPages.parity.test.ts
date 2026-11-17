@@ -54,7 +54,7 @@ beforeAll(async () => {
     '../wasm/loadWasmAsset': 'export const WASM32_MEMORY_LIMIT_BYTES = 2 ** 32; export const wasmModuleMemories = () => [];',
   };
   const result = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, 'residentEngineWorker.ts')],
+    entrypoints: [resolve(import.meta.dir, 'docxWorker.browser.ts')],
     target: 'bun',
     format: 'iife',
     plugins: [{

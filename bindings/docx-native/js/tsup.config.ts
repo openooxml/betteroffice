@@ -34,9 +34,10 @@ export default defineConfig([
       'utils/autoScroll': '../../../packages/docx/src/utils/autoScroll.ts',
       'yrs/index': '../../../packages/docx/src/yrs/index.ts',
       'collaboration/index': '../../../packages/docx/src/collaboration/index.ts',
-      'yrs/docxWorker': '../../../packages/docx/src/yrs/residentEngineWorker.ts',
-      'sessionWorker.browser': '../../../packages/docx/src/yrs/sessionWorker.browser.ts',
+      'yrs/docxWorker': '../../../packages/docx/src/yrs/docxWorker.browser.ts',
+      'yrs/docxWorker.node': '../../../packages/docx/src/yrs/docxWorker.node.ts',
       'sessionWorker.node': '../../../packages/docx/src/yrs/sessionWorker.node.ts',
+      'sessionWorker.missing': '../../../packages/docx/src/yrs/sessionWorker.missing.ts',
       'wasm-opc': '../../../packages/docx/src/wasm/opc.ts',
       'wasm-layout': '../../../packages/docx/src/wasm/layout.ts',
       'wasm-edit': '../../../packages/docx/src/wasm/edit.ts',
@@ -67,6 +68,7 @@ export default defineConfig([
     onSuccess: async () => {
       await writeFile('../dist/browser.js', 'throw new Error("use @betteroffice/docx in browsers");\n');
       await writeFile('../dist/docxWorker.mjs', "import './yrs/docxWorker.mjs';\n");
+      await writeFile('../dist/docxWorker.node.mjs', "import './yrs/docxWorker.node.mjs';\n");
     },
   },
 ]);

@@ -6,7 +6,6 @@ import {
   XlsxCommandAdmissionError,
 } from './createXlsxCommandStore';
 import {
-  commandForEvent,
   commandLabelKey,
   formatChord,
   isMacPlatform,
@@ -263,10 +262,12 @@ describe('xlsx command descriptors', () => {
     expect(matchesChord('Mod+Z', event({ metaKey: true }), true)).toBe(true);
     expect(matchesChord('Mod+Z', event({ ctrlKey: true, shiftKey: true }), false)).toBe(false);
     expect(formatChord('Mod+Shift+Z', false)).toBe('Ctrl+Shift+Z');
-    expect(formatChord('Mod+Shift+Z', true)).toBe('⌘⇧Z');
+    expect(formatChord('Mod+Shift+Z', true)).toBe('⇧⌘Z');
     const mod = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
-    expect(commandForEvent(event({ key: 'Z', shiftKey: true, ...mod }))?.id).toBe('redo');
-    expect(commandForEvent(event({ key: 'c', ...mod }))).toBeNull();
+    const controller = createXlsxCommandController();
+    expect(controller.shortcutAt(event({ key: 'Z', shiftKey: true, ...mod }))?.id).toBe('redo');
+    expect(controller.shortcutAt(event({ key: 'c', ...mod }))).toBeNull();
+    expect(controller.claimsKey(event({ key: 'c', ...mod }))).toBe(false);
   });
 
   test('redo lists Mod+Shift+Z first, then Mod+Y', () => {
@@ -283,7 +284,8 @@ describe('xlsx command descriptors', () => {
       expect(matchesChord('Mod+B', event({ ...mod, shiftKey: true }), mac)).toBe(false);
       expect(matchesChord('Mod+B', event({ ctrlKey: true, metaKey: true }), mac)).toBe(false);
     }
-    expect(commandForEvent(event({ ctrlKey: true, metaKey: true }))).toBeNull();
-    expect(commandForEvent(event({ key: 's', ctrlKey: true, metaKey: true }))).toBeNull();
+    const controller = createXlsxCommandController();
+    expect(controller.shortcutAt(event({ ctrlKey: true, metaKey: true }))).toBeNull();
+    expect(controller.shortcutAt(event({ key: 's', ctrlKey: true, metaKey: true }))).toBeNull();
   });
 });

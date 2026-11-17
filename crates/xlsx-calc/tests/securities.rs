@@ -1257,23 +1257,35 @@ fn yield_searches_answer_true_roots_or_num_errors() {
     );
 }
 
-/// a bill settled in year 9999 runs inside the date range even though its
-/// anniversary does not.
+/// Excel 365 for Mac result: TBILLPRICE(DATE(9999,1,1),DATE(9999,12,31),0.05)
+/// is #NUM!. the one-year check needs the settlement's anniversary, which
+/// for a bill settled in 9999 is past the last date excel holds.
 #[test]
-fn treasury_bills_settle_in_the_last_year() {
+fn treasury_bills_settled_in_the_last_year_are_num() {
+    for name in ["TBILLPRICE", "TBILLYIELD", "TBILLEQ"] {
+        let amount = if name == "TBILLYIELD" { "99" } else { "0.05" };
+        fails(
+            &format!("{name}(DATE(9999,1,1),DATE(9999,12,31),{amount})"),
+            ErrorValue::Num,
+        );
+        fails(
+            &format!("{name}(DATE(9999,1,1),DATE(9999,2,1),{amount})"),
+            ErrorValue::Num,
+        );
+    }
     close(
-        "TBILLPRICE(DATE(9999,1,1),DATE(9999,2,1),0.05)",
-        100.0 * (1.0 - 0.05 * 31.0 / 360.0),
+        "TBILLPRICE(DATE(9998,12,31),DATE(9999,12,31),0.05)",
+        100.0 * (1.0 - 0.05 * 365.0 / 360.0),
         1e-12,
     );
     close(
-        "TBILLYIELD(DATE(9999,1,1),DATE(9999,2,1),99)",
-        1.0 / 99.0 * 360.0 / 31.0,
+        "TBILLYIELD(DATE(9998,12,31),DATE(9999,2,1),99)",
+        1.0 / 99.0 * 360.0 / 32.0,
         1e-12,
     );
     close(
-        "TBILLEQ(DATE(9999,1,1),DATE(9999,2,1),0.05)",
-        365.0 * 0.05 / (360.0 - 0.05 * 31.0),
+        "TBILLEQ(DATE(9998,12,31),DATE(9999,2,1),0.05)",
+        365.0 * 0.05 / (360.0 - 0.05 * 32.0),
         1e-12,
     );
     fails(
@@ -1376,8 +1388,8 @@ fn extreme_operands_give_a_number_or_an_error() {
     let extremes = [
         "1E+200",
         "1E-200",
-        "1E+308",
-        "1E-308",
+        "1E+307*10",
+        "1E-300*1E-8",
         "-1E+200",
         "0",
         "1E15+0.75",

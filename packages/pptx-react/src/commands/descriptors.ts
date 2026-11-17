@@ -5,6 +5,18 @@ import type {
   PptxCommandShortcut,
   PptxPluginCommandId,
 } from './types';
+import {
+  normalizeChord as normalizeHostChord,
+  parseChord,
+} from '../../../../shared/keyboard/format';
+
+export { formatChord, isMacPlatform } from '../../../../shared/keyboard/format';
+
+/** `chord` in canonical form, or null; contributed chords name `Mod`, never a physical `Ctrl`. */
+export function normalizeChord(chord: string): string | null {
+  const canonical = normalizeHostChord(chord);
+  return canonical && !parseChord(canonical).ctrl ? canonical : null;
+}
 
 type DescriptorTable = { readonly [K in PptxCommandId]: PptxCommandDescriptor<K> };
 
@@ -22,9 +34,21 @@ const plain = <K extends PptxCommandId>(chord: string) =>
 
 /** Every PPTX command, with its label and keyboard bindings. */
 export const PPTX_COMMAND_DESCRIPTORS: DescriptorTable = Object.freeze({
+  cut: descriptor('cut', 'commands.cut', true, [plain('Mod+X')]),
+  copy: descriptor('copy', 'commands.copy', false, [plain('Mod+C')]),
+  paste: descriptor('paste', 'commands.paste', true, [plain('Mod+V')]),
+  pasteAsPlainText: descriptor('pasteAsPlainText', 'commands.pastePlainText', true, [
+    plain('Mod+Shift+V'),
+  ]),
+  deleteObject: descriptor('deleteObject', 'commands.delete', true),
+  deleteSlide: descriptor('deleteSlide', 'toolbar.deleteSlide', true),
+  duplicateSlide: descriptor('duplicateSlide', 'commands.duplicateSlide', true),
+  tableInsert: descriptor('tableInsert', 'commands.insert', true),
+  tableDelete: descriptor('tableDelete', 'commands.delete', true),
   bold: descriptor('bold', 'toolbar.bold', true, [plain('Mod+B')]),
   italic: descriptor('italic', 'toolbar.italic', true, [plain('Mod+I')]),
   underline: descriptor('underline', 'toolbar.underline', true, [plain('Mod+U')]),
+  strikethrough: descriptor('strikethrough', 'toolbar.strikethrough', true),
   fontFamily: descriptor('fontFamily', 'toolbar.fontFamily', true),
   fontSize: descriptor('fontSize', 'toolbar.fontSize', true),
   fontSizeStep: descriptor('fontSizeStep', 'commands.fontSizeStep', true),
@@ -72,94 +96,4 @@ export function isPluginCommandId(value: unknown): value is PptxPluginCommandId 
 /** Arguments a control uses when none are bound. */
 export function defaultArgs<K extends PptxCommandId>(id: K): PptxCommandArgs[K] {
   return (id === 'insertSlide' ? {} : null) as PptxCommandArgs[K];
-}
-
-interface ParsedChord {
-  mod: boolean;
-  shift: boolean;
-  alt: boolean;
-  key: string;
-}
-
-function parseChord(chord: string): ParsedChord {
-  const parts = chord.split('+');
-  const key = parts.length > 1 && parts[parts.length - 1] === '' ? '+' : parts[parts.length - 1];
-  const modifiers = new Set(parts.slice(0, -1));
-  return {
-    mod: modifiers.has('Mod'),
-    shift: modifiers.has('Shift'),
-    alt: modifiers.has('Alt'),
-    key: key.toLowerCase(),
-  };
-}
-
-const MODIFIERS: ReadonlySet<string> = new Set(['Mod', 'Shift', 'Alt']);
-
-/** `chord` in canonical form (`Mod+Alt+Shift+key`), or null when it is not a chord. */
-export function normalizeChord(chord: string): string | null {
-  if (typeof chord !== 'string' || chord.length === 0) return null;
-  const parts = chord.split('+');
-  const modifiers =
-    parts.length > 1 && parts[parts.length - 1] === '' ? parts.slice(0, -2) : parts.slice(0, -1);
-  if (!modifiers.every((modifier) => MODIFIERS.has(modifier))) return null;
-  const parsed = parseChord(chord);
-  if (parsed.key.length === 0) return null;
-  return [parsed.mod && 'Mod', parsed.alt && 'Alt', parsed.shift && 'Shift', parsed.key]
-    .filter(Boolean)
-    .join('+');
-}
-
-/** Canonical chords the text input handles itself (clipboard and select all). */
-export const EDITING_CHORDS: ReadonlySet<string> = new Set(
-  ['Mod+A', 'Mod+C', 'Mod+V', 'Mod+X', 'Mod+Shift+V'].map((chord) => normalizeChord(chord)!)
-);
-
-/** Canonical chords of the built-in commands, which always win over contributed ones. */
-export const BUILT_IN_CHORDS: ReadonlySet<string> = new Set(
-  Object.values(PPTX_COMMAND_DESCRIPTORS).flatMap((descriptor) =>
-    (descriptor.shortcuts as readonly PptxCommandShortcut[]).map(
-      (shortcut) => normalizeChord(shortcut.chord)!
-    )
-  )
-);
-
-export function isMacPlatform(): boolean {
-  return typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
-}
-
-/** Whether a keydown event presses `chord`. */
-export function matchesChord(chord: string, event: KeyboardEvent, mac = isMacPlatform()): boolean {
-  const parsed = parseChord(chord);
-  const mod = mac ? event.metaKey : event.ctrlKey;
-  const other = mac ? event.ctrlKey : event.metaKey;
-  return (
-    parsed.mod === mod &&
-    !other &&
-    parsed.shift === event.shiftKey &&
-    parsed.alt === event.altKey &&
-    event.key.toLowerCase() === parsed.key
-  );
-}
-
-/** A chord as people read it on the current platform (`Ctrl+B`, `⌘B`). */
-export function formatChord(chord: string, mac = isMacPlatform()): string {
-  const parsed = parseChord(chord);
-  const key = parsed.key.length === 1 ? parsed.key.toUpperCase() : parsed.key;
-  if (mac) {
-    return `${parsed.alt ? '⌥' : ''}${parsed.shift ? '⇧' : ''}${parsed.mod ? '⌘' : ''}${key}`;
-  }
-  return [parsed.mod && 'Ctrl', parsed.alt && 'Alt', parsed.shift && 'Shift', key]
-    .filter(Boolean)
-    .join('+');
-}
-
-/** The display chord for a command invoked with `args`, if it has one. */
-export function commandShortcut<K extends PptxCommandId>(
-  id: K,
-  args?: PptxCommandArgs[K]
-): string | null {
-  const shortcuts = PPTX_COMMAND_DESCRIPTORS[id].shortcuts as readonly PptxCommandShortcut<K>[];
-  const key = JSON.stringify(args ?? defaultArgs(id));
-  const match = shortcuts.find((shortcut) => JSON.stringify(shortcut.args) === key);
-  return match ? formatChord(match.chord) : null;
 }

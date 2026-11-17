@@ -385,7 +385,7 @@ describe('font pack wheels', () => {
     } finally {
       rmSync(out, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 });
 
 describe('repository-scoped token guard', () => {

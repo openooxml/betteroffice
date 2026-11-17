@@ -784,13 +784,15 @@ fn maturity_args(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(Span, f64, f64
 }
 
 /// the treasury-bill functions' arguments: settlement, maturity and one
-/// amount. the bill may run at most one calendar year; the days come back
-/// actual.
+/// amount. the bill may run at most one calendar year, and that year's end
+/// must itself be a date excel can hold, so a bill settled in 9999 is
+/// `#NUM!`; the days come back actual.
 fn bill_args(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(f64, f64), ErrorValue> {
     arity(args, 3, 3)?;
     let [settlement, maturity, amount] = numbers::<3>(args, ctx)?;
     let (settlement, maturity) = (day(settlement, ctx)?, day(maturity, ctx)?);
-    if settlement >= maturity || maturity > add_months(settlement, 12, false)? {
+    let anniversary = add_months(settlement, 12, false)?;
+    if settlement >= maturity || maturity > anniversary || !in_date_range(anniversary) {
         return Err(ErrorValue::Num);
     }
     Ok(((maturity - settlement) as f64, amount))

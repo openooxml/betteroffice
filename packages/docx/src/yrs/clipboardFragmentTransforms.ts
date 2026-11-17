@@ -13,10 +13,10 @@ const KEPT_FORMAT_KEYS = ['bold', 'italic', 'underline', 'strike'] as const;
 function mergeFormat(format: YrsInlineFormatDelta | undefined): YrsInlineFormatDelta | undefined {
   if (!format) return undefined;
   const kept: YrsInlineFormatDelta = {};
-  if (format.bold) kept.bold = format.bold;
-  if (format.italic) kept.italic = format.italic;
-  if (format.underline) kept.underline = format.underline;
-  if (format.strike) kept.strike = format.strike;
+  for (const key of KEPT_FORMAT_KEYS) {
+    const value = format[key] ?? format.other?.[key];
+    if (value) Object.assign(kept, { [key]: value });
+  }
   return Object.keys(kept).length > 0 ? kept : undefined;
 }
 
@@ -173,7 +173,7 @@ export function clipboardFragmentHasFormatting(fragment: DocxClipboardFragment |
     paragraph.list !== undefined ||
     (paragraph.tables ?? []).length > 0 ||
     (paragraph.inlines ?? []).some(inline => 'image' in inline) ||
-    (paragraph.runs ?? []).some(run =>
-      run.href !== undefined || (run.format !== undefined && Object.keys(run.format).length > 0)) ||
+    (paragraph.runs ?? []).some(run => run.href !== undefined || (run.format !== undefined &&
+      Object.entries(run.format).some(([key, value]) => key !== 'other' || Object.keys(value ?? {}).length > 0))) ||
     (paragraph.tables ?? []).some(table => table.rows.some(row => row.cells.some(cell => cell.content.some(segmentHas)))));
 }

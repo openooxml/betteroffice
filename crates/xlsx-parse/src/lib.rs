@@ -3,6 +3,7 @@
 
 mod axis;
 mod chart;
+mod drawing_anchors;
 mod facts_codec;
 mod formula;
 mod future_functions;
@@ -13,6 +14,7 @@ mod inventory;
 mod package;
 mod package_facts;
 mod patch;
+mod pictures;
 mod read;
 mod reference;
 mod rich_text;
@@ -21,17 +23,24 @@ mod rich_text_tests;
 #[cfg(any(test, feature = "test-oracle"))]
 mod save_oracle;
 mod styles;
+mod table_style;
+mod table_style_presets;
 mod tree;
 mod write;
 mod xml;
 
 pub use axis::SheetAxes;
 pub use chart::{
-    ChartMetadata, ChartRefresh, ChartRefreshPlan, ChartSeriesInfo, chart_bytes, chart_metadata,
-    chart_references, chart_space, edit_chart, edited_chart_space, preserved_chart_space,
+    ChartMetadata, ChartRefresh, ChartRefreshPlan, ChartSeriesInfo, agreed_chart_bytes,
+    chart_bytes, chart_metadata, chart_references, chart_space, conflicting_drawing_anchor,
+    edit_chart, edited_chart_space, is_unwritable_chart_reference, preserved_chart_space,
 };
 #[cfg(feature = "test-counters")]
 pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
+pub use drawing_anchors::{
+    GridShift, followed_anchor, relationship_part_of, sheet_drawing_targets,
+    sheet_drawings_may_move,
+};
 pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
 pub use formula::translate_formula;
 pub use future_functions::{
@@ -47,6 +56,7 @@ pub use inventory::{
 pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
 pub use package_facts::{PackageFacts, PackageFactsView};
 pub use patch::{keeps_source, keeps_source_conditional_formats};
+pub use pictures::sheet_pictures;
 #[doc(hidden)]
 pub use read::styles_part_name;
 pub use read::{
@@ -62,6 +72,8 @@ pub use save_oracle::with_legacy_save_path;
 pub use styles::legacy_style_reads;
 #[doc(hidden)]
 pub use styles::source_style_xml_markers;
+#[doc(hidden)]
+pub use write::{FragmentFailure, FragmentFailureReason, FragmentKind, PreservedFragmentFailure};
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,

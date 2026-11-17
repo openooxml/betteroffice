@@ -182,6 +182,65 @@ function setup(text = 'abc', object = false) {
   return { client, store, paintFrame, paintEcho, restoreLine };
 }
 
+const selectionMoves = (client: FakeCommandClient) => client.sent.filter((intent) => intent.kind === 'moveSelection');
+
+test('Ctrl or Cmd+A moves to the story start, then extends to its end', async () => {
+  for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+    const { client, store } = setup();
+    store.setSelection(selection(1));
+    const view = render(<PeerlessTextInput store={store} />);
+    const input = textarea(view.container);
+    let unhandled = true;
+    await act(async () => { unhandled = fireEvent.keyDown(input, { key: 'a', ...modifier }); });
+    expect(unhandled).toBe(false);
+    expect(selectionMoves(client)).toMatchObject([
+      { payload: { motion: 'storyStart', extend: false } },
+      { payload: { motion: 'storyEnd', extend: true, at: { source: 'afterSeq' } } },
+    ]);
+    view.unmount();
+  }
+});
+
+test('Ctrl+A follows a pending click out of an object selection without reporting a refusal', async () => {
+  const { client, store } = setup('abc', true);
+  const view = render(<PeerlessTextInput store={store} />);
+  const input = textarea(view.container);
+  await act(async () => {
+    void store.dispatch({ kind: 'selectAtPoint', payload: {
+      frame: client.state.frame, x: 30, y: 50, extend: false, inputTime: 1, undoGroup: 'pointer',
+    } }).catch(() => {});
+    fireEvent.keyDown(input, { key: 'a', ctrlKey: true });
+  });
+  expect(selectionMoves(client)).toMatchObject([
+    { payload: { motion: 'storyStart', extend: false, at: { source: 'afterSeq', seq: 1 } } },
+    { payload: { motion: 'storyEnd', extend: true, at: { source: 'afterSeq', seq: 2 } } },
+  ]);
+  await act(async () => {
+    client.ack(2, { outcomes: [{ seq: 2, status: 'refused', reason: 'bad-target', committed: false }] });
+  });
+  expect(view.queryByRole('alert')).toBeNull();
+});
+
+test('Ctrl+A leaves object selections, composition and other chords alone', async () => {
+  const object = setup('abc', true);
+  const objectView = render(<PeerlessTextInput store={object.store} />);
+  await act(async () => { fireEvent.keyDown(textarea(objectView.container), { key: 'a', ctrlKey: true }); });
+  expect(selectionMoves(object.client)).toEqual([]);
+  objectView.unmount();
+
+  const { client, store } = setup();
+  store.setSelection(selection(1));
+  const view = render(<PeerlessTextInput store={store} />);
+  const input = textarea(view.container);
+  await act(async () => {
+    fireEvent.keyDown(input, { key: 'a', ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(input, { key: 'a', ctrlKey: true, altKey: true });
+    compose(input, 'compositionstart', '');
+    fireEvent.keyDown(input, { key: 'a', ctrlKey: true });
+  });
+  expect(selectionMoves(client)).toEqual([]);
+});
+
 test('refused typing remains visible even without an error callback', async () => {
   const { client, store } = setup();
   const view = render(<PeerlessTextInput store={store} />);

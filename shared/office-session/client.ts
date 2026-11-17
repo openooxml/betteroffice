@@ -1,8 +1,86 @@
-import { hasOwn, isHostMessage, type HostMessage } from './protocol';
+import { hasOwn, isHostMessage, type ClientMessage, type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
 import { SessionFailure, type Promisified, type SessionEvents, type SessionMethods } from './types';
 
 export const OFFICE_SESSION_SILENCE_MS = 60_000;
+
+/**
+ * Starts fetching the worker's engine on this side while the worker boots, so the download overlaps the worker's own
+ * startup, and hands the response body over once the worker accepts it (no wasm on this thread). The body goes as a
+ * transferred stream, or as bytes where streams cannot be transferred. A worker from before this handoff never
+ * accepts: it compiles on its own and the body is cancelled when it advertises its module. The worker keeps its own
+ * path off http(s) and without fetch, and after a failed fetch, so it reports the same errors as before. Returns an
+ * abort for a session disposed mid-download.
+ * @internal
+ */
+export function supplyWasmFetch(transport: SessionTransport, url: URL): () => void {
+  if (typeof fetch !== 'function' || (url.protocol !== 'http:' && url.protocol !== 'https:')) {
+    requestWasmCompile(transport);
+    return () => {};
+  }
+  const controller = new AbortController();
+  let response: Response | undefined;
+  let accepted = false;
+  let done = false;
+  const post = (message: ClientMessage, transfer?: Transferable[]) => {
+    if (!controller.signal.aborted) transport.post(message, transfer);
+  };
+  const finish = () => {
+    if (done) return false;
+    done = true;
+    unlisten();
+    return true;
+  };
+  const drop = () => {
+    if (!finish()) return;
+    if (response) void response.body?.cancel().catch(() => {});
+    else controller.abort();
+  };
+  const fallback = () => {
+    if (!finish()) return;
+    void response?.body?.cancel().catch(() => {});
+    try { post({ protocol: 1, kind: 'wasm-compile' }); } catch {}
+  };
+  const hand = () => {
+    if (!accepted || !response || !finish()) return;
+    const body = response;
+    void (async () => {
+      try {
+        post({ protocol: 1, kind: 'wasm-compile', stream: body.body! }, [body.body!]);
+        return;
+      } catch (error) {
+        if (controller.signal.aborted || (error as { name?: string })?.name !== 'DataCloneError') throw error;
+      }
+      const bytes = await body.arrayBuffer();
+      post({ protocol: 1, kind: 'wasm-compile', bytes }, [bytes]);
+    })().catch(() => {
+      try { post({ protocol: 1, kind: 'wasm-compile' }); } catch {}
+    });
+  };
+  const unlisten = transport.listen((message) => {
+    if (!isHostMessage(message)) return;
+    if (message.kind === 'wasm-accept') {
+      accepted = true;
+      hand();
+    } else if (message.kind === 'wasm-module') drop();
+  });
+  post({ protocol: 1, kind: 'wasm-compile', pending: true });
+  fetch(url, { signal: controller.signal }).then((fetched) => {
+    if (done) {
+      void fetched.body?.cancel().catch(() => {});
+      return;
+    }
+    response = fetched;
+    if (!fetched.ok || !fetched.body) fallback();
+    else hand();
+  }, () => {
+    if (!controller.signal.aborted) fallback();
+  });
+  return () => {
+    controller.abort();
+    drop();
+  };
+}
 
 export function requestWasmCompile(transport: SessionTransport): void {
   try {
@@ -120,7 +198,7 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
         options.onWasmModule?.(message.url, message.module);
       } catch {}
       try { options.onWasmModuleMessage?.(message); } catch {}
-    } else if (message.kind === 'progress') {
+    } else if (message.kind === 'progress' || message.kind === 'wasm-accept') {
       return;
     } else if (message.kind === 'event') {
       const listeners = events.get(message.name);

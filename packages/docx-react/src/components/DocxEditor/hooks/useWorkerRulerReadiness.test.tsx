@@ -13,7 +13,8 @@ test('section margins remain editable while paragraph controls wait for a native
   const state = { status: 'ready', view: { identity: { session: 's', incarnation: 1, epoch: 1 }, version: 0, throughSeq: 0,
     workerSelection: null, geometry: null, editState: { toolbar: null } } };
   const applyQuery = mock(async () => ({ ok: true, status: 'executed' }));
-  const controller = { subscribe: () => () => {}, getSnapshot: () => state, applyQuery,
+  const controller = { subscribe: () => () => {}, getSnapshot: () => state,
+    subscribeShell: () => () => {}, getShellSnapshot: () => state, applyQuery,
     environment: () => ({ mode: 'editing', readOnly: false }), ref: { getCurrentPage: () => 1, focus() {} },
     query: async () => ({ version: 'native', selection: null, value: { version: 'native',
       sections: [{ section: 'final', properties: { marginLeft: 1440 } }], paragraphs: [] } }),

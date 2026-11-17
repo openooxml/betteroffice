@@ -319,7 +319,10 @@ impl PptxEditor {
         slide_index: usize,
     ) -> Result<betteroffice_pptx::RenderedPng> {
         self.presentation
-            .render_png(slide_index, &betteroffice_pptx::RenderOptions::default())
+            .render_png(
+                betteroffice_pptx::PngTarget { slide: slide_index },
+                &betteroffice_pptx::RenderOptions::default(),
+            )
             .map_err(anyhow::Error::from)
     }
 

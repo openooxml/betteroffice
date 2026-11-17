@@ -8,6 +8,7 @@ import {
   type XlsxAsyncEditorApi,
   type XlsxEditorApi,
   type XlsxPluginContext,
+  type XlsxPluginEvent,
   type XlsxPluginNavigationResult,
   type XlsxPluginSelection,
 } from '@betteroffice/xlsx-react';
@@ -16,6 +17,9 @@ import workbookUrl from '../../../packages/xlsx/test-fixtures/sample.xlsx?url';
 type ProbeContext = XlsxPluginContext<null>;
 
 interface ProbeWindow {
+  mutation: unknown;
+  runMutation(): Promise<unknown>;
+  events: XlsxPluginEvent[];
   editor: XlsxEditorApi | XlsxAsyncEditorApi | null;
   /** Runs `action` in the probe plugin's context, the same on either engine. */
   act<T>(action: (context: ProbeContext) => Promise<T>): Promise<T>;
@@ -28,7 +32,10 @@ interface ProbeWindow {
 const workerOnly = new URLSearchParams(location.search).get('engine') === 'worker';
 let pluginContext: ProbeContext | null = null;
 const probe: ProbeWindow = {
+  events: [],
   editor: null,
+  mutation: null,
+  runMutation: async () => null,
   act: (action) =>
     new Promise((resolve, reject) => void pluginContext!.run((context) => action(context).then(resolve, reject))),
   navigation: null,
@@ -39,8 +46,21 @@ const probe: ProbeWindow = {
 (window as unknown as { __probe: ProbeWindow }).__probe = probe;
 
 function ProbePanel({ context }: { context: ProbeContext }) {
+  probe.runMutation = () => context.commands.execute('bold', null);
   return (
     <div>
+      <button type="button" data-testid="probe-mutation" data-version={context.snapshot.version} onMouseDown={(event) => event.preventDefault()}
+        onClick={() => { void probe.runMutation().then((result) => { probe.mutation = result; }); }}>
+        Apply formatting
+      </button>
+      <button type="button" data-testid="probe-timer-mutation" onMouseDown={(event) => event.preventDefault()}
+        onClick={async () => {
+          probe.mutation = null;
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          probe.mutation = await probe.runMutation();
+        }}>
+        Apply formatting after a timer
+      </button>
       <button
         type="button"
         data-testid="probe-navigate"
@@ -78,6 +98,7 @@ const alignment = defineXlsxPlugin<null>({
     pluginContext = context;
   },
   onEvent(_context, event) {
+    probe.events.push(event);
     if (event.type === 'selection-change') probe.selection = event.selection;
   },
   panel: { title: 'Probe', placement: 'right', render: ProbePanel },
@@ -207,10 +228,10 @@ function Harness() {
   return (
     <div style={{ height: '100%' }}>
       <XlsxEditor
-        {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false })}
+        {...(workerOnly ? {} : { legacySyncApi: true, experimentalWorkerOpen: false }) as Record<never, never>}
         file={file}
         plugins={PLUGINS}
-        pluginGrants={{ 'probe.alignment': { document: 'write', editBatches: true } }}
+        pluginGrants={{ 'probe.alignment': { document: 'write', editBatches: true, commands: ['bold'] } }}
         onReady={(api) => {
           probe.editor = api;
         }}

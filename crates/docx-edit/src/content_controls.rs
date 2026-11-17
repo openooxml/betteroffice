@@ -25,7 +25,7 @@ use crate::structured::{
     ExportError, ExportFailure, ExportFailureCode, ExportRead, ExportRefusal, StoryKind,
     byte_limit, invalid_options, limit_exceeded,
 };
-use crate::{DEL, EditingDoc, INS, KIND_KEY, PARA_ID, PPR_DEL, PPR_INS, map_string, story_ref};
+use crate::{DEL, EditingDoc, INS, KIND_KEY, PARA_ID, PPR_DEL, PPR_INS, map_string, story_text};
 
 pub use crate::read_types::{Anchor, ControlMetadata, StorySelection};
 pub use crate::structured::{AnchorScope, Diagnostic, DiagnosticCode, Severity};
@@ -215,6 +215,12 @@ struct Gap {
     diagnostic: Diagnostic,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Calls of [`Inventory::build`].
+    pub(crate) static INVENTORY_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Every control of a document, listed or not, with its coverage gaps.
 pub(crate) struct Inventory {
     pub records: Vec<ControlRecord>,
@@ -226,6 +232,10 @@ pub(crate) struct Inventory {
     pub companions: HashMap<usize, Vec<usize>>,
     /// Controls whose part another story reads with different controls.
     pub divergent: HashSet<usize>,
+    /// The stories whose content the records read: those holding a control and
+    /// those inside one. Edits elsewhere that keep the story structure leave
+    /// every record as it is.
+    pub reads: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -418,6 +428,8 @@ struct Builder<'a, T: ReadTxn> {
     sources: HashMap<(&'a str, Option<usize>), Vec<usize>>,
     /// The source controls that hold other controls.
     parents: HashSet<usize>,
+    /// The stories walked inside a control.
+    nested: HashSet<String>,
 }
 
 impl<'a, T: ReadTxn> Builder<'a, T> {
@@ -623,7 +635,10 @@ impl<'a, T: ReadTxn> Builder<'a, T> {
         if !self.walked.insert(story.to_owned()) {
             return Ok(summary);
         }
-        let Ok(text) = story_ref(self.txn, story) else {
+        if !ancestors.is_empty() {
+            self.nested.insert(story.to_owned());
+        }
+        let Some(text) = story_text(self.txn, story) else {
             return Ok(summary);
         };
         let chunks = self.doc.chunk_snapshot(story, &text, self.txn);
@@ -1020,6 +1035,8 @@ impl Inventory {
 
     /// Reads every control of `doc`'s committed state.
     pub(crate) fn build<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> Result<Self, ExportFailure> {
+        #[cfg(test)]
+        INVENTORY_BUILDS.with(|builds| builds.set(builds.get() + 1));
         let source = doc.source_metadata();
         let read = source.as_deref().map(crate::seed::SourceMetadata::read);
         let story_ids: Vec<String> = txn
@@ -1052,6 +1069,7 @@ impl Inventory {
             walked: HashSet::new(),
             sources,
             parents,
+            nested: HashSet::new(),
         };
         let mut gaps = Vec::new();
         let mut notes = Vec::new();
@@ -1111,7 +1129,7 @@ impl Inventory {
                 .into_iter()
                 .map(|(category, story)| (category, story, None)),
         );
-        roots.sort_by_key(|(category, _, _)| *category);
+        crate::sort::sort_by_key(&mut roots, &|(category, _, _)| *category);
         let mut ranges: HashMap<&str, std::ops::Range<usize>> = HashMap::new();
         for (category, story, alias_of) in &roots {
             let start = builder.records.len();
@@ -1166,7 +1184,7 @@ impl Inventory {
                     && !ownership.owns(story)
             })
             .collect();
-        unclassified.sort();
+        crate::sort::sort(&mut unclassified);
         let mut unclassified_controls = 0usize;
         for story in unclassified {
             let before = builder.records.len();
@@ -1279,7 +1297,7 @@ impl Inventory {
                 format!("{count} controls share control id {id:?} because their paragraphs share an id; writes cannot address them by id."),
             ));
         }
-        notes.sort_by(|left, right| left.message.cmp(&right.message));
+        crate::sort::sort_by(&mut notes, &|left, right| left.message.cmp(&right.message));
         for record in &builder.records {
             if active(record.payload.get("value"))
                 && is_text_type(&record.control.metadata.control_type)
@@ -1292,6 +1310,8 @@ impl Inventory {
                 ));
             }
         }
+        let mut reads = builder.nested;
+        reads.extend(builder.records.iter().map(|record| record.story.clone()));
         Ok(Self {
             records: builder.records,
             gaps,
@@ -1299,6 +1319,7 @@ impl Inventory {
             unidentified,
             companions,
             divergent,
+            reads,
         })
     }
 

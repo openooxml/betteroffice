@@ -187,6 +187,132 @@ fn paragraph_patch_s13_unsupported_structure_uses_legacy_replacement() {
     assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
 }
 
+#[test]
+fn paragraph_patch_s13_text_beside_a_seeded_complex_field_keeps_the_field_bytes() {
+    let field = concat!(
+        "<w:r w:rsidR='00112233'><w:fldChar w:fldCharType='begin' w:dirty='true'/></w:r>",
+        "<w:r><w:instrText xml:space='preserve'> PAGEREF _Toc1 \\h </w:instrText></w:r>",
+        "<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType='separate'/></w:r>",
+        "<w:r><w:rPr><w:noProof/><w:webHidden/></w:rPr><w:t>12</w:t></w:r>",
+        "<w:r><w:rPr><w:webHidden/></w:rPr><w:fldChar w:fldCharType='end'/></w:r>"
+    );
+    let paragraph = format!(
+        "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r>{field}<w:r><w:t>tail</w:t></w:r></w:p>"
+    );
+    let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
+    let source = format!("{root}{paragraph}</w:body></w:document>");
+    let atom = UnitV1::Atom {
+        atom_kind: "field".to_owned(),
+        payload: serde_json::from_value(json!({
+            "fieldType": "PAGEREF", "instruction": "PAGEREF _Toc1 \\h", "displayText": "12",
+            "fieldKind": "complex", "fldLock": false, "dirty": true,
+            "displayMode": "result", "hasCachedResult": true, "modelKind": "field"
+        }))
+        .unwrap(),
+        attrs: Attrs::new(),
+    };
+    let units = |text: &str| {
+        vec![
+            UnitV1::Text {
+                text: text.to_owned(),
+                attrs: Attrs::new(),
+            },
+            atom.clone(),
+            UnitV1::Text {
+                text: "tail".to_owned(),
+                attrs: Attrs::new(),
+            },
+        ]
+    };
+    let seed = units("old");
+    let mut edited = text_paragraph("new", None);
+    edited["sourceOrdinal"] = json!(0);
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": determinism(),
+        "document": {"content": [edited]},
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [{
+            "part": "word/document.xml",
+            "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+            "paragraphs": [0], "changed": [0],
+            "paragraphPatches": [{
+                "ordinal": 0, "sessionKey": "source:0",
+                "seed": {"units": seed, "properties": {}, "unitSha256": unit_sha256(&seed)},
+                "textEdits": [{"from": 0, "to": 3, "insert": [{"text": "new", "attrs": {}, "inherit": {}}], "donor": {"kind": "at", "at": 0}}],
+                "runEdits": [], "paraDeltas": [], "paraInherit": {},
+                "resultSha256": result_sha256(&units("new"), &Attrs::new())
+            }]
+        }]}
+    }))
+    .unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+    assert_eq!(output, source.replace(">old<", ">new<"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn paragraph_patch_s13_a_declined_edit_beside_a_field_result_saves_the_edited_text() {
+    let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
+    let source = format!(
+        "{root}<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>12</w:t><w:fldChar w:fldCharType=\"end\"/><w:t>abc</w:t></w:r></w:p></w:body></w:document>"
+    );
+    let paragraph_text = |package: Vec<u8>| {
+        let parsed = crate::parse_docx_s9_wire(&package, Default::default()).unwrap();
+        match &parsed.document.package.document.content[0] {
+            crate::BlockContent::Paragraph(paragraph) => crate::get_paragraph_text(paragraph),
+            _ => panic!("not a paragraph"),
+        }
+    };
+    let parsed = crate::parse_docx_s9_wire(&base_package(&source), Default::default()).unwrap();
+    let model = serde_json::to_string(&parsed.document.package.document.content[0]).unwrap();
+    let mut edited: Value = serde_json::from_str(&model.replace("\"abc\"", "\"Abc\"")).unwrap();
+    edited["sourceOrdinal"] = json!(0);
+    let atom = UnitV1::Atom {
+        atom_kind: "field".to_owned(),
+        payload: serde_json::from_value(json!({
+            "fieldType": "PAGE", "instruction": "PAGE", "displayText": "12",
+            "fieldKind": "complex", "modelKind": "field"
+        }))
+        .unwrap(),
+        attrs: Attrs::new(),
+    };
+    let units = |text: &str| {
+        vec![
+            atom.clone(),
+            UnitV1::Text {
+                text: text.to_owned(),
+                attrs: Attrs::new(),
+            },
+        ]
+    };
+    let seed = units("abc");
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": determinism(),
+        "document": {"content": [edited]},
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"splicedParts": [{
+            "part": "word/document.xml",
+            "sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+            "paragraphs": [0], "changed": [0],
+            "paragraphPatches": [{
+                "ordinal": 0, "sessionKey": "source:0",
+                "seed": {"units": seed, "properties": {}, "unitSha256": unit_sha256(&seed)},
+                "textEdits": [{"from": 1, "to": 2, "insert": [{"text": "A", "attrs": {}, "inherit": {}}], "donor": {"kind": "at", "at": 1}}],
+                "runEdits": [], "paraDeltas": [], "paraInherit": {},
+                "resultSha256": result_sha256(&units("Abc"), &Attrs::new())
+            }]
+        }]}
+    }))
+    .unwrap();
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap();
+    assert_eq!(
+        paragraph_text(saved),
+        paragraph_text(base_package(&source)).replacen("abc", "Abc", 1)
+    );
+    assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
+}
+
 fn mixed_request(middle: &str) -> (String, S13SaveRequest) {
     let root = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#;
     let patched = "<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:t>old</w:t></w:r></w:p>";
@@ -560,6 +686,364 @@ fn paragraph_patch_s13_resolves_retained_attributes_at_ancestor_namespaces() {
         assert_eq!(output.matches("x:keep='A&#x26;B'").count(), 2);
         assert_eq!(warnings, ["DOCX_MINIMAL_PATCH replace counts {\"field\":1}"]);
     }
+}
+
+fn formatting_alone(middle: &str) -> (String, S13SaveRequest) {
+    let (source, mut request) = mixed_request(middle);
+    request.paragraph_ids.as_mut().unwrap().spliced_parts[0].format_only = vec![1, 2, 3];
+    (source, request)
+}
+
+fn saved_document(source: &str, request: S13SaveRequest) -> (String, Vec<String>) {
+    let (saved, warnings) = write_docx_s13_with_warnings(request, &base_package(source)).unwrap();
+    let output = String::from_utf8(part_map(&saved)["word/document.xml"].clone()).unwrap();
+    (output, warnings)
+}
+
+const HYPERLINK: &str =
+    "<w:p><w:hyperlink w:anchor=\"target\"><w:r><w:t>field</w:t></w:r></w:hyperlink></w:p>";
+
+const STRUCTURES: [(&str, &str); 4] = [
+    ("w:hyperlink", HYPERLINK),
+    (
+        "w:fldChar",
+        "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>field</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p>",
+    ),
+    (
+        "w:smartTag",
+        "<w:p><w:smartTag w:uri=\"urn:test\" w:element=\"place\"><w:r><w:t>field</w:t></w:r></w:smartTag></w:p>",
+    ),
+    (
+        "w:txbxContent",
+        "<w:p><w:r><w:pict><w:txbxContent></w:txbxContent></w:pict></w:r><w:r><w:t>field</w:t></w:r></w:p>",
+    ),
+];
+
+fn kept_warnings(warnings: &[String], count: u32, tag: &str) {
+    assert!(
+        warnings.contains(&format!(
+            "DOCX_KEPT_UNCHANGED structure {{\"word/document.xml\":{count}}}"
+        )),
+        "{warnings:?}"
+    );
+    let details = warnings
+        .iter()
+        .find(|warning| warning.starts_with("DOCX_KEPT_PARAGRAPHS "))
+        .expect("kept paragraphs are described");
+    assert!(details.contains(tag), "{details}");
+}
+
+#[test]
+fn paragraph_patch_s13_formatting_the_paragraph_splice_would_lose_keeps_the_paragraph() {
+    for (tag, middle) in STRUCTURES {
+        let (source, request) = formatting_alone(middle);
+        let (output, warnings) = saved_document(&source, request);
+        assert_eq!(output, source.replace("old", "new"), "{tag}");
+        kept_warnings(&warnings, 1, tag);
+    }
+}
+
+#[test]
+fn paragraph_patch_s13_formatting_the_model_splice_would_lose_keeps_the_paragraph() {
+    for (tag, middle) in STRUCTURES {
+        let (source, mut request) = formatting_alone(middle);
+        request.paragraph_ids.as_mut().unwrap().spliced_parts[0].legacy_paragraphs[0].detail =
+            "marker: mutation or touch".to_owned();
+        let (output, warnings) = saved_document(&source, request);
+        assert!(output.contains(middle), "{tag}");
+        kept_warnings(&warnings, 1, tag);
+    }
+}
+
+#[test]
+fn paragraph_patch_s13_formatting_replaced_after_rejection_keeps_a_dropping_paragraph() {
+    for (tag, middle) in STRUCTURES {
+        let (source, mut request) = formatting_alone(middle);
+        let source = source.replace("<w:r><w:rPr>", "<w:r xmlns='urn:metadata'><w:rPr>");
+        request.paragraph_ids.as_mut().unwrap().spliced_parts[0].sha256 =
+            format!("{:x}", Sha256::digest(source.as_bytes()));
+        let (output, warnings) = saved_document(&source, request);
+        assert_eq!(output, source.replace("old", "new"), "{tag}");
+        kept_warnings(&warnings, 1, tag);
+    }
+}
+
+#[test]
+fn paragraph_patch_s13_formatting_the_model_splice_declines_is_replaced_not_written_whole() {
+    let middle =
+        "<w:customXml w:element=\"held\"><w:p><w:r><w:t>field</w:t></w:r></w:p></w:customXml>";
+    let (source, mut request) = formatting_alone(middle);
+    request.paragraph_ids.as_mut().unwrap().spliced_parts[0].legacy_paragraphs[0].detail =
+        "key:pageBreak unsupported atom".to_owned();
+    let (output, warnings) = saved_document(&source, request);
+    assert_eq!(
+        output,
+        source
+            .replace("old", "new")
+            .replace(">field<", ">replaced<")
+    );
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED "))
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_formatting_with_no_safe_splice_keeps_the_part_and_says_so() {
+    for (tag, middle) in STRUCTURES {
+        let (source, mut request) = formatting_alone(middle);
+        request.paragraph_ids.as_mut().unwrap().spliced_parts[0]
+            .paragraphs
+            .push(99);
+        let (output, warnings) = saved_document(&source, request);
+        assert_eq!(output, source, "{tag}");
+        kept_warnings(&warnings, 3, tag);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("\"scope\":\"part\""))
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED "))
+        );
+    }
+}
+
+fn whole_part(middle: &str) -> (String, S13SaveRequest) {
+    let (source, mut request) = mixed_request(middle);
+    let ids = request.paragraph_ids.as_mut().unwrap();
+    let sha256 = ids.spliced_parts[0].sha256.clone();
+    ids.spliced_parts.clear();
+    ids.whole_parts = vec![crate::serializer::paragraph_ids::S13WholePart {
+        part: "word/document.xml".to_owned(),
+        sha256,
+        changed: vec![1, 2, 3],
+    }];
+    (source, request)
+}
+
+#[test]
+fn paragraph_patch_s13_a_whole_part_keeps_its_source_when_writing_it_drops_structure() {
+    for (tag, middle) in STRUCTURES {
+        let (source, request) = whole_part(middle);
+        let (output, warnings) = saved_document(&source, request);
+        assert_eq!(output, source, "{tag}");
+        kept_warnings(&warnings, 3, tag);
+    }
+}
+
+#[test]
+fn paragraph_patch_s13_a_whole_part_is_not_kept_as_a_source_the_plan_was_not_made_from() {
+    let (source, mut request) = whole_part(HYPERLINK);
+    request.paragraph_ids.as_mut().unwrap().whole_parts[0].sha256 = "0".repeat(64);
+    let (output, warnings) = saved_document(&source, request);
+    assert!(output.contains(">replaced<"));
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED "))
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_a_whole_part_is_written_when_that_loses_nothing() {
+    let (source, request) = whole_part("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+    let (output, warnings) = saved_document(&source, request);
+    assert!(output.contains(">replaced<"));
+    assert!(!output.contains("w:rsidR"));
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_KEPT_UNCHANGED"))
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_a_comment_naming_an_element_is_not_structure() {
+    let middle = "<w:p><w:r><w:t>field</w:t></w:r></w:p><!-- example: <w:hyperlink> -->";
+    let (source, mut request) = mixed_request(middle);
+    request
+        .paragraph_ids
+        .as_mut()
+        .unwrap()
+        .spliced_parts
+        .clear();
+    let (_, warnings) = saved_document(&source, request);
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED"))
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_a_moved_section_boundary_does_not_keep_the_source_body() {
+    let (source, mut request) = formatting_alone(HYPERLINK);
+    let ids = request.paragraph_ids.as_mut().unwrap();
+    let sha256 = ids.spliced_parts[0].sha256.clone();
+    ids.spliced_parts[0].paragraphs.push(99);
+    ids.section_edits = Some(
+        serde_json::from_value(json!({
+            "onlySections": false, "sha256": sha256,
+            "edits": [{"paragraph": 0, "donor": null, "properties": {"marginLeft": 1800}}]
+        }))
+        .unwrap(),
+    );
+    let error = write_docx_s13_with_warnings(request, &base_package(&source)).unwrap_err();
+    assert!(error.to_string().contains("unsafe section paragraph splice"));
+}
+
+#[test]
+fn paragraph_patch_s13_formatting_with_no_safe_splice_writes_a_part_it_would_not_damage() {
+    let (source, mut request) = formatting_alone("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+    request.paragraph_ids.as_mut().unwrap().spliced_parts[0]
+        .paragraphs
+        .push(99);
+    let (output, warnings) = saved_document(&source, request);
+    assert!(output.contains(">replaced<"));
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_KEPT_UNCHANGED"))
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_a_text_edit_beside_formatting_is_not_kept_with_its_part() {
+    let (source, mut request) = mixed_request(HYPERLINK);
+    let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
+    part.format_only = vec![1, 2, 3];
+    part.paragraphs.push(99);
+    part.inserted = vec![crate::serializer::S13SpliceAnchor::After(0)];
+    let (output, warnings) = saved_document(&source, request);
+    assert!(output.contains(">replaced<"));
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("\"dropped\":[\"w:hyperlink\"]")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_a_part_with_no_splice_plan_reports_the_structure_it_drops() {
+    let (source, mut request) = mixed_request(HYPERLINK);
+    request
+        .paragraph_ids
+        .as_mut()
+        .unwrap()
+        .spliced_parts
+        .clear();
+    let (output, warnings) = saved_document(&source, request);
+    assert!(!output.contains("<w:hyperlink"));
+    let report = warnings
+        .iter()
+        .find(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED "))
+        .expect("a whole write that drops structure is reported");
+    assert!(report.contains("\"part\":\"word/document.xml\",\"dropped\":[\"w:hyperlink\"]"));
+}
+
+#[test]
+fn paragraph_patch_s13_a_whole_write_reports_only_what_it_drops_outside_the_edit() {
+    let keep = "<w:p w:rsidR='12345678'><w:r><w:t>keep</w:t></w:r></w:p>";
+    let linked = "<w:p><w:hyperlink w:anchor=\"t\"><w:r><w:t>keep</w:t></w:r></w:hyperlink></w:p>";
+    let (source, mut request) = mixed_request(HYPERLINK);
+    let part = &mut request.paragraph_ids.as_mut().unwrap().spliced_parts[0];
+    part.paragraphs.push(99);
+    let (_, inside) = saved_document(&source, request.clone());
+    assert!(
+        !inside
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED "))
+    );
+    let source = source.replacen(keep, linked, 1);
+    request.paragraph_ids.as_mut().unwrap().spliced_parts[0].sha256 =
+        format!("{:x}", Sha256::digest(source.as_bytes()));
+    let (_, outside) = saved_document(&source, request);
+    assert!(
+        outside
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED "))
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_a_surviving_paragraph_saved_with_a_new_id_is_not_reported_lost() {
+    let root = concat!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+        r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>"#,
+    );
+    let source = format!(
+        concat!(
+            r#"{}<w:p w14:paraId="00000001"><w:r><w:t>kept</w:t></w:r></w:p>"#,
+            r#"<w:p w14:paraId="00000002"><w:r><w:t>deleted</w:t></w:r></w:p></w:body></w:document>"#,
+        ),
+        root
+    );
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": determinism(),
+        "document": {"content": [text_paragraph("kept", Some("00000003"))]},
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"touchedParts": [{"part": "word/document.xml", "touched": [1]}]}
+    }))
+    .unwrap();
+    let (output, warnings) = saved_document(&source, request);
+    assert!(output.contains(r#"w14:paraId="00000003""#), "{output}");
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED ")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_a_deleted_paragraph_does_not_take_the_text_of_its_surviving_twin() {
+    let root = concat!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+        r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>"#,
+    );
+    let source = format!(
+        concat!(
+            r#"{}<w:p w14:paraId="00000001"><w:r><w:t>same</w:t></w:r></w:p>"#,
+            r#"<w:p w14:paraId="00000002"><w:r><w:t>same</w:t></w:r></w:p></w:body></w:document>"#,
+        ),
+        root
+    );
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": determinism(),
+        "document": {"content": [text_paragraph("same", Some("00000003"))]},
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"touchedParts": [{"part": "word/document.xml", "touched": [0]}]}
+    }))
+    .unwrap();
+    let (_, warnings) = saved_document(&source, request);
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED ")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn paragraph_patch_s13_a_part_written_whole_with_all_its_structure_reports_nothing() {
+    let (source, mut request) = mixed_request("<w:p><w:r><w:t>field</w:t></w:r></w:p>");
+    request
+        .paragraph_ids
+        .as_mut()
+        .unwrap()
+        .spliced_parts
+        .clear();
+    let (_, warnings) = saved_document(&source, request);
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED "))
+    );
 }
 
 #[test]

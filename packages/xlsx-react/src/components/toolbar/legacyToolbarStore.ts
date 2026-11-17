@@ -43,6 +43,7 @@ const HANDLERS: Record<XlsxCommandId, Handler | null> = {
   verticalAlignment: 'onFormat',
   textWrapping: 'onFormat',
   searchMenus: 'onSearchMenus',
+  findReplace: null,
   save: null,
   exportPng: null,
   print: 'onPrint',
@@ -52,6 +53,19 @@ const HANDLERS: Record<XlsxCommandId, Handler | null> = {
   proposalsPanel: null,
   proposalAccept: null,
   proposalReject: null,
+  cut: null,
+  copy: null,
+  paste: null,
+  pastePlainText: null,
+  clearContents: null,
+  insertRows: null,
+  insertColumns: null,
+  deleteRows: null,
+  deleteColumns: null,
+  insertSheet: null,
+  deleteSheet: null,
+  renameSheet: null,
+  moveSheet: null,
 };
 
 const LEGACY_FONT_SIZE = 10;

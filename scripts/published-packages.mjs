@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export { PYPI_DISTRIBUTIONS } from './python-bindings.mjs';
@@ -18,7 +18,7 @@ function readManifest(directory) {
 }
 
 /** Every workspace directory and manifest, from the same globs Bun and Changesets expand. */
-function workspaceEntries() {
+export function workspaceEntries() {
   const entries = [];
   for (const pattern of readManifest('.').workspaces) {
     if (pattern.includes('*') && !pattern.endsWith('/*')) {
@@ -44,6 +44,14 @@ function workspaceManifests() {
 export function publishedPackageManifests() {
   return workspaceEntries()
     .filter(({ manifest }) => !manifest.private && manifest.name && manifest.version)
+    .sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
+}
+
+/** The directory and manifest of every `@betteroffice` library under packages/, published or not. */
+export function libraryPackageManifests() {
+  return workspaceEntries()
+    .filter(({ directory, manifest }) =>
+      manifest.name?.startsWith('@betteroffice/') && manifest.exports && dirname(directory) === join(ROOT, 'packages'))
     .sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
 }
 

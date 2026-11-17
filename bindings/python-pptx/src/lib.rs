@@ -95,6 +95,16 @@ fn map_edit_error(error: EditError, message: String) -> PyErr {
     }
 }
 
+fn png_target_slide<'py>(target: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let invalid =
+        || RangeError::new_err("target must be a dict containing only a slide index or ID");
+    let target = target.cast::<PyDict>().map_err(|_| invalid())?;
+    if target.len() != 1 {
+        return Err(invalid());
+    }
+    target.get_item("slide")?.ok_or_else(invalid)
+}
+
 fn map_error(error: CoreError) -> PyErr {
     let message = error.to_string();
     match error {
@@ -315,6 +325,7 @@ fn text_style(
     color: Option<String>,
     font_family: Option<String>,
     underline: Option<String>,
+    strike: Option<String>,
     spacing_pt: Option<f64>,
     baseline_pct: Option<f64>,
     kern_pt: Option<f64>,
@@ -333,6 +344,7 @@ fn text_style(
         color,
         font_family,
         underline,
+        strike,
         spacing_pt,
         baseline_pct,
         kern_pt,
@@ -348,6 +360,7 @@ fn text_style_patch(style: TextStyle) -> TextStylePatch {
         color: style.color,
         font_family: style.font_family,
         underline: style.underline,
+        strike: style.strike,
         spacing_pt: style.spacing_pt,
         baseline_pct: style.baseline_pct,
     }
@@ -484,6 +497,8 @@ pub struct PyTextRun {
     #[pyo3(get)]
     underline: Option<String>,
     #[pyo3(get)]
+    strike: Option<String>,
+    #[pyo3(get)]
     spacing_pt: Option<f64>,
     #[pyo3(get)]
     baseline_pct: Option<f64>,
@@ -503,6 +518,7 @@ impl PyTextRun {
             color: run.style.color.clone(),
             font_family: run.style.font_family.clone(),
             underline: run.style.underline.clone(),
+            strike: run.style.strike.clone(),
             spacing_pt: run.style.spacing_pt,
             baseline_pct: run.style.baseline_pct,
             kern_pt: run.style.kern_pt,
@@ -1409,6 +1425,10 @@ impl PyPresentation {
     fn resolve_slide_index(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
         Self::reject_bool(key)?;
         let ids = self.all_slide_ids()?;
+        Self::slide_index_in(key, &ids)
+    }
+
+    fn slide_index_in(key: &Bound<'_, PyAny>, ids: &[String]) -> PyResult<usize> {
         if let Ok(id) = key.extract::<String>() {
             return ids
                 .iter()
@@ -1843,7 +1863,7 @@ impl PyPresentation {
     #[pyo3(signature = (
         slide, *, x, y, width, height, text = String::new(), name = None,
         bold = None, italic = None, font_size = None,
-        color = None, font_family = None, underline = None,
+        color = None, font_family = None, underline = None, strike = None,
         spacing_pt = None, baseline_pct = None, kern_pt = None, caps = None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -1862,6 +1882,7 @@ impl PyPresentation {
         color: Option<String>,
         font_family: Option<String>,
         underline: Option<String>,
+        strike: Option<String>,
         spacing_pt: Option<f64>,
         baseline_pct: Option<f64>,
         kern_pt: Option<f64>,
@@ -1879,6 +1900,7 @@ impl PyPresentation {
                 color,
                 font_family,
                 underline,
+                strike,
                 spacing_pt,
                 baseline_pct,
                 kern_pt,
@@ -2218,7 +2240,7 @@ impl PyPresentation {
     #[pyo3(signature = (
         story_id, index, text, *,
         bold = None, italic = None, font_size = None,
-        color = None, font_family = None, underline = None,
+        color = None, font_family = None, underline = None, strike = None,
         spacing_pt = None, baseline_pct = None, kern_pt = None, caps = None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -2233,6 +2255,7 @@ impl PyPresentation {
         color: Option<String>,
         font_family: Option<String>,
         underline: Option<String>,
+        strike: Option<String>,
         spacing_pt: Option<f64>,
         baseline_pct: Option<f64>,
         kern_pt: Option<f64>,
@@ -2245,6 +2268,7 @@ impl PyPresentation {
             color,
             font_family,
             underline,
+            strike,
             spacing_pt,
             baseline_pct,
             kern_pt,
@@ -2300,7 +2324,7 @@ impl PyPresentation {
     #[pyo3(signature = (
         story_id, start, end, *,
         bold = None, italic = None, font_size = None,
-        color = None, font_family = None, underline = None,
+        color = None, font_family = None, underline = None, strike = None,
         spacing_pt = None, baseline_pct = None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -2315,6 +2339,7 @@ impl PyPresentation {
         color: Option<String>,
         font_family: Option<String>,
         underline: Option<String>,
+        strike: Option<String>,
         spacing_pt: Option<f64>,
         baseline_pct: Option<f64>,
     ) -> PyResult<PyTextEdit> {
@@ -2325,6 +2350,7 @@ impl PyPresentation {
             color,
             font_family,
             underline,
+            strike,
             spacing_pt,
             baseline_pct,
             None,
@@ -2554,16 +2580,17 @@ impl PyPresentation {
     /// Rasterize one slide to deterministic PNG bytes. Media resolves from the
     /// package, so only fonts need registering; `background` is `"slide"`,
     /// `"transparent"`, or a `#rrggbb` color painted under the slide's own.
-    #[pyo3(signature = (slide, *, scale = 1.0, background = "slide", max_shadow_pixels = None))]
+    #[pyo3(signature = (target, *, scale = 1.0, background = "slide", max_shadow_pixels = None))]
     fn render_png(
         &self,
         py: Python<'_>,
-        slide: &Bound<'_, PyAny>,
+        target: &Bound<'_, PyAny>,
         scale: f32,
         background: &str,
         max_shadow_pixels: Option<u64>,
     ) -> PyResult<PyPng> {
-        let index = self.resolve_slide_index(slide)?;
+        let slide = self.resolve_slide_index(&png_target_slide(target)?)?;
+        let target = betteroffice_pptx::PngTarget { slide };
         let options = RenderOptions {
             scale,
             background: parse_background(background)?,
@@ -2573,7 +2600,7 @@ impl PyPresentation {
         let deck = DetachedDeck(&self.presentation);
         py.detach(move || {
             let deck = deck;
-            deck.0.render_png(index, &options)
+            deck.0.render_png(target, &options)
         })
         .map(|rendered| PyPng {
             data: rendered.bytes,
@@ -2652,6 +2679,14 @@ impl PyPresentation {
     fn preview_proposal_json(&self, id: &str) -> PyResult<String> {
         let preview = self.presentation.preview_proposal(id).map_err(map_error)?;
         serde_json::to_string(&preview).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    fn proposal_slide_strip_json(&self, id: &str) -> PyResult<String> {
+        let entries = self
+            .presentation
+            .proposal_slide_strip(id)
+            .map_err(map_error)?;
+        serde_json::to_string(&entries).map_err(|error| PptxError::new_err(error.to_string()))
     }
 
     #[pyo3(signature = (id, *, force = false, receipt = false))]
@@ -2775,7 +2810,15 @@ impl PyPresentation {
     }
 
     fn render_proposal(&self, id: &str, slide: &Bound<'_, PyAny>) -> PyResult<PyDisplayList> {
-        let index = self.resolve_slide_index(slide)?;
+        Self::reject_bool(slide)?;
+        let preview = self.presentation.preview_proposal(id).map_err(map_error)?;
+        let ids: Vec<_> = preview
+            .snapshot
+            .slides
+            .into_iter()
+            .map(|slide| slide.id)
+            .collect();
+        let index = Self::slide_index_in(slide, &ids)?;
         let rendered = self
             .presentation
             .render_proposal(id, index)
@@ -2800,6 +2843,19 @@ impl PyPresentation {
         let result = self
             .presentation
             .layout_proposal_diff_slide(id, index)
+            .map_err(map_error)?;
+        json_result(py, serde_json::to_string(&result))
+    }
+
+    fn layout_proposal_diff_slide_by_id(
+        &self,
+        py: Python<'_>,
+        id: &str,
+        slide_id: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let result = self
+            .presentation
+            .layout_proposal_diff_slide_by_id(id, slide_id)
             .map_err(map_error)?;
         json_result(py, serde_json::to_string(&result))
     }

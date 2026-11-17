@@ -173,6 +173,7 @@ export interface TrackedChangeEntry {
     | 'paragraphMarkInsertion'
     | 'paragraphMarkDeletion'
     | 'paragraphPropertiesChanged'
+    | 'runPropertiesChanged'
     | 'rowInserted'
     | 'rowDeleted'
     | 'rowPropertiesChanged'

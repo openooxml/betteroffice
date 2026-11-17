@@ -14,7 +14,8 @@ import {
   docxCommandController,
   type DocxPendingCommand,
 } from '../../commands/createDocxCommandStore';
-import { commandShortcut, isPluginCommandId } from '../../commands/descriptors';
+import { isPluginCommandId } from '../../commands/descriptors';
+import { storeAriaShortcut, storeShortcutLabel } from '../../commands/shortcuts';
 import {
   useDocxChrome,
   useDocxCommand,
@@ -196,7 +197,8 @@ function commandItem<K extends DocxCommandId>(
     id: key,
     label: t(store.getDescriptor(id).labelKey),
     icon: icon ? <MaterialSymbol name={icon} size={16} /> : undefined,
-    shortcut: commandShortcut(id, args) ?? undefined,
+    shortcut: storeShortcutLabel(store, id, t, args) ?? undefined,
+    ariaShortcut: storeAriaShortcut(store, id, args) ?? undefined,
     checked: state.active,
     disabled: !state.enabled,
     description: reasonOf(state),
@@ -721,13 +723,14 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
   props: ToolbarCommandButtonProps<K>
 ) {
   const { id, children, label, className } = props;
+  const store = useDocxCommands();
   const args = (props as { args?: unknown }).args;
   const command = useDocxCommand(id as DocxCommandId, args as never);
   const prepareSave = useEditorChrome()?.prepareSave;
   if (isPluginCommandId(id) && command.descriptor === null) return null;
   const icon = isPluginCommandId(id) ? undefined : iconFor(id, args);
   const name = label ?? command.label;
-  return (
+  const button = (
     <ToolbarButton
       active={command.state.active}
       disabled={!command.state.enabled}
@@ -735,6 +738,7 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
       title={name}
       ariaLabel={name}
       shortcut={command.shortcut ?? undefined}
+      ariaShortcut={command.ariaShortcut ?? undefined}
       className={cn(!icon && !children && 'w-auto px-2 text-sm', className)}
       onClick={() => void command.execute()}
       onPointerEnter={id === 'save' ? prepareSave : undefined}
@@ -743,6 +747,11 @@ export function ToolbarCommandButton<K extends DocxCommandId | DocxPluginCommand
       {children ?? (icon ? <MaterialSymbol name={icon} size={ICON_SIZE} /> : name)}
     </ToolbarButton>
   );
+  return isPluginCommandId(id) ? (
+    <span data-plugin-activation={docxCommandController(store)?.pluginActivation(id)} style={{ display: 'contents' }}>
+      {button}
+    </span>
+  ) : button;
 }
 
 function styleOptionsFor(state: DocxCommandState<'paragraphStyle'>): StyleOption[] {

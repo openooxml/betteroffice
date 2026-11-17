@@ -120,6 +120,80 @@ fn approx_in(wb: &Workbook, src: &str, want: f64, tol: f64) {
     }
 }
 
+/// n! in decimal digits, an oracle independent of the engine's doubles: the
+/// standard library rounds the digits to the nearest double once.
+fn factorial_digits(n: u32) -> String {
+    let mut digits = vec![1u32];
+    for factor in 2..=n {
+        let mut carry = 0;
+        for digit in &mut digits {
+            let product = *digit * factor + carry;
+            *digit = product % 10;
+            carry = product / 10;
+        }
+        while carry > 0 {
+            digits.push(carry % 10);
+            carry /= 10;
+        }
+    }
+    digits
+        .iter()
+        .rev()
+        .map(|digit| char::from_digit(*digit, 10).unwrap())
+        .collect()
+}
+
+#[test]
+fn gamma_and_fact_are_exact_at_the_integers() {
+    let wb = workbook(&[]);
+    for k in 0..=170u32 {
+        let expected = n(factorial_digits(k).parse().unwrap());
+        assert_eq!(eval_in(&wb, &format!("GAMMA({})", k + 1)), expected, "{k}");
+        assert_eq!(eval_in(&wb, &format!("FACT({k})")), expected, "{k}");
+    }
+    assert_eq!(eval_in(&wb, "IFERROR(GAMMA(5),0)"), n(24.0));
+    assert_eq!(eval_in(&wb, "GAMMA(172)"), e(ErrorValue::Num));
+    assert_eq!(eval_in(&wb, "FACT(171)"), e(ErrorValue::Num));
+    assert_eq!(eval_in(&wb, "FACT(4.9)"), n(24.0));
+    for formula in ["FACT(28)", "FACT(28.5)"] {
+        assert_eq!(eval_in(&wb, formula), n(3.048_883_446_117_138_7e29));
+    }
+}
+
+#[test]
+fn gammaln_is_exact_at_the_integers() {
+    let wb = workbook(&[]);
+    for (z, expected) in [
+        (1, 0.0),
+        (2, 0.0),
+        (3, std::f64::consts::LN_2),
+        (5, 3.178_053_830_347_945_8),
+        (28, 64.557_538_627_006_34),
+        (171, 706.573_062_245_787_4),
+    ] {
+        assert_eq!(eval_in(&wb, &format!("GAMMALN({z})")), n(expected), "{z}");
+        let precise = format!("GAMMALN.PRECISE({z})");
+        assert_eq!(eval_in(&wb, &precise), n(expected), "{z}");
+    }
+}
+
+/// these share no code with GAMMA and hold to the exact closed forms at
+/// integer shapes as they stand.
+#[test]
+fn distributions_with_integer_shapes_match_their_closed_forms() {
+    let wb = workbook(&[]);
+    for (formula, expected) in [
+        ("GAMMA.DIST(2,3,1,TRUE)", 0.323_323_583_816_936_54),
+        ("GAMMA.DIST(2,3,1,FALSE)", 0.270_670_566_473_225_4),
+        ("GAMMA.DIST(3,4,1,TRUE)", 0.352_768_111_217_768_74),
+        ("BETA.DIST(0.5,2,3,TRUE)", 0.6875),
+        ("BETA.DIST(0.25,3,2,TRUE)", 0.050_781_25),
+        ("BETA.DIST(0.5,2,3,FALSE)", 1.5),
+    ] {
+        approx_in(&wb, formula, expected, 1e-14);
+    }
+}
+
 #[test]
 fn gamma_family() {
     approx("GAMMA(5)", 24.0);
@@ -700,7 +774,7 @@ fn right_tails_are_computed_directly() {
     );
     rel("CHISQ.DIST.RT(400,10)", 9.413291991183476e-80, 1e-12);
     rel("CHIDIST(400,10)", 9.413291991183476e-80, 1e-12);
-    approx("F.DIST(1E308,2,2,TRUE)", 1.0);
+    approx("F.DIST(1E307*10,2,2,TRUE)", 1.0);
 }
 
 #[test]
@@ -778,7 +852,7 @@ fn inverses_at_huge_quantiles() {
     rel("T.INV(1E-300,1)", -3.183098861837907e299, 1e-9);
     check(&[
         ("F.INV.RT(1E-300,1,1)", e(ErrorValue::Num)),
-        ("T.INV(5E-324,1)", e(ErrorValue::Num)),
+        ("T.INV(2^-1074,1)", e(ErrorValue::Num)),
     ]);
 }
 
@@ -790,11 +864,11 @@ fn huge_arguments_saturate() {
         ("ERFC(1E200)", n(0.0)),
         ("NORM.S.DIST(1E200,TRUE)", n(1.0)),
         ("NORM.S.DIST(-1E200,TRUE)", n(0.0)),
-        ("GAMMA.DIST(1E308,1,1E-10,TRUE)", n(1.0)),
-        ("GAMMA.DIST(1E308,1E308,1E-10,TRUE)", n(1.0)),
-        ("T.DIST(1E200,5,TRUE)", n(1.0)),
-        ("T.DIST.RT(1E200,5)", n(0.0)),
-        ("F.DIST.RT(5E-324,2,2)", n(1.0)),
+        ("GAMMA.DIST(1E307*10,1,1E-10,TRUE)", n(1.0)),
+        ("GAMMA.DIST(1E307*10,1E307*10,1E-10,TRUE)", n(1.0)),
+        ("T.DIST(1E154,5,TRUE)", n(1.0)),
+        ("T.DIST.RT(1E154,5)", n(0.0)),
+        ("F.DIST.RT(2^-1074,2,2)", n(1.0)),
         ("CHISQ.TEST({1E200,1},{1,1})", n(0.0)),
     ]);
 }
@@ -814,23 +888,23 @@ fn tiny_arguments_keep_their_digits() {
     rel("ERF(1E-200)", 1.1283791670955125e-200, 1e-12);
     rel("ERF.PRECISE(1E-200)", 1.1283791670955125e-200, 1e-12);
     rel("GAUSS(1E-200)", 3.9894228040143265e-201, 1e-12);
-    rel("GAMMALN(5E-324)", 744.4400719213812, 1e-12);
+    rel("GAMMALN(2^-1074)", 744.4400719213812, 1e-12);
     rel("GAMMALN(1E-200)", 460.51701859880916, 1e-12);
-    rel("GAMMA.DIST(5E-324,1,1,FALSE)", 1.0, 1e-12);
+    rel("GAMMA.DIST(2^-1074,1,1,FALSE)", 1.0, 1e-12);
     rel("F.DIST(1E-200,2,2,TRUE)", 1e-200, 1e-12);
-    approx("BETA.DIST(0.2,5E-324,1,TRUE)", 1.0);
+    approx("BETA.DIST(0.2,2^-1074,1,TRUE)", 1.0);
     check(&[
         ("ERF(0)", n(0.0)),
-        ("GAMMA.DIST(5E-324,2,1,FALSE)", n(5e-324)),
+        ("GAMMA.DIST(2^-1074,2,1,FALSE)", n(5e-324)),
     ]);
 }
 
 #[test]
 fn beta_bounds_spanning_the_whole_range() {
-    approx("BETA.DIST(0,2,2,TRUE,-1E308,1E308)", 0.5);
+    approx("BETA.DIST(0,2,2,TRUE,-1E307*10,1E307*10)", 0.5);
     // mpmath 30 digits
     rel(
-        "BETA.INV(0.25,2,2,-1E308,1E308)",
+        "BETA.INV(0.25,2,2,-1E307*10,1E307*10)",
         -3.472963553338607e307,
         1e-9,
     );
@@ -852,7 +926,7 @@ fn samples_at_extreme_magnitudes() {
         0.2545454545454546,
     );
     approx(
-        "T.TEST({1E308,-1E308,5E307},{-1E308,1E308,0},2,1)",
+        "T.TEST({1,-1,0.5}*(1E307*10),{-1,1,0}*(1E307*10),2,1)",
         0.8994962184740788,
     );
 }
@@ -869,9 +943,43 @@ fn documented_degrees_of_freedom_limits() {
         ("CHISQ.INV(0.5,2E10)", e(ErrorValue::Num)),
         ("CHISQ.INV.RT(0.5,2E10)", e(ErrorValue::Num)),
         ("CHIINV(0.5,2E10)", e(ErrorValue::Num)),
-        ("F.DIST.RT(1,1E10,1)", e(ErrorValue::Num)),
-        ("FDIST(1,1,1E10)", e(ErrorValue::Num)),
-        ("F.INV.RT(0.5,1E10,2)", e(ErrorValue::Num)),
-        ("FINV(0.5,2,1E10)", e(ErrorValue::Num)),
+        ("F.DIST.RT(1,1E10+1,1)", e(ErrorValue::Num)),
+        ("FDIST(1,1,2E10)", e(ErrorValue::Num)),
+        ("F.INV.RT(0.5,2E10,2)", e(ErrorValue::Num)),
+        ("FINV(0.5,2,1E10+1)", e(ErrorValue::Num)),
+        ("F.DIST(1,2E10,1,TRUE)", e(ErrorValue::Num)),
+        ("F.INV(0.5,2,2E10)", e(ErrorValue::Num)),
+    ]);
+}
+
+/// Excel 365 for Mac result: F.INV.RT(0.5,1E10,1E10) is 1, so 10^10
+/// degrees of freedom are still accepted by every f function.
+#[test]
+fn f_functions_accept_ten_billion_degrees_of_freedom() {
+    approx_inv("F.INV.RT(0.5,1E10,1E10)", 1.0);
+    approx_inv("FINV(0.5,1E10,1E10)", 1.0);
+    approx_inv("F.INV(0.5,1E10,1E10)", 1.0);
+    approx_inv("F.DIST(1,1E10,1E10,TRUE)", 0.5);
+    approx_inv("F.DIST.RT(1,1E10,1E10)", 0.5);
+    approx_inv("FDIST(1,1E10,1E10)", 0.5);
+}
+
+/// Excel 365 for Mac result: T.DIST.RT(1E200,5) is #NUM!. the t functions
+/// square `x`, so they answer `#NUM!` once that overflows, from about
+/// 1.34E+154; just below it the tails are still 0 and 1.
+#[test]
+fn t_functions_reject_x_whose_square_overflows() {
+    check(&[
+        ("T.DIST.RT(1E200,5)", e(ErrorValue::Num)),
+        ("T.DIST(1E200,5,TRUE)", e(ErrorValue::Num)),
+        ("T.DIST(-1E200,5,TRUE)", e(ErrorValue::Num)),
+        ("T.DIST(1E200,5,FALSE)", e(ErrorValue::Num)),
+        ("T.DIST.2T(1E200,5)", e(ErrorValue::Num)),
+        ("TDIST(1E200,5,1)", e(ErrorValue::Num)),
+        ("T.DIST.RT(1.35E154,5)", e(ErrorValue::Num)),
+        ("T.DIST.RT(1.34E154,5)", n(0.0)),
+        ("T.DIST(-1.34E154,5,TRUE)", n(0.0)),
+        ("T.DIST.2T(1.34E154,5)", n(0.0)),
+        ("TDIST(1.34E154,5,2)", n(0.0)),
     ]);
 }

@@ -3,7 +3,7 @@ import type { DocxCommandAck, DocxCommandPayload, DocxCommandSelection, DocxWork
 import type { CommandTicket, SubmitOptions, TicketOutcome } from '../../../../../../shared/office-session/commands/types';
 import type { PeerlessEchoIntent, PeerlessEchoPainter } from './echoPainter';
 import type { PeerlessViewSnapshot, PeerlessViewStore } from './viewStore';
-import { admitInputIntents, admitIntent, createInputAdmission, submitFormattingIntent, type PeerlessFormattingIntent } from './inputAdmission';
+import { admitInputIntents, admitIntent, createInputAdmission, submitFormattingIntent, submitPasteFragment, type PeerlessFormattingIntent } from './inputAdmission';
 import { normalizeInputEvent, type PeerlessInputIntent } from './inputEvents';
 import { createPeerlessCommandBinding } from './commandBinding';
 import { beginComposition, endComposition, updateComposition } from './composition';
@@ -1067,5 +1067,28 @@ test('inline picture moves keep their captured drop behind composition and stamp
   expect(submitted[1]!.options.echo).toBeUndefined();
   admission.setReadOnly(true);
   expect(admitIntent(admission, { kind: 'moveEmbed', payload })).toEqual({ status: 'ignored', reason: 'read-only' });
+  admission.dispose();
+});
+
+test('a refused paste fragment is reported, an applied one is not, and a held one is reported once it is refused', async () => {
+  const fragment = { paragraphs: [{ text: 'pasted' }] };
+  const { admission, submitted } = lane();
+  let refused = 0;
+  submitPasteFragment(admission, fragment, { source: 'paste', fence: true }, () => { refused += 1; });
+  submitPasteFragment(admission, fragment, { source: 'paste', fence: true }, () => { refused += 1; });
+  expect(submitted.map(entry => entry.kind)).toEqual(['pasteFragment', 'pasteFragment']);
+  expect(submitted[0]!.payload).toEqual({ fragment });
+  submitted[0]!.settle({ status: 'applied', seq: 1 });
+  submitted[1]!.settle({ status: 'refused', seq: 2, reason: 'invalid-selection' });
+  for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+  expect(refused).toBe(1);
+  const reservation = admission.reserveComposition();
+  submitPasteFragment(admission, fragment, { source: 'paste', fence: true }, () => { refused += 1; });
+  expect(submitted).toHaveLength(2);
+  admission.settleComposition(reservation.slot, { text: 'typed', target: reservation.target });
+  const pasted = submitted.find((entry, index) => index > 1 && entry.kind === 'pasteFragment')!;
+  pasted.settle({ status: 'refused', seq: 4, reason: 'stale-anchor' });
+  for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+  expect(refused).toBe(2);
   admission.dispose();
 });

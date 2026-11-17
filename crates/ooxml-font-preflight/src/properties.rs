@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crate::map::Map;
@@ -76,10 +77,12 @@ impl Props {
             .enumerate()
             {
                 props.fonts[index] = fonts.attr(explicit).map(Rc::from);
-                if props.fonts[index].as_deref().is_none_or(str::is_empty)
-                    && let Some(reference) = fonts.attr(reference).filter(|value| !value.is_empty())
-                {
-                    props.fonts[index] = Some(theme.resolve(reference));
+                if let Some(reference) = fonts.attr(reference).filter(|value| !value.is_empty()) {
+                    if let Some(font) = theme.resolve_rfonts(reference) {
+                        props.fonts[index] = Some(font);
+                    } else if props.fonts[index].as_deref().is_none_or(str::is_empty) {
+                        props.fonts[index] = Some(theme.resolve(reference));
+                    }
                 }
             }
             props.hint = fonts
@@ -192,16 +195,31 @@ impl Theme {
                     .and_then(language_script);
                 if result.fonts[index][slot].is_empty()
                     && let Some(script) = script
-                    && let Some(face) = font
-                        .children
-                        .iter()
-                        .find(|node| node.name == "a:font" && node.attr("script") == Some(script))
+                    && let Some(face) = font.children.iter().rfind(|node| {
+                        node.name == "a:font"
+                            && node.attr("script") == Some(script)
+                            && node.attr("typeface").is_some_and(|face| !face.is_empty())
+                    })
                 {
                     result.fonts[index][slot] = Rc::from(face.attr("typeface").unwrap_or_default());
                 }
             }
         }
         result
+    }
+
+    fn resolve_rfonts(&self, reference: &str) -> Option<Rc<str>> {
+        let (index, slot) = match reference.to_ascii_lowercase().as_str() {
+            "majorascii" | "majorhansi" => (0, 0),
+            "minorascii" | "minorhansi" => (1, 0),
+            "majoreastasia" => (0, 1),
+            "minoreastasia" => (1, 1),
+            "majorbidi" => (0, 2),
+            "minorbidi" => (1, 2),
+            _ => return None,
+        };
+        let font = &self.fonts[index][slot];
+        (!font.is_empty()).then(|| font.clone())
     }
 
     pub(crate) fn resolve(&self, reference: &str) -> Rc<str> {
@@ -302,6 +320,7 @@ impl Styles {
             root.path(&["w:docDefaults", "w:rPrDefault", "w:rPr"]),
             theme,
         );
+        let mut defaults = BTreeMap::new();
         for (index, node) in root
             .children
             .iter()
@@ -316,13 +335,10 @@ impl Styles {
                 continue;
             };
             let kind = node.attr("type").unwrap_or("paragraph");
-            if node.attr("default").and_then(on_off) == Some(true)
-                && !result.defaults_by_type.contains_key(kind)
-            {
-                result
-                    .defaults_by_type
-                    .insert(kind.to_owned(), id.to_owned());
-            }
+            defaults.insert(
+                id,
+                (kind, node.attr("default").and_then(on_off) == Some(true)),
+            );
             let mut conditionals = Map::new();
             for conditional in node
                 .children
@@ -369,6 +385,13 @@ impl Styles {
                     based_on: node.val("w:basedOn").map(str::to_owned),
                 },
             );
+        }
+        for (id, (kind, default)) in defaults {
+            if default && !result.defaults_by_type.contains_key(kind) {
+                result
+                    .defaults_by_type
+                    .insert(kind.to_owned(), id.to_owned());
+            }
         }
         if result.map.contains_key("Normal") && !result.defaults_by_type.contains_key("paragraph") {
             result

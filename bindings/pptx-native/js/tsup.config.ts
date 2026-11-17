@@ -12,11 +12,13 @@ const browser = 'throw new Error("@betteroffice/pptx-native runs on Node.js, Bun
 export default defineConfig({
   entry: {
     index: `${source}/src/index.ts`,
+    'wasm-preflight': `${source}/src/wasm/preflight.ts`,
     worker: `${source}/src/worker.ts`,
     collaboration: `${source}/src/collaboration/index.ts`,
     pptxSessionWorker: `${source}/src/session/worker.ts`,
-    'sessionWorker.browser': `${source}/src/session/sessionWorker.browser.ts`,
+    'pptxSessionWorker.node': `${source}/src/session/worker.node.ts`,
     'sessionWorker.node': `${source}/src/session/sessionWorker.node.ts`,
+    'sessionWorker.missing': `${source}/src/session/sessionWorker.missing.ts`,
   },
   outDir: dist,
   format: ['esm'],
@@ -41,11 +43,12 @@ export default defineConfig({
   },
   onSuccess: async () => {
     await rename(join(dist, 'pptxSessionWorker.js'), join(dist, 'pptxSessionWorker.mjs'));
+    await rename(join(dist, 'pptxSessionWorker.node.js'), join(dist, 'pptxSessionWorker.node.mjs'));
     await writeFile(join(dist, 'package.json'), JSON.stringify({
       type: 'module',
-      imports: { '#session-worker': {
-        node: './sessionWorker.node.js', default: './sessionWorker.browser.js',
-      } },
+      imports: {
+        '#session-worker': { node: './sessionWorker.node.js', default: './sessionWorker.missing.js' },
+      },
     }, null, 2) + '\n');
     await writeFile(join(dist, 'browser.js'), browser);
   },

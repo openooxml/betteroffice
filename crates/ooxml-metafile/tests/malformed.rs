@@ -4,6 +4,9 @@
 mod common;
 
 use common::*;
+use std::sync::Arc;
+
+use ooxml_metafile::drawing::{Op, Pixels};
 use ooxml_metafile::{
     MAX_SVG_BYTES, ReplayBudget, decode, replay, replay_with_budget, to_svg, to_svg_with_budget,
 };
@@ -389,8 +392,8 @@ fn failed_nested_images_spend_work_and_decoded_pixels() {
     let before = budget;
     let svg = to_svg_with_budget(&repeated_nested_images(&inner, 1), &mut budget).unwrap();
     assert!(svg.markup.contains("<path"));
-    assert_eq!(before.pixels - budget.pixels, 1024 * 1024);
-    assert!(budget.work < before.work);
+    assert_eq!(before.pixels, budget.pixels);
+    assert!(before.work - budget.work >= 1024 * 1024 / 16);
     assert_eq!(
         to_svg(&repeated_nested_images(&inner, 17)).unwrap_err().0,
         "the metafile draws more than the replay limits"
@@ -671,16 +674,18 @@ fn a_compressed_dib_is_charged_its_real_size() {
     let mut bmi = u32s(&[40, 1, 1]);
     bmi.extend(u16s(&[1, 0]));
     bmi.extend(u32s(&[5, 0, 0, 0, 0, 0]));
-    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
-    png.extend(4096u32.to_be_bytes());
-    png.extend(4096u32.to_be_bytes());
-    png.extend([8, 6, 0, 0, 0]);
-    let dib = (bmi, png);
-    let blits = |count: usize| {
+    let dib = |tag: u8| {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend(4096u32.to_be_bytes());
+        png.extend(4096u32.to_be_bytes());
+        png.extend([8, 6, 0, 0, 0, tag]);
+        (bmi.clone(), png)
+    };
+    let blits = |count: u8| {
         Emf::new(10, 10)
             .recs(
                 (0..count)
-                    .map(|_| stretch_dibits([0, 0, 10, 10], &dib, 0x00CC_0020))
+                    .map(|tag| stretch_dibits([0, 0, 10, 10], &dib(tag), 0x00CC_0020))
                     .collect(),
             )
             .bytes()
@@ -704,5 +709,332 @@ fn run_length_bitmaps_stop_expanding_past_their_width() {
                 0x00CC_0020,
             )])
             .bytes(),
+    );
+}
+
+/// Sides of a bitmap whose pixels fit the replay's pixel budget once, not twice.
+const SIDE: u32 = 3000;
+const SRCCOPY: u32 = 0x00CC_0020;
+
+/// A PNG header declaring `SIDE` x `SIDE`; pictures stay encoded, so the body
+/// is never decoded and `tag` tells them apart.
+fn png(tag: u8) -> Vec<u8> {
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend(13u32.to_be_bytes());
+    png.extend(b"IHDR");
+    png.extend(SIDE.to_be_bytes());
+    png.extend(SIDE.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0, 0, 0, 0, 0, tag]);
+    png
+}
+
+fn png_dib(tag: u8) -> (Vec<u8>, Vec<u8>) {
+    let bits = png(tag);
+    let mut bmi = u32s(&[40, SIDE, SIDE]);
+    bmi.extend(u16s(&[1, 0]));
+    bmi.extend(u32s(&[5, bits.len() as u32, 0, 0, 0, 0]));
+    (bmi, bits)
+}
+
+fn plus_png(id: u8, tag: u8) -> (u16, u16, Vec<u8>) {
+    let mut body = u32s(&[0xDBC0_1002, 1]);
+    body.extend(i32s(&[SIDE as i32, SIDE as i32, 0]));
+    body.extend(u32s(&[0, 1]));
+    body.extend(png(tag));
+    (0x4008, 0x0500 | u16::from(id), body)
+}
+
+fn draws(op: &Op, tag: u8) -> bool {
+    matches!(op, Op::Image(image) if matches!(&image.bitmap.pixels, Pixels::Encoded { bytes, .. } if bytes.get(33) == Some(&tag)))
+}
+
+fn drawn_twice(bytes: &[u8]) -> bool {
+    replay(bytes).is_ok_and(|drawing| drawing.ops.len() == 2)
+}
+
+fn pixels_spent(bytes: &[u8]) -> u64 {
+    let mut budget = ReplayBudget::default();
+    let before = budget.pixels;
+    replay_with_budget(bytes, &mut budget).unwrap();
+    before - budget.pixels
+}
+
+#[test]
+fn a_dual_metafile_falls_back_to_gdi_with_the_pixels_its_refused_emf_plus_pass_held() {
+    let bytes = Emf::new(100, 100)
+        .rec(
+            70,
+            &plus(&[plus_header(true), plus_png(1, 1), plus_png(2, 2)]).1,
+        )
+        .recs(vec![stretch_dibits([0, 0, 50, 50], &png_dib(3), SRCCOPY)])
+        .bytes();
+    let drawing = replay(&bytes).unwrap();
+    assert!(matches!(&drawing.ops[..], [op] if draws(op, 3)));
+    assert_eq!(pixels_spent(&bytes), u64::from(SIDE * SIDE));
+}
+
+#[test]
+fn an_honoured_emf_plus_rendition_never_decodes_its_gdi_bitmaps() {
+    let mut huge = png_dib(3);
+    huge.0[4..12].copy_from_slice(&i32s(&[8192, 8192]));
+    let bytes = Emf::new(100, 100)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(true),
+                plus_png(1, 1),
+                plus_draw_image(
+                    1,
+                    [0.0, 0.0, SIDE as f32, SIDE as f32],
+                    [0.0, 0.0, 50.0, 50.0],
+                ),
+            ])
+            .1,
+        )
+        .recs(vec![stretch_dibits([0, 0, 50, 50], &huge, SRCCOPY)])
+        .bytes();
+    let drawing = replay(&bytes).unwrap();
+    assert!(matches!(&drawing.ops[..], [op] if draws(op, 1)));
+    assert_eq!(pixels_spent(&bytes), u64::from(SIDE * SIDE));
+}
+
+#[test]
+fn equal_gdi_bitmaps_share_one_charge_and_different_ones_do_not() {
+    let same = png_dib(1);
+    let bytes = Emf::new(100, 100)
+        .recs(vec![
+            stretch_dibits([0, 0, 50, 50], &same, SRCCOPY),
+            stretch_dibits([50, 50, 50, 50], &same, SRCCOPY),
+        ])
+        .bytes();
+    let drawing = replay(&bytes).unwrap();
+    let [Op::Image(first), Op::Image(second)] = &drawing.ops[..] else {
+        panic!("both pictures");
+    };
+    assert!(Arc::ptr_eq(&first.bitmap, &second.bitmap));
+    assert_eq!(pixels_spent(&bytes), u64::from(SIDE * SIDE));
+    let different = Emf::new(100, 100)
+        .recs(vec![
+            stretch_dibits([0, 0, 50, 50], &png_dib(1), SRCCOPY),
+            stretch_dibits([50, 50, 50, 50], &png_dib(2), SRCCOPY),
+        ])
+        .bytes();
+    assert!(!drawn_twice(&different));
+}
+
+#[test]
+fn equal_emf_plus_images_share_one_charge_and_different_ones_do_not() {
+    let image = |tags: [u8; 2]| {
+        Emf::new(100, 100)
+            .rec(
+                70,
+                &plus(&[
+                    plus_header(false),
+                    plus_png(1, tags[0]),
+                    plus_png(2, tags[1]),
+                    plus_draw_image(
+                        1,
+                        [0.0, 0.0, SIDE as f32, SIDE as f32],
+                        [0.0, 0.0, 50.0, 50.0],
+                    ),
+                    plus_draw_image(
+                        2,
+                        [0.0, 0.0, SIDE as f32, SIDE as f32],
+                        [50.0, 50.0, 50.0, 50.0],
+                    ),
+                    plus_eof(),
+                ])
+                .1,
+            )
+            .bytes()
+    };
+    let same = image([1, 1]);
+    let drawing = replay(&same).unwrap();
+    let [Op::Image(first), Op::Image(second)] = &drawing.ops[..] else {
+        panic!("both pictures");
+    };
+    assert!(Arc::ptr_eq(&first.bitmap, &second.bitmap));
+    assert_eq!(pixels_spent(&same), u64::from(SIDE * SIDE));
+    assert!(!drawn_twice(&image([1, 2])));
+}
+
+/// A blank run-length bitmap declaring 4096 x 4096 in a few bytes, drawn
+/// `count` times with its source rectangle moved by `step` each time.
+fn blank_blits(count: i32, step: i32) -> Vec<u8> {
+    let mut bmi = u32s(&[40, 4096, 4096]);
+    bmi.extend(u16s(&[1, 8]));
+    bmi.extend(u32s(&[1, 2, 0, 0, 2, 0, 0, 0x00ff_ffff]));
+    let dib = (bmi, vec![0, 1]);
+    Emf::new(10, 10)
+        .recs(
+            (0..count)
+                .map(|draw| {
+                    let (kind, mut body) = stretch_dibits([0, 0, 10, 10], &dib, SRCCOPY);
+                    body[24..28].copy_from_slice(&i32s(&[draw * step]));
+                    body[32..40].copy_from_slice(&i32s(&[4000, 4000]));
+                    (kind, body)
+                })
+                .collect(),
+        )
+        .bytes()
+}
+
+fn work_spent(bytes: &[u8]) -> u64 {
+    let mut budget = ReplayBudget::default();
+    let before = budget.work;
+    replay_with_budget(bytes, &mut budget).unwrap();
+    before - budget.work
+}
+
+#[test]
+fn a_bitmap_drawn_again_the_same_way_is_not_decoded_again() {
+    let drawing = replay(&blank_blits(64, 0)).unwrap();
+    assert_eq!(drawing.ops.len(), 64);
+    assert!(drawing.ops.windows(2).all(|pair| matches!(
+        pair,
+        [Op::Image(first), Op::Image(second)] if Arc::ptr_eq(&first.bitmap, &second.bitmap)
+    )));
+    assert!(work_spent(&blank_blits(64, 0)) < work_spent(&blank_blits(1, 0)) + 64 * 64);
+}
+
+#[test]
+fn equal_pixels_cropped_from_one_source_are_decoded_a_bounded_number_of_times() {
+    let drawing = replay(&blank_blits(2, 1)).unwrap();
+    let [Op::Image(first), Op::Image(second)] = &drawing.ops[..] else {
+        panic!("both pictures");
+    };
+    assert!(Arc::ptr_eq(&first.bitmap, &second.bitmap));
+    assert!(replay(&blank_blits(8, 1)).is_err());
+}
+
+#[test]
+fn an_emf_plus_image_that_cannot_be_built_is_not_rebuilt_for_free() {
+    let objects = |count: u16| {
+        let mut body = u32s(&[0xDBC0_1002, 1]);
+        body.extend(i32s(&[2048, 2048, 0]));
+        body.extend(u32s(&[0, 0]));
+        let mut records = vec![plus_header(false)];
+        records.extend((0..count).map(|id| (0x4008, 0x0500 | id, body.clone())));
+        records.push(plus_eof());
+        Emf::new(10, 10).rec(70, &plus(&records).1).bytes()
+    };
+    assert!(work_spent(&objects(64)) < work_spent(&objects(1)) + 64 * 64);
+}
+
+#[test]
+fn a_bitmap_that_cannot_be_decoded_is_not_decoded_again() {
+    let mut bmi = u32s(&[40, 4096, 4096]);
+    bmi.extend(u16s(&[1, 3]));
+    bmi.extend(u32s(&[0, 0, 0, 0, 0, 0]));
+    let blits = |count: usize| {
+        Emf::new(10, 10)
+            .recs(vec![
+                stretch_dibits(
+                    [0, 0, 10, 10],
+                    &(bmi.clone(), vec![0; 4]),
+                    SRCCOPY
+                );
+                count
+            ])
+            .bytes()
+    };
+    let drawing = replay(&blits(64)).unwrap();
+    assert_eq!(
+        drawing
+            .omissions
+            .iter()
+            .map(|omission| omission.count)
+            .sum::<usize>(),
+        64
+    );
+    assert!(work_spent(&blits(64)) < work_spent(&blits(1)) + 64 * 64);
+}
+
+#[test]
+fn an_emf_plus_only_metafile_replayed_again_gets_back_its_first_pass_pixels() {
+    let side: u32 = 4096;
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend(13u32.to_be_bytes());
+    png.extend(b"IHDR");
+    png.extend(side.to_be_bytes());
+    png.extend(side.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0, 0, 0, 0, 0, 7]);
+    let mut image = u32s(&[0xDBC0_1002, 1]);
+    image.extend(i32s(&[side as i32, side as i32, 0]));
+    image.extend(u32s(&[0, 1]));
+    image.extend(png);
+    let bytes = Emf::new(100, 100)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(false),
+                (0x4008, 0x0501, image),
+                plus_draw_image(
+                    1,
+                    [0.0, 0.0, side as f32, side as f32],
+                    [0.0, 0.0, 50.0, 50.0],
+                ),
+                (0x4037, 0, Vec::new()),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .bytes();
+    let drawing = replay(&bytes).unwrap();
+    assert!(drawing.ops.iter().any(|op| draws(op, 7)));
+    assert_eq!(pixels_spent(&bytes), u64::from(side * side));
+}
+
+#[test]
+fn a_dual_fallback_draws_bitmaps_its_set_aside_emf_plus_pass_also_held() {
+    let bytes = Emf::new(100, 100)
+        .rec(
+            70,
+            &plus(&[
+                plus_header(true),
+                plus_png(1, 1),
+                plus_draw_image(
+                    1,
+                    [0.0, 0.0, SIDE as f32, SIDE as f32],
+                    [0.0, 0.0, 50.0, 50.0],
+                ),
+                (0x4037, 0, Vec::new()),
+                plus_eof(),
+            ])
+            .1,
+        )
+        .recs(vec![stretch_dibits([0, 0, 50, 50], &png_dib(3), SRCCOPY)])
+        .bytes();
+    let drawing = replay(&bytes).unwrap();
+    assert!(matches!(&drawing.ops[..], [op] if draws(op, 3)));
+    assert_eq!(pixels_spent(&bytes), u64::from(SIDE * SIDE));
+}
+
+#[test]
+fn separate_replays_never_share_bitmaps() {
+    let bytes = Emf::new(100, 100)
+        .recs(vec![
+            stretch_dibits([0, 0, 50, 50], &png_dib(1), SRCCOPY),
+            stretch_dibits([50, 50, 50, 50], &png_dib(1), SRCCOPY),
+        ])
+        .bytes();
+    let images = |drawing: &ooxml_metafile::drawing::Drawing| {
+        drawing
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Image(image) => Some(Arc::clone(&image.bitmap)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let (first, second) = (replay(&bytes).unwrap(), replay(&bytes).unwrap());
+    let (first, second) = (images(&first), images(&second));
+    assert_eq!((first.len(), second.len()), (2, 2));
+    assert!(Arc::ptr_eq(&first[0], &first[1]));
+    assert!(
+        first
+            .iter()
+            .all(|one| second.iter().all(|other| !Arc::ptr_eq(one, other)))
     );
 }

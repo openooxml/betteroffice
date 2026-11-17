@@ -3,12 +3,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::drawingml::{
-    ShapeFill, ShapeOutline, parse_fill, parse_outline, resolve_color_value_to_hex, rot_to_degrees,
+    ShapeFill, ShapeOutline, parse_fill, parse_outline, resolve_color_value_to_hex,
 };
 use crate::image::{
     ImagePadding, ImagePosition, ImageSize, ImageWrap, parse_anchor_position, parse_anchor_wrap,
 };
-use crate::shape::{Shape, ShapeTextBody};
+use crate::shape::{RelativeRect, Shape, ShapeTextBody, ShapeTextBodyProperties};
 use crate::xml::XmlElement;
 
 const DEFAULT_MARGIN_EMU: f64 = 91_440.0;
@@ -114,7 +114,7 @@ pub fn is_shape_text_box(shape: &XmlElement) -> bool {
     shape.child_by_full_name("wps:txbx").is_some()
 }
 
-pub fn parse_text_box(drawing: &XmlElement) -> Option<TextBox> {
+fn text_box_elements(drawing: &XmlElement) -> Option<(&XmlElement, &XmlElement)> {
     let container = drawing
         .child_elements()
         .find(|child| matches!(child.name.as_str(), "wp:inline" | "wp:anchor"))?;
@@ -122,6 +122,11 @@ pub fn parse_text_box(drawing: &XmlElement) -> Option<TextBox> {
     let graphic_data = graphic.child_by_full_name("a:graphicData")?;
     let shape = graphic_data.child_by_full_name("wps:wsp")?;
     shape.child_by_full_name("wps:txbx")?;
+    Some((container, shape))
+}
+
+pub fn parse_text_box(drawing: &XmlElement) -> Option<TextBox> {
+    let (container, shape) = text_box_elements(drawing)?;
     let properties = shape.child_by_full_name("wps:spPr");
     let body = shape.child_by_full_name("wps:bodyPr");
     let extent = container.child_by_full_name("wp:extent");
@@ -161,6 +166,32 @@ pub fn get_text_box_content_element(shape: &XmlElement) -> Option<&XmlElement> {
         .child_by_full_name("w:txbxContent")
 }
 
+/// The model of a standalone text box drawing, with `content` as its text.
+pub(crate) fn text_box_shape(
+    drawing: &XmlElement,
+    content: Vec<serde_json::Value>,
+) -> Option<Shape> {
+    let (_, element) = text_box_elements(drawing)?;
+    let mut shape = crate::shape::parse_shape_from_drawing(drawing)?;
+    let body = shape_body_properties(element.child_by_full_name("wps:bodyPr"));
+    shape.text_body = Some(ShapeTextBody {
+        vertical: body.as_ref().and_then(|body| {
+            body.vertical
+                .as_deref()
+                .filter(|value| *value != "horizontal")
+                .map(|_| true)
+        }),
+        rotation: body.as_ref().and_then(|body| body.rotation),
+        anchor: body.as_ref().and_then(|body| body.anchor.clone()),
+        anchor_center: body.as_ref().and_then(|body| body.anchor_center),
+        auto_fit: body.as_ref().and_then(|body| body.auto_fit.clone()),
+        margins: body.as_ref().and_then(|body| body_margins(&body.margins)),
+        content,
+    });
+    shape.text_body_properties = shape.text_body_properties.or(body);
+    Some(shape)
+}
+
 pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {
     if !has_bookmarked_text_box(source) {
         return;
@@ -174,6 +205,34 @@ pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {
     }));
 }
 
+/// The group model without its frame, text-box text and media sources, which a replay
+/// updates in place or which differ only by how the media was resolved.
+pub(crate) fn group_model_sha256(shape: &Shape) -> String {
+    fn clear(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(body) = map
+                    .get_mut("textBody")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    body.insert("content".to_owned(), serde_json::Value::Array(Vec::new()));
+                }
+                map.retain(|_, value| {
+                    !value
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("media:") || text.starts_with("data:"))
+                });
+                map.values_mut().for_each(clear);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(clear),
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(shape).expect("shape model");
+    clear(&mut value);
+    crate::smart_art::other_value_sha256(value)
+}
+
 pub(crate) fn content_sha256(content: &[serde_json::Value]) -> String {
     use sha2::{Digest, Sha256};
 
@@ -184,6 +243,23 @@ pub(crate) fn content_sha256(content: &[serde_json::Value]) -> String {
     )
 }
 
+/// An `mc:AlternateContent` holding a bookmarked text box next to another drawing in one
+/// branch: no single shape can own its source, so each drawing keeps its own.
+pub(crate) fn shares_a_bookmarked_branch(element: &XmlElement) -> bool {
+    has_bookmarked_text_box(element)
+        && element.child_elements().any(|branch| {
+            branch
+                .child_elements()
+                .filter(|child| matches!(child.local_name(), "drawing" | "pict" | "object"))
+                .count()
+                > 1
+        })
+}
+
+pub(crate) fn contains_text_box(element: &XmlElement) -> bool {
+    element.name == "w:txbxContent" || element.child_elements().any(contains_text_box)
+}
+
 pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
     has_block_bookmarks(element, false)
 }
@@ -191,12 +267,19 @@ pub(crate) fn has_bookmarked_text_box(element: &XmlElement) -> bool {
 fn has_block_bookmarks(element: &XmlElement, in_text_box: bool) -> bool {
     let in_text_box = in_text_box || element.name == "w:txbxContent";
     if in_text_box && element.name == "w:p" {
-        return false;
+        return contains_bookmark_boundary(element);
     }
     (in_text_box && crate::block::has_direct_block_bookmark(element))
         || element
             .child_elements()
             .any(|child| has_block_bookmarks(child, in_text_box))
+}
+
+fn contains_bookmark_boundary(element: &XmlElement) -> bool {
+    element.child_elements().any(|child| {
+        matches!(child.local_name(), "bookmarkStart" | "bookmarkEnd")
+            || contains_bookmark_boundary(child)
+    })
 }
 
 pub(crate) fn source_xml(source: &XmlElement) -> String {
@@ -256,105 +339,51 @@ pub fn parse_text_box_from_shape(
 fn parse_body_properties(
     body: Option<&XmlElement>,
 ) -> (Option<ImagePadding>, Option<TextBoxBodyProperties>) {
-    let Some(body) = body else {
+    let Some(body) = shape_body_properties(body) else {
         return (None, None);
     };
-    let margins = ImagePadding {
-        left: safe_numeric_attribute(Some(body), "lIns"),
-        right: safe_numeric_attribute(Some(body), "rIns"),
-        top: safe_numeric_attribute(Some(body), "tIns"),
-        bottom: safe_numeric_attribute(Some(body), "bIns"),
-    };
-    let margins = (margins.left.is_some()
-        || margins.right.is_some()
-        || margins.top.is_some()
-        || margins.bottom.is_some())
-    .then_some(margins);
-    let child = |name| {
-        body.child_elements()
-            .find(|element| element.local_name() == name)
-    };
-    let normal = child("normAutofit");
+    let margins = body_margins(&body.margins).map(|margins| ImagePadding {
+        left: margins.left,
+        top: margins.top,
+        right: margins.right,
+        bottom: margins.bottom,
+    });
     let properties = TextBoxBodyProperties {
-        vertical: match body.attribute(None, "vert") {
-            Some("horz") => Some("horizontal"),
-            Some("vert") => Some("vertical"),
-            Some("vert270") => Some("vertical270"),
-            Some("wordArtVert" | "wordArtVertRtl") => Some("wordArtVertical"),
-            Some("eaVert") => Some("eastAsianVertical"),
-            Some("mongolianVert") => Some("mongolianVertical"),
-            _ => None,
-        }
-        .map(str::to_owned),
-        rotation: rot_to_degrees(body.attribute(None, "rot")).filter(safe_number),
-        upright: (body.parse_boolean_attribute(None, "upright") == Some(true)).then_some(true),
-        anchor: match body.attribute(None, "anchor") {
-            Some("t") => Some("top"),
-            Some("ctr") => Some("middle"),
-            Some("b") => Some("bottom"),
-            Some("dist") => Some("distributed"),
-            Some("just") => Some("justified"),
-            _ => None,
-        }
-        .map(str::to_owned),
-        anchor_center: (body.parse_boolean_attribute(None, "anchorCtr") == Some(true))
-            .then_some(true),
-        columns: safe_numeric_attribute(Some(body), "numCol"),
-        column_spacing: safe_numeric_attribute(Some(body), "spcCol"),
-        wrap: match body.attribute(None, "wrap") {
-            Some("none") => Some("none"),
-            Some("square") => Some("square"),
-            _ => None,
-        }
-        .map(str::to_owned),
-        horizontal_overflow: match body.attribute(None, "horzOverflow") {
-            Some("clip") => Some("clip"),
-            Some("overflow") => Some("overflow"),
-            _ => None,
-        }
-        .map(str::to_owned),
-        vertical_overflow: match body.attribute(None, "vertOverflow") {
-            Some("clip") => Some("clip"),
-            Some("ellipsis") => Some("ellipsis"),
-            Some("overflow") => Some("overflow"),
-            _ => None,
-        }
-        .map(str::to_owned),
+        vertical: body.vertical,
+        rotation: body.rotation,
+        upright: body.upright,
+        anchor: body.anchor,
+        anchor_center: body.anchor_center,
+        columns: body.columns,
+        column_spacing: body.column_spacing,
+        wrap: body.wrap,
+        horizontal_overflow: body.horizontal_overflow,
+        vertical_overflow: body.vertical_overflow,
         margins: margins.clone(),
-        auto_fit: if child("noAutofit").is_some() {
-            Some("none".to_owned())
-        } else if normal.is_some() {
-            Some("normal".to_owned())
-        } else if child("spAutoFit").is_some() {
-            Some("shape".to_owned())
-        } else {
-            None
-        },
-        font_scale: safe_numeric_attribute(normal, "fontScale"),
-        line_spacing_reduction: safe_numeric_attribute(normal, "lnSpcReduction"),
-        from_word_art: (body.parse_boolean_attribute(None, "fromWordArt") == Some(true))
-            .then_some(true),
-        preset_text_warp: child("prstTxWarp")
-            .and_then(|element| element.attribute(None, "prst"))
-            .map(str::to_owned),
+        auto_fit: body.auto_fit,
+        font_scale: body.font_scale,
+        line_spacing_reduction: body.line_spacing_reduction,
+        from_word_art: body.from_word_art,
+        preset_text_warp: body.preset_text_warp,
     };
-    let has_properties = properties.vertical.is_some()
-        || properties.rotation.is_some()
-        || properties.upright.is_some()
-        || properties.anchor.is_some()
-        || properties.anchor_center.is_some()
-        || properties.columns.is_some()
-        || properties.column_spacing.is_some()
-        || properties.wrap.is_some()
-        || properties.horizontal_overflow.is_some()
-        || properties.vertical_overflow.is_some()
-        || properties.margins.is_some()
-        || properties.auto_fit.is_some()
-        || properties.font_scale.is_some()
-        || properties.line_spacing_reduction.is_some()
-        || properties.from_word_art.is_some()
-        || properties.preset_text_warp.is_some();
-    (margins, has_properties.then_some(properties))
+    (margins, Some(properties))
+}
+
+fn shape_body_properties(body: Option<&XmlElement>) -> Option<ShapeTextBodyProperties> {
+    let mut properties = crate::shape::parse_text_body_properties(body?);
+    properties.rotation = properties.rotation.filter(safe_number);
+    properties.upright = properties.upright.filter(|value| *value);
+    properties.anchor_center = properties.anchor_center.filter(|value| *value);
+    properties.from_word_art = properties.from_word_art.filter(|value| *value);
+    (properties != ShapeTextBodyProperties::default()).then_some(properties)
+}
+
+fn body_margins(margins: &RelativeRect) -> Option<RelativeRect> {
+    (margins.left.is_some()
+        || margins.top.is_some()
+        || margins.right.is_some()
+        || margins.bottom.is_some())
+    .then(|| margins.clone())
 }
 
 pub fn emu_to_pixels(emu: f64) -> f64 {
@@ -525,5 +554,61 @@ mod tests {
         assert_eq!(text_box.id.as_deref(), Some("x"));
         assert!(!is_floating_text_box(&text_box));
         assert_eq!(get_text_box_margins_px(&text_box).left, Some(10.0));
+    }
+
+    #[test]
+    fn shared_body_parser_preserves_text_box_defaults_and_numeric_limits() {
+        for (body, expected) in [
+            ("", serde_json::Value::Null),
+            ("<wps:bodyPr/>", serde_json::Value::Null),
+            (
+                r#"<wps:bodyPr upright="0" anchorCtr="false" fromWordArt="off" rot="6000000000000000000" numCol="1000000000001" lIns="1000000000001"/>"#,
+                serde_json::Value::Null,
+            ),
+            (
+                r#"<wps:bodyPr vert="vert270" rot="58432" upright="1" anchor="ctr" anchorCtr="true" numCol="2tail" spcCol="123" wrap="none" horzOverflow="clip" vertOverflow="ellipsis" lIns="0" tIns="91440" fromWordArt="on"><a:normAutofit fontScale="80000" lnSpcReduction="1000000000001"/><a:prstTxWarp prst="textWave1"/></wps:bodyPr>"#,
+                serde_json::json!({
+                    "vertical": "vertical270",
+                    "rotation": 58432.0 / 60000.0,
+                    "upright": true,
+                    "anchor": "middle",
+                    "anchorCenter": true,
+                    "columns": 2.0,
+                    "columnSpacing": 123.0,
+                    "wrap": "none",
+                    "horizontalOverflow": "clip",
+                    "verticalOverflow": "ellipsis",
+                    "margins": {"left": 0.0, "top": 91440.0},
+                    "autoFit": "normal",
+                    "fontScale": 80000.0,
+                    "fromWordArt": true,
+                    "presetTextWarp": "textWave1",
+                }),
+            ),
+        ] {
+            let shape = root(&format!(
+                r#"<wps:wsp xmlns:wps="wps" xmlns:a="a"><wps:txbx/>{body}</wps:wsp>"#
+            ));
+            let text_box = parse_text_box_from_shape(
+                &shape,
+                ImageSize {
+                    width: 1.0,
+                    height: 1.0,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&text_box.body_properties).unwrap(),
+                expected,
+                "{body}"
+            );
+            assert_eq!(
+                serde_json::to_value(&text_box.margins).unwrap(),
+                expected.get("margins").cloned().unwrap_or_default(),
+                "{body}"
+            );
+        }
     }
 }

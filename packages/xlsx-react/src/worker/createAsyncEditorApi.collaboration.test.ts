@@ -33,7 +33,8 @@ function pendingOperations() {
       encodeStateAsUpdate: calls.collaborationStateAsUpdate,
       applyUpdate: () => apply.promise, onUpdate: () => () => {},
     }),
-    save: async () => new Uint8Array(), on: () => () => {}, failure: undefined,
+    save: async () => new Uint8Array(), saveWithWarnings: async () => ({ bytes: new Uint8Array(), warnings: [] }),
+    on: () => () => {}, failure: undefined,
     onFailure(listener) { onFailure = listener; return () => { onFailure = undefined; }; },
     dispose: async () => {},
   };

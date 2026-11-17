@@ -10,7 +10,8 @@ type Engine = Pick<
   | 'unzip_docx'
 >;
 
-const binding = createRequire(import.meta.url)('../index.js') as Engine;
+const binding = createRequire(import.meta.url)('../index.js') as Engine & { install_panic_hook(): void };
+binding.install_panic_hook();
 
 export const rezip_docx = binding.rezip_docx;
 export const sanitizeOoxml = binding.sanitizeOoxml;

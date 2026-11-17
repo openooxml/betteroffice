@@ -40,7 +40,10 @@ pub(crate) fn max(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// paired numeric samples from two areas, dropping positions where either side
 /// is not a number. excel requires matching counts (`#N/A`); two equal ranges
 /// with no numeric pair leave nothing to divide by (`#DIV/0!`).
-fn pairs(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(Vec<f64>, Vec<f64>), ErrorValue> {
+pub(crate) fn pairs(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+) -> Result<(Vec<f64>, Vec<f64>), ErrorValue> {
     if args.len() != 2 {
         return Err(ErrorValue::Value);
     }
@@ -107,7 +110,7 @@ fn positioned(
 }
 
 /// sums a linear fit needs: n, mean x, mean y, Sxx, Syy, Sxy.
-fn moments(ys: &[f64], xs: &[f64]) -> (f64, f64, f64, f64, f64, f64) {
+pub(crate) fn moments(ys: &[f64], xs: &[f64]) -> (f64, f64, f64, f64, f64, f64) {
     let n = xs.len() as f64;
     let mx = xs.iter().sum::<f64>() / n;
     let my = ys.iter().sum::<f64>() / n;

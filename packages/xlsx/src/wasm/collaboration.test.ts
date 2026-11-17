@@ -106,7 +106,7 @@ describe('wasm collaboration', () => {
       const baseline = left.encodeStateVector();
       expect([...right.encodeStateVector()]).toEqual([...baseline]);
       expect([...left.encodeStateAsUpdate()]).toEqual([...right.encodeStateAsUpdate()]);
-      expect([...left.encodeStateAsUpdate(right.encodeStateVector())]).toEqual([0, 0]);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector())).applied).toBe(false);
 
       left.editCell(0, 19, 0, 'left');
       right.editCell(0, 19, 1, 'right');
@@ -426,6 +426,130 @@ describe('wasm collaboration', () => {
     } finally {
       target.dispose();
       structuralSource.dispose();
+    }
+  });
+
+  it('replicates defined names and their undo', () => {
+    const left = collaborative(6021);
+    const right = collaborative(6022);
+    const names = (replica: WorkbookHandle) => replica.listDefinedNames({ scope: null }).items;
+    const sync = (from: WorkbookHandle, to: WorkbookHandle) =>
+      to.applyUpdate(from.encodeStateAsUpdate(to.encodeStateVector()));
+    try {
+      const baseline = left.encodeStateVector();
+      expect(left.applyOps([{ type: 'setDefinedName', name: 'Margin', refers_to: '1' }]).applied).toBe(true);
+      expect(right.applyOps([{ type: 'setDefinedName', name: 'MARGIN', refers_to: '2' }]).applied).toBe(true);
+      const leftUpdate = left.encodeStateAsUpdate(baseline);
+      const rightUpdate = right.encodeStateAsUpdate(baseline);
+      expect(left.applyUpdate(rightUpdate).applied).toBe(true);
+      expect(right.applyUpdate(leftUpdate).applied).toBe(true);
+      expect(names(left)).toEqual(names(right));
+      expect(names(left).filter((name) => name.name.toLowerCase() === 'margin')).toHaveLength(1);
+      expect(left.listDefinedNames().overLimit).toBeUndefined();
+
+      expect(right.applyOps([{ type: 'deleteDefinedName', name: 'Margin' }]).applied).toBe(true);
+      expect(sync(right, left).applied).toBe(true);
+      expect(names(left).some((name) => name.name.toLowerCase() === 'margin')).toBe(false);
+      expect(right.undo().applied).toBe(true);
+      expect(sync(right, left).applied).toBe(true);
+      expect(names(left)).toEqual(names(right));
+      expect(names(left).filter((name) => name.name.toLowerCase() === 'margin')).toHaveLength(1);
+
+      expect(() => left.applyOps([{ type: 'setDefinedNames', defined_names: [] }])).toThrow(
+        'structural operations are unavailable in collaborative mode'
+      );
+    } finally {
+      left.dispose();
+      right.dispose();
+    }
+  });
+
+  it('replicates rules, filters and their undo', () => {
+    const left = collaborative(6031);
+    const right = collaborative(6032);
+    const sync = (from: WorkbookHandle, to: WorkbookHandle) =>
+      to.applyUpdate(from.encodeStateAsUpdate(to.encodeStateVector()));
+    const rule = (formula: string) => ({
+      type: 'addConditionalFormat',
+      sheet: 0,
+      range: { start: { row: 0, col: 0 }, end: { row: 2, col: 0 } },
+      kind: 'expression',
+      formulas: [formula],
+      format: { bold: true }
+    });
+    const filter = (replica: WorkbookHandle) => replica.sheetInfo().autoFilter;
+    const filterName = (replica: WorkbookHandle) =>
+      replica.listDefinedNames({ scope: 0 }).items.find((name) => name.name === '_xlnm._FilterDatabase');
+    try {
+      expect(left.applyOps([rule('A1>1')]).applied).toBe(true);
+      expect(right.applyOps([rule('A1>2')]).applied).toBe(true);
+      sync(left, right);
+      sync(right, left);
+      expect(left.conditionalFormats(0)).toEqual(right.conditionalFormats(0));
+      const added = left.conditionalFormats(0).filter((item) => item.id.startsWith('cf:'));
+      expect(added.map((item) => item.formulas[0])).toEqual(['A1>1', 'A1>2']);
+
+      expect(right.applyOps([{ type: 'removeConditionalFormat', sheet: 0, id: added[0].id }]).applied).toBe(true);
+      sync(right, left);
+      expect(left.conditionalFormats(0)).toEqual(right.conditionalFormats(0));
+      expect(left.conditionalFormats(0).some((item) => item.id === added[0].id)).toBe(false);
+      expect(right.undo().applied).toBe(true);
+      sync(right, left);
+      expect(left.conditionalFormats(0).some((item) => item.id === added[0].id)).toBe(true);
+
+      expect(left.applyOps([{ type: 'setAutoFilter', sheet: 0, range: 'A1:C5' }]).applied).toBe(true);
+      sync(left, right);
+      expect(filter(right)).toBe('A1:C5');
+      expect(filterName(right)?.refersTo).toContain('!$A$1:$C$5');
+      expect(filterName(right)).toEqual(filterName(left));
+      expect(left.undo().applied).toBe(true);
+      sync(left, right);
+      expect(filter(right)).toBe(filter(left));
+      expect(filterName(right)).toEqual(filterName(left));
+
+      expect(() => left.applyOps([{ type: 'setConditionalFormats', sheet: 0, formats: [] }])).toThrow(
+        'structural operations are unavailable in collaborative mode'
+      );
+    } finally {
+      left.dispose();
+      right.dispose();
+    }
+  });
+
+  it('converges sheets appended under one name and refuses one added earlier', () => {
+    const left = collaborative(6011);
+    const right = collaborative(6012);
+    try {
+      const end = left.sheetInfo().sheetNames.length;
+      const before = left.encodeStateAsUpdate();
+      expect(() => left.applyOps([{ type: 'addSheet', index: 0, name: 'Early' }])).toThrow(
+        'collaborative sheets can only be added at the end of the workbook'
+      );
+      expect([...left.encodeStateAsUpdate()]).toEqual([...before]);
+
+      const baseline = left.encodeStateVector();
+      expect(left.applyOps([{ type: 'addSheet', index: end, name: 'Notes' }]).applied).toBe(true);
+      expect(right.applyOps([{ type: 'addSheet', index: end, name: 'Notes' }]).applied).toBe(true);
+      const leftUpdate = left.encodeStateAsUpdate(baseline);
+      const rightUpdate = right.encodeStateAsUpdate(baseline);
+      expect(left.applyUpdate(rightUpdate).applied).toBe(true);
+      expect(right.applyUpdate(leftUpdate).applied).toBe(true);
+      expect(left.sheetInfo().sheetNames.slice(end)).toEqual(['Notes', 'Notes (2)']);
+      expect(right.sheetInfo().sheetNames).toEqual(left.sheetInfo().sheetNames);
+      expect(right.sheetInfo().sheetIds).toEqual(left.sheetInfo().sheetIds);
+
+      expect(left.undo().applied).toBe(true);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector())).applied).toBe(true);
+      expect(right.sheetInfo().sheetNames.slice(end)).toEqual(['Notes']);
+      expect(right.sheetInfo().sheetNames).toEqual(left.sheetInfo().sheetNames);
+
+      expect(left.redo().applied).toBe(true);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector())).applied).toBe(true);
+      expect(right.sheetInfo().sheetNames.slice(end)).toEqual(['Notes', 'Notes (2)']);
+      expect(right.sheetInfo().sheetIds).toEqual(left.sheetInfo().sheetIds);
+    } finally {
+      left.dispose();
+      right.dispose();
     }
   });
 

@@ -1,3 +1,4 @@
+import { isKeyReleasedFromInput, takeClipboardGesture } from '../../../../../../shared/keyboard/nativeGesture';
 import { Suspense, lazy, useCallback, useLayoutEffect, useRef, useSyncExternalStore, type ReactElement, type Ref, type RefObject } from 'react';
 import { effectiveZoom } from '@betteroffice/docx/layout/render';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
@@ -44,6 +45,19 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
   const { admission, viewStore, textareaRef, autoFocus, className, ariaLabel } = props;
   const textarea = useRef<HTMLTextAreaElement | null>(null);
   const composing = useRef(false);
+  const scrolledBeforeFirstCaret = useRef(false);
+  useLayoutEffect(() => {
+    const keys = new Set(['PageDown', 'PageUp', ' ', 'ArrowDown', 'ArrowUp', 'Home', 'End']);
+    const onIntent = (event: Event) => {
+      const host = props.caretHostRef?.current;
+      if (event.type === 'keydown' && (!keys.has((event as KeyboardEvent).key) || event.target instanceof HTMLTextAreaElement)) return;
+      const target = event.target;
+      if (host && target instanceof Node && (target.contains(host) || host.contains(target))) scrolledBeforeFirstCaret.current = true;
+    };
+    const types = ['wheel', 'touchmove', 'pointerdown', 'keydown', 'scroll'] as const;
+    for (const type of types) document.addEventListener(type, onIntent, { capture: true, passive: true });
+    return () => { for (const type of types) document.removeEventListener(type, onIntent, true); };
+  }, [props.caretHostRef]);
   const revealed = useRef<string | undefined>(undefined);
   const revealHold = useRef<{ seq?: number } | null>(null);
   const callbacks = useRef(props);
@@ -104,6 +118,13 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     else if (textareaRef) textareaRef.current = element;
   }, [textareaRef]);
 
+  const focusOnMount = useRef(autoFocus);
+  useLayoutEffect(() => {
+    if (!focusOnMount.current) return;
+    focusOnMount.current = false;
+    textarea.current?.focus({ preventScroll: true });
+  }, []);
+
   useLayoutEffect(() => {
     const element = textarea.current;
     if (!element) return;
@@ -113,14 +134,17 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const cellFocus = !geometry?.caret && !geometry?.selectionFocus ? geometry?.selectionRects.at(-1) : undefined;
       const focus = geometry?.caret ?? geometry?.selectionFocus ?? cellFocus;
       if (composing.current || !geometry || !focus || geometry.coversThroughSeq < state.throughSeq) return;
-      const host = props.caretHostRef?.current;
+      const parent = element.parentElement;
+      const host = props.caretHostRef?.current ?? (parent?.hasAttribute('data-docx-caret-host') ? parent : null);
       const bounds = host?.getBoundingClientRect();
       const zoom = props.zoom ?? 1;
-      const scale = effectiveZoom(element);
+      const inHost = !!host && element.parentElement === host;
+      const scale = inHost ? 1 : effectiveZoom(element);
       const top = (bounds?.top ?? 0) + focus.y * zoom;
       const height = Math.max(1, focus.height * zoom);
-      element.style.left = `${((bounds?.left ?? 0) + focus.x * zoom) / scale}px`;
-      element.style.top = `${top / scale}px`;
+      element.style.position = inHost ? 'absolute' : 'fixed';
+      element.style.left = `${((inHost ? 0 : bounds?.left ?? 0) + focus.x * zoom) / scale}px`;
+      element.style.top = `${(inHost ? focus.y * zoom : top) / scale}px`;
       element.style.height = `${height / scale}px`;
       const pasteRecord = pasteRecordRef.current;
       const workerSelection = state.workerSelection;
@@ -154,20 +178,22 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       const selection = state.workerSelection;
       const key = selection ? JSON.stringify([selection.anchor.story, selection.anchor.paraId, selection.anchor.offset,
         selection.focus.story, selection.focus.paraId, selection.focus.offset, cellFocus]) : '';
-      const changed = key !== revealed.current;
+      const scroller = host ? findVerticalScrollParentOrRoot(host) : null;
+      const scrolledSinceOpen = revealed.current === undefined && scrolledBeforeFirstCaret.current;
+      const changed = key !== revealed.current && !scrolledSinceOpen;
       revealed.current = key;
       const hold = revealHold.current;
       const held = !!hold && (hold.seq === undefined || geometry.coversThroughSeq <= hold.seq);
       if (hold?.seq !== undefined && geometry.coversThroughSeq >= hold.seq) revealHold.current = null;
-      if (!changed || held || !host || document.activeElement !== element) return;
-      const scroller = findVerticalScrollParentOrRoot(host);
+      if (!changed || held || !scroller || document.activeElement !== element) return;
       const delta = scrollIntoViewDelta(scrollViewport(scroller), top, top + height, 24);
       if (delta) scroller.scrollTop += delta;
     };
+    const follow = () => { if (pasteOptionsRef.current.visible) position(); };
     position();
-    window.addEventListener('scroll', position, true);
+    window.addEventListener('scroll', follow, true);
     window.addEventListener('resize', position);
-    return () => { window.removeEventListener('scroll', position, true); window.removeEventListener('resize', position); };
+    return () => { window.removeEventListener('scroll', follow, true); window.removeEventListener('resize', position); };
   }, [snapshot.geometry, snapshot.throughSeq, props.caretHostRef, props.zoom, viewStore]);
 
   useLayoutEffect(() => {
@@ -224,10 +250,13 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
         else hold!.seq = outcome.seq;
       }, release);
     };
+    let releasedKey = false;
     const keydown = (event: KeyboardEvent) => {
+      releasedKey = false;
       const exit = escapeArmed && event.key === 'Tab';
       if (event.key !== 'Shift') clearEscape();
       if (event.defaultPrevented || state.composing || event.isComposing || event.keyCode === 229) return;
+      if (isKeyReleasedFromInput(event)) { active = null; releasedKey = true; return; }
       if (event.key === 'Escape') { escapeArmed = true; active = null; return; }
       if (exit || (event.key === 'Tab' && isReadOnly())) { active = null; return; }
       state = { ...state, trailingCompositionText: null };
@@ -242,6 +271,18 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
           mark: { type: key === 'b' ? 'bold' : key === 'i' ? 'italic' : 'underline' },
         } }, { inputTime: event.timeStamp });
         return;
+      }
+      if (event.key === 'Delete' && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey &&
+        callbacks.current.onClipboard && !isReadOnly()) {
+        const selection = viewStore.getSnapshot().workerSelection;
+        const ranged = !!selection && (selection.anchor.story !== selection.focus.story ||
+          selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset);
+        if (ranged || admission.getSnapshot().pendingInputs > 0) {
+          event.preventDefault();
+          active = null;
+          void callbacks.current.onClipboard(true, null);
+          return;
+        }
       }
       const tab = event.key === 'Tab' && !event.altKey && !event.ctrlKey && !event.metaKey;
       const editState = viewStore.getSnapshot().editState ?? admission.session.state.editState;
@@ -295,6 +336,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const beforeinput = (event: InputEvent) => {
       clearEscape();
       const inputType = event.inputType ?? '';
+      if (releasedKey && inputType.startsWith('history')) { event.preventDefault(); return; }
       if (!active || active.phase !== 'start' || !compatible(inputType)) {
         active = { id: ++nextEventId, phase: 'start', inputType, keyboard: false };
       }
@@ -337,8 +379,10 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
       pasteOptionsRef.current.dismiss();
       if (state.composing) return;
       event.preventDefault();
+      const gesture = takeClipboardGesture(element);
+      if (gesture === 'ignore') return;
       active = { id: ++nextEventId, phase: 'start', inputType: 'insertFromPaste', keyboard: false };
-      const html = event.clipboardData?.getData('text/html') ?? '';
+      const html = gesture === 'plain' ? '' : event.clipboardData?.getData('text/html') ?? '';
       if (html) {
         const fragment = parseClipboardHtml(html);
         if (fragment && callbacks.current.onPasteFragment?.(fragment, event.timeStamp) === true) {
@@ -414,6 +458,7 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     const compositionend = (event: CompositionEvent) => finishComposition(event.data ?? composition?.text ?? element.value);
     const blur = () => { clearEscape(); if (composition) finishComposition(composition.text); active = null; };
     const copy = (event: ClipboardEvent) => {
+      if (takeClipboardGesture(element) === 'ignore') { event.preventDefault(); return; }
       if (!callbacks.current.onClipboard || state.composing) return;
       event.preventDefault();
       void callbacks.current.onClipboard(event.type === 'cut', event.clipboardData);
@@ -464,13 +509,12 @@ export function PeerlessInput(props: PeerlessInputProps): ReactElement | null {
     ref={attach}
     className={className ?? 'paged-editor__input'}
     aria-label={ariaLabel ?? t('editor.documentInput')}
-    autoFocus={autoFocus}
     readOnly={readOnly}
     rows={1}
     spellCheck
     autoCapitalize="sentences"
     autoCorrect="on"
-    style={{ position: 'fixed', left: 0, top: 0, width: 1, height: 1, opacity: 0,
+    style={{ position: 'fixed', left: 0, top: 0, width: 1, height: 1, opacity: 0, pointerEvents: 'none',
       padding: 0, border: 0, resize: 'none', overflow: 'hidden', caretColor: 'transparent' }}
   />
   {pasteOptions.visible && pasteOptions.anchor && (

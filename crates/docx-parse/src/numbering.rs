@@ -459,6 +459,10 @@ fn parse_level_paragraph_properties(element: &XmlElement) -> ParagraphFormatting
 
 fn parse_level_run_properties(element: &XmlElement) -> TextFormatting {
     let mut value = TextFormatting::default();
+    let typography =
+        crate::formatting::parse_run_properties(Some(element), None).unwrap_or_default();
+    value.ligatures = typography.ligatures;
+    value.contextual_alternates = typography.contextual_alternates;
     value.font_family = element.child("w", "rFonts").map(|fonts| FontFamily {
         ascii: attribute_owned(fonts, "ascii"),
         h_ansi: attribute_owned(fonts, "hAnsi"),
@@ -527,7 +531,12 @@ impl NumberingMap {
             }
         }
 
-        let mut abstract_numbering = self.get_abstract(instance.abstract_num_id)?;
+        self.get_abstract_level(instance.abstract_num_id, ilvl)
+            .cloned()
+    }
+
+    pub fn get_abstract_level(&self, abstract_num_id: f64, ilvl: f64) -> Option<&ListLevel> {
+        let mut abstract_numbering = self.get_abstract(abstract_num_id)?;
         if abstract_numbering
             .num_style_link
             .as_deref()
@@ -545,7 +554,6 @@ impl NumberingMap {
             .levels
             .iter()
             .find(|level| level.ilvl == ilvl)
-            .cloned()
     }
 
     pub fn get_abstract(&self, abstract_num_id: f64) -> Option<&AbstractNumbering> {

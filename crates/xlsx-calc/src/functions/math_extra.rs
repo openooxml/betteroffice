@@ -502,11 +502,16 @@ pub(crate) fn factdouble(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     })
 }
 
+/// the largest sum MULTINOMIAL takes: excel computes the factorial of the
+/// sum, and 171! is past the double range (Microsoft's MULTINOMIAL(2,3,166)
+/// example is `#NUM!`).
+const MULTINOMIAL_MAX_SUM: f64 = 170.0;
+
 /// MULTINOMIAL(number1, ...): (n1 + n2 + ...)! / (n1! n2! ...) over the
-/// truncated values, built as a product of binomials so only a result past a
-/// double overflows. a negative value is `#NUM!`; text or a logical in a
-/// range is `#VALUE!`, and typed arguments coerce as numbers do; blank cells
-/// are skipped.
+/// truncated values, built as a product of binomials. a negative value or a
+/// sum past [`MULTINOMIAL_MAX_SUM`] is `#NUM!`; text or a logical in a range
+/// is `#VALUE!`, and typed arguments coerce as numbers do; blank cells are
+/// skipped.
 pub(crate) fn multinomial(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     compute(|| {
         arity(args, 1, 255)?;
@@ -526,10 +531,15 @@ pub(crate) fn multinomial(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                     return Err(ErrorValue::Num);
                 }
                 let n = value.trunc();
-                let (small, large) = if n < total { (n, total) } else { (total, n) };
-                result *= binomial_from(large + 1.0, small).ok_or(ErrorValue::Num)?;
+                if total + n <= MULTINOMIAL_MAX_SUM {
+                    let (small, large) = if n < total { (n, total) } else { (total, n) };
+                    result *= binomial_from(large + 1.0, small).ok_or(ErrorValue::Num)?;
+                }
                 total += n;
             }
+        }
+        if total > MULTINOMIAL_MAX_SUM {
+            return Err(ErrorValue::Num);
         }
         Ok(result)
     })

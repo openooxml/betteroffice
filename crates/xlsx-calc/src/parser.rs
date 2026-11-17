@@ -312,6 +312,12 @@ impl Parser<'_> {
                 self.func_call(name, depth)
             }
             TokKind::Ident(name) => Ok(ParsedExpr::leaf(Expr::Name { scope: None, name })),
+            TokKind::Name { scope, name }
+                if matches!(self.peek().map(|token| &token.kind), Some(TokKind::LParen)) =>
+            {
+                let qualified = format!("{}{name}", crate::printer::sheet_prefix(&scope));
+                self.func_call(qualified, depth)
+            }
             TokKind::Name { scope, name } => Ok(ParsedExpr::leaf(Expr::Name { scope, name })),
             other => Err(ParseError::new(pos, format!("unexpected token {other:?}"))),
         }

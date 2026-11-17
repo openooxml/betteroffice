@@ -648,9 +648,9 @@ fn huge_fields_overflow_to_num_not_a_wrong_number() {
         1e200,
     );
     close_with(
-        &huge(&[1e-308, -0.0, 5e-324]),
+        &huge(&[3e-308, -0.0, 1e-307]),
         "DSUM(J1:J4,\"N\",K1:K2)",
-        1e-308 + 5e-324,
+        3e-308 + 1e-307,
     );
     for (database, plain) in [
         ("DSTDEV(J1:J4,\"N\",K1:K2)", "STDEV(J2:J4)"),

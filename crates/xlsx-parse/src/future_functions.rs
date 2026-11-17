@@ -660,10 +660,11 @@ pub fn excel_formula<'a>(formula: &'a str, names: FormulaNames<'_>) -> Cow<'a, s
 /// `LAMBDA` names, never from string literals, sheet names or structured
 /// references. A stripped text is shown only when it [`saves_as`] `formula`
 /// with the same `names`, otherwise a text keeping `_xleta.`, otherwise
-/// `formula` itself, so the result is idempotent. Text past the formula
-/// length limit comes back as it is; below it the work is linear: one
-/// tokenizing pass and at most two rewrites.
+/// `formula` itself, so the result is idempotent. A leading `=` some producers
+/// store is dropped first. Text past the formula length limit comes back as it
+/// is; below it the work is linear: one tokenizing pass and at most two rewrites.
 pub fn display_formula<'a>(formula: &'a str, names: FormulaNames<'_>) -> Cow<'a, str> {
+    let formula = formula.strip_prefix('=').unwrap_or(formula);
     if formula.len() > MAX_FORMULA_BYTES
         || !formula
             .as_bytes()
@@ -684,11 +685,13 @@ pub fn display_formula<'a>(formula: &'a str, names: FormulaNames<'_>) -> Cow<'a,
 }
 
 /// Whether formula text people typed or were shown saves as exactly `stored`,
-/// byte for byte, resolving bare names against `names`. The one test for
+/// byte for byte, or as `stored` without the leading `=` some producers keep,
+/// resolving bare names against `names`. The one test for
 /// showing a text in place of the stored one and for keeping the stored text
 /// when that text is committed.
 pub fn saves_as(typed: &str, stored: &str, names: FormulaNames<'_>) -> bool {
-    excel_formula(typed, names) == stored
+    let saved = excel_formula(typed, names);
+    saved == stored || stored.strip_prefix('=') == Some(&*saved)
 }
 
 /// `formula` with the source-ordered `edits` applied.

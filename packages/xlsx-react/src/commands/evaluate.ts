@@ -35,6 +35,13 @@ export interface XlsxSelectionEnvironment {
   formatting: SelectionFormatting | null;
 }
 
+export interface XlsxWorkbookEnvironment {
+  sheets: readonly string[];
+  active: number;
+  /** Whether the browser lets a menu read the clipboard. */
+  clipboardRead: boolean;
+}
+
 export interface XlsxProposalEnvironment {
   id: string;
   label: string;
@@ -44,6 +51,7 @@ export interface XlsxProposalEnvironment {
 export interface XlsxCommandEnvironment {
   status: 'ready' | 'loading' | 'empty';
   readOnly: boolean;
+  allowHostProposals?: boolean;
   collaborative: boolean;
   /** `'chart'` while a chart object is selected instead of cells. */
   selection: XlsxSelectionEnvironment | 'chart' | null;
@@ -63,6 +71,8 @@ export interface XlsxCommandEnvironment {
   fontSizes: readonly number[];
   /** Commands the host left without an implementation. */
   hostDisabled?: ReadonlySet<XlsxCommandId>;
+  /** Sheet names in tab order and the active index; absent where clipboard, row and sheet commands are not wired. */
+  workbook?: XlsxWorkbookEnvironment;
   translate(key: TranslationKey): string;
 }
 
@@ -89,20 +99,29 @@ const REASON_KEYS: Record<XlsxCommandFailureCode, TranslationKey> = {
   'permission-denied': 'commands.reasons.permissionDenied',
   'unsupported-policy': 'commands.reasons.unsupportedPolicy',
   'plugin-unavailable': 'commands.reasons.pluginUnavailable',
+  'clipboard-unavailable': 'commands.reasons.clipboardUnavailable',
+  'last-sheet': 'commands.reasons.lastSheet',
+  'sheet-at-edge': 'commands.reasons.sheetAtEdge',
+  'sheet-name-invalid': 'commands.reasons.sheetNameInvalid',
   aborted: 'commands.reasons.aborted',
   'input-failed': 'commands.reasons.inputFailed',
+  'edit-unsupported': 'commands.reasons.editUnsupported',
   'sheet-protected': 'commands.reasons.sheetProtected',
+  'host-refused': 'commands.reasons.hostRefused',
   'document-replaced': 'commands.reasons.documentReplaced',
   'target-changed': 'commands.reasons.targetChanged',
   'gesture-active': 'commands.reasons.gestureActive',
   'proposal-stale': 'commands.reasons.proposalStale',
   'render-failed': 'commands.reasons.renderFailed',
+  'clipboard-denied': 'commands.reasons.clipboardDenied',
   'command-failed': 'commands.reasons.commandFailed',
 };
 
 const ENGLISH_REASONS: Partial<Record<XlsxCommandFailureCode, string>> = {
   'editor-unavailable': 'The editor is not ready.',
+  'edit-unsupported': "This edit can't be applied here. The workbook is unchanged.",
   'sheet-protected': 'This cell is on a protected sheet.',
+  'host-refused': 'This edit is not allowed.',
 };
 
 /** A localized reason; without an editor the message is English. */
@@ -182,7 +201,53 @@ const CELL_COMMANDS: ReadonlySet<XlsxCommandId> = new Set<XlsxCommandId>([
   'horizontalAlignment',
   'verticalAlignment',
   'textWrapping',
+  'cut',
+  'paste',
+  'pastePlainText',
+  'clearContents',
+  'insertRows',
+  'insertColumns',
+  'deleteRows',
+  'deleteColumns',
 ]);
+
+/** Commands only editors that report {@link XlsxCommandEnvironment.workbook} implement. */
+const WORKBOOK_COMMANDS: ReadonlySet<XlsxCommandId> = new Set<XlsxCommandId>([
+  'cut',
+  'copy',
+  'paste',
+  'pastePlainText',
+  'clearContents',
+  'insertRows',
+  'insertColumns',
+  'deleteRows',
+  'deleteColumns',
+  'insertSheet',
+  'deleteSheet',
+  'renameSheet',
+  'moveSheet',
+]);
+
+const STRUCTURE_COMMANDS: ReadonlySet<XlsxCommandId> = new Set<XlsxCommandId>([
+  'insertRows',
+  'insertColumns',
+  'deleteRows',
+  'deleteColumns',
+  'insertSheet',
+  'deleteSheet',
+  'renameSheet',
+  'moveSheet',
+]);
+
+const FORBIDDEN_SHEET_NAME = /[:\\/?*[\]]/;
+
+/** Whether `name` may name the active sheet: Excel's length, character and uniqueness rules. */
+export function validSheetName(name: string, sheets: readonly string[], active: number): boolean {
+  if (name.length === 0 || name.length > 31 || name.trim() === '' || FORBIDDEN_SHEET_NAME.test(name)) return false;
+  if (name.startsWith("'") || name.endsWith("'") || name.toLowerCase() === 'history') return false;
+  const folded = name.toLowerCase();
+  return !sheets.some((sheet, index) => index !== active && sheet.toLowerCase() === folded);
+}
 
 /** Commands whose effect is a session change the read-only restriction also covers. */
 const WRITE_COMMANDS: ReadonlySet<XlsxCommandId> = new Set<XlsxCommandId>(['proposalReject']);
@@ -257,6 +322,14 @@ export function validArguments(id: XlsxCommandId, args: unknown): boolean {
       );
     case 'proposalReject':
       return isRecord(args) && typeof args.proposalId === 'string';
+    case 'insertRows':
+      return isRecord(args) && (args.position === 'above' || args.position === 'below');
+    case 'insertColumns':
+      return isRecord(args) && (args.position === 'left' || args.position === 'right');
+    case 'moveSheet':
+      return isRecord(args) && (args.direction === 'left' || args.direction === 'right');
+    case 'renameSheet':
+      return args === null || (isRecord(args) && typeof args.name === 'string');
     default:
       return args === null;
   }
@@ -282,11 +355,9 @@ function options<K extends XlsxCommandId>(
 }
 
 function mergeGate(
-  env: XlsxCommandEnvironment,
   selection: XlsxSelectionEnvironment,
   action: MergeAction
 ): Gate {
-  if (env.collaborative) return 'collaboration-unsupported';
   const rows = selection.bottom - selection.top + 1;
   const columns = selection.right - selection.left + 1;
   switch (action) {
@@ -384,6 +455,9 @@ function evaluateCells<K extends XlsxCommandId>(
         VERTICAL_ALIGNMENTS);
     case 'textWrapping':
       return choose(formatting?.textWrapping ?? null, TEXT_WRAPPINGS);
+    case 'paste':
+    case 'pastePlainText':
+      return { gate: env.workbook?.clipboardRead ? null : 'clipboard-unavailable' };
     case 'merge': {
       const value = {
         rows: selection.bottom - selection.top + 1,
@@ -396,13 +470,13 @@ function evaluateCells<K extends XlsxCommandId>(
       );
       if (bound) {
         return {
-          gate: mergeGate(env, selection, bound.value as MergeAction),
+          gate: mergeGate(selection, bound.value as MergeAction),
           value: value as XlsxCommandValues[K],
         };
       }
-      const available = MERGE_ACTIONS.some((action) => !mergeGate(env, selection, action));
+      const available = MERGE_ACTIONS.some((action) => !mergeGate(selection, action));
       return {
-        gate: available ? null : mergeGate(env, selection, 'all'),
+        gate: available ? null : mergeGate(selection, 'all'),
         value: value as XlsxCommandValues[K],
         options: list,
       };
@@ -432,11 +506,14 @@ function evaluate<K extends XlsxCommandId>(
   const stage = lifecycle(env);
   if (stage) return { gate: stage };
   const readOnly: Gate =
-    env.readOnly && (XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument || WRITE_COMMANDS.has(id))
+    env.readOnly && !(env.allowHostProposals && (id === 'proposalAccept' || id === 'proposalReject')) &&
+    (XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument || WRITE_COMMANDS.has(id))
       ? 'read-only'
       : null;
   let evaluation: Evaluation<K>;
-  if (!CELL_COMMANDS.has(id)) evaluation = evaluateSession(id, args, env);
+  if (WORKBOOK_COMMANDS.has(id) && !env.workbook) evaluation = { gate: 'unsupported-command' };
+  else if (STRUCTURE_COMMANDS.has(id) && env.collaborative) evaluation = { gate: 'collaboration-unsupported' };
+  else if (!CELL_COMMANDS.has(id)) evaluation = evaluateSession(id, args, env);
   else if (env.selection === null) evaluation = { gate: 'cell-selection-required' };
   else if (env.selection === 'chart') evaluation = { gate: 'unsupported-selection' };
   else evaluation = evaluateCells(id, args, env, env.selection);
@@ -455,6 +532,21 @@ function evaluateSession<K extends XlsxCommandId>(
       return { gate: env.canRedo ? null : 'nothing-to-redo' };
     case 'exportPng':
       return { gate: env.pngExport ? null : 'png-unavailable' };
+    case 'copy':
+      return { gate: env.selection === null ? 'cell-selection-required' : env.selection === 'chart' ? 'unsupported-selection' : null };
+    case 'deleteSheet':
+      return { gate: (env.workbook?.sheets.length ?? 0) > 1 ? null : 'last-sheet' };
+    case 'moveSheet': {
+      const workbook = env.workbook!;
+      if (!args) return { gate: workbook.sheets.length > 1 ? null : 'sheet-at-edge' };
+      const left = (args as XlsxCommandArgs['moveSheet']).direction === 'left';
+      return { gate: (left ? workbook.active > 0 : workbook.active < workbook.sheets.length - 1) ? null : 'sheet-at-edge' };
+    }
+    case 'renameSheet': {
+      const name = (args as XlsxCommandArgs['renameSheet'] | undefined)?.name;
+      const workbook = env.workbook!;
+      return { gate: name === undefined || validSheetName(name, workbook.sheets, workbook.active) ? null : 'sheet-name-invalid' };
+    }
     case 'proposalsPanel':
       if (!env.proposals) return { gate: 'unsupported-command' };
       return {

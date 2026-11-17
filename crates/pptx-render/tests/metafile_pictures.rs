@@ -44,6 +44,26 @@ fn emf_wmf_and_ole_pictures_keep_their_frames_and_source_crop() {
 }
 
 #[test]
+fn metafile_pictures_stay_addressable_for_assistive_technology() {
+    let session = DeckSession::open(FIXTURE, 320).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let list = SlideRenderer::new()
+        .layout_slide(session.package(), &snapshot, 0)
+        .unwrap()
+        .display_list;
+    let shape = snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "WMF")
+        .unwrap();
+    let index = list.alt_text[&shape.id].primitive.unwrap() as usize;
+    let Primitive::Shape { name, shape_id, .. } = &list.primitives[index] else {
+        panic!("picture did not become vector artwork");
+    };
+    assert_eq!((name.as_str(), shape_id.as_deref()), ("WMF", None));
+}
+
+#[test]
 fn full_replay_pictures_resolve_lazily_without_changing_saved_bytes() {
     let fixture = include_bytes!("fixtures/metafile-svg-pictures.pptx");
     let session = DeckSession::open(fixture, 319).unwrap();

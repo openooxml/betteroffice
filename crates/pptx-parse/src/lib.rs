@@ -16,6 +16,9 @@ mod package;
 mod relationships;
 mod slide_splice;
 mod table_style;
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub mod test_counters;
 mod theme;
 mod write;
 mod xml;
@@ -25,6 +28,7 @@ pub use comments::{
     Comment, CommentAuthor, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite,
     CommentsWrite,
 };
+pub use drawing::text_paragraph_properties;
 pub use error::PptxError;
 pub use inventory::{
     MediaKind, NotesSource, OmittedElement, OmittedInline, SlideSource, SourceShape,

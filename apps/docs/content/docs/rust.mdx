@@ -300,6 +300,7 @@ XML. The ZIP container is rebuilt, so the complete file may differ byte for byte
 | --- | --- |
 | `betteroffice-opc` | The OPC container reader and writer, with ZIP expansion limits and path validation. |
 | `betteroffice-fonts` | Font pack decoding shared by every engine; also available as `fonts::decode_font_face` through each Rust facade. The `manager` feature adds family resolution and local bundled packs. |
+| `betteroffice-base-latin` | Embedded fallback faces for native text measurement and rendering. |
 | `betteroffice-fonts-latin` | Embedded Latin pack: metric-compatible Office families, presentation families, Hebrew and Arabic. Enabled by the `fonts-latin` feature. |
 | `betteroffice-fonts-intl` | Embedded pack for 24 more scripts. Enabled by the `fonts-intl` feature. |
 | `betteroffice-fonts-cjk` | Embedded CJK faces through `betteroffice-fonts-cjk-sc`, `betteroffice-fonts-cjk-tc`, `betteroffice-fonts-cjk-jp`, `betteroffice-fonts-cjk-kr` and `betteroffice-fonts-cjk-serif-sc`, one crate per face. Enabled by the `fonts-cjk` feature. |
@@ -307,6 +308,7 @@ XML. The ZIP container is rebuilt, so the complete file may differ byte for byte
 | `betteroffice-ooxml-diff` | The bounded token LCS diff behind PPTX proposal previews and DOCX comparison. |
 | `betteroffice-drawingml` | The DrawingML colors, themes, shape models, and preset geometry shared by all three formats. |
 | `betteroffice-metafile` | Bounded EMF, EMF+ and WMF replay into vector drawings and SVG. |
+| `betteroffice-ooxml-raster` | The tiny-skia helpers the raster backends share: PNG encoding, colors, paths, and glyph outlines. For native builds. |
 | `betteroffice-docx-parse` | WordprocessingML parsing, typed relationship models, and the typed document model. |
 | `betteroffice-docx-layout` | DOCX pagination, line flow, tables, floats, notes, and display lists. |
 | `betteroffice-docx-edit` | CRDT editing and history for DOCX. |

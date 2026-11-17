@@ -397,7 +397,7 @@ fn vml_horizontal_rule_reserves_width_and_wraps_between_text() {
                     .as_array_mut()
                     .unwrap()
                 {
-                    for key in ["runAdvances", "clusterAdvances", "bidiSlices"] {
+                    for key in ["runAdvances", "clusterAdvances", "bidiSlices", "glyphRuns"] {
                         line.as_object_mut().unwrap().remove(key);
                     }
                 }
@@ -462,7 +462,7 @@ fn vml_horizontal_rule_carets_follow_standalone_alignment_and_adjacent_rules() {
                         .as_array_mut()
                         .unwrap()
                     {
-                        for key in ["runAdvances", "clusterAdvances", "bidiSlices"] {
+                        for key in ["runAdvances", "clusterAdvances", "bidiSlices", "glyphRuns"] {
                             line.as_object_mut().unwrap().remove(key);
                         }
                     }
@@ -535,7 +535,7 @@ fn vml_horizontal_rule_hidden_layout_inputs_keep_zero_advance_and_no_ink() {
                     .as_array_mut()
                     .unwrap()
                 {
-                    for key in ["runAdvances", "clusterAdvances", "bidiSlices"] {
+                    for key in ["runAdvances", "clusterAdvances", "bidiSlices", "glyphRuns"] {
                         line.as_object_mut().unwrap().remove(key);
                     }
                 }

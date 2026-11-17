@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync } from 'node:fs';
-import { LABEL, parseGroups } from './ci-route.mjs';
+import { LABEL, ROUTER, parseGroups } from './ci-route.mjs';
 
 const REPOSITORY = 'openooxml/betteroffice';
 const KYORA_CLASSES = ['kyora-4x8', 'kyora-8x8', 'kyora-8x16', 'kyora-16x32'];
@@ -181,23 +181,24 @@ const routers = jobs.filter(({ id }) => id === 'route');
 const groupsOf = (router: (typeof jobs)[number]) =>
   parseGroups(router.job.steps.find((step: any) => step.id === 'route').env.ROUTE_GROUPS) as { name: string; slots: number }[];
 const everyGroup = Object.fromEntries(routers.flatMap((router) => groupsOf(router).map(({ name }) => [name, LABEL])));
+const runSteps = (job: any): string[] => (job.steps ?? []).map((step: any) => String(step.run ?? '')).filter(Boolean);
 
 describe('CI runner routing', () => {
-  test('with nothing routed, every CI and End-to-end Linux job but the routers, the two shortest and the timings upload runs on its kyora class', () => {
+  test('with nothing routed, every CI and End-to-end Linux job but the routers, the audit, the two native jobs and the timings upload runs on its kyora class', () => {
     expect(Object.fromEntries(kyoraJobs.map(({ name, runners }) => [name, runners['push to main'].unset]))).toEqual({
       'ci.yml packages': ['kyora-4x8'],
       'ci.yml package-tests': ['kyora-8x8'],
       'ci.yml rust': ['kyora-8x16'],
       'ci.yml native-viewer': ['kyora-8x16'],
       'ci.yml python': ['kyora-4x8'],
-      'ci.yml route': ['kyora-4x8'],
-      'e2e.yml route': ['kyora-4x8'],
+      'ci.yml route': ['ubuntu-latest'],
+      'e2e.yml route': ['ubuntu-latest'],
       'e2e.yml corpus': ['kyora-8x8'],
       'e2e.yml browser-build': ['kyora-8x8'],
       'e2e.yml browser': ['kyora-8x8'],
     });
     const hosted = jobs.filter((entry) => /^(ci|e2e)\.yml /.test(entry.name) && !kyoraJobs.includes(entry));
-    expect(hosted.map(({ name }) => name).sort()).toEqual(['ci.yml audit', 'ci.yml native', 'e2e.yml publish']);
+    expect(hosted.map(({ name }) => name).sort()).toEqual(['ci.yml audit', 'ci.yml native', 'ci.yml native-hooks', 'e2e.yml publish']);
     for (const { name, runners } of kyoraJobs) {
       for (const event of TRUSTED) {
         expect(runners[event].unset, `${name}: ${event}`).toEqual(runners['push to main'].unset);
@@ -227,6 +228,7 @@ describe('CI runner routing', () => {
     expect(routers.map(({ name }) => name).sort()).toEqual(['ci.yml route', 'e2e.yml route']);
     for (const router of routers) {
       const { name, file, job } = router;
+      expect(job.name, name).toBe(ROUTER);
       expect(router.runsOn(EVENTS['push to main'], {}, everyGroup), name).toEqual(router.runners['push to main'].unset);
       expect(job.permissions, name).toEqual({ actions: 'read', contents: 'read' });
       for (const step of job.steps) expect(step['continue-on-error'], `${name}: ${step.name ?? step.uses}`).toBe(true);
@@ -276,6 +278,23 @@ describe('CI runner routing', () => {
       }
       for (const event of UNTRUSTED) {
         expect(entry.runsOn(EVENTS[event], {}, everyGroup), `${entry.name}: ${event}`).toEqual(['ubuntu-latest']);
+      }
+    }
+  });
+
+  test('Playwright installs browsers without system packages, which only a separate retried install-deps step adds', () => {
+    const installers = jobs.filter(({ job }) => runSteps(job).some((run) => /\bplaywright install-deps\b/.test(run)));
+    expect(installers.map(({ name }) => name).sort()).toEqual(['e2e.yml browser', 'visual-fidelity.yml measure']);
+    for (const { name, job } of jobs) {
+      for (const run of runSteps(job)) {
+        expect(run, name).not.toMatch(/--with-deps\b/);
+        if (/\bplaywright install-deps\b/.test(run)) {
+          expect(run, name).not.toMatch(/\bplaywright install(?!-deps)\b/);
+          expect(run, name).toMatch(/for attempt in 1 2 3\b/);
+          expect(run, name).toMatch(/\bif bunx playwright install-deps chromium; then exit 0; fi\b/);
+          expect(run, name).not.toMatch(/\btimeout \d+ bunx playwright install-deps\b/);
+          expect(run, name).toMatch(/Acquire::Retries "1"; Acquire::http::Timeout "20"; Acquire::https::Timeout "20"; DPkg::Lock::Timeout "60";/);
+        }
       }
     }
   });

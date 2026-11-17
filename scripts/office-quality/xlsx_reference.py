@@ -1,7 +1,7 @@
 import re
 import subprocess
 
-import fitz
+from raster import merge_pdfs, open_pdf, page_size_pt, pdf_metadata, render_page
 
 
 def export_profile(source, pdf, profile, timeout, dpi):
@@ -73,18 +73,17 @@ end run
                    text=True, capture_output=True, check=True, timeout=timeout + 5)
     capture = dict(profile, paper='landscape; Office paper size recorded per page', gridlines=True, headings=False,
                    pagination='one recorded range per page; fixed print scale', pages=[])
-    with fitz.open() as combined:
-        exports = []
-        for index, page in enumerate(pages):
-            with fitz.open(pdf.parent / f'sheet-{index + 1}.pdf') as document:
-                if len(document) != 1:
-                    raise ValueError(f'Print range {page["range"]} produced {len(document)} pages; choose a smaller range or scale')
-                pixmap = document[0].get_pixmap(dpi=dpi, alpha=False)
-                capture['pages'].append(dict(page, width_px=pixmap.width, height_px=pixmap.height,
-                                            width_pt=document[0].rect.width, height_pt=document[0].rect.height))
-                exports.append(document.metadata)
-                combined.insert_pdf(document)
-        combined.set_metadata(exports[0])
-        combined.save(pdf)
+    exports = []
+    sheets = [pdf.parent / f'sheet-{index + 1}.pdf' for index in range(len(pages))]
+    for page, sheet in zip(pages, sheets):
+        with open_pdf(sheet) as document:
+            if len(document) != 1:
+                raise ValueError(f'Print range {page["range"]} produced {len(document)} pages; choose a smaller range or scale')
+            image = render_page(document, 0, dpi)
+            width_pt, height_pt = page_size_pt(document, 0)
+            capture['pages'].append(dict(page, width_px=image.width, height_px=image.height,
+                                        width_pt=width_pt, height_pt=height_pt))
+            exports.append(pdf_metadata(document))
+    merge_pdfs(sheets, pdf)
     capture['office_pdf_metadata'] = exports
     return capture

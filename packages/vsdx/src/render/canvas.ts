@@ -1,7 +1,9 @@
 import type { Affine, PageDisplayList, PagePrimitive, Paint, PlaceholderPrimitive, ShapePrimitive, ShapeShadow, Stroke, TextBoxPrimitive, TextRun } from '../types';
 
 export type CanvasImageResolver = (assetId: string) => CanvasImageSource | Promise<CanvasImageSource | null> | null;
-export interface PaintPageOptions { resolveImage?: CanvasImageResolver; signal?: AbortSignal; }
+export interface PaintPageOptions { resolveImage?: CanvasImageResolver; signal?: AbortSignal; outlineMissingImages?: boolean; textFace?: (run: TextRun) => TextFace | undefined; }
+/** The face an export paints a run with: its installed family and its underline metrics in ems. */
+export interface TextFace { family: string; underlinePosition: number; underlineThickness: number; }
 export interface PageCanvasLike { width: number; height: number; style: { width: string; height: string }; }
 export function sizeCanvasForPage(canvas: PageCanvasLike, list: Pick<PageDisplayList, 'width' | 'height'>, dpr: number, scale = 1): number {
   const cssWidth = list.width * scale, cssHeight = list.height * scale;
@@ -55,20 +57,20 @@ export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplay
   await Promise.all(pending.values());
   if (options.signal?.aborted || paintRequests.get(ctx) !== request) return;
   ctx.save();
-  try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); const device = { a: dpr * scale, b: 0, c: 0, d: dpr * scale }; for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, primitive, list.paintTransform, images, device); }
+  try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); const device = { a: dpr * scale, b: 0, c: 0, d: dpr * scale }; for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, primitive, list.paintTransform, images, device, options.outlineMissingImages, options.textFace); }
   finally { ctx.restore(); }
 }
-function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive, paintTransform: Affine, images: Map<string, CanvasImageSource | null>, device: Linear): void {
+function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive, paintTransform: Affine, images: Map<string, CanvasImageSource | null>, device: Linear, outlineMissing = false, textFace?: (run: TextRun) => TextFace | undefined): void {
   ctx.save();
   try {
     const transform = 'transform' in primitive ? primitive.transform ?? identity() : identity(); ctx.transform(paintTransform.a, paintTransform.b, paintTransform.c, paintTransform.d, paintTransform.e, paintTransform.f); ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f);
     const linear = compose(compose(device, paintTransform), transform);
     switch (primitive.kind) {
       case 'shape': paintShape(ctx, primitive, linear); break;
-      case 'image': { const source = images.get(primitive.assetId); if (source) { ctx.translate(0, 2 * primitive.y + primitive.height); ctx.scale(1, -1); ctx.drawImage(source, primitive.x, primitive.y, primitive.width, primitive.height); } break; }
-      case 'textBox': paintTextBox(ctx, primitive); break;
+      case 'image': { const source = images.get(primitive.assetId); if (source) { ctx.translate(0, 2 * primitive.y + primitive.height); ctx.scale(1, -1); ctx.drawImage(source, primitive.x, primitive.y, primitive.width, primitive.height); } else if (outlineMissing) strokePlaceholder(ctx, primitive); break; }
+      case 'textBox': paintTextBox(ctx, primitive, textFace); break;
       case 'placeholder': paintPlaceholder(ctx, primitive); break;
-      case 'group': for (const child of [...primitive.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, child, identity(), images, linear); break;
+      case 'group': for (const child of [...primitive.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, child, identity(), images, linear, outlineMissing, textFace); break;
     }
   } finally { ctx.restore(); }
 }
@@ -112,7 +114,7 @@ function paintStyle(ctx: CanvasRenderingContext2D, paint: Paint, box: { x: numbe
   return gradient;
 }
 function stroke(ctx: CanvasRenderingContext2D, value: Stroke): void { ctx.strokeStyle = value.color; ctx.lineWidth = value.width; ctx.setLineDash(value.dashed ? [Math.max(3, value.width * 2), Math.max(2, value.width)] : []); ctx.stroke(); }
-function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): void {
+function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive, textFace?: (run: TextRun) => TextFace | undefined): void {
   ctx.translate(0, 2 * text.y + text.height); ctx.scale(1, -1); ctx.textBaseline = 'top';
   let offset = 0;
   const runs = text.paragraphs.flatMap(paragraph => paragraph.runs.map(run => {
@@ -124,11 +126,65 @@ function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): vo
     const start = Math.max(line.start, entry.start), end = Math.min(line.end, entry.end);
     if (start >= end) continue;
     const x = line.caretStops.find(stop => stop.position === start)?.x ?? line.x;
-    paintTextRun(ctx, entry.run, utf8Slice(entry.run.text, start - entry.start, end - entry.start), x, line.y);
+    paintTextRun(ctx, entry.run, textFace?.(entry.run), utf8Slice(entry.run.text, start - entry.start, end - entry.start), x, line.y);
   }
 }
-function paintTextRun(ctx: CanvasRenderingContext2D, run: TextRun, value: string, x: number, y: number): void { ctx.font = `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${run.sizeIn}px ${quote(run.family)}`; ctx.fillStyle = run.color; ctx.fillText(value, x, y); }
+const TEXT_UNITS_PER_INCH = 96;
+function paintTextRun(ctx: CanvasRenderingContext2D, run: TextRun, face: TextFace | undefined, value: string, x: number, y: number): void {
+  ctx.save();
+  ctx.scale(1 / TEXT_UNITS_PER_INCH, 1 / TEXT_UNITS_PER_INCH);
+  const size = run.sizeIn * TEXT_UNITS_PER_INCH, left = x * TEXT_UNITS_PER_INCH, top = y * TEXT_UNITS_PER_INCH;
+  ctx.font = canvasFontFor(face ? { ...run, family: face.family } : run, size);
+  (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
+  ctx.fillStyle = run.color;
+  const spacing = Number.isFinite(run.letterSpacing) ? run.letterSpacing * TEXT_UNITS_PER_INCH : 0;
+  const plain = ctx.measureText(value);
+  fillSpacedText(ctx, value, left, top, spacing);
+  if (run.underline) {
+    const width = plain.width + spacing * Math.max(1, [...value].length);
+    const position = face?.underlinePosition ?? DEFAULT_UNDERLINE_POSITION_EM, thickness = face?.underlineThickness ?? DEFAULT_UNDERLINE_THICKNESS_EM;
+    const matrix = typeof ctx.getTransform === 'function' ? ctx.getTransform() : undefined;
+    const device = matrix ? Math.hypot(matrix.a, matrix.b) : 1;
+    const height = Math.max(thickness * size, device > 0 ? 0.5 / device : 0);
+    const baseline = top + (typeof plain.alphabeticBaseline === 'number' ? -plain.alphabeticBaseline : size * BASELINE_EM);
+    if (width > 0) ctx.fillRect(left, baseline - position * size - height / 2, width, height);
+  }
+  ctx.restore();
+}
+const BASELINE_EM = 0.8, DEFAULT_UNDERLINE_POSITION_EM = -0.1, DEFAULT_UNDERLINE_THICKNESS_EM = 0.05;
+function fillSpacedText(ctx: CanvasRenderingContext2D, value: string, x: number, y: number, spacing: number): void {
+  if (spacing === 0) { ctx.fillText(value, x, y); return; }
+  const spaced = ctx as unknown as { letterSpacing?: unknown };
+  if (typeof spaced.letterSpacing === 'string') {
+    spaced.letterSpacing = `${spacing}px`;
+    ctx.fillText(value, x, y);
+    return;
+  }
+  let pen = x;
+  for (const glyph of value) { ctx.fillText(glyph, pen, y); pen += ctx.measureText(glyph).width + spacing; }
+}
 function utf8Length(value: string): number { return new TextEncoder().encode(value).byteLength; }
 function utf8Slice(value: string, start: number, end: number): string { return new TextDecoder().decode(new TextEncoder().encode(value).slice(start, end)); }
+/** The canvas font string a text run paints with. */
+export function canvasFontFor(run: Pick<TextRun, 'family' | 'bold' | 'italic'>, sizePx: number): string { return `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${sizePx}px ${quote(run.family)}`; }
 function quote(family: string): string { return family.includes(' ') ? JSON.stringify(family) : family; }
-function paintPlaceholder(ctx: CanvasRenderingContext2D, value: PlaceholderPrimitive): void { ctx.strokeStyle = '#8a94a6'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.strokeRect(value.x, value.y, value.width, value.height); ctx.setLineDash([]); ctx.fillStyle = '#5d6675'; ctx.font = '12px sans-serif'; ctx.fillText(value.reason, value.x + 6, value.y + 16, Math.max(0, value.width - 12)); }
+function strokePlaceholder(ctx: CanvasRenderingContext2D, value: { x: number; y: number; width: number; height: number }): void {
+  const matrix = (ctx as CanvasRenderingContext2D & { getTransform?: () => DOMMatrix }).getTransform?.();
+  const devicePerInch = matrix ? Math.hypot(matrix.a, matrix.b) : 0;
+  const pixel = 1 / TEXT_UNITS_PER_INCH;
+  ctx.strokeStyle = '#8a94a6'; ctx.lineWidth = devicePerInch > 0 ? Math.max(pixel, 1 / devicePerInch) : pixel; ctx.setLineDash([4 * pixel, 3 * pixel]); ctx.strokeRect(value.x, value.y, value.width, value.height); ctx.setLineDash([]);
+}
+const PLACEHOLDER_LABEL_IN = 10 / 72;
+function paintPlaceholder(ctx: CanvasRenderingContext2D, value: PlaceholderPrimitive): void {
+  strokePlaceholder(ctx, value);
+  if (!value.reason) return;
+  ctx.save();
+  ctx.translate(value.x, value.y);
+  ctx.scale(1 / TEXT_UNITS_PER_INCH, -1 / TEXT_UNITS_PER_INCH);
+  ctx.font = `${PLACEHOLDER_LABEL_IN * TEXT_UNITS_PER_INCH}px sans-serif`;
+  (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#5d6675';
+  ctx.fillText(value.reason, 0, PLACEHOLDER_LABEL_IN * 0.8 * TEXT_UNITS_PER_INCH);
+  ctx.restore();
+}

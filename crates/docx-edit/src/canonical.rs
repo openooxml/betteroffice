@@ -41,7 +41,7 @@
 //! schema carries no opaque-block discriminator, so [`project_story`] never
 //! emits one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 
 use serde_json::{Map as JsonMap, Value};
@@ -136,7 +136,14 @@ fn visit_story(
     items: &mut impl StorySink,
 ) -> Result<(), OpError> {
     let txn = doc.yrs_doc().transact();
-    let story = story_ref(&txn, story_id)?;
+    let story = match story_ref(&txn, story_id) {
+        Ok(story) => story,
+        Err(crate::EditError::CellHasNoStory(_)) => {
+            let cell = crate::empty_cells::EmptyCell::new(story_id);
+            return visit_story(cell.doc(), story_id, items);
+        }
+        Err(error) => return Err(error.into()),
+    };
     let comment_groups = story_comment_groups(&txn, story_id);
     // The running UTF-16 story-unit index (every embed, pilcrows included, = 1),
     // used to test each scalar against the resolved comment intervals.
@@ -320,9 +327,27 @@ pub(crate) fn story_comment_anchors<T: ReadTxn>(
     txn: &T,
     story_id: &str,
 ) -> BTreeMap<String, Vec<(u32, u32)>> {
-    let mut comments_by_key = BTreeMap::new();
+    decoded_comment_anchors(txn, Some(story_id))
+        .get(story_id)
+        .map(|anchors| resolve_comment_anchors(txn, anchors))
+        .unwrap_or_default()
+}
+
+/// The decoded anchors of each comment in one story, by comment key.
+pub(crate) type CommentAnchors = BTreeMap<String, Vec<crate::CommentAnchor>>;
+
+/// Every decodable comment anchor, by story.
+pub(crate) fn comment_anchors_by_story<T: ReadTxn>(txn: &T) -> HashMap<String, CommentAnchors> {
+    decoded_comment_anchors(txn, None)
+}
+
+fn decoded_comment_anchors<T: ReadTxn>(
+    txn: &T,
+    story_id: Option<&str>,
+) -> HashMap<String, CommentAnchors> {
+    let mut by_story: HashMap<String, CommentAnchors> = HashMap::new();
     let Some(comments) = txn.get_map(crate::COMMENTS) else {
-        return comments_by_key;
+        return by_story;
     };
     for (key, value) in comments.iter(txn) {
         let Out::YMap(comment) = value else {
@@ -331,27 +356,48 @@ pub(crate) fn story_comment_anchors<T: ReadTxn>(
         let Some(Out::Any(Any::Array(anchors))) = comment.get(txn, "anchors") else {
             continue;
         };
-        let mut offsets: Vec<(u32, u32)> = Vec::new();
         for encoded in anchors.iter() {
             let Ok(anchor) = crate::decode_anchor(encoded) else {
                 continue;
             };
-            if anchor.story != story_id {
+            if story_id.is_some_and(|story_id| anchor.story != story_id) {
                 continue;
             }
-            if let (Some(start), Some(end)) = (
-                sticky_offset(&anchor.start, txn),
-                sticky_offset(&anchor.end, txn),
-            ) {
-                offsets.push((start.index, end.index));
-            }
-        }
-        if !offsets.is_empty() {
-            offsets.sort_unstable();
-            comments_by_key.insert(key.to_owned(), offsets);
+            by_story
+                .entry(anchor.story.clone())
+                .or_default()
+                .entry(key.to_owned())
+                .or_default()
+                .push(anchor);
         }
     }
-    comments_by_key
+    by_story
+}
+
+/// [`story_comment_anchors`] of the story whose [`comment_anchors_by_story`] are `anchors`.
+pub(crate) fn resolve_comment_anchors<T: ReadTxn>(
+    txn: &T,
+    anchors: &CommentAnchors,
+) -> BTreeMap<String, Vec<(u32, u32)>> {
+    anchors
+        .iter()
+        .filter_map(|(key, anchors)| {
+            let mut offsets: Vec<(u32, u32)> = Vec::new();
+            for anchor in anchors {
+                if let (Some(start), Some(end)) = (
+                    sticky_offset(&anchor.start, txn),
+                    sticky_offset(&anchor.end, txn),
+                ) {
+                    offsets.push((start.index, end.index));
+                }
+            }
+            if offsets.is_empty() {
+                return None;
+            }
+            offsets.sort_unstable();
+            Some((key.clone(), offsets))
+        })
+        .collect()
 }
 
 /// Merges sorted-or-unsorted intervals, coalescing overlapping AND adjacent spans.

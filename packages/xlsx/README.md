@@ -85,15 +85,35 @@ or WASM loader.
 references in one undo step; the destination is the new top-left cell. Surface errors when a move is
 refused rather than discarding the source workbook.
 
+## Filling a range
+
+`workbook.fillRange(sheet, source, destination)` copies the A1 source block over the complete
+destination rectangle as one undo step. `destination` includes the source and must start at its
+top-left corner; cells outside the source are filled by tiling the source block. Values, cached
+formula results, and styles are copied, and formulas are translated by their relative offset with
+`$` references kept. This is copy tiling only — there is no series or trend detection. Array
+formulas, merged cells, Excel tables, charts anchored in either rectangle, hyperlinks, conditional
+formats covering only part of the filled cells, and sheets whose file keeps comments, data
+validations or extension rules are refused before the workbook changes, so surface the error and
+keep the selection where it was.
+
 ## Printing and PNG export
 
 `workbook.printDisplayList(sheet, range, metrics, gridlines)` renders an A1 range using `PrintMetrics`
 measured from the workbook's normal font. The caller chooses paper size, margins, and pagination;
 `paintDisplayList` accepts an optional origin in backing-store pixels for positioning the result.
 
-`workbook.renderPng(viewport)` exports the active sheet's viewport. `workbook.renderRangePng()` exports
-its used range, or accepts `{ range, scale }` to select an A1 range and raster scale. Both return PNG
-bytes synchronously; check `isPngExportAvailable()` before calling them.
+`await workbook.renderPng({ sheet, viewport })` draws a viewport of a sheet, and
+`await workbook.renderPng({ sheet, range })` a cell range, as PNG bytes. `sheet` is a zero-based index or
+a tab name; `range` is an A1 string, `{ kind: 'a1', a1 }`, zero-based `{ kind: 'rowCol', start, end }`, or `'used'`
+for the sheet's used range at call time.
+Options are `{ scale, maxWidth, maxHeight, signal, fonts }`. The editor's painter draws on a canvas. Without
+`fonts`, it loads the bundled faces `@betteroffice/xlsx-native` draws the sheet's fonts with, so both engines
+match, and rejects if one fails to load. A `fonts` list, even an empty one, replaces the bundled faces: a family it
+does not cover is painted with the engine's built-in substitute, whose pixels differ between the canvas and native
+engines. A supplied face that fails to load rejects with `PngExportError` code `font-unavailable`. Without a canvas, it rejects with
+code `canvas-unavailable`; use `@betteroffice/xlsx-native` for PNG export in that environment.
+`isPngExportAvailable()` reports whether PNG export can run.
 
 ## Worker sessions
 
@@ -112,7 +132,8 @@ The React editor uses a worker by default and exposes its own asynchronous API. 
 `workbook.propose(agentId, note, edits)` stages cell edits for review without applying them.
 `listProposals`, `acceptProposal`, and `rejectProposal` manage that queue; acceptance applies the
 proposal as one undo step and recalculates dependents. Check `isProposalsAvailable()` first;
-acceptance throws `StaleProposalError` if targeted cells have changed since staging.
+acceptance throws `StaleProposalError` if targeted cells have changed since staging. Listed proposals
+name those cells in `staleTargets`, so a host can warn before accepting.
 
 ## Version-checked edit batches
 
@@ -135,10 +156,16 @@ to a binary transport. See the [collaboration guide](https://docs.betteroffice.d
 for provider lifecycle, transport setup, and shared starting state.
 
 Open the workbook with `openWorkbook(bytes, { collaborative: true })`. Collaborative workbooks
-synchronize cell content, formulas, styles, column widths and row heights, with local undo and
-redo whose effects synchronize.
-Structural edits throw: inserting or deleting rows and columns, adding, removing, moving or renaming
-sheets, and changing charts or defined names.
+synchronize cell content, formulas, styles, column widths and row heights, row and column
+visibility, freeze panes, merged cells, single hyperlinks, chart positions, defined names,
+conditional formats, auto filters and sheets added at the end, with local undo and redo whose
+effects synchronize.
+
+Other structural edits are refused without changing the workbook: `applyOps` throws and editor
+sessions report the command as refused with reason `unsupported`. That covers inserting or deleting
+rows and columns, adding a sheet anywhere but the end, removing, moving or renaming sheets and chart
+edits beyond moving a chart. See the
+[collaboration guide](https://docs.betteroffice.dev/docs/collaboration#xlsx-limits) for the reasons.
 
 ## Operation profiles
 

@@ -72,6 +72,13 @@ export class GlyphCache {
     return this.entries.size;
   }
 
+  /** Drops the cached outlines of these fonts, whose outline data changed. */
+  invalidateFonts(fontIds: ReadonlySet<number>): void {
+    for (const key of [...this.entries.keys()]) {
+      if (fontIds.has(Number(key.slice(0, key.indexOf(':'))))) this.entries.delete(key);
+    }
+  }
+
   /**
    * Outline for one glyph, building and caching it on first request. Throws if
    * the provider throws or returns unparseable JSON — the caller falls back.

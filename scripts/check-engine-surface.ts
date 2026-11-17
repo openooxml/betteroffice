@@ -5,6 +5,12 @@ import { join } from "node:path";
 export interface ParamInfo {
   type: string;
   optional: boolean;
+  name?: string;
+}
+
+export interface ParseOptions {
+  /** Keep each parameter's declared name. */
+  paramNames?: boolean;
 }
 
 export interface MemberInfo {
@@ -17,12 +23,12 @@ export interface MemberInfo {
 export interface Surface {
   classes: Map<string, Map<string, MemberInfo>>;
   functions: Map<string, MemberInfo>;
+  consts: Set<string>;
 }
 
 interface FormatConfig {
   wasm: string;
   native: string;
-  classes: string[];
   pending: string[];
 }
 
@@ -30,50 +36,57 @@ export const FORMATS: Record<string, FormatConfig> = {
   xlsx: {
     wasm: "packages/xlsx/src/wasm/generated/xlsx_wasm.d.ts",
     native: "bindings/xlsx-native/index.d.ts",
-    classes: ["XlsxDocument", "XlsxSnapshotBuilder"],
     pending: [],
   },
   docx: {
     wasm: "packages/docx/src/wasm/generated/edit/docx_edit.d.ts",
     native: "bindings/docx-native/index.d.ts",
-    classes: ["EditSession", "RetainedLayoutMeta", "RunInheritance"],
     pending: [],
   },
   "docx-parse": {
     wasm: "packages/docx/src/wasm/generated/parse/docx_parse.d.ts",
     native: "bindings/docx-native/index.d.ts",
-    classes: [],
     pending: [],
   },
   "docx-query": {
     wasm: "packages/docx/src/wasm/generated/query/docx_query.d.ts",
     native: "bindings/docx-native/index.d.ts",
-    classes: [],
     pending: [],
   },
   "docx-opc": {
     wasm: "packages/docx/src/wasm/generated/opc/ooxml_opc.d.ts",
     native: "bindings/docx-native/index.d.ts",
-    classes: [],
+    pending: [],
+  },
+  "pptx-preflight": {
+    wasm: "packages/pptx/src/wasm/generated/preflight/pptx_preflight.d.ts",
+    native: "bindings/pptx-native/index.d.ts",
+    pending: [],
+  },
+  "xlsx-preflight": {
+    wasm: "packages/xlsx/src/wasm/generated/preflight/xlsx_preflight.d.ts",
+    native: "bindings/xlsx-native/index.d.ts",
     pending: [],
   },
   "docx-preflight": {
     wasm: "packages/docx/src/wasm/generated/preflight/docx_preflight.d.ts",
     native: "bindings/docx-native/index.d.ts",
-    classes: [],
     pending: [],
   },
   pptx: {
     wasm: "packages/pptx/src/wasm/generated/pptx_wasm.d.ts",
     native: "bindings/pptx-native/index.d.ts",
-    classes: ["PptxDocument", "PptxRenderer"],
     pending: [],
+  },
+  "pptx-metafile": {
+    wasm: "packages/pptx/src/wasm/generated/metafile_svg_wasm.d.ts",
+    native: "bindings/pptx-native/index.d.ts",
+    pending: ["MetafileConverter"],
   },
 };
 
 const IGNORED_FUNCTIONS = new Set([
   "free",
-  "install_panic_hook",
   "initSync",
   "default",
   "__wbg_init",
@@ -127,7 +140,7 @@ function normalizeParamType(raw: string, optional: boolean): string {
   return type;
 }
 
-export function parseParams(raw: string): ParamInfo[] {
+export function parseParams(raw: string, options: ParseOptions = {}): ParamInfo[] {
   const trimmed = raw.trim();
   if (trimmed === "") return [];
   return splitTopLevel(trimmed, ",").map((part) => {
@@ -137,7 +150,9 @@ export function parseParams(raw: string): ParamInfo[] {
     const namePart = item.slice(0, colon).trim();
     const optional = namePart.endsWith("?");
     const typeRaw = item.slice(colon + 1).trim();
-    return { type: normalizeParamType(typeRaw, optional), optional };
+    const param: ParamInfo = { type: normalizeParamType(typeRaw, optional), optional };
+    if (options.paramNames) param.name = namePart.replace(/^\.\.\./, "").replace(/\?$/, "");
+    return param;
   });
 }
 
@@ -161,7 +176,7 @@ function findClassBodies(text: string): Map<string, string> {
   return bodies;
 }
 
-function parseMember(declaration: string): MemberInfo | null {
+function parseMember(declaration: string, options: ParseOptions): MemberInfo | null {
   let item = declaration.trim().replace(/\s+/g, " ");
   if (item === "") return null;
   if (item.startsWith("[Symbol.dispose]")) return null;
@@ -171,7 +186,7 @@ function parseMember(declaration: string): MemberInfo | null {
     return {
       kind: "constructor",
       name: "constructor",
-      params: parseParams(constructor[1]),
+      params: parseParams(constructor[1], options),
       returnType: "void",
     };
   }
@@ -200,18 +215,18 @@ function parseMember(declaration: string): MemberInfo | null {
   return {
     kind,
     name: method[1],
-    params: parseParams(method[2]),
+    params: parseParams(method[2], options),
     returnType: normalizeType(method[3] ?? "void"),
   };
 }
 
-export function parseSurface(text: string): Surface {
+export function parseSurface(text: string, options: ParseOptions = {}): Surface {
   const withoutComments = text.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/.*$/gm, " ");
   const classes = new Map<string, Map<string, MemberInfo>>();
   for (const [className, body] of findClassBodies(withoutComments)) {
     const members = new Map<string, MemberInfo>();
     for (const rawDecl of splitTopLevel(body, ";").flatMap((part) => splitTopLevel(part, "\n"))) {
-      const member = parseMember(rawDecl);
+      const member = parseMember(rawDecl, options);
       if (member) members.set(member.name, member);
     }
     classes.set(className, members);
@@ -230,7 +245,7 @@ export function parseSurface(text: string): Surface {
     functions.set(name, {
       kind: "method",
       name,
-      params: parseParams(fnMatch[2]),
+      params: parseParams(fnMatch[2], options),
       returnType: normalizeType(fnMatch[3]),
     });
   }
@@ -238,7 +253,8 @@ export function parseSurface(text: string): Surface {
   if (defaultRe.test(topLevel)) {
     // default init is ignored by contract
   }
-  return { classes, functions };
+  const consts = new Set([...topLevel.matchAll(/export\s+(?:declare\s+)?const\s+(\w+)/g)].map((match) => match[1]!));
+  return { classes, functions, consts };
 }
 
 function describe(member: MemberInfo): string {
@@ -381,8 +397,9 @@ function main(): void {
   const root = join(import.meta.dir, "..");
   const wasmText = readFileSync(join(root, config.wasm), "utf8");
   const nativeText = readFileSync(join(root, config.native), "utf8");
+  const wasmSurface = parseSurface(wasmText);
   const problems = compareSurfaces(
-    parseSurface(wasmText), parseSurface(nativeText), config.classes, config.pending,
+    wasmSurface, parseSurface(nativeText), [...wasmSurface.classes.keys()], config.pending,
   );
   if (config.pending.length > 0) {
     console.log(`engine surface pending for ${format} (${config.pending.length}):`);

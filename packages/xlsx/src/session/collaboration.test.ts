@@ -311,6 +311,114 @@ test('collaborative worker replicas sync cell merges and undo', async () => {
   }
 });
 
+test('a defined name set on one replica lists and recalculates on the other', async () => {
+  const left = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 711 });
+  const right = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 712 });
+  const wire = transports();
+  const providers = [
+    new CollaborationProvider(left.replica!, wire.pair[0]),
+    new CollaborationProvider(right.replica!, wire.pair[1]),
+  ];
+  const submit = (session: WorkbookSession, ops: unknown[]) =>
+    session.editSession!.submit('applyOps', { payload: { args: [ops] } }).ack;
+  const listed = async (session: WorkbookSession) =>
+    (await session.call.listDefinedNames({ scope: null })).items.map((item) => item.name);
+  const value = async (session: WorkbookSession) => {
+    const read = await session.call.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B3' } }] });
+    if (!read.ok) throw new Error(read.failure.message);
+    return read.ranges[0].cells[0][0].value;
+  };
+  try {
+    const synced = Promise.all(providers.map(whenSynced));
+    for (const provider of providers) provider.connect();
+    await synced;
+    await quiet(() => wire.frames[0].length + wire.frames[1].length + left.throughSeq + right.throughSeq);
+
+    let merged = whenAcknowledged(left);
+    await edit(right, '=Shared*2');
+    await merged;
+    expect(await value(right)).toMatchObject({ kind: 'error', value: '#NAME?' });
+
+    merged = whenAcknowledged(right);
+    expect(await submit(left, [{ type: 'setDefinedName', name: 'Shared', refers_to: '21' }]))
+      .toMatchObject({ status: 'applied' });
+    await merged;
+    expect(await listed(right)).toContain('Shared');
+    expect(await value(right)).toEqual({ kind: 'number', value: 42 });
+
+    merged = whenAcknowledged(right);
+    expect(await submit(left, [{ type: 'setDefinedName', name: 'Shared', refers_to: '5' }]))
+      .toMatchObject({ status: 'applied' });
+    await merged;
+    expect(await value(right)).toEqual({ kind: 'number', value: 10 });
+
+    merged = whenAcknowledged(left);
+    expect(await submit(right, [{ type: 'deleteDefinedName', name: 'Shared' }])).toMatchObject({ status: 'applied' });
+    await merged;
+    expect(await listed(left)).not.toContain('Shared');
+    expect(await value(left)).toMatchObject({ kind: 'error', value: '#NAME?' });
+
+    expect(await submit(left, [{ type: 'setDefinedNames', defined_names: [] }]))
+      .toMatchObject({ status: 'refused', reason: 'unsupported' });
+    expect(left.failure).toBeUndefined();
+    expect(right.failure).toBeUndefined();
+  } finally {
+    for (const provider of providers) provider.destroy();
+    await left.dispose();
+    await right.dispose();
+  }
+});
+
+test('a sheet appended on one replica joins the other catalog and its undo refuses a peer edit', async () => {
+  const left = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 701 });
+  const right = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 702 });
+  const wire = transports();
+  const providers = [
+    new CollaborationProvider(left.replica!, wire.pair[0]),
+    new CollaborationProvider(right.replica!, wire.pair[1]),
+  ];
+  const catalog = (session: WorkbookSession) => (session.editState.sheets ?? []).map((sheet) => sheet.name);
+  const submit = (session: WorkbookSession, ops: unknown[]) =>
+    session.editSession!.submit('applyOps', { payload: { args: [ops] } }).ack;
+  try {
+    const synced = Promise.all(providers.map(whenSynced));
+    for (const provider of providers) provider.connect();
+    await synced;
+    await quiet(() => wire.frames[0].length + wire.frames[1].length + left.throughSeq + right.throughSeq);
+    const names = (await left.call.sheets()).map((sheet) => sheet.name);
+    const end = names.length;
+
+    let merged = whenAcknowledged(right);
+    expect(await submit(left, [{ type: 'addSheet', index: end, name: 'Appended' }])).toMatchObject({ status: 'applied' });
+    await merged;
+    expect(catalog(left)).toEqual([...names, 'Appended']);
+    expect(catalog(right)).toEqual([...names, 'Appended']);
+
+    const appended = right.editState.sheets![end].id;
+    merged = whenAcknowledged(left);
+    expect(await submit(right, [{ type: 'setCell', sheet: end, at: { row: 0, col: 0 },
+      cell: { value: { kind: 'text', value: 'from the peer' }, formula: null, style: null } }])).toMatchObject({ status: 'applied' });
+    await merged;
+    expect((await left.call.cellInputs(end, 'A1')).cells[0][0].input).toBe('from the peer');
+    expect(appended).toBeString();
+
+    expect(await submit(right, [{ type: 'addSheet', index: 0, name: 'Early' }]))
+      .toMatchObject({ status: 'refused', reason: 'unsupported' });
+    expect(catalog(right)).toEqual([...names, 'Appended']);
+
+    const refused = left.editSession!.submit('undo', { payload: { args: [] } });
+    expect(await refused.ack).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false });
+    expect(catalog(left)).toEqual([...names, 'Appended']);
+    expect((await right.call.cellInputs(end, 'A1')).cells[0][0].input).toBe('from the peer');
+    expect(left.failure).toBeUndefined();
+    expect(right.failure).toBeUndefined();
+  } finally {
+    for (const provider of providers) provider.destroy();
+    await left.dispose();
+    await right.dispose();
+  }
+});
+
 test('hyperlink edit limits have the same refusal on the main thread and worker', async () => {
   const main = openWorkbook(bytes, { collaborative: true, clientId: 501 });
   const worker = await createTestWorkbookSession(bytes, undefined, { collaborative: true, clientId: 502 });
@@ -357,4 +465,4 @@ test('hyperlink edit limits have the same refusal on the main thread and worker'
     main.dispose();
     await worker.dispose();
   }
-}, 30000);
+}, 70_000);

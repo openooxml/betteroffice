@@ -97,6 +97,7 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange,
   onPagedSelectionChange,
   onYrsSelectionChange,
+  onYrsPartSelectionChange,
   onViewerSelectionChange,
   onRenderedDomContextReady,
   pluginOverlays,
@@ -143,6 +144,7 @@ export function DocxEditorPagedArea({
   onCaretInput,
   onCaretInputDispatched,
   onCaretInterrupt,
+  onCutRefused,
   canvasHostRef,
   // Floating comment button
   floatingCommentBtn,
@@ -194,6 +196,7 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   onPagedSelectionChange: NonNullable<PagedEditorProps['onSelectionChange']>;
   onYrsSelectionChange: (selection: YrsToolbarSelection) => void;
+  onYrsPartSelectionChange?: PagedEditorProps['onYrsPartSelectionChange'];
   onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
   onRenderedDomContextReady:
     | ((ctx: RenderedDomContext, queries: DisplayListQueries) => void)
@@ -256,6 +259,7 @@ export function DocxEditorPagedArea({
   onCaretInput?: () => void;
   onCaretInputDispatched?: () => void;
   onCaretInterrupt?: () => void;
+  onCutRefused?: (error: Error) => void;
   /** `.canvas-pages` host element — canvas-path pointer events attach here. */
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   floatingCommentBtn: { top: number; left: number } | null;
@@ -501,6 +505,7 @@ export function DocxEditorPagedArea({
         onViewerSelectionChange={onViewerSelectionChange}
         onYrsPartSelectionChange={(part, selection) => {
           if (partEditStory(part, yrsCore.session) === partStory) setPartSelection(selection);
+          onYrsPartSelectionChange?.(part, selection);
         }}
         onRenderedDomContextReady={onRenderedDomContextReady}
         pluginOverlays={pluginOverlays}
@@ -536,6 +541,7 @@ export function DocxEditorPagedArea({
         onCaretInput={onCaretInput}
         onCaretInputDispatched={onCaretInputDispatched}
         onCaretInterrupt={onCaretInterrupt}
+        onCutRefused={onCutRefused}
         canvasHostRef={canvasHostRef}
         canvasOverlayTarget={canvasOverlayTarget}
         resolvedCommentIds={resolvedIdsForRender}

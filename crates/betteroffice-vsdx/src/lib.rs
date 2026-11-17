@@ -6,6 +6,8 @@ pub use betteroffice_fonts as fonts;
 pub use fonts::OpenOptions;
 #[cfg(not(feature = "fonts"))]
 pub use open_options::OpenOptions;
+#[cfg(feature = "raster")]
+pub use vsdx_raster::RenderedPage;
 
 use vsdx_eval::{
     DocumentReferences, Evaluation, MutationContext, MutationOutcome, Value, decide_mutation,
@@ -54,6 +56,25 @@ impl From<ResolveError> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(feature = "raster")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PngTarget {
+    pub page: usize,
+}
+
+#[cfg(feature = "raster")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderOptions {
+    pub scale: f32,
+}
+
+#[cfg(feature = "raster")]
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self { scale: 1.0 }
+    }
+}
 
 pub struct Diagram {
     package: VsdxPackage,
@@ -120,10 +141,9 @@ impl Diagram {
             .export_svg_page(&self.package, page_index)
             .map_err(|error| Error::Render(error.to_string()))
     }
-    /// Renders one diagram page to PNG at `scale` times the 96 dpi display list.
     #[cfg(feature = "raster")]
-    pub fn export_png(&self, page_index: usize, scale: f32) -> Result<vsdx_raster::RenderedPage> {
-        vsdx_raster::render_page(&self.renderer()?, &self.package, page_index, scale)
+    pub fn render_png(&self, target: PngTarget, options: &RenderOptions) -> Result<RenderedPage> {
+        vsdx_raster::render_page(&self.renderer()?, &self.package, target.page, options.scale)
             .map_err(Error::Render)
     }
     /// Applies formula edits sequentially, recomputing caches and enforcing current locks.

@@ -2,14 +2,16 @@ import {
   DOCX_CLIPBOARD_FRAGMENT_VERSION,
   clipboardFragmentHasFormatting,
   clipboardFragmentHasPictures,
+  clipboardParagraphUnits,
   validClipboardFragment,
   type DocxClipboardFragment,
   type DocxClipboardParagraph,
+  type DocxClipboardRun,
   type DocxFragmentSegment,
   type DocxTableFragment,
   type DocxTableFragmentCell,
 } from '@betteroffice/docx/yrs';
-import type { DocxClipboardRun, YrsInlineFormatDelta } from '@betteroffice/docx/yrs';
+import type { YrsInlineFormatDelta } from '@betteroffice/docx/yrs';
 
 const NBSP = '\u00a0';
 const LINE_SEP = '\u2028';
@@ -211,6 +213,13 @@ function serializeTable(table: DocxTableFragment): string {
   return html;
 }
 
+function serializeClipboardRun(run: DocxClipboardRun): string {
+  const style = spanStyleForText(run.format?.other as Record<string, unknown> | undefined, run.format);
+  const text = escapeHtml(run.text);
+  const markup = style ? `<span style="${escapeHtml(style)}">${text}</span>` : text;
+  return run.href ? `<a href="${escapeHtml(run.href)}">${markup}</a>` : markup;
+}
+
 /** HTML clipboard form of a fragment for Word, Google Docs and internal paste. */
 export function clipboardFragmentHtml(fragment: DocxClipboardFragment): string {
   const version = clipboardFragmentHasPictures(fragment) ? DOCX_CLIPBOARD_FRAGMENT_VERSION : 1;
@@ -219,22 +228,14 @@ export function clipboardFragmentHtml(fragment: DocxClipboardFragment): string {
   for (const paragraph of fragment.paragraphs) {
     for (const table of paragraph.tables ?? []) html += serializeTable(table);
     if (paragraph.inlines || paragraph.text !== '' || (paragraph.tables ?? []).length === 0) {
-      const runContent = !paragraph.inlines && paragraph.runs
-        ? paragraph.runs.map(run => {
-            const style = spanStyleForText(undefined, run.format);
-            const text = escapeHtml(run.text);
-            const styled = style ? `<span style="${escapeHtml(style)}">${text}</span>` : text;
-            return run.href ? `<a href="${escapeHtml(run.href)}">${styled}</a>` : styled;
-          }).join('')
-        : null;
-      const content = runContent ?? paragraph.inlines?.map(inline => {
-        if ('text' in inline) return escapeHtml(inline.text);
-        const image = inline.image;
+      const content = clipboardParagraphUnits(paragraph).map(unit => {
+        if ('text' in unit) return serializeClipboardRun(unit);
+        const image = unit.image;
         const dimensions = ['width', 'height'].map(key => typeof image[key] === 'number' && Number.isFinite(image[key]) && image[key] > 0
           ? ` ${key}="${image[key]}"` : '').join('');
         return `<img src="${escapeHtml(String(image.src))}" alt="${escapeHtml(typeof image.alt === 'string' ? image.alt : '')}"${dimensions}>`;
-      }).join('') ?? escapeHtml(paragraph.text);
-      html += `<p>${content}</p>`;
+      }).join('');
+      html += paragraph.runs ? `<p style="white-space:pre-wrap">${content}</p>` : `<p>${content}</p>`;
     }
   }
   html += '</div>';
@@ -942,4 +943,26 @@ export function parseClipboardHtml(html: string): DocxClipboardFragment | null {
   if (!hasRichContent) return null;
   const fragment: DocxClipboardFragment = { paragraphs: cleaned };
   return validClipboardFragment(fragment) ? fragment : null;
+}
+
+/** The rich content on the system clipboard, read through the async Clipboard API. */
+export async function readClipboardFragment(): Promise<DocxClipboardFragment | null> {
+  if (typeof navigator === 'undefined' || !navigator.clipboard || !('read' in navigator.clipboard)) return null;
+  let items: ClipboardItem[];
+  try {
+    items = await navigator.clipboard.read();
+  } catch {
+    return null;
+  }
+  for (const item of items) {
+    if (!item.types.includes('text/html')) continue;
+    let html: string;
+    try {
+      html = await (await item.getType('text/html')).text();
+    } catch {
+      return null;
+    }
+    return parseClipboardHtml(html);
+  }
+  return null;
 }

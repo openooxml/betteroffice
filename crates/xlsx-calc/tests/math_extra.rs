@@ -376,7 +376,7 @@ fn significance_roundings_absorb_binary_noise_as_excel_does() {
     assert_exact("FLOOR.PRECISE(4.42,0.01)", 4.42);
     assert_exact("CEILING.MATH(0.3,0.1)", 0.3);
     assert_exact("CEILING.PRECISE(4.42,0.01)", 4.42);
-    assert_exact("CEILING.MATH(1.000000000000001)", 2.0);
+    assert_exact("CEILING.MATH(1+1E-15)", 2.0);
 }
 
 #[test]
@@ -758,19 +758,28 @@ fn scalar_functions_lift_over_array_arguments() {
     );
 }
 
-/// (1 + 10^16)! / (1! 10^16!) is 10^16 + 1 whichever order the counts come
-/// in; the 1 must not vanish into a rounded running total.
+/// Excel 365 for Mac result: MULTINOMIAL(1E16,1) is #NUM!. excel takes the
+/// factorial of the sum, so any sum past 170 is `#NUM!` in either order,
+/// as Microsoft's MULTINOMIAL(2,3,166) example is.
 #[test]
-fn multinomial_keeps_a_small_count_beside_a_huge_one() {
-    assert_close("MULTINOMIAL(1,1E16)", 1e16);
-    assert_close("MULTINOMIAL(1E16,1)", 1e16);
-    // exact integer arithmetic: (10^16 + 2)(10^16 + 1) / 2
-    assert_close("MULTINOMIAL(2,1E16)", 5.000000000000001e31);
-    assert_close("MULTINOMIAL(1E16,2)", 5.000000000000001e31);
-    assert_close("MULTINOMIAL(2^53,1)", 9_007_199_254_740_992.0);
-    assert_close("MULTINOMIAL(1,2^53)", 9_007_199_254_740_992.0);
-    assert_exact("MULTINOMIAL(0,1E16)", 1.0);
+fn multinomial_sums_past_170_are_num() {
+    for formula in [
+        "MULTINOMIAL(1E16,1)",
+        "MULTINOMIAL(1,1E16)",
+        "MULTINOMIAL(2^53,1)",
+        "MULTINOMIAL(0,1E16)",
+        "MULTINOMIAL(2,3,166)",
+        "MULTINOMIAL(171)",
+        "MULTINOMIAL(85.9,86.9)",
+    ] {
+        assert_error(formula, ErrorValue::Num);
+    }
+    // exact integer arithmetic: 170! / (2! 3! 165!) and 169! / (85! 84!)
+    assert_close("MULTINOMIAL(2,3,165)", 11_150_342_840.0);
+    assert_exact("MULTINOMIAL(170)", 1.0);
+    assert_close("MULTINOMIAL(85.9,84.9)", 4.572_420_922_565_778e49);
     assert_error("MULTINOMIAL(-1E-200,2)", ErrorValue::Num);
+    assert_error("MULTINOMIAL(200,-1)", ErrorValue::Num);
 }
 
 /// 10^15 + 0.75 has a real fraction: FLOOR.MATH must round it down to
@@ -799,38 +808,40 @@ fn significance_roundings_keep_real_fractions_of_large_numbers() {
 /// underflows on the way.
 #[test]
 fn significance_roundings_survive_extreme_magnitudes() {
-    assert_exact("CEILING.MATH(1E308,0.1)", 1e308);
+    assert_exact("CEILING.MATH(1E307*10,0.1)", 1e308);
     assert_exact("FLOOR.PRECISE(1E300,1E-300)", 1e300);
     assert_exact("CEILING.MATH(1E-200,1E200)", 1e200);
     assert_exact("FLOOR.MATH(1E-200,1E200)", 0.0);
     assert_exact("FLOOR.MATH(-1E-200,1E200)", -1e200);
     assert_exact("CEILING.PRECISE(-1E-200,1E200)", 0.0);
-    assert_exact("CEILING.MATH(0.5,1E-308)", 0.5);
-    assert_error("CEILING.MATH(1.7E308,1E308)", ErrorValue::Num);
+    assert_exact("CEILING.MATH(0.5,1E-300*1E-8)", 0.5);
+    assert_error("CEILING.MATH(1.7E307*10,1E307*10)", ErrorValue::Num);
 }
 
+/// SECH(720) and CSCH(-730) are subnormal, which Excel 365 for Mac stores
+/// as 0; just inside the normal range the reciprocal keeps its digits.
 #[test]
-fn reciprocal_hyperbolics_do_not_underflow_to_zero_early() {
-    // mpmath 40 digits; the results are subnormal, where a double keeps
-    // about 11 significant digits
-    assert_close_in(&[], "SECH(720)", 4.06446160484e-313, 1e-10);
-    assert_close_in(&[], "SECH(-720)", 4.06446160484e-313, 1e-10);
-    assert_close_in(&[], "CSCH(-730)", -1.8452626e-317, 1e-6);
+fn reciprocal_hyperbolics_store_subnormal_results_as_zero() {
+    // 40-digit decimal arithmetic: 2 e^-700
+    assert_close_in(&[], "SECH(700)", 1.971_935_308_751_954e-304, 1e-12);
+    assert_close_in(&[], "SECH(-700)", 1.971_935_308_751_954e-304, 1e-12);
+    assert_exact("SECH(720)", 0.0);
+    assert_exact("CSCH(-730)", 0.0);
     assert_exact("SECH(800)", 0.0);
     assert_close("CSCH(1E-200)", 1e200);
-    assert_error("CSCH(1E-309)", ErrorValue::Num);
-    assert_error("COT(1E-310)", ErrorValue::Num);
+    assert_error("CSCH(1E-300*1E-9)", ErrorValue::Num);
+    assert_error("COT(1E-300*1E-10)", ErrorValue::Num);
 }
 
 #[test]
 fn sqrtpi_and_paired_sums_survive_extreme_magnitudes() {
     // mpmath 40 digits
-    assert_close("SQRTPI(1E308)", 1.772_453_850_905_516_2e154);
-    assert_close("SQRTPI(5E-324)", 3.939_737_305_158_755e-162);
+    assert_close("SQRTPI(1E307*10)", 1.772_453_850_905_516_2e154);
+    assert_close("SQRTPI(2^-1074)", 3.939_737_305_158_755e-162);
     assert_exact("SUMX2MY2(1E200,1E200)", 0.0);
-    assert_exact("SUMX2MY2(1E308,-1E308)", 0.0);
-    assert_error("SUMX2MY2(1.7E308,1E308)", ErrorValue::Num);
-    assert_error("SUMXMY2(1E308,-1E308)", ErrorValue::Num);
+    assert_exact("SUMX2MY2(1E307*10,-1E307*10)", 0.0);
+    assert_error("SUMX2MY2(1.7E307*10,1E307*10)", ErrorValue::Num);
+    assert_error("SUMXMY2(1E307*10,-1E307*10)", ErrorValue::Num);
 }
 
 #[test]
@@ -879,12 +890,12 @@ fn whole_number_limits_hold_past_2_to_the_53() {
 /// bounds that span the whole double range still draw finite numbers.
 #[test]
 fn randarray_draws_across_the_whole_double_range() {
-    let (_, _, wide) = block("RANDARRAY(20,1,-1E308,1E308)", Some(5));
+    let (_, _, wide) = block("RANDARRAY(20,1,-1E307*10,1E307*10)", Some(5));
     assert!(
         wide.iter()
             .all(|x| x.is_finite() && (-1e308..=1e308).contains(x))
     );
-    let (_, _, whole) = block("RANDARRAY(20,1,-1E308,1E308,TRUE)", Some(5));
+    let (_, _, whole) = block("RANDARRAY(20,1,-1E307*10,1E307*10,TRUE)", Some(5));
     assert!(whole.iter().all(|x| x.is_finite() && x.fract() == 0.0));
     let (_, _, big) = block("RANDARRAY(20,1,1E16,1E16+4,TRUE)", Some(5));
     assert!(big.iter().all(|x| (1e16..=1e16 + 4.0).contains(x)));

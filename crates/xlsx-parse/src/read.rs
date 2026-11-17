@@ -14,9 +14,10 @@ use xlsx_model::{
 
 use crate::formula::SharedFormulas;
 use crate::styles::parse_stylesheet;
+use crate::table_style::TableStyleInfo;
 use crate::xml::{
-    attr, collect_text, find_part, local_name, next_event, reader, resolve_entity,
-    resolve_part_path, xml_err,
+    PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_entity,
+    resolve_part_name, resolve_part_path, xml_err,
 };
 use crate::{
     MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAME_BYTES, MAX_HYPERLINKS, MAX_ROW_STYLES,
@@ -135,6 +136,7 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
+    let tables = crate::table_style::resolve_tables(tables, styles_bytes, &styles)?;
     if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
         styles.cell_xfs.push(xlsx_model::Xf::default());
     }
@@ -324,12 +326,12 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                     );
                 }
                 b"sheet" if sheets_depth.is_some_and(|sheets| depth == sheets + 1) => {
-                    let name = attr(&e, b"name")?.unwrap_or_default();
+                    let name = unescape_name(&attr(&e, b"name")?.unwrap_or_default());
                     let rid = attr(&e, b"id")?;
                     sheets.push(SheetEntry { name, rid });
                 }
                 b"definedName" => {
-                    let name = attr(&e, b"name")?.unwrap_or_default();
+                    let name = unescape_name(&attr(&e, b"name")?.unwrap_or_default());
                     let local_sheet = attr(&e, b"localSheetId")?
                         .and_then(|value| value.parse::<u32>().ok())
                         .map(SheetId);
@@ -431,14 +433,18 @@ fn collect_tables(
     worksheet_path: &str,
     sheet_rels: &BTreeMap<String, Relationship>,
     sheet: SheetId,
-    out: &mut Vec<Table>,
+    out: &mut Vec<(Table, Option<TableStyleInfo>)>,
 ) -> Result<(), ParseError> {
     let base = worksheet_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    let mut seen = PartNames::default();
     for relationship in sheet_rels.values() {
         if relationship.external || !relationship.is_table() {
             continue;
         }
-        let path = resolve_part_path(base, &relationship.target);
+        let path = resolve_part_name(base, &relationship.target);
+        if !seen.push(path.clone()) {
+            continue;
+        }
         let Some(bytes) = find_part(parts, &path) else {
             continue;
         };
@@ -452,13 +458,30 @@ fn collect_tables(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static TABLE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Table parts parsed since the last call.
+#[cfg(test)]
+pub(crate) fn take_table_parses() -> usize {
+    TABLE_PARSES.replace(0)
+}
+
 /// One `xl/tables/tableN.xml` part. `headerRowCount` defaults to 1 and
 /// `totalsRowCount` to 0, both clamped to the rows the `ref` actually spans.
-fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError> {
+fn parse_table(
+    data: &[u8],
+    sheet: SheetId,
+) -> Result<Option<(Table, Option<TableStyleInfo>)>, ParseError> {
+    #[cfg(test)]
+    TABLE_PARSES.set(TABLE_PARSES.get() + 1);
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
     let mut table: Option<Table> = None;
+    let mut style = None;
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) if local_name(&e) == b"table" && table.is_none() => {
@@ -481,7 +504,11 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError>
                     header_rows,
                     totals_rows,
                     columns: Vec::new(),
+                    style: Vec::new(),
                 });
+            }
+            Event::Start(e) if local_name(&e) == b"tableStyleInfo" && table.is_some() => {
+                style = TableStyleInfo::parse(&e)?;
             }
             Event::Start(e) if local_name(&e) == b"tableColumn" => {
                 if let Some(table) = table.as_mut() {
@@ -498,7 +525,7 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError>
             _ => {}
         }
     }
-    Ok(table)
+    Ok(table.map(|table| (table, style)))
 }
 
 fn row_count_attr(
@@ -596,21 +623,46 @@ fn collect_string_item(
     let target = *depth;
     let mut out = String::new();
     let mut runs = false;
+    let mut text: Option<(usize, String)> = None;
     loop {
         match next_event(reader, buf, depth)? {
-            Event::Start(e) if *depth == target + 1 && local_name(&e) == b"r" => runs = true,
-            Event::Text(t) => out.push_str(&t.decode().map_err(xml_err)?),
-            Event::CData(t) => out.push_str(&t.decode().map_err(xml_err)?),
+            Event::Start(e) => {
+                if *depth == target + 1 && local_name(&e) == b"r" {
+                    runs = true;
+                }
+                if text.is_none() && local_name(&e) == b"t" {
+                    text = Some((*depth, String::new()));
+                }
+            }
+            Event::Text(t) => {
+                push_item_text(&mut text, &mut out, &t.xml10_content().map_err(xml_err)?)
+            }
+            Event::CData(t) => {
+                push_item_text(&mut text, &mut out, &t.xml10_content().map_err(xml_err)?)
+            }
             Event::GeneralRef(r) => {
                 let name = r.decode().map_err(xml_err)?;
-                out.push_str(&resolve_entity(&name)?);
+                push_item_text(&mut text, &mut out, &resolve_entity(&name)?);
             }
             Event::End(_) if *depth < target => break,
+            Event::End(_) => {
+                if let Some((_, value)) = text.take_if(|(opened, _)| *depth < *opened) {
+                    out.push_str(&unescape_name(&value));
+                }
+            }
             Event::Eof => return Err(ParseError::Malformed("unexpected eof in text".into())),
             _ => {}
         }
     }
     Ok((out, runs))
+}
+
+/// Text of the open `<t>`, decoded once the element ends, or item text outside one.
+fn push_item_text(text: &mut Option<(usize, String)>, out: &mut String, value: &str) {
+    match text {
+        Some((_, pending)) => pending.push_str(value),
+        None => out.push_str(value),
+    }
 }
 
 /// What a source worksheet's cells said that the model does not keep.
@@ -664,6 +716,7 @@ fn parse_worksheet(
     let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
     let mut alternate_depth: usize = 0;
+    let mut seen_view = false;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -779,7 +832,19 @@ fn parse_worksheet(
                             .is_some_and(|value| is_truthy(&value)),
                         zero_height: attr(&e, b"zeroHeight")?
                             .is_some_and(|value| is_truthy(&value)),
+                        default_col_width: attr(&e, b"defaultColWidth")?
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .filter(|w| w.is_finite() && (0.0..=MAX_COL_WIDTH_CHARS).contains(w)),
+                        base_col_width: attr(&e, b"baseColWidth")?
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .filter(|w| f64::from(*w) <= MAX_COL_WIDTH_CHARS),
+                        ..sheet.format
                     };
+                }
+                b"sheetView" if !seen_view => {
+                    seen_view = true;
+                    sheet.format.hide_gridlines = attr(&e, b"showGridLines")?
+                        .is_some_and(|value| matches!(value.as_str(), "0" | "false"));
                 }
                 _ => {}
             },
@@ -931,13 +996,13 @@ fn parse_conditional_formats(
                 formula
                     .as_mut()
                     .unwrap()
-                    .push_str(&t.decode().map_err(xml_err)?);
+                    .push_str(&t.xml10_content().map_err(xml_err)?);
             }
             Event::CData(t) if formula.is_some() => {
                 formula
                     .as_mut()
                     .unwrap()
-                    .push_str(&t.decode().map_err(xml_err)?);
+                    .push_str(&t.xml10_content().map_err(xml_err)?);
             }
             Event::GeneralRef(r) if formula.is_some() => {
                 let name = r.decode().map_err(xml_err)?;
@@ -948,7 +1013,9 @@ fn parse_conditional_formats(
                     rule.formulas.push(formula);
                 }
             }
-            Event::End(e) if e.name().local_name().as_ref() == b"cfRule" && rule.is_some() => {
+            Event::End(e)
+                if e.name().local_name().as_ref() == b"cfRule" && depth == 2 && rule.is_some() =>
+            {
                 let mut rule = rule.take().unwrap();
                 rule.raw_xml = std::str::from_utf8(&data[rule_start.min(after)..after])
                     .ok()
@@ -959,6 +1026,7 @@ fn parse_conditional_formats(
             }
             Event::End(e)
                 if e.name().local_name().as_ref() == b"conditionalFormatting"
+                    && depth == 1
                     && group.is_some() =>
             {
                 groups.push(group.take().unwrap());
@@ -1187,7 +1255,7 @@ fn finalize_cell(
             None => CellValue::Empty,
         },
         Some("str") => CellValue::Text {
-            value: c.value_text.unwrap_or_default(),
+            value: unescape_name(&c.value_text.unwrap_or_default()),
         },
         Some("b") => CellValue::Bool {
             value: c.value_text.as_deref() == Some("1"),

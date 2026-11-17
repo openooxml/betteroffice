@@ -63,6 +63,25 @@ function firstRange(session: { paragraphs(story: string): Array<{ paraId: string
   return { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 1 } };
 }
 
+test('facade selection is null without throwing after a peer deletes the selected header story', async () => {
+  const session = own(await createYrsSession({ clientId: clientId() }));
+  const peer = own(await createYrsSession({ clientId: clientId() }));
+  const story = 'hf:rIdH1';
+  const [paraId] = session.loadStories([{ storyId: story, paragraphs: [{ text: 'Header' }] }])[story]!;
+  const caret = { story, paraId: paraId!, offset: 2 };
+  session.setSelection(caret);
+  expect(session.selection()).toEqual({ anchor: caret, head: caret });
+  peer.loadState(session.encodeState());
+  expect(peer.hasStory(story)).toBe(true);
+
+  peer.deleteStory(story);
+  session.applyUpdate(peer.encodeStateAsUpdate(session.encodeStateVector()));
+
+  expect(session.hasStory(story)).toBe(false);
+  expect(() => session.selection()).not.toThrow();
+  expect(session.selection()).toBeNull();
+});
+
 test('r1_resident_listener_reads_state_during_delivery', async () => {
   const engine = await residentFromState(await stateFor('alpha'));
   const errors: unknown[] = [];

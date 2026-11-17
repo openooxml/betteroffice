@@ -51,7 +51,7 @@ pub fn parse_header_footer(
 ) -> Result<HeaderFooter, ParseError> {
     let expected = if is_header { "hdr" } else { "ftr" };
     let content = if root.local_name() == expected {
-        parser.parse_blocks(root, 0, true)?
+        parser.parse_header_footer_blocks(root, is_header)?
     } else {
         Vec::new()
     };

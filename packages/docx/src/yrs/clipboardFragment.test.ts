@@ -217,17 +217,74 @@ describe('readClipboardSlice', () => {
     const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 8 });
     expect(slice.text).toBe('Hi\n' + 'a\tb\nc\td\n' + 'end\n');
     expect(slice.fragment?.paragraphs).toEqual([
-      { text: 'Hi' },
-      { tables: expect.any(Array), text: 'end' },
+      { text: 'Hi', runs: [{ text: 'Hi', format: { other: {} } }] },
+      { tables: expect.any(Array), text: 'end', runs: [{ text: 'end', format: { other: {} } }] },
       { text: '' },
     ]);
     expect(slice.fragment?.paragraphs[1]?.tables?.[0]?.rows).toHaveLength(2);
   });
 
-  test('returns no fragment when the range holds no table', () => {
+  test('reads plain text as runs and an empty selection as no fragment', () => {
     const reader = fakeReader({ body: [textSegment('Hi'), pilcrowSegment('p0')] }, {});
-    const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 3 });
-    expect(slice).toEqual({ text: 'Hi\n', fragment: null });
+    expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 3 })).toEqual({
+      text: 'Hi\n', fragment: { paragraphs: [{ text: 'Hi', runs: [{ text: 'Hi', format: { other: {} } }] }, { text: '' }] },
+    });
+    expect(readClipboardSlice(reader, { story: 'body', from: 2, to: 3 }).fragment).toBeNull();
+  });
+
+  test('keeps run formatting of a partial selection and leaves revisions and links out of the format', () => {
+    const reader = fakeReader({ body: [
+      textSegment('bold', { bold: true, ins: { id: 1 }, rPrChange: [] }),
+      textSegment('link', { hyperlink: { href: 'https://example.test/a', tooltip: 'Tip', rId: 'rId9' }, italic: true }),
+      pilcrowSegment('p0'),
+    ] }, {});
+    expect(readClipboardSlice(reader, { story: 'body', from: 2, to: 6 }).fragment?.paragraphs).toEqual([{
+      text: 'ldli',
+      runs: [
+        { text: 'ld', format: { other: { bold: true } } },
+        { text: 'li', format: { other: { italic: true } }, href: 'https://example.test/a', tooltip: 'Tip' },
+      ],
+    }]);
+  });
+
+  test('resolves document references to direct formatting', () => {
+    const reader = fakeReader({ body: [
+      textSegment('a', {
+        runStyle: { styleId: 'Fancy' },
+        textColor: { rgb: null, themeColor: 'accent1', themeTint: null, themeShade: '80', inheritedHyperlink: true },
+        fontFamily: { ascii: 'Calibri', hAnsi: 'Calibri', eastAsia: null, cs: null, asciiTheme: 'minorHAnsi' },
+        underline: { style: 'single', color: null, inheritedHyperlink: true },
+      }),
+      textSegment('b', { textColor: { rgb: null, themeColor: 'text1', themeTint: '33', themeShade: null } }),
+      textSegment('c', { textColor: { rgb: '00FF00', themeColor: 'unknownSlot' } }),
+    ] }, {});
+    const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 3 }, { accent1: '102030', dk1: '000000' });
+    expect(slice.fragment?.paragraphs[0]?.runs?.map(run => run.format?.other)).toEqual([
+      { textColor: { rgb: '081018' }, fontFamily: { ascii: 'Calibri', hAnsi: 'Calibri' }, underline: { style: 'single' } },
+      { textColor: { rgb: 'CCCCCC' } },
+      { textColor: { rgb: '00FF00' } },
+    ]);
+    expect(validClipboardFragment(slice.fragment)).toBe(true);
+  });
+
+  test('drops a link scheme a paste would refuse but keeps the text', () => {
+    const reader = fakeReader({ body: [textSegment('x', { hyperlink: { href: 'javascript:alert(1)' }, bold: true })] }, {});
+    expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 1 }).fragment?.paragraphs[0]?.runs).toEqual([
+      { text: 'x', format: { other: { bold: true } } },
+    ]);
+  });
+
+  test('text past the fragment limits copies as plain text only, a table keeps its fragment without runs', () => {
+    const many = Array.from({ length: 1001 }, (_, index) => [textSegment('x'), pilcrowSegment(`p${index}`)]).flat();
+    const plain = readClipboardSlice(fakeReader({ body: many }, {}), { story: 'body', from: 0, to: 2002 });
+    expect(plain.fragment).toBeNull();
+    expect(plain.text.length).toBe(2002);
+    const table = payload2x2();
+    const overRuns = Array.from({ length: 100_001 }, () => textSegment('x'));
+    const mixed = readClipboardSlice(fakeReader({ ...stories2x2(), body: [...overRuns, embedSegment('table', table)] }, { 'body:0': table }),
+      { story: 'body', from: 0, to: 100_002 });
+    expect(mixed.fragment?.paragraphs.some(paragraph => paragraph.runs)).toBe(false);
+    expect(mixed.fragment?.paragraphs.some(paragraph => paragraph.tables?.length)).toBe(true);
   });
 
   test('maps tabs, breaks and other embeds to paragraph structure', () => {
@@ -246,9 +303,9 @@ describe('readClipboardSlice', () => {
     );
     const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 7 });
     expect(slice.fragment?.paragraphs).toEqual([
-      { text: 'a\t' },
-      { text: 'x' },
-      { text: 'y' },
+      { text: 'a\t', runs: [{ text: 'a', format: { other: {} } }, { text: '\t', format: { other: {} } }] },
+      { text: 'x', runs: [{ text: 'x', format: { other: {} } }] },
+      { text: 'y', runs: [{ text: 'y', format: { other: {} } }] },
       { tables: expect.any(Array), text: '' },
       { text: '' },
     ]);
@@ -407,6 +464,15 @@ describe('validClipboardFragment rust parity', () => {
     expect(validClipboardFragment(tableFragment(rows, []))).toBe(true);
   });
 
+  test('rejects reserved run attributes in table format deltas', () => {
+    for (const key of ['ins', 'del', 'hyperlink', 'rPrChange']) {
+      for (const value of [null, [{ info: { author: 'Forged' } }]]) {
+        const fragment = tableFragment([{ trPr: {}, cells: [cell({}, { other: { [key]: value } })] }]);
+        expect(validClipboardFragment(fragment)).toBe(false);
+      }
+    }
+  });
+
   test('rejects mistyped format delta values', () => {
     const withFormat = (format: Record<string, unknown>): unknown =>
       tableFragment([{ trPr: {}, cells: [cell({}, format)] }]);
@@ -491,6 +557,9 @@ describe('applyClipboardFragment', () => {
           },
         };
       },
+      clearFormatting: () => { calls.push('clear'); },
+      formatRange: (_range: unknown, delta: unknown) => { calls.push(`format:${JSON.stringify(delta)}`); },
+      setHyperlink: (_range: unknown, link: unknown) => { calls.push(`link:${JSON.stringify(link)}`); },
       insertTableFragment: (at: YrsLoc) => {
         calls.push('table');
         return {
@@ -509,6 +578,58 @@ describe('applyClipboardFragment', () => {
     };
     return engine as unknown as ClipboardPasteEngine;
   }
+
+  test('a copied run replaces inherited formatting, then gets its own and its link', () => {
+    const calls: string[] = [];
+    applyClipboardFragment(fakeEngine(calls), { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 0 } }, {
+      paragraphs: [{ text: 'ab', runs: [
+        { text: 'a', format: { other: {} } },
+        { text: 'b', format: { other: { bold: true } }, href: 'https://example.test', tooltip: 'Tip' },
+      ] }],
+    });
+    expect(calls).toEqual([
+      'text:a', 'clear',
+      'text:b', 'clear', 'format:{"other":{"bold":true}}', 'link:{"href":"https://example.test","tooltip":"Tip"}',
+    ]);
+  });
+
+  test('a run with only typed formatting keeps what it inherits', () => {
+    const calls: string[] = [];
+    applyClipboardFragment(fakeEngine(calls), { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 0 } }, {
+      paragraphs: [{ text: 'a', runs: [{ text: 'a', format: { italic: true } }] }],
+    });
+    expect(calls).toEqual(['text:a', 'format:{"italic":true}']);
+  });
+
+  test('a pasted picture loses keys the engine reserves before anything is deleted', () => {
+    const calls: string[] = [];
+    const images: unknown[] = [];
+    const engine = { ...fakeEngine(calls), insertImage: (at: YrsLoc, image: unknown) => {
+      images.push(image);
+      return { revisionId: null, range: { story: at.story, start: at, end: { paraId: at.paraId, offset: at.offset + 1 } } };
+    } } as unknown as ClipboardPasteEngine;
+    const image = { src: 'data:image/png;base64,AA==', alt: 'a', paraId: 'p0', ooxmlParaId: 'x', sourceParaId: 'y', paraOrigin: 'z',
+      content: [{ kind: 'sdt' }], value: 'v', sdtType: 'text', propertiesJson: '{}' };
+    applyClipboardFragment(engine, { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 1 } },
+      { paragraphs: [{ text: '', inlines: [{ image }] }] });
+    expect(images).toEqual([{ src: 'data:image/png;base64,AA==', alt: 'a' }]);
+  });
+
+  test('runs interleave with pictures in order', () => {
+    const calls: string[] = [];
+    const engine = { ...fakeEngine(calls), insertImage: (at: YrsLoc) => {
+      calls.push('image');
+      return { revisionId: null, range: { story: at.story, start: at, end: { paraId: at.paraId, offset: at.offset + 1 } } };
+    } } as unknown as ClipboardPasteEngine;
+    applyClipboardFragment(engine, { story: 'body', start: { paraId: 'p', offset: 0 }, end: { paraId: 'p', offset: 0 } }, {
+      paragraphs: [{
+        text: 'ab',
+        inlines: [{ text: 'a' }, { image: { src: 'data:image/png;base64,AA==' } }, { text: 'b' }],
+        runs: [{ text: 'a', format: { other: { bold: true } } }, { text: 'b', format: { other: { italic: true } } }],
+      }],
+    });
+    expect(calls).toEqual(['text:a', 'clear', 'format:{"other":{"bold":true}}', 'image', 'text:b', 'clear', 'format:{"other":{"italic":true}}']);
+  });
 
   test('deletes an expanded range, then replays tables, text and splits', () => {
     const calls: string[] = [];
@@ -636,7 +757,8 @@ describe('picture clipboard fragments', () => {
   test('mixed copy preserves text and picture order', () => {
     const reader = fakeReader({ body: [textSegment('ab'), embedSegment('image', { src }), textSegment('cd'), pilcrowSegment('p0')] }, {});
     expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 5 })).toEqual({
-      text: 'abcd', fragment: { paragraphs: [{ text: 'abcd', inlines: [{ text: 'ab' }, { image: { src } }, { text: 'cd' }] }] },
+      text: 'abcd', fragment: { paragraphs: [{ text: 'abcd', inlines: [{ text: 'ab' }, { image: { src } }, { text: 'cd' }],
+        runs: [{ text: 'ab', format: { other: {} } }, { text: 'cd', format: { other: {} } }] }] },
     });
   });
 
@@ -705,7 +827,7 @@ test('picture copy rejects unrepresentable visible embeds in either order', () =
       const other = embedSegment(kind);
       const reader = fakeReader({ body: first ? [image, other] : [other, image] }, {});
       expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
-      expect(readClipboardSlice(reader, { story: 'body', from: first ? 1 : 0, to: first ? 2 : 1 })).toEqual({ text: '', fragment: null });
+      expect(readClipboardSlice(reader, { story: 'body', from: first ? 1 : 0, to: first ? 2 : 1 })).toEqual({ text: '', fragment: null, leftOut: [kind] });
     }
   }
 });
@@ -715,7 +837,7 @@ for (const objectKind of ['chart', 'shape', 'image']) {
     for (const controlKind of [null, 'sdt', 'blockSdt']) {
       test(`picture copy rejects ${objectKind} in a table cell at depth ${depth} through ${controlKind ?? 'no control'}`, () => {
         const image = { src: 'data:image/png;base64,AA==' };
-        const table = (story: string) => ({ grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
+        const table = (story: string) => ({ tblPr: {}, grid: [2000], rows: [{ cells: [{ story, tcPr: {} }] }] });
         const stories: Record<string, YrsStorySegment[]> = {};
         for (let level = 0; level < depth; level++) stories[`cell${level}`] = [embedSegment('table', table(`cell${level + 1}`))];
         const object = embedSegment(objectKind, image);
@@ -765,7 +887,8 @@ test('picture copy preserves text-only content controls and nested text controls
   const slice = readClipboardSlice(reader, { story: 'body', from: 0, to: 2 });
   expect(slice.text).toBe('before\tafter\nend');
   expect(slice.fragment?.paragraphs).toEqual([
-    { text: 'before\tafter', inlines: [{ image }, { text: 'before\tafter' }] }, { text: 'end' },
+    { text: 'before\tafter', inlines: [{ image }, { text: 'before\tafter' }], runs: [{ text: 'before\tafter', format: { other: {} } }] },
+    { text: 'end', runs: [{ text: 'end', format: { other: {} } }] },
   ]);
   const block = fakeReader({ body: [embedSegment('image', image), embedSegment('blockSdt', { story: 'control' })],
     control: [textSegment('block'), embedSegment('sdt', { content: [{ kind: 'text', text: ' text' }] }), pilcrowSegment('pc')],
@@ -778,7 +901,9 @@ test('picture copy rejects content controls containing nested pictures and other
   for (const controlKind of ['sdt', 'blockSdt']) {
     for (const objectKind of ['image', 'chart', 'shape', 'table', 'unknown']) {
       for (const nested of [false, true]) {
-        const object = { kind: objectKind, payload: { src: 'data:image/png;base64,AA==' } };
+        const object = { kind: objectKind, payload: objectKind === 'table'
+          ? { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'tableCell', tcPr: {} }] }] }
+          : { src: 'data:image/png;base64,AA==' } };
         const content = [{ kind: 'text', text: 'kept' }, ...(nested ? [{ kind: 'sdt', payload: { content: [object] } }] : [object])];
         const payload = controlKind === 'sdt' ? { content } : { story: 'control' };
         const child = nested ? embedSegment('sdt', { content: [object] }) : embedSegment(objectKind, object.payload);
@@ -788,7 +913,7 @@ test('picture copy rejects content controls containing nested pictures and other
         expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
         const plain = readClipboardSlice(reader, { story: 'body', from: 1, to: 2 });
         expect(plain.text).toContain('kept');
-        expect(plain.fragment).toBeNull();
+        expect(plain.fragment?.paragraphs.every(paragraph => !paragraph.inlines && !paragraph.tables?.length)).toBe(true);
       }
     }
   }
@@ -799,5 +924,219 @@ test('picture copy rejects content controls beyond the nested text depth limit',
   for (let depth = 0; depth < 10; depth += 1) payload = { content: [{ kind: 'sdt', payload }] };
   const reader = fakeReader({ body: [embedSegment('image', { src: 'data:image/png;base64,AA==' }), embedSegment('sdt', payload)] }, {});
   expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 2 })).toThrow();
-  expect(readClipboardSlice(reader, { story: 'body', from: 1, to: 2 })).toEqual({ text: 'deep', fragment: null });
+  expect(readClipboardSlice(reader, { story: 'body', from: 1, to: 2 })).toEqual({
+    text: 'deep', fragment: { paragraphs: [{ text: 'deep', runs: [{ text: 'deep', format: { other: {} } }] }] }, leftOut: ['sdt'],
+  });
+});
+
+describe('validClipboardFragment runs', () => {
+  const run = (patch: Record<string, unknown>) => ({ paragraphs: [{ text: 'a', runs: [{ text: 'a', ...patch }] }] });
+  const other = (attributes: Record<string, unknown>) => run({ format: { other: attributes } });
+
+  test('accepts the formatting a copy writes', () => {
+    expect(validClipboardFragment(other({
+      bold: true, snapToGrid: false, highlight: 'yellow', underline: { style: 'single', color: 'FF0000' },
+      textColor: { rgb: 'FF0000' }, fontSize: { size: 36, sizeCs: 36 }, fontFamily: { ascii: 'Courier New', hAnsi: 'Courier New' },
+      characterSpacing: { spacing: 20 }, strike: { double: false },
+    }))).toBe(true);
+    expect(validClipboardFragment(run({ href: 'mailto:a@example.test', tooltip: 'Mail' }))).toBe(true);
+    expect(validClipboardFragment(run({ href: '#heading' }))).toBe(true);
+  });
+
+  test('refuses attributes outside the allow-list and references into another document', () => {
+    for (const key of ['ins', 'del', 'hyperlink', 'rPrChange', 'runStyle', 'modernTextEffects', 'fieldResult', '__proto__x', 'unknown']) {
+      expect(validClipboardFragment(other({ [key]: true }))).toBe(false);
+    }
+    expect(validClipboardFragment(other({ textColor: { themeColor: 'accent1' } }))).toBe(false);
+    expect(validClipboardFragment(other({ fontFamily: { asciiTheme: 'minorHAnsi' } }))).toBe(false);
+    expect(validClipboardFragment(JSON.parse('{"paragraphs":[{"text":"a","runs":[{"text":"a","format":{"other":{"__proto__":{"bold":true}}}}]}]}'))).toBe(false);
+  });
+
+  test('refuses hostile attribute values', () => {
+    for (const value of ['<w:evil/>', '"><script>', 'a'.repeat(129), '']) {
+      expect(validClipboardFragment(other({ fontFamily: { ascii: value } }))).toBe(false);
+      expect(validClipboardFragment(other({ highlight: value }))).toBe(false);
+    }
+    for (const size of [Number.NaN, Number.POSITIVE_INFINITY, 1e9, '36', {}]) {
+      expect(validClipboardFragment(other({ fontSize: { size } }))).toBe(false);
+    }
+    expect(validClipboardFragment(other({ bold: 'true' }))).toBe(false);
+    expect(validClipboardFragment(other({ snapToGrid: true }))).toBe(false);
+    expect(validClipboardFragment(other({ underline: {} }))).toBe(false);
+    expect(validClipboardFragment(other({ underline: { style: { nested: true } } }))).toBe(false);
+  });
+
+  test('refuses hostile links and shapes', () => {
+    for (const href of ['javascript:alert(1)', 'data:text/html,x', 'file:///etc/passwd', 'https://a b', `https://${'a'.repeat(8192)}`, '', 7]) {
+      expect(validClipboardFragment(run({ href }))).toBe(false);
+    }
+    expect(validClipboardFragment(run({ tooltip: 't'.repeat(1025) }))).toBe(false);
+    expect(validClipboardFragment({ paragraphs: [{ text: 'a', runs: [] }] })).toBe(false);
+    expect(validClipboardFragment({ paragraphs: [{ text: 'ab', runs: [{ text: 'a' }] }] })).toBe(false);
+    expect(validClipboardFragment({ paragraphs: [{ text: 'a', runs: 'a' }] })).toBe(false);
+    expect(validClipboardFragment({ paragraphs: [{ text: 'a\nb', runs: [{ text: 'a\nb' }] }] })).toBe(false);
+    expect(validClipboardFragment({ paragraphs: [{ text: 'ab', inlines: [{ text: 'ab' }], runs: [{ text: 'a' }, { text: 'b' }] }] })).toBe(false);
+  });
+
+  test('refuses typed formatting on runs, which only carry allow-listed run attributes', () => {
+    for (const format of [{ language: 'bad' }, { language: { latin: 'en_US' } }, { bold: true }, { color: { rgb: 'zz' } }, { highlight: 'x' }, { other: { bold: true }, italic: true }]) {
+      expect(validClipboardFragment(run({ format }))).toBe(false);
+    }
+    expect(validClipboardFragment(other({ language: { latin: 'en-US', eastAsia: 'ja-JP' } }))).toBe(true);
+    for (const tag of ['en_US', 'e', 'en US', 'toolongtag1', 'x'.repeat(40)]) {
+      expect(validClipboardFragment(other({ language: { latin: tag } }))).toBe(false);
+    }
+  });
+
+  test('refuses unknown and malformed typed keys in table cell formats', () => {
+    const cell = (format: Record<string, unknown>) => ({ paragraphs: [{ text: '', tables: [{ tblPr: {}, grid: [], rows: [{ trPr: {}, cells: [{ tcPr: {}, content: [{ kind: 'text', text: 'a', format }, { kind: 'pilcrow' }] }] }] }] }] });
+    expect(validClipboardFragment(cell({ bold: true }))).toBe(true);
+    expect(validClipboardFragment(cell({ language: 'bad' }))).toBe(false);
+    expect(validClipboardFragment(cell({ language: { latin: 'en-US' } }))).toBe(true);
+    expect(validClipboardFragment(cell({ unknownKey: true }))).toBe(false);
+  });
+
+  test('refuses malformed Unicode in run text and link metadata', () => {
+    expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: '\ud800' }))).toBe(false);
+    expect(validClipboardFragment(run({ href: 'https://example.test/\udc00' }))).toBe(false);
+    expect(validClipboardFragment({ paragraphs: [{ text: 'a\ud800', runs: [{ text: 'a\ud800' }] }] })).toBe(false);
+    expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: 'ok \ud83d\ude00' }))).toBe(true);
+    expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: '' }))).toBe(false);
+  });
+
+  test('a copy drops a malformed tooltip but keeps the link', () => {
+    const reader = fakeReader({ body: [textSegment('x', { hyperlink: { href: 'https://example.test', tooltip: '\ud800' } })] }, {});
+    expect(readClipboardSlice(reader, { story: 'body', from: 0, to: 1 }).fragment?.paragraphs[0]?.runs).toEqual([
+      { text: 'x', format: { other: {} }, href: 'https://example.test' },
+    ]);
+  });
+
+  test('refuses attribute values Word would not open', () => {
+    for (const attributes of [
+      { underline: { style: 'Evil' } }, { underline: { style: 'single', color: 'red' } }, { highlight: 'orange' },
+      { fontSize: { size: 0 } }, { fontSize: { size: -4 } }, { fontSize: { size: 21.5 } }, { characterSpacing: { scale: 0 } },
+      { emphasisMark: { type: 'star' } }, { textEffect: { effect: 'flame' } }, { textColor: { rgb: '12345' } },
+    ]) expect(validClipboardFragment(other(attributes))).toBe(false);
+    expect(validClipboardFragment(other({ highlight: '#A1B2C3', underline: { style: 'wave', color: 'auto' }, characterSpacing: { spacing: -20, position: 6 } }))).toBe(true);
+  });
+
+  test('refuses run keys a paste would misread', () => {
+    for (const extra of [{ image: null }, { image: { src: 'data:image/png;base64,AA==' } }, { kind: 'text' }, { tables: [] }]) {
+      expect(validClipboardFragment(run(extra))).toBe(false);
+    }
+  });
+
+  test('refuses characters XML cannot hold in run text and link metadata', () => {
+    for (const bad of ['\u0001', '\u000b', '\ufffe', '\uffff', '\u0000']) {
+      expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: `a${bad}` }))).toBe(false);
+      expect(validClipboardFragment(run({ href: `https://example.test/${bad}` }))).toBe(false);
+      expect(validClipboardFragment({ paragraphs: [{ text: `a${bad}`, runs: [{ text: `a${bad}` }] }] })).toBe(false);
+    }
+    expect(validClipboardFragment(run({ href: 'https://example.test', tooltip: 'tab\there' }))).toBe(true);
+  });
+
+  test('refuses malformed or XML-illegal strings anywhere in the payload', () => {
+    const src = 'data:image/png;base64,AA==';
+    for (const fragment of [
+      { paragraphs: [{ text: 'a\u0001' }] },
+      { paragraphs: [{ text: 'a\ud800' }] },
+      { paragraphs: [{ text: 'a', inlines: [{ text: 'a\u0001' }] }] },
+      { paragraphs: [{ text: '', inlines: [{ image: { src, alt: '\ud800' } }] }] },
+      { paragraphs: [{ text: '', inlines: [{ image: { src, alt: 'x\uffff' } }] }] },
+      { paragraphs: [{ text: '', inlines: [{ image: { src, ['k\ud800']: 1 } }] }] },
+    ]) expect(validClipboardFragment(fragment)).toBe(false);
+    expect(validClipboardFragment({ paragraphs: [{ text: '', inlines: [{ image: { src, alt: 'ok \ud83d\ude00' } }] }] })).toBe(true);
+    expect(validClipboardFragment({ paragraphs: [{ text: 'tab\there' }] })).toBe(true);
+  });
+
+  test('refuses more runs than the budget', () => {
+    const runs = Array.from({ length: 100_001 }, () => ({ text: 'a' }));
+    expect(validClipboardFragment({ paragraphs: [{ text: 'a'.repeat(runs.length), runs }] })).toBe(false);
+  });
+});
+
+describe('readClipboardSlice leftOut', () => {
+  const span = (segments: YrsStorySegment[]) => segments.reduce((sum, segment) => sum + (segment.kind === 'text' ? segment.text.length : 1), 0);
+  const read = (segments: YrsStorySegment[], from = 0, to = span(segments), stories: Record<string, YrsStorySegment[]> = {}) =>
+    readClipboardSlice(fakeReader({ ...stories, body: segments }, {}), { story: 'body', from, to });
+
+  test('names each selected object the fragment cannot carry', () => {
+    for (const kind of ['noteRef', 'shape', 'chart', 'opaqueDrawing', 'horizontalRule', 'pageBreak', 'columnBreak', 'opaque', 'field', 'unknown']) {
+      expect(read([textSegment('ab'), embedSegment(kind), textSegment('cd'), pilcrowSegment('p0')]).leftOut).toEqual([kind]);
+    }
+  });
+
+  test('names equations and content controls, which come back as bare text', () => {
+    expect(read([textSegment('ab'), embedSegment('math', { plainText: 'x=1' }), pilcrowSegment('p0')]).leftOut).toEqual(['math']);
+    expect(read([textSegment('ab'), embedSegment('sdt', { content: [{ kind: 'text', text: 'SDT' }] }), pilcrowSegment('p0')]).leftOut).toEqual(['sdt']);
+    expect(read([embedSegment('blockSdt', { story: 'control' })], 0, 1, { control: [textSegment('kept'), pilcrowSegment('pc')] }).leftOut).toEqual(['blockSdt']);
+  });
+
+  test('names each kind once in selection order', () => {
+    expect(read([embedSegment('chart'), embedSegment('noteRef'), embedSegment('chart'), pilcrowSegment('p0')]).leftOut).toEqual(['chart', 'noteRef']);
+  });
+
+  test('names objects inside a selected table', () => {
+    const table = { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'cell', tcPr: {} }] }] };
+    expect(read([embedSegment('table', table), pilcrowSegment('p0')], 0, 2, { cell: [textSegment('a'), embedSegment('noteRef'), pilcrowSegment('pc')] }).leftOut)
+      .toEqual(['noteRef']);
+  });
+
+  test('names a column break the selected paragraph records between its runs', () => {
+    const boundaries = (type: string) => ({ _originalRunBoundaries: [{ text: 'ALPHA before ' }, { text: '', breaks: [{ offset: 0, type }] }, { text: ' after ALPHA' }] });
+    const body = (type: string) => [textSegment('ALPHA before  after ALPHA'), pilcrowSegment('p0', boundaries(type)), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(body('column'), 0, 25).leftOut).toEqual(['columnBreak']);
+    expect(read(body('column'), 0, 26).leftOut).toEqual(['columnBreak']);
+    expect(read(body('column'), 26, 31).leftOut).toBeUndefined();
+    expect(read(body('column'), 0, 5).leftOut).toEqual(['columnBreak']);
+    expect(read(body('page'), 0, 25).leftOut).toBeUndefined();
+  });
+
+  test('names a column break typing moved away from its recorded offset wherever a cut touches its paragraph', () => {
+    const recorded = { _originalRunBoundaries: [{ text: 'ALPHA before', breaks: [{ offset: 6, type: 'column' }] }] };
+    const body = [textSegment('TYPEDALPHA before'), pilcrowSegment('p0', recorded), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(body, 0, 2).leftOut).toEqual(['columnBreak']);
+    expect(read(body, 10, 13).leftOut).toEqual(['columnBreak']);
+    expect(read(body, 18, 21).leftOut).toBeUndefined();
+  });
+
+  test('names a column break unit after a paragraph holding a hyperlink or a field, which records no run boundaries', () => {
+    const link = [textSegment('see '), textSegment('link', { link: { href: 'https://example.com' } }), pilcrowSegment('p0'),
+      embedSegment('columnBreak'), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(link, 0, 3).leftOut).toEqual(['columnBreak']);
+    expect(read(link, 10, 13).leftOut).toBeUndefined();
+    const field = [textSegment('page '), embedSegment('field', { displayText: '1' }), pilcrowSegment('p0'),
+      embedSegment('columnBreak'), textSegment('BRAVO'), pilcrowSegment('p1')];
+    expect(read(field, 0, 3).leftOut).toEqual(['columnBreak']);
+    expect(read(field, 8, 11).leftOut).toBeUndefined();
+  });
+
+  test('names a column break a table cell records when the cut takes the table', () => {
+    const table = { tblPr: {}, grid: [2000], rows: [{ trPr: {}, cells: [{ story: 'cell', tcPr: {} }] }] };
+    const cell = [textSegment('ab'), pilcrowSegment('pc', { _originalRunBoundaries: [{ text: 'ab', breaks: [{ offset: 1, type: 'column' }] }] })];
+    expect(read([embedSegment('table', table), pilcrowSegment('p0')], 0, 2, { cell }).leftOut).toEqual(['columnBreak']);
+  });
+
+  test('names a column break a selected cell range records', () => {
+    const stories = stories2x2();
+    stories.c11 = [textSegment('d'), pilcrowSegment('p11', { _originalRunBoundaries: [{ text: 'd', breaks: [{ offset: 0, type: 'column' }] }] })];
+    const reader = fakeReader(stories, { 'body:0': payload2x2() });
+    const cells = (row: number, column: number) => readClipboardSlice(reader, {
+      cells: { anchor: { story: 'body', tableIndex: 0, row: 0, column: 0 }, head: { story: 'body', tableIndex: 0, row, column } },
+    });
+    expect(cells(1, 1).leftOut).toEqual(['columnBreak']);
+    expect(cells(0, 1).leftOut).toBeUndefined();
+  });
+
+  test('names what a picture selection cannot carry in its copy error', () => {
+    const reader = fakeReader({ body: [embedSegment('image', { src: 'data:image/png;base64,AA==' }), embedSegment('chart'), pilcrowSegment('p0')] }, {});
+    expect(() => readClipboardSlice(reader, { story: 'body', from: 0, to: 3 })).toThrow('Picture selection contains unsupported clipboard objects: chart');
+  });
+
+  test('leaves the report out for text and everything the fragment carries', () => {
+    const image = { src: 'data:image/png;base64,AA==' };
+    expect(read([textSegment('ab'), embedSegment('tab'), embedSegment('break'), embedSegment('bookmarkStart'), embedSegment('commentRangeStart'),
+      embedSegment('field', { displayText: 'link' }), embedSegment('image', image), pilcrowSegment('p0')]).leftOut).toBeUndefined();
+    expect(read([textSegment('ab'), embedSegment('noteRef'), textSegment('cd'), pilcrowSegment('p0')], 3, 6).leftOut).toBeUndefined();
+  });
 });

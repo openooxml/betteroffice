@@ -116,7 +116,14 @@ impl EditingDoc {
     /// hold a map-backed embed.
     pub fn embed_kind(&self, at: &Position) -> OpResult<Option<String>> {
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, &at.story)?;
+        let story = match story_ref(&txn, &at.story) {
+            Ok(story) => story,
+            Err(crate::EditError::CellHasNoStory(_)) => {
+                let cell = crate::empty_cells::EmptyCell::new(&at.story);
+                return cell.doc().embed_kind(at);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let map = embed_map_at(&story, &txn, at.index)?;
         Ok(crate::map_string(&map, &txn, KIND_KEY))
     }
@@ -197,6 +204,8 @@ impl EditingDoc {
 
     /// Moves one inline embed, preserving its payload and run attributes.
     pub fn move_embed(&self, ctx: &EditCtx, at: Position, mut to: Position) -> OpResult<Receipt> {
+        self.refuse_cell_write(&at.story)?;
+        self.refuse_cell_write(&to.story)?;
         if ctx.is_suggesting() {
             return Err(OpError::OverlapsTrackedChange);
         }
@@ -303,6 +312,7 @@ impl EditingDoc {
         kind: &str,
         payload: Vec<(String, Any)>,
     ) -> OpResult<Receipt> {
+        self.refuse_cell_write(&at.story)?;
         if kind == PILCROW_KIND {
             return Err(OpError::ReservedKey(kind.to_owned()));
         }

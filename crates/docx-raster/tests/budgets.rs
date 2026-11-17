@@ -689,7 +689,7 @@ fn an_image_is_charged_by_the_bytes_it_decodes_to_not_its_pixels() {
     const { assert!(4096 * 8192 * 8 + 4096 * 8192 * 4 > MAX_IMAGE_BYTES) };
     const { assert!(2 * 4096 * 8192 == MAX_PAGE_IMAGE_PIXELS) };
     for (depth, skipped, drawn) in [
-        (png::BitDepth::Eight, 3, [255, 255, 255, 255]),
+        (png::BitDepth::Eight, 3, [242, 242, 242, 255]),
         (png::BitDepth::Sixteen, 2, [0x11, 0x66, 0xcc, 255]),
     ] {
         let (fonts, chains) = (FontStore::new(), FontChains::new());
@@ -742,8 +742,13 @@ fn the_decode_cache_does_not_copy_attacker_sized_keys() {
         render_page(&scene, 0, &resources).unwrap_or_else(|error| panic!("render: {error}"))
     });
     assert_eq!(rendered.skipped_images, 512);
+    let report_bytes: u64 = rendered
+        .skipped_pictures
+        .iter()
+        .map(|picture| picture.id.len() as u64)
+        .sum();
     assert!(
-        allocated < 8 * MIB,
-        "512 distinct 64KiB references cost {allocated} bytes of cache key"
+        allocated < report_bytes + 8 * MIB,
+        "512 distinct 64KiB references cost {allocated} bytes including {report_bytes} of reports"
     );
 }

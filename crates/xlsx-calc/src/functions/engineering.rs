@@ -30,8 +30,6 @@ const MAX_ORDER: f64 = 2_147_483_647.0;
 const PRODUCT_ORDERS: usize = 100_000;
 /// the power of two series rescale by to stay inside the double range.
 const RESCALE_BITS: i32 = 500;
-/// past this argument K underflows at every order up to [`MAX_ORDER`].
-const K_VANISHES: f64 = 1e30;
 /// from here on e^-x is no longer a normal double.
 const EXP_UNDERFLOW: f64 = 700.0;
 /// below this natural logarithm a result is lost to underflow.
@@ -1000,14 +998,23 @@ pub(crate) fn besselj(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 }
 
 /// BESSELK(x, n): the modified bessel function of the second kind, for
-/// positive `x`. the recurrence runs on e^x K, so `BESSELK(1000,1000)` keeps
-/// its 1.3E-233 although e^-1000 underflows.
+/// positive `x`. the recurrence runs on e^x K while e^-x is a normal double.
+/// past that excel's K_0 and K_1 underflow before it recurs, so the
+/// recurrence starts from the underflowed values and `BESSELK(1000,1000)` is
+/// 0, as Excel gives, rather than 1.3E-233.
 pub(crate) fn besselk(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     bessel(args, ctx, true, |x, n| {
-        if x > K_VANISHES {
+        let decay = fmath::exp(-x);
+        if decay == 0.0 {
             return Ok(0.0);
         }
         let (k0, k1) = modified_second_scaled(x, ctx)?;
+        if decay < f64::MIN_POSITIVE {
+            let (value, exponent) = recur_up(k0 * decay, k1 * decay, n, ctx, |k, low, high| {
+                low + 2.0 * k / x * high
+            })?;
+            return Ok(times_power_of_two(value, exponent));
+        }
         let (value, exponent) = recur_up(k0, k1, n, ctx, |k, low, high| low + 2.0 * k / x * high)?;
         if exponent == 0 && x < EXP_UNDERFLOW {
             return Ok(value * fmath::exp(-x));

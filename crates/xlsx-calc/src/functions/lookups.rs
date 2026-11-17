@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, cmp_values, err, evaluate, num};
+use crate::graph::formula_source;
 use crate::parser::Expr;
 use crate::reference::{offset_rect, r1c1_rect};
 
@@ -893,7 +894,7 @@ pub(crate) fn formulatext(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::NA);
     };
     let at = area.start;
-    let Some(formula) = ctx.provider.formula(area.sheet, at) else {
+    let Some(formula) = ctx.provider.formula(area.sheet, at).map(formula_source) else {
         return err(ErrorValue::NA);
     };
     let text = match ctx.provider.spill_range(area.sheet, at) {

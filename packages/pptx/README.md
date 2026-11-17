@@ -50,6 +50,21 @@ export async function renderFirstSlide(
 below. The React editor in [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react)
 manages rendering and user input.
 
+Hosts loading bundled bytes themselves can import `preparePresentationFontDecoder` from
+`@betteroffice/pptx/worker` to decode in a worker; the editor session for the same `file` object
+then reuses that worker. Call `release()` on the prepared decoder if no session adopts it. Pass the
+`defaultFonts` and `activeSlideIndex` the editor will use: unless `defaultFonts` is false, the worker also
+starts fetching the CJK coverage faces of the opening slide while you load your fonts.
+
+```ts
+import { preparePresentationFontDecoder } from '@betteroffice/pptx/worker';
+import { loadBundledFontBytes, resolveMetricCompatFace } from '@betteroffice/fonts';
+
+const { decoder, release } = preparePresentationFontDecoder(file, { activeSlideIndex: 0 });
+const face = resolveMetricCompatFace('Arial', false, false)!;
+const bytes = await loadBundledFontBytes(face, { baseUrl }, { decoder });
+```
+
 ## Entry points
 
 All entry points below are exported from `@betteroffice/pptx`.
@@ -62,7 +77,6 @@ All entry points below are exported from `@betteroffice/pptx`.
 | `inspectPresentation(bytes, options?)` | Inspect parsed content without opening an editing handle; `includeMedia: false` omits media. |
 | `sizeCanvasForSlide(canvas, frame, dpr, scale?)` | Set canvas backing dimensions and CSS size for a slide. |
 | `paintSlide(context, frame, dpr?, scale?, options?)` | Paint a display list asynchronously onto a canvas. |
-| `slideToPng(frame, options?)` | Return a PNG `Blob` asynchronously using a browser canvas backend. |
 | `exportPptxStructured(bytes, options?)` | Export structured content asynchronously without fonts or a DOM. |
 | `exportPptxMarkdown(bytes, options?)` | Export Markdown and source anchors asynchronously. |
 | `renderPptxMarkdown(content, options?)` | Render structured content as Markdown asynchronously. |
@@ -90,7 +104,7 @@ UTF-16 code units.
 
 For embedded images, pass `paintSlide` an options object with `resolveImage`, a function mapping an
 asset ID to a canvas image source or a promise for one. It may return `null` for an unavailable image.
-`slideToPng` accepts the same resolver and an optional `scale`.
+`await handle.renderPng({ slide }, options?)` draws a slide (zero-based index or slide ID) as PNG bytes with the same painter, on a canvas. Options are `{ scale, background, maxShadowPixels, signal, fonts }`; `background` is `'slide'` (white under the slide), `'transparent'` or a `#rrggbb` color. It lays the slide out again with the faces the presentation registered, any new family in `fonts`, and the bundled faces for the rest, as `@betteroffice/pptx-native` does, so both engines break lines alike. It rejects with `PngExportError` (`font-unavailable`) when a face the slide needs cannot load, rather than paint a substitute font. Where there is no canvas it names `@betteroffice/pptx-native`.
 
 ## Saving and ownership
 

@@ -71,8 +71,9 @@ test('remote edits stay outside local undo and rebase the confirmed caret', asyn
     await b.run('insertText', { text: 'B' });
     const update = b.buffer.drain()!.updates[0]!;
     const merged = await a.run('applyRemoteUpdate', { update });
+    expect(merged.cause).toBe('remote');
     expect(merged.selection?.focus.offset).toBe(4);
-    await a.run('undo', {});
+    expect((await a.run('undo', {})).cause).toBeUndefined();
     expect(texts(a.arm)).toEqual(['BSeed']);
     await a.run('redo', {});
     expect(texts(a.arm)[0]).toContain('A');

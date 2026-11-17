@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { budgetShards } from './shards.mjs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -6,24 +7,15 @@ import { fetchAsset } from './asset-cache.mjs';
 import { download } from './download.mjs';
 import { mapPool, validatePlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
-import { CORPUS_ORIGIN } from './samples.mjs';
+import { corpusOrigin } from './samples.mjs';
 
 export const CHANNELS = ['published', 'commit', 'libreoffice'];
 export const TRIALS = 5;
-export const METHOD = 'docx-cli-page1-v1';
+export const METHOD = 'docx-cli-page1-v2';
 export const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 export function docxShards(plan) {
-  const samples = plan.samples.filter((sample) => sample.format === 'docx');
-  const shards = Array.from({ length: Math.min(4, samples.length) }, () => []);
-  const weights = shards.map(() => 0);
-  for (const sample of [...samples].sort((a, b) =>
-    b.metadata.reference.pages - a.metadata.reference.pages || a.id.localeCompare(b.id))) {
-    const index = weights.indexOf(Math.min(...weights));
-    shards[index].push(sample.id);
-    weights[index] += sample.metadata.reference.pages;
-  }
-  return shards;
+  return budgetShards('docx-benchmark', plan.samples.filter((sample) => sample.format === 'docx')).map((shard) => shard.samples);
 }
 
 function fail(message) {
@@ -77,7 +69,7 @@ export function mergeDocxBenchmarks(plan, report, inputs, planHash) {
     const config = part.benchmark;
     if (config?.method !== METHOD || config.trials !== TRIALS || config.dpi !== 96 ||
         !/^\d+(?:\.\d+){2,3}$/.test(config.libreoffice_version ?? '') ||
-        !/^[a-f0-9]{64}$/.test(config.fonts_sha256 ?? '') ||
+        !/^[a-f0-9]{64}$/.test(config.libreoffice_fonts_sha256 ?? '') || 'fonts_sha256' in config ||
         config.published_version !== plan.versions.docx ||
         !config.builds || Object.keys(config.builds).length !== 2 ||
         config.builds?.published?.source_sha !== plan.docx_published_source_sha ||
@@ -101,6 +93,10 @@ export function mergeDocxBenchmarks(plan, report, inputs, planHash) {
         fail('duplicate, unexpected, or misplaced sample');
       const sample = plan.samples.find((sample) => sample.id === row.id);
       if (row.source_sha256 !== sample.metadata.source.sha256) fail('source hash mismatch');
+      for (const channel of CHANNELS.slice(0, 2)) {
+        if (row.timings?.[channel]?.status === 'ok' && !/^[a-f0-9]{64}$/.test(row.timings[channel].fonts_sha256 ?? ''))
+          fail('native timing without the hash of its replayed fonts');
+      }
       const result = row.libreoffice;
       if (result?.channel !== 'libreoffice' || result.version !== config.libreoffice_version)
         fail('LibreOffice comparison identity mismatch');
@@ -147,7 +143,7 @@ export async function stageDocx(planPath, shard, output, cacheDir) {
   }
   let completed = 0;
   await mapPool(tasks, 8, async ({ sample, asset, path, maximum }) => {
-    await writeFile(path, await fetchAsset(asset, sample.id, download, { cacheDir, origin: CORPUS_ORIGIN, maximum }));
+    await writeFile(path, await fetchAsset(asset, sample.id, download, { cacheDir, origin: corpusOrigin(), maximum }));
     if (++completed % 50 === 0 || completed === tasks.length)
       console.log(`DOCX shard ${shard}: staged ${completed}/${tasks.length} verified assets`);
   });

@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, ImageMap, ImageScope, RenderResources, measure_text, render_png, scoped_image_key,
+    FontChains, ImageMap, ImageScope, RenderResources, measure_text, render_page, render_png,
+    scoped_image_key,
 };
 use ooxml_text::{FontId, FontStore, shape};
 use serde_json::{Value, json};
@@ -293,38 +294,19 @@ fn output_is_byte_deterministic() {
 }
 
 #[test]
-fn unsupported_visual_fields_are_errors() {
+fn an_image_filter_this_backend_cannot_apply_is_counted_and_the_image_drawn() {
     let (fonts, chains, images) = fixture_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);
-
-    let filtered = list(
-        20.0,
-        20.0,
-        vec![
-            json!({"kind":"image","relId":"rIdImage","x":0,"y":0,"w":20,"h":20,"filter":"grayscale(1)"}),
-        ],
-    );
+    let image = json!({"kind":"image","relId":"rIdImage","x":0,"y":0,"w":20,"h":20});
+    let mut filtered = image.clone();
+    filtered["filter"] = json!("grayscale(1)");
+    let plain = render_page(&list(20.0, 20.0, vec![image]), 0, &resources).expect("image");
+    let page =
+        render_page(&list(20.0, 20.0, vec![filtered]), 0, &resources).expect("filtered image");
+    assert_eq!(page.bytes, plain.bytes);
     assert_eq!(
-        render_png(&filtered, 0, &resources).unwrap_err(),
-        "unsupported image field: filter"
+        page.skipped_effects,
+        std::collections::BTreeMap::from([("image.filter".to_string(), 1)])
     );
-
-    let shadowed = list(
-        40.0,
-        20.0,
-        vec![json!({
-            "kind":"text",
-            "text":"x",
-            "x":0,
-            "baselineY":14,
-            "width":8,
-            "font":"400 12px Carlito, sans-serif",
-            "color":"#000000",
-            "textShadow":"shadow"
-        })],
-    );
-    assert_eq!(
-        render_png(&shadowed, 0, &resources).unwrap_err(),
-        "unsupported text field: textShadow"
-    );
+    assert!(plain.skipped_effects.is_empty());
 }

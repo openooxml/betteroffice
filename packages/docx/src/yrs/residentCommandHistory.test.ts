@@ -1,6 +1,5 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { closeCommandEngines, command, execute, openCommandEngine, selection, snapshot, texts, TIMEOUT, type CommandArm } from './residentCommandTestSupport';
-import { engineKind } from '../wasm/engineEdit';
 
 afterEach(closeCommandEngines);
 
@@ -67,7 +66,7 @@ test('coalesced_typing_groups_from_its_last_input', async () => {
   expect(undoTexts(arm, 2)).toEqual(['BetaAlpha', 'Alpha']);
 }, TIMEOUT);
 
-test.skipIf(engineKind === 'native')('edits_without_input_time_keep_apply_time_grouping', async () => {
+test('edits_without_input_time_keep_apply_time_grouping', async () => {
   const arm = await openCommandEngine(['Alpha']);
   typeWithApplyDelay(arm, [['B', {}], ['e', {}]], 700);
   expect(undoTexts(arm, 1)).toEqual(['BAlpha']);

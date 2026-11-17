@@ -32,6 +32,7 @@ mod manager;
 mod resolution;
 #[cfg(any(target_arch = "wasm32", test))]
 mod rust_zstd;
+pub mod slices;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
 mod woff2t;

@@ -17,6 +17,8 @@ mod read;
 mod shapes;
 #[cfg(feature = "svg")]
 mod svg;
+#[cfg(feature = "svg")]
+mod svg_session;
 mod text;
 mod transform;
 mod wmf;
@@ -29,8 +31,11 @@ pub use drawing::{Drawing, Omission, Refusal};
 pub use shapes::{MetafileDrawing, MetafileOp, MetafileStroke, decode};
 #[cfg(feature = "svg")]
 pub use svg::{
-    MAX_SVG_BYTES, Svg, placeholder_svg, to_svg, to_svg_with_budget, to_svg_with_limits,
+    MAX_SVG_BYTES, Svg, is_placeholder_svg, placeholder_svg, to_svg, to_svg_with_budget,
+    to_svg_with_limits,
 };
+#[cfg(feature = "svg")]
+pub use svg_session::SvgSession;
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -170,6 +175,7 @@ fn play_full_emf(
     if depth == 0 && dual && gdi_draws_nothing(bytes, &budget) {
         return play_emf::<true>(bytes, depth, false, Some(budget));
     }
+    let before = budget.remaining.get();
     let plus = play_emf::<true>(bytes, depth, true, Some(Rc::clone(&budget)));
     if budget.exceeded.get() {
         return Err("the metafile draws more than the replay limits".to_owned());
@@ -180,14 +186,36 @@ fn play_full_emf(
     {
         return plus;
     }
+    let plus_drew = plus.as_ref().ok().map(|player| !player.ops.is_empty());
+    drop(plus);
+    let plus_spent = budget.spent_since(before);
+    if !budget.release(plus_spent.pixels) {
+        return Err("the metafile draws more than the replay limits".to_owned());
+    }
+    let before = budget.remaining.get();
     let gdi = play_emf::<true>(bytes, depth, false, Some(Rc::clone(&budget)));
     if budget.exceeded.get() {
         return Err("the metafile draws more than the replay limits".to_owned());
     }
-    match gdi {
-        Ok(gdi) if !gdi.ops.is_empty() => Ok(gdi),
-        Err(error) if plus.as_ref().is_ok_and(|plus| plus.ops.is_empty()) => Err(error),
-        gdi => plus.or(gdi),
+    match (gdi, plus_drew) {
+        (Ok(gdi), _) if !gdi.ops.is_empty() => Ok(gdi),
+        (Err(error), Some(false)) => Err(error),
+        (gdi, Some(_)) => {
+            drop(gdi);
+            if !budget.release(budget.spent_since(before).pixels) {
+                return Err("the metafile draws more than the replay limits".to_owned());
+            }
+            budget.give_back(ReplayBudget {
+                work: plus_spent.work,
+                pixels: 0,
+            });
+            let plus = play_emf::<true>(bytes, depth, true, Some(Rc::clone(&budget)));
+            if budget.exceeded.get() {
+                return Err("the metafile draws more than the replay limits".to_owned());
+            }
+            plus
+        }
+        (gdi, None) => gdi,
     }
 }
 

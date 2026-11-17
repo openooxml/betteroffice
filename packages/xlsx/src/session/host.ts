@@ -2,7 +2,9 @@ import type { CollaborationPipeHost } from '../../../../shared/collaboration-pip
 import type { PipeCommandPayload, PipeOutputBatch } from '../../../../shared/collaboration-pipe/protocol';
 import type { AwarenessCursor, AwarenessPeer } from '../collaboration/types';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
+import { setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { deferReply, isHostMessage, transferable } from '../../../../shared/office-session/protocol';
+import { canvasUnavailable } from '../render/png';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type MethodHandlers, type MethodPolicy } from '../../../../shared/office-session/types';
 import type { XlsxEditRefusal } from '../edits';
@@ -11,18 +13,19 @@ import { wasmAssetUrl } from '../wasm/asset';
 import {
   decodeFontFace, engineAllocationFailure, initWasm, isPngExportAvailable, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
   workbookPeerSnapshot,
-  openWorkbookRecoveryCheckpoint, adoptWorkbookPeerVersion,
+  openWorkbookRecoveryCheckpoint, adoptWorkbookPeerVersion, translateFormulasOn,
   type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
   type Viewport, type WasmInitOptions,
 } from '../wasm/loader';
-import { workbookPngDisplayListJson, workbookRangePngDisplayListJson } from '../wasm/pngDisplayList';
+import type { XlsxPngTarget } from '../wasm/pngTarget';
+import { workbookPngFonts } from '../wasm/pngDisplayList';
 import { localNowSerial } from './calculationClock';
 import { createWorkbookCommandState, projectEditState, translateWorkbookSheetIds, type WorkbookCommandState } from './commandHandlers';
 import { createWorkbookCommandHost } from './commandHost';
 import { isWorkbookCommandFrameRequest, WorkbookCommandRefusal } from './commandProtocol';
 import {
   WORKBOOK_SESSION_POLICIES,
-  WorkbookPngUnavailableError,
+  type WorkbookPngOptions,
   type WorkbookCollaborationPipeReply,
   type WorkbookSessionEvents,
   type WorkbookSessionMethods,
@@ -38,6 +41,7 @@ import {
 } from './replay';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
 import { decodeWorkbookRecovery, isCollaborativeWorkbookRecovery, restoreWorkbookCommandState, type WorkbookRecovery } from './recovery';
+import { isEngineTrap, nativeBudgetFailure } from '../../../../shared/office-session/trap';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
@@ -60,7 +64,6 @@ export function createWorkbookSessionHost(
   options: {
     initWasm?: (source?: ArrayBuffer | WebAssembly.Module, options?: WasmInitOptions) => Promise<void>;
     wasmModule?(): WebAssembly.Module | undefined;
-    renderPng?(displayListJson: string): Promise<Uint8Array>;
   } = {}
 ): SessionHost<Events> {
   let handle: WorkbookHandle | undefined;
@@ -155,26 +158,10 @@ export function createWorkbookSessionHost(
       mergedRanges: opened.visibleMergedRanges(sheet, viewport) };
   }
 
-  function pngExportAvailable() {
-    return isPngExportAvailable() || options.renderPng !== undefined;
-  }
-
-  function renderPng(
-    sheet: number, render: (opened: WorkbookHandle) => Uint8Array,
-    displayList: (opened: WorkbookHandle) => string
-  ) {
+  function renderPng(target: XlsxPngTarget, pngOptions: WorkbookPngOptions) {
     const opened = workbook();
-    if (!pngExportAvailable()) throw new WorkbookPngUnavailableError();
-    checkSheet(opened, sheet);
-    const active = opened.sheetInfo().activeSheet;
-    try {
-      if (sheet !== active) opened.setActiveSheet(sheet);
-      if (isPngExportAvailable()) return transferBytes(render(opened));
-      const json = displayList(opened);
-      return deferReply(options.renderPng!(json).then(transferBytes));
-    } finally {
-      if (sheet !== active) opened.setActiveSheet(active);
-    }
+    if (!isPngExportAvailable()) throw canvasUnavailable();
+    return deferReply(opened.renderPng(target, pngOptions).then(transferBytes));
   }
 
   function transferBytes(bytes: Uint8Array) {
@@ -357,7 +344,7 @@ export function createWorkbookSessionHost(
       } catch (error) {
         const message = `Workbook replay diverged at sequence ${envelope.sequence} (${op.method})`;
         throw new SessionFailure(
-          error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash', message,
+          isEngineTrap(error) ? 'trap' : 'crash', message,
           `${message}: ${error instanceof Error ? error.message : String(error)}`
         );
       }
@@ -387,6 +374,7 @@ export function createWorkbookSessionHost(
       if (checkpoint.epoch !== recovery.epoch || checkpoint.version !== recovery.revision ||
         checkpoint.throughSeq !== recovery.throughSeq) throw new TypeError('Workbook recovery envelope mismatch');
       if (isCollaborativeWorkbookRecovery(recovery.engine)) throw new Error('Recovery is unavailable for collaborative workbooks');
+      if (input.fontCdn) setFontCdnConfiguration(input.fontCdn);
       enginePng = input.png;
       await (options.initWasm ?? initWasm)(input.wasm, { png: input.png });
       if (disposed) throw new Error('Workbook session is disposed');
@@ -403,7 +391,7 @@ export function createWorkbookSessionHost(
           sheets: commands.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] })),
           activeSheet: info.activeSheet, commandContext: { ...commandIdentity,
             basis: { epoch: commands.epoch, version: opened.version() } },
-          throughSeq: commands.throughSeq, revision: recovery.revision, historyReset: commands.historyReset === true, pngExport: pngExportAvailable(),
+          throughSeq: commands.throughSeq, revision: recovery.revision, historyReset: commands.historyReset === true, pngExport: isPngExportAvailable(),
           selection: commands.selection, editState: commands.editState };
       } catch (error) {
         handle = undefined;
@@ -426,6 +414,7 @@ export function createWorkbookSessionHost(
       retainedHydration = retainPeerHydration;
       let wasm = input.wasm;
       if (retainPeerHydration && wasm instanceof ArrayBuffer) wasm = await WebAssembly.compile(wasm);
+      if (input.fontCdn) setFontCdnConfiguration(input.fontCdn);
       enginePng = input.png;
       await (options.initWasm ?? initWasm)(wasm, { png: input.png });
       wasm ??= options.wasmModule?.();
@@ -481,13 +470,14 @@ export function createWorkbookSessionHost(
         }
         commands = createWorkbookCommandState(commandIdentity, { epoch: 1, version: opened.version() },
           { sheetId: info.sheetIds[info.activeSheet], range: { kind: 'a1', a1: 'A1' } }, info.sheetIds, calculation ?? null);
+        commands.collaborative = collaborative && !retainPeerHydration;
         installCommandHost();
         if (retainPeerHydration) host.emit('peerOpened', { version: opened.version(), initialCalculation });
         const projection = { ...commands };
         if (initial || !retainPeerHydration && input.includeEditState) projectEditState(opened, projection);
         const state = { format: 'xlsx' as const, stage: 'ready' as const, version, dirty,
           ...(collaborative && !retainPeerHydration ? { clientId: opened.clientId } : {}),
-          sheets: summaries, activeSheet: info.activeSheet, pngExport: pngExportAvailable(),
+          sheets: summaries, activeSheet: info.activeSheet, pngExport: isPngExportAvailable(),
           commandContext: { ...commandIdentity, basis: { epoch: commands.epoch, version: opened.version() } },
           ...(!retainPeerHydration && projection.editState ? { editState: projection.editState, selection: commands.selection } : {}) };
         if (!initial) return state;
@@ -591,6 +581,7 @@ export function createWorkbookSessionHost(
       checkSheet(opened, sheet);
       return { sheet, version: opened.version(), cells: opened.rangeCells(sheet, range) };
     },
+    translateFormulas: (_, items) => translateFormulasOn(workbook(), items),
     captureFormat(_, sheet, range) {
       const opened = workbook();
       checkSheet(opened, sheet);
@@ -599,14 +590,8 @@ export function createWorkbookSessionHost(
     sheets: () => sheets({ ...workbook().sheetInfo(),
       ...(commands?.throughSeq ? { sheetIds: commands.sheetIds } : {}) }),
     calculationStatus: () => workbook().calculationStatus(),
-    renderPng(_, viewport, options = {}) {
-      return renderPng(options.sheet ?? workbook().sheetInfo().activeSheet,
-        (opened) => opened.renderPng(viewport), (opened) => workbookPngDisplayListJson(opened, viewport));
-    },
-    renderRangePng(_, options, frameOptions = {}) {
-      return renderPng(frameOptions.sheet ?? workbook().sheetInfo().activeSheet,
-        (opened) => opened.renderRangePng(options), (opened) => workbookRangePngDisplayListJson(opened, options));
-    },
+    renderPng: (_, target, pngOptions = {}) => renderPng(target, pngOptions),
+    renderPngFonts: (_, target, pngOptions = {}) => workbookPngFonts(workbook(), target, { ...pngOptions, fonts: undefined }),
     exportStructured: (_, options) => exported(options),
     exportMarkdown(_, options, markdownOptions) {
       const opened = workbook();
@@ -628,6 +613,12 @@ export function createWorkbookSessionHost(
       const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
         bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
       return transferable(buffer, [buffer]);
+    },
+    saveWithWarnings() {
+      const { bytes, warnings } = workbook().saveWithWarnings();
+      const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
+        bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
+      return transferable({ bytes: buffer, warnings }, [buffer]);
     },
     dispose() {
       workbook();
@@ -679,9 +670,14 @@ export function createWorkbookSessionHost(
   return host;
 }
 
-/** The engine traps when an allocation fails; past the wasm32 memory limit that means the workbook is too large. */
-function engineOutOfMemory(trap: SessionFailure): SessionFailure | undefined {
-  const failed = engineAllocationFailure();
+/**
+ * @internal A WebAssembly engine traps when an allocation fails past the wasm32 memory limit; a native
+ * engine call fails with an error naming the allocation that crossed its budget. Either way the
+ * workbook is too large.
+ */
+export function engineOutOfMemory(trap: SessionFailure): SessionFailure | undefined {
+  const native = nativeBudgetFailure(trap.message) ?? nativeBudgetFailure(trap.diagnostics);
+  const failed = native ? { bytes: native.bytes, memoryBytes: native.budgetBytes } : engineAllocationFailure();
   return failed ? new SessionFailure('out-of-memory', 'The workbook is too large: the spreadsheet engine ran out of memory',
     `An allocation of ${failed.bytes} bytes failed with ${Math.round(failed.memoryBytes / 2 ** 20)} MiB of engine memory; ` +
     `${trap.message}${trap.diagnostics ? `: ${trap.diagnostics}` : ''}`) : undefined;

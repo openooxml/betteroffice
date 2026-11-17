@@ -80,6 +80,15 @@ function connection() {
 
 const options = { session: 'default-fonts', incarnation: 'worker-fonts', fonts: [] } satisfies PresentationCommandOpenOptions;
 
+async function scriptCalls(manager: ReturnType<typeof source>, count: number): Promise<string[]> {
+  for (let tries = 0; tries < 400 && manager.resolveScriptFallback.mock.calls.length < count; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return manager.resolveScriptFallback.mock.calls.map((call) => JSON.stringify(call)).sort();
+}
+
+const expectedCalls = (...list: unknown[][]) => list.map((call) => JSON.stringify(call)).sort();
+
 beforeAll(async () => {
   await initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
   font = new Uint8Array(await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url))).buffer;
@@ -269,6 +278,29 @@ test('failed and stalled defaults still acknowledge an open', async () => {
   }
 });
 
+test('a stalled coverage scan never holds back the default fonts', async () => {
+  const manager = source({ Calibri: async () => font });
+  const native = globalThis.DecompressionStream;
+  globalThis.DecompressionStream = class {
+    readonly readable = new ReadableStream<Uint8Array>();
+    readonly writable = new WritableStream<BufferSource>();
+  } as unknown as typeof DecompressionStream;
+  restorers.push(() => { globalThis.DecompressionStream = native; });
+  const timeout = globalThis.setTimeout;
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) =>
+    timeout(callback, delay === 5000 ? 50 : delay, ...args)) as typeof setTimeout);
+  restorers.push(() => timer.mockRestore());
+  const deflated = await (await JSZip.loadAsync(await deck(['Calibri'])))
+    .generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+  const faces: string[] = [];
+  const client = await createPresentationCommandClient(deflated, Object.assign({ ...options }, {
+    [defaultFontInstaller]: async (additions: readonly DefaultFontFace[]) => { faces.push(...additions.map((face) => face.family)); },
+  }), connection().transport);
+  clients.push(client);
+  expect(manager.resolve.mock.calls.map(([family]) => family)).toContain('Calibri');
+  expect(faces).toEqual(['Calibri']);
+});
+
 test('formatting updates collect new families in the background', async () => {
   const requested = deferred<void>();
   source({ Calibri: async () => font, Cambria: async () => { requested.resolve(); return font; } });
@@ -330,7 +362,7 @@ for (const supplied of [false, true]) test(`script defaults install in the cover
     [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { installed.push(...faces); },
   }), wire.transport);
   clients.push(client);
-  expect(manager.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false]]);
+  expect(await scriptCalls(manager, 2)).toEqual(expectedCalls(['cjk-jp', false, false], ['cjk-jp', false, false]));
   expect(installed).toMatchObject([{ family: 'Noto Sans JP', kind: 'coverage' }]);
   expect(fallback).toHaveBeenCalledTimes(1);
   expect(primary).toHaveBeenCalledTimes(supplied ? 1 : 0);
@@ -376,7 +408,7 @@ test('Japanese coverage loads once for an unmapped family and mixed Latin text w
     expect(covered.every((run) => run.fontFamily === 'Noto Sans JP' && run.fontId !== 0xffffffff)).toBe(true);
     expect(covered.flatMap((run) => run.glyphs).every((glyph) => glyph.glyphId > 0)).toBe(true);
   }
-  expect(manager.resolveScriptFallback.mock.calls).toEqual([['cjk-jp', true, true]]);
+  expect(await scriptCalls(manager, 2)).toEqual(expectedCalls(['cjk-jp', false, false], ['cjk-jp', true, true]));
   expect(fallback).toHaveBeenCalledTimes(1);
 });
 
@@ -396,9 +428,9 @@ test('four Japanese styles acknowledge one coverage installation and registratio
   }, { [defaultFontInstaller]: install }), wire.transport);
   clients.push(client);
   expect(wire.acknowledged).toBe(true);
-  expect(manager.resolveScriptFallback.mock.calls).toEqual([
-    ['cjk-jp', false, false], ['cjk-jp', true, false], ['cjk-jp', false, true], ['cjk-jp', true, true],
-  ]);
+  expect(await scriptCalls(manager, 5)).toEqual(expectedCalls(
+    ['cjk-jp', false, false], ['cjk-jp', false, false], ['cjk-jp', true, false], ['cjk-jp', false, true], ['cjk-jp', true, true],
+  ));
   expect(install).toHaveBeenCalledTimes(1);
   expect(install.mock.calls[0][0]).toMatchObject([
     { family: 'Noto Sans JP', bold: false, italic: false, kind: 'coverage' },

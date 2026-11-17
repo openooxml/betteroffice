@@ -175,7 +175,7 @@ test.skipIf(engineKind === 'native')('cold_editor_hydration_reuses_worker_module
 test('ordinary_session_wire_shapes_are_unchanged', async () => {
   expect(Object.keys(PRESENTATION_SESSION_METHODS)).toEqual([
     'open', 'version', 'readContent', 'findText', 'validateEdits', 'applyEdits', 'frame',
-    'slides', 'slideSize', 'save', 'dispose',
+    'slides', 'slideSize', 'save', 'renderPng', 'dispose',
   ]);
   expect(PRESENTATION_SESSION_POLICIES.frame).toEqual({
     lane: 'interactive', reframes: true, key: 'frame', replaceableBy: 'frame',

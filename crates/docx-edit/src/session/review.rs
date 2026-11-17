@@ -157,7 +157,7 @@ impl EditSessionCore {
     /// `[{"revisionId","author","date","kind","story","preview",
     /// "range":{"story","start":{"paraId","offset"},"end":{…}}}, …]`. `kind`
     /// is one of `"insertion"`, `"deletion"`, `"pPrIns"`, `"pPrDel"`,
-    /// `"pPrChange"`, `"trIns"`, `"trDel"`, `"tableIns"` or `"tableDel"`.
+    /// `"pPrChange"`, `"rPrChange"`, `"trIns"`, `"trDel"`, `"tableIns"` or `"tableDel"`.
     /// `preview` holds the first few characters of the affected text, and is
     /// empty for every structural kind, which covers no text.
     pub fn list_revisions(&self) -> EngineResult<String> {
@@ -175,6 +175,7 @@ impl EditSessionCore {
                     ChangeKind::ParagraphMarkInsertion => "pPrIns",
                     ChangeKind::ParagraphMarkDeletion => "pPrDel",
                     ChangeKind::ParagraphPropertiesChanged => "pPrChange",
+                    ChangeKind::RunPropertiesChanged => "rPrChange",
                     ChangeKind::TableRowInsertion => "trIns",
                     ChangeKind::TableRowDeletion => "trDel",
                     ChangeKind::TableInsertion => "tableIns",

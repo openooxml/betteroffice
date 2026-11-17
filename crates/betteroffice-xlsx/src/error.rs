@@ -26,6 +26,12 @@ pub enum Error {
     },
     NotCollaborative,
     CollaborativeStructureOperation,
+    /// A collaborative `AddSheet` anywhere but the end of the workbook.
+    CollaborativeSheetPosition,
+    /// An undo that would remove an added sheet still holding anything the add
+    /// did not write, such as another collaborator's edit. The workbook is
+    /// unchanged and the next undo reaches the step before it.
+    CollaborativeUndoRefused,
     CollaborativeStructureChanged,
     Spreadsheet(xlsx_parse::ParseError),
     Operation(xlsx_ops::OpError),
@@ -51,6 +57,10 @@ pub enum Error {
         max: u64,
     },
     InvalidViewport,
+    /// A face supplied for one export that cannot paint.
+    FontUnavailable {
+        family: String,
+    },
     DisplayTooLarge {
         cells: u64,
         max: u64,
@@ -108,6 +118,12 @@ impl fmt::Display for Error {
             Self::CollaborativeStructureOperation => {
                 f.write_str("structural operations are unavailable in collaborative mode")
             }
+            Self::CollaborativeSheetPosition => {
+                f.write_str("collaborative sheets can only be added at the end of the workbook")
+            }
+            Self::CollaborativeUndoRefused => {
+                f.write_str("undo would remove a sheet that holds collaborators' edits")
+            }
             Self::CollaborativeStructureChanged => {
                 f.write_str("remote update changes the frozen workbook structure")
             }
@@ -141,6 +157,7 @@ impl fmt::Display for Error {
                 write!(f, "range {rows}x{cols} exceeds the {max}-cell copy cap")
             }
             Self::InvalidViewport => f.write_str("viewport must have finite positive dimensions"),
+            Self::FontUnavailable { family } => write!(f, "png-font-unavailable: {family}"),
             Self::DisplayTooLarge { cells, max } => write!(
                 f,
                 "requested viewport spans {cells} cells, exceeds the {max}-cell display-list cap"

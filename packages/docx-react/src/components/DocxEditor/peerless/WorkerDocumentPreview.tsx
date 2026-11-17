@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef } from 'react';
-import { applyFrameDelta, CANVAS_PAGE_GAP_PX, decodeFrameDelta, type RetainedFramePage } from '@betteroffice/docx/layout/render';
+import { useLayoutEffect, useMemo, useRef } from 'react';
+import { applyFrameDelta, CANVAS_PAGE_GAP_PX, canvasPageStack, decodeFrameDelta, snapCanvasLength, type RetainedFramePage } from '@betteroffice/docx/layout/render';
 import type { ResidentEngineWorkerClient, ResidentEngineWorkerFrame } from '@betteroffice/docx/yrs';
 import { useTranslation } from '../../../i18n';
 
@@ -45,25 +45,28 @@ export function WorkerDocumentPreview({ job, zoom, onPresented }: {
   const { t } = useTranslation();
   const host = useRef<HTMLDivElement>(null);
   const { pages, presented } = job.pages;
-  const width = Math.max(0, ...pages.map(({ page }) => page.width));
-  const height = pages.reduce((total, { page }) => total + page.height + CANVAS_PAGE_GAP_PX, 0);
+  const rasterScale = (globalThis.devicePixelRatio || 1) * zoom;
+  const scale = useMemo(() => ({ rasterScale, unitScale: rasterScale }), [rasterScale]);
+  const boxes = useMemo(() => canvasPageStack(pages.map(({ page }) => page), { scale }), [pages, scale]);
+  const width = Math.max(0, ...boxes.map((box) => box.width));
+  const last = boxes.at(-1);
+  const height = last ? last.top + last.height + snapCanvasLength(CANVAS_PAGE_GAP_PX, scale) : 0;
   useLayoutEffect(() => {
     let current = true;
     const root = host.current!;
     try {
-      let y = 0;
-      const surfaces = presented.map(({ pageId, pageIndex, page }) => {
+      const surfaces = presented.map(({ pageId, pageIndex }, index) => {
+        const box = boxes[index]!;
         const element = document.createElement('div');
         element.className = 'paged-editor__page canvas-page';
         element.dataset.pageIndex = String(pageIndex);
-        Object.assign(element.style, { position: 'absolute', left: `${(width - page.width) / 2}px`, top: `${y}px`,
-          width: `${page.width}px`, height: `${page.height}px`, background: 'white' });
+        Object.assign(element.style, { position: 'absolute', left: `${snapCanvasLength((width - box.width) / 2, scale)}px`,
+          top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px`, background: 'white' });
         const canvas = document.createElement('canvas');
         canvas.dataset.previewPageId = pageId.toString();
         canvas.dataset.pageIndex = String(pageIndex);
         Object.assign(canvas.style, { display: 'block', width: '100%', height: '100%' });
         element.appendChild(canvas);
-        y += page.height + CANVAS_PAGE_GAP_PX;
         root.appendChild(element);
         return { pageId: pageId.toString(), canvas: canvas.transferControlToOffscreen() };
       });
@@ -75,7 +78,7 @@ export function WorkerDocumentPreview({ job, zoom, onPresented }: {
       }, job.reject);
     } catch (error) { job.reject(error); }
     return () => { current = false; root.replaceChildren(); };
-  }, [job, presented, width, onPresented]);
+  }, [job, presented, boxes, scale, width, onPresented]);
   return <div aria-label={t('editor.documentPreview')} style={{ position: 'relative', width: width * zoom, height: height * zoom,
     marginLeft: 'auto', marginRight: 'auto', pointerEvents: 'none' }}>
     <div ref={host} style={{ position: 'relative', width, height, transform: `scale(${zoom})`, transformOrigin: 'top left' }} />
