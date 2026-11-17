@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sheet_relating_one_drawing_many_times_reads_at_most_the_anchor_bound_of_pictures() {
+    fn a_sheet_with_many_drawings_reads_at_most_the_anchor_bound_of_pictures() {
         let anchor = format!(
             "<xdr:oneCellAnchor>{}<xdr:ext cx=\"1\" cy=\"1\"/>{}</xdr:oneCellAnchor>",
             marker("from", 0, 0),
@@ -238,10 +238,23 @@ mod tests {
         let mut parts = parts(&anchor.repeat(MAX_CHART_ANCHORS));
         parts[0].1 = rels(&[
             ("d1", "drawing", "../drawings/drawing1.xml"),
-            ("d2", "drawing", "//xl/drawings/drawing1.xml"),
-            ("d3", "drawing", "///xl/drawings/drawing1.xml"),
+            ("d2", "drawing", "../drawings/drawing2.xml"),
+            ("d3", "drawing", "../drawings/drawing3.xml"),
         ]);
+        let (drawing, drawing_rels) = (parts[1].1.clone(), parts[2].1.clone());
+        for n in [2, 3] {
+            parts.push((format!("xl/drawings/drawing{n}.xml"), drawing.clone()));
+            parts.push((
+                format!("xl/drawings/_rels/drawing{n}.xml.rels"),
+                drawing_rels.clone(),
+            ));
+        }
         let pictures = sheet_pictures(&parts, "xl/worksheets/sheet1.xml");
         assert_eq!(pictures.len(), MAX_CHART_ANCHORS);
+        assert!(
+            pictures
+                .iter()
+                .all(|picture| picture.drawing == "xl/drawings/drawing1.xml")
+        );
     }
 }
