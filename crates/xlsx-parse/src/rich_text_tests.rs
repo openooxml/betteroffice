@@ -122,14 +122,16 @@ fn inline_runs_follow_implicit_cell_addresses() {
 }
 
 #[test]
-fn phonetics_and_inter_run_whitespace_keep_legacy_plain_text() {
+fn phonetic_text_stays_in_the_value_outside_the_base_runs() {
     let parsed = rich_package(
-        "<si><r><t>漢</t></r><rPh sb=\"0\" eb=\"1\"><t>kan</t></rPh></si><si>\n<r><t>x</t></r>\n</si>",
-        "<r><t>字</t></r><rPh><t>ji</t></rPh>",
+        r#"<si><r><rPr><b/></rPr><t>漢</t></r><rPh sb="0" eb="1"><t>kan</t></rPh><phoneticPr fontId="1" type="noConversion"/></si>"#,
+        r#"<r><rPr><i/></rPr><t>字</t></r><rPh sb="0" eb="1"><t>ji</t></rPh><phoneticPr fontId="1"/>"#,
     );
-    assert_eq!(parsed.workbook.shared_strings, ["漢kan", "\nx\n"]);
-    assert!(parsed.package.shared_string_text_runs(0).is_none());
-    assert!(parsed.package.shared_string_text_runs(1).is_none());
+    assert_eq!(parsed.workbook.shared_strings[0], "漢kan");
+    let runs = parsed.package.shared_string_text_runs(0).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!((runs[0].start, runs[0].end), (0, 3));
+    assert_eq!(runs[0].style.bold, Some(true));
     assert_eq!(
         parsed.workbook.sheets[0]
             .cell(CellRef::new(0, 1))
@@ -139,16 +141,61 @@ fn phonetics_and_inter_run_whitespace_keep_legacy_plain_text() {
             value: "字ji".into()
         }
     );
-    assert!(
-        parsed
-            .package
-            .inline_string_text_runs(0, CellRef::new(0, 1))
-            .is_none()
-    );
+    let runs = parsed
+        .package
+        .inline_string_text_runs(0, CellRef::new(0, 1))
+        .unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!((runs[0].start, runs[0].end), (0, 3));
+    assert_eq!(runs[0].style.italic, Some(true));
 }
 
 #[test]
-fn unsupported_or_invalid_styles_discard_the_whole_item() {
+fn inter_run_whitespace_keeps_legacy_plain_text() {
+    let parsed = rich_package("<si>\n<r><t>x</t></r>\n</si>", "<t/>");
+    assert_eq!(parsed.workbook.shared_strings, ["\nx\n"]);
+    assert!(parsed.package.shared_string_text_runs(0).is_none());
+}
+
+#[test]
+fn unmodelled_properties_keep_the_run_and_its_known_properties() {
+    for (before_size, property) in [
+        (true, r#"<condense val="0"/>"#),
+        (true, r#"<extend val="0"/>"#),
+        (true, r#"<outline/>"#),
+        (true, r#"<shadow val="1"/>"#),
+        (false, r#"<family val="2"/>"#),
+        (false, r#"<charset val="129"/>"#),
+        (false, r#"<scheme val="minor"/>"#),
+        (false, r#"<unknown kind="future"/>"#),
+    ] {
+        let properties = if before_size {
+            format!(r#"<b/>{property}<sz val="9"/>"#)
+        } else {
+            format!(r#"<b/><sz val="9"/>{property}"#)
+        };
+        let parsed = rich_package(
+            &format!(r#"<si><r><t>first</t></r><r><rPr>{properties}</rPr><t>last</t></r></si>"#),
+            &format!(r#"<r><rPr><i/>{property}</rPr><t>inline</t></r>"#),
+        );
+        let runs = parsed
+            .package
+            .shared_string_text_runs(0)
+            .unwrap_or_else(|| panic!("{property}"));
+        assert_eq!(runs.len(), 2, "{property}");
+        assert_eq!((runs[1].start, runs[1].end), (5, 9), "{property}");
+        assert_eq!(runs[1].style.bold, Some(true), "{property}");
+        assert_eq!(runs[1].style.size_pt, Some(9.0), "{property}");
+        let runs = parsed
+            .package
+            .inline_string_text_runs(0, CellRef::new(0, 1))
+            .unwrap_or_else(|| panic!("{property}"));
+        assert_eq!(runs[0].style.italic, Some(true), "{property}");
+    }
+}
+
+#[test]
+fn malformed_or_repeated_known_properties_discard_the_whole_item() {
     for property in [
         r#"<sz val="NaN"/>"#,
         r#"<sz val="0"/>"#,
@@ -157,8 +204,8 @@ fn unsupported_or_invalid_styles_discard_the_whole_item() {
         r#"<vertAlign val="raised"/>"#,
         r#"<color theme="2" tint="inf"/>"#,
         r#"<color rgb="invalid"/>"#,
-        r#"<outline/>"#,
-        r#"<unknown/>"#,
+        r#"<b/><b/>"#,
+        r#"<rFont val="Aptos"/><rFont val="Calibri"/>"#,
     ] {
         let parsed = rich_package(
             &format!(
@@ -172,6 +219,63 @@ fn unsupported_or_invalid_styles_discard_the_whole_item() {
             "{property}"
         );
         assert!(parsed.package.shared_string_text_runs(1).is_some());
+    }
+}
+
+#[test]
+fn phonetic_markup_inside_run_properties_keeps_the_item_plain() {
+    for (properties, value) in [
+        ("<b/><rPh><t>guide</t></rPh>", "guidebase"),
+        (r#"<b/><rPh sb="0" eb="1"/>"#, "base"),
+        (r#"<b/><phoneticPr fontId="1"/>"#, "base"),
+    ] {
+        let run = format!("<r><rPr>{properties}</rPr><t>base</t></r>");
+        let parsed = rich_package(&format!("<si>{run}</si>"), &run);
+        assert_eq!(parsed.workbook.shared_strings[0], value, "{properties}");
+        assert!(
+            parsed.package.shared_string_text_runs(0).is_none(),
+            "{properties}"
+        );
+        assert_eq!(
+            parsed.workbook.sheets[0]
+                .cell(CellRef::new(0, 1))
+                .unwrap()
+                .value,
+            CellValue::Text {
+                value: value.into()
+            },
+            "{properties}"
+        );
+        assert!(
+            parsed
+                .package
+                .inline_string_text_runs(0, CellRef::new(0, 1))
+                .is_none(),
+            "{properties}"
+        );
+    }
+}
+
+#[test]
+fn zero_tint_on_a_colour_that_is_not_a_theme_colour_keeps_the_runs() {
+    let red = Some(Color::Rgb("#ff0000".into()));
+    let indexed = Some(Color::Indexed(10));
+    for (color, expected) in [
+        (r#"<color rgb="FFFF0000" tint="0"/>"#, Some(red.clone())),
+        (r#"<color rgb="FFFF0000" tint="0.0"/>"#, Some(red)),
+        (r#"<color indexed="10" tint="0"/>"#, Some(indexed)),
+        (r#"<color rgb="FFFF0000" tint="-0.25"/>"#, None),
+        (r#"<color indexed="10" tint="0.5"/>"#, None),
+    ] {
+        let parsed = rich_package(
+            &format!(r#"<si><r><rPr><b/>{color}</rPr><t>x</t></r></si>"#),
+            "<t/>",
+        );
+        let run_color = parsed
+            .package
+            .shared_string_text_runs(0)
+            .map(|runs| runs[0].style.color.clone());
+        assert_eq!(run_color, expected, "{color}");
     }
 }
 
@@ -306,4 +410,63 @@ fn source_clones_share_the_index_even_when_cloned_before_first_query() {
         parsed.package.shared_string_text_runs(0).unwrap(),
         clone.shared_string_text_runs(0).unwrap()
     ));
+}
+
+#[test]
+fn package_run_budget_keeps_runs_first_come_and_counts_unmodelled_properties() {
+    let per_item = 4_000;
+    let full_items = crate::MAX_RICH_TEXT_RUNS / per_item;
+    assert_eq!(full_items * per_item, crate::MAX_RICH_TEXT_RUNS);
+    let family = r#"<r><rPr><b/><family val="2"/></rPr><t>x</t></r>"#;
+    let plain = "<r><t>x</t></r>";
+    let last = full_items - 1;
+    let tail = full_items;
+    for extra in [0, 1] {
+        let mut items = String::new();
+        for item in 0..full_items {
+            let run = if item % 2 == 0 { family } else { plain };
+            let count = if item == last {
+                per_item + extra
+            } else {
+                per_item
+            };
+            items.push_str(&format!("<si>{}</si>", run.repeat(count)));
+        }
+        items.push_str("<si><r><rPr><i/></rPr><t>ta</t></r><r><t>il</t></r></si>");
+        let parsed = rich_package(&items, "<r><t>inline</t></r>");
+        for item in 0..last {
+            let runs = parsed.package.shared_string_text_runs(item).unwrap();
+            assert_eq!(runs.len(), per_item, "{item}");
+        }
+        let first = parsed.package.shared_string_text_runs(0).unwrap();
+        assert_eq!(first[0].style.bold, Some(true));
+        assert_eq!(
+            parsed.workbook.shared_strings[last],
+            "x".repeat(per_item + extra)
+        );
+        assert_eq!(
+            parsed
+                .package
+                .shared_string_text_runs(last)
+                .map(|runs| runs.len()),
+            (extra == 0).then_some(per_item)
+        );
+        assert_eq!(parsed.workbook.shared_strings[tail], "tail");
+        assert!(parsed.package.shared_string_text_runs(tail).is_none());
+        assert_eq!(
+            parsed.workbook.sheets[0]
+                .cell(CellRef::new(0, 1))
+                .unwrap()
+                .value,
+            CellValue::Text {
+                value: "inline".into()
+            }
+        );
+        assert!(
+            parsed
+                .package
+                .inline_string_text_runs(0, CellRef::new(0, 1))
+                .is_none()
+        );
+    }
 }
