@@ -706,17 +706,26 @@ it('shows the table side where a vertical band clears a horizontal band edge in 
 });
 
 it('takes the band edges of an explicit empty grid from the widest row in both seeders', async () => {
-  const styles = bandStyles(single('right') + single('insideV'), ['band1Horz', 'band2Horz'], cleared('right'));
-  const body =
-    `<w:tbl><w:tblPr><w:tblStyle w:val="Bands"/>${flagsOff}</w:tblPr><w:tblGrid/>` +
-    `<w:tr><w:tc>${paragraph('c0')}</w:tc></w:tr></w:tbl>`;
-  const seeded = await seedBoth(body, styles, (parsed) => {
-    for (const block of parsed.package.document.content) {
-      if (block.type === 'table') block.columnWidths = [];
+  const styles = bandStyles(sized('right', 12) + sized('insideV', 4), ['band1Vert', 'band2Vert'], cleared('right'));
+  const look =
+    '<w:tblLook w:firstRow="0" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="1" w:noVBand="0"/>';
+  const row = `<w:tr><w:tc>${paragraph('c0')}</w:tc><w:tc>${paragraph('c1')}</w:tc></w:tr>`;
+  for (const grid of ['<w:tblGrid/>', '']) {
+    const body = `<w:tbl><w:tblPr><w:tblStyle w:val="Bands"/>${look}</w:tblPr>${grid}${row}</w:tbl>`;
+    const seeded = await seedBoth(body, styles, (parsed) => {
+      for (const block of parsed.package.document.content) {
+        if (block.type !== 'table') continue;
+        if (grid) block.columnWidths = [];
+        else delete block.columnWidths;
+      }
+    });
+    for (const engine of ['projected', 'native']) {
+      const cells = seeded[engine]![0]!;
+      expect(edgeSize(cells, 0, 0, 'right')).toBeNull();
+      expect(edgeSize(cells, 0, 0, 'right')).not.toBe(12);
+      expect(edgeSize(cells, 0, 1, 'right')).toBe(12);
     }
-  });
-  expect(seeded.projected![0]![0]![0]!.borders).toEqual(seeded.native![0]![0]![0]!.borders);
-  expect(edgeSize(seeded.native![0]!, 0, 0, 'right')).toBe(8);
+  }
 });
 
 it('gives a skipped band edge the border of the same table without bands in both seeders', async () => {

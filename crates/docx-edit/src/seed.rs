@@ -9775,20 +9775,31 @@ mod tests {
 
     #[test]
     fn an_empty_grid_takes_its_band_edges_from_the_widest_row() {
-        let line = sized_line(8);
-        let table = json!({
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let missing = json!({
             "type": "table",
-            "formatting": { "styleId": "Bands", "look": row_band_look() },
-            "columnWidths": [],
-            "rows": [{ "cells": [{ "type": "tableCell", "content": [] }] }]
+            "formatting": {
+                "styleId": "Bands",
+                "look": {
+                    "firstRow": false, "lastRow": false, "firstColumn": false,
+                    "lastColumn": false, "noHBand": true, "noVBand": false
+                }
+            },
+            "rows": [{ "cells": [plain, plain] }]
         });
+        let mut empty = missing.clone();
+        empty["columnWidths"] = json!([]);
         let definitions = band_style(
-            json!({ "right": line, "insideV": line }),
-            ["band1Horz", "band2Horz"],
+            json!({ "right": sized_line(12), "insideV": sized_line(4) }),
+            ["band1Vert", "band2Vert"],
             json!({ "right": { "style": "nil" } }),
         );
-        let cells = seeded_cells(&definitions, &table);
-        assert_eq!(cells[0][0]["borders"]["right"]["size"], json!(8));
+        for (grid, table) in [("empty", empty), ("missing", missing)] {
+            let cells = seeded_cells(&definitions, &table);
+            assert!(cells[0][0]["borders"]["right"]["size"].is_null(), "{grid}");
+            assert_ne!(cells[0][0]["borders"]["right"]["size"], json!(12), "{grid}");
+            assert_eq!(cells[0][1]["borders"]["right"]["size"], json!(12), "{grid}");
+        }
     }
 
     fn without_bands(table: &Value) -> Value {
