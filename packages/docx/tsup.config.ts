@@ -57,6 +57,7 @@ export default defineConfig((options) => [
     dts: true,
     splitting: true,
     external: ['@betteroffice/fonts', '#session-worker'],
+    noExternal: ['@betteroffice/fonts/remote'],
     sourcemap: false,
     clean: true,
     treeshake: true,

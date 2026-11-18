@@ -16,7 +16,7 @@ import { dirname, join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dir, '..');
 const declarationMode = process.env.BETTEROFFICE_PACKAGE_DECLARATIONS;
-const PACKAGES = ['xlsx-i18n', 'xlsx', 'xlsx-react'];
+const PACKAGES = ['xlsx-i18n', 'xlsx', 'xlsx-react', 'fonts'];
 const LINKED = ['react', 'react-dom', '@types/react', '@types/react-dom', 'csstype'];
 
 const CONSUMER = `import {

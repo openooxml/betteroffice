@@ -580,6 +580,7 @@ function WopiEditor({ loaded, onRejoin, recoveryName }: { loaded: Loaded; onRejo
           collaborationClientId={loaded.clientId}
           readOnly={readOnly}
           downloadOnSave={false}
+          remoteFonts="off"
           onSaveRequest={onSaveRequest}
           onSave={() => undefined}
           onLocalUpdate={() => {

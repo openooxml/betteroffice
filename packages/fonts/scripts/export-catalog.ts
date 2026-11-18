@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as ts from 'typescript';
 import * as manifest from '../src/manifest';
 import { SCRIPT_PATTERNS } from '../src/scripts';
+import { WORD_FAMILY_SUBSTITUTES, resolveWordFamilySubstitute } from '../src/substitutes';
 import latin from '../../fonts-latin/assets/manifest.json';
 import intl from '../../fonts-intl/assets/manifest.json';
 import cjk from '../../fonts-cjk/assets/manifest.json';
@@ -56,6 +57,7 @@ export function exportCatalog(): Record<string, string> {
   const catalog = {
     faces,
     wordFamilyAliases: manifest.WORD_FAMILY_ALIASES,
+    wordFamilySubstitutes: WORD_FAMILY_SUBSTITUTES,
     unvendoredNotoSerif: tables.UNVENDORED_NOTO_SERIF,
     lighterThanRegular: [...tables.LIGHTER_THAN_REGULAR],
     heavierThanRegular: [...tables.HEAVIER_THAN_REGULAR],
@@ -87,6 +89,7 @@ export function exportCatalog(): Record<string, string> {
   const families = [...new Set([
     ...faces.map((face) => face.metricCompatWith ?? face.family),
     ...Object.keys(manifest.WORD_FAMILY_ALIASES),
+    ...Object.keys(WORD_FAMILY_SUBSTITUTES),
     ...faces.map((face) => face.family),
     ...Object.keys(tables.UNVENDORED_NOTO_SERIF),
     ...[...tables.LIGHTER_THAN_REGULAR].map((weight) => `Calibri ${weight}`),
@@ -114,6 +117,7 @@ export function exportCatalog(): Record<string, string> {
         }),
         lastResortFace: offices((office) => faceFile(manifest.resolveLastResortFace(family, bold, italic, office))),
         glyphFallbackFace: offices((office) => faceFile(manifest.resolveGlyphFallbackFace(family, bold, italic, office))),
+        wordFamilySubstitute: resolveWordFamilySubstitute(family) ?? null,
       } });
     }
   }

@@ -113,6 +113,10 @@ jobs:
       - name: Check changeset length
         run: bun scripts/check-changeset-length.ts
 
+      # Every `bun test` preloads scripts/test-preload.ts, which imports the built fonts package.
+      - name: Build the fonts package
+        run: bun run build:fonts
+
       - name: Check embedded fonts
         run: |
           bun scripts/check-embedded-fonts.mjs
@@ -778,6 +782,8 @@ jobs:
           BETTEROFFICE_NATIVE_TEST_HOOKS: "1"
           NODE_OPTIONS: --max-old-space-size=8192
         run: |
+          bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build
+          (cd packages/fonts && bunx tsup)
           for package in $(node scripts/native-bindings.mjs --paths); do
             bunx napi build --cwd "$package" --platform --profile hooks --features test-hooks -- --locked
             bun test "$package/panic.test.ts"

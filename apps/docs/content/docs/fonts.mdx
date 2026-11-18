@@ -1,0 +1,74 @@
+---
+title: Fonts
+description: Bundled font packs, how faces are resolved, and where fonts you don't bundle come from
+---
+
+Layout needs the fonts a document names. BetterOffice bundles open faces with the same advance
+widths as the Microsoft core fonts, plus script coverage, so line breaks and pagination match
+Office without the originals installed.
+
+## Resolution order
+
+DOCX layout resolves a face in this order: fonts embedded in the document, fonts your app
+configures, the bundled packs, then a last resort fallback. Office families with no bundled
+face are looked up in one substitution table shared by every package
+(`resolveWordFamilySubstitute` in `@betteroffice/fonts/remote`, mirrored in Rust and as
+`font_substitute` in Python). Each entry names a freely licensed look-alike and a generic family.
+
+## Node.js, Bun and Deno
+
+`@betteroffice/docx` and `@betteroffice/pptx` depend on the font manager `@betteroffice/fonts`,
+which installs `@betteroffice/fonts-latin`. Add `@betteroffice/fonts-intl` or
+`@betteroffice/fonts-cjk` to cover those scripts. DOCX reads each face from the installed package
+files the first time a document needs it; nothing is downloaded. Reading package files needs
+Node.js 20.16 or 22.3 and later, Bun or Deno.
+
+## Native bindings, Rust and Python
+
+The Rust format crates bundle all three packs by default and resolve faces in the same order, with
+nothing fetched; see the [Rust guide](/docs/rust) to leave packs out or load them from your own
+location. `@betteroffice/pptx-native` installs the npm packs and reads each face from disk;
+`@betteroffice/docx-native` uses the same font manager as `@betteroffice/docx`. The
+[Python packages](/docs/python) install the packs as data wheels and read them from disk;
+`register_font` adds a family or replaces a bundled one. None of these fetch fonts: they resolve
+the substitution table to bundled faces and the generic family only, so their layout is
+deterministic and works without network access.
+
+## Fonts you don't bundle on the web
+
+In the browser, a family with no bundled face can be fetched from a font service that speaks the
+Google Fonts CSS API. The spreadsheet editor and viewer take the provider as `remoteFonts`; the
+document editor reads it from `setRemoteFontProvider` in `@betteroffice/docx`.
+
+| Provider | Requests go to | Notes |
+| --- | --- | --- |
+| `'bunny'` (default) | `fonts.bunny.net` | Bunny Fonts is run by BunnyWay d.o.o. (Slovenia, EU), served from Bunny's global edge network, and states that it does not log visitor IP addresses. |
+| `'google'` | `fonts.googleapis.com`, `fonts.gstatic.com` | Opt-in only. |
+| `{ cssUrl }` | your endpoint | Any Google-compatible CSS endpoint, for example your own Bunny pull zone restricted to EU routing, or a self-hosted mirror. |
+| `'off'` | nowhere | No remote font requests; the generic family is used. |
+
+The editor fetches the stylesheet and the font files it names itself, without cookies and without a
+referrer. Providers split each face into files by character range (`unicode-range`); the editor
+fetches only the files covering the characters it paints, and fetches another file only when newly
+typed or shown characters need it. The requests carry the look-alike's family name, the requested
+weight and style and the chosen files, plus what every browser request carries (IP address, user
+agent); no document text is sent, though the files requested show which character ranges the shown
+text uses. Bunny's stylesheets for the Chinese, Japanese and Korean look-alikes leave the range of
+most of their files unnamed, so those families are not fetched from Bunny; Google's name every
+range, and with `'google'` only the touched files are fetched. Install `@betteroffice/fonts-cjk` to
+keep those families local. A family installed on the viewer's machine is used directly and never
+fetched.
+
+A fetched face is used for both measuring and painting, so layout always matches what is drawn.
+The spreadsheet editor measures and paints text in the browser and uses fetched faces today. The
+document and presentation editors don't fetch remote faces yet: families without a bundled face
+lay out and paint with the generic family until those editors measure with the fetched faces.
+`setGoogleFontsEnabled` in `@betteroffice/docx` is deprecated; `true` selects `'google'` and
+`false` selects `'off'`.
+
+## Fully offline
+
+Install the font packs, serve them from your own origin (the default, or your own `baseUrl`;
+not the `@betteroffice/fonts/cdn` entry, which loads from a public CDN) and set the provider to `'off'`
+(`remoteFonts="off"`, `setRemoteFontProvider('off')`). The editors then make no font request
+outside your origin.
