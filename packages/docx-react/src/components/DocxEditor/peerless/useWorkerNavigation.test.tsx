@@ -415,16 +415,23 @@ function revealRange(throughSeq: number, final: (first: PeerlessFrameGeometry) =
   const initial = viewStore.getSnapshot().geometry!;
   viewStore.installFrameGeometry({ ...initial, frameEpoch: initial.frameEpoch + 1, layoutEpoch: 4, rasterScale: 2, documentWidth: 816 });
   submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }),
-    presented: Promise.resolve('presented') } }));
+    presented: Promise.resolve().then(() => {
+      const view = viewStore.getSnapshot();
+      viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: 1, throughSeq: 1, presentedThroughSeq: 1,
+        selection: { anchor: { story: 'body', ...reviewRange.start }, focus: { story: 'body', ...reviewRange.start } }, editState: view.editState });
+      viewStore.installFrameGeometry({ ...view.geometry!, frameEpoch: view.geometry!.frameEpoch + 1, coversThroughSeq: 1 });
+      return 'presented';
+    }) } }));
   submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 2, ack: Promise.resolve({ status: 'applied', seq: 2 }),
     presented: Promise.resolve().then(() => {
       const view = viewStore.getSnapshot();
       const first = view.geometry!;
+      expect(first.coversThroughSeq).toBe(1);
       viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: 1, throughSeq, presentedThroughSeq: throughSeq,
         selection: { anchor: { story: 'body', ...reviewRange.end }, focus: { story: 'body', ...reviewRange.start } }, editState: view.editState });
       viewStore.installFrameGeometry({ ...first, frameEpoch: first.frameEpoch + 1, coversThroughSeq: throughSeq,
         caret: null, selectionFocus: null, ...final(first) });
-      if (rasterScale !== undefined) viewStore.rescaleFrameGeometry({ ...viewStore.getSnapshot().geometry!, rasterScale });
+      if (rasterScale !== undefined) viewStore.rescaleFrameGeometry!({ ...viewStore.getSnapshot().geometry!, rasterScale });
       return 'presented';
     }) } }));
   return navigation;
@@ -448,6 +455,8 @@ for (const [name, throughSeq, final, rasterScale] of [
     const navigation = revealRange(throughSeq, () => final, rasterScale);
     try {
       expect(await navigation.controller.ref.scrollToComment(7)).toBe(false);
+      expect(navigation.submit).toHaveBeenCalledTimes(2);
+      expect(navigation.viewStore.getSnapshot().geometry!.coversThroughSeq).toBe(throughSeq);
       expect(navigation.scroller.scrollTop).toBe(0);
     } finally { navigation.dispose(); }
   });
@@ -462,6 +471,7 @@ for (const [name, throughSeq, final, y] of [
     const navigation = revealRange(throughSeq, () => final);
     try {
       expect(await navigation.controller.ref.scrollToComment(7)).toBe(true);
+      expect(navigation.submit).toHaveBeenCalledTimes(2);
       expect(navigation.scroller.scrollTop).toBe(y * 2 - 24);
     } finally { navigation.dispose(); }
   });
