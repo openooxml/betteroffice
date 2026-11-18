@@ -1,3 +1,8 @@
-import { startWorker } from './residentEngineWorker';
+import { bootWorker } from '../../../../shared/office-session/workerBoot';
 
-startWorker(self as unknown as DedicatedWorkerGlobalScope);
+bootWorker(
+  self as unknown as DedicatedWorkerGlobalScope,
+  () => import('./residentEngineWorker').then((module) => module.startWorker),
+  (error) => ({ id: 0, ok: false, terminal: true, failureCode: 'crash', error }),
+  'betteroffice.docx.worker',
+);

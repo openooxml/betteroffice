@@ -23,6 +23,11 @@
       "types": "./dist/progressive.d.ts",
       "import": "./dist/progressive.js",
       "default": "./dist/progressive.js"
+    },
+    "./remote": {
+      "types": "./dist/remote.d.ts",
+      "import": "./dist/remote.js",
+      "default": "./dist/remote.js"
     }
   },
   "files": [

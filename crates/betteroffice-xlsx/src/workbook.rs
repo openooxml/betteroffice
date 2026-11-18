@@ -91,8 +91,8 @@ use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
-    ProposalRequest, RenderOptions, Result, SelectionFormatting, SheetInfo, TextSearchMatch,
-    UnevaluatedCell, UpdateEvent, UpdateOrigin,
+    ProposalRequest, ProtectedSheets, RenderOptions, Result, SelectionFormatting, SheetInfo,
+    TextSearchMatch, UnevaluatedCell, UpdateEvent, UpdateOrigin,
 };
 use batch::DocumentVersion;
 use staging::CommitHistory;
@@ -905,6 +905,32 @@ impl Workbook {
         Ok(workbook)
     }
 
+    /// Opens keeping the results the file cached. Recalculates every formula, as
+    /// [`Workbook::open_recalculated_with_seed`] does, only when a formula has no cached
+    /// result or `calcPr` asks for a full calculation on load.
+    /// A blank formula result, or a blank or missing array follower, counts as uncached.
+    pub fn open_recalculating_stale(
+        bytes: &[u8],
+        options: CalculationOptions,
+        rand_seed: Option<u32>,
+    ) -> Result<Self> {
+        let mut workbook = Self::open_internal(bytes, false, None)?;
+        workbook.set_rand_seed(rand_seed);
+        let full_calculation = match &workbook.source_package {
+            Some(package) => package.materialize()?.requests_full_calculation(),
+            None => false,
+        };
+        if full_calculation
+            || workbook.has_uncached_source_formulas()
+            || workbook.has_blank_formula_results()?
+        {
+            workbook.recalculate(options);
+        } else {
+            workbook.derive_unevaluated(Some(options));
+        }
+        Ok(workbook)
+    }
+
     pub fn set_rand_seed(&mut self, seed: Option<u32>) {
         if self.rand_seed != seed {
             self.snapshot_package_lineage = None;
@@ -979,7 +1005,7 @@ impl Workbook {
     /// must be `model`.
     #[allow(clippy::too_many_arguments)]
     fn from_source_deferring(
-        model: WorkbookModel,
+        mut model: WorkbookModel,
         source_package: Option<xlsx_parse::PreservedPackage>,
         active_sheet: SheetId,
         build_graph: bool,
@@ -988,6 +1014,7 @@ impl Workbook {
         legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
         defer: bool,
     ) -> Result<Self> {
+        model.styles.read_declared_number_formats();
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
         let active_sheet = if (active_sheet.0 as usize) < model.sheets.len() {
@@ -1781,6 +1808,56 @@ impl Workbook {
             .is_some_and(|package| package.facts().has_uncached_source_formulas())
     }
 
+    fn has_blank_formula_results(&self) -> Result<bool> {
+        if self.model().sheets.iter().any(|sheet| {
+            sheet
+                .iter_cells()
+                .any(|(_, cell)| cell.formula.is_some() && cell.value == CellValue::Empty)
+                || sheet.array_formulas().any(|(anchor, range)| {
+                    (range.start.row..=range.end.row).any(|row| {
+                        (range.start.col..=range.end.col).any(|col| {
+                            let at = CellRef::new(row, col);
+                            at != anchor
+                                && sheet
+                                    .cell(at)
+                                    .is_none_or(|cell| cell.value == CellValue::Empty)
+                        })
+                    })
+                })
+        }) {
+            return Ok(true);
+        }
+        let Some(package) = self.source_package.as_ref() else {
+            return Ok(false);
+        };
+        let package = package.materialize()?;
+        Ok(self
+            .model()
+            .sheets
+            .iter()
+            .enumerate()
+            .any(|(index, sheet)| {
+                let Some(facts) = package.source_cell_facts(index) else {
+                    return false;
+                };
+                facts.alternate_formulas
+                    || facts.dropped_array_ranges
+                    || facts.blank_results.iter().any(|&(row, col)| {
+                        sheet
+                            .cell(CellRef::new(row, col))
+                            .is_some_and(|cell| cell.formula.is_some())
+                    })
+                    || sheet.array_formulas().any(|(anchor, range)| {
+                        (range.start.row..=range.end.row).any(|row| {
+                            facts
+                                .blank_results
+                                .range((row, range.start.col)..=(row, range.end.col))
+                                .any(|&(row, col)| CellRef::new(row, col) != anchor)
+                        })
+                    })
+            }))
+    }
+
     /// The committed state a structured export reads.
     pub(crate) fn try_export_source(&self) -> Result<ExportSource<'_>> {
         Ok(ExportSource {
@@ -2047,7 +2124,26 @@ impl Workbook {
         patch: StylePatch,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.patch_range_style_with_protection(
+            sheet,
+            range,
+            patch,
+            options,
+            ProtectedSheets::Refuse,
+        )
+    }
+
+    /// [`Workbook::patch_range_style`] under a [`ProtectedSheets`] policy.
+    pub fn patch_range_style_with_protection(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        patch: StylePatch,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
+        self.ensure_cells_formattable(sheet, protection)?;
         self.apply_carried_ops(
             vec![Op::PatchRangeStyle {
                 sheet,
@@ -2065,7 +2161,26 @@ impl Workbook {
         format: NumberFormatMutation,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.set_range_number_format_with_protection(
+            sheet,
+            range,
+            format,
+            options,
+            ProtectedSheets::Refuse,
+        )
+    }
+
+    /// [`Workbook::set_range_number_format`] under a [`ProtectedSheets`] policy.
+    pub fn set_range_number_format_with_protection(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        format: NumberFormatMutation,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
+        self.ensure_cells_formattable(sheet, protection)?;
         self.apply_carried_ops(
             vec![Op::SetRangeNumberFormat {
                 sheet,
@@ -2083,14 +2198,26 @@ impl Workbook {
     ) -> Result<SelectionFormatting> {
         self.validate_bounded_range(sheet, range)?;
         let formats = self.range_formats(sheet, range)?;
+        let styles = &self.model.styles;
+        let mut defaults = xlsx_model::workbook::ColumnDefaults::new(self.sheet(sheet)?);
         let number_formats = formats
             .iter()
-            .map(|(_, format)| number_format_kind(&format.number_format))
+            .map(|(at, format)| {
+                let (kind, pattern) = number_format_kind(&format.number_format);
+                let style = defaults.effective_style(*at).unwrap_or(0);
+                let id = styles.xf(style).and_then(|xf| xf.num_fmt_id);
+                let kind = match (id, &format.number_format) {
+                    (Some(id @ 1..=163), NumberFormat::Custom { .. }) => {
+                        number_format_kind(&NumberFormat::Builtin { id }).0
+                    }
+                    _ => kind,
+                };
+                (kind, pattern)
+            })
             .collect::<Vec<_>>();
         let number_format = uniform(number_formats.iter().map(|(kind, _)| *kind));
         let number_format_pattern =
             uniform(number_formats.iter().map(|(_, pattern)| pattern.clone())).flatten();
-        let styles = &self.model.styles;
         Ok(SelectionFormatting {
             number_format,
             number_format_pattern,
@@ -2196,7 +2323,20 @@ impl Workbook {
         format: CapturedFormat,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.apply_format_with_protection(sheet, range, format, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::apply_format`] under a [`ProtectedSheets`] policy.
+    pub fn apply_format_with_protection(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        format: CapturedFormat,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, range)?;
+        self.ensure_cells_formattable(sheet, protection)?;
         self.apply_carried_ops(
             vec![Op::ApplyRangeFormat {
                 sheet,
@@ -2259,7 +2399,19 @@ impl Workbook {
         input: &str,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.edit_cell_marked(sheet, cell, input, options, &mut |_| {})
+        self.edit_cell_with_protection(sheet, cell, input, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::edit_cell`] under a [`ProtectedSheets`] policy.
+    pub fn edit_cell_with_protection(
+        &mut self,
+        sheet: SheetId,
+        cell: CellRef,
+        input: &str,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
+        self.edit_cell_marked(sheet, cell, input, options, protection, &mut |_| {})
     }
 
     /// [`Workbook::edit_cell`] with its stages timed by `now`, a millisecond
@@ -2272,8 +2424,28 @@ impl Workbook {
         options: CalculationOptions,
         now: &mut impl FnMut() -> f64,
     ) -> Result<(MutationResult, EditProfile)> {
+        self.edit_cell_profiled_with_protection(
+            sheet,
+            cell,
+            input,
+            options,
+            ProtectedSheets::Refuse,
+            now,
+        )
+    }
+
+    /// [`Workbook::edit_cell_profiled`] under a [`ProtectedSheets`] policy.
+    pub fn edit_cell_profiled_with_protection(
+        &mut self,
+        sheet: SheetId,
+        cell: CellRef,
+        input: &str,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<(MutationResult, EditProfile)> {
         profiled(now, |mark| {
-            self.edit_cell_marked(sheet, cell, input, options, mark)
+            self.edit_cell_marked(sheet, cell, input, options, protection, mark)
         })
     }
 
@@ -2283,9 +2455,11 @@ impl Workbook {
         cell: CellRef,
         input: &str,
         options: CalculationOptions,
+        protection: ProtectedSheets,
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
+        self.ensure_cells_writable(sheet, [cell], protection)?;
         let names = DefinedFunctionNames::new(&self.model.defined_names);
         let (mut state, format) =
             edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
@@ -2336,7 +2510,18 @@ impl Workbook {
         edits: &[CellInput],
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.edit_cells_from(sheet, edits, &[], options)
+        self.edit_cells_from(sheet, edits, &[], options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::edit_cells`] under a [`ProtectedSheets`] policy.
+    pub fn edit_cells_with_protection(
+        &mut self,
+        sheet: SheetId,
+        edits: &[CellInput],
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
+        self.edit_cells_from(sheet, edits, &[], options, protection)
     }
 
     /// [`Workbook::edit_cells`] for a paste: `copied[i]` marks `edits[i]` as a
@@ -2350,7 +2535,19 @@ impl Workbook {
         copied: &[bool],
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.edit_cells_from(sheet, edits, copied, options)
+        self.edit_cells_from(sheet, edits, copied, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::edit_pasted_cells`] under a [`ProtectedSheets`] policy.
+    pub fn edit_pasted_cells_with_protection(
+        &mut self,
+        sheet: SheetId,
+        edits: &[CellInput],
+        copied: &[bool],
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
+        self.edit_cells_from(sheet, edits, copied, options, protection)
     }
 
     fn edit_cells_from(
@@ -2359,18 +2556,23 @@ impl Workbook {
         edits: &[CellInput],
         copied: &[bool],
         options: CalculationOptions,
+        protection: ProtectedSheets,
     ) -> Result<MutationResult> {
+        self.admit_protected_sheets(protection)?;
         if edits.is_empty() {
             return Ok(MutationResult::default());
         }
         self.ensure_worksheet_sheet(sheet)?;
+        for edit in edits {
+            self.validate_cell(edit.cell)?;
+        }
+        self.ensure_cells_writable(sheet, edits.iter().map(|edit| edit.cell), protection)?;
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
         let names = DefinedFunctionNames::new(&preview.defined_names);
         let mut per_op = Vec::with_capacity(edits.len());
         for (index, edit) in edits.iter().enumerate() {
-            self.validate_cell(edit.cell)?;
             let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -2453,7 +2655,8 @@ impl Workbook {
     /// left alone. This is copy tiling only — there is no series detection —
     /// and an array formula, a partially covered merged range, an Excel table,
     /// or a chart anchored in either rectangle is refused before anything
-    /// mutates.
+    /// mutates. On a protected sheet a locked destination refuses the whole
+    /// fill, and so does a copied style unless the sheet allows formatting.
     pub fn fill_range(
         &mut self,
         sheet: SheetId,
@@ -2463,12 +2666,27 @@ impl Workbook {
     ) -> Result<MutationResult> {
         self.validate_bounded_range(sheet, source)?;
         self.validate_bounded_range(sheet, destination)?;
+        self.ensure_cells_writable(
+            sheet,
+            cells_in(destination).filter(|at| !source.contains(*at)),
+            ProtectedSheets::Refuse,
+        )?;
         let ops = crate::fill::fill_range_ops(&self.model, sheet, source, destination)?;
         if let Some(package) = self.source_package.as_ref()
             && let Some(error) =
                 crate::fill::preserved_fill_refusal(package.materialize()?, &self.preserved, sheet)
         {
             return Err(error);
+        }
+        let target = self.sheet(sheet)?;
+        let restyled = ops.iter().any(|op| match op {
+            Op::SetCell { at, cell, .. } => {
+                cell.style.unwrap_or(0) != target.effective_style(*at).unwrap_or(0)
+            }
+            _ => true,
+        });
+        if restyled {
+            self.ensure_cells_formattable(sheet, ProtectedSheets::Refuse)?;
         }
         self.apply_carried_ops(ops, options)
     }
@@ -2495,6 +2713,11 @@ impl Workbook {
             .ok_or(Error::CellOutOfRange(destination))?;
         let target = CellRange::new(destination, CellRef::new(end_row, end_col));
         self.validate_bounded_range(sheet, target)?;
+        self.ensure_cells_writable(
+            sheet,
+            cells_in(source).chain(cells_in(target)),
+            ProtectedSheets::Refuse,
+        )?;
         if source.start.row == destination.row && source.start.col == destination.col {
             return Ok(MutationResult::default());
         }
@@ -3019,6 +3242,10 @@ impl Workbook {
         let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
+            self.ensure_cells_writable(edit.sheet, [edit.cell], ProtectedSheets::Refuse)?;
+            if edit.number_format.is_some() {
+                self.ensure_cells_formattable(edit.sheet, ProtectedSheets::Refuse)?;
+            }
             let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -3132,6 +3359,10 @@ impl Workbook {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
+            self.ensure_cells_writable(sheet, [cell], ProtectedSheets::Refuse)?;
+            if edit.number_format.is_some() {
+                self.ensure_cells_formattable(sheet, ProtectedSheets::Refuse)?;
+            }
             let (mut state, format) = edit_cell_state(
                 &preview,
                 &names,
@@ -3386,7 +3617,8 @@ impl Workbook {
     ///
     /// A frame is one element in one drawing part, and two sheets may both
     /// anchor it. Every sheet holding it is repinned together, or the save
-    /// would refuse a drawing its sheets no longer agree on.
+    /// would refuse a drawing its sheets no longer agree on. The move is
+    /// refused if any sheet holding the frame is protected.
     pub fn move_chart(
         &mut self,
         sheet: SheetId,
@@ -3395,7 +3627,21 @@ impl Workbook {
         dy: f32,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.move_chart_with_protection(sheet, frame, dx, dy, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::move_chart`] under a [`ProtectedSheets`] policy.
+    pub fn move_chart_with_protection(
+        &mut self,
+        sheet: SheetId,
+        frame: &str,
+        dx: f32,
+        dy: f32,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         let sheet_ref = self.sheet(sheet)?;
+        self.ensure_objects_movable(sheet, protection)?;
         let chart = sheet_ref
             .charts
             .iter()
@@ -3408,26 +3654,45 @@ impl Workbook {
                     "chart {frame} is pinned to the sheet and cannot be moved"
                 ))
             })?;
-        let ops = self
+        let ops = self.repinned_frame_ops(frame, to, protection)?;
+        self.apply_carried_ops(ops, options)
+    }
+
+    /// The anchor writes that repin `frame` to `to` on every sheet holding it,
+    /// refused when any of those sheets is protected.
+    fn repinned_frame_ops(
+        &self,
+        frame: &str,
+        to: ChartAnchor,
+        protection: ProtectedSheets,
+    ) -> Result<Vec<Op>> {
+        let owners: Vec<SheetId> = self
             .model
             .sheets
             .iter()
             .enumerate()
-            .flat_map(|(index, sheet)| {
-                sheet
+            .filter(|(_, sheet)| sheet.charts.iter().any(|held| held.frame_id() == frame))
+            .map(|(index, _)| SheetId(index as u32))
+            .collect();
+        for &owner in &owners {
+            self.ensure_objects_movable(owner, protection)?;
+        }
+        Ok(owners
+            .into_iter()
+            .flat_map(|owner| {
+                self.model.sheets[owner.0 as usize]
                     .charts
                     .iter()
                     .filter(|held| held.frame_id() == frame)
                     .map(move |held| Op::SetChartAnchor {
-                        sheet: SheetId(index as u32),
+                        sheet: owner,
                         frame: frame.to_owned(),
                         part: held.part.clone(),
                         from: held.anchor,
                         to,
                     })
             })
-            .collect();
-        self.apply_carried_ops(ops, options)
+            .collect())
     }
 
     /// Resize the chart frame `frame` names — a `ChartRegion` id — by moving
@@ -3441,7 +3706,8 @@ impl Workbook {
     ///
     /// A frame is one element in one drawing part, and two sheets may both
     /// anchor it. Every sheet holding it is repinned together, or the save
-    /// would refuse a drawing its sheets no longer agree on.
+    /// would refuse a drawing its sheets no longer agree on. The resize is
+    /// refused if any sheet holding the frame is protected.
     pub fn resize_chart(
         &mut self,
         sheet: SheetId,
@@ -3449,7 +3715,20 @@ impl Workbook {
         edges: ChartResize,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
+        self.resize_chart_with_protection(sheet, frame, edges, options, ProtectedSheets::Refuse)
+    }
+
+    /// [`Workbook::resize_chart`] under a [`ProtectedSheets`] policy.
+    pub fn resize_chart_with_protection(
+        &mut self,
+        sheet: SheetId,
+        frame: &str,
+        edges: ChartResize,
+        options: CalculationOptions,
+        protection: ProtectedSheets,
+    ) -> Result<MutationResult> {
         let sheet_ref = self.sheet(sheet)?;
+        self.ensure_objects_movable(sheet, protection)?;
         let chart = sheet_ref
             .charts
             .iter()
@@ -3470,25 +3749,7 @@ impl Workbook {
             };
             Error::InvalidOperation(message)
         })?;
-        let ops = self
-            .model
-            .sheets
-            .iter()
-            .enumerate()
-            .flat_map(|(index, sheet)| {
-                sheet
-                    .charts
-                    .iter()
-                    .filter(|held| held.frame_id() == frame)
-                    .map(move |held| Op::SetChartAnchor {
-                        sheet: SheetId(index as u32),
-                        frame: frame.to_owned(),
-                        part: held.part.clone(),
-                        from: held.anchor,
-                        to,
-                    })
-            })
-            .collect();
+        let ops = self.repinned_frame_ops(frame, to, protection)?;
         self.apply_carried_ops(ops, options)
     }
 
@@ -5708,6 +5969,13 @@ fn validate_range(range: CellRange) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Row-major cells of a validated range.
+fn cells_in(range: CellRange) -> impl Iterator<Item = CellRef> {
+    (range.start.row..=range.end.row).flat_map(move |row| {
+        (range.start.col..=range.end.col).map(move |col| CellRef::new(row, col))
+    })
 }
 
 /// A chart part is only ever preserved from the package it was read with;

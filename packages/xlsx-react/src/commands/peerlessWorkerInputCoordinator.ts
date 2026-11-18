@@ -6,7 +6,7 @@ import type {
 } from '@betteroffice/xlsx/worker';
 
 import { refusalCause, refusedEdit, type XlsxRefusalCause } from './refusalCause';
-import { WorkerInputRefusal } from './workerInputErrors';
+import { isSheetProtectedMessage, SHEET_PROTECTED_MESSAGE, WorkerInputRefusal } from './workerInputErrors';
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -926,10 +926,9 @@ export class PeerlessWorkerCommandRefusal extends WorkerInputRefusal {
     readonly draft: InputDraft | null, readonly input: PeerlessWorkerCommandInput | null = null
   ) {
     const result = status.result as { failure?: { message?: string } } | undefined;
-    const protectedCell = status.reason === 'locked-target' &&
-      /^(?:[A-Z]+[1-9]\d* is locked on protected sheet |sheet [\s\S]+ is protected$)/.test(result?.failure?.message ?? '');
+    const protectedCell = status.reason === 'locked-target' && isSheetProtectedMessage(result?.failure?.message ?? '');
     const declined = !protectedCell && refusedEdit(status, draft, input);
-    super(protectedCell ? 'This cell is on a protected sheet.' : status.reason ?? 'Worker command refused',
+    super(protectedCell ? SHEET_PROTECTED_MESSAGE : status.reason ?? 'Worker command refused',
       false, protectedCell ? 'sheet-protected' : declined ? 'edit-unsupported' : 'input-failed');
     this.cause = declined ? refusalCause(status) : null;
     this.name = 'XlsxWorkerCommandRefusal';

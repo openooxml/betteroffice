@@ -5029,6 +5029,7 @@ pub(crate) fn border_side_sources(
 fn cell_borders(
     formatting: Option<&Value>,
     table_borders: Option<&Value>,
+    style_borders: Option<&Value>,
     first_row: bool,
     last_row: bool,
     first_column: bool,
@@ -5042,12 +5043,8 @@ fn cell_borders(
                 .collect(),
         )
     });
-    let direct = field(formatting, "borders");
-    if inherited.is_none() && direct.is_none() {
-        None
-    } else {
-        merge_plain(inherited.as_ref(), direct)
-    }
+    let inherited = merge_plain(inherited.as_ref(), style_borders);
+    merge_plain(inherited.as_ref(), field(formatting, "borders"))
 }
 
 pub(crate) fn synthesized_cell_width(
@@ -5076,6 +5073,7 @@ struct CellOptions<'a> {
     first_column: bool,
     last_column: bool,
     table_borders: Option<&'a Value>,
+    style_cell: Option<&'a Value>,
     default_margins: Option<&'a Value>,
     theme: Option<&'a Value>,
     table_bidi: bool,
@@ -5089,8 +5087,17 @@ fn structural_attrs(mut attrs: JsonObject, skipped: &[&str]) -> JsonObject {
 
 fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<'a> {
     let formatting = field(Some(cell), "formatting");
-    let background =
-        resolve_color_to_hex(field(field(formatting, "shading"), "fill"), options.theme);
+    let shading = field(formatting, "shading")
+        .filter(|value| !value.is_null())
+        .or_else(|| field(options.style_cell, "shading"));
+    let background = if string(field(shading, "pattern")) == Some("solid") {
+        Some(
+            resolve_color_to_hex(field(shading, "color"), options.theme)
+                .unwrap_or_else(|| "000000".to_string()),
+        )
+    } else {
+        resolve_color_to_hex(field(shading, "fill"), options.theme)
+    };
     let width = field(field(formatting, "width"), "value")
         .cloned()
         .or_else(|| options.grid_width.map(|value| json!(value)));
@@ -5131,6 +5138,7 @@ fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<
         "borders": cell_borders(
             formatting,
             options.table_borders,
+            field(options.style_cell, "borders"),
             options.first_row,
             options.last_row,
             options.first_column,
@@ -5246,25 +5254,155 @@ fn table_cell_style_formatting(
     };
     let mut result = field(style, property).cloned();
     let parts = array(field(style, "tblStylePr"));
-    if property == "rPr" {
-        let whole = parts
-            .iter()
-            .find(|part| string(field(Some(part), "type")) == Some("wholeTable"));
-        result = merge(result.as_ref(), field(whole, property));
-    }
     if !parts
         .iter()
         .any(|part| field(Some(part), property).is_some())
     {
         return result;
     }
+    for (region, _) in table_style_regions(
+        table,
+        style,
+        row_index,
+        start_column,
+        end_column,
+        columns,
+        1,
+    ) {
+        if region == "wholeTable" && property != "rPr" {
+            continue;
+        }
+        let conditional = parts
+            .iter()
+            .find(|part| string(field(Some(part), "type")) == Some(region));
+        result = merge(result.as_ref(), field(conditional, property));
+    }
+    result
+}
+
+/// Whether a cell takes its top, bottom, left and right border from the table's outer sides.
+fn cell_outer_edges(
+    rows: usize,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    total_columns: usize,
+) -> [bool; 4] {
+    [
+        row_index == 0,
+        row_index + 1 == rows,
+        start_column == 0,
+        end_column == total_columns,
+    ]
+}
+
+/// The shading and edge borders a cell takes from its table style's `tcPr` and active
+/// conditional parts.
+fn table_cell_style_properties(
+    table: &Value,
+    style: Option<&Value>,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    columns: usize,
+    rowspan: usize,
+    outer: [bool; 4],
+) -> Option<Value> {
+    let parts = array(field(style, "tblStylePr"));
+    if field(style, "tcPr").is_none()
+        && !parts.iter().any(|part| field(Some(part), "tcPr").is_some())
+    {
+        return None;
+    }
+    let regions = table_style_regions(
+        table,
+        style,
+        row_index,
+        start_column,
+        end_column,
+        columns,
+        rowspan,
+    );
+    let ltr = !truthy(field(field(Some(table), "formatting"), "bidi"));
+    let outer = [outer[0], outer[1], outer[2] && ltr, outer[3] && ltr];
+    let mut shading = field(field(style, "tcPr"), "shading");
+    let layers = regions
+        .into_iter()
+        .filter(|(region, _)| *region != "wholeTable")
+        .map(|(region, edges)| {
+            let conditional = parts
+                .iter()
+                .find(|part| string(field(Some(part), "type")) == Some(region));
+            (
+                field(conditional, "tcPr"),
+                edges,
+                region.starts_with("band"),
+            )
+        });
+    let mut borders = Map::new();
+    for (properties, [top, bottom, left, right], band) in layers {
+        if let Some(value) = field(properties, "shading") {
+            shading = Some(value);
+        }
+        if let Some(sides) = object(field(properties, "borders")) {
+            for ((edge, side), on_outer) in border_side_sources(top, bottom, left, right)
+                .into_iter()
+                .zip(outer)
+            {
+                let Some(border) = sides.get(side) else {
+                    continue;
+                };
+                let cleared = matches!(string(field(Some(border), "style")), Some("nil" | "none"));
+                if band && on_outer && cleared {
+                    borders.remove(edge);
+                } else {
+                    borders.insert(edge.to_owned(), border.clone());
+                }
+            }
+        }
+    }
+    (shading.is_some() || !borders.is_empty()).then(|| {
+        json!({
+            "shading": nullish(shading),
+            "borders": (!borders.is_empty()).then_some(Value::Object(borders))
+        })
+    })
+}
+
+/// The table style regions active for a cell in precedence order, each with whether the cell
+/// sits on the region's top, bottom, left and right edge.
+fn table_style_regions(
+    table: &Value,
+    style: Option<&Value>,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    columns: usize,
+    rowspan: usize,
+) -> Vec<(&'static str, [bool; 4])> {
     let formatting = field(Some(table), "formatting");
     let style_formatting = field(style, "tblPr");
     let look = field(formatting, "look").or_else(|| field(style_formatting, "look"));
     let mask = string(field(look, "value"))
         .and_then(|value| u32::from_str_radix(value, 16).ok())
         .unwrap_or(if look.is_none() { 0x04a0 } else { 0 });
-    let flag = |key, bit| boolean(field(look, key)).unwrap_or(mask & bit != 0);
+    let named = [
+        "firstRow",
+        "lastRow",
+        "firstColumn",
+        "lastColumn",
+        "noHBand",
+        "noVBand",
+    ]
+    .into_iter()
+    .any(|key| boolean(field(look, key)).is_some());
+    let flag = |key, bit| {
+        if named {
+            boolean(field(look, key)) == Some(true)
+        } else {
+            mask & bit != 0
+        }
+    };
     let first_row = flag("firstRow", 0x20);
     let last_row = flag("lastRow", 0x40);
     let first_column = flag("firstColumn", 0x80);
@@ -5282,51 +5420,72 @@ fn table_cell_style_formatting(
     let at_first_column = first_column && start_column == 0;
     let at_last_column = last_column && end_column == columns;
     let band_size = |key| {
-        number(field(formatting, key).or_else(|| field(style_formatting, key))).unwrap_or(1.0)
+        number(field(formatting, key).or_else(|| field(style_formatting, key))).unwrap_or(0.0)
     };
     let row_band_size = band_size("styleRowBandSize");
     let column_band_size = band_size("styleColBandSize");
-    let mut regions = Vec::new();
+    let top = row_index == 0;
+    let last_spanned_row = row_index + rowspan.max(1) - 1;
+    let bottom = last_spanned_row + 1 >= rows.len();
+    let left = start_column == 0;
+    let right = end_column == columns;
+    let band_of = |position: usize, size: f64| (position as f64 / size).floor();
+    let mut regions = vec![("wholeTable", [top, bottom, left, right])];
     if !flag("noHBand", 0x200) && !at_first_row && !at_last_row && row_band_size > 0.0 {
-        let band =
-            (row_index.saturating_sub(usize::from(first_row)) as f64 / row_band_size).floor();
-        regions.push(if band % 2.0 == 0.0 {
-            "band1Horz"
-        } else {
-            "band2Horz"
-        });
+        let position = row_index.saturating_sub(usize::from(first_row));
+        let band = band_of(position, row_band_size);
+        let body_end = rows.len().saturating_sub(usize::from(last_row));
+        regions.push((
+            if band % 2.0 == 0.0 {
+                "band1Horz"
+            } else {
+                "band2Horz"
+            },
+            [
+                position == 0 || band_of(position - 1, row_band_size) != band,
+                last_spanned_row + 1 >= body_end
+                    || band_of(position + last_spanned_row - row_index + 1, row_band_size)
+                        != band_of(position + last_spanned_row - row_index, row_band_size),
+                left,
+                right,
+            ],
+        ));
     }
     if !flag("noVBand", 0x400) && !at_first_column && !at_last_column && column_band_size > 0.0 {
-        let band = (start_column.saturating_sub(usize::from(first_column)) as f64
-            / column_band_size)
-            .floor();
-        regions.push(if band % 2.0 == 0.0 {
-            "band1Vert"
-        } else {
-            "band2Vert"
-        });
+        let position = start_column.saturating_sub(usize::from(first_column));
+        let band = band_of(position, column_band_size);
+        let last = end_column.saturating_sub(usize::from(first_column) + 1);
+        let body_end = columns.saturating_sub(usize::from(last_column));
+        regions.push((
+            if band % 2.0 == 0.0 {
+                "band1Vert"
+            } else {
+                "band2Vert"
+            },
+            [
+                top,
+                bottom,
+                position == 0 || band_of(position - 1, column_band_size) != band,
+                end_column >= body_end
+                    || band_of(last + 1, column_band_size) != band_of(last, column_band_size),
+            ],
+        ));
     }
-    for (region, active) in [
-        ("firstCol", at_first_column),
-        ("lastCol", at_last_column),
-        ("firstRow", at_first_row),
-        ("lastRow", at_last_row),
-        ("nwCell", at_first_row && at_first_column),
-        ("neCell", at_first_row && at_last_column),
-        ("swCell", at_last_row && at_first_column),
-        ("seCell", at_last_row && at_last_column),
+    for (region, active, edges) in [
+        ("firstCol", at_first_column, [top, bottom, true, true]),
+        ("lastCol", at_last_column, [top, bottom, true, true]),
+        ("firstRow", at_first_row, [true, true, left, right]),
+        ("lastRow", at_last_row, [true, true, left, right]),
+        ("nwCell", at_first_row && at_first_column, [true; 4]),
+        ("neCell", at_first_row && at_last_column, [true; 4]),
+        ("swCell", at_last_row && at_first_column, [true; 4]),
+        ("seCell", at_last_row && at_last_column, [true; 4]),
     ] {
         if active {
-            regions.push(region);
+            regions.push((region, edges));
         }
     }
-    for region in regions {
-        let conditional = parts
-            .iter()
-            .find(|part| string(field(Some(part), "type")) == Some(region));
-        result = merge(result.as_ref(), field(conditional, property));
-    }
-    result
+    regions
 }
 
 fn project_row<'a>(
@@ -5400,6 +5559,17 @@ fn project_row<'a>(
         if span.is_some_and(|(_, skip)| *skip) {
             continue;
         }
+        let outer = cell_outer_edges(rows.len(), row_index, start_column, column, total_columns);
+        let style_cell = table_cell_style_properties(
+            table,
+            style_context.style,
+            row_index,
+            start_column,
+            column,
+            style_context.column_count,
+            span.map(|(rowspan, _)| *rowspan).unwrap_or(1),
+            outer,
+        );
         let mut projected = project_cell(
             cell,
             CellOptions {
@@ -5410,11 +5580,12 @@ fn project_row<'a>(
                     )),
                 rowspan: span.map(|(rowspan, _)| *rowspan).unwrap_or(1),
                 grid_width,
-                first_row: row_index == 0,
-                last_row: row_index + 1 == rows.len(),
-                first_column: start_column == 0,
-                last_column: column == total_columns,
+                first_row: outer[0],
+                last_row: outer[1],
+                first_column: outer[2],
+                last_column: outer[3],
                 table_borders: style_context.borders,
+                style_cell: style_cell.as_ref(),
                 default_margins: style_context.margins,
                 theme: style_context.theme,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
@@ -5453,6 +5624,17 @@ fn project_row<'a>(
                 "content": [{ "type": "paragraph", "content": [] }]
             })
         };
+        let outer = cell_outer_edges(rows.len(), row_index, 0, total_columns, total_columns);
+        let style_cell = table_cell_style_properties(
+            table,
+            style_context.style,
+            row_index,
+            0,
+            total_columns,
+            style_context.column_count,
+            1,
+            outer,
+        );
         let projected = project_cell(
             &synthetic,
             CellOptions {
@@ -5463,11 +5645,12 @@ fn project_row<'a>(
                     )),
                 rowspan: 1,
                 grid_width: (total_width > 0.0).then_some(100.0),
-                first_row: row_index == 0,
-                last_row: row_index + 1 == rows.len(),
-                first_column: true,
-                last_column: true,
+                first_row: outer[0],
+                last_row: outer[1],
+                first_column: outer[2],
+                last_column: outer[3],
                 table_borders: style_context.borders,
+                style_cell: style_cell.as_ref(),
                 default_margins: style_context.margins,
                 theme: style_context.theme,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
@@ -8988,6 +9171,755 @@ mod tests {
             inheritance.run_attrs(None, None)["fontSize"]["size"],
             json!(22)
         );
+    }
+
+    fn conditional_cells(look: Value) -> Vec<Vec<Value>> {
+        let line = |color: &str| json!({ "style": "single", "size": 8, "color": { "rgb": color } });
+        let fill = |color: &str| json!({ "fill": { "rgb": color } });
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Shaded",
+                "tblPr": { "styleRowBandSize": 1, "borders": { "insideH": line("000000") } },
+                "tblStylePr": [
+                    { "type": "firstRow", "tcPr": {
+                        "shading": fill("FF0000"),
+                        "borders": { "bottom": line("FF0000"), "insideV": { "style": "nil" } }
+                    } },
+                    { "type": "firstCol", "tcPr": {
+                        "shading": fill("00FF00"), "borders": { "insideH": line("00FF00") }
+                    } },
+                    { "type": "band1Horz", "tcPr": { "shading": fill("0000FF") } },
+                    { "type": "band2Horz", "tcPr": { "borders": { "top": line("888888") } } }
+                ]
+            }]
+        });
+        let rows: Vec<Value> = (0..4)
+            .map(|row| {
+                let cells: Vec<Value> = (0..3)
+                    .map(|column| {
+                        let mut cell = json!({ "type": "tableCell", "content": [] });
+                        if (row, column) == (2, 1) {
+                            cell["formatting"] = json!({ "shading": fill("ABCDEF") });
+                        }
+                        cell
+                    })
+                    .collect();
+                json!({ "cells": cells })
+            })
+            .collect();
+        let mut table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Shaded" },
+            "rows": rows
+        });
+        if !look.is_null() {
+            table["formatting"]["look"] = look;
+        }
+        seeded_cells(&definitions, &table)
+    }
+
+    fn seeded_cells(definitions: &Value, table: &Value) -> Vec<Vec<Value>> {
+        let baseline = RunInheritance::new(Some(definitions)).table_attrs(table);
+        baseline["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                row.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|cell| cell["attributes"].clone())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn table_style_conditional_parts_shade_and_border_their_regions() {
+        let cells = conditional_cells(Value::Null);
+        let fill = |row: usize, column: usize| cells[row][column]["backgroundColor"].clone();
+        let edge = |row: usize, column: usize, side: &str| {
+            cells[row][column]["borders"][side]["color"]["rgb"].clone()
+        };
+        assert_eq!(fill(0, 0), json!("FF0000"));
+        assert_eq!(fill(0, 1), json!("FF0000"));
+        assert_eq!(fill(1, 0), json!("00FF00"));
+        assert_eq!(fill(1, 1), json!("0000FF"));
+        assert_eq!(fill(2, 1), json!("ABCDEF"));
+        assert_eq!(cells[2][1]["_originalResolvedFill"], json!("ABCDEF"));
+        assert!(fill(2, 2).is_null());
+        assert_eq!(fill(3, 1), json!("0000FF"));
+        assert_eq!(cells[1][1]["_originalResolvedFill"], json!("0000FF"));
+
+        assert_eq!(edge(0, 0, "bottom"), json!("FF0000"));
+        assert_eq!(cells[0][1]["borders"]["right"]["style"], json!("nil"));
+        assert_eq!(edge(1, 0, "bottom"), json!("00FF00"));
+        assert_eq!(edge(2, 0, "top"), json!("00FF00"));
+        assert_eq!(edge(1, 1, "top"), json!("000000"));
+        assert_eq!(edge(2, 2, "top"), json!("888888"));
+        assert_eq!(edge(3, 0, "bottom"), Value::Null);
+        assert!(cells[2][1]["_originalFormatting"]["borders"].is_null());
+    }
+
+    #[test]
+    fn table_look_turns_conditional_cell_regions_off() {
+        let cells = conditional_cells(json!({ "firstRow": true, "noHBand": true }));
+        assert_eq!(cells[0][0]["backgroundColor"], json!("FF0000"));
+        for (row, column) in [(1, 0), (1, 1), (2, 2), (3, 1)] {
+            assert!(cells[row][column]["backgroundColor"].is_null());
+        }
+        assert_eq!(
+            cells[1][0]["borders"]["bottom"]["color"]["rgb"],
+            json!("000000")
+        );
+        assert_eq!(
+            cells[2][2]["borders"]["top"]["color"]["rgb"],
+            json!("000000")
+        );
+    }
+
+    #[test]
+    fn direct_shading_element_replaces_style_shading() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Shaded",
+                "tblStylePr": [
+                    { "type": "firstRow", "tcPr": { "shading": { "fill": { "rgb": "0000FF" } } } }
+                ]
+            }]
+        });
+        let cell = |shading: Value| json!({ "type": "tableCell", "formatting": { "shading": shading }, "content": [] });
+        let nil = cell(json!({ "pattern": "nil" }));
+        let solid = cell(json!({
+            "pattern": "solid", "color": { "rgb": "FF0000" }, "fill": { "auto": true }
+        }));
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Shaded", "look": { "firstRow": true } },
+            "rows": [{ "cells": [nil, solid, plain] }]
+        });
+        let cells = seeded_cells(&definitions, &table);
+        assert!(cells[0][0]["backgroundColor"].is_null());
+        assert_eq!(cells[0][1]["backgroundColor"], json!("FF0000"));
+        assert_eq!(cells[0][2]["backgroundColor"], json!("0000FF"));
+    }
+
+    #[test]
+    fn solid_shading_takes_its_pattern_colour_black_when_automatic() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Solid",
+                "tblStylePr": [
+                    { "type": "firstRow", "tcPr": { "shading": {
+                        "pattern": "solid", "color": { "auto": true }, "fill": { "rgb": "0000FF" }
+                    } } },
+                    { "type": "lastRow", "tcPr": { "shading": {
+                        "pattern": "solid", "fill": { "rgb": "0000FF" }
+                    } } }
+                ]
+            }]
+        });
+        let cell = |shading: Value| json!({ "type": "tableCell", "formatting": { "shading": shading }, "content": [] });
+        let plain = || json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Solid", "look": { "firstRow": true, "lastRow": true } },
+            "rows": [
+                { "cells": [plain(), plain(), plain(), plain()] },
+                { "cells": [
+                    cell(json!({ "pattern": "solid", "color": { "auto": true }, "fill": { "rgb": "FFFF00" } })),
+                    cell(json!({ "pattern": "solid", "fill": { "rgb": "FFFF00" } })),
+                    cell(json!({ "pattern": "solid", "color": { "rgb": "FF0000" }, "fill": { "rgb": "FFFF00" } })),
+                    cell(json!({ "pattern": "clear", "color": { "auto": true }, "fill": { "rgb": "00FF00" } }))
+                ] },
+                { "cells": [plain(), plain(), plain(), plain()] }
+            ]
+        });
+        let cells = seeded_cells(&definitions, &table);
+        let fills = |row: usize| {
+            cells[row]
+                .iter()
+                .map(|cell| cell["backgroundColor"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fills(0), vec![json!("000000"); 4]);
+        assert_eq!(
+            fills(1),
+            vec![
+                json!("000000"),
+                json!("000000"),
+                json!("FF0000"),
+                json!("00FF00")
+            ]
+        );
+        assert_eq!(fills(2), vec![json!("000000"); 4]);
+    }
+
+    #[test]
+    fn vertically_merged_cell_takes_its_region_bottom_border() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Edged",
+                "tblStylePr": [{ "type": "firstCol", "tcPr": { "borders": {
+                    "bottom": { "style": "single", "size": 8, "color": { "rgb": "0000FF" } },
+                    "insideH": { "style": "nil" }
+                } } }]
+            }]
+        });
+        let cell = |merge: Option<&str>| match merge {
+            Some(merge) => {
+                json!({ "type": "tableCell", "formatting": { "vMerge": merge }, "content": [] })
+            }
+            None => json!({ "type": "tableCell", "content": [] }),
+        };
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Edged", "look": { "firstColumn": true } },
+            "rows": [
+                { "cells": [cell(None), cell(None)] },
+                { "cells": [cell(Some("restart")), cell(None)] },
+                { "cells": [cell(Some("continue")), cell(None)] }
+            ]
+        });
+        let cells = seeded_cells(&definitions, &table);
+        assert_eq!(cells[1][0]["rowspan"], json!(2));
+        assert_eq!(
+            cells[1][0]["borders"]["bottom"]["color"]["rgb"],
+            json!("0000FF")
+        );
+    }
+
+    fn styled_cells(style: Value, look: Value, rows: usize, columns: usize) -> Vec<Vec<Value>> {
+        let cells = vec![json!({ "type": "tableCell", "content": [] }); columns];
+        let rows: Vec<Value> = (0..rows)
+            .map(|_| json!({ "cells": cells.clone() }))
+            .collect();
+        let style_id = style["styleId"].clone();
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": style_id, "look": look },
+            "rows": rows
+        });
+        seeded_cells(&json!({ "styles": [style] }), &table)
+    }
+
+    fn first_column_fills(cells: &[Vec<Value>]) -> Vec<Value> {
+        cells
+            .iter()
+            .map(|row| row[0]["backgroundColor"].clone())
+            .collect()
+    }
+
+    fn shading_part(region: &str, color: &str) -> Value {
+        json!({ "type": region, "tcPr": { "shading": { "fill": { "rgb": color } } } })
+    }
+
+    fn edge_style() -> Value {
+        json!({
+            "type": "table", "styleId": "Edges",
+            "tblStylePr": [shading_part("firstRow", "FF0000"), shading_part("lastRow", "0000FF")]
+        })
+    }
+
+    #[test]
+    fn table_look_named_flags_ignore_the_hex_mask() {
+        let cells = styled_cells(
+            edge_style(),
+            json!({ "value": "04A0", "lastRow": true }),
+            3,
+            1,
+        );
+        assert_eq!(
+            first_column_fills(&cells),
+            vec![Value::Null, Value::Null, json!("0000FF")]
+        );
+    }
+
+    #[test]
+    fn table_look_hex_mask_applies_without_named_flags() {
+        let cells = styled_cells(edge_style(), json!({ "value": "04A0" }), 3, 1);
+        assert_eq!(
+            first_column_fills(&cells),
+            vec![json!("FF0000"), Value::Null, Value::Null]
+        );
+    }
+
+    fn banded_style(band_size: Option<u32>) -> Value {
+        let mut style = json!({
+            "type": "table", "styleId": "Banded",
+            "tblStylePr": [shading_part("band1Horz", "D3DFEE")]
+        });
+        if let Some(size) = band_size {
+            style["tblPr"] = json!({ "styleRowBandSize": size });
+        }
+        style
+    }
+
+    #[test]
+    fn absent_row_band_size_applies_no_horizontal_banding() {
+        let cells = styled_cells(banded_style(None), json!({ "noVBand": true }), 3, 1);
+        assert_eq!(first_column_fills(&cells), vec![Value::Null; 3]);
+    }
+
+    #[test]
+    fn explicit_row_band_size_of_one_bands_alternate_rows() {
+        let cells = styled_cells(banded_style(Some(1)), json!({ "noVBand": true }), 3, 1);
+        assert_eq!(
+            first_column_fills(&cells),
+            vec![json!("D3DFEE"), Value::Null, json!("D3DFEE")]
+        );
+    }
+
+    #[test]
+    fn whole_table_part_shading_does_not_reach_cells() {
+        let style = json!({
+            "type": "table", "styleId": "Whole",
+            "tblStylePr": [shading_part("wholeTable", "00FF00")]
+        });
+        let cells = styled_cells(style, json!({ "noHBand": true, "noVBand": true }), 2, 2);
+        let fills: Vec<Value> = cells
+            .iter()
+            .flatten()
+            .map(|cell| cell["backgroundColor"].clone())
+            .collect();
+        assert_eq!(fills, vec![Value::Null; 4]);
+    }
+
+    #[test]
+    fn absent_column_band_size_applies_no_vertical_banding() {
+        let style = json!({
+            "type": "table", "styleId": "Columns",
+            "tblStylePr": [shading_part("band1Vert", "D3DFEE")]
+        });
+        let cells = styled_cells(style, json!({ "noHBand": true }), 1, 3);
+        let fills: Vec<Value> = cells[0]
+            .iter()
+            .map(|cell| cell["backgroundColor"].clone())
+            .collect();
+        assert_eq!(fills, vec![Value::Null; 3]);
+    }
+
+    #[test]
+    fn whole_table_part_paragraph_formatting_does_not_reach_cells() {
+        let definitions = json!({
+            "styles": [{
+                "type": "table", "styleId": "Spaced",
+                "tblStylePr": [{ "type": "wholeTable", "pPr": { "spaceAfter": 777 } }]
+            }]
+        });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Spaced", "look": { "noHBand": true, "noVBand": true } },
+            "rows": [{ "cells": [{ "type": "tableCell", "content": [] }] }]
+        });
+        let baseline = RunInheritance::new(Some(&definitions)).table_attrs(&table);
+        assert!(baseline["rows"][0][0]["paragraphFormatting"]["spaceAfter"].is_null());
+    }
+
+    #[test]
+    fn style_level_cell_borders_do_not_reach_cells() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "0000FF" } });
+        let style = json!({
+            "type": "table", "styleId": "Boxed",
+            "tcPr": { "borders": { "top": line, "bottom": line, "left": line, "right": line } }
+        });
+        let cells = styled_cells(style, json!({ "noHBand": true, "noVBand": true }), 2, 2);
+        let edges: Vec<Value> = cells
+            .iter()
+            .flatten()
+            .map(|cell| json!([cell["borders"]["top"], cell["borders"]["left"]]))
+            .collect();
+        assert_eq!(edges, vec![json!([null, null]); 4]);
+    }
+
+    #[test]
+    fn band_nil_borders_keep_the_table_outer_edge() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let nil = json!({ "style": "nil" });
+        let style = json!({
+            "type": "table", "styleId": "Ruled",
+            "tblPr": {
+                "styleRowBandSize": 1,
+                "borders": { "top": line, "bottom": line, "left": line, "right": line }
+            },
+            "tblStylePr": [
+                { "type": "band1Horz", "tcPr": { "borders": { "top": nil, "bottom": nil } } },
+                { "type": "firstCol", "tcPr": { "borders": { "bottom": nil } } }
+            ]
+        });
+        let look = json!({
+            "firstRow": false, "lastRow": false, "firstColumn": true, "noVBand": true
+        });
+        let cells = styled_cells(style, look, 3, 3);
+        let size = |row: usize, column: usize, side: &str| {
+            cells[row][column]["borders"][side]["size"].clone()
+        };
+        assert_eq!(size(2, 1, "bottom"), json!(8));
+        assert_eq!(size(2, 2, "bottom"), json!(8));
+        assert!(size(2, 0, "bottom").is_null());
+        assert_eq!(size(0, 1, "top"), json!(8));
+        assert_eq!(size(0, 2, "top"), json!(8));
+    }
+
+    #[test]
+    fn a_three_line_table_draws_its_header_rule() {
+        let rule =
+            |size: u32| json!({ "style": "single", "size": size, "color": { "rgb": "000000" } });
+        let style = json!({
+            "type": "table", "styleId": "ThreeLine",
+            "tblPr": { "borders": { "top": rule(12), "bottom": rule(12) } },
+            "tblStylePr": [
+                { "type": "firstRow", "tcPr": { "borders": { "bottom": rule(4) } } }
+            ]
+        });
+        let look = json!({
+            "firstRow": true, "lastRow": false, "firstColumn": false, "noVBand": true
+        });
+        let cells = styled_cells(style, look, 2, 2);
+        let size = |row: usize, column: usize, side: &str| {
+            cells[row][column]["borders"][side]["size"].clone()
+        };
+        for column in 0..2 {
+            assert_eq!(size(0, column, "top"), json!(12));
+            assert_eq!(size(0, column, "bottom"), json!(4));
+            assert!(size(1, column, "top").is_null());
+            assert_eq!(size(1, column, "bottom"), json!(12));
+        }
+    }
+
+    fn band_style(borders: Value, regions: [&str; 2], sides: Value) -> Value {
+        let parts: Vec<Value> = regions
+            .iter()
+            .map(|region| json!({ "type": region, "tcPr": { "borders": sides } }))
+            .collect();
+        json!({ "styles": [{
+            "type": "table", "styleId": "Bands",
+            "tblPr": { "styleRowBandSize": 1, "styleColBandSize": 1, "borders": borders },
+            "tblStylePr": parts
+        }] })
+    }
+
+    fn row_band_look() -> Value {
+        json!({
+            "firstRow": false, "lastRow": false, "firstColumn": false, "lastColumn": false,
+            "noVBand": true
+        })
+    }
+
+    fn merged_cell(merge: &str) -> Value {
+        json!({ "type": "tableCell", "formatting": { "vMerge": merge }, "content": [] })
+    }
+
+    #[test]
+    fn a_band_clears_the_bottom_of_a_merged_cell_above_the_last_row() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "rows": [
+                { "cells": [merged_cell("restart"), plain] },
+                { "cells": [merged_cell("continue"), plain] }
+            ]
+        });
+        for cleared in ["nil", "none"] {
+            let definitions = band_style(
+                json!({ "bottom": { "style": "nil" }, "insideH": line }),
+                ["band1Horz", "band2Horz"],
+                json!({ "bottom": { "style": cleared } }),
+            );
+            let cells = seeded_cells(&definitions, &table);
+            assert_eq!(cells[0][0]["rowspan"], json!(2));
+            assert!(
+                cells[0][0]["borders"]["bottom"]["size"].is_null(),
+                "{cleared}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_band_clears_the_right_of_a_cell_short_of_the_grid() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "columnWidths": [2000, 2000, 2000],
+            "rows": [{ "formatting": { "gridBefore": 1 }, "cells": [plain, plain] }]
+        });
+        for cleared in ["nil", "none"] {
+            let definitions = band_style(
+                json!({ "right": line, "insideV": line }),
+                ["band1Horz", "band2Horz"],
+                json!({ "right": { "style": cleared } }),
+            );
+            let cells = seeded_cells(&definitions, &table);
+            assert!(
+                cells[0][1]["borders"]["right"]["size"].is_null(),
+                "{cleared}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_band_clears_the_sides_of_a_right_to_left_table() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let nil = json!({ "style": "nil" });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look(), "bidi": true },
+            "rows": [{ "cells": [plain, plain] }]
+        });
+        let definitions = band_style(
+            json!({ "left": line, "right": line, "insideV": nil }),
+            ["band1Horz", "band2Horz"],
+            json!({ "left": nil, "right": nil }),
+        );
+        let cells = seeded_cells(&definitions, &table);
+        assert!(cells[0][1]["borders"]["right"]["size"].is_null());
+        assert!(cells[0][0]["borders"]["left"]["size"].is_null());
+    }
+
+    #[test]
+    fn vertical_band_nil_borders_keep_the_table_sides() {
+        let line = json!({ "style": "single", "size": 8, "color": { "rgb": "000000" } });
+        let nil = json!({ "style": "nil" });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": {
+                "styleId": "Bands",
+                "look": {
+                    "firstRow": false, "lastRow": false, "firstColumn": false,
+                    "lastColumn": false, "noHBand": true, "noVBand": false
+                }
+            },
+            "rows": [{ "cells": [plain, plain, plain] }]
+        });
+        let definitions = band_style(
+            json!({ "left": line, "right": line, "insideV": line }),
+            ["band1Vert", "band2Vert"],
+            json!({ "left": nil, "right": nil }),
+        );
+        let cells = seeded_cells(&definitions, &table);
+        let unbanded = seeded_cells(&definitions, &without_bands(&table));
+        assert_eq!(cells[0][0]["borders"]["left"]["size"], json!(8));
+        assert_eq!(cells[0][2]["borders"]["right"]["size"], json!(8));
+        assert!(cells[0][1]["borders"]["left"]["size"].is_null());
+        assert_eq!(unbanded[0][1]["borders"]["left"]["size"], json!(8));
+        assert_ne!(
+            cells[0][1]["borders"]["left"],
+            unbanded[0][1]["borders"]["left"]
+        );
+    }
+
+    fn both_bands_look() -> Value {
+        json!({
+            "firstRow": false, "lastRow": false, "firstColumn": false, "lastColumn": false,
+            "noHBand": false, "noVBand": false
+        })
+    }
+
+    fn layered_band_style(table_borders: Value, parts: [(&str, Value); 2]) -> Value {
+        let parts: Vec<Value> = parts
+            .iter()
+            .map(|(region, sides)| json!({ "type": region, "tcPr": { "borders": sides } }))
+            .collect();
+        json!({ "styles": [{
+            "type": "table", "styleId": "Bands",
+            "tblPr": { "styleRowBandSize": 1, "styleColBandSize": 1, "borders": table_borders },
+            "tblStylePr": parts
+        }] })
+    }
+
+    fn offset_band_table() -> Value {
+        let plain = json!({ "type": "tableCell", "content": [] });
+        json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": both_bands_look() },
+            "columnWidths": [2000, 2000, 2000],
+            "rows": [
+                { "cells": [plain, plain, plain] },
+                { "formatting": { "gridBefore": 1 }, "cells": [plain, plain] }
+            ]
+        })
+    }
+
+    fn sized_line(size: u32) -> Value {
+        json!({ "style": "single", "size": size, "color": { "rgb": "000000" } })
+    }
+
+    #[test]
+    fn a_skipped_band_edge_leaves_no_earlier_band_layer_behind() {
+        for cleared in ["nil", "none"] {
+            let definitions = layered_band_style(
+                json!({ "left": sized_line(4) }),
+                [
+                    ("band2Horz", json!({ "insideV": sized_line(8) })),
+                    ("band2Vert", json!({ "left": { "style": cleared } })),
+                ],
+            );
+            let cells = seeded_cells(&definitions, &offset_band_table());
+            assert_eq!(
+                cells[1][0]["borders"]["left"]["size"],
+                json!(4),
+                "{cleared}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cleared_vertical_band_edge_shows_the_table_side_over_a_horizontal_band() {
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": both_bands_look() },
+            "rows": [{ "cells": [plain, plain] }]
+        });
+        let definitions = layered_band_style(
+            json!({ "left": sized_line(4) }),
+            [
+                ("band1Horz", json!({ "left": sized_line(12) })),
+                ("band1Vert", json!({ "left": { "style": "nil" } })),
+            ],
+        );
+        let cells = seeded_cells(&definitions, &table);
+        assert_eq!(cells[0][0]["borders"]["left"]["size"], json!(4));
+    }
+
+    #[test]
+    fn an_empty_grid_takes_its_band_edges_from_the_widest_row() {
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let missing = json!({
+            "type": "table",
+            "formatting": {
+                "styleId": "Bands",
+                "look": {
+                    "firstRow": false, "lastRow": false, "firstColumn": false,
+                    "lastColumn": false, "noHBand": true, "noVBand": false
+                }
+            },
+            "rows": [{ "cells": [plain, plain] }]
+        });
+        let mut empty = missing.clone();
+        empty["columnWidths"] = json!([]);
+        let definitions = band_style(
+            json!({ "right": sized_line(12), "insideV": sized_line(4) }),
+            ["band1Vert", "band2Vert"],
+            json!({ "right": { "style": "nil" } }),
+        );
+        for (grid, table) in [("empty", empty), ("missing", missing)] {
+            let cells = seeded_cells(&definitions, &table);
+            assert!(cells[0][0]["borders"]["right"]["size"].is_null(), "{grid}");
+            assert_ne!(cells[0][0]["borders"]["right"]["size"], json!(12), "{grid}");
+            assert_eq!(cells[0][1]["borders"]["right"]["size"], json!(12), "{grid}");
+        }
+    }
+
+    fn without_bands(table: &Value) -> Value {
+        let mut table = table.clone();
+        table["formatting"]["look"]["noHBand"] = json!(true);
+        table["formatting"]["look"]["noVBand"] = json!(true);
+        table
+    }
+
+    #[test]
+    fn a_skipped_band_edge_matches_the_same_table_without_bands() {
+        let line = sized_line(8);
+        let nil = json!({ "style": "nil" });
+        let plain = json!({ "type": "tableCell", "content": [] });
+        let ruled = json!({ "styles": [{
+            "type": "table", "styleId": "Ruled",
+            "tblPr": {
+                "styleRowBandSize": 1,
+                "borders": { "top": line, "bottom": line, "left": line, "right": line }
+            },
+            "tblStylePr": [
+                { "type": "band1Horz", "tcPr": { "borders": { "top": nil, "bottom": nil } } },
+                { "type": "firstCol", "tcPr": { "borders": { "bottom": nil } } }
+            ]
+        }] });
+        let ruled_table = json!({
+            "type": "table",
+            "formatting": {
+                "styleId": "Ruled",
+                "look": {
+                    "firstRow": false, "lastRow": false, "firstColumn": true, "noVBand": true
+                }
+            },
+            "rows": [
+                { "cells": [plain, plain, plain] },
+                { "cells": [plain, plain, plain] },
+                { "cells": [plain, plain, plain] }
+            ]
+        });
+        let merged_table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "rows": [
+                { "cells": [merged_cell("restart"), plain] },
+                { "cells": [merged_cell("continue"), plain] }
+            ]
+        });
+        let offset_table = json!({
+            "type": "table",
+            "formatting": { "styleId": "Bands", "look": row_band_look() },
+            "columnWidths": [2000, 2000, 2000],
+            "rows": [{ "formatting": { "gridBefore": 1 }, "cells": [plain, plain] }]
+        });
+        let constructions = [
+            (
+                ruled,
+                ruled_table,
+                vec![
+                    (0, 1, "top"),
+                    (0, 2, "top"),
+                    (2, 1, "bottom"),
+                    (2, 2, "bottom"),
+                ],
+            ),
+            (
+                band_style(
+                    json!({ "bottom": nil, "insideH": line }),
+                    ["band1Horz", "band2Horz"],
+                    json!({ "bottom": nil }),
+                ),
+                merged_table,
+                vec![(1, 0, "bottom")],
+            ),
+            (
+                band_style(
+                    json!({ "left": line, "insideV": line }),
+                    ["band1Horz", "band2Horz"],
+                    json!({ "insideV": nil }),
+                ),
+                offset_table,
+                vec![(0, 0, "left")],
+            ),
+            (
+                layered_band_style(
+                    json!({ "left": sized_line(4) }),
+                    [
+                        ("band2Horz", json!({ "insideV": sized_line(8) })),
+                        ("band2Vert", json!({ "left": nil })),
+                    ],
+                ),
+                offset_band_table(),
+                vec![(1, 0, "left")],
+            ),
+        ];
+        for (definitions, table, edges) in constructions {
+            let banded = seeded_cells(&definitions, &table);
+            let unbanded = seeded_cells(&definitions, &without_bands(&table));
+            for (row, column, side) in edges {
+                assert_eq!(
+                    banded[row][column]["borders"][side], unbanded[row][column]["borders"][side],
+                    "{row} {column} {side}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nativeEnginePlugin } from '../../../scripts/native-engine';
 import { packageBoundary } from '../../../scripts/package-boundary';
+import { buildWorkerStubs } from '../../../scripts/worker-stub';
 
 const source = '../../../packages/pptx';
 const dist = '../dist';
@@ -15,7 +16,7 @@ export default defineConfig({
     'wasm-preflight': `${source}/src/wasm/preflight.ts`,
     worker: `${source}/src/worker.ts`,
     collaboration: `${source}/src/collaboration/index.ts`,
-    pptxSessionWorker: `${source}/src/session/worker.ts`,
+    pptxWorkerStart: `${source}/src/session/workerStart.ts`,
     'pptxSessionWorker.node': `${source}/src/session/worker.node.ts`,
     'sessionWorker.node': `${source}/src/session/sessionWorker.node.ts`,
     'sessionWorker.missing': `${source}/src/session/sessionWorker.missing.ts`,
@@ -42,7 +43,7 @@ export default defineConfig({
     options.chunkNames = 'chunk-[hash]';
   },
   onSuccess: async () => {
-    await rename(join(dist, 'pptxSessionWorker.js'), join(dist, 'pptxSessionWorker.mjs'));
+    await buildWorkerStubs('pptx', dist);
     await rename(join(dist, 'pptxSessionWorker.node.js'), join(dist, 'pptxSessionWorker.node.mjs'));
     await writeFile(join(dist, 'package.json'), JSON.stringify({
       type: 'module',

@@ -179,6 +179,23 @@ pub enum Watermark {
     },
 }
 
+/// The shape box a text watermark's glyphs are stretched to, as its VML style writes it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatermarkBox {
+    pub width_pt: f64,
+    pub height_pt: f64,
+    pub rotation: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal_relative: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_relative: Option<String>,
+}
+
 /// Parses bounded style declarations with stable first-insertion order.
 pub fn parse_style_attr(style: Option<&str>) -> VmlStyle {
     let mut output = VmlStyle::new();
@@ -1103,6 +1120,44 @@ pub fn extract_watermark(
         }
     }
     None
+}
+
+/// The shape box of the text watermark [`extract_watermark`] reads, when its style sizes it.
+pub fn extract_watermark_box(header_root: &XmlElement) -> Option<WatermarkBox> {
+    let mut shapes = Vec::new();
+    collect_named(header_root, "v:shape", 0, &mut shapes, MAX_VML_SHAPES);
+    let shape = shapes.into_iter().find(|shape| {
+        let id_lower = shape
+            .attribute(None, "id")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let text_path = shape
+            .child_elements()
+            .any(|child| child.local_name() == "textpath");
+        text_path || (is_watermark_shape(shape, &id_lower) && direct_image_data(shape).is_some())
+    })?;
+    shape
+        .child_elements()
+        .find(|child| child.local_name() == "textpath")?;
+    let style = parse_style_attr(shape.attribute(None, "style"));
+    let length = |key: &str| {
+        vml_length_to_px(style.get(key).map(String::as_str))
+            .map(|px| px * 0.75)
+            .filter(|pt| *pt > 0.0)
+    };
+    let value = |key: &str| style.get(key).cloned();
+    Some(WatermarkBox {
+        width_pt: length("width")?,
+        height_pt: length("height")?,
+        rotation: style
+            .get("rotation")
+            .and_then(|value| parse_javascript_float_prefix(value))
+            .unwrap_or(0.0),
+        horizontal: value("mso-position-horizontal"),
+        horizontal_relative: value("mso-position-horizontal-relative"),
+        vertical: value("mso-position-vertical"),
+        vertical_relative: value("mso-position-vertical-relative"),
+    })
 }
 
 #[derive(Default)]

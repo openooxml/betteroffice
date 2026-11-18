@@ -7335,6 +7335,9 @@ impl EngineSession {
                 }
             }
         }
+        for watermark in regions.header_watermarks.values() {
+            collector.collect_watermark(watermark);
+        }
         let requirements = collector.finish();
         let preview_superset_safe = stable_markers
             && requirements
@@ -9730,7 +9733,21 @@ impl EngineSession {
             };
             #[cfg(test)]
             HEADER_FOOTER_MEASUREMENTS.with(|count| count.set(count.get() + 1));
-            if let Some(variant) = measure_header_footer(
+            let watermark = regions.header_watermarks.get(&r_id).cloned();
+            let blank = watermark.is_some().then(|| HeaderFooterVariant {
+                r_id: r_id.clone(),
+                kind,
+                hf_type,
+                section_index,
+                measured: Vec::new(),
+                height: 0.0,
+                flow_height: 0.0,
+                visual_top: 0.0,
+                visual_bottom: 0.0,
+                field_widths: Vec::new(),
+                watermark: None,
+            });
+            if let Some(mut variant) = measure_header_footer(
                 r_id,
                 kind,
                 hf_type,
@@ -9739,7 +9756,10 @@ impl EngineSession {
                 content_width,
                 metrics,
                 measurement,
-            )? {
+            )?
+            .or(blank)
+            {
+                variant.watermark = watermark;
                 variants.push(variant);
             }
         }
@@ -9772,6 +9792,10 @@ impl EngineSession {
                 .collect(),
             variants,
             watermark: regions.watermark.clone(),
+            header_watermarks: regions
+                .header_watermarks
+                .values()
+                .any(|watermark| watermark["kind"] == "text"),
         }))
     }
 
@@ -15012,6 +15036,153 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn region_layout_paints_a_header_watermark_only_where_that_header_applies() {
+        let engine = EngineSession::new(133);
+        for r_id in ["rId1", "rId2"] {
+            engine
+                .doc()
+                .create_story(format!("hf:{r_id}"), "Header", "Normal", "left")
+                .unwrap();
+        }
+        let request = |title_pg: bool| {
+            serde_json::json!({
+                "measured": [],
+                "options": {
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5}
+                },
+                "regions": {
+                    "sections": [{
+                        "sectionId": "main",
+                        "pageSize": {"w": 300, "h": 200},
+                        "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5},
+                        "titlePg": title_pg,
+                        "headerFooterRefs": {"headerDefault": "rId1", "headerFirst": "rId2"}
+                    }],
+                    "headerWatermarks": {
+                        "rId1": {"kind": "text", "text": "DRAFT", "widthEmu": 1828800, "heightEmu": 457200}
+                    }
+                },
+                "measurement": {"defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"}},
+                "renderEnv": {}
+            })
+            .to_string()
+        };
+        let watermarks = |title_pg: bool| {
+            let output = engine
+                .layout_document_with_regions_json(&request(title_pg))
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+            let display: serde_json::Value =
+                serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+            let watermark = |r_id: &str| {
+                value["headersFooters"]["variants"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|variant| variant["rId"] == r_id)
+                    .and_then(|variant| variant["watermark"]["text"].as_str())
+            };
+            assert_eq!(watermark("rId1"), Some("DRAFT"));
+            assert_eq!(watermark("rId2"), None);
+            display["pages"][0]["watermarkPrimitiveCount"].clone()
+        };
+        assert_eq!(watermarks(true), serde_json::Value::Null);
+        assert_eq!(watermarks(false), serde_json::json!(1));
+    }
+
+    #[test]
+    fn region_layout_keeps_a_clean_header_clean_when_only_an_unused_header_has_a_watermark() {
+        let engine = EngineSession::new(1339);
+        for r_id in ["rId1", "rId2"] {
+            engine
+                .doc()
+                .create_story(format!("hf:{r_id}"), "Header", "Normal", "left")
+                .unwrap();
+        }
+        let request = json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5},
+                    "titlePg": false,
+                    "headerFooterRefs": {"headerDefault": "rId1", "headerFirst": "rId2"}
+                }],
+                "watermark": {"kind": "text", "text": "DRAFT"},
+                "headerWatermarks": {
+                    "rId2": {"kind": "text", "text": "DRAFT"}
+                }
+            },
+            "measurement": {"defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"}},
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let display: serde_json::Value =
+            serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+        assert_eq!(display["pages"][0]["header"]["rId"], "rId1");
+        assert_eq!(
+            display["pages"][0]["watermarkPrimitiveCount"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn region_layout_paints_the_watermark_of_a_header_with_no_blocks() {
+        let engine = EngineSession::new(1338);
+        engine
+            .doc()
+            .create_story("hf:rId1", "", "Normal", "left")
+            .unwrap();
+        engine
+            .doc()
+            .apply_raw_ops(
+                "hf:rId1",
+                vec![crate::RawOp::Delete { index: 0, len: 1 }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+        assert!(
+            crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "hf:rId1", &RenderEnv::default())
+                .unwrap()
+                .is_empty()
+        );
+        let request = json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20, "header": 5, "footer": 5},
+                    "headerFooterRefs": {"headerDefault": "rId1"}
+                }],
+                "headerWatermarks": {
+                    "rId1": {"kind": "text", "text": "DRAFT", "widthEmu": 1828800, "heightEmu": 457200}
+                }
+            },
+            "measurement": {"defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"}},
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let display: serde_json::Value =
+            serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+        assert_eq!(display["pages"][0]["watermarkPrimitiveCount"], json!(1));
     }
 
     #[test]
@@ -33092,6 +33263,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             visual_top: 0.0,
             visual_bottom: 100.0,
             field_widths: Vec::new(),
+            watermark: None,
         }];
         extend_input_for_header_footer(&mut input, &regions, &variants, None);
         let margins = input.options.margins.expect("extended margins");

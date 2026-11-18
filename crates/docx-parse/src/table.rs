@@ -230,12 +230,22 @@ pub fn parse_document_shading(element: Option<&XmlElement>) -> Option<ShadingPro
 pub fn parse_document_table_look(element: Option<&XmlElement>) -> Option<TableLook> {
     let element = element?;
     let mut look = TableLook::default();
+    let named = [
+        "firstRow",
+        "lastRow",
+        "firstColumn",
+        "lastColumn",
+        "noHBand",
+        "noVBand",
+    ]
+    .into_iter()
+    .any(|attribute| element.attribute(Some("w"), attribute).is_some());
     if let Some(raw) = element
         .attribute(Some("w"), "val")
         .filter(|value| !value.is_empty())
     {
         look.value = Some(raw.chars().take(8).collect());
-        if let Some(bits) = parse_javascript_hex_prefix(raw) {
+        if let Some(bits) = parse_javascript_hex_prefix(raw).filter(|_| !named) {
             look.first_row = Some(bits & 0x0020 != 0);
             look.last_row = Some(bits & 0x0040 != 0);
             look.first_column = Some(bits & 0x0080 != 0);
@@ -1099,7 +1109,7 @@ mod tests {
         assert_eq!(borders.tl2br.unwrap().style, "dashed");
         let look = parsed.look.unwrap();
         assert_eq!(look.first_row, Some(false));
-        assert_eq!(look.no_v_band, Some(true));
+        assert_eq!(look.no_v_band, None);
         let fill = parsed.shading.unwrap().fill.unwrap();
         assert_eq!(fill.rgb, None);
         assert_eq!(fill.theme_color.as_deref(), Some("accent1"));

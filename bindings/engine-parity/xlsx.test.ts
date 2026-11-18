@@ -80,7 +80,7 @@ const STYLES = `<styleSheet xmlns="${MAIN}"><fonts count="2"><font><sz val="11"/
   '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
   '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>';
 
-async function buildFixture(): Promise<Uint8Array> {
+async function buildFixture(replaced: Record<string, string> = {}): Promise<Uint8Array> {
   const zip = new JSZip();
   const date = new Date('2024-01-01T00:00:00Z');
   const override = (part: string, type: string) => `<Override PartName="/${part}" ContentType="${OFFICE}.${type}"/>`;
@@ -103,7 +103,45 @@ async function buildFixture(): Promise<Uint8Array> {
     'xl/drawings/_rels/drawing1.xml.rels': rels([['rIdChart', 'chart', '../charts/chart1.xml']]),
     'xl/charts/chart1.xml': CHART,
   };
-  for (const [name, content] of Object.entries(parts)) zip.file(name, content, { date });
+  for (const [name, content] of Object.entries({ ...parts, ...replaced })) zip.file(name, content, { date });
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}
+
+const ACCOUNTING ='_-* #,##0_-;\\-* #,##0_-;_-* &quot;-&quot;_-;_-@_-';
+const EAST_ASIAN_DATE = 'yyyy&quot;年&quot;m&quot;月&quot;d&quot;日&quot;';
+
+// The fixture with `code` declared under `id`, and the Notes sheet's A1 down holding `values` in an xf that points at it.
+const declaredFormat = (id: number, code: string, values: number[]) => buildFixture({
+  'xl/styles.xml': STYLES.replace('<fonts', `<numFmts count="1"><numFmt numFmtId="${id}" formatCode="${code}"/></numFmts><fonts`)
+    .replace('<cellXfs count="2">', '<cellXfs count="3">')
+    .replace('</cellXfs>', `<xf numFmtId="${id}" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>`),
+  'xl/worksheets/sheet2.xml': `<worksheet xmlns="${MAIN}"><sheetData>${values.map((value, row) => `<row r="${row + 1}"><c r="A${row + 1}" s="2"><v>${value}</v></c></row>`).join('')}</sheetData></worksheet>`,
+});
+const notesCells = (doc: Doc, rows: number) =>
+  (JSON.parse(doc.readCellsJson(json({ ranges: [at(`A1:A${rows}`, 'sheet:1')] }))) as { ranges: { cells: { displayText: string }[][] }[] })
+    .ranges[0]!.cells.map((row) => row[0]!.displayText);
+const notesText = (engine: XlsxEngine, bytes: Uint8Array, rows: number) => scoped(engine.XlsxDocument.open(bytes), (doc) => notesCells(doc, rows));
+// The Notes sheet's A1 down as `engine` shows it once it has restored the peer snapshot `chunks`.
+const restoredNotesText = (engine: XlsxEngine, chunks: Uint8Array[], rows: number) => {
+  const builder = new engine.XlsxSnapshotBuilder();
+  let consumed = false;
+  try {
+    for (const chunk of chunks) builder.push(chunk);
+    advanceUntilReady(builder);
+    consumed = true;
+    return scoped(builder.finish(), (doc) => notesCells(doc, rows));
+  } finally {
+    if (!consumed) builder.free();
+  }
+};
+
+async function buildProtectedFixture(source: Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(source);
+  const date = new Date('2024-01-01T00:00:00Z');
+  const unlocked = '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0"/></xf>';
+  zip.file('xl/styles.xml', STYLES.replace('<cellXfs count="2">', '<cellXfs count="3">').replace('</cellXfs>', `${unlocked}</cellXfs>`), { date });
+  const sheet = DATA_SHEET.replace('<row r="5">', '<row r="4"><c r="B4" s="2"><v>1</v></c></row><row r="5">').replace('</sheetData>', '</sheetData><sheetProtection sheet="1"/>');
+  zip.file('xl/worksheets/sheet1.xml', sheet, { date });
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
@@ -111,11 +149,13 @@ const wasmEngine: XlsxEngine = { ...wasmXlsx, font_preflight: wasmFontPreflight 
 const nativeEngine = createRequire(import.meta.url)('../xlsx-native/index.js') as XlsxEngine;
 const ENGINES = [['wasm', wasmEngine], ['native', nativeEngine]] as const;
 let fixture: Uint8Array;
+let protectedFixture: Uint8Array;
 
 beforeAll(async () => {
   await initWasm({ module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)) });
   await initPreflight({ module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/preflight/xlsx_preflight_bg.wasm', import.meta.url)) });
   fixture = await buildFixture();
+  protectedFixture = await buildProtectedFixture(fixture);
 });
 
 // documentVersion() is "{nonce:32 hex}-{epoch}"; the nonce is minted per open.
@@ -353,6 +393,10 @@ const rows: Row<Xlsx>[] = [
   {
     method: 'XlsxDocument.openWithCalculationJson',
     call: ({ engine }) => scoped(engine.XlsxDocument.openWithCalculationJson(fixture, CONTEXT), (d) => [d.sheetInfoJson(), d.calculationStatusJson()]),
+  },
+  {
+    method: 'XlsxDocument.openRecalculatingStale',
+    call: ({ engine }) => scoped(engine.XlsxDocument.openRecalculatingStale(fixture, CONTEXT), (d) => [d.sheetInfoJson(), d.calculationStatusJson()]),
   },
   { method: 'XlsxDocument.openCollaborative', call: ({ engine }) => scoped(engine.XlsxDocument.openCollaborative(fixture, CLIENT), (d) => d.sheetInfoJson()) },
   {
@@ -679,6 +723,14 @@ const rows: Row<Xlsx>[] = [
     call: ({ doc }) => doc.translateFormulasJson(json([{ formula: 'B2*2', from: { row: 1, col: 2 }, to: { row: 4, col: 3 } }, { formula: 'A1', from: { row: 0, col: 0 }, to: { row: 0, col: 0 } }])),
   },
   { method: 'XlsxDocument.proposeJson', mutates: true, call: ({ doc }) => doc.proposeJson(json({ agentId: 'parity-agent', note: null, edits: [{ sheet: 0, row: 3, col: 1, input: '5' }] })) },
+  {
+    method: 'XlsxDocument.proposeJson',
+    name: 'XlsxDocument.proposeJson refuses a number format on a protected sheet',
+    throws: { name: 'string', reason: 'the sheet does not allow formatting cells', message: 'sheet "Data" is protected' },
+    call: ({ engine }) =>
+      scoped(engine.XlsxDocument.openWithCalculationJson(protectedFixture, CONTEXT), (d) =>
+        d.proposeJson(json({ agentId: 'parity-agent', note: null, edits: [{ sheet: 0, row: 3, col: 1, input: '5', numberFormat: { type: 'percent' } }] }))),
+  },
   defineRow({
     method: 'XlsxDocument.listProposalsJson',
     setup: ({ doc }: Xlsx) => propose(doc),
@@ -885,6 +937,32 @@ describe('xlsx native and wasm parity table', () => {
       const clients = [0, 1].map(() => scoped(engine.XlsxDocument.openRecoveryCheckpoint(checkpoint, CHECKPOINT_SEQ), (d) => d.clientId));
       console.log(`RECOVERY-OPEN-CLIENT-PROBE ${side} ${JSON.stringify(clients)}`);
       expect(clients[0]).not.toBe(clients[1]);
+    }
+  });
+
+  test('a declared built-in number format id displays like its custom twin on both engines', async () => {
+    for (const [id, code, values] of [[41, ACCOUNTING, [-1234, 1234]], [31, EAST_ASIAN_DATE, [45000]]] as const) {
+      const declared = await declaredFormat(id, code, [...values]);
+      const custom = await declaredFormat(164, code, [...values]);
+      const [wasm, native] = ENGINES.map(([, engine]) => notesText(engine, declared, values.length));
+      expect(native).toEqual(wasm);
+      expect(wasm).toEqual(notesText(wasmEngine, custom, values.length));
+      if (id === 41) {
+        expect(wasm![0]).toContain('-');
+        expect(wasm![0]).not.toContain('(');
+      } else {
+        expect(wasm![0]).toContain('年');
+      }
+    }
+  });
+
+  test('a declared built-in number format id keeps the file code in a snapshot restored on the other engine', async () => {
+    const declared = await declaredFormat(41, ACCOUNTING, [-1234, 1234]);
+    for (const [, engine] of ENGINES) {
+      const chunks = scoped(engine.XlsxDocument.openWithCalculationJson(declared, CONTEXT), snapshotChain);
+      const [shown] = restoredNotesText(otherEngine(engine), chunks, 2);
+      expect(shown).toContain('-');
+      expect(shown).not.toContain('(');
     }
   });
 
