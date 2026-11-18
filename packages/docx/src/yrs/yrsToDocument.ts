@@ -1512,8 +1512,8 @@ function buildParagraphContent(
   };
 
   for (const item of items) {
-    // A note reference is handled before tracked/link marks.
-    if (item.kind === 'embed' && item.embedKind === 'noteRef') {
+    // An untracked note reference is handled before link marks.
+    if (item.kind === 'embed' && item.embedKind === 'noteRef' && !item.attributes.ins && !item.attributes.del) {
       flushRun();
       flushHyperlink();
       const note = ordinaryContentForItem(item, recovery, format);
