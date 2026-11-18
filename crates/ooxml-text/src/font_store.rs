@@ -866,7 +866,7 @@ impl FontStore {
         first.map_or(id, |(index, _)| FontId(index as u32))
     }
 
-    /// Whether `a` and `b` shape `ch` alike: one font's bytes at one em and horizontal pitch,
+    /// Whether `a` and `b` shape `ch` alike: one font's bytes at one horizontal pitch,
     /// giving `ch` the same width from whichever named width table each carries. Views of one
     /// face that differ only in line metrics, such as a substitute for another family that
     /// measurement reaches through a second `w:rFonts` slot, shape and paint it the same.
@@ -883,8 +883,8 @@ impl FontStore {
                 .widths
                 .and_then(|widths| family_cluster_advance(widths, &cluster))
         };
+        // a view keeps the em of the bytes it views
         self.byte_owner(a).ok() == self.byte_owner(b).ok()
-            && first.metrics.units_per_em == second.metrics.units_per_em
             && first.advance_scale == second.advance_scale
             && width(first) == width(second)
     }
