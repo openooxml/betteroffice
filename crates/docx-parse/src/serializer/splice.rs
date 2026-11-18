@@ -5363,13 +5363,11 @@ mod tests {
         )
     }
 
-    const PLAIN: &str = "<w:p><w:r><w:t>b</w:t></w:r></w:p>";
-
     #[test]
     fn a_range_id_the_source_holds_twice_does_not_refuse_the_splice() {
         let first = bookmarked(4, "a");
         let third = bookmarked(4, "c");
-        let edited = PLAIN.replace("b<", "b, edited<");
+        let edited = PLAIN.replace("Plain<", "Plain, edited<");
         let expected = body(&format!("{first}{edited}{third}"));
         for (route, spliced) in
             ["planned", "direct"]
