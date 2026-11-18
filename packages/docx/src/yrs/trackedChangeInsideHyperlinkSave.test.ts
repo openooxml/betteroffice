@@ -148,14 +148,11 @@ async function yrs(): Promise<YrsSession> {
 /** The comments the host holds for the opened document, which the editor hands to its save. */
 const hostComments = (document: Document): Comment[] => document.package.document.comments ?? [];
 
-/** The editor's main-thread save: the body projected for a save onto `base`, merged with the opening host when there is one. */
+/** The editor's main-thread save: the body projected onto `base`, merged with the opening host when there is one. */
 async function editorSave(session: YrsSession, base: Document, comments: Comment[], host?: Document): Promise<Uint8Array> {
   const dirty = new DirtyProjectionStories();
   dirty.add('body');
-  const projected = yrsToDocument(session, host ? mergeDocxHostMetadata(base, host) : base, {
-    ...dirty.projectionOptions(),
-    save: true,
-  });
+  const projected = yrsToDocument(session, host ? mergeDocxHostMetadata(base, host) : base, dirty.projectionOptions());
   return new Uint8Array(await saveEditorDocument(session, projected, comments));
 }
 
