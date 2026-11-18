@@ -1222,6 +1222,19 @@ impl Stylesheet {
         if self.borders.is_empty() && format.border != Border::default() {
             self.borders.push(Border::default());
         }
+        let authored;
+        let format = match self.redefined_builtin_code(&format.number_format) {
+            Some(pattern) => {
+                authored = CellFormat {
+                    number_format: NumberFormat::Custom {
+                        pattern: pattern.to_string(),
+                    },
+                    ..format.clone()
+                };
+                &authored
+            }
+            None => format,
+        };
         let previous_len = self.cell_xfs.len();
         let result = match &format.number_format {
             NumberFormat::Builtin { id } => Ok(Some(self.intern_builtin_cell_format(format, *id))),
@@ -1392,6 +1405,22 @@ impl Stylesheet {
             canonical_index,
         );
         Ok(index)
+    }
+
+    /// the builtin code an authored builtin id means where the workbook
+    /// declares that id with another code.
+    fn redefined_builtin_code(&self, format: &NumberFormat) -> Option<&'static str> {
+        let NumberFormat::Builtin { id } = format else {
+            return None;
+        };
+        let code = crate::numfmt::builtin_format_code(*id)?;
+        let redefined = *id != 0
+            && !self.builtin_number_formats
+            && self
+                .num_fmts
+                .iter()
+                .any(|(declared, own)| declared == id && own != code);
+        redefined.then_some(code)
     }
 
     #[inline(never)]
