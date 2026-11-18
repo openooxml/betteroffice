@@ -892,7 +892,7 @@ fn conditional_table_paragraph_spacing_follows_regions_and_cascade() {
             vec![160; 5],
             vec![160; 5],
         ],
-        vec![vec![10; 5]; 5],
+        vec![vec![170, 180, 170, 180, 170]; 5],
         vec![
             vec![190, 110, 200],
             vec![170, 180, 170],
