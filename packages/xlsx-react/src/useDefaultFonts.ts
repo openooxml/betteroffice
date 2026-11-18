@@ -17,10 +17,7 @@ export function useDefaultFonts(
   settledRef.current = settled;
   const state = useRef<{ owner: unknown; painter?: ReturnType<typeof createDefaultFontPainter>; last?: DisplayList }>(undefined);
   const openingFrame = useRef<DisplayList>(undefined);
-  const lastRemote = useRef<string>(undefined);
   useLayoutEffect(() => {
-    const switched = lastRemote.current !== undefined && lastRemote.current !== remote && remote !== JSON.stringify('off');
-    lastRemote.current = remote;
     if (defaultFonts === false || decoder === undefined) return;
     const current: NonNullable<typeof state.current> = { owner };
     if (owner != null) {
@@ -33,7 +30,6 @@ export function useDefaultFonts(
       current.painter = createDefaultFontPainter(decoder, () => repaintRef.current(),
         { onSettled: () => settledRef.current?.(), remoteFonts: JSON.parse(remote) as RemoteFontProvider });
       if (current.last) current.painter.adopt(current.last);
-      else if (switched) repaintRef.current();
     }, () => {
       if (state.current !== current) return;
       state.current = undefined;
