@@ -464,8 +464,13 @@ fn editing_another_cell_keeps_the_rich_items_and_their_runs() {
     let receipt = workbook
         .edit_cell(SheetId(0), at, "2", CalculationOptions::default())
         .unwrap();
-    assert!(receipt.applied);
-    assert!(receipt.changed.is_empty());
+    assert_eq!(
+        receipt,
+        betteroffice_xlsx::MutationResult {
+            applied: true,
+            ..Default::default()
+        }
+    );
     for (col, runs) in (0..4).zip(&before) {
         assert_eq!(cell_runs(&workbook, col), runs.as_slice(), "{col}");
     }
