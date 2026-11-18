@@ -53,15 +53,16 @@ const revised = (values: Record<string, unknown> | undefined, keys: readonly str
 
 /**
  * A paragraph's accepted-view text and whether it holds inline atoms, read from its own segments
- * without building the story's view. Undefined wherever tracked changes touch it or the mark
- * before it (they can join paragraphs or hide text), or its id is not unique: the caller then
- * reads the story. An engine without segment reads also reads the story.
+ * without building the story's view, with the offset units of the block embeds it starts with,
+ * which the text leaves out and paragraph offsets count. Undefined wherever tracked changes touch
+ * it or the mark before it (they can join paragraphs or hide text), or its id is not unique: the
+ * caller then reads the story. An engine without segment reads also reads the story.
  */
 export function readEchoParagraph(
   engine: Pick<DocxWorkerCommandEngine, 'geometryReader' | 'paragraphUnit' | 'paragraphSegments'>,
   story: string,
   paraId: string
-): { text: string; hasAtoms: boolean } | undefined {
+): { text: string; hasAtoms: boolean; lead: number } | undefined {
   if (typeof engine.geometryReader.paragraphIdCount !== 'function' || typeof engine.paragraphUnit !== 'function' ||
     typeof engine.paragraphSegments !== 'function') return undefined;
   if (engine.geometryReader.paragraphIdCount(story, paraId) !== 1) return undefined;
@@ -78,22 +79,45 @@ export function readEchoParagraph(
   let text = '';
   let hasAtoms = false;
   let leading = true;
+  let lead = 0;
   for (const segment of own) {
     if (revised(segment.attributes, ['ins', 'del'])) return undefined;
     if (segment.kind === 'text') {
       text += segment.text;
       leading = false;
     } else if (segment.kind === 'embed') {
-      if (leading && BLOCK_EMBEDS.has(segment.embedKind)) continue;
+      if (leading && BLOCK_EMBEDS.has(segment.embedKind)) { lead += 1; continue; }
       text += '\uFFFC';
       hasAtoms = true;
       leading = false;
     } else {
       if (segment.paraId !== paraId || revised(segment.properties, ['pPrIns', 'pPrDel'])) return undefined;
-      return { text, hasAtoms };
+      return { text, hasAtoms, lead };
     }
   }
   return undefined;
+}
+
+/**
+ * Offset units of the block embeds a paragraph starts with, for a paragraph the story read gave:
+ * its text leaves them out too. Zero for an engine without segment reads; the line text check
+ * below still declines a line the paragraph text does not match.
+ */
+function leadingBlockUnits(
+  engine: Pick<DocxWorkerCommandEngine, 'paragraphUnit' | 'paragraphSegments'>,
+  story: string,
+  paraId: string
+): number | undefined {
+  if (typeof engine.paragraphUnit !== 'function' || typeof engine.paragraphSegments !== 'function') return 0;
+  const unit = engine.paragraphUnit(story, paraId);
+  const own = unit < 0 ? undefined : engine.paragraphSegments(story, [unit])[0];
+  if (!own) return undefined;
+  let lead = 0;
+  for (const segment of own) {
+    if (segment.kind !== 'embed' || !BLOCK_EMBEDS.has(segment.embedKind)) break;
+    lead += 1;
+  }
+  return lead;
 }
 
 export function projectCommandEchoContext(
@@ -118,6 +142,11 @@ export function projectCommandEchoContext(
     : engine.proposalEngine.readParagraphs({ story: 'body', paraIds: [selection.focus.paraId], view: 'accepted' });
   const paragraph = fast ? { paraId: selection.focus.paraId, text: fast.text, atoms: fast.hasAtoms ? [0] : [] }
     : read?.ok ? read.paragraphs[0] : undefined;
+  // paragraph offsets count the block embeds the paragraph starts with; its text does not
+  const lead = fast ? fast.lead : leadingBlockUnits(engine, 'body', selection.focus.paraId);
+  const anchorOffset = selection.anchor.offset - (lead ?? 0);
+  const focusOffset = selection.focus.offset - (lead ?? 0);
+  if (lead === undefined || anchorOffset < 0 || focusOffset < 0) return undefined;
   if (!paragraph || paragraph.paraId !== selection.focus.paraId || paragraph.atoms.length || !paragraph.text ||
     echoEncoder.encode(paragraph.text).byteLength > DOCX_ECHO_MAX_CONTEXT_BYTES ||
     /[\u0000-\u001f\u007f\u0590-\u109f\u200e-\u200f\u202a-\u202e\u2066-\u2069]/u.test(paragraph.text)) return undefined;
@@ -146,12 +175,12 @@ export function projectCommandEchoContext(
       if (glyph.y < caret.y || glyph.y > caret.y + caret.height) continue;
       const local = byteToUtf16.get(glyph.cluster);
       if (local !== undefined && Math.abs(glyph.x - caret.x) < 0.01) {
-        starts.add(primitive.docStart + local - selection.focus.offset);
+        starts.add(primitive.docStart + local - focusOffset);
       }
       const next = primitive.glyphs[index + 1];
       const end = next ? byteToUtf16.get(next.cluster) : primitive.text.length;
       if (end !== undefined && glyph.advance !== undefined && Math.abs(glyph.x + glyph.advance - caret.x) < 0.01) {
-        starts.add(primitive.docStart + end - selection.focus.offset);
+        starts.add(primitive.docStart + end - focusOffset);
       }
     }
   }
@@ -221,8 +250,8 @@ export function projectCommandEchoContext(
     const offsets = [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)]
       .map((segment) => segment.index).concat(text.length);
     if (offsets.some((offset) => !positions.has(offset))) continue;
-    const anchorGrapheme = offsets.indexOf(selection.anchor.offset - lineOffset);
-    const focusGrapheme = offsets.indexOf(selection.focus.offset - lineOffset);
+    const anchorGrapheme = offsets.indexOf(anchorOffset - lineOffset);
+    const focusGrapheme = offsets.indexOf(focusOffset - lineOffset);
     if (anchorGrapheme < 0 || focusGrapheme < 0) return undefined;
     const size = Math.max(...styleRuns.map((run) => run.fontSizePx));
     const x = positions.get(0)!;

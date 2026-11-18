@@ -3730,6 +3730,27 @@ test('typing in a wrapped paragraph under an active display window carries echo 
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+test('typing after a paragraph that holds only a page break echoes the caret paragraph, not one character off', async () => {
+  const bodyXml = '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:br w:type="page"/></w:r></w:p>' +
+    '<w:p w14:paraId="00000003"><w:r><w:t>After a page break</w:t></w:r></w:p>';
+  const { client, engine } = await openWorker({ bodyXml, prepare: (engine) => {
+    const paraId = engine.paragraphs('body').find((paragraph) => paragraph.text.includes('After'))!.paraId;
+    return { story: 'body', paraId, offset: engine.geometryReader.locateParagraph('body', paraId).end -
+      engine.geometryReader.locateParagraph('body', paraId).start - 3 };
+  } });
+  try {
+    const typed = (await client.edit(intent(1, 0, 'insertText', { text: 'x' }))).frame!.payload.echoContext;
+    const paragraph = engine.paragraphs('body').find((paragraph) => paragraph.text.includes('After'))!;
+    // the page break leads this paragraph as a block embed: offsets count it, the paragraph text does not
+    expect(paragraph.text).toBe('After a page brxeak');
+    expect(typed?.text).toBe('After a page brxeak');
+    expect(typed!.boundaries[typed!.selection.focusGrapheme]!.utf16).toBe(16);
+    expect(typed!.selection.anchorGrapheme).toBe(typed!.selection.focusGrapheme);
+    expect(typed!.glyphs).toBeDefined();
+  } finally { client.destroy(); }
+}, TIMEOUT);
+
 test('resident geometry, object rects and selection after inline controls match the layout', async () => {
   const { createDisplayListQueries } = await import('../layout/render/displayListQueries');
   const { loadRustDisplayListQueryEngine } = await import('../layout/render/rustDisplayList');
