@@ -315,7 +315,8 @@ fn fields_open_across_paragraphs_at_the_nesting_limit_open_within_a_linear_budge
     on_a_large_stack(open_at_the_nesting_limit);
 }
 
-fn open_at_the_nesting_limit() {
+/// The serialised body of the stair at the nesting limit, held to the linear byte budget.
+fn body_at_the_nesting_limit() -> Vec<u8> {
     let base = capped_body(4, usize::MAX).unwrap();
     let bound = NESTING_LIMIT / 4 * base.len() + BYTE_SLACK;
     let Some(body) = capped_body(NESTING_LIMIT, bound) else {
@@ -324,6 +325,11 @@ fn open_at_the_nesting_limit() {
             base.len()
         );
     };
+    body
+}
+
+fn open_at_the_nesting_limit() {
+    let body = body_at_the_nesting_limit();
     assert!(field_entries(&body) >= NESTING_LIMIT);
     let blocks: Vec<Value> = serde_json::from_slice(&body).unwrap();
     let texts: Vec<_> = blocks.iter().map(own_text).collect();
@@ -421,4 +427,14 @@ fn save_each_field_and_paragraph_once() {
         let reopened: Vec<_> = body_values(&saved).iter().map(own_text).collect();
         assert_eq!(reopened, expected_paragraph_texts(depth));
     }
+}
+
+#[test]
+fn saving_fields_open_across_paragraphs_at_the_nesting_limit_needs_no_large_stack() {
+    let body = body_at_the_nesting_limit();
+    let bytes = stair(NESTING_LIMIT);
+    let saved = save(&bytes, serde_json::from_slice(&body).unwrap());
+    let xml = document_xml(&saved);
+    assert_eq!(field_char_counts(&xml), [NESTING_LIMIT; 3]);
+    assert_eq!(tagged_texts(&xml, "w:t"), expected_run_texts(NESTING_LIMIT));
 }
