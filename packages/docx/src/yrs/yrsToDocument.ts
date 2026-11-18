@@ -1431,6 +1431,10 @@ function restoreProjectedFieldResults(
     const group = children.get(index) ?? [];
     const attributes = { ...item.attributes };
     delete attributes.fieldResult;
+    if (item.kind === 'embed' && item.embedKind === 'noteRef') {
+      delete attributes.ins;
+      delete attributes.del;
+    }
     group.push({ ...item, attributes });
     children.set(index, group);
     groups.set(owner, children);
