@@ -289,25 +289,25 @@ fn spill_list(neighbour: bool) -> DisplayList {
         .unwrap()
 }
 
-fn rich_cell(list: &DisplayList) -> (f32, xlsx_render::Rect, usize) {
-    list.commands
-        .iter()
-        .find_map(|command| match command {
-            DrawCmd::Text { x, clip, runs, .. } if !runs.is_empty() => {
-                Some((*x, *clip, runs.len()))
-            }
-            _ => None,
-        })
-        .expect("a text command with runs")
+fn rich_cell(list: &DisplayList) -> Option<(f32, xlsx_render::Rect, usize)> {
+    list.commands.iter().find_map(|command| match command {
+        DrawCmd::Text { x, clip, runs, .. } if !runs.is_empty() => Some((*x, *clip, runs.len())),
+        _ => None,
+    })
 }
 
 #[test]
 fn a_rich_cell_spills_into_an_empty_neighbour_and_is_cut_at_a_filled_one() {
     let fonts = fonts();
     let (spill, cut) = (spill_list(false), spill_list(true));
-    let (x, spill_clip, spill_runs) = rich_cell(&spill);
-    let (_, cut_clip, cut_runs) = rich_cell(&cut);
-    assert_eq!((spill_runs, cut_runs), (2, 2));
+    let (spill_cell, cut_cell) = (rich_cell(&spill), rich_cell(&cut));
+    assert_eq!(
+        (spill_cell.map(|cell| cell.2), cut_cell.map(|cell| cell.2)),
+        (Some(2), Some(2))
+    );
+    let (Some((x, spill_clip, _)), Some((_, cut_clip, _))) = (spill_cell, cut_cell) else {
+        unreachable!();
+    };
     assert!(spill_clip.w > cut_clip.w, "{spill_clip:?} {cut_clip:?}");
     let edge = (cut_clip.x + cut_clip.w) as u32;
     let spilled = pixels(&fonts, spill.commands);

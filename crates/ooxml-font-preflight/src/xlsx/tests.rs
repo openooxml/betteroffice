@@ -292,9 +292,6 @@ fn shared_and_inline_strings_attach_only_used_scripts_and_request_their_run_font
     );
     let result = xlsx_font_preflight(&fixture(&sheet, STYLES, Some(&strings), &[], false)).unwrap();
     assert!(result.complete);
-    assert_eq!(result.faces[0].scripts, ["cjk-jp"]);
-    assert_eq!(result.faces[1].scripts, ["cjk-jp", "arabic", "hebrew"]);
-    assert_eq!(result.faces[2].scripts, ["arabic"]);
     assert_eq!(
         keys(&result),
         [
@@ -303,6 +300,9 @@ fn shared_and_inline_strings_attach_only_used_scripts_and_request_their_run_font
             ("Unused", true, true)
         ]
     );
+    assert_eq!(result.faces[0].scripts, ["cjk-jp"]);
+    assert_eq!(result.faces[1].scripts, ["cjk-jp", "arabic", "hebrew"]);
+    assert_eq!(result.faces[2].scripts, ["arabic"]);
 }
 
 #[test]
