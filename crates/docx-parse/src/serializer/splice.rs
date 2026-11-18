@@ -1108,16 +1108,20 @@ fn ranges(xml: &str) -> Option<Ranges<'_>> {
     })
 }
 
-fn unique_ranges<'x>(fragments: impl IntoIterator<Item = &'x str>) -> Option<bool> {
+/// Whether `fragments` hold each range end at most as often as `source`, the spliced part, or
+/// at most once.
+fn unique_ranges<'x>(source: &str, fragments: impl IntoIterator<Item = &'x str>) -> Option<bool> {
+    let held = ranges(source).map_or_else(Ends::new, |ranges| ranges.all);
     let mut ends = Ends::new();
     for fragment in fragments {
-        for ((kind, id, opens), count) in ranges(fragment)?.all {
-            if matches!(kind, "spell" | "gram") {
+        for (end, count) in ranges(fragment)?.all {
+            if matches!(end.0, "spell" | "gram") {
                 continue;
             }
-            let total = ends.entry((kind, id, opens)).or_insert(0);
+            let allowed = held.get(&end).copied().unwrap_or(0).max(1);
+            let total = ends.entry(end).or_insert(0);
             *total += count;
-            if *total > 1 {
+            if *total > allowed {
                 return Some(false);
             }
         }
@@ -2175,7 +2179,7 @@ fn splice_story_part_inner(
         .map(|(range, rank, xml)| (range.clone(), *rank, xml.as_str()))
         .collect();
     let fragments = splice_fragments(&source, edits)?;
-    if !unique_ranges(fragments.iter().copied())? {
+    if !unique_ranges(&source, fragments.iter().copied())? {
         return None;
     }
     options.replace_reasons.extend(tables.reasons);
@@ -2715,7 +2719,7 @@ pub(crate) fn splice_source_direct(
         .map(|(range, rank, xml)| (range.clone(), *rank, xml.as_str()))
         .collect();
     let fragments = splice_fragments(&source, edits)?;
-    if !unique_ranges(fragments.iter().copied())? {
+    if !unique_ranges(&source, fragments.iter().copied())? {
         return None;
     }
     Some(fragments.concat())
