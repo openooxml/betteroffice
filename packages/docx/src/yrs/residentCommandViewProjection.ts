@@ -639,7 +639,20 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   const ratio = provider.pixelRatio;
   const left = Math.floor(((center === undefined ? xs[0]! : chosen.x) + ink.xMin * first.size) * ratio) - 1;
   const top = Math.floor((baseline - ink.yMax * first.size) * ratio) - 1;
-  const inkRight = Math.ceil((Math.max(right, placement.end) + ink.overhang * first.size) * ratio) + 1;
+  // A line that stays put inks no further right than the glyphs it has now, or than the painter lets
+  // typed glyphs reach (their advance ends by right - 1, their outlines by the sets' overhang past it).
+  // The band stops at the last pixel either touches, short of a cell border just past the line.
+  let painted = right - 1 + ink.overhang * first.size;
+  for (const run of runs) {
+    for (const glyph of run.glyphs) {
+      const outline = provider.glyphInk(run.fontId, glyph.id);
+      if (outline === null) continue;
+      painted = Math.max(painted, outline ? glyph.x + outline.xMax * run.size / outline.upem
+        : glyph.x + (glyph.advance ?? 0) + ink.overhang * first.size);
+    }
+  }
+  const inkRight = center === undefined ? Math.floor(painted * ratio) + 1
+    : Math.ceil((Math.max(right, placement.end) + ink.overhang * first.size) * ratio) + 1;
   const bottom = Math.ceil((baseline - ink.yMin * first.size) * ratio) + 1;
   // the line paints nothing outside its cell's clip, so the band stops at the pixels the clip touches
   const clip = input.clip;
@@ -650,7 +663,7 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
   const device = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
   if (device.width <= 0 || device.height <= 0) return undefined;
   const band = { x: device.x / ratio, y: device.y / ratio, w: device.width / ratio, h: device.height / ratio };
-  if (paintedOver(provider, page, input.omitted, band)) return undefined;
+  if (paintedOver(provider, page, input.omitted, band) || edgedUnder(page, input.omitted, device, ratio)) return undefined;
   return {
     line: { ...route, size: first.size,
       color: first.color, x: chosen.x, y: baseline, next, right, ...(center === undefined ? {} : { center }),
@@ -664,6 +677,38 @@ function projectGlyphLine(input: GlyphLineInput): { line: DocxEchoGlyphLine; rec
 /** The size a run shapes at: its half points as the engine measures them, in px. */
 function echoShapingSize(size: number): number {
   return Math.fround(Math.fround(Math.round(size * 1.5) / 2 * 96) / 72);
+}
+
+/**
+ * Whether a shape, rule or picture painted before the echoed line has an edge that only partly
+ * covers a pixel of its repaint band. The band is restored from a background rastered on a canvas of
+ * its own size, which antialiases such an edge a level apart from the page raster; whole pixels and
+ * the inside of a fill come out the same.
+ */
+function edgedUnder(
+  page: RetainedFrame['pages'][number]['page'],
+  omitted: ReadonlySet<number>,
+  device: { x: number; y: number; width: number; height: number },
+  ratio: number,
+): boolean {
+  const firstOmitted = Math.min(...omitted);
+  const partial = (value: number) => Math.abs(value - Math.round(value)) > 1e-6;
+  const inside = (value: number, from: number, to: number) => Math.floor(value) >= from && Math.floor(value) < to;
+  for (let index = 0; index < firstOmitted && index < page.primitives.length; index += 1) {
+    const primitive = page.primitives[index]!;
+    if (omitted.has(index) || primitive.kind === 'glyphRun' || primitive.kind === 'text') continue;
+    const rect = displayPrimitiveRect(primitive);
+    const x0 = rect.x * ratio;
+    const x1 = (rect.x + rect.w) * ratio;
+    const y0 = rect.y * ratio;
+    const y1 = (rect.y + rect.h) * ratio;
+    const right = device.x + device.width;
+    const bottom = device.y + device.height;
+    if (x1 <= device.x || x0 >= right || y1 <= device.y || y0 >= bottom) continue;
+    if ([x0, x1].some((edge) => partial(edge) && inside(edge, device.x, right)) ||
+      [y0, y1].some((edge) => partial(edge) && inside(edge, device.y, bottom))) return true;
+  }
+  return false;
 }
 
 /** Whether anything painted after the echoed line reaches into its repaint band. */
