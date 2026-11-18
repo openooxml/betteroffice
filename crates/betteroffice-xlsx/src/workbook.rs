@@ -3048,7 +3048,7 @@ impl Workbook {
         let rebased = self.rebased_proposals(&ops);
         self.apply_model_history(|undo, model| undo.undo(model))?;
         self.rebase_answers(&names_before, &ops);
-        self.bump_model_epoch_after(&ops);
+        self.bump_model_epoch();
         self.queue_geometry_delta(delta);
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
@@ -3112,7 +3112,7 @@ impl Workbook {
         let rebased = self.rebased_proposals(&ops);
         self.apply_model_history(|undo, model| undo.redo(model))?;
         self.rebase_answers(&names_before, &ops);
-        self.bump_model_epoch_after(&ops);
+        self.bump_model_epoch();
         self.queue_geometry_delta(delta);
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
@@ -4342,7 +4342,7 @@ impl Workbook {
             };
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
             self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
-            self.bump_model_epoch_after(ops);
+            self.bump_model_epoch_keeping_results();
             self.queue_geometry_delta(delta);
             self.update_sheet_info_cache(ops, &prior_styles);
             update
@@ -4567,7 +4567,7 @@ impl Workbook {
     ) -> CalculationResult {
         match scope {
             CalculationScope::Kept => {
-                self.bump_model_epoch_after(&[]);
+                self.bump_model_epoch_keeping_results();
                 self.last_calculation.changed.clear();
                 CalculationResult::default()
             }
@@ -4585,7 +4585,7 @@ impl Workbook {
         rewritten: &[(SheetId, CellRef)],
         options: CalculationOptions,
     ) -> CalculationResult {
-        self.bump_model_epoch_after(&[]);
+        self.bump_model_epoch_keeping_results();
         let graph = self.graph.as_mut().expect("graph initialized");
         let seeds = graph.rename_sheets(&self.model, rewritten);
         let (result, recomputed) = recalc_after_with_recomputed(
@@ -4629,7 +4629,7 @@ impl Workbook {
         let keep = self.graph_current();
         #[cfg(test)]
         let fresh = keep.then(|| self.fresh_full_recalculation(options));
-        self.bump_model_epoch_after(&[]);
+        self.bump_model_epoch_keeping_results();
         self.recalculated_since_open = true;
         self.calculations_since_open = self.calculations_since_open.saturating_add(1);
         self.count_graph_reuse(keep);
@@ -5348,21 +5348,17 @@ impl StagedApply {
 impl Workbook {
     /// Model writes funnel through here, `commit_*` or `rebuild_and_recalculate`;
     /// charts revalidate against their refresh value after the bump. Screen
-    /// frames paint no conditional result from before a write no ops explain.
+    /// frames paint no conditional result from before it.
     fn bump_model_epoch(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
         self.conditional_cells_moved();
     }
 
-    /// [`Self::bump_model_epoch`] for a write that applied `ops`, none for a
-    /// recalculation: when each keeps every cell and rule in place, screen
-    /// frames may paint a cell's conditional result from before it until the
-    /// cell is decided again.
-    fn bump_model_epoch_after(&mut self, ops: &[Op]) {
+    /// [`Self::bump_model_epoch`] for a direct edit of one cell or a
+    /// recalculation, after which screen frames may paint a cell's conditional
+    /// result from before it until the cell is decided again.
+    fn bump_model_epoch_keeping_results(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
-        if !ops.iter().all(keeps_cells) {
-            self.conditional_cells_moved();
-        }
     }
 
     fn conditional_cells_moved(&mut self) {
@@ -5384,32 +5380,6 @@ impl Workbook {
         self.model = model;
         Ok(())
     }
-}
-
-/// Whether `op` leaves every cell at its address and every conditional-format
-/// rule as it was, so a cell's earlier conditional result still answers it.
-fn keeps_cells(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::SetCell { .. }
-            | Op::PatchRangeStyle { .. }
-            | Op::SetRangeNumberFormat { .. }
-            | Op::ApplyRangeFormat { .. }
-            | Op::RestoreColStyles { .. }
-            | Op::RestoreRowStyles { .. }
-            | Op::SetColWidth { .. }
-            | Op::SetColVisibility { .. }
-            | Op::SetColsVisibility { .. }
-            | Op::RestoreColDimension { .. }
-            | Op::SetRowHeight { .. }
-            | Op::SetRowVisibility { .. }
-            | Op::SetRowsVisibility { .. }
-            | Op::RestoreRowDimension { .. }
-            | Op::SetFreezePane { .. }
-            | Op::SetHyperlinks { .. }
-            | Op::SetHyperlink { .. }
-            | Op::RemoveHyperlink { .. }
-    )
 }
 
 /// Everything a single sheet must satisfy on its own. A batch of ops passes
