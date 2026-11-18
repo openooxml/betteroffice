@@ -9,7 +9,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { documentToYrs } from './documentToYrs';
 import { DirtyProjectionStories, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
-import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
+import { createYrsSession, decodeDocxHostJson, saveYrsDocx, type YrsSession } from './index';
 import { createResidentEngineSession } from './residentEngineSession';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -470,14 +470,18 @@ describe('a comment range end whose start is not in its story', () => {
 
   const LONE = (id: number, ids: number[]) =>
     docx(para(run('Plain one.')) + para(`${run('Lone')}${end(id)}${run(' end.')}`) + para(run('Last.')), ids);
-  const ORPHANS: Array<[string, number, Uint8Array]> = [
-    ['an end whose comment has no start anywhere', 3, LONE(3, [3])],
-    ['an end whose id has no comment', 9, LONE(9, [])],
+  const ORPHANS: Array<[string, string, number, Uint8Array]> = [
+    ['an end whose comment has no start anywhere', 'is written back before its reference', 3, LONE(3, [3])],
+    ['an end whose id has no comment', 'stays removed as on main', 9, LONE(9, [])],
   ];
 
-  it.each(ORPHANS.flatMap(([name, id, bytes]) => ROUTES.map((route) => [name, route, id, bytes] as [string, Route, number, Uint8Array])))(
-    '%s, opened by the %s, is saved as main saves it and shows nothing after an edit in its paragraph',
-    async (_name, route, id, bytes) => {
+  it.each(
+    ORPHANS.flatMap(([name, outcome, id, bytes]) =>
+      ROUTES.map((route) => [name, route, outcome, id, bytes] as [string, Route, string, number, Uint8Array])
+    )
+  )(
+    '%s, opened by the %s, %s after an edit in its paragraph, and the session lists and shows nothing new for it',
+    async (_name, route, _outcome, id, bytes) => {
       const source = documentBody(bytes);
       const opened = await open(route, bytes);
       try {
@@ -495,6 +499,37 @@ describe('a comment range end whose start is not in its story', () => {
         ]).toEqual([kept ?? 0, true, [], false, 0]);
       } finally {
         opened.destroy();
+      }
+    },
+    TIMEOUT
+  );
+});
+
+describe('a session joined from an update alone', () => {
+  it(
+    'holds no source document, so saving a comment that ends in a table cell after an edit fails as on main',
+    async () => {
+      const source = await createYrsSession({ clientId: (clientId += 1) });
+      const peer = await createYrsSession({ clientId: (clientId += 1) });
+      try {
+        source.openDocx(BUILT[0]!.bytes.slice(), true);
+        peer.loadState(source.encodeState());
+        const { paraId } = peer.paragraphs('body')[0]!;
+        peer.insertText({ story: 'body', paraId, offset: 7 }, 'X');
+        let failure = '';
+        try {
+          await saveYrsDocx(peer, { updateModifiedDate: false });
+        } catch (error) {
+          failure = error instanceof Error ? error.message : String(error);
+        }
+        expect([peer.paragraphs('body')[0]!.text, peer.materializeDocx()?.originalBuffer, failure]).toEqual([
+          'Alpha oXne.',
+          undefined,
+          'saveYrsDocx requires a session opened from DOCX bytes',
+        ]);
+      } finally {
+        source.destroy();
+        peer.destroy();
       }
     },
     TIMEOUT
