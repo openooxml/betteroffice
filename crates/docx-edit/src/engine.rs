@@ -2890,12 +2890,48 @@ fn windowed_full_build_pages(
     )
 }
 
+/// The display position of `offset` in the paragraph `para_id`, in table cells too.
 fn resident_paragraph_position(input: &LayoutInput, para_id: &str, offset: u32) -> Option<i64> {
-    let start = input.measured.iter().find_map(|measured| {
-        let (id, start) = paragraph_identity(&measured.block)?;
-        (block_key(id) == para_id).then_some(start?)
-    })?;
+    fn start(block: &LayoutBlock, para_id: &str) -> Option<f64> {
+        match block {
+            LayoutBlock::Table(table) => table
+                .rows
+                .iter()
+                .flat_map(|row| &row.cells)
+                .flat_map(|cell| &cell.blocks)
+                .find_map(|nested| start(nested, para_id)),
+            _ => {
+                let (id, start) = paragraph_identity(block)?;
+                (block_key(id) == para_id).then_some(start?)
+            }
+        }
+    }
+    let start = input
+        .measured
+        .iter()
+        .find_map(|measured| start(&measured.block, para_id))?;
     paragraph_offset_position(start, offset)
+}
+
+/// Whether `story` is the body or a table cell in it, however deeply nested
+/// (`body:t0:r1c2:t0:r0c0`): the stories whose paragraphs take the body's display positions.
+pub(crate) fn body_or_body_cell_story(story: &str) -> bool {
+    let Some(mut rest) = story.strip_prefix("body") else {
+        return false;
+    };
+    while !rest.is_empty() {
+        for tag in [":t", ":r", "c"] {
+            let Some(after) = rest.strip_prefix(tag) else {
+                return false;
+            };
+            let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 {
+                return false;
+            }
+            rest = &after[digits..];
+        }
+    }
+    true
 }
 
 /// The display positions every block lowered from the paragraph `para_id` spans,
@@ -28990,6 +29026,108 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             ("word/document.xml".to_owned(), document.into_bytes()),
         ])
         .expect("zip the fixture")
+    }
+
+    #[test]
+    fn body_cell_stories_are_the_body_and_its_table_cells_however_nested() {
+        for story in ["body", "body:t0:r1c2", "body:t0:r0c0:t3:r12c4"] {
+            assert!(body_or_body_cell_story(story), "{story}");
+        }
+        for story in [
+            "",
+            "bodyx",
+            "body:",
+            "body:t0",
+            "body:t0:r1",
+            "body:t0:r1c",
+            "body:tx:r0c0",
+            "body:t0:r0c0:sdt1",
+            "fn:1:t0:r0c0",
+            "header1:t0:r0c0",
+        ] {
+            assert!(!body_or_body_cell_story(story), "{story}");
+        }
+    }
+
+    #[test]
+    fn the_resident_caret_finds_a_paragraph_in_a_table_cell() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let latin = docx_layout::register_measure_font_bytes(LIBERATION).unwrap();
+        let body = r#"<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>ABCDE</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+        let engine = EngineSession::new(9492);
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", body)).unwrap();
+        let mut request = json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "pageSize": {"w": 600, "h": 800},
+                "margins": {"top": 40, "right": 40, "bottom": 40, "left": 40,
+                    "header": 10, "footer": 10}
+            }]},
+            "renderEnv": {}
+        });
+        let requirements: Vec<serde_json::Value> = serde_json::from_str(
+            &engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let chains: serde_json::Map<String, serde_json::Value> = requirements
+            .iter()
+            .map(|requirement| {
+                (
+                    requirement["key"].as_str().unwrap().to_owned(),
+                    json!([latin]),
+                )
+            })
+            .collect();
+        request["measurement"] = json!({
+            "fontChains": chains,
+            "defaults": {"fontSize": 11, "fontFamily": "Liberation Sans"},
+            "authoritativeShaping": true,
+        });
+        engine
+            .layout_document_with_regions_retained(&request.to_string())
+            .unwrap();
+        engine
+            .build_display_list_frame(&json!({"fontChains": chains}).to_string(), 0)
+            .unwrap();
+        let (para_id, before) = {
+            let pagination = engine.pagination.borrow();
+            let measured = &pagination.input.as_ref().unwrap().measured;
+            let cell = measured
+                .iter()
+                .find_map(|measured| match &measured.block {
+                    LayoutBlock::Table(table) => {
+                        paragraph_identity(&table.rows[0].cells[0].blocks[0])
+                            .map(|(id, _)| block_key(id).into_owned())
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let before = paragraph_identity(&measured[0].block)
+                .map(|(id, _)| block_key(id).into_owned())
+                .unwrap();
+            (cell, before)
+        };
+        let caret = |para_id: &str, offset| {
+            engine
+                .resident_caret_snapshot(Some((para_id, offset)))
+                .unwrap()
+                .caret_rect
+                .expect("a caret rect")
+        };
+        let (start, inside, above) = (caret(&para_id, 0), caret(&para_id, 2), caret(&before, 0));
+        assert_eq!((start.page_index, inside.page_index), (0, 0));
+        assert_eq!(inside.y, start.y);
+        assert!(inside.x > start.x + 1.0, "{} after {}", inside.x, start.x);
+        assert!(
+            start.y > above.y,
+            "the cell line {} sits below the body line {}",
+            start.y,
+            above.y
+        );
     }
 
     #[test]
