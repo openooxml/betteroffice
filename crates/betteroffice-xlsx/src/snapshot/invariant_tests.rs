@@ -1953,14 +1953,16 @@ fn released_fill_snapshot_and_state_keep_the_source_fill() {
             r#"<fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill>"#,
             "",
             None,
+            "#ffc7ce",
         ),
         (
             r#"<fill><patternFill patternType="solid"><fgColor rgb="FF111111"/><bgColor rgb="FFFFC7CE"/></patternFill></fill>"#,
             r#"<fill><patternFill patternType="solid"><fgColor rgb="FF111111"/></patternFill></fill>"#,
             Some("#111111"),
+            "#111111",
         ),
     ];
-    for ((source, released, reading), alternate) in readings
+    for ((source, released, reading, current), alternate) in readings
         .into_iter()
         .flat_map(|reading| [(reading, false), (reading, true)])
     {
@@ -1980,7 +1982,7 @@ fn released_fill_snapshot_and_state_keep_the_source_fill() {
                 .format
                 .fill
                 .as_deref(),
-            Some("#ffc7ce")
+            Some(current)
         );
         for workbook in [restored, peer] {
             let saved = workbook.save().unwrap();

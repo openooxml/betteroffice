@@ -188,6 +188,7 @@ pub(crate) struct Rule {
     test: Test,
     formulas: Vec<Formula>,
     format: Arc<DifferentialFormat>,
+    fill_unknown: bool,
     stop: bool,
 }
 
@@ -463,6 +464,7 @@ impl Cache {
             .and_then(|owner| owner.cell(at))
             .map_or(CellValue::Empty, |cell| cell.value.clone());
         let mut merged: Option<Arc<DifferentialFormat>> = None;
+        let mut fill_unknown = false;
         for &index in candidates {
             let rule = &rules[index];
             if !rule.covers(at) {
@@ -486,12 +488,20 @@ impl Cache {
                         .or_else(|| rule.format.font_color.clone()),
                     bold: format.bold.or(rule.format.bold),
                     italic: format.italic.or(rule.format.italic),
-                    fill: format.fill.clone().or_else(|| rule.format.fill.clone()),
+                    fill: format
+                        .fill
+                        .clone()
+                        .or_else(|| rule.format.fill.clone().filter(|_| !fill_unknown)),
                 }),
             });
+            fill_unknown |= rule.fill_unknown
+                && merged.as_ref().is_some_and(|format| format.fill.is_none());
             if rule.stop {
                 break;
             }
+        }
+        if fill_unknown {
+            self.stats.withheld_fill += 1;
         }
         merged
     }
@@ -839,6 +849,18 @@ fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
                     None => return None,
                 };
                 let anchor = ranges.first()?.start;
+                let fill_unknown = rule.dxf_id.is_some_and(|id| {
+                    model.styles.dxf_fill_colors_differ(id)
+                        && model.styles.dxfs.get(id as usize) == Some(&rule.format)
+                });
+                let format = if fill_unknown {
+                    DifferentialFormat {
+                        fill: None,
+                        ..rule.format.clone()
+                    }
+                } else {
+                    rule.format.clone()
+                };
                 Some((
                     rule.priority,
                     Rule {
@@ -849,7 +871,8 @@ fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
                             .iter()
                             .map(|source| compile(source, anchor))
                             .collect(),
-                        format: Arc::new(rule.format.clone()),
+                        format: Arc::new(format),
+                        fill_unknown,
                         stop,
                     },
                 ))
@@ -1314,6 +1337,7 @@ mod tests {
             ranges,
             test: Test::Expression,
             format: Arc::new(DifferentialFormat::default()),
+            fill_unknown: false,
             stop: false,
         }
     }

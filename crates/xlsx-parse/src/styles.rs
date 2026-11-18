@@ -278,16 +278,16 @@ fn parse_style_pools(
                 }
                 b"fgColor" if dxf_fill && dxf.is_some() => {
                     if dxf_solid {
-                        dxf_fill_sides.0 = parse_color(&e).ok().flatten();
-                    }
-                    if dxf_solid && dxf_fill_color.is_none() {
                         dxf_fill_color = parse_color(&e)?;
+                        dxf_fill_sides.0 = dxf_fill_color.clone();
                     }
                 }
                 b"bgColor" if dxf_fill && dxf.is_some() => {
-                    if dxf_solid && let Some(color) = parse_color(&e)? {
-                        dxf_fill_sides.1 = Some(color.clone());
-                        dxf_fill_color = Some(color);
+                    if dxf_solid && dxf_fill_color.is_none() {
+                        dxf_fill_color = parse_color(&e)?;
+                        dxf_fill_sides.1 = dxf_fill_color.clone();
+                    } else if dxf_solid {
+                        dxf_fill_sides.1 = parse_color(&e).ok().flatten();
                     }
                 }
                 b"numFmt" if unfiltered || (section == Section::NumFmts && depth == 3) => {
