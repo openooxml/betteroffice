@@ -48,6 +48,7 @@ const RUNTIME_ALLOWED = new Set([
   "/app/packages/docx/src",
   "/app/packages/docx/tsconfig.json",
   "/app/packages/fonts/assets",
+  "/app/packages/fonts/dist/remote.js",
   "/app/packages/fonts-cjk/assets",
   "/app/packages/pptx/src",
   "/app/packages/pptx/tsconfig.json",
