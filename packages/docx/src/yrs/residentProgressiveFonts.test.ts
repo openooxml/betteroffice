@@ -292,17 +292,29 @@ test('frames during a fill rebuild the face only for a glyph whose outline the e
   const { resident, updates } = fonts(undefined, [filling]);
   expect(await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]))).toEqual(new Set([10]));
   expect(updates).toHaveLength(1);
+  // Each batch's chunks arrive only once the next frame has drawn, as over a slow network: a quiet stretch between
+  // frames otherwise lets the fill load every batch and install the whole face.
+  let release = () => {};
+  const hold = () => {
+    gate = new Promise<void>((resolve) => { release = resolve; });
+  };
+  hold();
   resident.scheduleFill();
   // Frames a quiet stretch apart let the fill load a batch between them; each draws only the installed glyph.
   while (chunkHits() < 17) {
     await sleep(FILL_QUIET_MS + 50);
     expect(await resident.ensure(new Map([[10, new Set([glyphIn(41)])]]))).toEqual(new Set());
+    const arrive = release;
+    hold();
+    arrive();
   }
   expect(updates).toHaveLength(1);
   // A glyph the fill loaded but has not installed yet still reaches the engine before its frame paints.
   const loadedByFill = index.chunks.map((chunk) => chunk.id).find((id) => id !== 41)!;
   expect(await resident.ensure(new Map([[10, new Set([glyphIn(loadedByFill)])]]))).toEqual(new Set([10]));
   expect(updates).toHaveLength(2);
+  gate = null;
+  release();
   await resident.whenFilled();
   expect(updates).toHaveLength(3);
   expect(await resident.ensure(new Map([[11, new Set([glyphIn(41), glyphIn(loadedByFill)])]]))).toEqual(new Set());
