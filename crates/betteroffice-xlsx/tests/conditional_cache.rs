@@ -867,16 +867,24 @@ fn decided_one_sheet(viewport: &Viewport) -> Workbook {
     workbook
 }
 
-#[test]
-fn edits_of_several_cells_paint_no_previous_result() {
-    let viewport = view(0.0, 800.0);
-    let mut workbook = decided_one_sheet(&viewport);
-    edit(&mut workbook, SheetId(0), &[(29, 3, "7"), (29, 2, "8")]);
-    paints_only_decided(&workbook, &viewport, "edit cells");
+/// Asserts that a frame of `viewport` the budget stops paints all 120 cells
+/// decided before the change.
+fn paints_previous_results(workbook: &Workbook, viewport: &Viewport, change: &str) {
+    let list = frame(workbook, viewport);
+    assert!(list.conditional_pending > 0, "{change}");
+    assert_eq!(painted(&list).len(), 120, "{change}");
 }
 
 #[test]
-fn a_paste_paints_no_previous_result() {
+fn edits_of_several_cells_keep_previous_results_until_decided() {
+    let viewport = view(0.0, 800.0);
+    let mut workbook = decided_one_sheet(&viewport);
+    edit(&mut workbook, SheetId(0), &[(29, 3, "7"), (29, 2, "8")]);
+    paints_previous_results(&workbook, &viewport, "edit cells");
+}
+
+#[test]
+fn a_paste_keeps_previous_results_until_decided() {
     let viewport = view(0.0, 800.0);
     let mut workbook = decided_one_sheet(&viewport);
     let pasted = [(29, 3, "7"), (29, 2, "8")].map(|(row, col, input)| CellInput {
@@ -891,7 +899,7 @@ fn a_paste_paints_no_previous_result() {
             CalculationOptions::default(),
         )
         .unwrap();
-    paints_only_decided(&workbook, &viewport, "paste");
+    paints_previous_results(&workbook, &viewport, "paste");
 }
 
 #[test]
