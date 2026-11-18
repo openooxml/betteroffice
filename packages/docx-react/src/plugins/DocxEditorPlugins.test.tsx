@@ -3892,7 +3892,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
   });
 
   if (engine !== 'DL') test('T2: a direction-only reversal settles once and refuses retained geometry', async () => {
-    const h = await matrixEditor(engine);
+    const h = await matrixEditor(engine, documentBytes(), undefined, true);
     try {
       await h.selection('body', h.first.paraId, 0, 3);
       await h.quiet();
@@ -4262,7 +4262,7 @@ for (const engine of ['DI', 'DL', 'DP'] as const) describe(`selection matrix ${e
 
   if (engine !== 'DL') for (const story of ['fn:1', 'en:1']) {
     test(`T3: moving within one note settles again (${story})`, async () => {
-      const h = await matrixEditor(engine, await matrixDocument());
+      const h = await matrixEditor(engine, await matrixDocument(), undefined, true);
       try {
         const paraId = story === 'fn:1' ? '60000001' : '70000001';
         await h.openStory(story);
