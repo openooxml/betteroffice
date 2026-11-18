@@ -479,7 +479,7 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
 }
 
 /** The run properties a run with these attributes saves with. */
-type RunFormatter = ((attributes: Attrs) => TextFormatting) & { defaultRunStyle?: string };
+type RunFormatter = (attributes: Attrs) => TextFormatting;
 
 const directFormatting: RunFormatter = (attributes) =>
   attrsToTextFormatting(formattingAttrs(attributes));
@@ -1284,11 +1284,6 @@ function inlineContentForItem(
     case 'noteRef': {
       const footnote = item.payload.footnoteRefId;
       const endnote = item.payload.endnoteRefId;
-      const formatting = format({ ...item.attributes, _sourceRunFormatting: undefined });
-      if (format.defaultRunStyle !== undefined && formatting.styleId === format.defaultRunStyle) {
-        delete formatting.styleId;
-        if (formatting.color?.auto) delete formatting.color;
-      }
       return {
         type: 'run',
         content: [
@@ -1296,7 +1291,6 @@ function inlineContentForItem(
             ? { type: 'footnoteRef', id: revisionId(footnote) }
             : { type: 'endnoteRef', id: revisionId(endnote) },
         ],
-        ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
       };
     }
     default:
@@ -1414,11 +1408,6 @@ function projectionSignature(items: InlineItem[]): string {
   return stableStringify(normalized);
 }
 
-const bareNoteReference = (child: ParagraphContent): ParagraphContent =>
-  child.type === 'run' && child.content.some((entry) => entry.type === 'footnoteRef' || entry.type === 'endnoteRef')
-    ? { ...child, formatting: undefined }
-    : child;
-
 function restoreProjectedFieldResults(
   items: InlineItem[],
   recovery: ChartRecovery,
@@ -1463,7 +1452,7 @@ function restoreProjectedFieldResults(
       if (index === undefined || !Array.isArray(child?.items)) continue;
       const current = groups.get(owner)?.get(index) ?? [];
       if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
-      const rebuilt = fieldInlineContent(buildParagraphContent(current, recovery, format).map(bareNoteReference));
+      const rebuilt = fieldInlineContent(buildParagraphContent(current, recovery, format));
       const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
       if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
         rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
@@ -3990,13 +3979,12 @@ class SaveContext {
    */
   private runFormatter(story: string, properties: Attrs): RunFormatter {
     const paragraphStyle = typeof properties.pStyle === 'string' ? properties.pStyle : null;
-    const format = (attributes: Attrs) =>
+    return (attributes) =>
       relativeFormatting(
         attributes,
         this.inheritedRun(paragraphStyle, asString(asObject(attributes.runStyle)?.styleId) || null, this.cellRuns.get(story)),
         this.fontScheme
       );
-    return Object.assign(format, { defaultRunStyle: this.styleDefinitions?.docDefaults?.rPr?.styleId });
   }
 
   private inheritedRun(paragraphStyle: string | null, runStyle: string | null, tableRun: TextFormatting | undefined): TextFormatting {
