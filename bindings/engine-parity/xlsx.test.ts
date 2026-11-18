@@ -107,7 +107,7 @@ async function buildFixture(replaced: Record<string, string> = {}): Promise<Uint
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
-const ACCOUNTING = '_-* #,##0_-;\\-* #,##0_-;_-* &quot;-&quot;_-;_-@_-';
+const ACCOUNTING ='_-* #,##0_-;\\-* #,##0_-;_-* &quot;-&quot;_-;_-@_-';
 const EAST_ASIAN_DATE = 'yyyy&quot;年&quot;m&quot;月&quot;d&quot;日&quot;';
 
 // The fixture with `code` declared under `id`, and the Notes sheet's A1 down holding `values` in an xf that points at it.
@@ -135,15 +135,27 @@ const restoredNotesText = (engine: XlsxEngine, chunks: Uint8Array[], rows: numbe
   }
 };
 
+async function buildProtectedFixture(source: Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(source);
+  const date = new Date('2024-01-01T00:00:00Z');
+  const unlocked = '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0"/></xf>';
+  zip.file('xl/styles.xml', STYLES.replace('<cellXfs count="2">', '<cellXfs count="3">').replace('</cellXfs>', `${unlocked}</cellXfs>`), { date });
+  const sheet = DATA_SHEET.replace('<row r="5">', '<row r="4"><c r="B4" s="2"><v>1</v></c></row><row r="5">').replace('</sheetData>', '</sheetData><sheetProtection sheet="1"/>');
+  zip.file('xl/worksheets/sheet1.xml', sheet, { date });
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
+}
+
 const wasmEngine: XlsxEngine = { ...wasmXlsx, font_preflight: wasmFontPreflight };
 const nativeEngine = createRequire(import.meta.url)('../xlsx-native/index.js') as XlsxEngine;
 const ENGINES = [['wasm', wasmEngine], ['native', nativeEngine]] as const;
 let fixture: Uint8Array;
+let protectedFixture: Uint8Array;
 
 beforeAll(async () => {
   await initWasm({ module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', import.meta.url)) });
   await initPreflight({ module_or_path: readFileSync(new URL('../../packages/xlsx/src/wasm/generated/preflight/xlsx_preflight_bg.wasm', import.meta.url)) });
   fixture = await buildFixture();
+  protectedFixture = await buildProtectedFixture(fixture);
 });
 
 // documentVersion() is "{nonce:32 hex}-{epoch}"; the nonce is minted per open.
@@ -711,6 +723,14 @@ const rows: Row<Xlsx>[] = [
     call: ({ doc }) => doc.translateFormulasJson(json([{ formula: 'B2*2', from: { row: 1, col: 2 }, to: { row: 4, col: 3 } }, { formula: 'A1', from: { row: 0, col: 0 }, to: { row: 0, col: 0 } }])),
   },
   { method: 'XlsxDocument.proposeJson', mutates: true, call: ({ doc }) => doc.proposeJson(json({ agentId: 'parity-agent', note: null, edits: [{ sheet: 0, row: 3, col: 1, input: '5' }] })) },
+  {
+    method: 'XlsxDocument.proposeJson',
+    name: 'XlsxDocument.proposeJson refuses a number format on a protected sheet',
+    throws: { name: 'string', reason: 'the sheet does not allow formatting cells', message: 'sheet "Data" is protected' },
+    call: ({ engine }) =>
+      scoped(engine.XlsxDocument.openWithCalculationJson(protectedFixture, CONTEXT), (d) =>
+        d.proposeJson(json({ agentId: 'parity-agent', note: null, edits: [{ sheet: 0, row: 3, col: 1, input: '5', numberFormat: { type: 'percent' } }] }))),
+  },
   defineRow({
     method: 'XlsxDocument.listProposalsJson',
     setup: ({ doc }: Xlsx) => propose(doc),

@@ -143,6 +143,7 @@ class Workbook:
         value: str,
         *,
         now_serial: float | None = ...,
+        protected_sheets: str = ...,
     ) -> Mutation: ...
     @staticmethod
     def open_collaborative(
@@ -175,6 +176,7 @@ class Workbook:
         edits: list[tuple[str, str]],
         *,
         now_serial: float | None = ...,
+        protected_sheets: str = ...,
     ) -> Mutation: ...
     def apply_ops_json(
         self, transaction: str, *, now_serial: float | None = ...
@@ -226,7 +228,13 @@ class Workbook:
     def merged_ranges(self, sheet: int | str, range: str) -> list[str]: ...
     def last_calculation(self) -> Calculation: ...
     def set_number_format(
-        self, sheet: int | str, range: str, format: str, *, now_serial: float | None = ...
+        self,
+        sheet: int | str,
+        range: str,
+        format: str,
+        *,
+        now_serial: float | None = ...,
+        protected_sheets: str = ...,
     ) -> Mutation: ...
     def set_style(
         self,
@@ -244,6 +252,7 @@ class Workbook:
         vertical_alignment: str | None = ...,
         text_wrapping: str | None = ...,
         now_serial: float | None = ...,
+        protected_sheets: str = ...,
     ) -> Mutation: ...
     def render_png(self, target: ViewportTarget | PngRangeTarget, *, scale: float = ..., max_width: int | None = ..., max_height: int | None = ...) -> Png: ...
     def render_sheet(

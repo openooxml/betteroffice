@@ -11093,6 +11093,81 @@ fn a_drag_repins_every_sheet_sharing_the_drawing() {
     assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
 }
 
+/// [`shared_drawing_fixture`] with only the Mirror sheet protected.
+fn protected_mirror_fixture() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&shared_drawing_fixture()).unwrap();
+    let mirror = test_part_text(&parts, "xl/worksheets/sheet2.xml").replace(
+        "<sheetData/>",
+        r#"<sheetData/><sheetProtection sheet="1"/>"#,
+    );
+    set_test_part(&mut parts, "xl/worksheets/sheet2.xml", mirror.into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn shared_frame_edit(
+    workbook: &mut Workbook,
+    resize: bool,
+    protection: betteroffice_xlsx::ProtectedSheets,
+) -> betteroffice_xlsx::Result<betteroffice_xlsx::MutationResult> {
+    if resize {
+        workbook.resize_chart_with_protection(
+            SheetId(0),
+            MOVED_FRAME,
+            ChartResize {
+                left: 0.0,
+                top: 0.0,
+                right: 48.0,
+                bottom: 24.0,
+            },
+            CalculationOptions::default(),
+            protection,
+        )
+    } else {
+        workbook.move_chart_with_protection(
+            SheetId(0),
+            MOVED_FRAME,
+            18.0,
+            9.0,
+            CalculationOptions::default(),
+            protection,
+        )
+    }
+}
+
+/// A frame shared with a protected sheet cannot be moved or resized through
+/// an unprotected sheet holding it, since that would repin the protected one.
+#[test]
+fn a_shared_frame_is_not_moved_or_resized_when_another_owner_is_protected() {
+    use betteroffice_xlsx::ProtectedSheets;
+    for resize in [false, true] {
+        let mut workbook = Workbook::open(&protected_mirror_fixture()).unwrap();
+        let version = workbook.version();
+        let before = workbook.model().sheets[0].charts[0].anchor;
+        assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
+
+        let message = match shared_frame_edit(&mut workbook, resize, ProtectedSheets::Refuse) {
+            Err(Error::LockedTarget(message)) => message,
+            other => panic!("expected a protection refusal, got {other:?}"),
+        };
+        assert_eq!(message, r#"sheet "Mirror" is protected"#);
+        assert_eq!(workbook.version(), version);
+        assert!(!workbook.can_undo());
+        assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+        assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
+
+        assert!(
+            shared_frame_edit(&mut workbook, resize, ProtectedSheets::Allow)
+                .unwrap()
+                .applied
+        );
+        let edited = workbook.model().sheets[0].charts[0].anchor;
+        assert_ne!(edited, before);
+        assert_eq!(workbook.model().sheets[1].charts[0].anchor, edited);
+        let parts = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+        assert!(test_part_text(&parts, "xl/worksheets/sheet2.xml").contains("<sheetProtection"));
+    }
+}
+
 const MOVED_FRAME: &str = "xl/drawings/drawing1.xml#0";
 
 #[derive(Clone, Copy, Debug)]
