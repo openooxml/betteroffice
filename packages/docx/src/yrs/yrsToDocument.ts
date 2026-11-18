@@ -1284,6 +1284,7 @@ function inlineContentForItem(
     case 'noteRef': {
       const footnote = item.payload.footnoteRefId;
       const endnote = item.payload.endnoteRefId;
+      const formatting = format(item.attributes);
       return {
         type: 'run',
         content: [
@@ -1291,6 +1292,7 @@ function inlineContentForItem(
             ? { type: 'footnoteRef', id: revisionId(footnote) }
             : { type: 'endnoteRef', id: revisionId(endnote) },
         ],
+        ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
       };
     }
     default:
