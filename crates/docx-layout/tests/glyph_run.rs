@@ -2099,7 +2099,11 @@ fn tracked_paragraph_marks_shape_into_glyph_runs() {
         assert_eq!(run.glyphs.len(), 1, "{kind:?}");
         assert_eq!(run.glyphs[0].id, pilcrow, "{kind:?}");
         assert_eq!(run.glyphs[0].x, text.x.as_f64().unwrap(), "{kind:?}");
-        assert_eq!(run.glyphs[0].y, text.baseline_y.as_f64().unwrap(), "{kind:?}");
+        assert_eq!(
+            run.glyphs[0].y,
+            text.baseline_y.as_f64().unwrap(),
+            "{kind:?}"
+        );
         assert_eq!(run.color, text.color, "{kind:?}");
         assert_eq!((text.attrs.doc_start, text.attrs.doc_end), (None, None));
         assert_eq!((run.attrs.doc_start, run.attrs.doc_end), (None, None));
