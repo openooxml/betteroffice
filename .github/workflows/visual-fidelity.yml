@@ -74,6 +74,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       source-sha: ${{ steps.source.outputs.sha }}
+      run-date: ${{ steps.run-date.outputs.date }}
       runner-image: ${{ steps.runner.outputs.image }}
       formats: ${{ steps.plan.outputs.formats }}
       measure-shards: ${{ steps.plan.outputs.measure-shards }}
@@ -118,6 +119,10 @@ jobs:
             test "$source_sha" = "$remote_sha"
           fi
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Record the run date
+        id: run-date
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
       - name: Keep custom-origin runs off the public render viewer
         if: inputs.corpus_origin != '' && inputs.publish_renders
@@ -1688,27 +1693,21 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: bun scripts/office-quality/publish-renders.mjs
 
-      - name: Replace the generated README section
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         if: ${{ (!inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality') || (inputs.private_corpus && inputs.publish_readme && !inputs.report_only) }}
-        run: |
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          section = (Path(os.environ['RUNNER_TEMP']) / 'fidelity-report/section.md').read_text()
-          begin = '<!-- BEGIN GENERATED VISUAL FIDELITY -->'
-          end = '<!-- END GENERATED VISUAL FIDELITY -->'
-          if not section.startswith(begin) or not section.endswith(end):
-              raise SystemExit('Invalid generated report')
-          path = Path('README.md')
-          if path.is_symlink() or not path.is_file():
-              raise SystemExit('README must be a regular file')
-          readme = path.read_text()
-          if readme.count(begin) != 1 or readme.count(end) != 1:
-              raise SystemExit('README must contain exactly one generated block')
-          before, tail = readme.split(begin)
-          _, after = tail.split(end)
-          path.write_text(before + section + after)
-          PY
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .workflow-tools
+          sparse-checkout: scripts/office-quality
+          persist-credentials: false
+
+      - name: Replace the generated public README block
+        if: ${{ !inputs.private_corpus && !inputs.report_only && inputs.corpus_origin == '' && inputs.samples == '' && inputs.collection == 'office-quality' }}
+        run: node .workflow-tools/scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --date "${{ needs.prepare.outputs.run-date }}" README.md
+
+      - name: Replace the generated large set README block
+        if: ${{ inputs.private_corpus && inputs.publish_readme && !inputs.report_only }}
+        run: node .workflow-tools/scripts/office-quality/readme.mjs --as large "$RUNNER_TEMP/fidelity-report/aggregate.json" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --date "${{ needs.prepare.outputs.run-date }}" README.md
 
       - name: Detect a changed report
         id: changed

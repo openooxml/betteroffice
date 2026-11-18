@@ -24,7 +24,7 @@ python3 -m venv .source/office-quality/venv
 QUALITY_PYTHON=.source/office-quality/venv/bin/python \
 QUALITY_OUTPUT=.source/office-quality/run \
   node scripts/office-quality/run.mjs
-node scripts/office-quality/readme.mjs .source/office-quality/run/report.json
+node scripts/office-quality/readme.mjs --section .source/office-quality/run/section.md
 ```
 
 The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. The single [`office-quality` collection](https://corpus.betteroffice.dev/collections/office-quality.json) contains all three formats, including PPTArena. Set `QUALITY_FORMAT=docx`, `pptx`, or `xlsx` to measure one format, `QUALITY_COLLECTION=<id>` to measure another collection, or `QUALITY_SAMPLES='["betteroffice-demo"]'` for explicit samples. `QUALITY_CORPUS_ORIGIN` points every step at another corpus origin with the same layout (https, or http on a loopback host for a local mirror); sample metadata must link assets under that origin. Runs support up to 8,000 samples.
