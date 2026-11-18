@@ -3805,12 +3805,22 @@ mod tests {
     ];
 
     fn write_values(session: &mut Session, edit: Option<&str>) {
-        match edit {
-            Some(batch) => {
-                session.edit_cells_json(batch, None).unwrap();
-            }
-            None => type_into_d30(session, "0"),
+        let result = match edit {
+            Some(batch) => session.edit_cells_json(batch, None),
+            None => session.edit_cell_json(r#"{"sheet":0,"row":29,"col":3,"input":"0"}"#, None),
         }
+        .unwrap();
+        assert_applied(&result);
+    }
+
+    fn assert_applied(result: &str) {
+        assert!(result.contains(r#""applied":true"#), "{result}");
+    }
+
+    /// Asserts that a screen frame decides every ruled cell and paints all 120
+    /// red, so a later frame with fewer fills shows dropped results.
+    fn assert_all_fills_settled(session: &Session) {
+        assert_eq!(red_fills(&settled_frame(session)), 120);
     }
 
     /// Asserts that a frame stopped right after an edit paints the fills of
@@ -3863,7 +3873,7 @@ mod tests {
     #[test]
     fn a_sort_paints_no_previous_fill_until_decided() {
         let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
-        settled_frame(&session);
+        assert_all_fills_settled(&session);
         let format = session
             .capture_format_json(r#"{"sheet":0,"range":"A1:D30"}"#)
             .unwrap();
@@ -3876,42 +3886,44 @@ mod tests {
         let sorted = session
             .apply_ops_json(&format!(r#"{{"ops":[{}]}}"#, ops.join(",")), None)
             .unwrap();
-        assert!(sorted.contains(r#""applied":true"#), "{sorted}");
+        assert_applied(&sorted);
         assert_previous_fills_dropped(&session, "sort");
     }
 
     #[test]
     fn an_inserted_row_paints_no_previous_fill_until_decided() {
         let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
-        settled_frame(&session);
-        session
+        assert_all_fills_settled(&session);
+        let inserted = session
             .apply_ops_json(
                 r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
                 None,
             )
             .unwrap();
+        assert_applied(&inserted);
         assert_previous_fills_dropped(&session, "insert row");
     }
 
     #[test]
     fn a_paste_that_carries_a_style_paints_no_previous_fill_until_decided() {
         let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
-        settled_frame(&session);
+        assert_all_fills_settled(&session);
         let paste = r#"{"ops":[{"type":"setCell","sheet":0,"at":{"row":29,"col":3},"cell":{"value":{"kind":"number","value":0}}},{"type":"patchRangeStyle","sheet":0,"range":{"start":{"row":29,"col":3},"end":{"row":29,"col":3}},"patch":{"bold":true}}]}"#;
-        session.apply_ops_json(paste, None).unwrap();
+        assert_applied(&session.apply_ops_json(paste, None).unwrap());
         assert_previous_fills_dropped(&session, "styled paste");
     }
 
     #[test]
     fn a_fill_paints_no_previous_fill_until_decided() {
         let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
-        settled_frame(&session);
-        session
+        assert_all_fills_settled(&session);
+        let filled = session
             .fill_range_json(
                 r#"{"sheet":0,"source":"C29:D29","destination":"C29:D30"}"#,
                 None,
             )
             .unwrap();
+        assert_applied(&filled);
         assert_previous_fills_dropped(&session, "fill");
     }
 
@@ -3919,15 +3931,13 @@ mod tests {
     fn undoing_or_redoing_a_value_edit_paints_no_previous_fill_until_decided() {
         for edit in VALUE_EDITS {
             let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
-            settled_frame(&session);
+            assert_all_fills_settled(&session);
             write_values(&mut session, edit);
             settle_stopped(&session, |_| {});
-            let undone = session.undo_json(None).unwrap();
-            assert!(undone.contains(r#""applied":true"#), "{undone}");
+            assert_applied(&session.undo_json(None).unwrap());
             assert_previous_fills_dropped(&session, &format!("undo {edit:?}"));
-            settle_stopped(&session, |_| {});
-            let redone = session.redo_json(None).unwrap();
-            assert!(redone.contains(r#""applied":true"#), "{redone}");
+            assert_all_fills_settled(&session);
+            assert_applied(&session.redo_json(None).unwrap());
             assert_previous_fills_dropped(&session, &format!("redo {edit:?}"));
         }
     }
@@ -3936,7 +3946,7 @@ mod tests {
     fn value_edits_in_a_collaborative_session_paint_no_previous_fill_until_decided() {
         for edit in VALUE_EDITS {
             let mut session = Session::open_collaborative(&positive_xlsx(&[]), 721, None).unwrap();
-            settled_frame(&session);
+            assert_all_fills_settled(&session);
             write_values(&mut session, edit);
             assert_previous_fills_dropped(&session, &format!("{edit:?}"));
         }
