@@ -368,6 +368,102 @@ fn deferred_snapshot_run_queries_skip_non_strings_and_cells_without_sources() {
     assert!(!peer.source_package_is_unmaterialized_for_test());
 }
 
+fn rich_text_viewport() -> Viewport {
+    Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 600.0,
+        height: 400.0,
+    }
+}
+
+fn paints_runs(command: &crate::DrawCmd) -> bool {
+    matches!(command, crate::DrawCmd::Text { runs, .. } if !runs.is_empty())
+}
+
+fn serialized_without(list: &crate::DisplayList, skipped: &[usize]) -> Vec<u8> {
+    let mut list = list.clone();
+    list.commands = std::mem::take(&mut list.commands)
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !skipped.contains(index))
+        .map(|(_, command)| command)
+        .collect();
+    serde_json::to_vec(&list).unwrap()
+}
+
+#[test]
+fn snapshot_rich_text_paints_plain_until_the_package_is_parsed_then_with_its_runs() {
+    let workbook = Workbook::open(&rich_text_source()).unwrap();
+    let viewport = rich_text_viewport();
+    for parse_by_save in [false, true] {
+        let peer = hydrate(&workbook, budgets()[0]);
+        assert!(peer.source_package_is_unmaterialized_for_test());
+        let parses = crate::snapshot::package::rebuild_count();
+        let plain = peer.display_list_for(SheetId(0), &viewport).unwrap();
+        assert_eq!(crate::snapshot::package::rebuild_count(), parses);
+        assert!(peer.source_package_is_unmaterialized_for_test());
+        assert!(!plain.commands.iter().any(paints_runs));
+        let (version, epoch) = (peer.version(), peer.model_epoch);
+        if parse_by_save {
+            peer.save().unwrap();
+        } else {
+            assert!(
+                peer.cell_text_runs(SheetId(0), CellRef::new(0, 2))
+                    .is_some()
+            );
+        }
+        assert_eq!(crate::snapshot::package::rebuild_count(), parses + 1);
+        assert!(!peer.source_package_is_unmaterialized_for_test());
+        assert_eq!((peer.version(), peer.model_epoch), (version, epoch));
+        let painted = peer.display_list_for(SheetId(0), &viewport).unwrap();
+        assert_eq!(painted.commands.len(), plain.commands.len());
+        let rich: Vec<usize> = painted
+            .commands
+            .iter()
+            .enumerate()
+            .filter(|(_, command)| paints_runs(command))
+            .map(|(index, _)| index)
+            .collect();
+        let mut texts: Vec<&str> = rich
+            .iter()
+            .filter_map(|&index| match &painted.commands[index] {
+                crate::DrawCmd::Text { text, .. } => Some(&**text),
+                _ => None,
+            })
+            .collect();
+        texts.sort_unstable();
+        texts.dedup();
+        assert_eq!(texts, ["duplicate", "inline"]);
+        assert_eq!(
+            serialized_without(&plain, &rich),
+            serialized_without(&painted, &rich)
+        );
+        for &index in &rich {
+            let mut command = painted.commands[index].clone();
+            if let crate::DrawCmd::Text { runs, .. } = &mut command {
+                runs.clear();
+            }
+            assert_eq!(command, plain.commands[index]);
+        }
+    }
+}
+
+#[test]
+fn snapshot_with_adopted_committed_version_paints_plain_after_the_package_is_parsed() {
+    let mut workbook = Workbook::open(&rich_text_source()).unwrap();
+    let version = format!("{}-1", workbook.version_nonce);
+    workbook.adopt_peer_version(&version).unwrap();
+    let peer = hydrate(&workbook, budgets()[0]);
+    let viewport = rich_text_viewport();
+    let plain = peer.display_list_for(SheetId(0), &viewport).unwrap();
+    assert!(!plain.commands.iter().any(paints_runs));
+    peer.save().unwrap();
+    assert!(!peer.source_package_is_unmaterialized_for_test());
+    let repainted = peer.display_list_for(SheetId(0), &viewport).unwrap();
+    assert_eq!(repainted, plain);
+}
+
 #[test]
 fn format_facets_bounded_snapshot_and_replay() {
     let expected = serde_json::json!({
