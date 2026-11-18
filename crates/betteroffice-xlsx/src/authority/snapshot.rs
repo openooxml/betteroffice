@@ -3581,6 +3581,7 @@ mod tests {
             committed_changes: 0,
             last_calculation: CalculationResult::default(),
             calculation_context: None,
+            calculated_now: None,
             client_id,
             guid,
             next_sheet_id,

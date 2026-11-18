@@ -322,6 +322,7 @@ impl WorkbookSnapshotEncoder {
             committed_changes: workbook.committed_changes,
             last_calculation: CalculationResult::default(),
             calculation_context: context,
+            calculated_now: workbook.calculated_now,
             client_id,
             guid,
             next_sheet_id,
@@ -2075,6 +2076,7 @@ impl WorkbookSnapshotBuilder {
             committed_changes,
             last_calculation,
             calculation_context,
+            calculated_now,
             client_id: _,
             guid: _,
             next_sheet_id: _,
@@ -2136,7 +2138,7 @@ impl WorkbookSnapshotBuilder {
             chart_cache: Mutex::new(ChartCache::default()),
             conditional_cache: Mutex::default(),
             source_part_hashes: Mutex::new(BTreeMap::new()),
-            calculated_now: None,
+            calculated_now,
         });
         Ok(())
     }
