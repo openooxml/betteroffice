@@ -127,6 +127,28 @@ pub struct ConditionalStats {
     pub withheld_fill: u64,
 }
 
+impl ConditionalStats {
+    fn withhold(&mut self, reason: Unknown) {
+        let counter = match reason {
+            Unknown::ErrorBound => &mut self.withheld_error_bound,
+            Unknown::Unparsable => &mut self.withheld_unparsable,
+            Unknown::Refused => &mut self.withheld_refused,
+            Unknown::Unsupported => &mut self.withheld_unsupported,
+        };
+        *counter += 1;
+    }
+}
+
+/// Why a rule's result at a cell cannot be decided; a cell whose rules reach
+/// one paints no conditional format.
+#[derive(Clone, Copy)]
+enum Unknown {
+    ErrorBound,
+    Unparsable,
+    Refused,
+    Unsupported,
+}
+
 /// Each sheet's rules, aggregates and decided cells for one model epoch, the
 /// decided cells of the epoch before, and shifted formulas parsed in any.
 pub(crate) struct Cache {
@@ -185,6 +207,7 @@ enum Test {
     Duplicates {
         unique: bool,
     },
+    Undecidable(Unknown),
 }
 
 #[derive(Clone, Copy)]
@@ -221,6 +244,8 @@ struct Aggregate {
     bases: Vec<Option<Arc<Expr>>>,
     /// Each formula's count tables, in `Formula::counts` order.
     tables: Vec<Vec<Option<CountTable>>>,
+    /// Whether the calc engine refused a constant call for size.
+    refused: bool,
 }
 
 enum Stats {
@@ -331,16 +356,27 @@ impl Cache {
             }
             for col in cols.iter().cloned().flatten() {
                 let at = CellRef::new(row, col);
-                if !candidates.iter().any(|&index| rules[index].covers(at)) {
+                let Some(first) = candidates
+                    .iter()
+                    .map(|&index| &rules[index])
+                    .find(|rule| rule.covers(at))
+                else {
                     continue;
-                }
+                };
                 let key = (sheet, row, col);
-                let result = match self.results.get(&key).cloned() {
-                    Some(result) => {
+                let result = match (self.results.get(&key).cloned(), first.undecidable()) {
+                    (Some(result), _) => {
                         self.stats.hits += 1;
                         result
                     }
-                    None => {
+                    (None, Some(reason)) => {
+                        self.stats.withhold(reason);
+                        if caching {
+                            caching = self.keep(sheet, at, None, rows, cols);
+                        }
+                        None
+                    }
+                    (None, None) => {
                         if !stopped
                             && spent < limit
                             && let Some(clock) = clock
@@ -433,8 +469,13 @@ impl Cache {
                 continue;
             }
             *spent += 1;
-            if !self.matches(model, sheet, index, rule, &value, at, context, spent) {
-                continue;
+            match self.matches(model, sheet, index, rule, &value, at, context, spent) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(reason) => {
+                    self.stats.withhold(reason);
+                    return None;
+                }
             }
             merged = Some(match merged {
                 None => Arc::clone(&rule.format),
@@ -466,43 +507,54 @@ impl Cache {
         at: CellRef,
         context: &mut EvalContext<'_>,
         spent: &mut u64,
-    ) -> bool {
+    ) -> Result<bool, Unknown> {
+        if let Some(reason) = rule.undecidable() {
+            return Err(reason);
+        }
         let aggregate = self.aggregate(model, sheet, index, rule, context, spent);
+        if aggregate.refused {
+            return Err(Unknown::Refused);
+        }
         context.restart();
         context.cell = Some(at);
         let ctx: &EvalContext<'_> = context;
         let matched = match &rule.test {
             Test::CellIs(op) => {
-                if matches!(value, CellValue::Error { .. }) {
-                    false
+                if is_error(value) {
+                    Ok(false)
                 } else {
                     match *op {
-                        Op::Compare(op) => self
-                            .formula(rule, 0, &aggregate, at, ctx)
-                            .is_some_and(|rhs| compare(ctx, op, value, &rhs)),
+                        Op::Compare(op) => match self.formula(rule, 0, &aggregate, at, ctx) {
+                            Some(rhs) => Ok(compare(ctx, op, value, &rhs)),
+                            None => Err(Unknown::Unparsable),
+                        },
                         Op::Between(inside) => {
                             let low = self.formula(rule, 0, &aggregate, at, ctx);
                             let high = self.formula(rule, 1, &aggregate, at, ctx);
                             match (low, high) {
+                                (Some(low), Some(high)) if is_error(&low) || is_error(&high) => {
+                                    Err(Unknown::ErrorBound)
+                                }
                                 (Some(low), Some(high)) => {
                                     let within = |low: &CellValue, high: &CellValue| {
                                         compare(ctx, BinaryOp::Ge, value, low)
                                             && compare(ctx, BinaryOp::Le, value, high)
                                     };
-                                    (within(&low, &high) || within(&high, &low)) == inside
+                                    Ok((within(&low, &high) || within(&high, &low)) == inside)
                                 }
-                                _ => false,
+                                _ => Err(Unknown::Unparsable),
                             }
                         }
                     }
                 }
             }
             Test::Expression => match self.formula(rule, 0, &aggregate, at, ctx) {
-                Some(CellValue::Bool { value }) => value,
-                Some(CellValue::Number { value }) => value != 0.0,
-                _ => false,
+                Some(CellValue::Bool { value }) => Ok(value),
+                Some(CellValue::Number { value }) => Ok(value != 0.0),
+                Some(_) => Ok(false),
+                None => Err(Unknown::Unparsable),
             },
-            Test::Top { bottom, .. } => match (value, &aggregate.stats) {
+            Test::Top { bottom, .. } => Ok(match (value, &aggregate.stats) {
                 (CellValue::Number { value }, Some(Stats::Threshold(Some(threshold)))) => {
                     if *bottom {
                         value <= threshold
@@ -511,12 +563,12 @@ impl Cache {
                     }
                 }
                 _ => false,
-            },
+            }),
             Test::Average {
                 above,
                 equal,
                 deviations,
-            } => match (value, &aggregate.stats) {
+            } => Ok(match (value, &aggregate.stats) {
                 (CellValue::Number { value }, Some(Stats::Average { mean, deviation })) => {
                     let bound = if *above {
                         mean + deviations * deviation
@@ -531,16 +583,20 @@ impl Cache {
                     }
                 }
                 _ => false,
-            },
-            Test::Duplicates { unique } => match (key(value), &aggregate.stats) {
+            }),
+            Test::Duplicates { unique } => Ok(match (key(value), &aggregate.stats) {
                 (Some(key), Some(Stats::Counts(counts))) => {
                     let count = counts.get(&key).copied().unwrap_or(0);
                     if *unique { count == 1 } else { count > 1 }
                 }
                 _ => false,
-            },
+            }),
+            Test::Undecidable(reason) => Err(*reason),
         };
         *spent += MAX_EVALUATION_CELL_VISITS.saturating_sub(ctx.remaining_cells());
+        if ctx.exhausted() {
+            return Err(Unknown::Refused);
+        }
         matched
     }
 
@@ -644,6 +700,7 @@ impl Cache {
                 context.cell = Some(rule.anchor);
                 values.push(evaluate(call, context));
                 *spent += MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
+                aggregate.refused |= context.exhausted();
                 built = true;
             }
             let mut tables = Vec::with_capacity(formula.counts.len());
@@ -686,10 +743,22 @@ impl Rule {
     fn covers(&self, at: CellRef) -> bool {
         self.ranges.iter().any(|range| range.contains(at))
     }
+
+    /// Why no cell can decide this rule, when that is known without a cell.
+    fn undecidable(&self) -> Option<Unknown> {
+        match self.test {
+            Test::Undecidable(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 fn within(runs: &[Range<u32>], index: u32) -> bool {
     runs.iter().any(|run| run.contains(&index))
+}
+
+fn is_error(value: &CellValue) -> bool {
+    matches!(value, CellValue::Error { .. })
 }
 
 fn compare(ctx: &EvalContext<'_>, op: BinaryOp, lhs: &CellValue, rhs: &CellValue) -> bool {
@@ -724,25 +793,30 @@ fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
                 let flag = |name: &str, default: bool| {
                     attribute(name).map_or(default, |value| value == "1" || value == "true")
                 };
-                let (test, sources) = match rule.rule_type.as_str() {
-                    "cellIs" => (
-                        Test::CellIs(operator(rule.operator.as_deref()?)?),
-                        rule.formulas.clone(),
-                    ),
+                let stop = flag("stopIfTrue", false);
+                let supported = match rule.rule_type.as_str() {
+                    "cellIs" => rule
+                        .operator
+                        .as_deref()
+                        .and_then(operator)
+                        .map(|op| (Test::CellIs(op), rule.formulas.clone())),
                     "expression" | "containsText" | "notContainsText" | "beginsWith"
                     | "endsWith" | "containsBlanks" | "notContainsBlanks" | "containsErrors"
-                    | "notContainsErrors" => {
-                        (Test::Expression, vec![rule.formulas.first()?.clone()])
-                    }
-                    "top10" => (
-                        Test::Top {
-                            rank: attribute("rank").and_then(|rank| rank.parse().ok())?,
-                            percent: flag("percent", false),
-                            bottom: flag("bottom", false),
-                        },
-                        Vec::new(),
-                    ),
-                    "aboveAverage" => (
+                    | "notContainsErrors" => Some((
+                        Test::Expression,
+                        rule.formulas.iter().take(1).cloned().collect(),
+                    )),
+                    "top10" => attribute("rank")
+                        .and_then(|rank| rank.parse().ok())
+                        .map(|rank| {
+                            let test = Test::Top {
+                                rank,
+                                percent: flag("percent", false),
+                                bottom: flag("bottom", false),
+                            };
+                            (test, Vec::new())
+                        }),
+                    "aboveAverage" => Some((
                         Test::Average {
                             above: flag("aboveAverage", true),
                             equal: flag("equalAverage", false),
@@ -751,10 +825,18 @@ fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
                                 .unwrap_or(0.0),
                         },
                         Vec::new(),
-                    ),
-                    "duplicateValues" => (Test::Duplicates { unique: false }, Vec::new()),
-                    "uniqueValues" => (Test::Duplicates { unique: true }, Vec::new()),
-                    _ => return None,
+                    )),
+                    "duplicateValues" => Some((Test::Duplicates { unique: false }, Vec::new())),
+                    "uniqueValues" => Some((Test::Duplicates { unique: true }, Vec::new())),
+                    "colorScale" | "dataBar" | "iconSet" => return None,
+                    _ => None,
+                };
+                let paints =
+                    stop || rule.dxf_id.is_some() || rule.format != DifferentialFormat::default();
+                let (test, sources) = match supported {
+                    Some(supported) => supported,
+                    None if paints => (Test::Undecidable(Unknown::Unsupported), Vec::new()),
+                    None => return None,
                 };
                 let anchor = ranges.first()?.start;
                 Some((
@@ -768,7 +850,7 @@ fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
                             .map(|source| compile(source, anchor))
                             .collect(),
                         format: Arc::new(rule.format.clone()),
-                        stop: flag("stopIfTrue", false),
+                        stop,
                     },
                 ))
             })
