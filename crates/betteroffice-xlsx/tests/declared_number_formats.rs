@@ -133,7 +133,10 @@ fn the_structured_export_reads_a_declared_builtin_id_like_its_custom_twin() {
     }
     let declared = export(&book(41, ACCOUNTING_XML, &[-1234.0, 1234.0]));
     assert_eq!(declared[0].1, ACCOUNTING);
-    assert!(declared[0].0.contains('-') && !declared[0].0.contains('('), "{declared:?}");
+    assert!(
+        declared[0].0.contains('-') && !declared[0].0.contains('('),
+        "{declared:?}"
+    );
 }
 
 #[test]

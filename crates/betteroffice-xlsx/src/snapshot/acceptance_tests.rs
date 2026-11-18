@@ -3537,7 +3537,10 @@ fn clients_sharing_a_new_seed_of_a_declared_accounting_id_show_its_code() {
         for target in [CellRef::new(0, 0), at] {
             let cell = shared.sheets[0].cell(target).unwrap();
             let shown = xlsx_render::display_text(&shared.styles, shared.date_system, cell);
-            assert!(shown.contains('-') && !shown.contains('('), "{target:?}: {shown}");
+            assert!(
+                shown.contains('-') && !shown.contains('('),
+                "{target:?}: {shown}"
+            );
         }
     }
 }

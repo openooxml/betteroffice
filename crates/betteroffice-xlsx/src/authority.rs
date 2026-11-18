@@ -590,8 +590,7 @@ impl WorkbookBase {
     }
 
     fn accepts_fingerprint(&self, version: i64, fingerprint: &str) -> bool {
-        if version >= NUMBER_FORMATS_SCHEMA_VERSION
-            && declares_builtin_number_formats(&self.styles)
+        if version >= NUMBER_FORMATS_SCHEMA_VERSION && declares_builtin_number_formats(&self.styles)
         {
             return fingerprint == self.fingerprint;
         }
@@ -1749,7 +1748,8 @@ impl WorkbookAuthority {
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut styles, indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION).ok()?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION)
+                .ok()?;
         let plain = (count != 0).then(|| styles.plain_xf());
         styles.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
@@ -1851,7 +1851,8 @@ impl WorkbookAuthority {
         let txn = self.doc.transact();
         let cell_formats = txn.get_map(CELL_FORMATS)?;
         let (mut stylesheet, indices) =
-            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION).ok()?;
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles, SCHEMA_VERSION)
+                .ok()?;
         let plain = (plain_style_cells != 0).then(|| stylesheet.plain_xf());
         stylesheet.bind_plain_xf();
         let order = txn.get_array(SHEET_ORDER)?;
@@ -5481,7 +5482,9 @@ fn materialize_cell_format_catalog(
     for index in 0..base.cell_xfs.len() {
         let index =
             u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
-        known.entry(style_key(&styles, index)?).or_insert(Some(index));
+        known
+            .entry(style_key(&styles, index)?)
+            .or_insert(Some(index));
     }
     let mut indices = BTreeMap::new();
     for (key, stored) in catalog {
