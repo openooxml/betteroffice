@@ -668,7 +668,7 @@ fn rich_cells_carry_their_runs_on_the_screen_print_and_png_paths() {
     ];
     for (path, list) in [("screen", &screen), ("png", &png), ("print", &print)] {
         assert_eq!(text_runs(list, MIXED_TEXT), [mixed_runs()], "{path}");
-        assert_eq!(text_runs(list, "Inline text"), [inline.clone()], "{path}");
+        assert_eq!(text_runs(list, "Inline text"), std::slice::from_ref(&inline), "{path}");
         assert_eq!(text_runs(list, "plain"), [Vec::new()], "{path}");
     }
 }
