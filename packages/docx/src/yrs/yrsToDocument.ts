@@ -3084,6 +3084,38 @@ function commentRanges(
   return byStory;
 }
 
+/**
+ * Per story, the comments whose source range starts there and ends in another story (`open`),
+ * and those whose source range ends there and starts in another story or nowhere (`far`).
+ */
+function crossStoryComments(stories: ReadonlyMap<string, readonly BlockContent[]>): {
+  open: Map<string, Set<number>>;
+  far: Map<string, Set<number>>;
+} {
+  const open = new Map<string, Set<number>>();
+  const far = new Map<string, Set<number>>();
+  const visit = (items: readonly unknown[], starts: Set<number>, ends: Set<number>): void => {
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      const node = item as { type?: unknown; id?: unknown; content?: unknown; children?: unknown };
+      if (typeof node.id === 'number' && node.type === 'commentRangeStart') starts.add(node.id);
+      if (typeof node.id === 'number' && node.type === 'commentRangeEnd') ends.add(node.id);
+      if (Array.isArray(node.content)) visit(node.content, starts, ends);
+      if (Array.isArray(node.children)) visit(node.children, starts, ends);
+    }
+  };
+  for (const [story, blocks] of stories) {
+    const starts = new Set<number>();
+    const ends = new Set<number>();
+    for (const block of blocks) if (block.type === 'paragraph') visit(block.content, starts, ends);
+    const opens = [...starts].filter((id) => !ends.has(id));
+    const fars = [...ends].filter((id) => !starts.has(id));
+    if (opens.length) open.set(story, new Set(opens));
+    if (fars.length) far.set(story, new Set(fars));
+  }
+  return { open, far };
+}
+
 /** Chart placements recoverable from the base document, keyed per story. */
 interface ChartRecovery {
   drawingFor(rId: string | undefined, path: string | undefined): string | undefined;
@@ -3622,6 +3654,8 @@ class SaveContext {
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly baseChartDrawings = new Map<string, Map<string, string>>();
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
+  private readonly crossStory: ReturnType<typeof crossStoryComments>;
+  private readonly savedComments: Set<number>;
   /** Per story, the comment ranges of it and of the stories nested in it, which key its blocks. */
   private readonly subtreeComments = new Map<string, Map<string, unknown>>();
   private readonly memo: SessionProjectionMemo;
@@ -3678,6 +3712,8 @@ class SaveContext {
     this.hasCommentReferenceStyle = (base.package.styles?.styles ?? [])
       .some(style => style.styleId === 'CommentReference' && style.type === 'character');
     this.comments = commentRanges(session, base.package.document.comments, commentIds);
+    this.crossStory = crossStoryComments(this.baseStories);
+    this.savedComments = new Set((base.package.document.comments ?? []).map((comment) => comment.id));
     this.memo = sessionProjectionMemo(session);
     this.styleDefinitions = base.package.styles;
     this.fontScheme = base.package.theme?.fontScheme;
@@ -4020,6 +4056,9 @@ class SaveContext {
   storyToBlocks(storyId: string): BlockContent[] {
     const baseBlocks = this.baseStories.get(storyId);
     const storyComments = this.comments.get(storyId) ?? [];
+    const openHere = this.crossStory.open.get(storyId);
+    const farHere = this.crossStory.far.get(storyId);
+    const farEnds: Array<{ id: number; offset: number }> = [];
     const nestedComments = this.subtreeComments.get(storyId);
     const commentsKey = nestedComments ? stableStringify(Object.fromEntries(nestedComments)) : '';
     const priorStory = this.memo.stories.get(storyId);
@@ -4097,8 +4136,13 @@ class SaveContext {
           const offset = Math.max(0, range.start - inlineStart);
           boundaries.push({ id: range.id, kind: 'start', offset });
         }
-        if (range.end >= paragraphStart && range.end <= end) {
+        if (range.end >= paragraphStart && range.end <= end && !openHere?.has(range.id)) {
           boundaries.push({ id: range.id, kind: 'end', offset: Math.max(0, range.end - inlineStart) });
+        }
+      }
+      for (const far of farEnds) {
+        if (far.offset >= paragraphStart && far.offset <= end) {
+          boundaries.push({ id: far.id, kind: 'end', offset: Math.max(0, far.offset - inlineStart) });
         }
       }
       return boundaries;
@@ -4283,6 +4327,15 @@ class SaveContext {
           // documented opaque carry gap.
         }
       } else {
+        const referenced = segment.payload.modelKind === 'commentReference' ? Number(segment.payload.commentId) : NaN;
+        if (
+          farHere?.has(referenced) &&
+          this.savedComments.has(referenced) &&
+          !storyComments.some((range) => range.id === referenced) &&
+          !farEnds.some((far) => far.id === referenced)
+        ) {
+          farEnds.push({ id: referenced, offset: storyOffset });
+        }
         items.push(segment as EmbedItem);
       }
       const kind = blockBreakKind(segment.embedKind);
