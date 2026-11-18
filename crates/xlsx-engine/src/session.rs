@@ -3644,4 +3644,149 @@ mod tests {
         assert!(export.get("conditionalPending").is_none());
         assert_eq!(export["commands"], settled["commands"]);
     }
+
+    const RULED_VIEW: &str = r#"{"x":0,"y":0,"width":640,"height":800}"#;
+
+    /// 30 rows of `row + col` in A:D, zero in the 1-based `(row, col)` cells of
+    /// `zeros`, each cell above zero painted red by its rule.
+    fn positive_xlsx(zeros: &[(u32, u32)]) -> Vec<u8> {
+        let rows: String = (1..=30)
+            .map(|row| {
+                let cells: String = (0..4).map(|col| positive_cell(row, col, zeros)).collect();
+                format!(r#"<row r="{row}">{cells}</row>"#)
+            })
+            .collect();
+        let parts: Vec<(String, Vec<u8>)> = vec![
+            ("xl/workbook.xml".into(), br#"<workbook><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec()),
+            ("xl/_rels/workbook.xml.rels".into(), br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec()),
+            ("xl/worksheets/sheet1.xml".into(), format!(r#"<worksheet><sheetData>{rows}</sheetData><conditionalFormatting sqref="A1:D30"><cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>0</formula></cfRule></conditionalFormatting></worksheet>"#).into_bytes()),
+            ("xl/styles.xml".into(), br#"<styleSheet><cellXfs count="1"><xf/></cellXfs><dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>"#.to_vec()),
+        ];
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    fn positive_cell(row: u32, col: u32, zeros: &[(u32, u32)]) -> String {
+        let letter = char::from(b'A' + col as u8);
+        let value = if zeros.contains(&(row, col)) {
+            0
+        } else {
+            row + col
+        };
+        format!(r#"<c r="{letter}{row}"><v>{value}</v></c>"#)
+    }
+
+    fn pending(list: &serde_json::Value) -> u64 {
+        list["conditionalPending"].as_u64().unwrap_or(0)
+    }
+
+    /// Every fill a frame paints, as its rectangle and colour, sorted.
+    fn fills(list: &serde_json::Value) -> Vec<String> {
+        let mut fills: Vec<String> = list["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["op"] == "fillRect")
+            .map(|command| {
+                format!(
+                    "{} {} {} {} {}",
+                    command["x"],
+                    command["y"],
+                    command["w"],
+                    command["h"],
+                    command["color"]
+                )
+            })
+            .collect();
+        fills.sort();
+        fills
+    }
+
+    /// A screen frame of the whole ruled area with the frame budget alone,
+    /// which decides all of its cells.
+    fn settled_frame(session: &Session) -> serde_json::Value {
+        let frame: serde_json::Value =
+            serde_json::from_str(&session.display_list_json(RULED_VIEW).unwrap()).unwrap();
+        assert_eq!(pending(&frame), 0);
+        frame
+    }
+
+    /// A screen frame under a clock that moves a second on every reading, so
+    /// the frame stops at its first clock check.
+    fn stopped_frame(session: &Session) -> serde_json::Value {
+        let readings = std::cell::Cell::new(0.0);
+        let clock = || {
+            readings.set(readings.get() + 1000.0);
+            readings.get()
+        };
+        let json = session
+            .display_list_timed_json(None, RULED_VIEW, &clock)
+            .unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// Stopped frames until one decides every cell, each passed to `check`,
+    /// and how many that took; fails past 40 frames.
+    fn settle_stopped(
+        session: &Session,
+        check: impl Fn(&serde_json::Value),
+    ) -> (serde_json::Value, usize) {
+        for count in 1..=40 {
+            let frame = stopped_frame(session);
+            check(&frame);
+            if pending(&frame) == 0 {
+                return (frame, count);
+            }
+        }
+        panic!("conditional formats still pending after 40 frames");
+    }
+
+    /// The call a typed edit of D30 reaches in the editor.
+    fn type_into_d30(session: &mut Session, input: &str) {
+        let args = format!(r#"{{"sheet":0,"row":29,"col":3,"input":"{input}"}}"#);
+        session.edit_cell_json(&args, None).unwrap();
+    }
+
+    #[test]
+    fn a_typed_edit_that_changes_no_result_keeps_every_fill_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        let settled = settled_frame(&session);
+        assert_eq!(red_fills(&settled), 120);
+        let before = fills(&settled);
+        type_into_d30(&mut session, "7");
+        let stopped = stopped_frame(&session);
+        assert!(pending(&stopped) > 0);
+        assert_eq!(fills(&stopped), before);
+        let (after, frames) = settle_stopped(&session, |frame| assert_eq!(fills(frame), before));
+        assert!(frames > 1);
+        assert_eq!(fills(&after), before);
+    }
+
+    #[test]
+    fn a_typed_edit_that_changes_a_result_shows_its_previous_fill_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        let before = fills(&settled_frame(&session));
+        type_into_d30(&mut session, "0");
+        let stopped = stopped_frame(&session);
+        assert!(pending(&stopped) > 0);
+        assert_eq!(fills(&stopped), before);
+        let (after, _) = settle_stopped(&session, |_| {});
+        let reference = Session::open(&positive_xlsx(&[(30, 3)]), None).unwrap();
+        let expected = settled_frame(&reference);
+        assert_eq!(red_fills(&expected), 119);
+        assert_eq!(fills(&after), fills(&expected));
+    }
+
+    #[test]
+    fn clearing_one_cell_with_the_delete_key_shows_the_previous_fills_until_decided() {
+        let mut session = Session::open(&positive_xlsx(&[]), None).unwrap();
+        let before = fills(&settled_frame(&session));
+        let clear = r#"{"sheet":0,"edits":[{"row":29,"col":3,"input":""}]}"#;
+        session.edit_cells_json(clear, None).unwrap();
+        let stopped = stopped_frame(&session);
+        assert!(pending(&stopped) > 0);
+        assert_eq!(fills(&stopped), before);
+        let (after, _) = settle_stopped(&session, |_| {});
+        let reference = Session::open(&positive_xlsx(&[(30, 3)]), None).unwrap();
+        assert_eq!(fills(&after), fills(&settled_frame(&reference)));
+    }
 }
