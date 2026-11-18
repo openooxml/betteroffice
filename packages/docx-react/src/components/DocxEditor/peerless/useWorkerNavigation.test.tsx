@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, jest, mock, spyOn, test } from 'bun:test';
 import { useRef } from 'react';
 import { createPeerlessShellController, WorkerReadSupersededError } from './shellController';
-import { createPeerlessViewStore, type PeerlessViewSnapshot } from './viewStore';
+import { createPeerlessViewStore, type PeerlessFrameGeometry, type PeerlessViewSnapshot } from './viewStore';
 import { useWorkerNavigation } from './useWorkerNavigation';
 import { createInputAdmission } from './inputAdmission';
 import { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
@@ -408,3 +408,61 @@ test('review navigation scrolls a range start to where the final frame shows it 
     expect(navigation.scroller.scrollTop).toBe(700 * 2 - 24);
   } finally { navigation.dispose(); }
 });
+
+function revealRange(throughSeq: number, final: (first: PeerlessFrameGeometry) => Partial<PeerlessFrameGeometry>, rasterScale?: number) {
+  const navigation = reviewNavigation(reviewTargets);
+  const { submit, viewStore } = navigation;
+  const initial = viewStore.getSnapshot().geometry!;
+  viewStore.installFrameGeometry({ ...initial, frameEpoch: initial.frameEpoch + 1, layoutEpoch: 4, rasterScale: 2, documentWidth: 816 });
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 1, ack: Promise.resolve({ status: 'applied', seq: 1 }),
+    presented: Promise.resolve('presented') } }));
+  submit.mockImplementationOnce(() => ({ status: 'submitted', ticket: { seq: 2, ack: Promise.resolve({ status: 'applied', seq: 2 }),
+    presented: Promise.resolve().then(() => {
+      const view = viewStore.getSnapshot();
+      const first = view.geometry!;
+      viewStore.acceptWorkerState(view.identity, { epoch: view.identity.epoch, version: 1, throughSeq, presentedThroughSeq: throughSeq,
+        selection: { anchor: { story: 'body', ...reviewRange.end }, focus: { story: 'body', ...reviewRange.start } }, editState: view.editState });
+      viewStore.installFrameGeometry({ ...first, frameEpoch: first.frameEpoch + 1, coversThroughSeq: throughSeq,
+        caret: null, selectionFocus: null, ...final(first) });
+      if (rasterScale !== undefined) viewStore.rescaleFrameGeometry({ ...viewStore.getSnapshot().geometry!, rasterScale });
+      return 'presented';
+    }) } }));
+  return navigation;
+}
+
+test('review navigation scrolls a range start to the selection focus the final frame shows after a relayout', async () => {
+  const navigation = revealRange(2, (first) => ({ layoutRevision: first.layoutRevision + 1, layoutEpoch: 5,
+    selectionFocus: { x: 10, y: 700, width: 1, height: 12 } }));
+  try {
+    expect(await navigation.controller.ref.scrollToComment(7)).toBe(true);
+    expect(navigation.submit).toHaveBeenCalledTimes(2);
+    expect(navigation.scroller.scrollTop).toBe(700 * 2 - 24);
+  } finally { navigation.dispose(); }
+});
+
+for (const [name, throughSeq, final, rasterScale] of [
+  ['a later command repaginated without a new layout revision', 3, { layoutEpoch: 5, layoutProvisional: true }, undefined],
+  ['the raster scale changed', 2, { layoutProvisional: true }, 3],
+] as const) {
+  test(`review navigation resolves false without scrolling when the final frame has no range geometry and ${name}`, async () => {
+    const navigation = revealRange(throughSeq, () => final, rasterScale);
+    try {
+      expect(await navigation.controller.ref.scrollToComment(7)).toBe(false);
+      expect(navigation.scroller.scrollTop).toBe(0);
+    } finally { navigation.dispose(); }
+  });
+}
+
+for (const [name, throughSeq, final, y] of [
+  ['a later command kept the layout and the final frame has no range geometry', 3, { layoutProvisional: true }, 400],
+  ['the final frame covers only its own selection and has no range geometry', 2, { layoutProvisional: true }, 400],
+  ['the final frame covers only its own selection and shows its focus', 2, { selectionFocus: { x: 10, y: 650, width: 1, height: 12 } }, 650],
+] as const) {
+  test(`review navigation scrolls a range start when ${name}`, async () => {
+    const navigation = revealRange(throughSeq, () => final);
+    try {
+      expect(await navigation.controller.ref.scrollToComment(7)).toBe(true);
+      expect(navigation.scroller.scrollTop).toBe(y * 2 - 24);
+    } finally { navigation.dispose(); }
+  });
+}
