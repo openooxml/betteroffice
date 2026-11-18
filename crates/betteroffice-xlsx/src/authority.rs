@@ -2954,7 +2954,8 @@ impl WorkbookAuthority {
                 .ok_or_else(|| "missing workbook base fingerprint".to_string())?;
             (SHEET_APPEND_SCHEMA_VERSION, fingerprint)
         } else {
-            (SCHEMA_VERSION, self.base.fingerprint.clone())
+            let target = current_schema_version(&self.base.styles).max(version);
+            (target, self.base.fingerprint.clone())
         };
         let fingerprint = self.state_fingerprint();
         let current = fingerprint.as_deref() == Some(base_fingerprint.as_str());
@@ -4066,7 +4067,7 @@ fn seed_in_chunks(
     #[cfg(not(test))]
     let marked = true;
     if marked {
-        meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+        meta.insert(&mut txn, "schemaVersion", current_schema_version(&base.styles));
     }
     let update = txn.encode_update_v1();
     drop(txn);
@@ -6857,6 +6858,16 @@ fn declares_builtin_number_formats(styles: &Stylesheet) -> bool {
     styles.num_fmts.iter().any(|(id, _)| (1..164).contains(id))
 }
 
+/// The schema a seed of `styles` writes: schema 8 only where `styles` declares
+/// its own entry for a builtin id.
+fn current_schema_version(styles: &Stylesheet) -> i64 {
+    if declares_builtin_number_formats(styles) {
+        NUMBER_FORMATS_SCHEMA_VERSION
+    } else {
+        SHEET_APPEND_SCHEMA_VERSION
+    }
+}
+
 /// Whether a state at `version` reads the entries `styles` declares for
 /// builtin ids as the builtins, as states before schema 8 were made.
 fn reads_builtins(version: i64, styles: &Stylesheet) -> bool {
@@ -8641,8 +8652,6 @@ mod tests {
         7, 1, 187, 136, 232, 167, 239, 183, 153, 12, 1, 2, 1, 0,
     ];
 
-    const CHECKPOINT_SCHEMA_VERSION_AT: usize = 1866;
-
     fn recovery_checkpoint_model() -> WorkbookModel {
         let mut model = WorkbookModel::default();
         model.sheets.push(Sheet::new("Data"));
@@ -8684,18 +8693,7 @@ mod tests {
     fn recovery_state_without_column_defaults_keeps_main_bytes() {
         let model = recovery_checkpoint_model();
         let authority = WorkbookAuthority::from_model_with_client_id(&model, 109).unwrap();
-        let bytes = authority.encode_recovery_state().unwrap();
-        assert_eq!(bytes.len(), MAIN_CHECKPOINT.len());
-        let differing = bytes
-            .iter()
-            .zip(MAIN_CHECKPOINT)
-            .enumerate()
-            .filter(|(_, (ours, main))| ours != main)
-            .map(|(at, _)| at)
-            .collect::<Vec<usize>>();
-        assert_eq!(differing, vec![CHECKPOINT_SCHEMA_VERSION_AT]);
-        assert_eq!(MAIN_CHECKPOINT[CHECKPOINT_SCHEMA_VERSION_AT], 7);
-        assert_eq!(bytes[CHECKPOINT_SCHEMA_VERSION_AT], SCHEMA_VERSION as u8);
+        assert_eq!(authority.encode_recovery_state().unwrap(), MAIN_CHECKPOINT);
     }
 
     #[test]
@@ -9596,7 +9594,7 @@ mod tests {
     #[test]
     fn singleton_set_cell_legacy_schema_matches_full_materialization() {
         let model = rich_model();
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..current_schema_version(&model.styles) {
             let bytes = legacy_update(&model, version, true);
             let mut fast = authority_from_update(&model, &bytes, 73);
             let mut oracle = authority_from_update(&model, &bytes, 73);
@@ -10132,7 +10130,7 @@ mod tests {
             authority
                 .apply_staged_update_v1(&staged.commit_update)
                 .unwrap();
-            assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(authority.schema_version().unwrap(), current_schema_version(&model.styles));
             assert_eq!(authority.strict_materialize().unwrap().0, model);
         }
     }
@@ -10148,7 +10146,7 @@ mod tests {
             authority
                 .apply_staged_update_v1(&staged.commit_update)
                 .unwrap();
-            assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(authority.schema_version().unwrap(), current_schema_version(&model.styles));
             assert_eq!(authority.strict_materialize().unwrap().0, model);
         }
     }
@@ -10220,7 +10218,7 @@ mod tests {
     fn a_charted_workbook_pairs_with_a_legacy_fingerprint() {
         let mut model = WorkbookModel::default();
         model.sheets.push(charted("Report", "Report!$A$1"));
-        for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..current_schema_version(&model.styles) {
             let update = legacy_update(&model, version, true);
             let authority = authority_from_update(&model, &update, 130 + version as u64);
             let materialized = authority.materialize().unwrap();
@@ -10398,12 +10396,12 @@ mod tests {
         let current = WorkbookAuthority::from_model_with_client_id(&model, 301).unwrap();
         let previous = schema_six_replica(&model, &current.base);
         assert_eq!(doc_schema_version(&previous), 6);
-        assert_eq!(current.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(current.schema_version().unwrap(), current_schema_version(&model.styles));
         let known = previous.transact().state_vector();
         let diff = current.doc.transact().encode_diff_v1(&known);
         assert!(diff.len() < 64);
         hydrate_doc(&previous, &diff).unwrap();
-        assert_eq!(doc_schema_version(&previous), SCHEMA_VERSION);
+        assert_eq!(doc_schema_version(&previous), current_schema_version(&model.styles));
         assert_eq!(
             previous.transact().state_vector(),
             current.doc.transact().state_vector()
@@ -10424,7 +10422,7 @@ mod tests {
         current
             .apply_staged_update_v1(&staged.commit_update)
             .unwrap();
-        assert_eq!(current.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(current.schema_version().unwrap(), current_schema_version(&model.styles));
     }
 
     #[test]
@@ -10840,7 +10838,7 @@ mod tests {
             let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 119).unwrap();
             let mut oracle =
                 WorkbookAuthority::from_source_oracle(&model, Some(119), &[], None, &[]).unwrap();
-            assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(authority.schema_version().unwrap(), current_schema_version(&model.styles));
             assert_eq!(authority.base.fingerprint, oracle.base.fingerprint);
             assert_eq!(
                 authority.base.bootstrap_client_id,
@@ -10856,7 +10854,7 @@ mod tests {
                 panic!("schema six snapshot refused")
             };
             assert_eq!(resumed.encode_state_as_update_v1(), state);
-            assert_eq!(resumed.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(resumed.schema_version().unwrap(), current_schema_version(&model.styles));
             let ops = [Op::SetCell {
                 sheet: SheetId(0),
                 at: CellRef::new(20, 0),
@@ -10891,7 +10889,10 @@ mod tests {
                             .all(|key| !key.starts_with("merge:") && key != "mergeEdits")
                     );
                 }
-                assert_eq!(current.schema_version().unwrap(), SCHEMA_VERSION);
+                assert_eq!(
+                    current.schema_version().unwrap(),
+                    current_schema_version(&model.styles)
+                );
             }
             assert_eq!(
                 authority.encode_state_as_update_v1(),
@@ -11406,7 +11407,7 @@ mod tests {
             let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 229).unwrap();
             let mut oracle =
                 WorkbookAuthority::from_source_oracle(&model, Some(229), &[], None, &[]).unwrap();
-            assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(authority.schema_version().unwrap(), current_schema_version(&model.styles));
             assert_eq!(authority.base.fingerprint, oracle.base.fingerprint);
             assert_eq!(
                 authority.base.bootstrap_client_id,
@@ -11422,7 +11423,7 @@ mod tests {
                 panic!("schema six snapshot refused")
             };
             assert_eq!(resumed.encode_state_as_update_v1(), state);
-            assert_eq!(resumed.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(resumed.schema_version().unwrap(), current_schema_version(&model.styles));
             let ops = [Op::SetCell {
                 sheet: SheetId(0),
                 at: CellRef::new(20, 0),
@@ -11457,7 +11458,10 @@ mod tests {
                             .all(|key| !key.starts_with("hyperlink:") && key != "hyperlinkEdits")
                     );
                 }
-                assert_eq!(current.schema_version().unwrap(), SCHEMA_VERSION);
+                assert_eq!(
+                    current.schema_version().unwrap(),
+                    current_schema_version(&model.styles)
+                );
             }
             assert_eq!(
                 authority.encode_state_as_update_v1(),
@@ -12895,7 +12899,7 @@ mod tests {
                 )
                 .unwrap();
             }
-            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+            meta.insert(&mut txn, "schemaVersion", current_schema_version(&base.styles));
         }
         doc.transact()
             .encode_state_as_update_v1(&StateVector::default())
