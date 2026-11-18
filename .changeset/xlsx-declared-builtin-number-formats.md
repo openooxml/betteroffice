@@ -6,4 +6,4 @@
 '@betteroffice/xlsx-react': minor
 ---
 
-A number format a workbook declares for a built-in id is shown as declared, as in Excel. Shared workbook states move to schema version 8: clients on an older version cannot open states created by this one.
+A number format a workbook declares for a built-in id is shown as declared, as in Excel. Shared states of a workbook that declares such an id use schema version 8, which clients on an older version do not open; all other workbooks are unchanged.
