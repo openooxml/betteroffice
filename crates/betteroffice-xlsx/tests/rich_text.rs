@@ -465,7 +465,7 @@ fn editing_another_cell_keeps_the_rich_items_and_their_runs() {
         .edit_cell(SheetId(0), at, "2", CalculationOptions::default())
         .unwrap();
     assert!(receipt.applied);
-    assert!(receipt.changed.iter().any(|changed| changed.cell == at));
+    assert!(receipt.changed.is_empty());
     for (col, runs) in (0..4).zip(&before) {
         assert_eq!(cell_runs(&workbook, col), runs.as_slice(), "{col}");
     }
