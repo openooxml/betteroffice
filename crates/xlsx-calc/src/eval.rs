@@ -2064,6 +2064,35 @@ mod tests {
         assert_eq!(parses, 2);
     }
 
+    #[test]
+    fn a_restarted_context_keeps_its_parsed_definitions() {
+        let mut workbook = Workbook::default();
+        let mut data = Sheet::new("Data");
+        data.set_cell(CellRef::parse_a1("A1").unwrap(), number(1.0));
+        workbook.sheets.push(data);
+        workbook.defined_names.extend([
+            defined_name("Kind", "IF(Data!$A$1=1,\"S\",\"T\")"),
+            defined_name("Code", "Data!$A$1+301"),
+        ]);
+        let context = EvalContext::new(&workbook, SheetId(0));
+        let kind = parse_formula("OR(Kind=\"S\",Kind=\"M\")").unwrap();
+        let code = parse_formula("OR(Code=302,Code=303)").unwrap();
+        let fresh = |formula: &Expr| evaluate(formula, &EvalContext::new(&workbook, SheetId(0)));
+        let expected = [fresh(&kind), fresh(&code)];
+        assert_eq!(expected, [boolean(true), boolean(true)]);
+
+        DEFINED_NAME_PARSES.with(|count| count.set(0));
+        for _ in 0..8 {
+            context.restart();
+            assert_eq!(evaluate(&kind, &context), expected[0]);
+            context.restart();
+            assert_eq!(evaluate(&code, &context), expected[1]);
+        }
+        let parses = DEFINED_NAME_PARSES.with(std::cell::Cell::get);
+
+        assert_eq!(parses, 2);
+    }
+
     fn names_workbook() -> Workbook {
         let mut workbook = Workbook::default();
         let mut data = Sheet::new("Data");
