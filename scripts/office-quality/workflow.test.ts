@@ -428,7 +428,7 @@ test('the README step writes only the block of its own run kind through readme.m
   const step = publish.steps.find((step: any) => step.name === 'Replace the generated README section');
   expect(step.if).toBe(README);
   expect(step.env).toEqual({ QUALITY_PRIVATE: '${{ inputs.private_corpus }}' });
-  expect(String(step.run).trim()).toBe('node scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" README.md');
+  expect(String(step.run).trim()).toBe('node scripts/office-quality/readme.mjs --section "$RUNNER_TEMP/fidelity-report/section.md" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" README.md');
   expect(step.run).not.toContain('GENERATED');
 });
 
