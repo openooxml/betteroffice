@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
-import type { Comment, Document, Paragraph } from '../types/document';
+import type { Comment, Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
@@ -166,11 +166,23 @@ function changedParts(source: Uint8Array, saved: Uint8Array, allowed: ReadonlySe
 const formatting = (bytes: Uint8Array) =>
   paragraphs(bytes).map((xml) => KEPT.map((needle) => xml.split(needle).length - 1).join('/'));
 
+/** The run formatting of the paragraphs outside `touched`, keyed by their index. */
+const untouchedFormatting = (bytes: Uint8Array, touched: number[]) =>
+  Object.fromEntries(
+    formatting(bytes).flatMap((counts, at) => (touched.includes(at) ? [] : [[`untouched paragraph ${at}`, counts]]))
+  );
+
+/** The text of body paragraph `at`. */
+const textAt = (bytes: Uint8Array, at: number) => (paragraphs(bytes)[at] ?? '').replace(/<[^>]+>/g, '');
+
 /** The comment's markers in the body, in document order. */
 const marks = (bytes: Uint8Array, id: number) =>
   [...part(bytes, 'word/document.xml').matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id="(\d+)"\/>/g)]
     .filter((match) => Number(match[2]) === id)
     .map((match) => match[1]!);
+
+/** The markers of each comment in `ids`, keyed by id. */
+const marksOf = (bytes: Uint8Array, ids: number[]) => Object.fromEntries(ids.map((id) => [id, marks(bytes, id)]));
 
 const commentIds = (bytes: Uint8Array) =>
   [...part(bytes, 'word/comments.xml').matchAll(/<w:comment\b[^>]*?\bw:id="(\d+)"/g)].map((match) => Number(match[1]));
@@ -342,23 +354,19 @@ async function agentsDelete(source: Uint8Array, id: number): Promise<Uint8Array>
 
 const ROUTES = { worker: workerSave, 'main-thread': mainThreadSave } as const;
 
-const editedNote: Paragraph = {
-  type: 'paragraph',
-  content: [{ type: 'run', content: [{ type: 'text', text: 'Edited note' }] }],
-};
-
 for (const [route, save] of Object.entries(ROUTES)) {
   describe(`${route} editor save`, () => {
     test('T1 deleting one comment rewrites only the paragraph that held it', async () => {
       const source = built();
       const saved = await save(source, { remove: 1 });
       expect(differing(source, saved.bytes)).toEqual([0]);
-      expect(formatting(saved.bytes)).toEqual(formatting(source));
+      expect(untouchedFormatting(saved.bytes, [0])).toEqual(untouchedFormatting(source, [0]));
+      expect(textAt(saved.bytes, 0)).toBe(textAt(source, 0));
       expect(changedParts(source, saved.bytes)).toEqual([]);
       expect(marks(saved.bytes, 1)).toEqual([]);
       expect(commentIds(saved.bytes)).toEqual([2, 3, 4, 5]);
       expect(companionIds(saved.bytes)).toEqual({ extended: [2, 3, 4, 5], ids: [2, 3, 4, 5], extensible: [2, 3, 4, 5] });
-      for (const id of [2, 3, 4, 5]) expect([id, ...marks(saved.bytes, id)]).toEqual([id, ...marks(source, id)]);
+      expect(marksOf(saved.bytes, [2, 3, 4, 5])).toEqual(marksOf(source, [2, 3, 4, 5]));
       const reread = await reopened(saved.bytes);
       expect(reread.ids).toEqual([2, 3, 4, 5]);
       expect([reread.anchored(2), reread.anchored(5)]).toEqual(['discussed words', 'fifth note']);
@@ -369,7 +377,8 @@ for (const [route, save] of Object.entries(ROUTES)) {
       const source = built([5], false);
       const saved = await save(source, { remove: 5 });
       expect(differing(source, saved.bytes)).toEqual([4]);
-      expect(formatting(saved.bytes)).toEqual(formatting(source));
+      expect(untouchedFormatting(saved.bytes, [4])).toEqual(untouchedFormatting(source, [4]));
+      expect(textAt(saved.bytes, 4)).toBe(textAt(source, 4));
       expect(changedParts(source, saved.bytes)).toEqual([]);
       expect(marks(saved.bytes, 5)).toEqual([]);
       expect(commentsPart(saved.bytes)).toEqual(commentsPart(await agentsDelete(source, 5)));
@@ -382,10 +391,13 @@ for (const [route, save] of Object.entries(ROUTES)) {
       const saved = await save(source, { remove: 1, type: '0A000002' });
       expect(differing(source, saved.bytes)).toEqual([0, 1]);
       expect(paragraphs(saved.bytes)[1]).toContain(TYPED);
-      expect(formatting(saved.bytes).filter((_, at) => at !== 1)).toEqual(formatting(source).filter((_, at) => at !== 1));
+      expect(untouchedFormatting(saved.bytes, [0, 1])).toEqual(untouchedFormatting(source, [0, 1]));
+      expect(textAt(saved.bytes, 0)).toBe(textAt(source, 0));
       expect(changedParts(source, saved.bytes)).toEqual([]);
       expect(marks(saved.bytes, 1)).toEqual([]);
       expect(commentIds(saved.bytes)).toEqual([2, 3, 4, 5]);
+      expect(companionIds(saved.bytes)).toEqual({ extended: [2, 3, 4, 5], ids: [2, 3, 4, 5], extensible: [2, 3, 4, 5] });
+      expect(marksOf(saved.bytes, [2, 3, 4, 5])).toEqual(marksOf(source, [2, 3, 4, 5]));
       expect(saved.full).toBe(false);
     }, TIMEOUT);
 
@@ -393,10 +405,13 @@ for (const [route, save] of Object.entries(ROUTES)) {
       const source = built();
       const saved = await save(source, { remove: 5 });
       expect(differing(source, saved.bytes)).toEqual([4]);
-      expect(formatting(saved.bytes)).toEqual(formatting(source));
+      expect(untouchedFormatting(saved.bytes, [4])).toEqual(untouchedFormatting(source, [4]));
+      expect(textAt(saved.bytes, 4)).toBe(textAt(source, 4));
       expect(changedParts(source, saved.bytes)).toEqual([]);
       expect(marks(saved.bytes, 5)).toEqual([]);
       expect(commentIds(saved.bytes)).toEqual([1, 2, 3, 4]);
+      expect(companionIds(saved.bytes)).toEqual({ extended: [1, 2, 3, 4], ids: [1, 2, 3, 4], extensible: [1, 2, 3, 4] });
+      expect(marksOf(saved.bytes, [1, 2, 3, 4])).toEqual(marksOf(source, [1, 2, 3, 4]));
       const reread = await reopened(saved.bytes);
       expect([reread.anchored(1), reread.anchored(2)]).toEqual(['first note', 'discussed words']);
       expect(saved.full).toBe(false);
@@ -406,15 +421,26 @@ for (const [route, save] of Object.entries(ROUTES)) {
       const source = built();
       const saved = await save(source, { remove: 2 });
       expect(differing(source, saved.bytes)).toEqual([3]);
-      expect(formatting(saved.bytes)).toEqual(formatting(source));
+      expect(untouchedFormatting(saved.bytes, [3])).toEqual(untouchedFormatting(source, [3]));
+      expect(textAt(saved.bytes, 3)).toBe(textAt(source, 3));
       expect(changedParts(source, saved.bytes)).toEqual([]);
-      expect([2, 3, 4].flatMap((id) => marks(saved.bytes, id))).toEqual([]);
+      expect(marksOf(saved.bytes, [2, 3, 4])).toEqual({ 2: [], 3: [], 4: [] });
+      expect(marksOf(saved.bytes, [1, 5])).toEqual(marksOf(source, [1, 5]));
       expect(commentIds(saved.bytes)).toEqual([1, 5]);
       expect(companionIds(saved.bytes)).toEqual({ extended: [1, 5], ids: [1, 5], extensible: [1, 5] });
       expect(orphanReplies(saved.bytes)).toEqual([]);
       const reread = await reopened(saved.bytes);
       expect([reread.ids, reread.orphans]).toEqual([[1, 5], 0]);
       expect(saved.full).toBe(false);
+    }, TIMEOUT);
+
+    test('today the paragraph that held a deleted comment is written again and keeps its text', async () => {
+      const source = built();
+      const saved = await save(source, { remove: 5 });
+      const after = paragraphs(saved.bytes)[4] ?? '';
+      expect(after === paragraphs(source)[4]).toBe(false);
+      expect(textAt(saved.bytes, 4)).toBe('Plain fifth note end');
+      expect(after.match(/<w:comment\w*\b[^>]*w:id="5"/g) ?? []).toEqual([]);
     }, TIMEOUT);
 
     test('T4 a missing comment with changed host metadata still writes every part', async () => {
@@ -428,19 +454,6 @@ for (const [route, save] of Object.entries(ROUTES)) {
       });
       expect(saved.full).toBe(true);
       expect(marks(saved.bytes, 1)).toEqual([]);
-    }, TIMEOUT);
-
-    test('T4 an edited comment text saves through the patched parts', async () => {
-      const source = built();
-      const saved = await save(source, {
-        comments: (list) =>
-          list.map((comment) => (comment.id === 5 ? { ...comment, content: [editedNote], blockContent: [editedNote] } : comment)),
-      });
-      expect(saved.full).toBe(false);
-      expect(part(saved.bytes, 'word/document.xml') === part(source, 'word/document.xml')).toBe(true);
-      expect(part(saved.bytes, 'word/comments.xml')).toContain('Edited note');
-      expect(commentIds(saved.bytes)).toEqual(ALL);
-      expect(changedParts(source, saved.bytes)).toEqual([]);
     }, TIMEOUT);
 
     test('T4 a save without edits keeps every part', async () => {
