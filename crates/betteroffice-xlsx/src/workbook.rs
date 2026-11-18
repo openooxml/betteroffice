@@ -513,6 +513,9 @@ pub struct Workbook {
     graph: Option<DepGraph>,
     graph_reuse: GraphReuse,
     rand_seed: Option<u32>,
+    /// The clock the last recalculation gave TODAY and NOW, which conditional
+    /// rules reading them are decided with; `None` until a recalculation with one.
+    calculated_now: Option<f64>,
     proposals: ProposalSet,
     last_calculation: CalculationResult,
     update_observers: Arc<Mutex<UpdateObservers>>,
@@ -695,6 +698,8 @@ pub struct PeerHydration {
     recalculated_since_open: bool,
     calculations_since_open: u64,
     rand_seed: Option<u32>,
+    #[serde(default)]
+    calculated_now: Option<f64>,
     active_sheet: SheetId,
     version_nonce: String,
     committed_changes: u64,
@@ -752,6 +757,7 @@ impl Workbook {
             recalculated_since_open: self.recalculated_since_open,
             calculations_since_open: self.calculations_since_open,
             rand_seed: self.rand_seed,
+            calculated_now: self.calculated_now,
             active_sheet: self.active_sheet,
             version_nonce: self.version_nonce.clone(),
             committed_changes: self.committed_changes,
@@ -819,6 +825,7 @@ impl Workbook {
         workbook.recalculated_since_open = hydration.recalculated_since_open;
         workbook.calculations_since_open = hydration.calculations_since_open;
         workbook.rand_seed = hydration.rand_seed;
+        workbook.calculated_now = hydration.calculated_now;
         workbook.set_active_sheet(hydration.active_sheet)?;
         workbook.version_nonce = hydration.version_nonce;
         workbook.committed_changes = hydration.committed_changes;
@@ -1121,6 +1128,7 @@ impl Workbook {
             graph,
             graph_reuse: GraphReuse::default(),
             rand_seed: None,
+            calculated_now: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
@@ -1401,6 +1409,7 @@ impl Workbook {
         self.graph = Some(graph);
         self.mark_graph_current();
         self.last_calculation = calculation;
+        self.calculated_now = options.now_serial;
         self.mode = WorkbookMode::Collaborative {
             structure: Box::new(structure),
         };
@@ -1676,6 +1685,7 @@ impl Workbook {
         self.graph = Some(graph);
         self.mark_graph_current();
         self.last_calculation = calculation.clone();
+        self.calculated_now = options.now_serial;
         self.undo.clear();
         self.preserved_undo.clear();
         self.preserved_redo.clear();
@@ -2500,6 +2510,7 @@ impl Workbook {
         );
         mark(EditStage::Recalculated);
         let result = self.mutation_result(true, result, &seeds);
+        self.calculated_now = options.now_serial;
         self.publish(update);
         if keeps_graph {
             self.mark_graph_current();
@@ -2641,6 +2652,7 @@ impl Workbook {
             self.rand_seed,
         );
         let result = self.mutation_result(true, result, &seeds);
+        self.calculated_now = options.now_serial;
         self.publish(update);
         if keeps_graph {
             self.mark_graph_current();
@@ -3465,6 +3477,7 @@ impl Workbook {
             self.rand_seed,
         );
         let mutation = self.mutation_result(true, result, &seeds);
+        self.calculated_now = options.now_serial;
         self.proposals.remove(id);
         self.publish(update);
         if keeps_graph {
@@ -4633,6 +4646,7 @@ impl Workbook {
         result.budget_exhausted |= previous.budget_exhausted && !kept.is_empty();
         result.limited_cells = kept.into_iter().chain(result.limited_cells).collect();
         self.last_calculation = result.clone();
+        self.calculated_now = options.now_serial;
         result
     }
 
@@ -4677,6 +4691,7 @@ impl Workbook {
             panic!("a kept dependency graph diverged from a fresh build: {difference}");
         }
         self.last_calculation = result.clone();
+        self.calculated_now = options.now_serial;
         xlsx_model::progress::pulse();
         result
     }
@@ -6813,7 +6828,7 @@ impl Workbook {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .effects(
-                (self.model_epoch, None),
+                (self.model_epoch, self.calculated_now),
                 &self.model,
                 sheet,
                 rows,
@@ -7529,6 +7544,7 @@ impl Workbook {
                 ..GraphReuse::default()
             },
             rand_seed: None,
+            calculated_now: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),

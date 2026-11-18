@@ -62,9 +62,12 @@ const AGGREGATES: &[&str] = &[
     "VAR.S",
 ];
 
-/// Functions whose value changes with no edit: the calc engine's volatile
-/// functions less INDIRECT, whose value follows the cells it reads.
-const VOLATILE: &[&str] = &["TODAY", "NOW", "RAND", "RANDBETWEEN", "RANDARRAY"];
+/// Volatile functions reading the clock, decided with the date the cells were
+/// last calculated with when there is one.
+const CLOCK: &[&str] = &["TODAY", "NOW"];
+/// The calc engine's other volatile functions less INDIRECT, whose value
+/// follows the cells it reads: no date decides them.
+const RANDOM: &[&str] = &["RAND", "RANDBETWEEN", "RANDARRAY"];
 /// Defined names one volatility scan expands, the calc engine's name depth.
 const NAME_DEPTH: usize = 256;
 
@@ -126,7 +129,8 @@ pub struct ConditionalStats {
     pub withheld_refused: u64,
     /// Cells withheld because a rule's kind, operator or rank is unsupported.
     pub withheld_unsupported: u64,
-    /// Cells withheld because a rule reads the clock or random numbers.
+    /// Cells withheld because a rule reads random numbers, or the clock in a
+    /// workbook not calculated with a date.
     pub withheld_volatile: u64,
     /// Cells withheld because a range rule's areas overlap.
     pub withheld_overlapping: u64,
@@ -164,7 +168,10 @@ enum Unknown {
 /// Each sheet's rules, aggregates and decided cells for one model epoch, the
 /// decided cells of the epoch before, and shifted formulas parsed in any.
 pub(crate) struct Cache {
-    epoch: Option<u64>,
+    /// The model epoch and the bits of the calculation date the cache holds.
+    epoch: Option<(u64, Option<u64>)>,
+    /// The calculation date rules on the clock are decided with.
+    now_serial: Option<f64>,
     rules: HashMap<SheetId, Arc<[Rule]>>,
     aggregates: HashMap<(SheetId, usize), Arc<Aggregate>>,
     results: HashMap<(SheetId, u32, u32), Option<Arc<DifferentialFormat>>>,
@@ -183,6 +190,7 @@ impl Default for Cache {
     fn default() -> Self {
         Self {
             epoch: None,
+            now_serial: None,
             rules: HashMap::new(),
             aggregates: HashMap::new(),
             results: HashMap::new(),
@@ -291,7 +299,7 @@ impl Cache {
         ConditionalStats {
             cached_cells: self.results.len(),
             previous_cells: self.previous.len(),
-            epoch: self.epoch.unwrap_or_default(),
+            epoch: self.epoch.map_or(0, |(epoch, _)| epoch),
             ..self.stats
         }
     }
@@ -305,7 +313,9 @@ impl Cache {
     /// The effects on the cells of `sheet` in the `rows` by `cols` runs, and
     /// how many of them `budget` left undecided. A cell takes each property
     /// from the highest-priority matching rule that sets it, and no rule
-    /// below a matching `stopIfTrue` rule applies.
+    /// below a matching `stopIfTrue` rule applies. `epoch` is the model epoch
+    /// and the date its cells were last calculated with; a change of either
+    /// starts a new epoch of the cache.
     pub(crate) fn effects(
         &mut self,
         epoch: (u64, Option<f64>),
@@ -315,9 +325,11 @@ impl Cache {
         cols: &[Range<u32>],
         budget: Budget<'_>,
     ) -> (CellFormats, u32) {
-        let (epoch, _) = epoch;
-        if self.epoch != Some(epoch) {
-            self.epoch = Some(epoch);
+        let (epoch, now_serial) = epoch;
+        let key = (epoch, now_serial.map(f64::to_bits));
+        if self.epoch != Some(key) {
+            self.epoch = Some(key);
+            self.now_serial = now_serial;
             self.rules.clear();
             self.aggregates.clear();
             if std::mem::take(&mut self.moved) {
@@ -343,7 +355,7 @@ impl Cache {
             .map(|clock| clock.now_ms() + CONDITIONAL_FRAME_MS);
         let mut scanned = 0u64;
         if !self.rules.contains_key(&sheet) {
-            let built: Arc<[Rule]> = rules(model, sheet).into();
+            let built: Arc<[Rule]> = rules(model, sheet, self.now_serial.is_some()).into();
             scanned += built
                 .iter()
                 .map(|rule| rule.formulas.len() as u64)
@@ -377,7 +389,10 @@ impl Cache {
         let mut decided = 0u64;
         let mut checked = 0u64;
         let mut stopped = false;
-        let mut context = EvalContext::new(model, sheet);
+        let mut context = match self.now_serial {
+            Some(now_serial) => EvalContext::with_now(model, sheet, now_serial),
+            None => EvalContext::new(model, sheet),
+        };
         let mut spent = 0;
         let mut pending = 0u32;
         let mut caching = true;
@@ -847,8 +862,9 @@ fn compare(ctx: &EvalContext<'_>, op: BinaryOp, lhs: &CellValue, rhs: &CellValue
     evaluate(&expr, ctx) == CellValue::Bool { value: true }
 }
 
-/// The sheet's rules that paint a differential format, highest priority first.
-fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
+/// The sheet's rules that paint a differential format, highest priority first;
+/// `dated` when the cells were calculated with a date.
+fn rules(model: &Workbook, sheet: SheetId, dated: bool) -> Vec<Rule> {
     let Some(owner) = model.sheet(sheet) else {
         return Vec::new();
     };
@@ -924,7 +940,7 @@ fn rules(model: &Workbook, sheet: SheetId) -> Vec<Rule> {
                     formula
                         .base
                         .as_deref()
-                        .is_some_and(|base| volatile(model, sheet, base))
+                        .is_some_and(|base| volatile(model, sheet, base, dated))
                 });
                 let whole_range = matches!(
                     test,
@@ -976,11 +992,12 @@ fn overlapping(ranges: &[CellRange]) -> bool {
 }
 
 /// Whether `expr` at `sheet`, or a defined name it reads at any depth, calls
-/// a function whose value changes with no edit; names past `NAME_DEPTH`
-/// count as such a call.
-fn volatile(model: &Workbook, sheet: SheetId, expr: &Expr) -> bool {
+/// a function whose value changes with no edit and nothing decides: one in
+/// `RANDOM`, or in `CLOCK` unless `dated`. Names past `NAME_DEPTH` count as
+/// such a call.
+fn volatile(model: &Workbook, sheet: SheetId, expr: &Expr, dated: bool) -> bool {
     let mut names = Vec::new();
-    if calls_volatile(model, sheet, expr, &mut names) {
+    if calls_volatile(model, sheet, expr, &mut names, dated) {
         return true;
     }
     let mut expanded = HashSet::new();
@@ -999,29 +1016,31 @@ fn volatile(model: &Workbook, sheet: SheetId, expr: &Expr) -> bool {
             continue;
         };
         let scope = defined.local_sheet.unwrap_or(owner);
-        if calls_volatile(model, scope, &definition, &mut names) {
+        if calls_volatile(model, scope, &definition, &mut names, dated) {
             return true;
         }
     }
     false
 }
 
-/// Whether `expr` calls a function in `VOLATILE`, collecting the defined
-/// names it reads into `names`.
+/// Whether `expr` calls a function in `RANDOM`, or in `CLOCK` unless
+/// `dated`, collecting the defined names it reads into `names`.
 fn calls_volatile(
     model: &Workbook,
     sheet: SheetId,
     expr: &Expr,
     names: &mut Vec<(SheetId, String)>,
+    dated: bool,
 ) -> bool {
     match expr {
         Expr::FuncCall { name, args, .. } => {
             let upper = name.to_ascii_uppercase();
             let bare = upper.strip_prefix("_XLFN.").unwrap_or(&upper);
-            VOLATILE.contains(&bare)
+            RANDOM.contains(&bare)
+                || (!dated && CLOCK.contains(&bare))
                 || args
                     .iter()
-                    .any(|arg| calls_volatile(model, sheet, arg, names))
+                    .any(|arg| calls_volatile(model, sheet, arg, names, dated))
         }
         Expr::Name { scope, name } => {
             let owner = match scope {
@@ -1032,11 +1051,12 @@ fn calls_volatile(
             false
         }
         Expr::RangeJoin { start, end } => {
-            calls_volatile(model, sheet, start, names) || calls_volatile(model, sheet, end, names)
+            calls_volatile(model, sheet, start, names, dated)
+                || calls_volatile(model, sheet, end, names, dated)
         }
         other => children(other)
             .into_iter()
-            .any(|child| calls_volatile(model, sheet, child, names)),
+            .any(|child| calls_volatile(model, sheet, child, names, dated)),
     }
 }
 
