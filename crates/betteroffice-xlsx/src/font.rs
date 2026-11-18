@@ -97,7 +97,7 @@ impl Workbook {
                 continue;
             };
             let pieces = xlsx_render::run_pieces(command).unwrap_or_default();
-            let own = (font_family, *bold, *italic, text.as_ref());
+            let own = (font_family, *bold, *italic, &**text);
             let runs = pieces.iter().map(|piece| {
                 let text = &text[piece.range.clone()];
                 (&piece.font_family, piece.bold, piece.italic, text)
