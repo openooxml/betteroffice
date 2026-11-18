@@ -3689,11 +3689,7 @@ mod tests {
             .map(|command| {
                 format!(
                     "{} {} {} {} {}",
-                    command["x"],
-                    command["y"],
-                    command["w"],
-                    command["h"],
-                    command["color"]
+                    command["x"], command["y"], command["w"], command["h"], command["color"]
                 )
             })
             .collect();
