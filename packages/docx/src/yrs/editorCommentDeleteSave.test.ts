@@ -73,7 +73,7 @@ function body(ids: number[], twice = false): string {
   );
 }
 
-function built(ids: number[] = ALL, companions = true, twice = false): Uint8Array {
+function built(ids: number[] = ALL, companions = true, twice = false, content = body(ids, twice)): Uint8Array {
   const extra = companions
     ? [
         ['commentsExtended', 'http://schemas.microsoft.com/office/2011/relationships/commentsExtended'],
@@ -102,7 +102,7 @@ function built(ids: number[] = ALL, companions = true, twice = false): Uint8Arra
       '</Relationships>'
     )],
     ['word/document.xml', toBytes(
-      `<w:document xmlns:w="${W}" xmlns:r="${REL}" xmlns:w14="${W14}"><w:body>${body(ids, twice)}<w:sectPr/></w:body></w:document>`
+      `<w:document xmlns:w="${W}" xmlns:r="${REL}" xmlns:w14="${W14}"><w:body>${content}<w:sectPr/></w:body></w:document>`
     )],
     ['word/comments.xml', toBytes(
       `<w:comments xmlns:w="${W}" xmlns:w14="${W14}">` +
@@ -388,6 +388,19 @@ for (const [route, save] of Object.entries(ROUTES)) {
       expect(bookmarkPairs(saved.bytes)).toEqual(bookmarkPairs(source));
       expect(marks(saved.bytes, 1)).toEqual([]);
       expect(marksOf(saved.bytes, [2, 3, 4, 5])).toEqual(marksOf(source, [2, 3, 4, 5]));
+      expect(saved.full).toBe(false);
+    }, TIMEOUT);
+
+    test('deleting a comment between two paragraphs that hold one bookmark id rewrites only its paragraph', async () => {
+      const marked = (n: number, name: string) => para(n, bookmark(true, name, run(`${name} paragraph`)));
+      const noted = `<w:commentRangeStart w:id="1"/>${run('noted')}<w:commentRangeEnd w:id="1"/>${reference(1)}`;
+      const content = marked(1, 'First') + para(2, `${run('Lead ')}${noted}${run(' end')}`) + marked(3, 'Third');
+      const source = built([1], false, false, content);
+      expect(bookmarkPairs(source)).toHaveLength(2);
+      const saved = await save(source, { remove: 1 });
+      expect(differing(source, saved.bytes)).toEqual([1]);
+      expect(bookmarkPairs(saved.bytes)).toEqual(bookmarkPairs(source));
+      expect(marks(saved.bytes, 1)).toEqual([]);
       expect(saved.full).toBe(false);
     }, TIMEOUT);
 
