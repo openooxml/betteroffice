@@ -7164,38 +7164,50 @@ pub(crate) fn emit_paragraph_fragment(
         let mut glyph_attrs = block_ref.attrs();
         glyph_attrs.structural_revision = Some(Box::new(rev.clone()));
         let glyph_x = line.end_x + PARAGRAPH_MARK_GLYPH_GAP;
-        prims.push(Primitive::Text(TextRunPrimitive {
-            text: "¶".to_string(),
-            paint_text: None,
-            x: px(glyph_x),
-            baseline_y: px(line.baseline),
-            width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
-            paint_clip: None,
-            font: resolved_css_font(ctx.shape, "¶", &RunFormattingIn::default()),
-            scripts: None,
-            color: structural_color(rev.kind).to_string(),
-            letter_spacing: None,
-            word_spacing: None,
-            rtl: None,
-            opacity: None,
-            rotation_deg: None,
-            horizontal_scale: None,
-            substitute_scale: text_substitute_scale(
-                ctx.shape,
-                "¶",
-                &RunFormattingIn::default(),
-                0,
-                false,
-            ),
-            all_caps: false,
-            small_caps: false,
-            hidden: false,
-            text_shadow: None,
-            text_outline: false,
-            emphasis_mark: None,
-            text_effect: None,
-            attrs: glyph_attrs.clone(),
-        }));
+        let shaped = ctx.shape.is_some_and(|shape| {
+            emit_paragraph_mark_glyph_run(
+                prims,
+                shape,
+                glyph_x,
+                line.baseline,
+                &glyph_attrs,
+                structural_color(rev.kind),
+            )
+        });
+        if !shaped {
+            prims.push(Primitive::Text(TextRunPrimitive {
+                text: "¶".to_string(),
+                paint_text: None,
+                x: px(glyph_x),
+                baseline_y: px(line.baseline),
+                width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
+                paint_clip: None,
+                font: resolved_css_font(ctx.shape, "¶", &RunFormattingIn::default()),
+                scripts: None,
+                color: structural_color(rev.kind).to_string(),
+                letter_spacing: None,
+                word_spacing: None,
+                rtl: None,
+                opacity: None,
+                rotation_deg: None,
+                horizontal_scale: None,
+                substitute_scale: text_substitute_scale(
+                    ctx.shape,
+                    "¶",
+                    &RunFormattingIn::default(),
+                    0,
+                    false,
+                ),
+                all_caps: false,
+                small_caps: false,
+                hidden: false,
+                text_shadow: None,
+                text_outline: false,
+                emphasis_mark: None,
+                text_effect: None,
+                attrs: glyph_attrs.clone(),
+            }));
+        }
         if rev.kind == StructuralRevisionKind::Del {
             prims.push(Primitive::Decoration(DecorationPrimitive {
                 deco: DecoKind::Strike,
@@ -7247,6 +7259,51 @@ pub(crate) fn emit_paragraph_fragment(
             }
         }
     }
+}
+
+/// Shape the tracked paragraph mark in the default run formatting into a glyph
+/// run `PARAGRAPH_MARK_GLYPH_WIDTH` wide, or return `false`, touching nothing,
+/// when no face of the chain draws the pilcrow.
+fn emit_paragraph_mark_glyph_run(
+    prims: &mut Vec<Primitive>,
+    shape: &ShapeFonts<'_>,
+    x: f64,
+    baseline: f64,
+    attrs: &DocAttrs,
+    color: &str,
+) -> bool {
+    let start = prims.len();
+    if !try_emit_glyph_runs(
+        prims,
+        shape,
+        "¶",
+        &RunFormattingIn::default(),
+        None,
+        None,
+        x,
+        baseline,
+        &None,
+        0,
+        Some(PARAGRAPH_MARK_GLYPH_WIDTH),
+        None,
+        attrs,
+        color,
+        &None,
+        ooxml_text::AutoSpace::from_options(Some(false), Some(false)),
+    ) {
+        return false;
+    }
+    let mut drawn = true;
+    for primitive in &mut prims[start..] {
+        if let Primitive::GlyphRun(run) = primitive {
+            run.echo = None;
+            drawn &= !run.glyphs.is_empty() && run.glyphs.iter().all(|glyph| glyph.id != 0);
+        }
+    }
+    if !drawn {
+        prims.truncate(start);
+    }
+    drawn
 }
 
 /// Everything one line needs beyond its own measure: the fragment box it sits

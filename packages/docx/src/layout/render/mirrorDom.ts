@@ -1422,6 +1422,16 @@ function inLogicalOrder<T extends BlockGroup['prims']>(prims: T): T {
   return prims.map((p) => (p.logicalOrder === undefined ? p : ordered[index++])) as T;
 }
 
+/** A tracked paragraph mark, text item or glyph run, is a review cue hidden from readers. */
+function applyParagraphMarkGlyph(el: HTMLElement, p: { structuralRevision?: StructuralRevision }): void {
+  const revision = p.structuralRevision;
+  if (revision?.scope !== 'pmark') return;
+  el.classList.add(MIRROR_CLASS_NAMES.revisionPmarkGlyph);
+  if (revision.kind === 'ins') el.classList.add(MIRROR_CLASS_NAMES.revisionPmarkIns);
+  if (revision.kind === 'del') el.classList.add(MIRROR_CLASS_NAMES.revisionPmarkDel);
+  el.setAttribute('aria-hidden', 'true');
+}
+
 function applyListMarker(
   el: HTMLElement,
   p: { listMarker?: boolean; listMarkerNumbered?: boolean; listMarkerBullet?: boolean; listMarkerRevision?: 'ins' | 'del' },
@@ -1529,16 +1539,7 @@ function createMirrorPrimitive(
         p.rotationDeg,
         p.horizontalScale
       );
-      if (p.structuralRevision?.scope === 'pmark') {
-        el.classList.add(MIRROR_CLASS_NAMES.revisionPmarkGlyph);
-        if (p.structuralRevision.kind === 'ins') {
-          el.classList.add(MIRROR_CLASS_NAMES.revisionPmarkIns);
-        }
-        if (p.structuralRevision.kind === 'del') {
-          el.classList.add(MIRROR_CLASS_NAMES.revisionPmarkDel);
-        }
-        el.setAttribute('aria-hidden', 'true');
-      }
+      applyParagraphMarkGlyph(el, p);
       applyListMarker(el, p, ctx);
       applyDocAttrs(el, p);
       return el;
@@ -1563,6 +1564,7 @@ function createMirrorPrimitive(
         p.rotationDeg,
         p.horizontalScale
       );
+      applyParagraphMarkGlyph(el, p);
       applyListMarker(el, p, ctx);
       applyDocAttrs(el, p);
       return el;
